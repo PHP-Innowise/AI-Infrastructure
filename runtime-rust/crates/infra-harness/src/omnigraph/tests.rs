@@ -4575,6 +4575,58 @@ async fn publish_session_outputs_increments_turn_snapshot_turn_index() {
 }
 
 #[tokio::test]
+async fn atom_update_payload_preserves_brain_and_memory_provenance() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let first = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "brain-ttl", "kind": "decision", "title": "Session TTL", "summary": "One hour.", "verified": true, "origin_layer": "project-brain", "authority": "verified", "privacy": "team", "brain_record_id": "11111111-2222-4333-8444-555555555555", "record_revision": 3}))
+        .await
+        .unwrap();
+    let created = first["atom"]["created_at"].clone();
+    // Editing the text alone keeps where the atom came from.
+    let edited = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "brain-ttl", "kind": "decision", "title": "Session TTL", "summary": "Ninety minutes."}))
+        .await
+        .unwrap();
+    let atom = &edited["atom"];
+    assert_eq!(atom["summary"], "Ninety minutes.");
+    assert_eq!(atom["verified"], true);
+    assert_eq!(atom["origin_layer"], "project-brain");
+    assert_eq!(atom["authority"], "verified");
+    assert_eq!(atom["privacy"], "team");
+    assert_eq!(
+        atom["brain_record_id"],
+        "11111111-2222-4333-8444-555555555555"
+    );
+    assert_eq!(atom["record_revision"], 3);
+    assert_eq!(atom["created_at"], created);
+    // A field sent as null is cleared; a new atom starts unverified.
+    let cleared = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "brain-ttl", "kind": "decision", "title": "Session TTL", "verified": false, "privacy": null}))
+        .await
+        .unwrap();
+    assert_eq!(cleared["atom"]["verified"], false);
+    assert!(cleared["atom"]["privacy"].is_null());
+    assert_eq!(cleared["atom"]["origin_layer"], "project-brain");
+    let fresh = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "kind": "insight", "title": "New note"}))
+        .await
+        .unwrap();
+    assert_eq!(fresh["atom"]["verified"], false);
+    assert!(fresh["atom"]["origin_layer"].is_null());
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn sync_canonical_knowledge_deletes_retired_archived_and_stale_atoms() {
     let state_dir = tempfile::tempdir().unwrap();
     let store = crate::store::SessionStore::open(state_dir.path()).unwrap();

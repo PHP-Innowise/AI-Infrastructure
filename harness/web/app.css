@@ -1759,6 +1759,11 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .run-pane-text { margin:0 0 8px; color:var(--ink-2); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
 .run-pane-facts { margin:0; padding:0; list-style:none; color:var(--muted); font-size:var(--text-meta); }
 .run-pane-facts li + li { margin-top:4px; }
+.retrieval-trace-items { margin:4px 0 0; padding:0; list-style:none; font-size:var(--text-ui); }
+.retrieval-trace-items li { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+.retrieval-trace-items .retrieval-cut { color:var(--muted); }
+.retrieval-votes { display:inline-flex; gap:4px; margin-left:auto; }
+.retrieval-votes .button[aria-pressed="true"] { background:var(--purple-soft); border-color:var(--purple-line); }
 .memory-history { margin:16px 0 12px; }
 .memory-history h4 { margin:0 0 8px; color:var(--ink-2); font-size:var(--text-ui); font-weight:var(--weight-strong); }
 .memory-history-plot { display:inline-grid; max-width:100%; min-width:160px; }

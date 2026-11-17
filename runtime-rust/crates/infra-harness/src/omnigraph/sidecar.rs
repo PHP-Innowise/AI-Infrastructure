@@ -1673,12 +1673,46 @@ impl OmnigraphManager {
         let files = parse_string_list(&body["files"]);
         let confidence = body["confidence"].as_f64().unwrap_or(0.85).clamp(0.0, 1.0);
         let pin_priority = body["pin_priority"].as_i64().unwrap_or(10) as i32;
-        let verified = body["verified"].as_bool().unwrap_or(false);
-        let provenance = AtomProvenance::from_value(body);
         let expected_commit = clean_opt(body["expected_commit"].as_str()).map(str::to_string);
         let ts = now_utc_iso_ms();
 
         let client = self.client().await?;
+        // An update that leaves out a provenance field, the verification or
+        // the creation time keeps the atom's own: the upsert writes every
+        // field, and an edit of the text must not turn a Project Brain atom
+        // into an unverified one with no source. A field sent as null clears.
+        let named = clean_opt(body["atom_id"].as_str())
+            .or_else(|| clean_opt(body["id"].as_str()))
+            .is_some();
+        let existing = if named {
+            find_atom_on_branch(&client, &project_id, &branch, &atom_id).await
+        } else {
+            None
+        };
+        let mut merged = body.clone();
+        if let Some(existing) = &existing
+            && merged.is_object()
+        {
+            for key in [
+                "origin_layer",
+                "authority",
+                "privacy",
+                "brain_record_id",
+                "memory_id",
+                "record_revision",
+                "verified",
+            ] {
+                if body.get(key).is_none() && !existing[key].is_null() {
+                    merged[key] = existing[key].clone();
+                }
+            }
+        }
+        let verified = merged["verified"].as_bool().unwrap_or(false);
+        let provenance = AtomProvenance::from_value(&merged);
+        let created_at = existing
+            .as_ref()
+            .and_then(|atom| clean_opt(atom["created_at"].as_str()).map(str::to_string))
+            .unwrap_or_else(|| ts.clone());
         let atom_params = build_upsert_atom_params(
             &atom_id,
             &project_id,
@@ -1693,7 +1727,7 @@ impl OmnigraphManager {
             pin_priority,
             verified,
             &provenance,
-            &ts,
+            &created_at,
             &ts,
         );
         let req = ChangeRequest {

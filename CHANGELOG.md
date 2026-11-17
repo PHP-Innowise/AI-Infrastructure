@@ -24,6 +24,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Updating an Omnigraph atom through `POST /api/omnigraph/atoms` keeps what
+  the update leaves out: its six provenance fields (`origin_layer`,
+  `authority`, `privacy`, `brain_record_id`, `memory_id`,
+  `record_revision`), its verification and its creation time. An edit of the
+  text had turned a Project Brain atom into an unverified one with no source;
+  a field sent as `null` still clears. Memory use lists each retrieval's
+  delivered chunks and cuts instead of its JSON, with Helped, Stale and
+  Harmful marks on each chunk (`retrieval-feedback`, telemetry only). A jump
+  from the Context Graph to a Brain record or chunk selects it without
+  writing its id into the list's filter. The page's next-message inbox
+  follows the server's rules (a System explain session and a mode other than
+  Plan or Edit are refused), and a session with a linked task says why its
+  next message waits.
 - Bring back Harness memory views the Rust port left as placeholders, on the
   markup their styles were written for. The linked task card's capsule meter
   shows again: the server measures the capsule with the runtime's own

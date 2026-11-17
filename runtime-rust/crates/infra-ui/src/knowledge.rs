@@ -358,9 +358,23 @@ pub async fn open_from_omnigraph(scope: &str, project_id: &str, target_id: &str)
     if scope == "brain" {
         dom::set_value("brain-category", "");
     }
-    dom::set_value(&format!("{scope}-filter"), target_id);
+    // The jump target chooses the record; its id is no filter to leave in
+    // the list, and a filter typed earlier could hide it.
+    dom::set_value(&format!("{scope}-filter"), "");
     m::set(&format!("{scope}-jump-target"), json!(target_id));
     session::open_view(scope, true).await;
+}
+/// The listing entry an Omnigraph jump names: by record id, external id or
+/// path.
+pub(crate) fn jump_entry<'a>(entries: &'a [V], target: &str) -> Option<&'a V> {
+    if target.is_empty() {
+        return None;
+    }
+    entries.iter().find(|x| {
+        x["id"].as_str() == Some(target)
+            || x["external_id"].as_str() == Some(target)
+            || m::text(x, "path").contains(target)
+    })
 }
 
 pub fn knowledge_omnigraph_atom_id(scope: &str, record: &V) -> Option<String> {
@@ -548,13 +562,7 @@ pub async fn load(scope: &str, bank_changed: bool) {
             let entries = m::array(&v["entries"]);
             let selected = jump
                 .as_deref()
-                .and_then(|target| {
-                    entries.iter().find(|x| {
-                        x["id"].as_str() == Some(target)
-                            || x["external_id"].as_str() == Some(target)
-                            || m::text(x, "path").contains(target)
-                    })
-                })
+                .and_then(|target| jump_entry(&entries, target))
                 .or_else(|| entries.iter().find(|x| x["path"] == selected))
                 .or_else(|| {
                     entries.iter().find(|x| {
@@ -1413,6 +1421,62 @@ pub(crate) fn render_usage_legend_html(turn: &V) -> String {
     }
     format!("<tbody>{rows}</tbody>")
 }
+const FEEDBACK_VOTES: [(&str, &str); 3] = [
+    ("helped", "Helped"),
+    ("stale", "Stale"),
+    ("harmful", "Harmful"),
+];
+/// One retrieval's delivered chunks and cuts, with the verdict a person
+/// recorded on each delivered chunk and buttons to change it. A verdict is
+/// telemetry: nothing ranks, admits or packs memory by it.
+pub(crate) fn render_retrieval_trace_html(row: &V, feedback: &V, supported: bool) -> String {
+    let esc = crate::omnigraph::esc;
+    let manifest = row["manifest_id"].as_str().unwrap_or("");
+    let mut html = format!(
+        "<p class=\"knowledge-note\">{} Project Brain · {} Memory Bank · {} rules and docs</p><ul class=\"retrieval-trace-items\">",
+        m::string(&row["brain"]),
+        m::string(&row["bank"]),
+        m::string(&row["rules"])
+    );
+    for chunk in m::array(&row["chunks"]) {
+        let chunk = chunk.as_str().unwrap_or("");
+        if chunk.is_empty() {
+            continue;
+        }
+        let vote = feedback[manifest][chunk]["vote"].as_str().unwrap_or("");
+        html.push_str(&format!("<li><code>{}</code>", esc(chunk)));
+        if supported && !manifest.is_empty() {
+            html.push_str("<span class=\"retrieval-votes\" role=\"group\" aria-label=\"Was this chunk right?\">");
+            for (choice, label) in FEEDBACK_VOTES {
+                let pressed = vote == choice;
+                let payload = json!({
+                    "manifest_id": manifest,
+                    "chunk_id": chunk,
+                    // A second press takes the verdict back.
+                    "vote": if pressed { "clear" } else { choice },
+                });
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"button compact\" data-action=\"memory-feedback\" data-payload=\"{}\" aria-pressed=\"{pressed}\">{label}</button>",
+                    esc(&payload.to_string())
+                ));
+            }
+            html.push_str("</span>");
+        }
+        html.push_str("</li>");
+    }
+    for cut in m::array(&row["cuts"]) {
+        let (id, reason) = (cut[0].as_str().unwrap_or(""), cut[1].as_str().unwrap_or(""));
+        if !id.is_empty() {
+            html.push_str(&format!(
+                "<li class=\"retrieval-cut\">{} — cut: {}</li>",
+                esc(id),
+                esc(reason)
+            ));
+        }
+    }
+    html.push_str("</ul>");
+    html
+}
 /// A Brain or Memory Bank listing row: its title, its path and its state.
 pub(crate) fn render_list_entry_inner_html(v: &V) -> String {
     let meta = [m::text(v, "status"), bytes(&v["bytes"])]
@@ -1781,19 +1845,30 @@ fn render_memory() {
         &serde_json::to_string_pretty(&v["history"]).unwrap_or_default(),
     );
     dom::append("memory-use-body", &history);
+    let supported = v["feedback_supported"] == true;
     for row in m::array(&v["retrievals"]["items"]) {
-        dom::append(
-            "memory-use-body",
-            &dom::details(
+        let block = dom::el("details", "setup-file retrieval-trace", "");
+        dom::add(
+            &block,
+            &dom::el(
+                "summary",
+                "",
                 &format!(
                     "{} · {} · {} chunks",
                     m::text(&row, "at"),
                     m::text(&row, "route"),
                     m::array(&row["chunks"]).len()
                 ),
-                &serde_json::to_string_pretty(&row).unwrap_or_default(),
             ),
         );
+        let body = dom::el("div", "", "");
+        body.set_inner_html(&render_retrieval_trace_html(
+            &row,
+            &v["feedback"],
+            supported,
+        ));
+        dom::add(&block, &body);
+        dom::append("memory-use-body", &block);
     }
     memory_changes(&v, &before);
     let mut snapshot = json!({"at":js_sys::Date::new_0().to_iso_string().as_string(),"today":v["today"],"chunks":{},"promotions":{},"newest":m::array(&v["retrievals"]["items"]).last().map(|r|r["at"].clone())});
@@ -2187,6 +2262,28 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
                     m::set("memory-use-check", v);
                     render_memory();
                 }
+                Err(e) => dom::error("memory-use-error", &e.message),
+            }
+        }
+        "memory-feedback" => {
+            let project = dom::value("memory-use-project");
+            let bank = m::data("memory-use")["bank_id"].clone();
+            let mut body = json!({
+                "action": "retrieval-feedback",
+                "manifest_id": payload["manifest_id"],
+                "chunk_id": payload["chunk_id"],
+                "vote": payload["vote"],
+            });
+            if bank.is_string() {
+                body["bank"] = bank;
+            }
+            match api::post(
+                &format!("/api/projects/{}/knowledge", dom::enc(&project)),
+                body,
+            )
+            .await
+            {
+                Ok(_) => load_memory_use().await,
                 Err(e) => dom::error("memory-use-error", &e.message),
             }
         }
@@ -3040,6 +3137,57 @@ mod tests {
         assert!(legend.contains("Dropped to fit: 1 episodic"), "{legend}");
         // No raw JSON reaches the legend.
         assert!(!legend.contains('{'), "{legend}");
+    }
+
+    #[test]
+    fn retrieval_trace_renders_chunks_cuts_and_feedback_toggles() {
+        let row = json!({"manifest_id": "manifest-1", "brain": 1, "bank": 2, "rules": 0, "chunks": ["MEM-20261117-aabbccdd", "MEM-20261117-eeff0011"], "cuts": [["MEM-20261117-99998888", "budget"]]});
+        let feedback = json!({"manifest-1": {"MEM-20261117-aabbccdd": {"vote": "stale"}}});
+        let html = super::render_retrieval_trace_html(&row, &feedback, true);
+        assert!(
+            html.contains("<code>MEM-20261117-aabbccdd</code>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("MEM-20261117-99998888 — cut: budget"),
+            "{html}"
+        );
+        // The recorded verdict is pressed, and pressing it again clears it.
+        assert!(
+            html.contains(
+                "&quot;vote&quot;:&quot;clear&quot;}\" aria-pressed=\"true\">Stale</button>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "&quot;vote&quot;:&quot;helped&quot;}\" aria-pressed=\"false\">Helped</button>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("data-action=\"memory-feedback\""));
+        // Without the server's support, or without a manifest, nothing is offered.
+        assert!(!super::render_retrieval_trace_html(&row, &feedback, false).contains("<button"));
+        let mut anonymous = row.clone();
+        anonymous["manifest_id"] = json!(null);
+        assert!(
+            !super::render_retrieval_trace_html(&anonymous, &feedback, true).contains("<button")
+        );
+    }
+
+    #[test]
+    fn open_from_omnigraph_finds_its_record_without_a_filter() {
+        let entries = vec![
+            json!({"id": "11111111-2222-4333-8444-555555555555", "external_id": "finding-1", "path": "dynamic/a.md"}),
+            json!({"id": "MEM-20261117-aabbccdd", "path": "memory-bank/chunks/MEM-20261117-aabbccdd-ttl.md"}),
+        ];
+        assert_eq!(
+            super::jump_entry(&entries, "finding-1").map(|v| &v["path"]),
+            Some(&json!("dynamic/a.md"))
+        );
+        assert!(super::jump_entry(&entries, "MEM-20261117-aabbccdd").is_some());
+        assert!(super::jump_entry(&entries, "").is_none());
+        assert!(super::jump_entry(&entries, "missing").is_none());
     }
 
     #[test]
