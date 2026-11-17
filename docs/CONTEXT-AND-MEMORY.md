@@ -2075,6 +2075,15 @@ read after the turn is recorded, for a second at most; each checkout of an
 attached project keeps its own list; and excerpt growth leaves the line its
 720 characters.
 
+`capsule_pack_deduplicated` is another experiment, off unless it is `true` in
+`runtime.json` or `CONTEXT_CAPSULE_PACK_DEDUP=1` (`0` turns a configured one
+off). The JSON capsule repeats each delivered item's snippet in `selected` and
+in `categories`, and a capsule over its 8,000 characters gives up its last
+turn, ticket files and then items. With the experiment, such a capsule first
+empties those repeated snippets; the layer item keeps its own. A capsule
+within the limit is unchanged. It changes which items a full capsule keeps, so
+it waits for its own held-out measurement (`docs/MEMORY-EVAL.md`).
+
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.
 

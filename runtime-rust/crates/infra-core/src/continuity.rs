@@ -1047,15 +1047,20 @@ pub fn host_loaded(context: &RuntimeContext, host: &str) -> BTreeSet<String> {
             }
         }
     }
-    if context.roots.attached() {
-        loaded.insert(
-            context
-                .roots
-                .tooling
-                .join("AGENTS.md")
-                .to_string_lossy()
-                .replace('\\', "/"),
-        );
+    // An attached overlay hands the edition's policy to Claude Code
+    // (`--append-system-prompt-file`) and Codex (`developer_instructions`).
+    // Cursor is only told where it is, the CLI is no host, and a linked
+    // worktree's host reads the worktree's own files, so none of them has
+    // loaded the edition's AGENTS.md.
+    if context.roots.attached()
+        && !context.roots.shared
+        && matches!(host, "claude" | "codex")
+        && let Ok(key) = context.roots.key_for(
+            &context.roots.tooling,
+            &context.roots.tooling.join("AGENTS.md"),
+        )
+    {
+        loaded.insert(key);
     }
     loaded
 }
@@ -1429,4 +1434,72 @@ fn topic_root_digest(project: &Path) -> Result<String> {
     #[cfg(not(unix))]
     let bytes = project.to_string_lossy().into_owned().into_bytes();
     Ok(query::sha256(&bytes))
+}
+
+#[cfg(test)]
+mod host_loaded_tests {
+    use super::*;
+
+    #[test]
+    fn attached_tooling_policy_matches_index_key_for_overlay_hosts_only() {
+        let base = std::env::temp_dir().join(format!("infra-host-loaded-{}", domain::uuid4()));
+        for directory in ["tooling", "project", "state"] {
+            std::fs::create_dir_all(base.join(directory)).unwrap();
+        }
+        std::fs::write(
+            base.join("tooling/AGENTS.md"),
+            "# Policy\n\nThe cobalt rule.\n",
+        )
+        .unwrap();
+        let context = |shared| {
+            RuntimeContext::new(
+                crate::Roots {
+                    tooling: base.join("tooling"),
+                    project: base.join("project"),
+                    state: base.join("state"),
+                    shared,
+                },
+                "local",
+                "governed",
+            )
+            .unwrap()
+        };
+        let attached = context(false);
+        // The key the index gives the edition's policy.
+        let discovery =
+            crate::index::discover_sources(&attached, &crate::index::SourceState::new()).unwrap();
+        let key = discovery
+            .documents
+            .iter()
+            .find(|document| document.kind == "policy")
+            .map(|document| document.path.clone())
+            .unwrap();
+        assert_eq!(
+            key,
+            attached
+                .roots
+                .key_for(
+                    &attached.roots.tooling,
+                    &attached.roots.tooling.join("AGENTS.md")
+                )
+                .unwrap()
+        );
+        for (host, loaded) in [
+            ("claude", true),
+            ("codex", true),
+            ("cursor", false),
+            ("cli", false),
+        ] {
+            assert_eq!(
+                host_loaded(&attached, host).contains(&key),
+                loaded,
+                "{host}"
+            );
+        }
+        let shared = context(true);
+        for host in ["claude", "codex", "cursor", "cli"] {
+            assert!(!host_loaded(&shared, host).contains(&key), "{host}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

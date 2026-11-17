@@ -1037,7 +1037,11 @@ fn retrieve_inner(
         capsule.0["categories"] = json!({});
         capsule.0["token_estimates"] =
             json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0});
-        return capsule::pack(capsule, request.delivery_profile);
+        return capsule::pack_with_options(
+            capsule,
+            request.delivery_profile,
+            capsule::pack_deduplicated(&config),
+        );
     }
     warnings.extend(binding_notices);
     let (mut candidates, diagnostics) = query::rank_candidates_observed(
@@ -1571,7 +1575,11 @@ fn retrieve_inner(
     trace.boundary("pack_input", &selected);
     capsule.1 = prepared;
     let pack_started = Instant::now();
-    capsule = capsule::pack(capsule, request.delivery_profile)?;
+    capsule = capsule::pack_with_options(
+        capsule,
+        request.delivery_profile,
+        capsule::pack_deduplicated(&config),
+    )?;
     pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();
@@ -1686,7 +1694,11 @@ fn retrieve_inner(
     }
     capsule::synchronize(&mut capsule);
     let pack_started = Instant::now();
-    capsule = capsule::pack(capsule, request.delivery_profile)?;
+    capsule = capsule::pack_with_options(
+        capsule,
+        request.delivery_profile,
+        capsule::pack_deduplicated(&config),
+    )?;
     pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();

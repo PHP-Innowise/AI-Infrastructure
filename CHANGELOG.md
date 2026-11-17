@@ -24,6 +24,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Recognize a class name after an acronym in a request (`HTTPClient`,
+  `APIV2Handler`, `HTTP2Client`) when seeding files the request names; an
+  acronym alone (`HTTP`) or plural (`URLs`) is still no class name. Count the
+  edition's `AGENTS.md` of an attached overlay as host-loaded only for Claude
+  Code and Codex, which receive it; Cursor, the CLI and a linked worktree's
+  host do not, and their traces now say so. Add the
+  `capsule_pack_deduplicated` experiment, off by default
+  (`CONTEXT_CAPSULE_PACK_DEDUP=1`): a JSON capsule over its size limit empties
+  the snippets `selected` and `categories` repeat before it evicts anything.
 - Keep a capsule excerpt's text after a customer identifier. The renderer ran
   each excerpt body, heading and snippet through the inbound query screen,
   which cuts a query at the first `customer id: …`, so a schema note that
