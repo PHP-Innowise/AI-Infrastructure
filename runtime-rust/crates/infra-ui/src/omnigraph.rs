@@ -10,6 +10,8 @@ const ZOOM_STEP: f64 = 1.22;
 const DRAG_THRESHOLD_PX: f64 = 4.0;
 const PULSE_INTERVAL_MS: i32 = 3500;
 const MAX_PULSE_EVENTS: usize = 80;
+pub const CAPSULE_CHAR_LIMIT: usize = 6000;
+pub const CANONICAL_KNOWLEDGE_BRANCH: &str = "knowledge/canonical";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OmnigraphCamera {
@@ -87,6 +89,112 @@ pub fn esc(s: &str) -> String {
         }
     }
     out
+}
+
+pub fn format_count(n: usize) -> String {
+    let raw = n.to_string();
+    let mut out = String::with_capacity(raw.len() + raw.len() / 3);
+    for (idx, ch) in raw.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+pub fn atom_is_verified(atom: &V) -> bool {
+    if atom["verified"].as_bool() == Some(true) {
+        return true;
+    }
+    if atom["verified"].as_bool() == Some(false) {
+        return false;
+    }
+    matches!(atom["authority"].as_str(), Some("verified"))
+}
+
+fn render_provenance_pills_html(atom: &V) -> String {
+    let mut pills = Vec::new();
+    if atom_is_verified(atom) {
+        pills.push(
+            "<span class=\"omni-badge\" data-kind=\"success\" data-prov=\"verified\">Verified</span>"
+                .to_owned(),
+        );
+    } else {
+        pills.push(
+            "<span class=\"omni-badge\" data-kind=\"warning\" data-prov=\"unverified\">Unverified reference</span>"
+                .to_owned(),
+        );
+    }
+    if let Some(layer) = atom["origin_layer"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        pills.push(format!(
+            "<span class=\"omni-badge\" data-prov=\"origin_layer\">{}</span>",
+            esc(layer)
+        ));
+    }
+    if let Some(auth) = atom["authority"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        pills.push(format!(
+            "<span class=\"omni-meta-pill\" data-prov=\"authority\">authority: {}</span>",
+            esc(auth)
+        ));
+    }
+    if let Some(priv_val) = atom["privacy"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        pills.push(format!(
+            "<span class=\"omni-meta-pill\" data-prov=\"privacy\">privacy: {}</span>",
+            esc(priv_val)
+        ));
+    }
+    pills.join("")
+}
+
+fn render_provenance_jump_buttons_html(atom: &V) -> String {
+    let mut buttons = Vec::new();
+    let brain_id = atom["brain_record_id"].as_str().unwrap_or("").trim();
+    if !brain_id.is_empty() {
+        let short_id: String = brain_id.chars().take(8).collect();
+        let payload = json!({ "record_id": brain_id }).to_string();
+        buttons.push(format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-brain\" data-record-id=\"{}\" data-payload=\"{}\" title=\"Open Project Brain record {}\">Brain: {}</button>",
+            esc(brain_id),
+            esc(&payload),
+            esc(brain_id),
+            esc(&short_id)
+        ));
+    }
+    let memory_id = atom["memory_id"].as_str().unwrap_or("").trim();
+    if !memory_id.is_empty() {
+        let payload = json!({ "memory_id": memory_id }).to_string();
+        buttons.push(format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-memory\" data-memory-id=\"{}\" data-payload=\"{}\" title=\"Open Memory Bank chunk {}\">Memory: {}</button>",
+            esc(memory_id),
+            esc(&payload),
+            esc(memory_id),
+            esc(memory_id)
+        ));
+    }
+    buttons.join("")
+}
+
+fn response_error_message(res: &V, fallback: &str) -> String {
+    res["error"]["message"]
+        .as_str()
+        .or_else(|| res["error"].as_str())
+        .or_else(|| res["message"].as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
 }
 
 pub fn parse_csv_list(raw: &str) -> Vec<String> {
@@ -1484,8 +1592,10 @@ pub fn render_search_hits_html(search_res: &V) -> String {
             .filter(|s| !s.is_empty())
             .unwrap_or("bm25");
         let neighbors = m::array(&hit["neighbors"]).len();
+        let prov_pills = render_provenance_pills_html(atom);
+        let jump_buttons = render_provenance_jump_buttons_html(atom);
         html.push_str(&format!(
-            "<button type=\"button\" class=\"omni-search-hit\" data-action=\"omnigraph-focus-hit\" data-node-id=\"{}\"><div class=\"omni-search-hit-head\"><span class=\"omni-badge\" data-kind=\"{}\"><span aria-hidden=\"true\">{}</span> {}</span><span class=\"omni-meta-pill\">{} · {:.2}{}</span></div><strong>{}</strong>{}</button>",
+            "<div class=\"omni-search-hit-card\"><button type=\"button\" class=\"omni-search-hit\" data-action=\"omnigraph-focus-hit\" data-node-id=\"{}\"><div class=\"omni-search-hit-head\"><span class=\"omni-badge\" data-kind=\"{}\"><span aria-hidden=\"true\">{}</span> {}</span><span class=\"omni-meta-pill\">{} · {:.2}{}</span></div><strong>{}</strong>{}<div class=\"omni-search-hit-meta\">{}</div></button>{}</div>",
             esc(&id),
             esc(kind),
             kind_glyph(kind),
@@ -1502,6 +1612,12 @@ pub fn render_search_hits_html(search_res: &V) -> String {
                 String::new()
             } else {
                 format!("<span class=\"omni-node-summary\">{}</span>", esc(summary))
+            },
+            prov_pills,
+            if jump_buttons.is_empty() {
+                String::new()
+            } else {
+                format!("<div class=\"omni-search-hit-links\">{jump_buttons}</div>")
             }
         ));
     }
@@ -1636,14 +1752,20 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
     if !created_at.is_empty() {
         provenance_parts.push(format!("Created: {}", esc(&created_at)));
     }
-    if !provenance_parts.is_empty() || !session_id.is_empty() || !commit_id.is_empty() {
-        html.push_str("<div class=\"omni-inspector-group\"><h4>Provenance</h4>");
-        if !provenance_parts.is_empty() {
-            html.push_str(&format!(
-                "<p class=\"knowledge-note\">{}</p>",
-                provenance_parts.join(" · ")
-            ));
-        }
+    if let Some(rev) = atom["record_revision"].as_i64() {
+        provenance_parts.push(format!("Revision: v{rev}"));
+    }
+    let prov_pills = render_provenance_pills_html(atom);
+    let jump_buttons = render_provenance_jump_buttons_html(atom);
+    html.push_str("<div class=\"omni-inspector-group\"><h4>Provenance</h4>");
+    html.push_str(&format!("<div class=\"omni-chip-list\">{prov_pills}</div>"));
+    if !provenance_parts.is_empty() {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">{}</p>",
+            provenance_parts.join(" · ")
+        ));
+    }
+    if !session_id.is_empty() || !commit_id.is_empty() || !jump_buttons.is_empty() {
         html.push_str("<div class=\"omni-chip-list\">");
         if !session_id.is_empty() {
             html.push_str(&format!(
@@ -1660,8 +1782,10 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
                 esc(&commit_id.chars().take(10).collect::<String>())
             ));
         }
-        html.push_str("</div></div>");
+        html.push_str(&jump_buttons);
+        html.push_str("</div>");
     }
+    html.push_str("</div>");
 
     let related: Vec<(String, String, String)> = m::array(&graph["edges"])
         .into_iter()
@@ -1723,8 +1847,27 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
         }
     }
     html.push_str("</select></div><div class=\"field\"><label for=\"omni-share-mode\">Mode</label><select id=\"omni-share-mode\"><option value=\"inject\">Inject</option><option value=\"reference\">Reference</option><option value=\"inject_and_link\">Inject &amp; Link</option><option value=\"copy\">Copy to Branch</option></select></div></div>");
+    let brain_record_id = atom["brain_record_id"].as_str().unwrap_or("").trim();
+    let has_brain_link = !brain_record_id.is_empty();
+    let default_promote_kind = match kind {
+        "decision" => "decision",
+        "warning" => "incident",
+        _ => "finding",
+    };
+    let promote_payload = json!({
+        "atom_id": id,
+        "branch": branch,
+    })
+    .to_string();
+    let promote_label = if has_brain_link {
+        "Promoted to Brain"
+    } else {
+        "Promote to Brain…"
+    };
+    let promote_disabled = if has_brain_link { " disabled" } else { "" };
+
     html.push_str(&format!(
-        "<div class=\"omni-chip-list\"><button type=\"button\" class=\"button compact primary\" data-action=\"omnigraph-share-atom\" data-atom-id=\"{}\" data-branch=\"{}\"{}>Share to Session</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-copy-snippet\" data-atom-id=\"{}\">Copy context snippet</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-branch\" data-branch=\"{}\">Open in Branch</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-cite-atom\" data-atom-id=\"{}\">Cite in new atom</button></div><p class=\"knowledge-note\" id=\"omni-share-status\" role=\"status\" hidden></p><p class=\"error-text\" id=\"omni-share-error\" role=\"alert\" hidden></p></div></article>",
+        "<div class=\"omni-chip-list\"><button type=\"button\" class=\"button compact primary\" data-action=\"omnigraph-share-atom\" data-atom-id=\"{}\" data-branch=\"{}\"{}>Share to Session</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-copy-snippet\" data-atom-id=\"{}\">Copy context snippet</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-branch\" data-branch=\"{}\">Open in Branch</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-cite-atom\" data-atom-id=\"{}\">Cite in new atom</button></div><p class=\"knowledge-note\" id=\"omni-share-status\" role=\"status\" hidden></p><p class=\"error-text\" id=\"omni-share-error\" role=\"alert\" hidden></p><div class=\"omni-promote-row\"><div class=\"field\"><label for=\"omni-promote-kind\">Brain record</label><select id=\"omni-promote-kind\"{promote_disabled}>",
         esc(&id),
         esc(branch),
         if target_sessions.is_empty() {
@@ -1735,6 +1878,25 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
         esc(&id),
         esc(branch),
         esc(&id)
+    ));
+    for (k, klabel) in [
+        ("finding", "Finding"),
+        ("decision", "Decision"),
+        ("bug", "Bug"),
+        ("incident", "Incident"),
+    ] {
+        let sel = if k == default_promote_kind {
+            " selected"
+        } else {
+            ""
+        };
+        html.push_str(&format!("<option value=\"{k}\"{sel}>{klabel}</option>"));
+    }
+    html.push_str(&format!(
+        "</select></div><div class=\"field\"><label for=\"omni-promote-privacy\">Privacy</label><select id=\"omni-promote-privacy\"{promote_disabled}><option value=\"team\" selected>Team</option><option value=\"public\">Public</option></select></div><button type=\"button\" class=\"button compact\" id=\"omni-promote-atom\" data-action=\"omnigraph-promote-atom\" data-atom-id=\"{}\" data-branch=\"{}\" data-payload=\"{}\"{promote_disabled}>{promote_label}</button></div><p class=\"knowledge-note\" id=\"omni-promote-status\" role=\"status\" hidden></p><p class=\"error-text\" id=\"omni-promote-error\" role=\"alert\" hidden></p></div></article>",
+        esc(&id),
+        esc(branch),
+        esc(&promote_payload)
     ));
     html
 }
@@ -2038,9 +2200,47 @@ pub fn session_bar_error(session: &V) -> String {
     m::text(&session["omnigraph"], "last_error")
 }
 
-pub fn session_bar_summary(session: &V) -> (bool, String, String, Vec<V>, bool) {
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionOmnigraphMetrics {
+    pub enabled: bool,
+    pub branch: String,
+    pub capsule_chars: usize,
+    pub capsule_limit: usize,
+    pub verified_count: usize,
+    pub unverified_count: usize,
+    pub atom_count: usize,
+    pub atoms: Vec<V>,
+}
+
+fn normalize_session_atoms(raw: Vec<V>) -> Vec<V> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in raw {
+        let normalized = if let Some(id_str) = item.as_str().filter(|s| !s.is_empty()) {
+            json!({ "id": id_str, "title": id_str, "kind": "finding" })
+        } else {
+            item
+        };
+        let aid = atom_id(&normalized);
+        if aid.is_empty() || seen.insert(aid) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+pub fn session_bar_metrics(session: &V) -> SessionOmnigraphMetrics {
     if !m::omnigraph_enabled(session) {
-        return (false, String::new(), String::new(), Vec::new(), false);
+        return SessionOmnigraphMetrics {
+            enabled: false,
+            branch: String::new(),
+            capsule_chars: 0,
+            capsule_limit: CAPSULE_CHAR_LIMIT,
+            verified_count: 0,
+            unverified_count: 0,
+            atom_count: 0,
+            atoms: Vec::new(),
+        };
     }
     let omni = &session["omnigraph"];
     let branch = m::omnigraph_branch(session);
@@ -2057,26 +2257,41 @@ pub fn session_bar_summary(session: &V) -> (bool, String, String, Vec<V>, bool) 
             }
         }
     };
-    let published = m::array(&omni["published_atoms"]);
-    let count = omni["atom_count"]
+    let atoms = normalize_session_atoms(shared_atoms);
+    let verified_count = atoms.iter().filter(|a| atom_is_verified(a)).count();
+    let unverified_count = atoms.len().saturating_sub(verified_count);
+    let atom_count = omni["atom_count"]
         .as_u64()
-        .unwrap_or(shared_atoms.len() as u64);
+        .map(|n| n as usize)
+        .unwrap_or(atoms.len());
+    let capsule_chars = m::text(omni, "capsule_text").chars().count();
+    SessionOmnigraphMetrics {
+        enabled: true,
+        branch,
+        capsule_chars,
+        capsule_limit: CAPSULE_CHAR_LIMIT,
+        verified_count,
+        unverified_count,
+        atom_count,
+        atoms,
+    }
+}
+
+pub fn session_bar_summary(session: &V) -> (bool, String, String, Vec<V>, bool) {
+    let metrics = session_bar_metrics(session);
+    if !metrics.enabled {
+        return (false, String::new(), String::new(), Vec::new(), false);
+    }
+    let omni = &session["omnigraph"];
+    let branch = metrics.branch;
+    let published = m::array(&omni["published_atoms"]);
+    let count = metrics.atom_count;
     let pub_count = omni["published_count"]
         .as_u64()
         .unwrap_or(published.len() as u64);
-    let mut combined = Vec::new();
-    let mut seen = BTreeSet::new();
-    for item in shared_atoms.into_iter().chain(published) {
-        let normalized = if let Some(id_str) = item.as_str().filter(|s| !s.is_empty()) {
-            json!({ "id": id_str, "title": id_str, "kind": "finding" })
-        } else {
-            item
-        };
-        let aid = atom_id(&normalized);
-        if aid.is_empty() || seen.insert(aid) {
-            combined.push(normalized);
-        }
-    }
+    let mut combined_raw = metrics.atoms;
+    combined_raw.extend(published);
+    let combined = normalize_session_atoms(combined_raw);
     let mut parts = vec![format!("{count} shared atoms")];
     if pub_count > 0 {
         parts.push(format!("{pub_count} published"));
@@ -2341,6 +2556,75 @@ pub fn focus_branch(branch: &str) {
     let _ = switch_branch_state(branch, true);
 }
 
+pub async fn open_knowledge_atom(project_id: &str, target_atom_id: &str) {
+    if !project_id.is_empty() && dom::value("omnigraph-project") != project_id {
+        crate::session::sync_project(project_id);
+    }
+    let _ = switch_branch_state(CANONICAL_KNOWLEDGE_BRANCH, true);
+    set_ui_state(|s| {
+        s["kind"] = json!("");
+        s["query"] = json!("");
+        if target_atom_id.is_empty() {
+            s["selected_id"] = V::Null;
+        } else {
+            s["selected_id"] = json!(target_atom_id);
+        }
+        s["stage_tab"] = json!("constellation");
+        s["drawer_tab"] = json!("inspector");
+    });
+    dom::set_value("omnigraph-search", "");
+    m::set("omnigraph-search-results", V::Null);
+    dom::hidden("omnigraph-search-clear", true);
+    crate::session::open_view("omnigraph", true).await;
+
+    if target_atom_id.is_empty() {
+        return;
+    }
+    let graph = m::data("omnigraph-graph");
+    let raw_id = target_atom_id
+        .strip_prefix("brain-")
+        .or_else(|| target_atom_id.strip_prefix("mem-"))
+        .unwrap_or(target_atom_id);
+    let matched_id = m::array(&graph["atoms"])
+        .into_iter()
+        .find(|a| {
+            atom_id(a) == target_atom_id
+                || a["brain_record_id"].as_str() == Some(raw_id)
+                || a["memory_id"].as_str() == Some(raw_id)
+        })
+        .map(|a| atom_id(&a));
+    if let Some(found_id) = matched_id {
+        if found_id != target_atom_id {
+            set_ui_state(|s| s["selected_id"] = json!(found_id));
+            render_constellation();
+            render_inspector();
+        }
+        fly_to_node(&found_id);
+    } else {
+        let has_canonical = branch_names_from_graph(&graph)
+            .iter()
+            .any(|b| b == CANONICAL_KNOWLEDGE_BRANCH);
+        if !has_canonical {
+            let _ = switch_branch_state("main", true);
+            sync_controls_from_state();
+            refresh_graph().await;
+        }
+        dom::set_value("omnigraph-search", raw_id);
+        run_search(raw_id.to_owned()).await;
+        let hits = m::array(&m::data("omnigraph-search-results")["hits"]);
+        if let Some(first_id) = hits
+            .first()
+            .map(|h| atom_id(&h["atom"]))
+            .filter(|s| !s.is_empty())
+        {
+            set_ui_state(|s| s["selected_id"] = json!(first_id));
+            render_constellation();
+            render_inspector();
+            fly_to_node(&first_id);
+        }
+    }
+}
+
 pub fn hydrate_status(status: &V) {
     if !status.is_object() {
         return;
@@ -2444,6 +2728,7 @@ fn apply_status_to_chrome(status: &V) {
     let docker_ok = m::yes(&status["docker_available"]);
     dom::disabled("omnigraph-start-docker", !docker_ok && !connected);
     dom::disabled("omni-dlg-start-docker", !docker_ok);
+    dom::disabled("omni-sync-knowledge", !connected);
     dom::disabled("omnigraph-export-open", !connected);
     dom::disabled("omnigraph-import-open", !connected);
 
@@ -3269,12 +3554,14 @@ pub async fn load_session_branches() {
 
 pub fn render_session_bar(session: &V) {
     let (visible, branch, meta, atoms, can_merge) = session_bar_summary(session);
+    let metrics = session_bar_metrics(session);
     let sid = m::text(session, "id");
     let connected = m::yes(&m::data("omnigraph-status")["connected"]);
     let show_ready_bar = !visible && !sid.is_empty() && connected;
     dom::hidden("session-omnigraph-bar", !visible && !show_ready_bar);
     if !visible && !show_ready_bar {
         dom::error("session-omnigraph-error", "");
+        dom::hidden("session-omnigraph-meter", true);
         dom::hidden("session-omnigraph-peers", true);
         return;
     }
@@ -3286,6 +3573,7 @@ pub fn render_session_bar(session: &V) {
             "Omnigraph ready · share with tasks, export, or import context",
         );
         dom::error("session-omnigraph-error", "");
+        dom::hidden("session-omnigraph-meter", true);
         dom::hidden("session-omnigraph-merge", true);
         dom::hidden("session-omnigraph-peers", true);
         dom::hidden("session-omnigraph-atoms", true);
@@ -3293,11 +3581,55 @@ pub fn render_session_bar(session: &V) {
     }
     dom::attr("session-omnigraph-bar", "data-active", "true");
     dom::hidden("session-omnigraph-atoms", false);
+    dom::hidden("session-omnigraph-meter", false);
     dom::text("session-omnigraph-branch", &branch);
     dom::text("session-omnigraph-meta", &meta);
     dom::error("session-omnigraph-error", &session_bar_error(session));
     dom::hidden("session-omnigraph-merge", !can_merge);
     dom::disabled("session-omnigraph-merge", m::active(session));
+
+    let pct = ((metrics.capsule_chars as f64 / metrics.capsule_limit as f64) * 100.0).min(100.0);
+    dom::attr(
+        "session-omnigraph-meter-bar",
+        "aria-valuenow",
+        &metrics.capsule_chars.to_string(),
+    );
+    dom::attr(
+        "session-omnigraph-meter-bar",
+        "data-over",
+        if metrics.capsule_chars > metrics.capsule_limit {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(fill) = dom::get("session-omnigraph-meter-fill")
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = fill.style().set_property("width", &format!("{pct:.1}%"));
+    }
+    dom::text(
+        "session-omnigraph-chars",
+        &format!(
+            "{} / {} chars",
+            format_count(metrics.capsule_chars),
+            format_count(metrics.capsule_limit)
+        ),
+    );
+    let total_injected = metrics.verified_count + metrics.unverified_count;
+    dom::hidden("session-omnigraph-verified", total_injected == 0);
+    dom::text(
+        "session-omnigraph-verified",
+        &format!("{} verified", metrics.verified_count),
+    );
+    dom::hidden(
+        "session-omnigraph-unverified",
+        metrics.unverified_count == 0,
+    );
+    dom::text(
+        "session-omnigraph-unverified",
+        &format!("{} unverified reference", metrics.unverified_count),
+    );
 
     let all_sessions = m::read(|s| s.sessions.clone());
     let (show_peers, peers_html) = render_session_peers_html(session, &all_sessions);
@@ -3320,10 +3652,12 @@ pub fn render_session_bar(session: &V) {
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&id);
+                let verified = atom_is_verified(atom);
                 html.push_str(&format!(
-                    "<button type=\"button\" class=\"omni-session-atom-chip\" data-action=\"omnigraph-open-atom\" data-atom-id=\"{}\" data-branch=\"{}\"><span aria-hidden=\"true\">{}</span> {}</button>",
+                    "<button type=\"button\" class=\"omni-session-atom-chip\" data-action=\"omnigraph-open-atom\" data-atom-id=\"{}\" data-branch=\"{}\" data-verified=\"{}\"><span aria-hidden=\"true\">{}</span> {}</button>",
                     esc(&id),
                     esc(&branch),
+                    if verified { "true" } else { "false" },
                     kind_glyph(kind),
                     esc(title)
                 ));
@@ -4846,6 +5180,71 @@ pub async fn event(
             load().await;
             true
         }
+        "omni-sync-knowledge" => {
+            let project = current_project_id();
+            if project.is_empty() {
+                dom::error("omnigraph-error", "Select a project first.");
+                return true;
+            }
+            dom::error("omnigraph-error", "");
+            dom::text(
+                "omnigraph-status-message",
+                "Syncing Project Brain & Memory Bank into Omnigraph…",
+            );
+            dom::hidden("omnigraph-status-message", false);
+            dom::disabled("omni-sync-knowledge", true);
+            let mut body = json!({ "project_id": project });
+            if dom::value("brain-project") == project {
+                let bank = dom::value("brain-bank");
+                if !bank.is_empty() {
+                    body["bank"] = json!(bank);
+                }
+            }
+            let sid = m::read(|s| s.sid.clone());
+            if !sid.is_empty() {
+                body["session_id"] = json!(sid);
+            }
+            match api::post("/api/omnigraph/sync-knowledge", body).await {
+                Ok(res) => {
+                    if res["ok"].as_bool() == Some(false) {
+                        let msg = response_error_message(
+                            &res,
+                            "Could not sync Brain & Memory into Omnigraph.",
+                        );
+                        dom::hidden("omnigraph-status-message", true);
+                        dom::error("omnigraph-error", &msg);
+                    } else {
+                        let branch = res["branch"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(CANONICAL_KNOWLEDGE_BRANCH)
+                            .to_owned();
+                        let synced = res["synced"].as_u64().unwrap_or(0);
+                        let brain_count = res["brain_count"].as_u64().unwrap_or(0);
+                        let memory_count = res["memory_count"].as_u64().unwrap_or(0);
+                        let skipped = res["skipped"].as_u64().unwrap_or(0);
+                        let _ = switch_branch_state(&branch, true);
+                        sync_controls_from_state();
+                        refresh_pill().await;
+                        refresh_graph().await;
+                        dom::text(
+                            "omnigraph-status-message",
+                            &format!(
+                                "Synced {synced} item(s) ({brain_count} Brain, {memory_count} Memory, {skipped} skipped) to {branch}."
+                            ),
+                        );
+                        dom::hidden("omnigraph-status-message", false);
+                    }
+                }
+                Err(e) => {
+                    dom::hidden("omnigraph-status-message", true);
+                    dom::error("omnigraph-error", &e.message);
+                }
+            }
+            let connected = m::yes(&m::data("omnigraph-status")["connected"]);
+            dom::disabled("omni-sync-knowledge", !connected);
+            true
+        }
         "omnigraph-search-clear" => {
             dom::set_value("omnigraph-search", "");
             run_search(String::new()).await;
@@ -5183,6 +5582,129 @@ pub async fn event(
                 set_ui_state(|s| s["drawer_tab"] = json!("publish"));
                 render_tabs();
                 dom::focus("omni-pub-title");
+            }
+            true
+        }
+        "omnigraph-promote-atom" => {
+            dom::error("omni-promote-error", "");
+            dom::hidden("omni-promote-status", true);
+            let atom_id_str = payload["atom_id"].as_str().unwrap_or("").trim().to_owned();
+            let branch = payload["branch"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::text(&ui_state(), "branch"));
+            let project = current_project_id();
+            if project.is_empty() || atom_id_str.is_empty() {
+                dom::error("omni-promote-error", "Select a project and atom first.");
+                return true;
+            }
+            let mut body = json!({
+                "project_id": project,
+                "atom_id": atom_id_str,
+            });
+            if !branch.is_empty() {
+                body["branch"] = json!(branch);
+            }
+            let kind_choice = dom::value("omni-promote-kind");
+            if !kind_choice.is_empty() {
+                body["kind"] = json!(kind_choice);
+            }
+            let privacy_choice = dom::value("omni-promote-privacy");
+            if !privacy_choice.is_empty() {
+                body["privacy"] = json!(privacy_choice);
+            }
+            if dom::value("brain-project") == project {
+                let bank = dom::value("brain-bank");
+                if !bank.is_empty() {
+                    body["bank"] = json!(bank);
+                }
+            }
+            if let Some(atom) = m::array(&m::data("omnigraph-graph")["atoms"])
+                .into_iter()
+                .find(|a| atom_id(a) == atom_id_str)
+            {
+                let atom_sid = atom_session_id(&atom);
+                if !atom_sid.is_empty() {
+                    body["session_id"] = json!(atom_sid);
+                }
+            }
+            if body["session_id"].is_null() {
+                let sid = m::read(|s| s.sid.clone());
+                if !sid.is_empty() {
+                    body["session_id"] = json!(sid);
+                }
+            }
+            dom::disabled("omni-promote-atom", true);
+            dom::text("omni-promote-status", "Promoting to Project Brain…");
+            dom::hidden("omni-promote-status", false);
+            match api::post("/api/omnigraph/promote", body).await {
+                Ok(res) => {
+                    if res["ok"].as_bool() == Some(false) {
+                        let msg = response_error_message(&res, "Could not promote atom to Brain.");
+                        dom::hidden("omni-promote-status", true);
+                        dom::error("omni-promote-error", &msg);
+                        dom::disabled("omni-promote-atom", false);
+                    } else {
+                        let brain_id = m::text(&res, "brain_record_id");
+                        let rec_type = m::text(&res, "record_type");
+                        let rev = res["revision"].as_i64().unwrap_or(1);
+                        let verified_count = m::array(&res["verified_files"]).len();
+                        let status_msg =
+                            format!(
+                            "Promoted to Project Brain as {} ({}) · rev {} · {} verified file(s).",
+                            if rec_type.is_empty() { "record" } else { &rec_type },
+                            brain_id,
+                            rev,
+                            verified_count
+                        );
+                        refresh_pill().await;
+                        refresh_graph().await;
+                        if dom::value("brain-project") == project {
+                            crate::knowledge::load("brain", false).await;
+                        }
+                        if dom::value("project") == project && m::read(|s| s.sid.is_empty()) {
+                            crate::knowledge::load_brain_link().await;
+                        }
+                        if m::text(&ui_state(), "selected_id") == atom_id_str {
+                            dom::text("omni-promote-status", &status_msg);
+                            dom::hidden("omni-promote-status", false);
+                        }
+                        dom::text("omnigraph-status-message", &status_msg);
+                        dom::hidden("omnigraph-status-message", false);
+                    }
+                }
+                Err(e) => {
+                    dom::hidden("omni-promote-status", true);
+                    dom::error("omni-promote-error", &e.message);
+                    dom::disabled("omni-promote-atom", false);
+                }
+            }
+            true
+        }
+        "omnigraph-open-brain" => {
+            let record_id = payload["record_id"]
+                .as_str()
+                .or_else(|| payload.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let project = current_project_id();
+            if !record_id.is_empty() {
+                crate::knowledge::open_from_omnigraph("brain", &project, &record_id).await;
+            }
+            true
+        }
+        "omnigraph-open-memory" => {
+            let memory_id = payload["memory_id"]
+                .as_str()
+                .or_else(|| payload.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let project = current_project_id();
+            if !memory_id.is_empty() {
+                crate::knowledge::open_from_omnigraph("memory", &project, &memory_id).await;
             }
             true
         }
@@ -6161,5 +6683,109 @@ mod tests {
         assert!(filtered_cards.contains("Auth UI"));
         assert!(share_session_matches_filter(&all[0], "sprint-auth"));
         assert!(!share_session_matches_filter(&all[0], "nonexistent"));
+    }
+
+    #[test]
+    fn inspector_and_search_render_provenance_jump_links_and_promote_button() {
+        let graph = json!({
+            "atoms": [
+                {
+                    "id": "atom-unverified",
+                    "kind": "insight",
+                    "title": "Draft session finding",
+                    "summary": "Observed in run",
+                    "branch": "session/s1",
+                    "origin_layer": "session-draft",
+                    "authority": "inferred",
+                    "verified": false
+                },
+                {
+                    "id": "atom-linked",
+                    "kind": "decision",
+                    "title": "Enforce token expiry",
+                    "summary": "Validated against Brain and Bank",
+                    "branch": "knowledge/canonical",
+                    "origin_layer": "project-brain",
+                    "authority": "verified",
+                    "privacy": "team",
+                    "verified": true,
+                    "brain_record_id": "12345678-abcd-ef00-9999-000000000001",
+                    "memory_id": "MEM-20261117-abcdef01-token-expiry",
+                    "record_revision": 4
+                }
+            ]
+        });
+
+        let unverified_html = render_node_inspector_html(&graph, "atom-unverified", &[], "main");
+        assert!(unverified_html.contains("Unverified reference"));
+        assert!(unverified_html.contains("session-draft"));
+        assert!(unverified_html.contains("authority: inferred"));
+        assert!(unverified_html.contains("data-action=\"omnigraph-promote-atom\""));
+        assert!(unverified_html.contains("Promote to Brain…"));
+        assert!(!unverified_html.contains("id=\"omni-promote-atom\" data-action=\"omnigraph-promote-atom\" data-atom-id=\"atom-unverified\" data-branch=\"session/s1\" data-payload=\"{&quot;atom_id&quot;:&quot;atom-unverified&quot;,&quot;branch&quot;:&quot;session/s1&quot;}\" disabled"));
+        assert!(!unverified_html.contains("data-action=\"omnigraph-open-brain\""));
+        assert!(!unverified_html.contains("data-action=\"omnigraph-open-memory\""));
+
+        let linked_html = render_node_inspector_html(&graph, "atom-linked", &[], "main");
+        assert!(linked_html.contains("Verified"));
+        assert!(!linked_html.contains("Unverified reference"));
+        assert!(linked_html.contains("project-brain"));
+        assert!(linked_html.contains("authority: verified"));
+        assert!(linked_html.contains("privacy: team"));
+        assert!(linked_html.contains("Revision: v4"));
+        assert!(linked_html.contains("data-action=\"omnigraph-open-brain\""));
+        assert!(linked_html.contains("Brain: 12345678"));
+        assert!(linked_html.contains("data-action=\"omnigraph-open-memory\""));
+        assert!(linked_html.contains("Memory: MEM-20261117-abcdef01-token-expiry"));
+        assert!(linked_html.contains("Promoted to Brain"));
+        assert!(linked_html.contains("id=\"omni-promote-status\""));
+        assert!(linked_html.contains("id=\"omni-promote-error\""));
+
+        let hits = json!({
+            "query": "token",
+            "hits": [
+                { "atom": graph["atoms"][0], "score": 1.2, "matched_via": "bm25", "neighbors": [] },
+                { "atom": graph["atoms"][1], "score": 3.4, "matched_via": "bm25", "neighbors": [] }
+            ]
+        });
+        let hits_html = render_search_hits_html(&hits);
+        assert!(hits_html.contains("Unverified reference"));
+        assert!(hits_html.contains("Verified"));
+        assert!(hits_html.contains("data-action=\"omnigraph-open-brain\""));
+        assert!(hits_html.contains("data-action=\"omnigraph-open-memory\""));
+    }
+
+    #[test]
+    fn session_bar_metrics_measure_capsule_chars_and_verified_counts() {
+        let session = json!({
+            "id": "s-bar",
+            "omnigraph": {
+                "enabled": true,
+                "branch": "session/s-bar",
+                "capsule_text": "x".repeat(1425),
+                "injected_atoms": [
+                    { "id": "a1", "title": "Brain decision", "verified": true, "authority": "verified" },
+                    { "id": "a2", "title": "Bank constraint", "authority": "verified" },
+                    { "id": "a3", "title": "Session insight", "verified": false, "origin_layer": "session-draft" },
+                    { "id": "a4", "title": "Legacy atom" }
+                ]
+            }
+        });
+        let m = session_bar_metrics(&session);
+        assert!(m.enabled);
+        assert_eq!(m.branch, "session/s-bar");
+        assert_eq!(m.capsule_chars, 1425);
+        assert_eq!(m.capsule_limit, 6000);
+        assert_eq!(
+            format!(
+                "{} / {} chars",
+                format_count(m.capsule_chars),
+                format_count(m.capsule_limit)
+            ),
+            "1,425 / 6,000 chars"
+        );
+        assert_eq!(m.verified_count, 2);
+        assert_eq!(m.unverified_count, 2);
+        assert_eq!(m.atom_count, 4);
     }
 }
