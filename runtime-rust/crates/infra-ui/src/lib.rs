@@ -9,6 +9,7 @@ mod classify;
 mod commands;
 mod dom;
 mod eval_viewer;
+mod git_commit_graph;
 mod graph;
 mod graph_explanation;
 mod graph_map;
