@@ -844,7 +844,25 @@ impl KnowledgeDomain {
                 "The linked task is terminal. Prepare another task.",
             ));
         }
-        let refreshed=MemoryService::new(context.clone(),None).execute("retrieve",&json!({"task_id":id,"query":brain["query"],"ephemeral":true,"host":"cli","gate":"off","limit":3,"json":true,"provenance_response":true}),&[])?;
+        let mut verify_req = json!({
+            "task_id": id,
+            "query": brain["query"],
+            "ephemeral": true,
+            "host": "cli",
+            "gate": "off",
+            "limit": 3,
+            "capsule_profile": "full",
+            "json": true,
+            "provenance_response": true,
+        });
+        if session["omnigraph"]["enabled"] == true
+            && let Some(atoms) = session["omnigraph"]["injected_atoms"].as_array()
+            && let Some(hints) = self.build_omnigraph_source_hints(&context, atoms)
+        {
+            verify_req["source_hints"] = hints;
+        }
+        let refreshed =
+            MemoryService::new(context.clone(), None).execute("retrieve", &verify_req, &[])?;
         let capsule = if refreshed["response_profile"] == "local-source-provenance-v1" {
             &refreshed["capsule"]
         } else {
