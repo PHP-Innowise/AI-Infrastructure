@@ -425,15 +425,37 @@ impl Services for NativeServices {
                                 "Unexpected omnigraph sync payload.",
                             ));
                         };
-                        Payload::Json(json!({
-                            "ok": synced["ok"] == true,
+                        let ok = synced["ok"] == true;
+                        let skip_reason = (!ok)
+                            .then(|| synced["skipped"].as_str().map(str::to_owned))
+                            .flatten();
+                        let mut out = json!({
+                            "ok": ok,
                             "branch": synced["branch"].as_str().unwrap_or("knowledge/canonical"),
                             "synced": synced["synced"].as_u64().unwrap_or(0),
                             "brain_count": collected["brain_count"].as_u64().unwrap_or(0),
                             "memory_count": collected["memory_count"].as_u64().unwrap_or(0),
-                            "skipped": collected["skipped"].as_u64().unwrap_or(0),
+                            "skipped": skip_reason.as_deref().map(|r| json!(r)).unwrap_or_else(|| json!(collected["skipped"].as_u64().unwrap_or(0))),
                             "atom_ids": synced["atom_ids"].as_array().cloned().unwrap_or_default(),
-                        }))
+                        });
+                        if !ok {
+                            let err_msg = synced["error"]
+                                .as_str()
+                                .or_else(|| synced["message"].as_str())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| {
+                                    if skip_reason.as_deref() == Some("omnigraph-off") {
+                                        "Omnigraph is off. Configure or enable Omnigraph before syncing.".to_owned()
+                                    } else if let Some(reason) = &skip_reason {
+                                        format!("Omnigraph sync skipped: {reason}")
+                                    } else {
+                                        "Omnigraph sync failed.".to_owned()
+                                    }
+                                });
+                            out["error"] = json!(err_msg);
+                            out["message"] = json!(err_msg);
+                        }
+                        Payload::Json(out)
                     }
                     "omnigraph.promote" => {
                         let project_id = body["project_id"]
@@ -504,19 +526,28 @@ impl Services for NativeServices {
                         let branch = fetched["branch"].as_str().unwrap_or("main");
                         let brain_record_id = promoted["record_id"].as_str().unwrap_or("");
                         let revision = promoted["revision"].as_i64().unwrap_or(1);
+                        let privacy = promoted
+                            .get("privacy")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        let mut link_body = json!({
+                            "project_id": project_id,
+                            "branch": branch,
+                            "atom": fetched["atom"],
+                            "brain_record_id": brain_record_id,
+                            "revision": revision,
+                        });
+                        if let Some(p) = privacy {
+                            link_body["privacy"] = json!(p);
+                        }
                         let Payload::Json(linked) = omnigraph
                             .execute(
                                 "omnigraph.link_brain",
                                 json!({
                                     "params": {},
                                     "query": {},
-                                    "body": {
-                                        "project_id": project_id,
-                                        "branch": branch,
-                                        "atom": fetched["atom"],
-                                        "brain_record_id": brain_record_id,
-                                        "revision": revision,
-                                    },
+                                    "body": link_body,
                                 }),
                             )
                             .await?
@@ -537,6 +568,9 @@ impl Services for NativeServices {
                                 obj.insert("origin_layer".into(), json!("project-brain"));
                                 obj.insert("authority".into(), json!("verified"));
                                 obj.insert("verified".into(), json!(true));
+                                if let Some(p) = privacy {
+                                    obj.insert("privacy".into(), json!(p));
+                                }
                             }
                             patched
                         };
@@ -547,6 +581,7 @@ impl Services for NativeServices {
                             "brain_record_id": brain_record_id,
                             "record_type": promoted["record_type"],
                             "revision": revision,
+                            "privacy": promoted["privacy"],
                             "origin_layer": "project-brain",
                             "authority": "verified",
                             "verified_files": promoted["verified_files"],
@@ -570,8 +605,26 @@ impl Services for NativeServices {
             if let Payload::Json(ref val) = payload
                 && val["ok"] == true
             {
-                if operation == "knowledge.run"
-                    && matches!(
+                if operation == "omnigraph.promote" {
+                    let project_id = body["project_id"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            params["project_id"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                        })
+                        .unwrap_or("");
+                    self.best_effort_sync_knowledge(
+                        project_id,
+                        body["bank"].as_str(),
+                        body["session_id"].as_str(),
+                    )
+                    .await;
+                } else if operation == "knowledge.run"
+                    && (matches!(
                         body["action"].as_str(),
                         Some(
                             "complete"
@@ -580,8 +633,11 @@ impl Services for NativeServices {
                                 | "bank-retire"
                                 | "brain-update"
                                 | "record-result"
+                                | "bank-reverify"
                         )
-                    )
+                    ) || (body["action"].as_str() == Some("brain-create")
+                        && (val["result"]["authority"] == "verified"
+                            || (val["result"].is_null() && body["authority"] == "verified"))))
                 {
                     self.best_effort_sync_knowledge(
                         params["project_id"].as_str().unwrap_or(""),
@@ -731,12 +787,14 @@ mod tests {
     struct RecordingDomain {
         calls: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
         promote_error: bool,
+        sync_off: bool,
     }
     impl Domain for RecordingDomain {
         fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
             let op = operation.to_owned();
             let calls = self.calls.clone();
             let promote_error = self.promote_error;
+            let sync_off = self.sync_off;
             Box::pin(async move {
                 calls.lock().unwrap().push((op.clone(), request.clone()));
                 let val = match op.as_str() {
@@ -749,13 +807,31 @@ mod tests {
                         "memory_count": 1,
                         "skipped": 2
                     }),
-                    "omnigraph.status" => json!({"state": "connected", "mode": "external"}),
-                    "omnigraph.sync_items" => json!({
-                        "ok": true,
-                        "branch": "knowledge/canonical",
-                        "synced": 2,
-                        "atom_ids": ["brain-b1", "mem-MEM-0001"]
-                    }),
+                    "omnigraph.status" => {
+                        if sync_off {
+                            json!({"state": "unconfigured", "mode": "off"})
+                        } else {
+                            json!({"state": "connected", "mode": "external"})
+                        }
+                    }
+                    "omnigraph.sync_items" => {
+                        if sync_off {
+                            json!({
+                                "ok": false,
+                                "skipped": "omnigraph-off",
+                                "branch": "knowledge/canonical",
+                                "synced": 0,
+                                "atom_ids": []
+                            })
+                        } else {
+                            json!({
+                                "ok": true,
+                                "branch": "knowledge/canonical",
+                                "synced": 2,
+                                "atom_ids": ["brain-b1", "mem-MEM-0001"]
+                            })
+                        }
+                    }
                     "omnigraph.fetch_atom" => json!({
                         "branch": "session/s1",
                         "files": ["src/auth.rs"],
@@ -913,12 +989,25 @@ mod tests {
         assert_eq!(promote_res["origin_layer"], "project-brain");
         assert_eq!(promote_res["authority"], "verified");
         assert_eq!(promote_res["verified_files"], json!(["src/auth.rs"]));
+        assert_eq!(promote_res["privacy"], "team");
         assert_eq!(
             promote_res["atom"]["brain_record_id"],
             "11111111-1111-4111-8111-111111111111"
         );
+        {
+            let recorded = rec.calls.lock().unwrap();
+            let link_call = recorded
+                .iter()
+                .find(|(op, _)| op == "omnigraph.link_brain")
+                .expect("link_brain called");
+            assert_eq!(link_call.1["body"]["privacy"], "team");
+            assert!(
+                recorded.iter().any(|(op, _)| op == "omnigraph.sync_items"),
+                "omnigraph.promote must trigger canonical sync"
+            );
+        }
 
-        // 3. Best-effort sync triggers after knowledge.run(complete), brain.act, and memory.save
+        // 3. Best-effort sync triggers after knowledge.run(complete|brain-create verified|bank-reverify), brain.act, and memory.save
         rec.calls.lock().unwrap().clear();
         services
             .request(
@@ -937,22 +1026,42 @@ mod tests {
         services
             .request(
                 "knowledge.run",
-                json!({"params":{"project_id": pid},"query":{},"body":{"action":"complete"}}),
+                json!({"params":{"project_id": pid},"query":{},"body":{"action":"brain-create","authority":"observed"}}),
             )
             .await
             .unwrap();
-        let ops: Vec<String> = rec
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(op, _)| op.clone())
-            .collect();
-        assert!(
-            ops.contains(&"knowledge.sync_collect".to_string()),
-            "{ops:?}"
+        assert_eq!(
+            rec.calls.lock().unwrap().len(),
+            1,
+            "unverified brain-create must not trigger sync"
         );
-        assert!(ops.contains(&"omnigraph.sync_items".to_string()), "{ops:?}");
+
+        for body in [
+            json!({"action":"complete"}),
+            json!({"action":"brain-create","authority":"verified"}),
+            json!({"action":"bank-reverify"}),
+        ] {
+            rec.calls.lock().unwrap().clear();
+            services
+                .request(
+                    "knowledge.run",
+                    json!({"params":{"project_id": pid},"query":{},"body": body}),
+                )
+                .await
+                .unwrap();
+            let ops: Vec<String> = rec
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(op, _)| op.clone())
+                .collect();
+            assert!(
+                ops.contains(&"knowledge.sync_collect".to_string()),
+                "{ops:?}"
+            );
+            assert!(ops.contains(&"omnigraph.sync_items".to_string()), "{ops:?}");
+        }
 
         for op in ["brain.act", "memory.save"] {
             rec.calls.lock().unwrap().clear();
@@ -980,10 +1089,37 @@ mod tests {
             );
         }
 
-        // 4. Promote error aborts before omnigraph.link_brain
+        // 4. omnigraph.sync_knowledge preserves omnigraph-off skip reason and error message
+        let off_rec = Arc::new(RecordingDomain {
+            sync_off: true,
+            ..Default::default()
+        });
+        let off_services = build_services_with_recording(store.clone(), off_rec, false);
+        let Payload::Json(off_res) = off_services
+            .request(
+                "omnigraph.sync_knowledge",
+                json!({"params":{},"query":{},"body":{"project_id": pid}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(off_res["ok"], false);
+        assert_eq!(off_res["skipped"], "omnigraph-off");
+        assert!(
+            off_res["error"]
+                .as_str()
+                .is_some_and(|s| s.contains("Omnigraph is off")),
+            "{off_res}"
+        );
+        assert_eq!(off_res["message"], off_res["error"]);
+
+        // 5. Promote error aborts before omnigraph.link_brain
         let failing_rec = Arc::new(RecordingDomain {
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
             promote_error: true,
+            sync_off: false,
         });
         let failing_services = build_services_with_recording(store, failing_rec.clone(), false);
         let err = failing_services
@@ -1008,6 +1144,7 @@ mod tests {
         );
 
         services.close().await.unwrap();
+        off_services.close().await.unwrap();
         failing_services.close().await.unwrap();
     }
 }

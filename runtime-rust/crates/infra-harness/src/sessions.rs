@@ -1580,6 +1580,13 @@ impl Sessions {
         }
         let mut graph_binding = None;
         let mut omnigraph_prepared = false;
+        let omnigraph_already_reviewed = session["brain"]["approved"] == true
+            && (!session["omnigraph"]["capsule_text"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+                || session["omnigraph"]["query"].is_string());
         if !session["fleet"].is_null() || !session["clash"].is_null() {
             let saved: Option<String> = self.store.connection()?.query_row(
                 "SELECT fleet_action FROM sessions WHERE id=?1",
@@ -1590,7 +1597,7 @@ impl Sessions {
                 .as_deref()
                 .is_some_and(|value| ["approve", "reject"].contains(&value))
             {
-                if session["omnigraph"]["enabled"] == true {
+                if session["omnigraph"]["enabled"] == true && !omnigraph_already_reviewed {
                     self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
                         .await;
                     omnigraph_prepared = true;
@@ -1765,7 +1772,10 @@ impl Sessions {
         if let Some(notice) = &route.notice {
             emit(json!({"kind":"status","text":notice}))?;
         }
-        if session["omnigraph"]["enabled"] == true {
+        if session["omnigraph"]["enabled"] == true
+            && !omnigraph_prepared
+            && !omnigraph_already_reviewed
+        {
             self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
                 .await;
         }
@@ -2315,7 +2325,11 @@ impl Domain for Sessions {
                         && let Ok(results) = self.results()
                     {
                         let _ = results
-                            .publish_manual_memory_to_omnigraph(&saved.0, body)
+                            .publish_manual_memory_to_omnigraph(
+                                &saved.0,
+                                body,
+                                Some(&saved.1["saved"]),
+                            )
                             .await;
                     }
                     return Ok(Payload::Json(saved.1));
