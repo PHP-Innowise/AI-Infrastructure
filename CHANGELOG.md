@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Say when a running Harness session was not told about an Omnigraph import
+  or link: the inbox notice used to be dropped without a word. Each live
+  session's outcome comes back in `inbox_notifications` (`notified`, or a
+  reason code: `brain_linked`, `specialized_workflow`, `agents_enabled`,
+  `unsupported_provider_or_mode`, `missing_native_session_id`,
+  `missing_binding`, `inbox_refused`), and a running session that could not
+  take it records an `inbox_notify` event. The inbox now refuses a System
+  explain session too, as chat follow-ups already did.
 - Harness Omnigraph sessions: the text a session searches with and leaves
   on its shared `Session` node is screened as an automatic memory query
   (secrets, personal data and transcript markers removed) instead of the raw

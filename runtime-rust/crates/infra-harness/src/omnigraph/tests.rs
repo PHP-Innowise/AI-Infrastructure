@@ -3980,7 +3980,9 @@ async fn sidecar_link_sessions_shared_branch_and_broadcast_via_mock() {
     );
 
     let synced_rows =
-        crate::sessions::sync_omnigraph_link_to_sessions(&store, None, &link_req, &shared).await;
+        crate::sessions::sync_omnigraph_link_to_sessions(&store, None, &link_req, &shared)
+            .await
+            .sessions;
     assert_eq!(synced_rows.len(), 2);
 
     // Graph view and status reflect `SessionFollows` and `shared_space`.

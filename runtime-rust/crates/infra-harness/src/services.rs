@@ -411,14 +411,18 @@ impl Services for NativeServices {
                         let mut payload = domain.execute(operation, request.clone()).await?;
                         if let Payload::Json(ref mut val) = payload {
                             let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
-                            let updated_sessions =
-                                crate::sessions::sync_omnigraph_import_to_sessions(
-                                    &self.store,
-                                    sessions_domain,
-                                    &request["body"],
-                                    val,
-                                )
-                                .await;
+                            let synced = crate::sessions::sync_omnigraph_import_to_sessions(
+                                &self.store,
+                                sessions_domain,
+                                &request["body"],
+                                val,
+                            )
+                            .await;
+                            if !synced.inbox_notifications.is_empty() {
+                                val["inbox_notifications"] =
+                                    Value::Array(synced.inbox_notifications);
+                            }
+                            let updated_sessions = synced.sessions;
                             if !updated_sessions.is_empty() {
                                 val["session"] = updated_sessions[0].clone();
                                 val["sessions"] = Value::Array(updated_sessions);
@@ -433,14 +437,18 @@ impl Services for NativeServices {
                         let mut payload = domain.execute(operation, request.clone()).await?;
                         if let Payload::Json(ref mut val) = payload {
                             let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
-                            let updated_sessions =
-                                crate::sessions::sync_omnigraph_link_to_sessions(
-                                    &self.store,
-                                    sessions_domain,
-                                    &request["body"],
-                                    val,
-                                )
-                                .await;
+                            let synced = crate::sessions::sync_omnigraph_link_to_sessions(
+                                &self.store,
+                                sessions_domain,
+                                &request["body"],
+                                val,
+                            )
+                            .await;
+                            if !synced.inbox_notifications.is_empty() {
+                                val["inbox_notifications"] =
+                                    Value::Array(synced.inbox_notifications);
+                            }
+                            let updated_sessions = synced.sessions;
                             if let Some(first) = updated_sessions.first() {
                                 val["session"] = first.clone();
                             }

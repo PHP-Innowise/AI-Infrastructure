@@ -3231,35 +3231,79 @@ fn sync_reciprocal_session_links(store: &SessionStore, session: &Value) {
     }
 }
 
+/// Tell a running native session about a context update through its inbox,
+/// and say what happened: `notified`, or the `reason` it was not. A session
+/// that is not running has nothing to tell; a running one that cannot take
+/// the follow-up, or whose inbox refuses it, records an `inbox_notify` event.
 async fn notify_live_native_session_inbox(
+    store: &SessionStore,
     sessions_domain: Option<&dyn Domain>,
     session: &Value,
     request_prefix: &str,
     prompt: &str,
-) {
-    let Some(domain) = sessions_domain else {
-        return;
+) -> Value {
+    let sid = session["id"].as_str().unwrap_or("");
+    let mut outcome = json!({ "session_id": sid, "notified": false });
+    let refused = if let Err(reason) = crate::inbox::live_eligibility_reason(session) {
+        outcome["reason"] = json!(reason);
+        reason != "not_running"
+    } else if let Some(domain) = sessions_domain {
+        let request_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
+        match domain
+            .execute(
+                "sessions.inbox_accept",
+                json!({
+                    "params": { "session_id": sid },
+                    "query": {},
+                    "body": {
+                        "request_id": request_id,
+                        "prompt": prompt,
+                    },
+                }),
+            )
+            .await
+        {
+            Ok(_) => {
+                outcome["notified"] = json!(true);
+                outcome["request_id"] = json!(request_id);
+                false
+            }
+            Err(error) => {
+                outcome["reason"] = json!("inbox_refused");
+                outcome["error"] = json!(error.message);
+                true
+            }
+        }
+    } else {
+        outcome["reason"] = json!("inbox_unavailable");
+        true
     };
-    if session["status"] != "running" || session["workflow"] != "native" {
-        return;
-    }
-    let Some(sid) = session["id"].as_str().filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let req_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
-    let _ = domain
-        .execute(
-            "sessions.inbox_accept",
-            json!({
-                "params": { "session_id": sid },
-                "query": {},
-                "body": {
-                    "request_id": req_id,
-                    "prompt": prompt,
-                },
+    if refused && !sid.is_empty() {
+        let reason = outcome["reason"].as_str().unwrap_or("");
+        let detail = outcome["error"]
+            .as_str()
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        let _ = store.event(
+            sid,
+            &json!({
+                "kind": "omnigraph",
+                "phase": "inbox_notify",
+                "ok": false,
+                "reason": reason,
+                "text": format!(
+                    "The running turn was not told about the Omnigraph update ({reason}{detail}); the next turn reads it from the session's context."
+                ),
             }),
-        )
-        .await;
+        );
+    }
+    outcome
+}
+
+/// Sessions an Omnigraph update changed, and what each running one was told.
+pub(crate) struct SessionContextSync {
+    pub sessions: Vec<Value>,
+    pub inbox_notifications: Vec<Value>,
 }
 
 /// Update `session["omnigraph"]`, emit events, and notify active native sessions after `omnigraph.import`.
@@ -3268,9 +3312,13 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
     sessions_domain: Option<&dyn Domain>,
     body: &Value,
     import_result: &Value,
-) -> Vec<Value> {
+) -> SessionContextSync {
+    let mut synced = SessionContextSync {
+        sessions: Vec::new(),
+        inbox_notifications: Vec::new(),
+    };
     if import_result["ok"] != true {
-        return Vec::new();
+        return synced;
     }
     let shared_sids: Vec<String> = import_result["shared_session_ids"]
         .as_array()
@@ -3282,7 +3330,7 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
         .map(str::to_owned)
         .collect();
     if shared_sids.is_empty() {
-        return Vec::new();
+        return synced;
     }
     let target_branch = import_result["target_branch"]
         .as_str()
@@ -3296,7 +3344,6 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
     let atom_ids = import_result["atom_ids"].clone();
     let inject_live = body.get("inject_live").and_then(Value::as_bool) != Some(false);
 
-    let mut updated = Vec::new();
     for sid in &shared_sids {
         let Ok(session) = store.get(sid) else {
             continue;
@@ -3342,12 +3389,20 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
                 "Omnigraph context update: {} imported atom(s) added on branch `{target_branch}` and injected into this session.",
                 atoms.len()
             );
-            notify_live_native_session_inbox(sessions_domain, &session, "omni-import", &notice)
-                .await;
+            synced.inbox_notifications.push(
+                notify_live_native_session_inbox(
+                    store,
+                    sessions_domain,
+                    &session,
+                    "omni-import",
+                    &notice,
+                )
+                .await,
+            );
         }
-        updated.push(patched);
+        synced.sessions.push(patched);
     }
-    updated
+    synced
 }
 
 /// Update `session["omnigraph"]` (`shared_space`, `linked_session_ids`, `pull_branches`, `injected_atoms`,
@@ -3357,9 +3412,13 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
     sessions_domain: Option<&dyn Domain>,
     body: &Value,
     link_result: &Value,
-) -> Vec<Value> {
+) -> SessionContextSync {
+    let mut synced = SessionContextSync {
+        sessions: Vec::new(),
+        inbox_notifications: Vec::new(),
+    };
     if link_result["ok"] != true {
-        return Vec::new();
+        return synced;
     }
     let linked_sids: Vec<String> = link_result["linked_session_ids"]
         .as_array()
@@ -3371,7 +3430,7 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
         .map(str::to_owned)
         .collect();
     if linked_sids.is_empty() {
-        return Vec::new();
+        return synced;
     }
     let mode = link_result["mode"]
         .as_str()
@@ -3411,7 +3470,6 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
         }
     }
 
-    let mut updated = Vec::new();
     for sid in &linked_sids {
         let Ok(session) = store.get(sid) else {
             continue;
@@ -3500,11 +3558,20 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
             let notice = format!(
                 "Shared Omnigraph context update ({mode}): {synced_count} atom(s) synced on `{shared_branch}` across linked tasks."
             );
-            notify_live_native_session_inbox(sessions_domain, &session, "omni-link", &notice).await;
+            synced.inbox_notifications.push(
+                notify_live_native_session_inbox(
+                    store,
+                    sessions_domain,
+                    &session,
+                    "omni-link",
+                    &notice,
+                )
+                .await,
+            );
         }
-        updated.push(patched);
+        synced.sessions.push(patched);
     }
-    updated
+    synced
 }
 
 struct CancelRelay(tokio::task::JoinHandle<()>);
@@ -4819,6 +4886,84 @@ mod graph_focus_tests {
             !hit.load(Ordering::Acquire),
             "memory.save must not publish to Omnigraph unless ok == true"
         );
+    }
+}
+
+#[cfg(test)]
+mod inbox_notify_tests {
+    use super::*;
+
+    struct Refusing;
+    impl Domain for Refusing {
+        fn execute<'a>(&'a self, operation: &'a str, _: Value) -> Reply<'a> {
+            Box::pin(async move {
+                assert_eq!(operation, "sessions.inbox_accept");
+                Err(HarnessError::conflict("The inbox is full."))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_live_native_session_inbox_surfaces_brain_skip_and_domain_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("state")).unwrap();
+        {
+            let db = store.connection().unwrap();
+            crate::inbox::initialize(&db).unwrap();
+            for (id, status) in [
+                ("live", "running"),
+                ("idle", "completed"),
+                ("linked", "running"),
+            ] {
+                db.execute("INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,native_session_id,created_at,updated_at) VALUES(?1,'Example','p','/project','codex','plan','native',0,?2,'native-1','now','now')", rusqlite::params![id, status]).unwrap();
+            }
+        }
+        let events = |sid: &str| {
+            store
+                .events(sid, 0)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event["phase"] == "inbox_notify")
+                .collect::<Vec<_>>()
+        };
+        let mut linked = store.get("linked").unwrap();
+        linked["brain"] = json!({"task_id": "TASK-1"});
+        let skipped =
+            notify_live_native_session_inbox(&store, Some(&Refusing), &linked, "omni", "Update")
+                .await;
+        assert_eq!(skipped["notified"], false);
+        assert_eq!(skipped["reason"], "brain_linked");
+        assert_eq!(events("linked").len(), 1);
+        let refused = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &store.get("live").unwrap(),
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(refused["reason"], "inbox_refused");
+        assert_eq!(refused["error"], "The inbox is full.");
+        let recorded = events("live");
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("The inbox is full."),
+            "{recorded:?}"
+        );
+        // A session that is not running has nothing to be told.
+        let idle = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &store.get("idle").unwrap(),
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(idle["reason"], "not_running");
+        assert!(events("idle").is_empty());
     }
 }
 
