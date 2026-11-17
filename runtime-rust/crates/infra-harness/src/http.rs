@@ -1371,6 +1371,22 @@ pub const ROUTES: &[Route] = &[
         query: &[],
     },
     Route {
+        method: "POST",
+        pattern: "/api/omnigraph/sync-knowledge",
+        operation: "omnigraph.sync_knowledge",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/promote",
+        operation: "omnigraph.promote",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
         method: "GET",
         pattern: "/api/omnigraph/changes",
         operation: "omnigraph.changes",
@@ -1721,4 +1737,34 @@ pub async fn serve_listener(listener: tokio::net::TcpListener, app: App) -> Resu
         })
         .await
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omnigraph_sync_and_promote_routes_are_registered_with_csrf_tokens() {
+        for (method, pattern, op) in [
+            (
+                "POST",
+                "/api/omnigraph/sync-knowledge",
+                "omnigraph.sync_knowledge",
+            ),
+            ("POST", "/api/omnigraph/promote", "omnigraph.promote"),
+        ] {
+            let found = ROUTES
+                .iter()
+                .find(|r| r.method == method && r.pattern == pattern)
+                .unwrap_or_else(|| panic!("missing route {method} {pattern}"));
+            assert_eq!(found.operation, op);
+            assert_eq!(found.status, 200);
+            assert!(found.token, "{pattern} must require CSRF token");
+            assert!(found.query.is_empty());
+
+            let (matched, params) = route(method, pattern).expect("route matches");
+            assert_eq!(matched.operation, op);
+            assert!(params.is_empty());
+        }
+    }
 }

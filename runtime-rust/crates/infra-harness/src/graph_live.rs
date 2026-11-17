@@ -361,6 +361,35 @@ pub fn predict_session_targets(
             }
         }
     }
+    if session["omnigraph"]["enabled"] == true {
+        for atom in session["omnigraph"]["injected_atoms"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            for path in atom["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                let trimmed = path.trim();
+                if !trimmed.is_empty() {
+                    capsule_paths.push(trimmed.to_owned());
+                }
+            }
+        }
+        if let Some(text) = session["omnigraph"]["capsule_text"].as_str() {
+            for line in text.lines().take(200) {
+                for token in extract_explicit_paths(line) {
+                    let candidate = strip_line_suffix(&token).trim();
+                    if looks_like_source_path(candidate) {
+                        capsule_paths.push(candidate.to_owned());
+                    }
+                }
+            }
+        }
+    }
 
     let mut attachment_paths = Vec::new();
     if let Ok(events) = store.events(sid, 0)
@@ -6226,5 +6255,92 @@ class Guard:
         assert_eq!(php_a[1].params_signature, php_b[1].params_signature);
         assert_ne!(php_a[1].visibility, php_b[1].visibility);
         assert_eq!(php_a[2].params_signature, php_b[2].params_signature);
+    }
+
+    #[test]
+    fn predict_session_targets_extracts_omnigraph_atom_files_and_capsule_paths() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/Aaa")).expect("aaa dir");
+        for i in 0..20 {
+            fs::write(
+                root.join(format!("src/Aaa/Pad{i:02}.rs")),
+                format!("pub fn pad_{i}() {{}}\n"),
+            )
+            .expect("pad file");
+        }
+        fs::create_dir_all(root.join("src/Auth")).expect("auth dir");
+        fs::create_dir_all(root.join("src/Cache")).expect("cache dir");
+        fs::write(
+            root.join("src/Auth/TokenGuard.rs"),
+            "pub fn check_token() {}\n",
+        )
+        .expect("token guard");
+        fs::write(
+            root.join("src/Cache/RedisStore.rs"),
+            "pub fn cache_key() {}\n",
+        )
+        .expect("redis store");
+
+        let store = SessionStore::open(&root.join("harness-state")).expect("store");
+        let enabled_session = json!({
+            "omnigraph": {
+                "enabled": true,
+                "injected_atoms": [
+                    {
+                        "atom_id": "a1",
+                        "files": ["src/Cache/RedisStore.rs"]
+                    }
+                ],
+                "capsule_text": "- [finding] Check TokenGuard in src/Auth/TokenGuard.rs:42\n"
+            }
+        });
+        let focus = predict_session_targets(
+            &store,
+            "sess-1",
+            &enabled_session,
+            root,
+            None,
+            "Review session",
+        );
+        assert!(
+            focus
+                .target_paths
+                .contains(&"src/Cache/RedisStore.rs".to_owned()),
+            "{:?}",
+            focus.target_paths
+        );
+        assert!(
+            focus
+                .target_paths
+                .contains(&"src/Auth/TokenGuard.rs".to_owned()),
+            "{:?}",
+            focus.target_paths
+        );
+
+        let mut disabled_session = enabled_session;
+        disabled_session["omnigraph"]["enabled"] = json!(false);
+        let disabled_focus = predict_session_targets(
+            &store,
+            "sess-2",
+            &disabled_session,
+            root,
+            None,
+            "Review session",
+        );
+        assert!(
+            !disabled_focus
+                .target_paths
+                .contains(&"src/Cache/RedisStore.rs".to_owned()),
+            "{:?}",
+            disabled_focus.target_paths
+        );
+        assert!(
+            !disabled_focus
+                .target_paths
+                .contains(&"src/Auth/TokenGuard.rs".to_owned()),
+            "{:?}",
+            disabled_focus.target_paths
+        );
     }
 }
