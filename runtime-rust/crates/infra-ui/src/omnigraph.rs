@@ -3078,39 +3078,21 @@ async fn preview_merge(source: &str, target: &str) {
     }
 }
 
-/// Settle one Context Atom conflict by writing the kept side's value onto
-/// the other branch, then preview the merge again.
+/// Settle one Context Atom conflict by copying the kept side's atom onto
+/// the other branch as it is stored, then preview the merge again.
 async fn keep_conflict_side(payload: &V) {
     let project = current_project_id();
     dom::error("omnigraph-error", "");
     for button in dom::all("[data-action=\"omnigraph-conflict-keep\"]") {
         let _ = button.set_attribute("disabled", "");
     }
-    let mut request = omnigraph_canvas::conflict_keep_request(&project, payload, None);
-    if request.is_err() {
-        // A field-level conflict carries one value: read the whole atom the
-        // written branch holds now.
-        let path = format!(
-            "/api/omnigraph/graph{}",
-            dom::query(&[
-                ("project_id", project.clone()),
-                ("branch", m::text(payload, "write_branch")),
-            ])
-        );
-        if let Ok(graph) = api::get(&path).await {
-            let written = m::array(&graph["atoms"])
-                .into_iter()
-                .find(|atom| atom_id(atom) == m::text(payload, "atom_id"));
-            request = omnigraph_canvas::conflict_keep_request(&project, payload, written.as_ref());
-        }
-    }
-    let outcome = match request {
-        Ok(body) => match api::post("/api/omnigraph/atoms", body).await {
+    let outcome = match omnigraph_canvas::conflict_keep_request(&project, payload) {
+        Ok(body) => match api::post("/api/omnigraph/branches", body).await {
             Ok(res) if res["ok"].as_bool() != Some(false) => Ok(()),
             Ok(res) => Err(res["error"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .unwrap_or("Could not write the kept value.")
+                .unwrap_or("Could not keep the atom.")
                 .to_owned()),
             Err(e) => Err(e.message),
         },
@@ -3124,7 +3106,7 @@ async fn keep_conflict_side(payload: &V) {
     dom::text(
         "omnigraph-status-message",
         &format!(
-            "Kept the {} value of {} on {}.",
+            "Copied the {} atom {} to {}.",
             m::text(payload, "keep"),
             m::text(payload, "atom_id"),
             m::text(payload, "write_branch")

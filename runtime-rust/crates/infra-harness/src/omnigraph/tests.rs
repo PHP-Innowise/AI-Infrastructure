@@ -4783,19 +4783,9 @@ async fn atom_update_without_session_keeps_its_session_and_links_none() {
     mgr.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn divergent_atom_conflicts_carry_both_branches_atoms() {
-    let state_dir = tempfile::tempdir().unwrap();
-    let (base_url, _server, mock) = spawn_mock_omnigraph_with_state().await;
-    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
-    mgr.setup_json(&json!({
-        "action": "connect",
-        "endpoint": base_url,
-        "token": "tok-harness",
-        "graph_id": schema::HARNESS_GRAPH_ID
-    }))
-    .await
-    .unwrap();
+/// `atom-keys` and `atom-ttl` updated differently on `session/keep` and on
+/// `main` after the branch split, and `atom-twin` created on both.
+async fn publish_divergent_atoms(mgr: &OmnigraphManager) {
     for atom_id in ["atom-keys", "atom-ttl"] {
         mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": atom_id, "kind": "decision", "title": format!("Title of {atom_id}"), "summary": "Base"}))
             .await
@@ -4818,6 +4808,32 @@ async fn divergent_atom_conflicts_carry_both_branches_atoms() {
             .await
             .unwrap();
     }
+}
+
+/// The fake Omnigraph and a manager connected to it.
+async fn connected_mock() -> (
+    tempfile::TempDir,
+    OmnigraphManager,
+    Arc<Mutex<MockGraphState>>,
+) {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server, mock) = spawn_mock_omnigraph_with_state().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    (state_dir, mgr, mock)
+}
+
+#[tokio::test]
+async fn divergent_atom_conflicts_carry_both_branches_atoms() {
+    let (_state_dir, mgr, mock) = connected_mock().await;
+    publish_divergent_atoms(&mgr).await;
 
     mock.lock().unwrap().reads.clear();
     let diff = mgr
@@ -4894,13 +4910,110 @@ async fn divergent_atom_conflicts_carry_both_branches_atoms() {
     mgr.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn keep_copies_the_kept_atom_and_settles_its_conflict() {
+    let (_state_dir, mgr, mock) = connected_mock().await;
+    publish_divergent_atoms(&mgr).await;
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    let ttl = diff["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entity_id"] == "atom-ttl")
+        .cloned()
+        .unwrap();
+
+    // Keep source: main gets the source's atom exactly as the branch
+    // stores it, its branch and time included.
+    let kept = mgr
+        .branch_action_json(&json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-ttl", "from": "session/keep", "to": "main", "expected_updated_at": ttl["source_value"]["updated_at"], "replaced_updated_at": ttl["target_value"]["updated_at"]}))
+        .await
+        .unwrap();
+    assert_eq!(kept["ok"], true);
+    assert_eq!(kept["atom"]["summary"], "Source atom-ttl");
+    assert_eq!(kept["atom"]["source_branch"], "session/keep");
+    assert_eq!(kept["atom"]["source_session_id"], "sess-source");
+    assert_eq!(
+        mock_head(&mock, "main").atoms["atom-ttl"],
+        mock_head(&mock, "session/keep").atoms["atom-ttl"]
+    );
+    // Keep target for the other atom: the source branch gets main's.
+    mgr.branch_action_json(&json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-keys", "from": "main", "to": "session/keep"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        mock_head(&mock, "session/keep").atoms["atom-keys"],
+        mock_head(&mock, "main").atoms["atom-keys"]
+    );
+
+    // Both updates are settled; the atom created twice is left.
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    let left: Vec<&str> = diff["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["entity_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, ["atom-twin"], "{diff}");
+
+    // Refused: another version than the preview showed on either branch
+    // (409), an atom the branch or the project does not hold (404), and a
+    // request that names no project or one branch twice (400). Nothing is
+    // written.
+    let before = mock_head(&mock, "main");
+    for (status, body) in [
+        (
+            409,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "session/keep", "to": "main", "expected_updated_at": "2000-01-01T00:00:00.000Z"}),
+        ),
+        (
+            409,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "session/keep", "to": "main", "replaced_updated_at": "2000-01-01T00:00:00.000Z"}),
+        ),
+        (
+            404,
+            json!({"project_id": "proj-1", "atom_id": "atom-gone", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            404,
+            json!({"project_id": "proj-2", "atom_id": "atom-twin", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            400,
+            json!({"atom_id": "atom-twin", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            400,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "main", "to": "main"}),
+        ),
+    ] {
+        let mut body = body;
+        body["action"] = json!("keep");
+        let err = mgr.branch_action_json(&body).await.unwrap_err();
+        assert_eq!(err.status, status, "{body}: {}", err.message);
+    }
+    assert_eq!(
+        mock_head(&mock, "main").atoms,
+        before.atoms,
+        "a refused keep wrote"
+    );
+    mgr.close().await.unwrap();
+}
+
 /// The same against the Omnigraph release when `/tmp/omnigraph-v0.15.0`
 /// holds it. Its conflict names the atom by its key and the diff carries
 /// both atoms, each keeping the author an update without a session left
 /// alone. A `divergent_update` compares whole rows, as the fake's
-/// `three_way_merge` does: the source's text with the target's own
-/// `source_branch` and a later `updated_at`, which is what an atom update
-/// writes, still conflicts, and only the source's row itself converges.
+/// `three_way_merge` does: an atom update with the source's text, which
+/// stamps the target's own `source_branch` and a new `updated_at`, still
+/// conflicts, and only `keep`, which copies the source's row as stored,
+/// lets the branches merge.
 #[tokio::test]
 async fn real_omnigraph_binary_divergent_update_carries_both_atoms() {
     let bin_cli = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph");
@@ -4964,21 +5077,6 @@ async fn real_omnigraph_binary_divergent_update_carries_both_atoms() {
     }
 
     let client = mgr.client().await.unwrap();
-    let write_target = |params: Value| {
-        let client = client.clone();
-        async move {
-            client
-                .mutate(&ChangeRequest {
-                    query: schema::GQ_UPSERT_ATOM.into(),
-                    name: Some("upsert_atom".into()),
-                    params: Some(params),
-                    branch: Some("session/real-tgt".into()),
-                    settings: None,
-                })
-                .await
-                .unwrap();
-        }
-    };
     let dry_run = || {
         let client = client.clone();
         async move {
@@ -4994,37 +5092,24 @@ async fn real_omnigraph_binary_divergent_update_carries_both_atoms() {
                 .await
         }
     };
-    let mut source_row = json!({"project_id": "proj-1"});
-    for key in [
-        "atom_id",
-        "kind",
-        "title",
-        "summary",
-        "body",
-        "tags",
-        "source_branch",
-        "source_session_id",
-        "confidence",
-        "pin_priority",
-        "verified",
-        "origin_layer",
-        "authority",
-        "privacy",
-        "brain_record_id",
-        "memory_id",
-        "record_revision",
-        "created_at",
-        "updated_at",
-    ] {
-        source_row[key] = source.get(key).cloned().unwrap_or(Value::Null);
-    }
-    let mut restamped = source_row.clone();
-    restamped["source_branch"] = json!("session/real-tgt");
-    restamped["updated_at"] = json!("2030-01-01T00:00:00.000Z");
-    write_target(restamped).await;
+    mgr.publish_atom_json(&update("session/real-tgt", "Ninety minutes."))
+        .await
+        .unwrap();
     let still = dry_run().await.unwrap_err();
     assert!(still.is_merge_conflict(), "{still}");
-    write_target(source_row).await;
+
+    // That update came after the preview, so keeping the source over the
+    // target version the preview showed is refused; a fresh preview's
+    // versions are accepted and the branches merge.
+    let keep = |diff: &Value| json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-real-keep", "from": "session/real-src", "to": "session/real-tgt", "expected_updated_at": diff["conflicts"][0]["source_value"]["updated_at"], "replaced_updated_at": diff["conflicts"][0]["target_value"]["updated_at"]});
+    let stale = mgr.branch_action_json(&keep(&diff)).await.unwrap_err();
+    assert_eq!(stale.status, 409, "{}", stale.message);
+    let fresh = mgr
+        .branch_diff_json("proj-1", "session/real-src", Some("session/real-tgt"))
+        .await
+        .unwrap();
+    let kept = mgr.branch_action_json(&keep(&fresh)).await.unwrap();
+    assert_eq!(kept["atom"]["source_branch"], "session/real-src");
     assert_eq!(dry_run().await.unwrap().outcome, BranchMergeOutcome::Merged);
     mgr.close().await.unwrap();
 }

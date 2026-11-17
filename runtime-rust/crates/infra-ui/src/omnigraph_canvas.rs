@@ -1260,10 +1260,10 @@ fn conflict_keep_blocker(conflict: &Value) -> Option<&'static str> {
     None
 }
 
-/// Keep source writes the source branch's value of the atom onto the target
-/// branch, and Keep target writes the target's value onto the source, so
-/// both branches agree before the merge runs again. Each button carries the
-/// kept value and, as `base`, the value the written branch holds now.
+/// Keep source copies the source branch's atom onto the target branch, and
+/// Keep target copies the target's onto the source, so both branches hold
+/// the same atom before the merge runs again. Each button carries the kept
+/// value and, as `base`, the value the written branch holds now.
 fn render_conflict_keep_html(
     conflict: &Value,
     entity_id: &str,
@@ -1321,7 +1321,7 @@ fn render_conflict_keep_html(
     html.push_str(&match blocker {
         Some(note) => format!("<p class=\"omni-conflict-note\">{}</p>", esc(note)),
         None => format!(
-            "<p class=\"omni-conflict-note\">Keep source writes the source value to <strong>{}</strong>; Keep target writes the target value to <strong>{}</strong>. The merge preview then runs again.</p>",
+            "<p class=\"omni-conflict-note\">Keep source copies the source's atom to <strong>{}</strong> as it is stored; Keep target copies the target's to <strong>{}</strong>. The merge preview then runs again.</p>",
             esc(target),
             esc(source)
         ),
@@ -1329,94 +1329,43 @@ fn render_conflict_keep_html(
     html
 }
 
-/// The text an atom update carries: an omitted `summary` or `body` would
-/// fall back to the title, so every one is sent.
-const ATOM_CONTENT_KEYS: [&str; 7] = [
-    "kind",
-    "title",
-    "summary",
-    "body",
-    "tags",
-    "confidence",
-    "pin_priority",
-];
-/// What the atom endpoint keeps from the stored atom when a request leaves
-/// it out.
-const ATOM_PROVENANCE_KEYS: [&str; 7] = [
-    "origin_layer",
-    "authority",
-    "privacy",
-    "brain_record_id",
-    "memory_id",
-    "record_revision",
-    "verified",
-];
-
-/// The `POST /api/omnigraph/atoms` body a Keep button sends: the written
-/// branch's atom (`written`, else the button's `base`) with the kept value
-/// over it, either one `field` or the whole atom. Provenance and
-/// verification go only where the kept value names them, so the server keeps
-/// the written atom's own; no session, file or relation is sent, so the
-/// update adds no edge.
-pub(crate) fn conflict_keep_request(
-    project_id: &str,
-    payload: &Value,
-    written: Option<&Value>,
-) -> Result<Value, String> {
-    let properties = |value: &Value| -> Value {
-        value
-            .get("properties")
-            .filter(|p| p.is_object())
-            .unwrap_or(value)
-            .clone()
-    };
+/// The `POST /api/omnigraph/branches` body a Keep button sends: the `keep`
+/// action, which copies the kept branch's atom onto the written branch as
+/// that branch stores it. Omnigraph settles a `divergent_update` only once
+/// both branches hold the same row, and an ordinary atom update stamps its
+/// own branch and time, so it would leave the conflict in place. The
+/// `updated_at` of the kept value and of the replaced one (`base`) go along:
+/// the server refuses when either branch holds another version than the
+/// preview showed.
+pub(crate) fn conflict_keep_request(project_id: &str, payload: &Value) -> Result<Value, String> {
     let atom_id = str_field(payload, &["atom_id"]);
-    let branch = str_field(payload, &["write_branch"]);
-    if atom_id.is_empty() || branch.is_empty() {
-        return Err("This conflict names no atom or branch to write.".into());
-    }
-    let titled = |atom: &Value| {
-        atom["title"]
-            .as_str()
-            .is_some_and(|title| !title.trim().is_empty())
+    let to = str_field(payload, &["write_branch"]);
+    let from = match str_field(payload, &["keep"]).as_str() {
+        "source" => str_field(payload, &["source_branch"]),
+        "target" => str_field(payload, &["target_branch"]),
+        _ => String::new(),
     };
-    let kept = properties(&payload["value"]);
-    let mut atom = properties(written.unwrap_or(&payload["base"]));
-    if !titled(&atom) {
-        return Err(format!(
-            "The atom {atom_id} could not be read on {branch}. Open it in the inspector."
-        ));
-    }
-    let field = str_field(payload, &["field"]);
-    let named: Vec<String> = if !field.is_empty() {
-        atom[field.as_str()] = kept;
-        vec![field]
-    } else if let Some(fields) = kept.as_object() {
-        for (key, value) in fields {
-            atom[key.as_str()] = value.clone();
-        }
-        fields.keys().cloned().collect()
-    } else {
-        return Err("The kept value is neither an atom nor one named field.".into());
-    };
-    if !titled(&atom) {
-        return Err(format!(
-            "Keeping this value would leave the atom {atom_id} without a title."
-        ));
+    if project_id.is_empty() || atom_id.is_empty() || from.is_empty() || to.is_empty() || from == to
+    {
+        return Err("This conflict names no project, atom or pair of branches to keep.".into());
     }
     let mut body = serde_json::json!({
+        "action": "keep",
         "project_id": project_id,
-        "branch": branch,
         "atom_id": atom_id,
+        "from": from,
+        "to": to,
     });
-    for key in ATOM_CONTENT_KEYS {
-        if !atom[key].is_null() {
-            body[key] = atom[key].clone();
-        }
-    }
-    for key in ATOM_PROVENANCE_KEYS {
-        if named.iter().any(|name| name == key) {
-            body[key] = atom[key].clone();
+    for (key, value) in [
+        ("expected_updated_at", &payload["value"]),
+        ("replaced_updated_at", &payload["base"]),
+    ] {
+        let atom = value
+            .get("properties")
+            .filter(|p| p.is_object())
+            .unwrap_or(value);
+        if let Some(updated_at) = atom["updated_at"].as_str().filter(|s| !s.trim().is_empty()) {
+            body[key] = Value::from(updated_at);
         }
     }
     Ok(body)
@@ -3940,8 +3889,8 @@ mod tests {
     #[test]
     fn conflict_card_offers_keep_only_for_atom_updates_with_both_values() {
         use crate::test_support::payloads;
-        let source_atom = json!({"kind": "decision", "title": "Signing", "summary": "RS256 rotated keys", "body": "Rotate daily.", "tags": ["auth"], "confidence": 0.9, "pin_priority": 40});
-        let target_atom = json!({"kind": "decision", "title": "Signing", "summary": "EdDSA keys", "body": "Rotate weekly.", "tags": ["auth"], "confidence": 0.8, "pin_priority": 40, "authority": "verified", "brain_record_id": "rec-1"});
+        let source_atom = json!({"kind": "decision", "title": "Signing", "summary": "RS256 rotated keys", "body": "Rotate daily.", "tags": ["auth"], "confidence": 0.9, "pin_priority": 40, "updated_at": "2026-11-17T11:00:00"});
+        let target_atom = json!({"kind": "decision", "title": "Signing", "summary": "EdDSA keys", "body": "Rotate weekly.", "tags": ["auth"], "confidence": 0.8, "pin_priority": 40, "authority": "verified", "brain_record_id": "rec-1", "updated_at": "2026-11-17T12:00:00"});
         let diff = json!({
             "source": "session/s1",
             "target": "main",
@@ -3956,7 +3905,7 @@ mod tests {
         });
         let html = render_merge_diff(&diff);
         // Only the Context Atom update with both values gets live buttons:
-        // keeping the source writes it onto the target, and the reverse.
+        // keeping the source copies it onto the target, and the reverse.
         let keeps = payloads(&html, "omnigraph-conflict-keep");
         assert_eq!(keeps.len(), 2, "{html}");
         assert_eq!(keeps[0]["keep"], "source");
@@ -3972,7 +3921,20 @@ mod tests {
             assert_eq!(keep["target_branch"], "main");
             assert!(keep["field"].is_null());
         }
-        assert!(html.contains("Keep source writes the source value to <strong>main</strong>"));
+        // Each button asks the server to copy the kept atom as stored,
+        // naming both versions the preview showed.
+        let request = |keep: &Value| conflict_keep_request("proj-1", keep).expect("live button");
+        assert_eq!(
+            request(&keeps[0]),
+            json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-2", "from": "session/s1", "to": "main", "expected_updated_at": "2026-11-17T11:00:00", "replaced_updated_at": "2026-11-17T12:00:00"})
+        );
+        assert_eq!(
+            request(&keeps[1]),
+            json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-2", "from": "main", "to": "session/s1", "expected_updated_at": "2026-11-17T12:00:00", "replaced_updated_at": "2026-11-17T11:00:00"})
+        );
+        assert!(html.contains(
+            "Keep source copies the source's atom to <strong>main</strong> as it is stored"
+        ));
         // Every other card shows both buttons disabled and says why.
         assert_eq!(
             html.matches("class=\"button compact\" disabled>Keep source</button>")
@@ -3992,51 +3954,41 @@ mod tests {
     }
 
     #[test]
-    fn conflict_keep_request_writes_the_kept_value_over_the_written_atom() {
+    fn conflict_keep_request_copies_the_kept_atom_between_the_branches() {
         let keep = json!({
             "atom_id": "atom-2",
             "keep": "source",
+            "source_branch": "session/s1",
+            "target_branch": "main",
             "write_branch": "main",
             "field": null,
-            "value": {"properties": {"kind": "decision", "title": "Signing", "summary": "RS256 rotated keys", "body": "Rotate daily.", "tags": ["auth"], "confidence": 0.9, "verified": false, "source_session_id": "sess-1"}},
-            "base": {"kind": "decision", "title": "Signing", "summary": "EdDSA keys", "body": "Rotate weekly.", "tags": ["auth", "keys"], "confidence": 0.8, "pin_priority": 40, "authority": "verified", "brain_record_id": "rec-1", "verified": true}
+            "value": {"properties": {"title": "Signing", "summary": "RS256 rotated keys", "updated_at": "2026-11-17T11:00:00"}},
+            "base": {"title": "Signing", "summary": "EdDSA keys", "updated_at": "2026-11-17T12:00:00"}
         });
-        let body = conflict_keep_request("proj-1", &keep, None).expect("whole atoms");
         assert_eq!(
-            body,
-            json!({
-                "project_id": "proj-1",
-                "branch": "main",
-                "atom_id": "atom-2",
-                "kind": "decision",
-                "title": "Signing",
-                "summary": "RS256 rotated keys",
-                "body": "Rotate daily.",
-                "tags": ["auth"],
-                "confidence": 0.9,
-                "pin_priority": 40,
-                // The kept side names its verification, so it travels; the
-                // written atom's authority and record stay on the server.
-                "verified": false
-            })
+            conflict_keep_request("proj-1", &keep).expect("whole atom"),
+            json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-2", "from": "session/s1", "to": "main", "expected_updated_at": "2026-11-17T11:00:00", "replaced_updated_at": "2026-11-17T12:00:00"})
         );
 
-        // One field: the written branch's atom must be read first.
-        let field = json!({"atom_id": "atom-7", "keep": "target", "write_branch": "session/s1", "field": "summary", "value": "Use EdDSA", "base": "Use RS256"});
-        assert!(conflict_keep_request("proj-1", &field, None).is_err());
-        let written = json!({"id": "atom-7", "kind": "contract", "title": "Token TTL", "summary": "Use RS256", "body": "900 s", "tags": [], "confidence": 0.7, "pin_priority": 10});
-        let body = conflict_keep_request("proj-1", &field, Some(&written)).expect("read atom");
-        assert_eq!(body["summary"], "Use EdDSA");
-        assert_eq!(body["title"], "Token TTL");
-        assert_eq!(body["branch"], "session/s1");
-        for absent in ["session_id", "files", "relates_to", "authority", "verified"] {
-            assert!(body.get(absent).is_none(), "{absent}: {body}");
-        }
+        // Omnigraph merges whole atoms, so a field-level conflict copies the
+        // kept atom too; values without `updated_at` name no version.
+        let field = json!({"atom_id": "atom-7", "keep": "target", "source_branch": "session/s1", "target_branch": "main", "write_branch": "session/s1", "field": "summary", "value": "Use EdDSA", "base": "Use RS256"});
+        assert_eq!(
+            conflict_keep_request("proj-1", &field).expect("one field"),
+            json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-7", "from": "main", "to": "session/s1"})
+        );
 
-        // A value that would empty the title is refused.
-        let untitled =
-            json!({"atom_id": "atom-7", "write_branch": "main", "field": "title", "value": " "});
-        assert!(conflict_keep_request("proj-1", &untitled, Some(&written)).is_err());
-        assert!(conflict_keep_request("proj-1", &json!({"value": {}}), Some(&written)).is_err());
+        // Without a project, an atom, a known side or two branches there is
+        // nothing to copy.
+        assert!(conflict_keep_request("", &keep).is_err());
+        let mut broken = keep.clone();
+        broken["atom_id"] = json!("");
+        assert!(conflict_keep_request("proj-1", &broken).is_err());
+        let mut broken = keep.clone();
+        broken["keep"] = json!("both");
+        assert!(conflict_keep_request("proj-1", &broken).is_err());
+        let mut broken = keep.clone();
+        broken["write_branch"] = json!("session/s1");
+        assert!(conflict_keep_request("proj-1", &broken).is_err());
     }
 }

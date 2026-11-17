@@ -1639,6 +1639,75 @@ impl OmnigraphManager {
                     Err(err) => Err(err.into()),
                 }
             }
+            "keep" => {
+                // Copy one atom onto `to` exactly as `from` stores it.
+                // Omnigraph settles a `divergent_update` only once both
+                // branches hold the same row; an ordinary update stamps its
+                // own branch and time, so it would leave the conflict.
+                let required = |key: &str| {
+                    clean_opt(body[key].as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            HarnessError::invalid(format!("Keeping an atom needs `{key}`."))
+                        })
+                };
+                let project_id = required("project_id")?;
+                let atom_id = required("atom_id")?;
+                let from = required("from")?;
+                let to = required("to")?;
+                if from == to {
+                    return Err(HarnessError::invalid(
+                        "Keep copies an atom from one branch to another.",
+                    ));
+                }
+                let kept = find_atom_on_branch(&client, &project_id, &from, &atom_id)
+                    .await
+                    .ok_or_else(|| {
+                        HarnessError::missing(format!("The atom {atom_id} is not on {from}."))
+                    })?;
+                // The person chose between the two versions the preview
+                // showed; a session may have published a newer one on either
+                // branch since, and neither is copied or overwritten unseen.
+                let changed = |branch: &str| {
+                    HarnessError::conflict(format!(
+                        "The atom {atom_id} changed on {branch} after the merge preview. Preview the merge again."
+                    ))
+                };
+                if let Some(expected) = clean_opt(body["expected_updated_at"].as_str())
+                    && kept["updated_at"].as_str() != Some(expected)
+                {
+                    return Err(changed(&from));
+                }
+                if let Some(replaced) = clean_opt(body["replaced_updated_at"].as_str()) {
+                    let current = find_atom_on_branch(&client, &project_id, &to, &atom_id).await;
+                    if current
+                        .as_ref()
+                        .and_then(|atom| atom["updated_at"].as_str())
+                        != Some(replaced)
+                    {
+                        return Err(changed(&to));
+                    }
+                }
+                let params = stored_atom_params(&kept, &project_id);
+                let resp = client
+                    .mutate(&ChangeRequest {
+                        query: GQ_UPSERT_ATOM.into(),
+                        name: Some("upsert_atom".into()),
+                        params: Some(params.clone()),
+                        branch: Some(to.clone()),
+                        settings: None,
+                    })
+                    .await?;
+                Ok(json!({
+                    "ok": true,
+                    "action": "keep",
+                    "atom_id": atom_id,
+                    "from": from,
+                    "to": to,
+                    "atom": normalize_atom_row(&params),
+                    "commit": resp.commit,
+                }))
+            }
             "delete" => {
                 let name = store::text(&body["name"], "branch name", 128)?;
                 if name == "main" {
@@ -5045,6 +5114,46 @@ fn whole_atom(atom: &Value, project_id: &str) -> Value {
         }
     }
     whole
+}
+
+/// Every `ContextAtom` property, as `GQ_UPSERT_ATOM` takes them.
+const ATOM_COLUMNS: [&str; 20] = [
+    "atom_id",
+    "project_id",
+    "kind",
+    "title",
+    "summary",
+    "body",
+    "tags",
+    "source_branch",
+    "source_session_id",
+    "confidence",
+    "pin_priority",
+    "verified",
+    "origin_layer",
+    "authority",
+    "privacy",
+    "brain_record_id",
+    "memory_id",
+    "record_revision",
+    "created_at",
+    "updated_at",
+];
+
+/// The upsert parameters that write `atom` back as a branch stores it,
+/// every property included and nothing restamped.
+fn stored_atom_params(atom: &Value, project_id: &str) -> Value {
+    let atom = whole_atom(atom, project_id);
+    let columns = ATOM_COLUMNS
+        .iter()
+        .map(|key| {
+            (
+                key.to_string(),
+                atom.get(*key).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+    Value::Object(columns)
 }
 
 /// The Context Atom a merge conflict names when both branches updated it.
