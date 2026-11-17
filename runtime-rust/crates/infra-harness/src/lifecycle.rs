@@ -1211,7 +1211,10 @@ impl RunnerLifecycle {
                         &generation,
                         json!({"kind":"memory","ok":result["ok"],"text":notice,"delivered_sources":provenance["delivered"],"opened_delivered_sources":provenance["opened"],"opened_observation":provenance["observation"],"reported_used_sources":provenance["reported_used"].as_array().map(Vec::len).unwrap_or(0),"attestation":provenance["attestation"]}),
                     )?;
-                    memory = json!({"state":"drafted","ok":result["ok"],"records":result["saved"]["records"].as_array().map(Vec::len).unwrap_or(0),"skipped":result["skipped"].as_array().map(Vec::len).unwrap_or(0)});
+                    let promotion = &result["saved"]["promotion"];
+                    let count =
+                        |field: &str| promotion[field].as_array().map(Vec::len).unwrap_or(0);
+                    memory = json!({"state":"drafted","ok":result["ok"],"records":result["saved"]["records"].as_array().map(Vec::len).unwrap_or(0),"skipped":result["skipped"].as_array().map(Vec::len).unwrap_or(0),"bank_promoted":count("promoted")>0,"promotion":{"promoted":count("promoted"),"blocked":count("blocked"),"failed":count("failed")}});
                 }
             } else if latest.state != "none" {
                 event(

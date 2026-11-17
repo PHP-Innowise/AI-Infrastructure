@@ -991,6 +991,55 @@ impl Sessions {
         *slot = Some(value);
         Ok(())
     }
+    /// After a run saved verified records or promoted chunks, carry them to
+    /// the canonical Omnigraph branch in the background, as a manual save
+    /// does: the turn's job does not wait for it, and a failure is the next
+    /// sync's to repair.
+    fn spawn_canonical_knowledge_sync(
+        &self,
+        sid: &str,
+    ) -> Option<tokio::task::JoinHandle<Option<Value>>> {
+        let session = self.store.get(sid).ok()?;
+        if session["omnigraph"]["enabled"] != true {
+            return None;
+        }
+        let project_id = session["project_id"].as_str()?.trim().to_string();
+        if project_id.is_empty() {
+            return None;
+        }
+        let omnigraph = self.results().ok()?.omnigraph()?;
+        let knowledge = self.knowledge.clone();
+        let mut body = json!({ "project_id": project_id, "session_id": sid });
+        if let Some(bank) = session["brain"]["bank"]
+            .as_str()
+            .map(str::trim)
+            .filter(|bank| !bank.is_empty())
+        {
+            body["bank"] = json!(bank);
+        }
+        Some(tokio::spawn(async move {
+            let collected = crate::services::collect_sync_items(
+                knowledge.as_ref(),
+                &project_id,
+                &json!({}),
+                &body,
+            )
+            .await
+            .ok()?;
+            let items = collected["items"].as_array().cloned().unwrap_or_default();
+            let prune_layers = collected["prune_layers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            omnigraph
+                .sync_canonical_knowledge_with_options(&project_id, &items, &prune_layers)
+                .await
+                .ok()
+        }))
+    }
     fn results(&self) -> Result<Arc<crate::results::Results>> {
         lock(&self.results)?
             .clone()
@@ -1476,6 +1525,9 @@ impl Sessions {
             && let Ok(results) = self.results()
         {
             let _ = spawn_omnigraph_publish(results, &job.sid, &job.generation, val, &cancel).await;
+            if saved_canonical_knowledge(&val["memory"]) {
+                let _ = self.spawn_canonical_knowledge_sync(&job.sid);
+            }
         }
         match finalize_job(&self.store, &job, &result, &cancel) {
             Ok(status) => {
@@ -2342,6 +2394,12 @@ impl Domain for Sessions {
 }
 
 #[inline(never)]
+/// Whether a finished run's memory save wrote what the canonical branch
+/// carries: verified records, or chunks promoted into the bank.
+fn saved_canonical_knowledge(memory: &Value) -> bool {
+    memory["records"].as_u64().unwrap_or(0) > 0 || memory["bank_promoted"] == true
+}
+
 fn spawn_omnigraph_publish(
     results: Arc<crate::results::Results>,
     sid: &str,
@@ -4572,6 +4630,109 @@ mod graph_focus_tests {
         assert_eq!(delta["created_entities"].as_array().map(Vec::len), Some(1));
         assert_eq!(delta["created_entities"][0]["name"], "verifyToken");
         assert_eq!(delta["created_entities"][0]["parent"], "JwtGuard");
+    }
+
+    #[tokio::test]
+    async fn saved_knowledge_syncs_the_canonical_branch_in_the_background() {
+        assert!(saved_canonical_knowledge(
+            &json!({"records": 2, "bank_promoted": false})
+        ));
+        assert!(saved_canonical_knowledge(
+            &json!({"records": 0, "bank_promoted": true})
+        ));
+        assert!(!saved_canonical_knowledge(
+            &json!({"records": 0, "bank_promoted": false})
+        ));
+        assert!(!saved_canonical_knowledge(&json!({"state": "none"})));
+
+        let fixture = Fixture::new();
+        let (base_url, _server) = crate::omnigraph::tests::spawn_mock_omnigraph().await;
+        let omni_state = fixture.temporary.path().join("omni-state");
+        std::fs::create_dir_all(&omni_state).unwrap();
+        let manager = Arc::new(crate::omnigraph::OmnigraphManager::new(omni_state, None).unwrap());
+        manager
+            .setup_json(&json!({
+                "action": "connect",
+                "endpoint": base_url,
+                "token": "tok-harness",
+                "graph_id": crate::omnigraph::schema::HARNESS_GRAPH_ID
+            }))
+            .await
+            .unwrap();
+        fixture
+            .results
+            .install_omnigraph(Arc::clone(&manager))
+            .unwrap();
+        // A governed installation with a Brain and an empty bank.
+        let proj = fixture.temporary.path().join("project");
+        std::fs::create_dir_all(proj.join("memory-bank/chunks")).unwrap();
+        for (name, text) in [
+            ("INDEX.md", "# Index\n"),
+            ("README.md", "# Memory Bank\n"),
+            ("runtime-contract.json", "{}"),
+        ] {
+            std::fs::write(proj.join("memory-bank").join(name), text).unwrap();
+        }
+        std::fs::create_dir_all(proj.join("project-brain/config")).unwrap();
+        std::fs::write(
+            proj.join("project-brain/config/runtime.json"),
+            r#"{"mode":"governed","allowed_privacy":["public","team"],"allowed_authority":["observed","verified"],"owners":["*"]}"#,
+        )
+        .unwrap();
+        let schemas = proj.join("project-brain/schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        for entry in std::fs::read_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../PHP Core/project-brain/schemas"),
+        )
+        .unwrap()
+        {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), schemas.join(entry.file_name())).unwrap();
+        }
+        let reg = fixture.sessions.store.register(&proj).unwrap();
+        let project_id = reg["id"].as_str().unwrap().to_string();
+        // An atom of a record the Brain no longer holds.
+        manager
+            .sync_canonical_knowledge(
+                &project_id,
+                &[json!({"atom_id": "brain-gone", "kind": "finding", "title": "Gone", "origin_layer": "project-brain", "authority": "verified", "privacy": "public"})],
+            )
+            .await
+            .unwrap();
+        let sess = fixture
+            .sessions
+            .store
+            .create(
+                &json!({"project_id": reg["id"], "provider": "claude", "workflow": "native", "mode": "plan", "agents_enabled": false}),
+                "Test session",
+                &[],
+            )
+            .unwrap();
+        let sid = sess["id"].as_str().unwrap();
+        // A session without Omnigraph starts nothing.
+        assert!(
+            fixture
+                .sessions
+                .spawn_canonical_knowledge_sync(sid)
+                .is_none()
+        );
+        fixture
+            .sessions
+            .store
+            .patch(sid, &json!({"omnigraph": {"enabled": true}}))
+            .unwrap();
+        let synced = fixture
+            .sessions
+            .spawn_canonical_knowledge_sync(sid)
+            .expect("a background sync")
+            .await
+            .unwrap()
+            .expect("the sync answered");
+        assert_eq!(synced["ok"], true);
+        assert_eq!(synced["branch"], "knowledge/canonical");
+        // The Brain was read whole, so its gone record left the branch.
+        assert_eq!(synced["deleted_atom_ids"], json!(["brain-gone"]));
     }
 
     #[tokio::test]

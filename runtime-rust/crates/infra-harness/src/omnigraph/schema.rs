@@ -743,6 +743,20 @@ pub(crate) const GQ_CLEAR_BRANCH_CONTEXT: &str = r#"query clear_branch_context()
     delete Session where session_id != ""
 }"#;
 
+/// Remove one synced atom and every edge that names it from a branch (the
+/// canonical sync prunes Project Brain and Memory Bank atoms gone from their
+/// source).
+pub(crate) const GQ_DELETE_CANONICAL_ATOM: &str = r#"query delete_canonical_atom($atom_id: String) {
+    delete PublishedBy where @src = $atom_id
+    delete ConsumedBy where @src = $atom_id
+    delete TouchesFile where @src = $atom_id
+    delete MentionsSymbol where @src = $atom_id
+    delete RelatesTo where @src = $atom_id
+    delete RelatesTo where @dst = $atom_id
+    delete DerivedFrom where @src = $atom_id
+    delete ContextAtom where atom_id = $atom_id
+}"#;
+
 /// Default `cluster.yaml` template using `{{GRAPH_ID}}` placeholder.
 pub const CLUSTER_YAML_TEMPLATE: &str = r#"version: 1
 state:

@@ -921,6 +921,26 @@ async fn mock_mutate(
         }));
     } else if query_text.contains("delete ContextAtom") {
         let aid = params["atom_id"].as_str().unwrap_or("").to_string();
+        // As `GQ_DELETE_CANONICAL_ATOM`: every edge naming the atom goes too.
+        let named = |key: &String, props: &Value| {
+            props["source_id"].as_str() == Some(aid.as_str())
+                || props["target_id"].as_str() == Some(aid.as_str())
+                || key.starts_with(&format!("{aid}->"))
+                || key.starts_with(&format!("{aid}:"))
+                || key.ends_with(&format!(":{aid}"))
+        };
+        for edges in [
+            &mut snap.published_by,
+            &mut snap.consumed_by,
+            &mut snap.touches_file,
+            &mut snap.mentions_symbol,
+            &mut snap.relates_to,
+            &mut snap.derived_from,
+        ] {
+            let before = edges.len();
+            edges.retain(|key, props| !named(key, props));
+            affected_edges += before - edges.len();
+        }
         if let Some(prev) = snap.atoms.remove(&aid) {
             affected_nodes += 1;
             changes.push(json!({
@@ -2066,7 +2086,7 @@ async fn mock_load_json(
     apply_mock_ndjson_load(&mut st, actor, branch, from, mode, data, true)
 }
 
-async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
+pub(crate) async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
     let srv = MockServer {
         state: Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID))),
     };
@@ -4368,6 +4388,136 @@ async fn real_omnigraph_binary_export_import_and_share_round_trip() {
     assert_eq!(imported_mem["memory_id"], "MEM-20261117-aabbccdd-pkce");
     assert_eq!(imported_mem["record_revision"], 4);
 
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn sync_canonical_knowledge_deletes_retired_archived_and_stale_atoms() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let mut projects = Vec::new();
+    for name in ["project", "other"] {
+        let dir = state_dir.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        projects.push(
+            store.register(&dir).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let (project_id, other_id) = (projects[0].clone(), projects[1].clone());
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let atom = |id: &str, layer: &str, files: &[&str]| json!({"atom_id": id, "kind": "finding", "title": id, "files": files, "verified": true, "origin_layer": layer, "authority": "verified", "privacy": "public"});
+    let first = mgr
+        .sync_canonical_knowledge_with_options(
+            &project_id,
+            &[
+                atom("brain-kept", "project-brain", &["src/kept.rs"]),
+                atom("brain-retired", "project-brain", &["src/retired.rs"]),
+                atom("mem-archived", "memory-bank", &[]),
+            ],
+            &["project-brain".into(), "memory-bank".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["synced"], 3);
+    assert_eq!(first["deleted"], 0);
+    // Atoms the sync does not own: another project's, and one a session
+    // published onto the branch.
+    mgr.sync_canonical_knowledge(&other_id, &[atom("brain-elsewhere", "project-brain", &[])])
+        .await
+        .unwrap();
+    mgr.sync_canonical_knowledge(&project_id, &[atom("brain-session-copy", "session", &[])])
+        .await
+        .unwrap();
+
+    // Without pruning nothing leaves the branch.
+    let plain = mgr
+        .sync_canonical_knowledge(
+            &project_id,
+            &[atom("brain-kept", "project-brain", &["src/kept.rs"])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(plain["deleted"], 0);
+    // A Brain read whole prunes its own gone records only.
+    let brain_only = mgr
+        .sync_canonical_knowledge_with_options(
+            &project_id,
+            &[atom("brain-kept", "project-brain", &["src/kept.rs"])],
+            &["project-brain".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(brain_only["deleted_atom_ids"], json!(["brain-retired"]));
+    let both = mgr
+        .sync_canonical_knowledge_with_options(
+            &project_id,
+            &[atom("brain-kept", "project-brain", &["src/kept.rs"])],
+            &["project-brain".into(), "memory-bank".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(both["deleted_atom_ids"], json!(["mem-archived"]));
+
+    let view = mgr
+        .graph_view_json(
+            &project_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let ids = view["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|atom| atom["atom_id"].as_str())
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
+    assert!(ids.contains("brain-kept"), "{ids:?}");
+    assert!(ids.contains("brain-session-copy"), "{ids:?}");
+    assert!(!ids.contains("brain-retired"), "{ids:?}");
+    assert!(!ids.contains("mem-archived"), "{ids:?}");
+    // The retired atom's file edge left with it.
+    let edges = view["edges"].as_array().unwrap();
+    assert!(
+        !edges
+            .iter()
+            .any(|edge| edge.to_string().contains("brain-retired")),
+        "{edges:?}"
+    );
+    let other = mgr
+        .graph_view_json(
+            &other_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        other["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|atom| atom["atom_id"] == "brain-elsewhere")
+    );
     mgr.close().await.unwrap();
 }
 

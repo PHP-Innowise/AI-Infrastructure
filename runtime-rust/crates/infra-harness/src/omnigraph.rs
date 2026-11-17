@@ -10,7 +10,7 @@ pub mod sidecar;
 mod transfer;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use client::{
     BranchCreateRequest, BranchCreateResponse, BranchDeleteResponse, BranchDetail, BranchDiffQuery,

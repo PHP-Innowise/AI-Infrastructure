@@ -1623,19 +1623,22 @@ impl KnowledgeDomain {
         Ok((effective_project, bank, workspace))
     }
 
+    /// One page of the knowledge the canonical Omnigraph branch carries,
+    /// sorted by atom id before it is cut (`offset`, `limit` up to
+    /// `SYNC_PAGE_LIMIT`). `complete_layers` names each layer read whole, the
+    /// only layers a sync may prune atoms from.
     pub fn sync_collect(&self, project_id: &str, body: &V, query_bank: Option<&str>) -> Result<V> {
         let _source_frame = core::git::source_frame_scope();
+        let offset = body["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = body["limit"].as_u64().map_or(SYNC_PAGE_LIMIT, |limit| {
+            (limit as usize).clamp(1, SYNC_PAGE_LIMIT)
+        });
         let (effective_project, bank, workspace) =
             self.resolve_knowledge_scope(project_id, body, query_bank)?;
         let (context, info) =
             self.selected(&effective_project, bank.as_deref(), workspace.as_deref())?;
         if info["bank_id"].is_null() && info["brain_available"] != true {
-            return Ok(json!({
-                "items": [],
-                "brain_count": 0,
-                "memory_count": 0,
-                "skipped": 0,
-            }));
+            return Ok(sync_page(Vec::new(), (0, 0, 0), offset, limit, &[]));
         }
         let config = RuntimeConfig::load(&context.roots)?;
         let allowed_privacy = config.strings("allowed_privacy")?;
@@ -1643,13 +1646,11 @@ impl KnowledgeDomain {
         let mut brain_count = 0usize;
         let mut memory_count = 0usize;
         let mut skipped = 0usize;
+        let mut complete_layers = Vec::new();
 
         if info["brain_available"] == true && context.mode == "governed" {
-            for image in BrainRepository::new(context.clone())?
-                .records(false)?
-                .into_iter()
-                .take(1000)
-            {
+            complete_layers.push("project-brain");
+            for image in BrainRepository::new(context.clone())?.records(false)? {
                 let r = &image.record;
                 let kind = r["type"].as_str().unwrap_or("");
                 if !["finding", "decision", "bug", "incident"].contains(&kind) {
@@ -1777,6 +1778,11 @@ impl KnowledgeDomain {
             }
         }
 
+        // A selected bank without chunks, or whose chunks no allowed privacy
+        // admits, is read whole too: none of its atoms belongs on the branch.
+        if info["bank_id"].is_string() {
+            complete_layers.push("memory-bank");
+        }
         if info["bank_id"].is_string()
             && core::fs::admit_directory(&context.roots.state.join("memory-bank/chunks"))?
             && allowed_privacy.iter().any(|p| p == "public")
@@ -1784,10 +1790,7 @@ impl KnowledgeDomain {
             let bank_service = BankService::new(context.clone());
             let mut state_files = PublicationFiles::new(&context.roots.state)?;
             let mut project_files = PublicationFiles::new(&context.roots.project)?;
-            for path in core::bank::codec::paths(&bank_service)?
-                .into_iter()
-                .take(1000)
-            {
+            for path in core::bank::codec::paths(&bank_service)? {
                 let chunk = match core::bank::codec::read(&mut state_files, &path) {
                     Ok(c) => c,
                     Err(_) => {
@@ -1915,12 +1918,13 @@ impl KnowledgeDomain {
             state_files.check()?;
         }
 
-        Ok(json!({
-            "items": items,
-            "brain_count": brain_count,
-            "memory_count": memory_count,
-            "skipped": skipped,
-        }))
+        Ok(sync_page(
+            items,
+            (brain_count, memory_count, skipped),
+            offset,
+            limit,
+            &complete_layers,
+        ))
     }
 
     pub fn promote_atom(&self, project_id: &str, body: &V, query_bank: Option<&str>) -> Result<V> {
@@ -3256,6 +3260,37 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
     value
 }
 
+/// The most items one `knowledge.sync_collect` page carries.
+pub const SYNC_PAGE_LIMIT: usize = 1000;
+fn sync_page(
+    mut items: Vec<V>,
+    (brain_count, memory_count, skipped): (usize, usize, usize),
+    offset: usize,
+    limit: usize,
+    complete_layers: &[&str],
+) -> V {
+    items.sort_by(|left, right| left["atom_id"].as_str().cmp(&right["atom_id"].as_str()));
+    let total = items.len();
+    let page = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next = offset.saturating_add(page.len());
+    let has_more = !page.is_empty() && next < total;
+    json!({
+        "items": page,
+        "brain_count": brain_count,
+        "memory_count": memory_count,
+        "skipped": skipped,
+        "total_items": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": if has_more { json!(next) } else { V::Null },
+        "complete_layers": complete_layers,
+    })
+}
 fn clean_relative_path(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -3521,6 +3556,68 @@ mod tests {
         assert_eq!(mem_atom["authority"], "verified");
         assert_eq!(mem_atom["memory_id"], "MEM-20261117-aaaa1111");
         assert_eq!(mem_atom["files"], json!(["src/fresh.rs"]));
+    }
+
+    #[test]
+    fn sync_collect_sorts_and_paginates_past_1000_items() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, _ctx) = setup_governed_knowledge_project(&project);
+        // Written in descending order, so the files list them unsorted too.
+        for number in (0..1005u32).rev() {
+            write_mem_chunk(
+                &project,
+                &format!("MEM-20261117-{number:08x}"),
+                "rule",
+                &format!("Rule {number}"),
+                "Audience validation prevents token replay.",
+                &["src/fresh.rs"],
+            );
+        }
+        let first = knowledge
+            .sync_collect(&project_id, &json!({}), None)
+            .unwrap();
+        assert_eq!(first["total_items"], 1005);
+        assert_eq!(first["memory_count"], 1005);
+        assert_eq!(first["offset"], 0);
+        assert_eq!(first["limit"], SYNC_PAGE_LIMIT);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["next_offset"], 1000);
+        let layers = first["complete_layers"].as_array().unwrap();
+        assert!(layers.contains(&json!("project-brain")), "{layers:?}");
+        assert!(layers.contains(&json!("memory-bank")), "{layers:?}");
+        let second = knowledge
+            .sync_collect(&project_id, &json!({"offset": 1000}), None)
+            .unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 5);
+        assert_eq!(second["has_more"], false);
+        assert!(second["next_offset"].is_null());
+        let ids = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["items"].as_array().unwrap())
+            .map(|item| item["atom_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(ids, sorted, "pages are cut from one sorted list");
+        assert_eq!(ids.len(), 1005);
+        // A small limit cuts the same list.
+        let small = knowledge
+            .sync_collect(&project_id, &json!({"offset": 3, "limit": 2}), None)
+            .unwrap();
+        assert_eq!(
+            small["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["atom_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ids[3..5].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(small["next_offset"], 5);
     }
 
     #[test]

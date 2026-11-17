@@ -8,13 +8,13 @@ use super::{
         OmnigraphClient, QueryRequest, StoredQueryRequest,
     },
     schema::{
-        self, CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_BRANCH_CONTEXT, GQ_LINK_CONSUMED_BY,
-        GQ_LINK_DERIVED_FROM, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO, GQ_LINK_SESSION_FOLLOWS,
-        GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS, GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES,
-        GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSION_FOLLOWS, GQ_LIST_SESSIONS,
-        GQ_UPSERT_ATOM, GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT,
-        HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE, OMNIGRAPH_RELEASE_URL_LINUX_X86_64,
-        OMNIGRAPH_VERSION,
+        self, CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_BRANCH_CONTEXT, GQ_DELETE_CANONICAL_ATOM,
+        GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO,
+        GQ_LINK_SESSION_FOLLOWS, GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS,
+        GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES, GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES,
+        GQ_LIST_SESSION_FOLLOWS, GQ_LIST_SESSIONS, GQ_UPSERT_ATOM, GQ_UPSERT_FILE,
+        GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT, HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE,
+        OMNIGRAPH_RELEASE_URL_LINUX_X86_64, OMNIGRAPH_VERSION,
     },
     session_branch_name,
     transfer::{
@@ -3505,6 +3505,21 @@ impl OmnigraphManager {
         project_id: &str,
         items: &[Value],
     ) -> Result<Value> {
+        self.sync_canonical_knowledge_with_options(project_id, items, &[])
+            .await
+    }
+
+    /// `sync_canonical_knowledge` that also deletes, for each of
+    /// `prune_layers` (`project-brain`, `memory-bank`), the project's synced
+    /// atoms of that layer that `items` no longer carries: a retired,
+    /// archived, superseded or stale record or chunk leaves the branch. Pass
+    /// only a layer read whole, with every page of it in `items`.
+    pub async fn sync_canonical_knowledge_with_options(
+        &self,
+        project_id: &str,
+        items: &[Value],
+        prune_layers: &[String],
+    ) -> Result<Value> {
         let cfg = self.config().await;
         if cfg.mode == OmnigraphMode::Off {
             return Ok(json!({
@@ -3615,12 +3630,55 @@ impl OmnigraphManager {
             }
         }
 
-        Ok(json!({
+        let mut deleted_atom_ids = Vec::new();
+        let mut prune_error = None;
+        if !prune_layers.is_empty() {
+            let current = atom_ids.iter().cloned().collect::<BTreeSet<_>>();
+            match collect_branch_atom_rows(&client, project_id, branch).await {
+                Ok(rows) => {
+                    for row in rows {
+                        let Some(atom_id) = str_field(&row, "atom_id") else {
+                            continue;
+                        };
+                        if current.contains(&atom_id)
+                            || !synced_atom_of(&row, &atom_id, project_id, prune_layers)
+                        {
+                            continue;
+                        }
+                        match client
+                            .mutate(&ChangeRequest {
+                                query: GQ_DELETE_CANONICAL_ATOM.into(),
+                                name: Some("delete_canonical_atom".into()),
+                                params: Some(json!({ "atom_id": atom_id })),
+                                branch: Some(branch.to_string()),
+                                settings: None,
+                            })
+                            .await
+                        {
+                            Ok(_) => deleted_atom_ids.push(atom_id),
+                            Err(error) => {
+                                prune_error = Some(error.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => prune_error = Some(error.to_string()),
+            }
+        }
+
+        let mut synced = json!({
             "ok": true,
             "branch": branch,
             "synced": atom_ids.len(),
             "atom_ids": atom_ids,
-        }))
+            "deleted": deleted_atom_ids.len(),
+            "deleted_atom_ids": deleted_atom_ids,
+        });
+        if let Some(error) = prune_error {
+            synced["prune_error"] = json!(error);
+        }
+        Ok(synced)
     }
 
     /// Locate `atom_id` on `branch` (or across `"main"`, `CANONICAL_KNOWLEDGE_BRANCH`, and listed branches)
@@ -3894,7 +3952,17 @@ impl Domain for OmnigraphDomain {
                     let items = body["items"].as_array().ok_or_else(|| {
                         HarnessError::invalid("`items` must be an array for omnigraph.sync_items.")
                     })?;
-                    self.manager.sync_canonical_knowledge(pid, items).await?
+                    let prune_layers = body["prune_layers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|layer| matches!(*layer, "project-brain" | "memory-bank"))
+                        .map(String::from)
+                        .collect::<Vec<_>>();
+                    self.manager
+                        .sync_canonical_knowledge_with_options(pid, items, &prune_layers)
+                        .await?
                 }
                 "omnigraph.fetch_atom" => {
                     let pid = body["project_id"]
@@ -4586,6 +4654,53 @@ async fn collect_branch_atom_ids(
         }
     }
     ids
+}
+
+/// Every atom of `project_id` on `branch`, or an error where the listing may
+/// be partial: pruning acts only on a whole listing.
+async fn collect_branch_atom_rows(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+) -> Result<Vec<Value>> {
+    let mut rows = BTreeMap::new();
+    let recent = fetch_branch_atoms(client, project_id, branch).await?;
+    // `recent_atoms` stops at 100 rows; past that the export has them all.
+    let capped = recent.len() >= 100;
+    for mut row in recent {
+        if row["project_id"].as_str().is_none() {
+            // The query is scoped to the project.
+            row["project_id"] = json!(project_id);
+        }
+        if let Some(atom_id) = str_field(&row, "atom_id") {
+            rows.insert(atom_id, row);
+        }
+    }
+    if capped {
+        let ndjson = client
+            .export_branch(Some(branch), &["ContextAtom"], None)
+            .await?;
+        for (atom_id, row) in parse_ndjson_records(&ndjson)?.atoms {
+            if str_field(&row, "project_id").as_deref() == Some(project_id) {
+                rows.insert(atom_id, row);
+            }
+        }
+    }
+    Ok(rows.into_values().collect())
+}
+
+/// Whether `row` is an atom the canonical sync wrote for `project_id` from
+/// one of `layers`: its layer, its id prefix and its project all agree.
+fn synced_atom_of(row: &Value, atom_id: &str, project_id: &str, layers: &[String]) -> bool {
+    let layer = row["origin_layer"].as_str().unwrap_or("");
+    let prefix = match layer {
+        "project-brain" => "brain-",
+        "memory-bank" => "mem-",
+        _ => return false,
+    };
+    layers.iter().any(|held| held == layer)
+        && atom_id.starts_with(prefix)
+        && row["project_id"].as_str() == Some(project_id)
 }
 
 async fn find_atom_on_branch(

@@ -24,6 +24,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Prune the Omnigraph `knowledge/canonical` branch: a canonical sync now
+  deletes the project's synced Project Brain and Memory Bank atoms whose
+  record or chunk is gone (retired, archived, superseded, stale), with every
+  edge naming them (`GQ_DELETE_CANONICAL_ATOM`), and reports `deleted` and
+  `deleted_atom_ids`. It prunes a layer only when that layer was read whole
+  and every page of it is in hand; another project's or a session's atoms are
+  never touched. `knowledge.sync_collect` sorts its items by atom id and pages
+  them (`offset`, `limit`, `total_items`, `has_more`, `next_offset`,
+  `complete_layers`) instead of keeping the first 1,000 records and chunks in
+  file order. A run whose automatic save wrote verified records or promoted
+  chunks starts the sync in the background, as a manual save did.
 - Read the Project Brain once per retrieval: the binding check, the served
   task and its lookup share one inventory of the active records
   (`BrainRepository::find_in`, `checkpoint::served_uuid_in`) instead of

@@ -655,6 +655,38 @@ async fn mock_mutate(
             "before": prev.map(|p| json!({ "properties": p })),
             "after": { "properties": params }
         }));
+    } else if qtext.contains("delete ContextAtom") {
+        // As `GQ_DELETE_CANONICAL_ATOM`: the atom and every edge naming it.
+        let aid = params["atom_id"].as_str().unwrap_or("").to_string();
+        let named = |key: &String, props: &Value| {
+            props["source_id"].as_str() == Some(aid.as_str())
+                || props["target_id"].as_str() == Some(aid.as_str())
+                || key.starts_with(&format!("{aid}->"))
+                || key.starts_with(&format!("{aid}:"))
+                || key.ends_with(&format!(":{aid}"))
+        };
+        for held in [
+            &mut snap.published_by,
+            &mut snap.consumed_by,
+            &mut snap.touches_file,
+            &mut snap.mentions_symbol,
+            &mut snap.relates_to,
+            &mut snap.derived_from,
+        ] {
+            let before = held.len();
+            held.retain(|key, props| !named(key, props));
+            edges += before - held.len();
+        }
+        if let Some(prev) = snap.atoms.remove(&aid) {
+            nodes += 1;
+            changes.push(json!({
+                "kind": "node",
+                "type": { "id": "t-atom", "name": "ContextAtom" },
+                "id": aid,
+                "op": "delete",
+                "before": { "properties": prev }
+            }));
+        }
     } else if qtext.contains("insert FileRef") || qname == "upsert_file" {
         let path = params["path"].as_str().unwrap_or("f.rs").to_string();
         snap.files.insert(path, params.clone());
