@@ -7,6 +7,9 @@ use std::path::Path;
 /// Default graph id used by Harness. Must match `^[a-zA-Z0-9-]{1,64}$` (no underscores).
 pub const HARNESS_GRAPH_ID: &str = "harness-context";
 
+/// Dedicated Omnigraph branch holding synced canonical `Project Brain` and `Memory Bank` knowledge.
+pub const CANONICAL_KNOWLEDGE_BRANCH: &str = "knowledge/canonical";
+
 /// Pinned Omnigraph release tag supported by the local/Docker sidecar installer.
 pub const OMNIGRAPH_VERSION: &str = "v0.15.0";
 
@@ -44,6 +47,12 @@ node ContextAtom {
     confidence: F64
     pin_priority: I32
     verified: Bool
+    origin_layer: String?
+    authority: String?
+    privacy: String?
+    brain_record_id: String?
+    memory_id: String?
+    record_revision: I64?
     created_at: DateTime
     updated_at: DateTime
 }
@@ -133,6 +142,12 @@ pub const QUERY_CONTEXT_SEARCH: &str = r#"query context_search($q: String, $proj
         $a.confidence as confidence,
         $a.pin_priority as pin_priority,
         $a.verified as verified,
+        $a.origin_layer as origin_layer,
+        $a.authority as authority,
+        $a.privacy as privacy,
+        $a.brain_record_id as brain_record_id,
+        $a.memory_id as memory_id,
+        $a.record_revision as record_revision,
         $a.created_at as created_at,
         $a.updated_at as updated_at,
         rrf(bm25($a.title, $q), bm25($a.body, $q)) as score
@@ -156,6 +171,13 @@ pub const QUERY_SESSION_NEIGHBORS: &str = r#"query session_neighbors($session_id
         $a.source_branch as source_branch,
         $a.confidence as confidence,
         $a.pin_priority as pin_priority,
+        $a.verified as verified,
+        $a.origin_layer as origin_layer,
+        $a.authority as authority,
+        $a.privacy as privacy,
+        $a.brain_record_id as brain_record_id,
+        $a.memory_id as memory_id,
+        $a.record_revision as record_revision,
         $a.updated_at as updated_at
     }
     order { $a.pin_priority desc, $a.updated_at desc }
@@ -177,6 +199,13 @@ pub const QUERY_FILE_CONTEXT: &str = r#"query file_context($path: String) {
         $a.source_branch as source_branch,
         $a.confidence as confidence,
         $a.pin_priority as pin_priority,
+        $a.verified as verified,
+        $a.origin_layer as origin_layer,
+        $a.authority as authority,
+        $a.privacy as privacy,
+        $a.brain_record_id as brain_record_id,
+        $a.memory_id as memory_id,
+        $a.record_revision as record_revision,
         $a.updated_at as updated_at
     }
     order { $a.pin_priority desc, $a.updated_at desc }
@@ -200,6 +229,12 @@ pub const QUERY_RECENT_ATOMS: &str = r#"query recent_atoms($project_id: String) 
         $a.confidence as confidence,
         $a.pin_priority as pin_priority,
         $a.verified as verified,
+        $a.origin_layer as origin_layer,
+        $a.authority as authority,
+        $a.privacy as privacy,
+        $a.brain_record_id as brain_record_id,
+        $a.memory_id as memory_id,
+        $a.record_revision as record_revision,
         $a.created_at as created_at,
         $a.updated_at as updated_at
     }
@@ -246,6 +281,12 @@ pub const HARNESS_STORED_QUERIES_GQ: &str = concat!(
     "        $a.confidence as confidence,\n",
     "        $a.pin_priority as pin_priority,\n",
     "        $a.verified as verified,\n",
+    "        $a.origin_layer as origin_layer,\n",
+    "        $a.authority as authority,\n",
+    "        $a.privacy as privacy,\n",
+    "        $a.brain_record_id as brain_record_id,\n",
+    "        $a.memory_id as memory_id,\n",
+    "        $a.record_revision as record_revision,\n",
     "        $a.created_at as created_at,\n",
     "        $a.updated_at as updated_at,\n",
     "        rrf(bm25($a.title, $q), bm25($a.body, $q)) as score\n",
@@ -267,6 +308,13 @@ pub const HARNESS_STORED_QUERIES_GQ: &str = concat!(
     "        $a.source_branch as source_branch,\n",
     "        $a.confidence as confidence,\n",
     "        $a.pin_priority as pin_priority,\n",
+    "        $a.verified as verified,\n",
+    "        $a.origin_layer as origin_layer,\n",
+    "        $a.authority as authority,\n",
+    "        $a.privacy as privacy,\n",
+    "        $a.brain_record_id as brain_record_id,\n",
+    "        $a.memory_id as memory_id,\n",
+    "        $a.record_revision as record_revision,\n",
     "        $a.updated_at as updated_at\n",
     "    }\n",
     "    order { $a.pin_priority desc, $a.updated_at desc }\n",
@@ -286,6 +334,13 @@ pub const HARNESS_STORED_QUERIES_GQ: &str = concat!(
     "        $a.source_branch as source_branch,\n",
     "        $a.confidence as confidence,\n",
     "        $a.pin_priority as pin_priority,\n",
+    "        $a.verified as verified,\n",
+    "        $a.origin_layer as origin_layer,\n",
+    "        $a.authority as authority,\n",
+    "        $a.privacy as privacy,\n",
+    "        $a.brain_record_id as brain_record_id,\n",
+    "        $a.memory_id as memory_id,\n",
+    "        $a.record_revision as record_revision,\n",
     "        $a.updated_at as updated_at\n",
     "    }\n",
     "    order { $a.pin_priority desc, $a.updated_at desc }\n",
@@ -307,6 +362,12 @@ pub const HARNESS_STORED_QUERIES_GQ: &str = concat!(
     "        $a.confidence as confidence,\n",
     "        $a.pin_priority as pin_priority,\n",
     "        $a.verified as verified,\n",
+    "        $a.origin_layer as origin_layer,\n",
+    "        $a.authority as authority,\n",
+    "        $a.privacy as privacy,\n",
+    "        $a.brain_record_id as brain_record_id,\n",
+    "        $a.memory_id as memory_id,\n",
+    "        $a.record_revision as record_revision,\n",
     "        $a.created_at as created_at,\n",
     "        $a.updated_at as updated_at\n",
     "    }\n",
@@ -514,6 +575,12 @@ pub(crate) const GQ_UPSERT_ATOM: &str = r#"query upsert_atom(
     $confidence: F64,
     $pin_priority: I32,
     $verified: Bool,
+    $origin_layer: String?,
+    $authority: String?,
+    $privacy: String?,
+    $brain_record_id: String?,
+    $memory_id: String?,
+    $record_revision: I64?,
     $created_at: DateTime,
     $updated_at: DateTime
 ) {
@@ -530,6 +597,12 @@ pub(crate) const GQ_UPSERT_ATOM: &str = r#"query upsert_atom(
         confidence: $confidence,
         pin_priority: $pin_priority,
         verified: $verified,
+        origin_layer: $origin_layer,
+        authority: $authority,
+        privacy: $privacy,
+        brain_record_id: $brain_record_id,
+        memory_id: $memory_id,
+        record_revision: $record_revision,
         created_at: $created_at,
         updated_at: $updated_at
     }

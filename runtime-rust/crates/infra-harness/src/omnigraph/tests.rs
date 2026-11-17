@@ -2122,8 +2122,41 @@ async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
 #[test]
 fn schema_bundle_is_valid_and_writes_cleanly() {
     assert!(!schema::HARNESS_GRAPH_ID.contains('_'));
+    assert_eq!(schema::CANONICAL_KNOWLEDGE_BRANCH, "knowledge/canonical");
     assert!(schema::HARNESS_CONTEXT_PG.contains("node Session"));
     assert!(schema::HARNESS_CONTEXT_PG.contains("node ContextAtom"));
+    for prop in [
+        "origin_layer: String?",
+        "authority: String?",
+        "privacy: String?",
+        "brain_record_id: String?",
+        "memory_id: String?",
+        "record_revision: I64?",
+    ] {
+        assert!(
+            schema::HARNESS_CONTEXT_PG.contains(prop),
+            "missing schema property {prop}"
+        );
+    }
+    for q in [
+        schema::QUERY_CONTEXT_SEARCH,
+        schema::QUERY_SESSION_NEIGHBORS,
+        schema::QUERY_FILE_CONTEXT,
+        schema::QUERY_RECENT_ATOMS,
+        schema::HARNESS_STORED_QUERIES_GQ,
+        schema::GQ_UPSERT_ATOM,
+    ] {
+        for field in [
+            "origin_layer",
+            "authority",
+            "privacy",
+            "brain_record_id",
+            "memory_id",
+            "record_revision",
+        ] {
+            assert!(q.contains(field), "missing {field} in query:\n{q}");
+        }
+    }
     assert!(schema::HARNESS_CONTEXT_PG.contains("node FileRef"));
     assert!(schema::HARNESS_CONTEXT_PG.contains("node SymbolRef"));
     assert!(schema::HARNESS_CONTEXT_PG.contains("node TurnSnapshot"));
@@ -2240,6 +2273,12 @@ async fn client_enforces_contract_auth_cas_branch_merge_conflict_and_feeds() {
             "confidence": 0.9,
             "pin_priority": 10,
             "verified": true,
+            "origin_layer": Value::Null,
+            "authority": Value::Null,
+            "privacy": Value::Null,
+            "brain_record_id": Value::Null,
+            "memory_id": Value::Null,
+            "record_revision": Value::Null,
             "created_at": "2026-11-16T18:00:00Z",
             "updated_at": "2026-11-16T18:00:00Z"
         })),
@@ -4209,6 +4248,637 @@ async fn real_omnigraph_binary_export_import_and_share_round_trip() {
             .unwrap()
             .iter()
             .any(|e| e["kind"] == "session_follows")
+    );
+
+    // 4. Real Omnigraph provenance, canonical sync, read-only canonical retrieval, fetch_atom, link_brain, and export/import round-trip
+    let sync_res = mgr
+        .sync_canonical_knowledge(
+            &project_id,
+            &[
+                json!({
+                    "atom_id": "brain-real-old",
+                    "kind": "finding",
+                    "title": "Legacy session token rule",
+                    "summary": "Superseded rule",
+                    "files": ["src/real.rs"],
+                    "verified": true,
+                    "origin_layer": "project-brain",
+                    "authority": "verified",
+                    "privacy": "team",
+                    "brain_record_id": "brain-uuid-old",
+                    "record_revision": 1
+                }),
+                json!({
+                    "atom_id": "mem-real-1",
+                    "kind": "decision",
+                    "title": "PKCE required for OAuth flows",
+                    "summary": "Verified memory bank decision for Real Omnigraph",
+                    "files": ["src/oauth.rs"],
+                    "verified": true,
+                    "origin_layer": "memory-bank",
+                    "authority": "verified",
+                    "privacy": "public",
+                    "memory_id": "MEM-20261117-aabbccdd-pkce",
+                    "record_revision": 4,
+                    "supersedes_atom_ids": ["brain-real-old", "missing-target-id"]
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_res["ok"], true);
+    assert_eq!(sync_res["branch"], schema::CANONICAL_KNOWLEDGE_BRANCH);
+    assert_eq!(sync_res["synced"], 2);
+
+    let prep_real = mgr
+        .prepare_session_context(&sess_b, &proj_dir)
+        .await
+        .unwrap();
+    let prep_atoms = prep_real["atoms"].as_array().unwrap();
+    let canon_hit = prep_atoms
+        .iter()
+        .find(|a| a["atom_id"] == "mem-real-1")
+        .expect("canonical atom surfaced in prepare_session_context");
+    assert_eq!(canon_hit["origin_layer"], "memory-bank");
+    assert_eq!(canon_hit["authority"], "verified");
+    assert_eq!(canon_hit["privacy"], "public");
+    assert_eq!(canon_hit["memory_id"], "MEM-20261117-aabbccdd-pkce");
+    assert_eq!(canon_hit["record_revision"], 4);
+    assert_eq!(canon_hit["files"], json!(["src/oauth.rs"]));
+    assert!(
+        prep_real["capsule_text"]
+            .as_str()
+            .unwrap()
+            .contains("[memory-bank decision · MEM-20261117-aabbccdd-pkce]")
+    );
+
+    let fetched = mgr
+        .fetch_atom_with_files(&project_id, "atom-real-1", None)
+        .await
+        .unwrap();
+    assert_eq!(fetched["files"], json!(["src/real.rs"]));
+    let linked_brain = mgr
+        .link_atom_to_brain(
+            &project_id,
+            fetched["branch"].as_str().unwrap(),
+            &fetched["atom"],
+            "brain-uuid-real-99",
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(linked_brain["ok"], true);
+    assert_eq!(linked_brain["origin_layer"], "project-brain");
+    assert_eq!(linked_brain["authority"], "verified");
+    assert_eq!(linked_brain["verified"], true);
+    assert_eq!(linked_brain["brain_record_id"], "brain-uuid-real-99");
+    assert_eq!(linked_brain["record_revision"], 7);
+    assert_eq!(linked_brain["files"], json!(["src/real.rs"]));
+
+    let canon_export = mgr
+        .export_context_json(&json!({
+            "project_id": project_id,
+            "branch": schema::CANONICAL_KNOWLEDGE_BRANCH,
+            "scope": "branch",
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    let canon_import = mgr
+        .import_context_json(&json!({
+            "project_id": project_id,
+            "target_branch": "imported/real-provenance",
+            "from_branch": "main",
+            "create_branch": true,
+            "mode": "replace",
+            "bundle": canon_export["bundle"]
+        }))
+        .await
+        .unwrap();
+    assert_eq!(canon_import["ok"], true);
+    let imported_mem = canon_import["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["atom_id"] == "mem-real-1")
+        .expect("imported mem-real-1");
+    assert_eq!(imported_mem["origin_layer"], "memory-bank");
+    assert_eq!(imported_mem["memory_id"], "MEM-20261117-aabbccdd-pkce");
+    assert_eq!(imported_mem["record_revision"], 4);
+
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn provenance_defaults_canonical_sync_fetch_and_link_brain_work() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let proj_dir = state_dir.path().join("project");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let project = store.register(&proj_dir).unwrap();
+    let project_id = project["id"].as_str().unwrap().to_string();
+
+    // 1. OmnigraphMode::Off returns skipped payload gracefully for sync_canonical_knowledge
+    let off_mgr =
+        OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    let off_sync = off_mgr
+        .sync_canonical_knowledge(&project_id, &[json!({"atom_id": "a1", "title": "ignored"})])
+        .await
+        .unwrap();
+    assert_eq!(
+        off_sync,
+        json!({"ok": false, "skipped": "omnigraph-off", "synced": 0, "atom_ids": []})
+    );
+
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = Arc::new(
+        OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap(),
+    );
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let domain = OmnigraphDomain::new(mgr.clone());
+
+    // 2. publish_atom_json keeps verified=false by default and echoes the 6 provenance fields
+    let pub_unverified = mgr
+        .publish_atom_json(&json!({
+            "project_id": project_id,
+            "branch": "main",
+            "atom_id": "atom-default-unverified",
+            "kind": "insight",
+            "title": "Unverified atom default",
+            "summary": "No verified flag provided",
+            "origin_layer": "session-draft",
+            "authority": "inferred",
+            "privacy": "team",
+            "brain_record_id": "rec-draft-1",
+            "memory_id": "MEM-draft-1",
+            "record_revision": 2
+        }))
+        .await
+        .unwrap();
+    assert_eq!(pub_unverified["atom"]["verified"], false);
+    assert_eq!(pub_unverified["atom"]["origin_layer"], "session-draft");
+    assert_eq!(pub_unverified["atom"]["authority"], "inferred");
+    assert_eq!(pub_unverified["atom"]["privacy"], "team");
+    assert_eq!(pub_unverified["atom"]["brain_record_id"], "rec-draft-1");
+    assert_eq!(pub_unverified["atom"]["memory_id"], "MEM-draft-1");
+    assert_eq!(pub_unverified["atom"]["record_revision"], 2);
+
+    // 3. publish_session_outputs defaults verified to false and forwards provenance fields
+    let sess = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "codex",
+                "workflow": "native",
+                "mode": "plan",
+                "agents_enabled": false,
+                "title": "Session draft provenance",
+                "goal": "oauth token refresh",
+                "omnigraph": { "enabled": true, "branch": "session/sessprov01", "query": "oauth token refresh" }
+            }),
+            "oauth token refresh",
+            &[],
+        )
+        .unwrap();
+    let _sid = sess["id"].as_str().unwrap();
+    let pub_out = mgr
+        .publish_session_outputs(
+            &sess,
+            &[json!({
+                "kind": "finding",
+                "title": "Session oauth refresh finding",
+                "summary": "Observed retry race on refresh token rotation",
+                "files": ["src/oauth_client.rs"],
+                "origin_layer": "session-draft",
+                "authority": "inferred",
+                "privacy": "team",
+                "record_revision": 1
+            })],
+            &["src/oauth_client.rs".into()],
+            "Investigated refresh token rotation",
+        )
+        .await
+        .unwrap();
+    assert_eq!(pub_out["ok"], true);
+    let session_atom_id = pub_out["published_atom_ids"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let sess_graph_before = mgr
+        .graph_view_json(
+            &project_id,
+            Some("session/sessprov01"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let published_sess_atom = sess_graph_before["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["atom_id"] == session_atom_id)
+        .expect("session atom");
+    assert_eq!(published_sess_atom["verified"], false);
+    assert_eq!(published_sess_atom["origin_layer"], "session-draft");
+    assert_eq!(published_sess_atom["authority"], "inferred");
+    assert_eq!(published_sess_atom["privacy"], "team");
+    assert_eq!(published_sess_atom["record_revision"], 1);
+    assert_eq!(published_sess_atom["files"], json!(["src/oauth_client.rs"]));
+
+    // 4. omnigraph.sync_items creates knowledge/canonical, preserves provenance + files, and adds supersedes only for existing targets
+    let sync_payload = match domain
+        .execute(
+            "omnigraph.sync_items",
+            json!({
+                "params": {},
+                "query": {},
+                "body": {
+                    "project_id": project_id,
+                    "items": [
+                        {
+                            "atom_id": "brain-101",
+                            "kind": "finding",
+                            "title": "Legacy oauth refresh workaround",
+                            "summary": "Old workaround",
+                            "files": ["src/legacy_oauth.rs"],
+                            "verified": true,
+                            "origin_layer": "project-brain",
+                            "authority": "verified",
+                            "privacy": "public",
+                            "brain_record_id": "550e8400-e29b-41d4-a716-446655440101",
+                            "record_revision": 1
+                        },
+                        {
+                            "atom_id": "mem-202",
+                            "kind": "decision",
+                            "title": "Use atomic oauth refresh lock",
+                            "summary": "Serialized refresh prevents double revoke",
+                            "body": "Always acquire single-flight lock before refreshing oauth tokens.",
+                            "tags": ["oauth", "concurrency"],
+                            "files": ["src/oauth_lock.rs", "src/oauth_client.rs"],
+                            "verified": true,
+                            "origin_layer": "memory-bank",
+                            "authority": "verified",
+                            "privacy": "team",
+                            "memory_id": "MEM-20261117-12345678-oauth-lock",
+                            "brain_record_id": "550e8400-e29b-41d4-a716-446655440202",
+                            "record_revision": 3,
+                            "supersedes_atom_ids": ["brain-101", "does-not-exist-999"]
+                        }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap()
+    {
+        crate::services::Payload::Json(v) => v,
+        _ => panic!("expected json"),
+    };
+    assert_eq!(sync_payload["ok"], true);
+    assert_eq!(sync_payload["branch"], schema::CANONICAL_KNOWLEDGE_BRANCH);
+    assert_eq!(sync_payload["synced"], 2);
+    assert_eq!(sync_payload["atom_ids"], json!(["brain-101", "mem-202"]));
+
+    let canon_graph = mgr
+        .graph_view_json(
+            &project_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let canon_edges = canon_graph["edges"].as_array().unwrap();
+    assert!(canon_edges.iter().any(|e| {
+        e["kind"] == "relates_to"
+            && e["relation"] == "supersedes"
+            && e["from"] == "mem-202"
+            && e["to"] == "brain-101"
+    }));
+    assert!(!canon_edges.iter().any(|e| e["to"] == "does-not-exist-999"));
+
+    // 5. prepare_session_context reads knowledge/canonical read-only without mutating session branch,
+    //    attaches `files` from GQ_LIST_FILE_EDGES, preserves provenance, and tags capsule lines clearly.
+    let prep = mgr.prepare_session_context(&sess, &proj_dir).await.unwrap();
+    let atoms = prep["atoms"].as_array().unwrap();
+    let sess_atom = atoms
+        .iter()
+        .find(|a| a["atom_id"] == session_atom_id)
+        .expect("session atom in prepared context");
+    assert_eq!(sess_atom["files"], json!(["src/oauth_client.rs"]));
+    assert_eq!(sess_atom["verified"], false);
+    assert_eq!(sess_atom["origin_layer"], "session-draft");
+
+    let canon_mem = atoms
+        .iter()
+        .find(|a| a["atom_id"] == "mem-202")
+        .expect("canonical memory-bank atom in prepared context");
+    let mut canon_files: Vec<String> = canon_mem["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    canon_files.sort();
+    assert_eq!(
+        canon_files,
+        vec!["src/oauth_client.rs", "src/oauth_lock.rs"]
+    );
+    assert_eq!(canon_mem["memory_id"], "MEM-20261117-12345678-oauth-lock");
+    assert_eq!(
+        canon_mem["brain_record_id"],
+        "550e8400-e29b-41d4-a716-446655440202"
+    );
+    assert_eq!(canon_mem["record_revision"], 3);
+
+    let capsule = prep["capsule_text"].as_str().unwrap();
+    assert!(capsule.contains("subordinate to canonical"));
+    assert!(capsule.contains("[memory-bank decision · MEM-20261117-12345678-oauth-lock]"));
+    assert!(
+        capsule.contains("[project-brain finding · 550e8400]")
+            || !atoms.iter().any(|a| a["atom_id"] == "brain-101")
+    );
+    assert!(capsule.contains("[unverified reference — verify against code & Brain]"));
+
+    // Session branch must NOT have canonical atoms merged/mutated onto it
+    let sess_graph_after = mgr
+        .graph_view_json(
+            &project_id,
+            Some("session/sessprov01"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !sess_graph_after["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["atom_id"] == "mem-202" || a["atom_id"] == "brain-101")
+    );
+
+    // Also verify capsule tags [project-brain ...] when a verified brain atom is matched
+    let mut brain_atom_check = canon_graph["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["atom_id"] == "brain-101")
+        .unwrap()
+        .clone();
+    brain_atom_check["verified"] = json!(true);
+    let cap_both = super::sidecar::format_context_capsule_for_test(
+        schema::HARNESS_GRAPH_ID,
+        "session/sessprov01",
+        &proj_dir,
+        &[brain_atom_check, canon_mem.clone(), sess_atom.clone()],
+    );
+    assert!(cap_both.contains("[project-brain finding · 550e8400]"));
+    assert!(cap_both.contains("[memory-bank decision · MEM-20261117-12345678-oauth-lock]"));
+    assert!(cap_both.contains("[unverified reference — verify against code & Brain]"));
+
+    // 6. omnigraph.fetch_atom locates atom across branches with files; missing returns NotFound
+    let fetch_res = match domain
+        .execute(
+            "omnigraph.fetch_atom",
+            json!({
+                "params": {},
+                "query": {},
+                "body": {
+                    "project_id": project_id,
+                    "atom_id": session_atom_id
+                }
+            }),
+        )
+        .await
+        .unwrap()
+    {
+        crate::services::Payload::Json(v) => v,
+        _ => panic!("expected json"),
+    };
+    assert_eq!(fetch_res["branch"], "session/sessprov01");
+    assert_eq!(fetch_res["files"], json!(["src/oauth_client.rs"]));
+    assert_eq!(fetch_res["atom"]["files"], json!(["src/oauth_client.rs"]));
+
+    let Err(missing_err) = domain
+        .execute(
+            "omnigraph.fetch_atom",
+            json!({
+                "params": {},
+                "query": {},
+                "body": {
+                    "project_id": project_id,
+                    "atom_id": "nonexistent-atom-xyz"
+                }
+            }),
+        )
+        .await
+    else {
+        panic!("expected missing atom error");
+    };
+    assert_eq!(missing_err.status, 404);
+
+    // 7. omnigraph.link_brain preserves content/tags/files while setting verified Project Brain provenance
+    let mut atom_to_link = fetch_res["atom"].clone();
+    atom_to_link["tags"] = json!(["oauth", "promoted"]);
+    let link_res = match domain
+        .execute(
+            "omnigraph.link_brain",
+            json!({
+                "params": {},
+                "query": {},
+                "body": {
+                    "project_id": project_id,
+                    "branch": fetch_res["branch"],
+                    "atom": atom_to_link,
+                    "brain_record_id": "brain-promoted-uuid-77",
+                    "revision": 4
+                }
+            }),
+        )
+        .await
+        .unwrap()
+    {
+        crate::services::Payload::Json(v) => v,
+        _ => panic!("expected json"),
+    };
+    assert_eq!(link_res["ok"], true);
+    assert_eq!(link_res["origin_layer"], "project-brain");
+    assert_eq!(link_res["authority"], "verified");
+    assert_eq!(link_res["verified"], true);
+    assert_eq!(link_res["brain_record_id"], "brain-promoted-uuid-77");
+    assert_eq!(link_res["record_revision"], 4);
+    assert_eq!(link_res["atom"]["tags"], json!(["oauth", "promoted"]));
+    assert_eq!(link_res["atom"]["files"], json!(["src/oauth_client.rs"]));
+    assert_eq!(link_res["atom"]["title"], "Session oauth refresh finding");
+
+    let refetched = mgr
+        .fetch_atom_with_files(&project_id, &session_atom_id, Some("session/sessprov01"))
+        .await
+        .unwrap();
+    assert_eq!(refetched["atom"]["verified"], true);
+    assert_eq!(refetched["atom"]["origin_layer"], "project-brain");
+    assert_eq!(refetched["atom"]["authority"], "verified");
+    assert_eq!(
+        refetched["atom"]["brain_record_id"],
+        "brain-promoted-uuid-77"
+    );
+    assert_eq!(refetched["atom"]["record_revision"], 4);
+    assert_eq!(refetched["atom"]["tags"], json!(["oauth", "promoted"]));
+    assert_eq!(refetched["files"], json!(["src/oauth_client.rs"]));
+
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn transfer_round_trip_with_and_without_provenance_fields() {
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+
+    // Publish one atom WITH all 6 provenance fields onto main
+    mgr.publish_atom_json(&json!({
+        "project_id": "proj-xfer",
+        "branch": "main",
+        "atom_id": "atom-prov-full",
+        "kind": "decision",
+        "title": "Provenance-bearing atom",
+        "summary": "Carries all 6 nullable fields",
+        "files": ["src/prov.rs"],
+        "verified": true,
+        "origin_layer": "memory-bank",
+        "authority": "verified",
+        "privacy": "team",
+        "brain_record_id": "brain-xfer-1",
+        "memory_id": "MEM-20261117-deadbeef-prov",
+        "record_revision": 9
+    }))
+    .await
+    .unwrap();
+
+    let exported = mgr
+        .export_context_json(&json!({
+            "project_id": "proj-xfer",
+            "branch": "main",
+            "scope": "branch",
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    let exp_atom = exported["bundle"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["atom_id"] == "atom-prov-full")
+        .expect("exported atom");
+    assert_eq!(exp_atom["origin_layer"], "memory-bank");
+    assert_eq!(exp_atom["authority"], "verified");
+    assert_eq!(exp_atom["privacy"], "team");
+    assert_eq!(exp_atom["brain_record_id"], "brain-xfer-1");
+    assert_eq!(exp_atom["memory_id"], "MEM-20261117-deadbeef-prov");
+    assert_eq!(exp_atom["record_revision"], 9);
+
+    // Import bundle WITH provenance fields + legacy bundle WITHOUT provenance fields
+    let reimported = mgr
+        .import_context_json(&json!({
+            "project_id": "proj-xfer",
+            "target_branch": "imported/prov-check",
+            "from_branch": "main",
+            "create_branch": true,
+            "mode": "replace",
+            "bundle": exported["bundle"]
+        }))
+        .await
+        .unwrap();
+    let reimp_atom = reimported["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["atom_id"] == "atom-prov-full")
+        .expect("reimported atom");
+    assert_eq!(reimp_atom["origin_layer"], "memory-bank");
+    assert_eq!(reimp_atom["authority"], "verified");
+    assert_eq!(reimp_atom["privacy"], "team");
+    assert_eq!(reimp_atom["brain_record_id"], "brain-xfer-1");
+    assert_eq!(reimp_atom["memory_id"], "MEM-20261117-deadbeef-prov");
+    assert_eq!(reimp_atom["record_revision"], 9);
+
+    let legacy_bundle = json!({
+        "format": "harness.omnigraph.bundle.v1",
+        "atoms": [
+            {
+                "id": "atom-legacy-noprovenance",
+                "kind": "insight",
+                "title": "Legacy atom missing provenance",
+                "summary": "Should import cleanly with null provenance"
+            }
+        ],
+        "edges": []
+    });
+    let legacy_imp = mgr
+        .import_context_json(&json!({
+            "project_id": "proj-xfer",
+            "target_branch": "imported/legacy-noprovenance",
+            "from_branch": "main",
+            "create_branch": true,
+            "mode": "replace",
+            "bundle": legacy_bundle
+        }))
+        .await
+        .unwrap();
+    assert_eq!(legacy_imp["ok"], true);
+    assert_eq!(legacy_imp["imported_atoms"], 1);
+    let leg_atom = &legacy_imp["atoms"][0];
+    assert_eq!(leg_atom["atom_id"], "atom-legacy-noprovenance");
+    for field in [
+        "origin_layer",
+        "authority",
+        "privacy",
+        "brain_record_id",
+        "memory_id",
+        "record_revision",
+    ] {
+        assert!(leg_atom[field].is_null(), "expected {field} to be null");
+    }
+
+    let legacy_reexport = mgr
+        .export_context_json(&json!({
+            "project_id": "proj-xfer",
+            "branch": "imported/legacy-noprovenance",
+            "scope": "branch",
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(legacy_reexport["counts"]["atoms"], 1);
+    assert_eq!(
+        legacy_reexport["bundle"]["atoms"][0]["atom_id"],
+        "atom-legacy-noprovenance"
     );
 
     mgr.close().await.unwrap();

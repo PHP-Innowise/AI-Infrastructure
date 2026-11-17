@@ -845,6 +845,16 @@ pub(super) fn prepare_import_ndjson(
             .clamp(0.0, 1.0);
         let pin_priority = v.get("pin_priority").and_then(Value::as_i64).unwrap_or(10) as i32;
         let verified = v.get("verified").and_then(Value::as_bool).unwrap_or(false);
+        let origin_layer = opt_trimmed_str_val(v, "origin_layer");
+        let authority = opt_trimmed_str_val(v, "authority");
+        let privacy = opt_trimmed_str_val(v, "privacy");
+        let brain_record_id = opt_trimmed_str_val(v, "brain_record_id");
+        let memory_id = opt_trimmed_str_val(v, "memory_id");
+        let record_revision = v
+            .get("record_revision")
+            .and_then(parse_i64_opt)
+            .map(|n| Value::Number(n.into()))
+            .unwrap_or(Value::Null);
         let created_at = normalize_iso_ms(v.get("created_at").and_then(Value::as_str), ts);
         let updated_at = normalize_iso_ms(v.get("updated_at").and_then(Value::as_str), &created_at);
 
@@ -863,6 +873,12 @@ pub(super) fn prepare_import_ndjson(
                 "confidence": confidence,
                 "pin_priority": pin_priority,
                 "verified": verified,
+                "origin_layer": origin_layer,
+                "authority": authority,
+                "privacy": privacy,
+                "brain_record_id": brain_record_id,
+                "memory_id": memory_id,
+                "record_revision": record_revision,
                 "created_at": created_at,
                 "updated_at": updated_at,
             }),
@@ -1264,6 +1280,21 @@ fn str_in_map(map: &Map<String, Value>, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+fn opt_trimmed_str_val(v: &Value, key: &str) -> Value {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| Value::String(s.to_string()))
+        .unwrap_or(Value::Null)
+}
+
+pub(super) fn parse_i64_opt(val: &Value) -> Option<i64> {
+    val.as_i64()
+        .or_else(|| val.as_u64().and_then(|n| i64::try_from(n).ok()))
+        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
 }
 
 pub(super) fn parse_bool_param(val: &Value) -> Option<bool> {
