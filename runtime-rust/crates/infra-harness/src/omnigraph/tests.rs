@@ -74,6 +74,9 @@ struct MockGraphState {
     commit_order: Vec<String>,
     next_seq: u64,
     expired_cursor: Option<String>,
+    /// Every query and export served, as `name@branch`, so a test can
+    /// bound how many reads a call makes.
+    reads: Vec<String>,
 }
 
 impl MockGraphState {
@@ -116,6 +119,7 @@ impl MockGraphState {
             commit_order: vec!["c-0001".into()],
             next_seq: 2,
             expired_cursor: Some("expired-cursor".into()),
+            reads: Vec::new(),
         }
     }
 
@@ -1223,7 +1227,7 @@ async fn mock_query(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let st = srv.state.lock().unwrap();
+    let mut st = srv.state.lock().unwrap();
     if let Err(resp) = check_auth_and_contract(&headers, &st) {
         return *resp;
     }
@@ -1244,6 +1248,9 @@ async fn mock_query(
         };
         (b.head_commit.clone(), Some(bname.to_string()), None)
     };
+    let qname = body["name"].as_str().unwrap_or("inline_query");
+    let read = format!("{qname}@{}", branch_out.as_ref().unwrap_or(&commit_id));
+    st.reads.push(read);
     let Some(commit) = st.commits.get(&commit_id) else {
         return json_err(
             StatusCode::NOT_FOUND,
@@ -1252,7 +1259,6 @@ async fn mock_query(
             None,
         );
     };
-    let qname = body["name"].as_str().unwrap_or("inline_query");
     let qtext = body["query"].as_str().unwrap_or("");
     let (rows, ranking) = evaluate_mock_query(&commit.snapshot, qname, qtext, &body["params"]);
     axum::Json(json!({
@@ -1273,7 +1279,7 @@ async fn mock_stored_query(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let st = srv.state.lock().unwrap();
+    let mut st = srv.state.lock().unwrap();
     if let Err(resp) = check_auth_and_contract(&headers, &st) {
         return *resp;
     }
@@ -1302,6 +1308,8 @@ async fn mock_stored_query(
         };
         (b.head_commit.clone(), Some(bname.to_string()), None)
     };
+    let read = format!("{query_name}@{}", branch_out.as_ref().unwrap_or(&commit_id));
+    st.reads.push(read);
     let Some(commit) = st.commits.get(&commit_id) else {
         return json_err(
             StatusCode::NOT_FOUND,
@@ -1700,7 +1708,7 @@ async fn mock_export(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let st = srv.state.lock().unwrap();
+    let mut st = srv.state.lock().unwrap();
     if let Err(resp) = check_auth_and_contract(&headers, &st) {
         return *resp;
     }
@@ -1708,6 +1716,7 @@ async fn mock_export(
         return json_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
     }
     let bname = body["branch"].as_str().unwrap_or("main");
+    st.reads.push(format!("export@{bname}"));
     let Some(branch) = st.branches.get(bname) else {
         return json_err(
             StatusCode::NOT_FOUND,
@@ -2112,8 +2121,19 @@ async fn mock_load_json(
 }
 
 pub(crate) async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
+    let (base_url, handle, _state) = spawn_mock_omnigraph_with_state().await;
+    (base_url, handle)
+}
+
+/// The fake Omnigraph and its state, for a test that inspects what it served.
+async fn spawn_mock_omnigraph_with_state() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<MockGraphState>>,
+) {
+    let state = Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID)));
     let srv = MockServer {
-        state: Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID))),
+        state: state.clone(),
     };
     let app = Router::new()
         .route("/healthz", get(mock_healthz))
@@ -2161,7 +2181,7 @@ pub(crate) async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<(
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), handle)
+    (format!("http://{addr}"), handle, state)
 }
 
 #[test]
@@ -4688,6 +4708,409 @@ async fn atom_update_payload_preserves_brain_and_memory_provenance() {
         .unwrap();
     assert_eq!(fresh["atom"]["verified"], false);
     assert!(fresh["atom"]["origin_layer"].is_null());
+    mgr.close().await.unwrap();
+}
+
+/// What `branch` holds now in the fake Omnigraph.
+fn mock_head(state: &Arc<Mutex<MockGraphState>>, branch: &str) -> MockSnapshot {
+    let st = state.lock().unwrap();
+    st.commits[&st.branches[branch].head_commit]
+        .snapshot
+        .clone()
+}
+
+#[tokio::test]
+async fn atom_update_without_session_keeps_its_session_and_links_none() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server, mock) = spawn_mock_omnigraph_with_state().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let authored = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "summary": "One hour.", "session_id": "sess-author"}))
+        .await
+        .unwrap();
+    assert_eq!(authored["atom"]["source_session_id"], "sess-author");
+    let published = |snap: &MockSnapshot| {
+        snap.published_by
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(
+        published(&mock_head(&mock, "main")),
+        "atom-ttl->sess-author"
+    );
+
+    // An update that names no session (a Keep button's) keeps the author
+    // and links no session.
+    let edited = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "summary": "Ninety minutes."}))
+        .await
+        .unwrap();
+    assert_eq!(edited["atom"]["summary"], "Ninety minutes.");
+    assert_eq!(edited["atom"]["source_session_id"], "sess-author");
+    assert_eq!(edited["atom"]["session_id"], "sess-author");
+    let head = mock_head(&mock, "main");
+    assert_eq!(head.atoms["atom-ttl"]["source_session_id"], "sess-author");
+    assert_eq!(published(&head), "atom-ttl->sess-author");
+
+    // A named session takes the atom over and is linked, as before.
+    let taken = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "summary": "Two hours.", "session_id": "sess-editor"}))
+        .await
+        .unwrap();
+    assert_eq!(taken["atom"]["source_session_id"], "sess-editor");
+    assert_eq!(
+        published(&mock_head(&mock, "main")),
+        "atom-ttl->sess-author atom-ttl->sess-editor"
+    );
+
+    // `session_id: null` clears it, like any field sent as null.
+    let cleared = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "session_id": null}))
+        .await
+        .unwrap();
+    assert!(cleared["atom"]["source_session_id"].is_null(), "{cleared}");
+    assert!(mock_head(&mock, "main").atoms["atom-ttl"]["source_session_id"].is_null());
+    mgr.close().await.unwrap();
+}
+
+/// `atom-keys` and `atom-ttl` updated differently on `session/keep` and on
+/// `main` after the branch split, and `atom-twin` created on both.
+async fn publish_divergent_atoms(mgr: &OmnigraphManager) {
+    for atom_id in ["atom-keys", "atom-ttl"] {
+        mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": atom_id, "kind": "decision", "title": format!("Title of {atom_id}"), "summary": "Base"}))
+            .await
+            .unwrap();
+    }
+    mgr.branch_action_json(&json!({"action": "create", "name": "session/keep", "from": "main"}))
+        .await
+        .unwrap();
+    for (branch, side, session) in [
+        ("session/keep", "Source", "sess-source"),
+        ("main", "Target", "sess-target"),
+    ] {
+        for atom_id in ["atom-keys", "atom-ttl"] {
+            mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": branch, "atom_id": atom_id, "kind": "decision", "title": format!("Title of {atom_id}"), "summary": format!("{side} {atom_id}"), "session_id": session}))
+                .await
+                .unwrap();
+        }
+        // Created on both branches: a `divergent_insert`, not for Keep.
+        mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": branch, "atom_id": "atom-twin", "kind": "insight", "title": format!("{side} twin")}))
+            .await
+            .unwrap();
+    }
+}
+
+/// The fake Omnigraph and a manager connected to it.
+async fn connected_mock() -> (
+    tempfile::TempDir,
+    OmnigraphManager,
+    Arc<Mutex<MockGraphState>>,
+) {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server, mock) = spawn_mock_omnigraph_with_state().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    (state_dir, mgr, mock)
+}
+
+#[tokio::test]
+async fn divergent_atom_conflicts_carry_both_branches_atoms() {
+    let (_state_dir, mgr, mock) = connected_mock().await;
+    publish_divergent_atoms(&mgr).await;
+
+    mock.lock().unwrap().reads.clear();
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    assert_eq!(diff["outcome"], "conflict");
+    let conflicts = diff["conflicts"].as_array().unwrap();
+    let ids: Vec<&str> = conflicts
+        .iter()
+        .map(|c| c["entity_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["atom-keys", "atom-ttl", "atom-twin"], "{diff}");
+    for conflict in conflicts {
+        let atom_id = conflict["entity_id"].as_str().unwrap();
+        // Omnigraph's own fields pass through as it sent them.
+        assert_eq!(conflict["entity_kind"], "node");
+        assert_eq!(conflict["type_name"], "ContextAtom");
+        assert!(
+            conflict["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(atom_id)),
+            "{conflict}"
+        );
+        if atom_id == "atom-twin" {
+            assert_eq!(conflict["kind"], "divergent_insert");
+            assert!(conflict.get("source_value").is_none(), "{conflict}");
+            assert!(conflict.get("target_value").is_none(), "{conflict}");
+            continue;
+        }
+        assert_eq!(conflict["kind"], "divergent_update");
+        for (key, branch, side, session) in [
+            ("source_value", "session/keep", "Source", "sess-source"),
+            ("target_value", "main", "Target", "sess-target"),
+        ] {
+            let atom = &conflict[key];
+            assert_eq!(atom["atom_id"], atom_id, "{key}: {conflict}");
+            assert_eq!(atom["project_id"], "proj-1");
+            assert_eq!(atom["title"], format!("Title of {atom_id}"));
+            assert_eq!(atom["summary"], format!("{side} {atom_id}"));
+            assert_eq!(atom["source_branch"], branch);
+            assert_eq!(atom["source_session_id"], session);
+            assert_eq!(atom["verified"], false);
+        }
+    }
+    // One read of each branch, however many atoms are in conflict.
+    let mut reads = std::mem::take(&mut mock.lock().unwrap().reads);
+    reads.sort();
+    assert_eq!(reads, ["recent_atoms@main", "recent_atoms@session/keep"]);
+
+    // A merge that stops on the same conflicts returns the same atoms.
+    let merge = mgr
+        .branch_action_json(&json!({"action": "merge", "project_id": "proj-1", "source": "session/keep", "target": "main"}))
+        .await
+        .unwrap();
+    assert_eq!(merge["ok"], false);
+    assert_eq!(merge["outcome"], "conflict");
+    assert_eq!(merge["conflicts"], diff["conflicts"]);
+
+    // Another project's atoms, or any atom when no project is named, are
+    // not offered to keep: a Keep writes under the caller's project.
+    for project_id in ["proj-2", ""] {
+        let unscoped = mgr
+            .branch_diff_json(project_id, "session/keep", Some("main"))
+            .await
+            .unwrap();
+        let unscoped = unscoped["conflicts"].as_array().unwrap();
+        assert_eq!(unscoped.len(), 3, "{project_id}");
+        for conflict in unscoped {
+            assert!(conflict.get("source_value").is_none(), "{conflict}");
+            assert!(conflict.get("target_value").is_none(), "{conflict}");
+        }
+    }
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn keep_copies_the_kept_atom_and_settles_its_conflict() {
+    let (_state_dir, mgr, mock) = connected_mock().await;
+    publish_divergent_atoms(&mgr).await;
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    let ttl = diff["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entity_id"] == "atom-ttl")
+        .cloned()
+        .unwrap();
+
+    // Keep source: main gets the source's atom exactly as the branch
+    // stores it, its branch and time included.
+    let kept = mgr
+        .branch_action_json(&json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-ttl", "from": "session/keep", "to": "main", "expected_updated_at": ttl["source_value"]["updated_at"], "replaced_updated_at": ttl["target_value"]["updated_at"]}))
+        .await
+        .unwrap();
+    assert_eq!(kept["ok"], true);
+    assert_eq!(kept["atom"]["summary"], "Source atom-ttl");
+    assert_eq!(kept["atom"]["source_branch"], "session/keep");
+    assert_eq!(kept["atom"]["source_session_id"], "sess-source");
+    assert_eq!(
+        mock_head(&mock, "main").atoms["atom-ttl"],
+        mock_head(&mock, "session/keep").atoms["atom-ttl"]
+    );
+    // Keep target for the other atom: the source branch gets main's.
+    mgr.branch_action_json(&json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-keys", "from": "main", "to": "session/keep"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        mock_head(&mock, "session/keep").atoms["atom-keys"],
+        mock_head(&mock, "main").atoms["atom-keys"]
+    );
+
+    // Both updates are settled; the atom created twice is left.
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    let left: Vec<&str> = diff["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["entity_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, ["atom-twin"], "{diff}");
+
+    // Refused: another version than the preview showed on either branch
+    // (409), an atom the branch or the project does not hold (404), and a
+    // request that names no project or one branch twice (400). Nothing is
+    // written.
+    let before = mock_head(&mock, "main");
+    for (status, body) in [
+        (
+            409,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "session/keep", "to": "main", "expected_updated_at": "2000-01-01T00:00:00.000Z"}),
+        ),
+        (
+            409,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "session/keep", "to": "main", "replaced_updated_at": "2000-01-01T00:00:00.000Z"}),
+        ),
+        (
+            404,
+            json!({"project_id": "proj-1", "atom_id": "atom-gone", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            404,
+            json!({"project_id": "proj-2", "atom_id": "atom-twin", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            400,
+            json!({"atom_id": "atom-twin", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            400,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "main", "to": "main"}),
+        ),
+    ] {
+        let mut body = body;
+        body["action"] = json!("keep");
+        let err = mgr.branch_action_json(&body).await.unwrap_err();
+        assert_eq!(err.status, status, "{body}: {}", err.message);
+    }
+    assert_eq!(
+        mock_head(&mock, "main").atoms,
+        before.atoms,
+        "a refused keep wrote"
+    );
+    mgr.close().await.unwrap();
+}
+
+/// The same against the Omnigraph release when `/tmp/omnigraph-v0.15.0`
+/// holds it. Its conflict names the atom by its key and the diff carries
+/// both atoms, each keeping the author an update without a session left
+/// alone. A `divergent_update` compares whole rows, as the fake's
+/// `three_way_merge` does: an atom update with the source's text, which
+/// stamps the target's own `source_branch` and a new `updated_at`, still
+/// conflicts, and only `keep`, which copies the source's row as stored,
+/// lets the branches merge.
+#[tokio::test]
+async fn real_omnigraph_binary_divergent_update_carries_both_atoms() {
+    let bin_cli = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph");
+    let bin_srv = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph-server");
+    if !bin_cli.is_file() || !bin_srv.is_file() {
+        eprintln!(
+            "skipping real_omnigraph_binary_divergent_update_carries_both_atoms: /tmp/omnigraph-v0.15.0 not present"
+        );
+        return;
+    }
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    std::fs::create_dir_all(mgr.tools_dir()).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::os::unix::fs::symlink(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::fs::copy(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+    let started = mgr.start_local(None).await.unwrap();
+    assert_eq!(started["connected"], true);
+
+    let update = |branch: &str, summary: &str| json!({"project_id": "proj-1", "branch": branch, "atom_id": "atom-real-keep", "kind": "decision", "title": "Token TTL", "summary": summary});
+    let mut authored = update("main", "One hour.");
+    authored["session_id"] = json!("sess-author");
+    mgr.publish_atom_json(&authored).await.unwrap();
+    for name in ["session/real-src", "session/real-tgt"] {
+        mgr.branch_action_json(&json!({"action": "create", "name": name, "from": "main"}))
+            .await
+            .unwrap();
+    }
+    mgr.publish_atom_json(&update("session/real-src", "Ninety minutes."))
+        .await
+        .unwrap();
+    mgr.publish_atom_json(&update("session/real-tgt", "Two hours."))
+        .await
+        .unwrap();
+
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/real-src", Some("session/real-tgt"))
+        .await
+        .unwrap();
+    assert_eq!(diff["outcome"], "conflict", "{diff}");
+    let conflict = &diff["conflicts"][0];
+    assert_eq!(conflict["kind"], "divergent_update", "{diff}");
+    assert_eq!(conflict["entity_id"], "atom-real-keep");
+    let source = conflict["source_value"].clone();
+    assert_eq!(source["summary"], "Ninety minutes.", "{conflict}");
+    assert_eq!(source["source_branch"], "session/real-src");
+    // Omnigraph leaves null columns and the project out of the row; the
+    // value names them, so keeping the whole atom keeps its empty tags.
+    assert_eq!(source.get("tags"), Some(&Value::Null), "{conflict}");
+    assert_eq!(source["project_id"], "proj-1");
+    assert_eq!(conflict["target_value"]["summary"], "Two hours.");
+    for key in ["source_value", "target_value"] {
+        assert_eq!(conflict[key]["source_session_id"], "sess-author", "{key}");
+    }
+
+    let client = mgr.client().await.unwrap();
+    let dry_run = || {
+        let client = client.clone();
+        async move {
+            client
+                .merge_branches(&BranchMergeRequest {
+                    source: "session/real-src".into(),
+                    target: Some("session/real-tgt".into()),
+                    delete_branch: false,
+                    as_commit: false,
+                    dry_run: true,
+                    settings: None,
+                })
+                .await
+        }
+    };
+    mgr.publish_atom_json(&update("session/real-tgt", "Ninety minutes."))
+        .await
+        .unwrap();
+    let still = dry_run().await.unwrap_err();
+    assert!(still.is_merge_conflict(), "{still}");
+
+    // That update came after the preview, so keeping the source over the
+    // target version the preview showed is refused; a fresh preview's
+    // versions are accepted and the branches merge.
+    let keep = |diff: &Value| json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-real-keep", "from": "session/real-src", "to": "session/real-tgt", "expected_updated_at": diff["conflicts"][0]["source_value"]["updated_at"], "replaced_updated_at": diff["conflicts"][0]["target_value"]["updated_at"]});
+    let stale = mgr.branch_action_json(&keep(&diff)).await.unwrap_err();
+    assert_eq!(stale.status, 409, "{}", stale.message);
+    let fresh = mgr
+        .branch_diff_json("proj-1", "session/real-src", Some("session/real-tgt"))
+        .await
+        .unwrap();
+    let kept = mgr.branch_action_json(&keep(&fresh)).await.unwrap();
+    assert_eq!(kept["atom"]["source_branch"], "session/real-src");
+    assert_eq!(dry_run().await.unwrap().outcome, BranchMergeOutcome::Merged);
     mgr.close().await.unwrap();
 }
 

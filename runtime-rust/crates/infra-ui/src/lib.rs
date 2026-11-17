@@ -24,6 +24,52 @@ mod session;
 mod system_map;
 mod systems;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Rendered markup takes its colors from `app.css` tokens: a `#` followed
+    /// by a hex digit is an inline color unless it is an HTML entity (`&#39;`)
+    /// or an SVG fragment reference (`url(#…)`).
+    pub(crate) fn assert_no_inline_hex_colors(markup: &str) {
+        let bytes = markup.as_bytes();
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b == b'#' {
+                let prev = idx.checked_sub(1).and_then(|p| bytes.get(p)).copied();
+                let next = bytes.get(idx + 1).copied();
+                let is_entity = prev == Some(b'&');
+                let is_url_ref = idx >= 4 && &bytes[idx - 4..idx] == b"url(";
+                if !is_entity && !is_url_ref && next.is_some_and(|c| c.is_ascii_hexdigit()) {
+                    panic!(
+                        "unexpected inline hex color in markup around byte {idx}: {}",
+                        &markup[idx..markup.len().min(idx + 16)]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The JSON payload of every element with `data-action="{action}"`, in
+    /// document order, decoded from its escaped `data-payload` attribute.
+    pub(crate) fn payloads(markup: &str, action: &str) -> Vec<serde_json::Value> {
+        let marker = format!("data-action=\"{action}\"");
+        markup
+            .match_indices(&marker)
+            .map(|(at, _)| {
+                let rest = &markup[at..];
+                let tag = &rest[..rest.find('>').expect("closed tag")];
+                let start = tag.find("data-payload=\"").expect("payload") + 14;
+                let raw = &tag[start..start + tag[start..].find('"').expect("quoted")];
+                let text = raw
+                    .replace("&quot;", "\"")
+                    .replace("&#39;", "'")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&");
+                serde_json::from_str(&text).expect("JSON payload")
+            })
+            .collect()
+    }
+}
+
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     if dom::get("eval-viewer-data").is_some() {

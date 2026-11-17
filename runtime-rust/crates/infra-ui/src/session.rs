@@ -2118,6 +2118,21 @@ pub async fn send() {
         if let Some(omni) = omnigraph::session_payload() {
             turn["omnigraph"] = omni;
         }
+    } else {
+        // A follow-up carries only the Omnigraph and task-context settings
+        // the person changed for the next turn.
+        let selected = m::read(|s| s.selected.clone());
+        if let Some(omni) = omnigraph::followup_payload(&selected) {
+            turn["omnigraph"] = omni;
+        }
+        match knowledge::followup_brain(&selected) {
+            Ok(Some(brain)) => turn["brain"] = brain,
+            Ok(None) => {}
+            Err(message) => {
+                dom::error("composer-error", message);
+                return;
+            }
+        }
     }
     m::write(|s| s.pending = true);
     controls();

@@ -5,7 +5,7 @@ use super::{
     client::{
         BranchCreateRequest, BranchDiffQuery, BranchMergeRequest, ChangeBaselineRequest,
         ChangeFeedQuery, ChangeOp, ChangeRequest, CommitListQuery, CommitOutput, EntityKind,
-        OmnigraphClient, QueryRequest, StoredQueryRequest,
+        MergeConflict, MergeConflictKind, OmnigraphClient, QueryRequest, StoredQueryRequest,
     },
     schema::{
         self, CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_BRANCH_CONTEXT, GQ_DELETE_CANONICAL_ATOM,
@@ -1460,7 +1460,7 @@ impl OmnigraphManager {
     /// Compare `source` branch against `target` (default `main`), including 3-way dry-run conflict checks.
     pub async fn branch_diff_json(
         &self,
-        _project_id: &str,
+        project_id: &str,
         source: &str,
         target: Option<&str>,
     ) -> Result<Value> {
@@ -1524,7 +1524,11 @@ impl OmnigraphManager {
             .await
         {
             Ok(resp) => (resp.outcome.as_str().to_string(), Vec::new()),
-            Err(err) if err.is_merge_conflict() => ("conflict".to_string(), err.merge_conflicts),
+            Err(err) if err.is_merge_conflict() => (
+                "conflict".to_string(),
+                conflicts_with_values(&client, project_id, source, target, &err.merge_conflicts)
+                    .await,
+            ),
             Err(err) => return Err(err.into()),
         };
 
@@ -1604,23 +1608,105 @@ impl OmnigraphManager {
                         "commit": resp.commit,
                         "conflicts": [],
                     })),
-                    Err(err) if err.is_merge_conflict() => Ok(json!({
-                        "ok": false,
-                        "action": "merge",
-                        "source": source,
-                        "target": target,
-                        "outcome": "conflict",
-                        "dry_run": dry_run,
-                        "added_atoms": [],
-                        "updated_atoms": [],
-                        "deleted_atoms": [],
-                        "added_edges": [],
-                        "deleted_edges": [],
-                        "conflicts": err.merge_conflicts,
-                        "error": err.message,
-                    })),
+                    Err(err) if err.is_merge_conflict() => {
+                        // A conflicting merge publishes nothing, so both
+                        // branches still hold the atoms in conflict.
+                        let project_id = clean_opt(body["project_id"].as_str()).unwrap_or("");
+                        let conflicts = conflicts_with_values(
+                            &client,
+                            project_id,
+                            &source,
+                            &target,
+                            &err.merge_conflicts,
+                        )
+                        .await;
+                        Ok(json!({
+                            "ok": false,
+                            "action": "merge",
+                            "source": source,
+                            "target": target,
+                            "outcome": "conflict",
+                            "dry_run": dry_run,
+                            "added_atoms": [],
+                            "updated_atoms": [],
+                            "deleted_atoms": [],
+                            "added_edges": [],
+                            "deleted_edges": [],
+                            "conflicts": conflicts,
+                            "error": err.message,
+                        }))
+                    }
                     Err(err) => Err(err.into()),
                 }
+            }
+            "keep" => {
+                // Copy one atom onto `to` exactly as `from` stores it.
+                // Omnigraph settles a `divergent_update` only once both
+                // branches hold the same row; an ordinary update stamps its
+                // own branch and time, so it would leave the conflict.
+                let required = |key: &str| {
+                    clean_opt(body[key].as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            HarnessError::invalid(format!("Keeping an atom needs `{key}`."))
+                        })
+                };
+                let project_id = required("project_id")?;
+                let atom_id = required("atom_id")?;
+                let from = required("from")?;
+                let to = required("to")?;
+                if from == to {
+                    return Err(HarnessError::invalid(
+                        "Keep copies an atom from one branch to another.",
+                    ));
+                }
+                let kept = find_atom_on_branch(&client, &project_id, &from, &atom_id)
+                    .await
+                    .ok_or_else(|| {
+                        HarnessError::missing(format!("The atom {atom_id} is not on {from}."))
+                    })?;
+                // The person chose between the two versions the preview
+                // showed; a session may have published a newer one on either
+                // branch since, and neither is copied or overwritten unseen.
+                let changed = |branch: &str| {
+                    HarnessError::conflict(format!(
+                        "The atom {atom_id} changed on {branch} after the merge preview. Preview the merge again."
+                    ))
+                };
+                if let Some(expected) = clean_opt(body["expected_updated_at"].as_str())
+                    && kept["updated_at"].as_str() != Some(expected)
+                {
+                    return Err(changed(&from));
+                }
+                if let Some(replaced) = clean_opt(body["replaced_updated_at"].as_str()) {
+                    let current = find_atom_on_branch(&client, &project_id, &to, &atom_id).await;
+                    if current
+                        .as_ref()
+                        .and_then(|atom| atom["updated_at"].as_str())
+                        != Some(replaced)
+                    {
+                        return Err(changed(&to));
+                    }
+                }
+                let params = stored_atom_params(&kept, &project_id);
+                let resp = client
+                    .mutate(&ChangeRequest {
+                        query: GQ_UPSERT_ATOM.into(),
+                        name: Some("upsert_atom".into()),
+                        params: Some(params.clone()),
+                        branch: Some(to.clone()),
+                        settings: None,
+                    })
+                    .await?;
+                Ok(json!({
+                    "ok": true,
+                    "action": "keep",
+                    "atom_id": atom_id,
+                    "from": from,
+                    "to": to,
+                    "atom": normalize_atom_row(&params),
+                    "commit": resp.commit,
+                }))
             }
             "delete" => {
                 let name = store::text(&body["name"], "branch name", 128)?;
@@ -1713,6 +1799,16 @@ impl OmnigraphManager {
             .as_ref()
             .and_then(|atom| clean_opt(atom["created_at"].as_str()).map(str::to_string))
             .unwrap_or_else(|| ts.clone());
+        // So does the session that wrote it: an update without `session_id`
+        // keeps the stored one and links no session, so the Keep buttons of
+        // the merge preview do not erase who published the atom.
+        let source_session_id = if body.get("session_id").is_some() {
+            session_id.clone()
+        } else {
+            existing
+                .as_ref()
+                .and_then(|atom| clean_opt(atom["source_session_id"].as_str()).map(str::to_string))
+        };
         let atom_params = build_upsert_atom_params(
             &atom_id,
             &project_id,
@@ -1722,7 +1818,7 @@ impl OmnigraphManager {
             &atom_body,
             tags,
             &branch,
-            session_id.as_deref(),
+            source_session_id.as_deref(),
             confidence,
             pin_priority,
             verified,
@@ -4901,27 +4997,171 @@ async fn find_atom_on_branch(
     branch: &str,
     atom_id: &str,
 ) -> Option<Value> {
+    let ids = BTreeSet::from([atom_id.to_string()]);
+    atoms_on_branch(client, project_id, branch, &ids)
+        .await
+        .remove(atom_id)
+}
+
+/// The atoms of `ids` as `branch` holds them for `project_id`, by id: one
+/// `recent_atoms` read, and one export of the branch's atoms only when an
+/// id is missing from a listing that may be partial (100 rows, no project
+/// to scope it, or a failed read). An id the branch does not hold is left
+/// out.
+async fn atoms_on_branch(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+    ids: &BTreeSet<String>,
+) -> BTreeMap<String, Value> {
+    let mut found = BTreeMap::new();
+    if ids.is_empty() {
+        return found;
+    }
+    let mut whole = false;
     if let Ok(rows) = fetch_branch_atoms(client, project_id, branch).await {
-        if let Some(found) = rows
-            .iter()
-            .find(|a| str_field(a, "atom_id").as_deref() == Some(atom_id))
-        {
-            return Some(found.clone());
-        }
-        if rows.len() < 100 && !project_id.is_empty() {
-            return None;
+        whole = rows.len() < 100 && !project_id.is_empty();
+        for row in rows {
+            if let Some(atom_id) = str_field(&row, "atom_id").filter(|id| ids.contains(id)) {
+                found.entry(atom_id).or_insert(row);
+            }
         }
     }
-    let ndjson = client
+    if whole || found.len() == ids.len() {
+        return found;
+    }
+    let Ok(ndjson) = client
         .export_branch(Some(branch), &["ContextAtom"], None)
         .await
-        .ok()?;
-    let parsed = parse_ndjson_records(&ndjson).ok()?;
-    let row = parsed.atoms.get(atom_id)?;
-    if !project_id.is_empty() && str_field(row, "project_id").is_some_and(|p| p != project_id) {
-        return None;
+    else {
+        return found;
+    };
+    let Ok(parsed) = parse_ndjson_records(&ndjson) else {
+        return found;
+    };
+    for atom_id in ids {
+        if found.contains_key(atom_id) {
+            continue;
+        }
+        if let Some(row) = parsed.atoms.get(atom_id)
+            && (project_id.is_empty()
+                || str_field(row, "project_id").is_none_or(|p| p == project_id))
+        {
+            found.insert(atom_id.clone(), normalize_atom_row(row));
+        }
     }
-    Some(normalize_atom_row(row))
+    found
+}
+
+/// Omnigraph's merge conflicts, each Context Atom `divergent_update` with
+/// the atom as the source and the target branch hold it (`source_value`,
+/// `target_value`), which the merge preview's Keep source and Keep target
+/// need. The atoms come from one read per branch whatever the number of
+/// conflicts. A Keep writes the atom back under the caller's project, so
+/// there are values only for an atom the branch holds for a named
+/// `project_id`; every other conflict passes through as Omnigraph returned
+/// it.
+async fn conflicts_with_values(
+    client: &OmnigraphClient,
+    project_id: &str,
+    source: &str,
+    target: &str,
+    conflicts: &[MergeConflict],
+) -> Vec<Value> {
+    let ids: BTreeSet<String> = if project_id.is_empty() {
+        BTreeSet::new()
+    } else {
+        conflicts
+            .iter()
+            .filter_map(updated_atom_id)
+            .map(str::to_string)
+            .collect()
+    };
+    let (source_atoms, target_atoms) = tokio::join!(
+        atoms_on_branch(client, project_id, source, &ids),
+        atoms_on_branch(client, project_id, target, &ids),
+    );
+    conflicts
+        .iter()
+        .map(|conflict| {
+            let mut out = json!(conflict);
+            if let Some(atom_id) = updated_atom_id(conflict) {
+                for (key, atoms) in [
+                    ("source_value", &source_atoms),
+                    ("target_value", &target_atoms),
+                ] {
+                    if let Some(atom) = atoms.get(atom_id) {
+                        out[key] = whole_atom(atom, project_id);
+                    }
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// `atom` with every column a branch may hold, as null where it holds none:
+/// Omnigraph leaves null columns out of a row and `recent_atoms` returns no
+/// project, and a Keep of the whole atom carries what the kept side holds.
+fn whole_atom(atom: &Value, project_id: &str) -> Value {
+    let mut whole = atom.clone();
+    if let Some(columns) = whole.as_object_mut() {
+        columns
+            .entry("project_id")
+            .or_insert_with(|| json!(project_id));
+        for key in ["tags", "source_session_id", "session_id"] {
+            columns.entry(key).or_insert(Value::Null);
+        }
+    }
+    whole
+}
+
+/// Every `ContextAtom` property, as `GQ_UPSERT_ATOM` takes them.
+const ATOM_COLUMNS: [&str; 20] = [
+    "atom_id",
+    "project_id",
+    "kind",
+    "title",
+    "summary",
+    "body",
+    "tags",
+    "source_branch",
+    "source_session_id",
+    "confidence",
+    "pin_priority",
+    "verified",
+    "origin_layer",
+    "authority",
+    "privacy",
+    "brain_record_id",
+    "memory_id",
+    "record_revision",
+    "created_at",
+    "updated_at",
+];
+
+/// The upsert parameters that write `atom` back as a branch stores it,
+/// every property included and nothing restamped.
+fn stored_atom_params(atom: &Value, project_id: &str) -> Value {
+    let atom = whole_atom(atom, project_id);
+    let columns = ATOM_COLUMNS
+        .iter()
+        .map(|key| {
+            (
+                key.to_string(),
+                atom.get(*key).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+    Value::Object(columns)
+}
+
+/// The Context Atom a merge conflict names when both branches updated it.
+fn updated_atom_id(conflict: &MergeConflict) -> Option<&str> {
+    let both_updated = conflict.entity_kind == EntityKind::Node
+        && conflict.type_name == "ContextAtom"
+        && conflict.kind == MergeConflictKind::DivergentUpdate;
+    clean_opt(conflict.entity_id.as_deref()).filter(|_| both_updated)
 }
 
 fn normalize_atom_row(row: &Value) -> Value {
