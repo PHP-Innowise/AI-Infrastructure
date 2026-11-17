@@ -15289,16 +15289,42 @@ fn map_side_html(
     )
 }
 const MEMORY_LINKS: &str = "graph-memory-links";
+const MEMORY_LINKS_LOOKING: &str = "<h4>Linked memory</h4><p class=\"knowledge-note\">Looking for Project Brain records and Memory Bank chunks that cite this file…</p>";
+/// A file's links, or a request for them, are good for a minute: a record
+/// saved since then shows on the next selection.
+fn memory_links_fresh(cached: &V) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        cached["at"]
+            .as_f64()
+            .is_none_or(|at| js_sys::Date::now() - at < 60_000.)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = cached;
+        true
+    }
+}
 /// The linked-memory section of a selected file: drawn from what an earlier
 /// request returned, or a placeholder a request fills in.
 fn memory_links_section(project: &str, path: &str) -> String {
     let key = format!("{project}\u{1f}{path}");
     let cached = m::data(MEMORY_LINKS)[&key].clone();
-    let body = if cached.is_object() {
+    let fresh = cached.is_object() && memory_links_fresh(&cached);
+    let body = if fresh && cached["pending"] != true {
         render_side_memory_bridge_html(project, &cached)
+    } else if fresh {
+        // The map redraws often; one request per file is in flight at a time.
+        MEMORY_LINKS_LOOKING.to_owned()
     } else {
         #[cfg(target_arch = "wasm32")]
         {
+            let mut cache = m::data(MEMORY_LINKS);
+            if !cache.is_object() {
+                cache = json!({});
+            }
+            cache[&key] = json!({"pending": true, "at": js_sys::Date::now()});
+            m::set(MEMORY_LINKS, cache);
             let (project, path, key) = (project.to_owned(), path.to_owned(), key.clone());
             spawn_local(async move {
                 let url = format!(
@@ -15306,10 +15332,11 @@ fn memory_links_section(project: &str, path: &str) -> String {
                     dom::enc(&project),
                     dom::enc(&path)
                 );
-                let links = match crate::api::get(&url).await {
+                let mut links = match crate::api::get(&url).await {
                     Ok(links) => links,
                     Err(error) => json!({"error": error.message}),
                 };
+                links["at"] = json!(js_sys::Date::now());
                 let mut cache = m::data(MEMORY_LINKS);
                 if !cache.is_object() {
                     cache = json!({});
@@ -15323,7 +15350,7 @@ fn memory_links_section(project: &str, path: &str) -> String {
                 }
             });
         }
-        "<h4>Linked memory</h4><p class=\"knowledge-note\">Looking for Project Brain records and Memory Bank chunks that cite this file…</p>".to_owned()
+        MEMORY_LINKS_LOOKING.to_owned()
     };
     format!(
         "<section class=\"graph-memory-links\" data-path=\"{}\" aria-live=\"polite\" aria-label=\"Linked memory\">{body}</section>",
