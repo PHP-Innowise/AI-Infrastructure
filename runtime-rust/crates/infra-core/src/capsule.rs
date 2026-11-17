@@ -793,13 +793,11 @@ pub fn render_plan(capsule: &Capsule, profile: DeliveryProfile) -> Result<Render
                 .map(|excerpt| excerpt.limit)
                 .unwrap_or(if layer == "semantic" { 800 } else { 600 });
             let body = bounded(
-                &domain::sanitize_automatic_query(raw).unwrap_or_default(),
+                &domain::screen_rendered_text(raw).unwrap_or_default(),
                 limit,
             );
             let heading = excerpt
-                .map(|excerpt| {
-                    domain::sanitize_automatic_query(&excerpt.heading).unwrap_or_default()
-                })
+                .map(|excerpt| domain::screen_rendered_text(&excerpt.heading).unwrap_or_default())
                 .unwrap_or_default();
             entries.push(Entry {
                 layer: layer.into(),
@@ -881,9 +879,8 @@ pub fn render_plan(capsule: &Capsule, profile: DeliveryProfile) -> Result<Render
     let mut shown = Vec::new();
     for entry in entries {
         shown.push((entry.layer.clone(), entry.path.clone()));
-        let snippet =
-            domain::sanitize_automatic_query(entry.item["snippet"].as_str().unwrap_or(""))
-                .unwrap_or_default();
+        let snippet = domain::screen_rendered_text(entry.item["snippet"].as_str().unwrap_or(""))
+            .unwrap_or_default();
         let section = if entry.heading.is_empty() {
             "none"
         } else if ["Sources", "Goal", "Progress", "Files", "Next Steps"]
@@ -931,7 +928,7 @@ pub fn describe_excerpt_windows(capsule: &Capsule) -> BTreeMap<String, Value> {
                 .map(|excerpt| excerpt.limit)
                 .unwrap_or(if layer == "semantic" { 800 } else { 600 });
             let body = bounded(
-                &domain::sanitize_automatic_query(raw).unwrap_or_default(),
+                &domain::screen_rendered_text(raw).unwrap_or_default(),
                 limit,
             );
             output.insert(path.to_string(),json!({"sha256":sha256(body.as_bytes()),"bytes":body.len(),"state":if !body.is_empty(){"excerpt"}else if !raw.is_empty(){"sanitized-empty"}else{"no-excerpt"}}));
@@ -943,6 +940,51 @@ pub fn describe_excerpt_windows(capsule: &Capsule) -> BTreeMap<String, Value> {
 #[cfg(test)]
 mod native_guidance_tests {
     use super::*;
+
+    #[test]
+    fn a_rendered_excerpt_keeps_its_text_after_a_customer_identifier() {
+        let path = "docs/orders.md";
+        let text = "Customer id: 48213\nlog: retry succeeded after the order total was \
+            recomputed. API_KEY=Sup3rS3cret99";
+        let excerpts = BTreeMap::from([(
+            path.to_string(),
+            crate::excerpts::Excerpt {
+                text: text.into(),
+                heading: "Customer id: 48213".into(),
+                limit: 800,
+                cut: false,
+            },
+        )]);
+        let capsule = Capsule(
+            json!({"working":null,"semantic":[{"path":path,"title":"Orders","match":"strong"}],"episodic":[],"procedural":[]}),
+            Some(crate::excerpts::PreparedRender {
+                images: BTreeMap::new(),
+                excerpts,
+            }),
+            None,
+        );
+        let plan = render_plan(&capsule, DeliveryProfile::Ordinary).unwrap();
+        assert!(
+            plan.text
+                .contains("retry succeeded after the order total was recomputed"),
+            "{}",
+            plan.text
+        );
+        assert!(plan.text.contains("Customer id: \u{2026}"), "{}", plan.text);
+        for withheld in ["48213", "Sup3rS3cret99"] {
+            assert!(!plan.text.contains(withheld), "{}", plan.text);
+        }
+        let windows = describe_excerpt_windows(&capsule);
+        assert_eq!(windows[path]["state"], "excerpt");
+        let record = plan
+            .records
+            .iter()
+            .find(|record| record["path"] == path)
+            .unwrap();
+        assert_eq!(record["body_reason"], "excerpt");
+        assert_eq!(record["body_bytes"], windows[path]["bytes"]);
+        assert_eq!(record["body_sha256"], windows[path]["sha256"]);
+    }
 
     #[test]
     fn closed_task_recovery_uses_the_installed_native_command() {

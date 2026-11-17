@@ -844,6 +844,34 @@ fn substitute<'a>(rule: &Rule, view: View<'a>, keep_label: bool) -> Result<View<
     Ok(View::new(replace_ranges(text, &ranges)))
 }
 pub fn sanitize_automatic_query(original: &str) -> Result<String> {
+    screen(original, false)
+}
+/// The privacy screen of capsule text an agent reads: a project's excerpt or
+/// heading. It is the query screen, except that a customer identifier's value
+/// gives way to `…` where a query drops everything after it: the sentences
+/// after a field description are the answer the excerpt was chosen to carry.
+pub fn screen_rendered_text(original: &str) -> Result<String> {
+    screen(original, true)
+}
+/// `view` with each match of the customer identifier `rule` cut after its
+/// label: `Customer id: 48213` reads `Customer id: …`. The marker is not
+/// space, so a second pass cannot take the next word as the value.
+fn elide_identifier_values<'a>(rule: &Rule, view: View<'a>) -> Result<View<'a>> {
+    let text: &str = &view.text;
+    let mut ranges = Vec::new();
+    for found in rule.regex()?.find_iter(text) {
+        let found = found.map_err(|_| failure())?;
+        let label = text[found.start()..found.end()]
+            .find([':', '='])
+            .map_or(0, |at| at + 1);
+        ranges.push((found.start() + label, found.end(), " \u{2026}".into()));
+    }
+    if ranges.is_empty() {
+        return Ok(view);
+    }
+    Ok(View::new(replace_ranges(text, &ranges)))
+}
+fn screen(original: &str, rendered: bool) -> Result<String> {
     let p = policy()?;
     let mut view = substitute(&p.block, View::new(original), false)?;
     view = substitute(&p.quoted, view, false)?;
@@ -852,13 +880,16 @@ pub fn sanitize_automatic_query(original: &str) -> Result<String> {
         .iter()
         .find(|rule| rule.label == "customer identifier")
         .ok_or_else(failure)?;
-    if view.admits(identifier)
-        && let Some(found) = identifier
+    if view.admits(identifier) {
+        if rendered {
+            view = elide_identifier_values(identifier, view)?;
+        } else if let Some(found) = identifier
             .regex()?
             .find(&view.text)
             .map_err(|_| failure())?
-    {
-        view = View::new(view.text[..found.start()].to_string());
+        {
+            view = View::new(view.text[..found.start()].to_string());
+        }
     }
     for _ in 0..3 {
         let previous = view.text.clone();
@@ -963,6 +994,40 @@ pub fn source_path_problem(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_text_keeps_the_excerpt_after_a_customer_identifier() {
+        let text = "Customer id: 48213\nThe order total is recomputed on retry; \
+            mail jane.doe@example.com or call +1 (555) 010-4477.\nAPI_KEY=Sup3rS3cret99";
+        // The query screen keeps nothing after the identifier, as before.
+        assert_eq!(sanitize_automatic_query(text).unwrap(), "");
+        let rendered = screen_rendered_text(text).unwrap();
+        assert!(rendered.starts_with("Customer id: \u{2026}"), "{rendered}");
+        assert!(
+            rendered.contains("The order total is recomputed on retry"),
+            "{rendered}"
+        );
+        for withheld in ["48213", "jane.doe@example.com", "010-4477", "Sup3rS3cret99"] {
+            assert!(!rendered.contains(withheld), "{rendered}");
+        }
+        // The marker is not a value a second pass would take the next word for.
+        assert_eq!(screen_rendered_text(&rendered).unwrap(), rendered);
+        // A client address and a patient name keep their label too; text
+        // without an identifier is the query screen's.
+        assert_eq!(
+            screen_rendered_text("client address: billing_city is required").unwrap(),
+            "client address: \u{2026} is required"
+        );
+        assert_eq!(
+            screen_rendered_text("Patient name=Ivanova; retry later").unwrap(),
+            "Patient name= \u{2026} retry later"
+        );
+        let plain = "Retries back off; see docs/retry.md.";
+        assert_eq!(
+            screen_rendered_text(plain).unwrap(),
+            sanitize_automatic_query(plain).unwrap()
+        );
+    }
 
     fn pinned(p: &Policy) -> impl Iterator<Item = &Rule> {
         p.secrets

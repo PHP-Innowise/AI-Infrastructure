@@ -1108,7 +1108,10 @@ text is chosen to hold the answer:
   of declared citation paths when another section contains prose. Explicit
   requests for those headings, annotated references and source-only records
   retain their content. The remaining sections keep the same weighted window
-  selection. Headings receive the excerpt body's privacy screen.
+  selection. Headings receive the excerpt body's privacy screen. That screen
+  is the query's, except that a customer identifier loses only its value
+  (`Customer id: …`): a query is cut at the identifier, while an excerpt keeps
+  the sentences after it.
 - Windows are 800, 600 and 400 characters by rank, 600 for a history item; the
   rendered capsule stays under 3,600.
 - The item line names the section: `- memory specs/auth.md § Sessions — Auth`.

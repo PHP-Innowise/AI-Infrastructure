@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Keep a capsule excerpt's text after a customer identifier. The renderer ran
+  each excerpt body, heading and snippet through the inbound query screen,
+  which cuts a query at the first `customer id: …`, so a schema note that
+  opened with one rendered as a pointer only (`sanitized-empty`). The rendered
+  text now has its own screen (`screen_rendered_text`): the identifier keeps
+  its label and loses its value (`Customer id: …`); secrets, e-mail addresses,
+  phone numbers and customer numbers are still removed, and queries keep the
+  old screen.
 - Withhold an `auto-promoted` Memory Bank chunk whose title or body reads as
   instructions to the agent, as `docs/MEMORY-WRITE-PATH.md` describes and the
   retired runtime did; the native port had lost it. Indexing excludes such a
