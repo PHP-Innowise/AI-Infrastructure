@@ -1259,6 +1259,149 @@ pub const ROUTES: &[Route] = &[
         token: true,
         query: &[],
     },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/status",
+        operation: "omnigraph.status",
+        status: 200,
+        token: false,
+        query: &["project_id"],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/setup",
+        operation: "omnigraph.setup",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/graph",
+        operation: "omnigraph.graph",
+        status: 200,
+        token: false,
+        query: &[
+            "project_id",
+            "branch",
+            "snapshot",
+            "kind",
+            "q",
+            "session_id",
+        ],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/search",
+        operation: "omnigraph.search",
+        status: 200,
+        token: false,
+        query: &["project_id", "q", "branch", "kind", "limit"],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/branches/diff",
+        operation: "omnigraph.branch_diff",
+        status: 200,
+        token: false,
+        query: &["project_id", "source", "target"],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/branches",
+        operation: "omnigraph.branch_act",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/atoms",
+        operation: "omnigraph.publish",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/share",
+        operation: "omnigraph.share",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/export",
+        operation: "omnigraph.export",
+        status: 200,
+        token: false,
+        query: &[
+            "project_id",
+            "branch",
+            "session_id",
+            "format",
+            "scope",
+            "include_inherited",
+            "download",
+        ],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/export",
+        operation: "omnigraph.export",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/import",
+        operation: "omnigraph.import",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/sessions/link",
+        operation: "omnigraph.link_sessions",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/sync-knowledge",
+        operation: "omnigraph.sync_knowledge",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/promote",
+        operation: "omnigraph.promote",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/changes",
+        operation: "omnigraph.changes",
+        status: 200,
+        token: false,
+        query: &["project_id", "cursor", "branch"],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/commits/{commit_id}",
+        operation: "omnigraph.commit_detail",
+        status: 200,
+        token: false,
+        query: &["project_id"],
+    },
 ];
 fn equal(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
@@ -1509,6 +1652,10 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
             crate::attachments::MAX_JSON_BYTES
         } else if route.operation == "skills.create_preview" {
             131072
+        } else if route.operation == "omnigraph.import" {
+            4 * 1024 * 1024
+        } else if ["omnigraph.publish", "omnigraph.share"].contains(&route.operation) {
+            512 * 1024
         } else if ["systems.preview", "discovery.start"].contains(&route.operation) {
             2 * 1024 * 1024
         } else {
@@ -1590,4 +1737,34 @@ pub async fn serve_listener(listener: tokio::net::TcpListener, app: App) -> Resu
         })
         .await
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omnigraph_sync_and_promote_routes_are_registered_with_csrf_tokens() {
+        for (method, pattern, op) in [
+            (
+                "POST",
+                "/api/omnigraph/sync-knowledge",
+                "omnigraph.sync_knowledge",
+            ),
+            ("POST", "/api/omnigraph/promote", "omnigraph.promote"),
+        ] {
+            let found = ROUTES
+                .iter()
+                .find(|r| r.method == method && r.pattern == pattern)
+                .unwrap_or_else(|| panic!("missing route {method} {pattern}"));
+            assert_eq!(found.operation, op);
+            assert_eq!(found.status, 200);
+            assert!(found.token, "{pattern} must require CSRF token");
+            assert!(found.query.is_empty());
+
+            let (matched, params) = route(method, pattern).expect("route matches");
+            assert_eq!(matched.operation, op);
+            assert!(params.is_empty());
+        }
+    }
 }

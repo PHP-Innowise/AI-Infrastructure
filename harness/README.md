@@ -2609,3 +2609,42 @@ project root to include links across folders.
 The current map reads the working copy's rules. A historical change uses the
 rules from its selected revision. Declared layers show violations in the chosen
 graph. The existing added/removed comparison applies to inferred layers.
+
+## Cross-session context sharing with Omnigraph
+
+When enabled, Harness integrates an out-of-process [Omnigraph](https://github.com/ModernRelay/omnigraph) (`v0.15.0`, HTTP API contract `0.14`) server over HTTP so multiple sessions can share structured architectural decisions, findings, contracts, warnings, and insights on versioned graph branches without embedding heavy Lance/Arrow crates into the Rust workspace.
+
+Operating modes persisted at `<state>/omnigraph.json` (plus auto-generated cluster config in `<state>/omnigraph/`):
+
+- **Off** (`off`): disabled; existing Brain and Memory Bank workflows behave identically.
+- **Local sidecar** (`local_sidecar`): installs or runs `omnigraph` / `omnigraph-server` (`<state>/tools/omnigraph/v0.15.0/`) locally on loopback.
+- **Docker** (`docker`): runs the managed container (`ghcr.io/modernrelay/omnigraph-server:v0.15.0`).
+- **External** (`external`): connects with bearer token auth to an existing Omnigraph endpoint.
+
+### Session lifecycle
+
+- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`, `shared_space`, `linked_session_ids`), persisted on the SQLite `sessions.omnigraph` column. Passing `linked_session_ids` automatically adds peer branches to `pull_branches`, updates reciprocal `linked_session_ids`, and records `SessionFollows` edges in Omnigraph.
+- Before a run launches, when `omnigraph.enabled` is `true`, Harness ensures the session branch (`session/<sid12>` or configured branch) exists, pulls any configured `pull_branches` (defaulting to `["main"]`), queries shared context atoms (plus read-only `knowledge/canonical` hits), attaches touched `files`, resolves eligible local `Project Brain` / `Memory Bank` references into `infra-core` `source-hints-v1`, and stores `injected_atoms` and a bounded capsule on the session prior to `awaiting_context` review (preserving the approved capsule after `context.run`). Unreachable Omnigraph servers record a session warning/event without blocking the Harness turn.
+- `prompt::build` inserts the bounded `Shared Omnigraph Context` section (6,000-character cap, distinguishing verified canonical atoms from unverified reference context) and records it under the `"omnigraph"` bucket in `PromptLedger` (charted alongside Brain/Bank/Rules in `#context-usage`).
+- After a turn completes (including manual `/api/sessions/{id}/memory` saves, Clash, and Fleet runs), when `auto_publish` is not `false`, Harness validates `memory-draft` learnings against workspace sources and safety checks (`sensitive_label`, `instruction_like`), collects Clash/Fleet findings, touched files, and the turn outcome summary, publishes `ContextAtom` nodes with provenance metadata (`origin_layer`, `authority`, `privacy`, `brain_record_id`, `memory_id`, `record_revision`) and edges (`PublishedBy`, `TouchesFile`, `DerivedFrom`), optionally merges into `main` when `auto_merge` is `true`, and records a session `omnigraph` event. Canonical Knowledge/Brain/Memory mutations also trigger best-effort sync onto `knowledge/canonical`.
+
+### HTTP endpoints
+
+All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in `infra-harness::http::ROUTES`:
+
+- `GET /api/omnigraph/status?project_id=...` — connection state, operating mode, MCP URL, and graph stats.
+- `POST /api/omnigraph/setup` — configure/start/stop/install/connect/disconnect (`local_sidecar`, `docker`, `external`, `off`).
+- `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...` — constellation nodes/edges, branches, and commits.
+- `GET /api/omnigraph/search?project_id=...&q=...&branch=...&kind=...&limit=...` — BM25/lexical hybrid search across atoms and neighbor context.
+- `GET /api/omnigraph/branches/diff?project_id=...&source=...&target=...` — 3-way branch diff (`added_atoms`, `updated_atoms`, `deleted_atoms`, `added_edges`, `deleted_edges`, dry-run conflict preview).
+- `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts), or `delete` branches.
+- `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links.
+- `POST /api/omnigraph/share` — inject/share selected `atom_ids` into a target session (`inject`, `reference`, `inject_and_link`, or `copy`), updating `session["omnigraph"]` and emitting a session event.
+- `POST /api/omnigraph/sync-knowledge` — project verified `Project Brain` records and active `Memory Bank` chunks onto the `knowledge/canonical` branch (with `TouchesFile` and `supersedes` edges).
+- `POST /api/omnigraph/promote` — human-gated promotion of a `ContextAtom` into `Project Brain` (`attestation: "person"`) after `sensitive_label`, `instruction_like`, `provenance_problems`, and workspace `PublicationFiles` freshness checks, linking `brain_record_id` back onto the graph atom.
+- `GET|POST /api/omnigraph/export` — export scoped task, branch, or main Omnigraph context (`bundle` `harness.omnigraph.bundle.v1` JSON or raw `ndjson`, with optional `download=1` attachment download).
+- `POST /api/omnigraph/import` — import an exported JSON bundle or raw Omnigraph NDJSON onto a branch (creating from `from_branch` if requested, in `merge` or `replace` mode) and optionally inject `ConsumedBy` context into target sessions.
+- `POST /api/omnigraph/sessions/link` — link multiple Harness sessions in `shared_branch` (mutual) or `broadcast` mode, syncing branches/atoms, creating `SessionFollows` and `ConsumedBy` edges, updating `session["omnigraph"]`, and best-effort queuing live native `session_inbox` context notices.
+- `GET /api/omnigraph/changes?project_id=...&cursor=...&branch=...` — incremental commit/entity pulse feed.
+- `GET /api/omnigraph/commits/{commit_id}?project_id=...` — inspect commit metadata, `changes`, and affected `atoms`.
+

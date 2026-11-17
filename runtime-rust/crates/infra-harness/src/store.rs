@@ -150,6 +150,7 @@ impl SessionStore {
             ("clash", "TEXT"),
             ("clash_result", "TEXT"),
             ("cost_totals", "TEXT"),
+            ("omnigraph", "TEXT"),
         ] {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
@@ -366,6 +367,7 @@ impl SessionStore {
             "system_run",
             "system_discovery",
             "system_explain",
+            "omnigraph",
         ] {
             if !options[key].is_null() {
                 tx.execute(
@@ -572,6 +574,7 @@ impl SessionStore {
             "clash",
             "clash_result",
             "cost_totals",
+            "omnigraph",
         ];
         if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -642,6 +645,7 @@ impl SessionStore {
             "clash",
             "clash_result",
             "cost_totals",
+            "omnigraph",
         ];
         if map.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -695,6 +699,7 @@ impl SessionStore {
             "clash",
             "brain",
             "fleet_action",
+            "omnigraph",
         ];
         if fields.keys().any(|k| !allowed.contains(&k.as_str())) {
             return Err(HarnessError::invalid("Unknown follow-up option."));
@@ -901,6 +906,7 @@ fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
         "clash",
         "clash_result",
         "cost_totals",
+        "omnigraph",
     ] {
         if let Some(raw) = result.get(key).and_then(Value::as_str) {
             let parsed = crate::strict_json::parse(raw.as_bytes(), 16 * 1024 * 1024)?;

@@ -268,6 +268,7 @@ async fn http_responsive(fixture: &Fixture, selected: &Path) -> Result<()> {
         "updates",
         "providers",
         "knowledge",
+        "omnigraph",
     ]
     .into_iter()
     .map(|name| (name.into(), unused.clone()))
