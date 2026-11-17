@@ -2301,6 +2301,7 @@ fn happened(status: &str) -> &'static str {
     match status {
         "A" => "added",
         "M" => "modified",
+        "D" => "deleted",
         "R" => "renamed",
         "C" => "copied",
         "T" => "changed in kind",
@@ -3991,9 +3992,81 @@ fn resolve_canvas_node_by_path(nodes: &[V], target_path: &str) -> Option<usize> 
         .map(|(_, idx)| idx)
 }
 
+fn normalize_change_status(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "created" | "added" | "a" | "c" => "created".to_owned(),
+        "modified" | "m" => "modified".to_owned(),
+        "deleted" | "removed" | "d" => "deleted".to_owned(),
+        "renamed" | "r" => "renamed".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn change_status_letter(status: &str) -> &'static str {
+    match status {
+        "created" => "A",
+        "modified" => "M",
+        "deleted" => "D",
+        "renamed" => "R",
+        _ => "",
+    }
+}
+
+fn clean_symbol_token(raw: &str) -> String {
+    let mut s = raw.trim();
+    if let Some(stripped) = s.strip_suffix("()") {
+        s = stripped;
+    }
+    if let Some(stripped) = s.strip_prefix('.') {
+        s = stripped;
+    }
+    s.trim().to_owned()
+}
+
+fn symbol_name_matches(node_name: &str, node_path: &str, entity_name: &str) -> bool {
+    let target = clean_symbol_token(entity_name);
+    if target.is_empty() {
+        return false;
+    }
+    let clean_node = clean_symbol_token(node_name);
+    if clean_node == target
+        || clean_node
+            .rsplit_once('.')
+            .is_some_and(|(_, member)| member == target)
+        || clean_node
+            .rsplit_once("::")
+            .is_some_and(|(_, member)| member == target)
+    {
+        return true;
+    }
+    if let Some((_, suffix)) = node_path.split_once('#') {
+        let after_line = suffix.split_once(':').map_or(suffix, |(_, name)| name);
+        let clean_suffix = clean_symbol_token(after_line);
+        if clean_suffix == target
+            || clean_suffix
+                .rsplit_once('.')
+                .is_some_and(|(_, member)| member == target)
+            || clean_suffix
+                .rsplit_once("::")
+                .is_some_and(|(_, member)| member == target)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+struct ChangedEntityDiff {
+    id: String,
+    name: String,
+    line: u64,
+    change: String,
+}
+
 struct ChangesLookup {
     exact: BTreeMap<String, String>,
     files: Vec<(String, String)>,
+    entities: BTreeMap<String, Vec<ChangedEntityDiff>>,
 }
 
 impl ChangesLookup {
@@ -4001,20 +4074,155 @@ impl ChangesLookup {
         let arr = doc["files"].as_array()?;
         let mut exact = BTreeMap::new();
         let mut files = Vec::new();
+        let mut entities: BTreeMap<String, Vec<ChangedEntityDiff>> = BTreeMap::new();
         for item in arr {
             let path = normalize_rel_path(&m::text(item, "path"));
-            let status = m::text(item, "status").to_ascii_lowercase();
+            let status = normalize_change_status(&m::text(item, "status"));
             if path.is_empty() || status.is_empty() {
                 continue;
             }
             exact.insert(path.clone(), status.clone());
-            files.push((path, status));
+            files.push((path.clone(), status));
+            let mut file_entities = Vec::new();
+            for entity in m::array(&item["entities"]) {
+                let raw_change = entity["change"]
+                    .as_str()
+                    .or_else(|| entity["status"].as_str())
+                    .unwrap_or("");
+                let change = normalize_change_status(raw_change);
+                if !matches!(
+                    change.as_str(),
+                    "created" | "modified" | "deleted" | "renamed"
+                ) {
+                    continue;
+                }
+                let id = m::text(&entity, "id");
+                let name = m::text(&entity, "name");
+                let line = entity["line"].as_u64().unwrap_or(0);
+                if id.is_empty() && name.is_empty() {
+                    continue;
+                }
+                file_entities.push(ChangedEntityDiff {
+                    id,
+                    name,
+                    line,
+                    change,
+                });
+            }
+            if !file_entities.is_empty() {
+                entities.insert(path, file_entities);
+            }
         }
-        Some(Self { exact, files })
+        Some(Self {
+            exact,
+            files,
+            entities,
+        })
     }
 
-    fn status_for(&self, node_path: &str, folder: bool) -> Option<String> {
-        let norm = normalize_rel_path(strip_symbol_suffix(node_path));
+    fn entity_status_for(&self, node: &V) -> Option<String> {
+        let node_path = m::text(node, "path");
+        let parent_file = {
+            let from_path = normalize_rel_path(strip_symbol_suffix(&node_path));
+            if from_path.is_empty() {
+                normalize_rel_path(&m::text(node, "file"))
+            } else {
+                from_path
+            }
+        };
+        if parent_file.is_empty() {
+            return None;
+        }
+        let node_id = m::text(node, "id");
+        let node_name = m::text(node, "name");
+        let node_line = node["line"].as_u64().unwrap_or(0);
+        if let Some(diffs) = self.entities.get(&parent_file) {
+            for entity in diffs {
+                let id_match = !entity.id.is_empty()
+                    && (node_path == entity.id || (!node_id.is_empty() && node_id == entity.id));
+                let line_ok = entity.line == 0 || node_line == 0 || entity.line == node_line;
+                if id_match
+                    || (line_ok && symbol_name_matches(&node_name, &node_path, &entity.name))
+                {
+                    return Some(entity.change.clone());
+                }
+            }
+        }
+        let node_changed = node["changed"].as_u64().unwrap_or(0) > 0 || m::yes(&node["changed"]);
+        if !node_changed {
+            return None;
+        }
+        if let Some(raw_status) = node["status"].as_str() {
+            let norm = normalize_change_status(raw_status);
+            if matches!(
+                norm.as_str(),
+                "created" | "modified" | "deleted" | "renamed"
+            ) {
+                return Some(norm);
+            }
+        }
+        self.exact.get(&parent_file).cloned()
+    }
+
+    fn folder_status_for(
+        &self,
+        folder_path: &str,
+        node: Option<&V>,
+        all_nodes: &[V],
+    ) -> Option<String> {
+        let prefix = format!("{folder_path}/");
+        let mut seen = BTreeSet::new();
+        for (file, status) in &self.files {
+            if file.starts_with(&prefix) {
+                seen.insert(status.as_str());
+            }
+        }
+        if seen.is_empty() {
+            return None;
+        }
+        if seen.len() > 1 {
+            return Some("modified".to_owned());
+        }
+        let only = seen.into_iter().next()?;
+        if only != "deleted" {
+            return Some(only.to_owned());
+        }
+        if let Some(node) = node {
+            if m::yes(&node["synthetic_deleted"]) || node["status"].as_str() == Some("D") {
+                return Some("deleted".to_owned());
+            }
+            if let Some(files_count) = node["files"].as_u64() {
+                return Some(if files_count == 0 {
+                    "deleted".to_owned()
+                } else {
+                    "modified".to_owned()
+                });
+            }
+        }
+        let has_surviving_child = all_nodes.iter().any(|other| {
+            if m::yes(&other["synthetic_deleted"]) {
+                return false;
+            }
+            let other_path = normalize_rel_path(&m::text(other, "path"));
+            other_path.starts_with(&prefix)
+                && self.exact.get(&other_path).map(String::as_str) != Some("deleted")
+        });
+        if has_surviving_child
+            || node.is_some_and(|n| n["changed"].as_u64().unwrap_or(0) > 0)
+        {
+            Some("modified".to_owned())
+        } else {
+            Some("deleted".to_owned())
+        }
+    }
+
+    fn status_for_node(&self, node: &V, all_nodes: &[V]) -> Option<String> {
+        let is_symbol = m::yes(&node["symbol"]) || node["kind"].as_str() == Some("symbol");
+        if is_symbol {
+            return self.entity_status_for(node);
+        }
+        let folder = m::yes(&node["folder"]);
+        let norm = normalize_rel_path(&m::text(node, "path"));
         if norm.is_empty() {
             return None;
         }
@@ -4024,20 +4232,25 @@ impl ChangesLookup {
         if !folder {
             return None;
         }
-        let prefix = format!("{norm}/");
-        let mut seen = BTreeSet::new();
-        for (file, status) in &self.files {
-            if file.starts_with(&prefix) {
-                seen.insert(status.as_str());
-            }
+        self.folder_status_for(&norm, Some(node), all_nodes)
+    }
+
+    #[allow(dead_code)]
+    fn status_for(&self, node_path: &str, folder: bool) -> Option<String> {
+        if node_path.contains('#') {
+            return None;
         }
-        if seen.is_empty() {
-            None
-        } else if seen.len() == 1 {
-            seen.into_iter().next().map(str::to_owned)
-        } else {
-            Some("modified".to_owned())
+        let norm = normalize_rel_path(node_path);
+        if norm.is_empty() {
+            return None;
         }
+        if let Some(status) = self.exact.get(&norm) {
+            return Some(status.clone());
+        }
+        if !folder {
+            return None;
+        }
+        self.folder_status_for(&norm, None, &[])
     }
 }
 
@@ -4055,15 +4268,40 @@ struct ImpactLookup {
     /// their target: one target may be called, read and written.
     kinds_added: BTreeMap<String, [u64; 7]>,
     kinds_removed: BTreeMap<String, [u64; 7]>,
+    /// Commit-wide edge diffs & caller risks parsed from `/graph/changes` `edge_diffs`
+    /// and deleted file `callers[]`.
+    commit_edges_added: Vec<(String, String, &'static str)>,
+    commit_edges_removed: Vec<(String, String, &'static str)>,
+    commit_risk_callers: Vec<(String, String, String)>,
+}
+
+fn edge_diff_primary_kind(entry: &V) -> &'static str {
+    let mut kinds = m::array(&entry["kinds"]);
+    if kinds.is_empty() {
+        if let Some(single) = entry["kind"].as_str() {
+            kinds.push(json!(single));
+        }
+    }
+    let pseudo = json!({ "kinds": kinds.into_iter().map(|k| {
+        if k.is_string() { json!({"kind": k, "links": 1}) } else { k }
+    }).collect::<Vec<_>>() });
+    pick_precedence_kind(&EdgeKinds::of(&pseudo).counts)
 }
 
 impl ImpactLookup {
+    #[allow(dead_code)]
     fn from_value(doc: &V, nodes: &[V]) -> Option<Self> {
-        let selected_path = normalize_rel_path(strip_symbol_suffix(&m::text(doc, "path")));
-        if selected_path.is_empty() {
-            return None;
-        }
-        let selected_idx = resolve_canvas_node_by_path(nodes, &selected_path);
+        Self::from_sources(Some(doc), None, nodes)
+    }
+
+    fn from_sources(impact_doc: Option<&V>, changes_doc: Option<&V>, nodes: &[V]) -> Option<Self> {
+        let selected_path = impact_doc
+            .map(|doc| normalize_rel_path(strip_symbol_suffix(&m::text(doc, "path"))))
+            .unwrap_or_default();
+        let has_selected = !selected_path.is_empty();
+        let selected_idx = has_selected
+            .then(|| resolve_canvas_node_by_path(nodes, &selected_path))
+            .flatten();
         let collect_deps = |arr: &V| -> Vec<String> {
             m::array(arr)
                 .into_iter()
@@ -4091,32 +4329,132 @@ impl ImpactLookup {
         let mut callers_impacted = Vec::new();
         let mut callers_added = Vec::new();
         let mut callers_unchanged = Vec::new();
-        for caller in m::array(&doc["used_by"]) {
-            let path = normalize_rel_path(strip_symbol_suffix(&m::text(&caller, "path")));
-            if path.is_empty() {
-                continue;
+        let (uses_added, uses_removed, uses_unchanged, kinds_added, kinds_removed) =
+            if let Some(doc) = impact_doc.filter(|_| has_selected) {
+                for caller in m::array(&doc["used_by"]) {
+                    let path = normalize_rel_path(strip_symbol_suffix(&m::text(&caller, "path")));
+                    if path.is_empty() {
+                        continue;
+                    }
+                    match m::text(&caller, "impact").as_str() {
+                        "broken_risk" => callers_risk.push(path),
+                        "impacted" => callers_impacted.push(path),
+                        "added_caller" => callers_added.push(path),
+                        _ => callers_unchanged.push(path),
+                    }
+                }
+                (
+                    collect_deps(&doc["uses"]["added"]),
+                    collect_deps(&doc["uses"]["removed"]),
+                    collect_deps(&doc["uses"]["unchanged"]),
+                    collect_kinds(&doc["uses"]["added"]),
+                    collect_kinds(&doc["uses"]["removed"]),
+                )
+            } else {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                )
+            };
+
+        let mut commit_edges_added = Vec::new();
+        let mut commit_edges_removed = Vec::new();
+        let mut commit_risk_callers = Vec::new();
+        let mut seen_risk: BTreeSet<(String, String, String)> = BTreeSet::new();
+        if let Some(changes) = changes_doc {
+            let edge_diffs = &changes["edge_diffs"];
+            if edge_diffs.is_object() {
+                for item in m::array(&edge_diffs["added"]) {
+                    let from = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "from")));
+                    let to = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "to")));
+                    if !from.is_empty() && !to.is_empty() {
+                        commit_edges_added.push((from, to, edge_diff_primary_kind(&item)));
+                    }
+                }
+                for item in m::array(&edge_diffs["removed"]) {
+                    let from = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "from")));
+                    let to = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "to")));
+                    if !from.is_empty() && !to.is_empty() {
+                        commit_edges_removed.push((from, to, edge_diff_primary_kind(&item)));
+                    }
+                }
+                for item in m::array(&edge_diffs["risk_callers"]) {
+                    let raw_from = m::text(&item, "from");
+                    let fallback_from = m::text(&item, "path");
+                    let from = normalize_rel_path(strip_symbol_suffix(if raw_from.is_empty() {
+                        &fallback_from
+                    } else {
+                        &raw_from
+                    }));
+                    let to = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "to")));
+                    let impact = m::text(&item, "impact").to_ascii_lowercase();
+                    if !from.is_empty() && !impact.is_empty() {
+                        let key = (from.clone(), to.clone(), impact.clone());
+                        if seen_risk.insert(key) {
+                            commit_risk_callers.push((from, to, impact));
+                        }
+                    }
+                }
             }
-            match m::text(&caller, "impact").as_str() {
-                "broken_risk" => callers_risk.push(path),
-                "impacted" => callers_impacted.push(path),
-                "added_caller" => callers_added.push(path),
-                _ => callers_unchanged.push(path),
+            for file in m::array(&changes["files"]) {
+                if normalize_change_status(&m::text(&file, "status")) != "deleted" {
+                    continue;
+                }
+                let del_path = normalize_rel_path(&m::text(&file, "path"));
+                if del_path.is_empty() {
+                    continue;
+                }
+                for caller in m::array(&file["callers"]) {
+                    if let Some(caller_str) = caller.as_str() {
+                        let from = normalize_rel_path(strip_symbol_suffix(caller_str));
+                        if !from.is_empty() {
+                            let key = (
+                                from.clone(),
+                                del_path.clone(),
+                                "broken_risk".to_owned(),
+                            );
+                            if seen_risk.insert(key) {
+                                commit_risk_callers.push((
+                                    from,
+                                    del_path.clone(),
+                                    "broken_risk".to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        if !has_selected
+            && commit_edges_added.is_empty()
+            && commit_edges_removed.is_empty()
+            && commit_risk_callers.is_empty()
+        {
+            return None;
+        }
+
         Some(Self {
             selected_path,
             selected_idx,
-            uses_added: collect_deps(&doc["uses"]["added"]),
-            uses_removed: collect_deps(&doc["uses"]["removed"]),
-            uses_unchanged: collect_deps(&doc["uses"]["unchanged"]),
+            uses_added,
+            uses_removed,
+            uses_unchanged,
             callers_risk,
             callers_impacted,
             callers_added,
             callers_unchanged,
-            kinds_added: collect_kinds(&doc["uses"]["added"]),
-            kinds_removed: collect_kinds(&doc["uses"]["removed"]),
+            kinds_added,
+            kinds_removed,
+            commit_edges_added,
+            commit_edges_removed,
+            commit_risk_callers,
         })
     }
+
     /// The kind a dependency on `target` that a change added, or took
     /// away, is drawn as: the strongest of the kinds it had.
     fn dep_kind(&self, target: &str, added: bool) -> &'static str {
@@ -4136,42 +4474,101 @@ impl ImpactLookup {
             .any(|path| path_matches_node(&node_path, is_folder, path))
     }
 
-    fn edge_diff(&self, nodes: &[V], from: usize, to: usize) -> Option<&'static str> {
+    fn pair_matches(nodes: &[V], from: usize, to: usize, expected_from: &str, expected_to: &str) -> bool {
         let from_node = &nodes[from];
         let to_node = &nodes[to];
-        let from_is_selected = path_matches_node(
+        path_matches_node(
             &m::text(from_node, "path"),
             m::yes(&from_node["folder"]),
-            &self.selected_path,
-        );
-        let to_is_selected = path_matches_node(
-            &m::text(to_node, "path"),
-            m::yes(&to_node["folder"]),
-            &self.selected_path,
-        );
-        if from_is_selected {
-            if self.node_matches_any(to_node, &self.uses_added) {
-                return Some("added");
+            expected_from,
+        ) && (expected_to.is_empty()
+            || path_matches_node(
+                &m::text(to_node, "path"),
+                m::yes(&to_node["folder"]),
+                expected_to,
+            ))
+    }
+
+    fn edge_diff(&self, nodes: &[V], from: usize, to: usize) -> Option<&'static str> {
+        let mut selected_unchanged = false;
+        if !self.selected_path.is_empty() {
+            let from_node = &nodes[from];
+            let to_node = &nodes[to];
+            let from_is_selected = path_matches_node(
+                &m::text(from_node, "path"),
+                m::yes(&from_node["folder"]),
+                &self.selected_path,
+            );
+            let to_is_selected = path_matches_node(
+                &m::text(to_node, "path"),
+                m::yes(&to_node["folder"]),
+                &self.selected_path,
+            );
+            if from_is_selected {
+                if self.node_matches_any(to_node, &self.uses_added) {
+                    return Some("added");
+                }
+                if self.node_matches_any(to_node, &self.uses_removed) {
+                    return Some("removed");
+                }
+                if self.node_matches_any(to_node, &self.uses_unchanged) {
+                    selected_unchanged = true;
+                }
             }
-            if self.node_matches_any(to_node, &self.uses_removed) {
-                return Some("removed");
-            }
-            if self.node_matches_any(to_node, &self.uses_unchanged) {
-                return Some("unchanged");
+            if to_is_selected {
+                if self.node_matches_any(from_node, &self.callers_added) {
+                    return Some("added");
+                }
+                if self.node_matches_any(from_node, &self.callers_risk) {
+                    return Some("removed");
+                }
+                if self.node_matches_any(from_node, &self.callers_impacted)
+                    || self.node_matches_any(from_node, &self.callers_unchanged)
+                {
+                    selected_unchanged = true;
+                }
             }
         }
-        if to_is_selected {
-            if self.node_matches_any(from_node, &self.callers_added) {
-                return Some("added");
-            }
-            if self.node_matches_any(from_node, &self.callers_risk) {
-                return Some("removed");
-            }
-            if self.node_matches_any(from_node, &self.callers_impacted)
-                || self.node_matches_any(from_node, &self.callers_unchanged)
+        if self
+            .commit_edges_added
+            .iter()
+            .any(|(ef, et, _)| Self::pair_matches(nodes, from, to, ef, et))
+        {
+            return Some("added");
+        }
+        if self
+            .commit_edges_removed
+            .iter()
+            .any(|(ef, et, _)| Self::pair_matches(nodes, from, to, ef, et))
+        {
+            return Some("removed");
+        }
+        if selected_unchanged {
+            Some("unchanged")
+        } else {
+            None
+        }
+    }
+
+    fn edge_impact(&self, nodes: &[V], from: usize, to: usize) -> Option<&'static str> {
+        if !self.selected_path.is_empty() {
+            let from_node = &nodes[from];
+            let to_node = &nodes[to];
+            if path_matches_node(
+                &m::text(to_node, "path"),
+                m::yes(&to_node["folder"]),
+                &self.selected_path,
+            ) && self.node_matches_any(from_node, &self.callers_risk)
             {
-                return Some("unchanged");
+                return Some("broken_risk");
             }
+        }
+        if self
+            .commit_risk_callers
+            .iter()
+            .any(|(cf, ct, imp)| imp == "broken_risk" && Self::pair_matches(nodes, from, to, cf, ct))
+        {
+            return Some("broken_risk");
         }
         None
     }
@@ -4182,18 +4579,35 @@ impl ImpactLookup {
         }
         let node = &nodes[idx];
         if self.node_matches_any(node, &self.callers_risk) {
-            Some("caller-risk")
-        } else if self.node_matches_any(node, &self.uses_removed) {
-            Some("removed-dep")
-        } else if self.node_matches_any(node, &self.uses_added) {
-            Some("added-dep")
-        } else if self.node_matches_any(node, &self.callers_impacted)
+            return Some("caller-risk");
+        }
+        if self.node_matches_any(node, &self.uses_removed) {
+            return Some("removed-dep");
+        }
+        if self.node_matches_any(node, &self.uses_added) {
+            return Some("added-dep");
+        }
+        if self.node_matches_any(node, &self.callers_impacted)
             || self.node_matches_any(node, &self.callers_added)
         {
-            Some("caller-impacted")
-        } else {
-            None
+            return Some("caller-impacted");
         }
+        let node_path = m::text(node, "path");
+        let is_folder = m::yes(&node["folder"]);
+        if self
+            .commit_risk_callers
+            .iter()
+            .any(|(cf, _, imp)| imp == "broken_risk" && path_matches_node(&node_path, is_folder, cf))
+        {
+            return Some("caller-risk");
+        }
+        if self.commit_risk_callers.iter().any(|(cf, _, imp)| {
+            matches!(imp.as_str(), "impacted" | "added_caller")
+                && path_matches_node(&node_path, is_folder, cf)
+        }) {
+            return Some("caller-impacted");
+        }
+        None
     }
 }
 
@@ -4932,6 +5346,161 @@ pub fn canvas_with(view: &V, id_prefix: &str, live_focus: Option<&LiveFocus>) ->
         },
     )
 }
+fn inject_synthetic_deleted_nodes_and_edges(
+    view: &V,
+    changes: Option<&V>,
+    nodes: &mut Vec<V>,
+    edges: &mut Vec<V>,
+    frames: &[V],
+) {
+    let Some(changes_doc) = changes else {
+        return;
+    };
+    if !plain_map(view) || symbols(view) || follows(view) {
+        return;
+    }
+    let commit_or_change_view = view["chosen"].is_object()
+        || self::changes(view)
+        || matches!(changes_doc["target"].as_str(), None | Some(""))
+        || changes_doc["target"]
+            .as_str()
+            .is_some_and(|t| t != "work");
+    if !commit_or_change_view {
+        return;
+    }
+    let files = m::array(&changes_doc["files"]);
+    if files.is_empty() {
+        return;
+    }
+    let scope = normalize_rel_path(&m::text(view, "scope"));
+    let scope_prefix = if scope.is_empty() {
+        String::new()
+    } else {
+        format!("{scope}/")
+    };
+    let mut existing_paths: BTreeSet<String> = nodes
+        .iter()
+        .map(|node| normalize_rel_path(&m::text(node, "path")))
+        .filter(|path| !path.is_empty())
+        .collect();
+    let frame_paths: BTreeSet<String> = frames
+        .iter()
+        .map(|frame| normalize_rel_path(&m::text(frame, "path")))
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut edge_diff_callers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for bucket in [
+        &changes_doc["edge_diffs"]["removed"],
+        &changes_doc["edge_diffs"]["risk_callers"],
+    ] {
+        for item in m::array(bucket) {
+            let from = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "from")));
+            let to = normalize_rel_path(strip_symbol_suffix(&m::text(&item, "to")));
+            if !from.is_empty() && !to.is_empty() {
+                let list = edge_diff_callers.entry(to).or_default();
+                if !list.contains(&from) {
+                    list.push(from);
+                }
+            }
+        }
+    }
+
+    let mut injected: Vec<(String, Vec<String>)> = Vec::new();
+    for file in files {
+        if normalize_change_status(&m::text(&file, "status")) != "deleted" {
+            continue;
+        }
+        let path = normalize_rel_path(&m::text(&file, "path"));
+        if path.is_empty() || existing_paths.contains(&path) {
+            continue;
+        }
+        if !scope_prefix.is_empty() && !path.starts_with(&scope_prefix) {
+            continue;
+        }
+        let parent_dir = parent(&path);
+        let collapsed_ancestor = nodes.iter().any(|node| {
+            m::yes(&node["folder"])
+                && !frame_paths.contains(&normalize_rel_path(&m::text(node, "path")))
+                && path_matches_node(&m::text(node, "path"), true, &path)
+        });
+        if scope != parent_dir && collapsed_ancestor {
+            continue;
+        }
+        let holder = if !parent_dir.is_empty() && frame_paths.contains(parent_dir) {
+            json!(parent_dir)
+        } else {
+            V::Null
+        };
+        let mut callers = Vec::new();
+        for caller in m::array(&file["callers"]) {
+            if let Some(raw) = caller.as_str() {
+                let norm = normalize_rel_path(strip_symbol_suffix(raw));
+                if !norm.is_empty() && !callers.contains(&norm) {
+                    callers.push(norm);
+                }
+            }
+        }
+        if let Some(extra) = edge_diff_callers.get(&path) {
+            for norm in extra {
+                if !callers.contains(norm) {
+                    callers.push(norm.clone());
+                }
+            }
+        }
+        nodes.push(json!({
+            "path": path,
+            "name": base(&path),
+            "folder": false,
+            "files": 1,
+            "symbols": 0,
+            "within": 0,
+            "out": 0,
+            "in": callers.len(),
+            "changed": 1,
+            "status": "D",
+            "kind": "file",
+            "holder": holder,
+            "synthetic_deleted": true,
+        }));
+        existing_paths.insert(path.clone());
+        injected.push((path, callers));
+    }
+
+    if injected.is_empty() {
+        return;
+    }
+    let mut existing_edges: BTreeSet<(String, String)> = edges
+        .iter()
+        .map(|edge| {
+            (
+                normalize_rel_path(&m::text(edge, "from")),
+                normalize_rel_path(&m::text(edge, "to")),
+            )
+        })
+        .collect();
+    for (del_path, callers) in injected {
+        for caller in callers {
+            if let Some(caller_idx) = resolve_canvas_node_by_path(nodes, &caller) {
+                let from_path = m::text(&nodes[caller_idx], "path");
+                let norm_from = normalize_rel_path(&from_path);
+                if !from_path.is_empty()
+                    && norm_from != del_path
+                    && existing_edges.insert((norm_from, del_path.clone()))
+                {
+                    edges.push(json!({
+                        "from": from_path,
+                        "to": del_path,
+                        "links": 1,
+                        "guessed": 0,
+                        "kinds": [{"kind": "calls", "links": 1}],
+                        "synthetic_diff": "removed",
+                    }));
+                }
+            }
+        }
+    }
+}
+
 /// Renders a dependency map plane with live focus, changed-files markers, and file-impact diff edges.
 pub fn canvas_with_overlays(
     view: &V,
@@ -4939,23 +5508,24 @@ pub fn canvas_with_overlays(
     overlay: CanvasOverlayContext<'_>,
 ) -> RenderedCanvas {
     let live_focus = overlay.live_focus;
-    let nodes = m::array(&view["nodes"]);
+    let mut nodes = m::array(&view["nodes"]);
+    let mut edges = m::array(&view["edges"]);
+    let frames = m::array(&view["frames"]);
+    inject_synthetic_deleted_nodes_and_edges(view, overlay.changes, &mut nodes, &mut edges, &frames);
     let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
-    let impact_lookup = overlay
-        .impact
-        .and_then(|doc| ImpactLookup::from_value(doc, &nodes));
-    let edges = m::array(&view["edges"]);
+    let impact_lookup = ImpactLookup::from_sources(overlay.impact, overlay.changes, &nodes);
     let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
     // A link whose end is not drawn is not drawn either. Nor is, where
     // that was asked for, a link that a longer way already joins: without
     // those the picture holds fewer links that pass layers, and every box
     // still reaches what it reached.
     let plain = plain_map(view);
-    let left_out = if overlay.hide_transitive && plain {
+    let mut left_out = if overlay.hide_transitive && plain {
         said_twice(view)
     } else {
         vec![false; edges.len()]
     };
+    left_out.resize(edges.len(), false);
     let edges = edges
         .iter()
         .zip(&left_out)
@@ -4972,7 +5542,6 @@ pub fn canvas_with_overlays(
         .map(|((from, to), edge)| (*from, *to, edge["links"].as_u64().unwrap_or(1)))
         .collect::<Vec<_>>();
     // A folder that is spread out is a frame around what it holds.
-    let frames = m::array(&view["frames"]);
     let frame = |path: &V| frames.iter().position(|frame| &frame["path"] == path);
     let framed = Frames {
         of: nodes.iter().map(|node| frame(&node["holder"])).collect(),
@@ -5119,12 +5688,41 @@ pub fn canvas_with_overlays(
     let pattern_family = pattern_view
         .then(|| m::text(&view["pattern"], "family"))
         .filter(|family| !family.is_empty());
+    let node_change_statuses: Vec<Option<String>> = nodes
+        .iter()
+        .map(|node| {
+            changes_lookup
+                .as_ref()
+                .and_then(|lookup| lookup.status_for_node(node, &nodes))
+        })
+        .collect();
+    let node_is_changed: Vec<bool> = nodes
+        .iter()
+        .zip(&node_change_statuses)
+        .map(|(node, status)| {
+            node["changed"].as_u64().unwrap_or(0) > 0
+                || m::yes(&node["changed"])
+                || status.is_some()
+        })
+        .collect();
+    let commit_changes_active = view["chosen"].is_object()
+        || changes(view)
+        || overlay.impact.is_some()
+        || overlay.changes.is_some_and(|doc| {
+            let target = m::text(doc, "target");
+            (!target.is_empty() && target != "work")
+                || doc["edge_diffs"].is_object()
+                || (doc["target"].is_null() && node_change_statuses.iter().any(Option::is_some))
+        });
     let mut plane_attrs = String::new();
     if named {
         plane_attrs.push_str(" data-names=\"true\"");
     }
     if cycle_view {
         plane_attrs.push_str(" data-cycle-view=\"true\"");
+    }
+    if commit_changes_active {
+        plane_attrs.push_str(" data-commit-changes=\"true\"");
     }
     if let Some(family) = &pattern_family {
         plane_attrs.push_str(&format!(
@@ -5299,9 +5897,31 @@ pub fn canvas_with_overlays(
             ),
             None => format!("{user} uses {used} · {}", weight(links, guessed)),
         };
+        let synthetic_diff = edge["synthetic_diff"].as_str();
         let edge_diff = impact_lookup
             .as_ref()
-            .and_then(|lookup| lookup.edge_diff(&nodes, from, to));
+            .and_then(|lookup| lookup.edge_diff(&nodes, from, to))
+            .map(|diff| {
+                if diff == "unchanged" {
+                    synthetic_diff.unwrap_or("unchanged")
+                } else {
+                    diff
+                }
+            })
+            .or(synthetic_diff);
+        let edge_impact = impact_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.edge_impact(&nodes, from, to));
+        let commit_touched =
+            commit_changes_active && (node_is_changed[from] || node_is_changed[to]);
+        let edge_impact_attr = edge_impact
+            .map(|impact| format!(" data-impact=\"{impact}\""))
+            .unwrap_or_default();
+        let commit_touched_attr = if commit_touched {
+            " data-commit-touched=\"true\""
+        } else {
+            ""
+        };
         let edge_diff_attr = edge_diff
             .map(|diff| format!(" data-diff=\"{diff}\""))
             .unwrap_or_default();
@@ -5348,7 +5968,7 @@ pub fn canvas_with_overlays(
         // the rules is always drawn.
         let portal = wire.portal && !against;
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{}{hidden_attr}{detour_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{}{})\" stroke-width=\"{:.1}\" marker-start=\"url(#{id_prefix}-port{})\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}{}{}\" data-ends=\"{from} {to}\"{edge_impact_attr}{commit_touched_attr}{edge_diff_attr}{}{}{hidden_attr}{detour_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{}{})\" stroke-width=\"{:.1}\" marker-start=\"url(#{id_prefix}-port{})\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
             if guess { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if against { " graph-map-edge-against" } else { "" },
@@ -5437,35 +6057,45 @@ pub fn canvas_with_overlays(
         }
     }
     if let Some(lookup) = impact_lookup.as_ref() {
-        if let Some(sel_idx) = lookup.selected_idx {
-            let rendered_pairs: BTreeSet<(usize, usize)> = pairs.iter().copied().collect();
-            let mut synthetic_drawn: BTreeSet<(usize, usize, &'static str)> = BTreeSet::new();
-            let mut add_synthetic = |from_idx: usize,
-                                     to_idx: usize,
-                                     diff: &'static str,
-                                     label: &str,
-                                     kind: &'static str| {
-                if from_idx == to_idx
-                    || rendered_pairs.contains(&(from_idx, to_idx))
-                    || !synthetic_drawn.insert((from_idx, to_idx, diff))
-                {
-                    return;
-                }
-                let (fp, tp) = synthetic_edge_points(&plan.nodes[from_idx], &plan.nodes[to_idx]);
-                let mut d = format!("M{:.1} {:.1}", fp.0, fp.1);
-                curve(&mut d, fp, tp);
-                let mark_symbol = if diff == "added" { "+" } else { "-" };
-                html.push_str(&format!(
-                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
-                    arrow_marker_suffix(kind, false),
-                    escape(&m::text(&nodes[from_idx], "name")),
+        let rendered_pairs: BTreeSet<(usize, usize)> = pairs.iter().copied().collect();
+        let mut synthetic_drawn: BTreeSet<(usize, usize, &'static str)> = BTreeSet::new();
+        let mut add_synthetic = |from_idx: usize,
+                                 to_idx: usize,
+                                 diff: &'static str,
+                                 label: &str,
+                                 kind: &'static str,
+                                 impact: Option<&'static str>| {
+            if from_idx == to_idx
+                || rendered_pairs.contains(&(from_idx, to_idx))
+                || !synthetic_drawn.insert((from_idx, to_idx, diff))
+            {
+                return;
+            }
+            let (fp, tp) = synthetic_edge_points(&plan.nodes[from_idx], &plan.nodes[to_idx]);
+            let mut d = format!("M{:.1} {:.1}", fp.0, fp.1);
+            curve(&mut d, fp, tp);
+            let mark_symbol = if diff == "added" { "+" } else { "-" };
+            let impact_attr = impact
+                .map(|imp| format!(" data-impact=\"{imp}\""))
+                .unwrap_or_default();
+            let touched_attr =
+                if commit_changes_active && (node_is_changed[from_idx] || node_is_changed[to_idx]) {
+                    " data-commit-touched=\"true\""
+                } else {
+                    ""
+                };
+            html.push_str(&format!(
+                "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
+                arrow_marker_suffix(kind, false),
+                escape(&m::text(&nodes[from_idx], "name")),
+            ));
+            if let Some((mx, my)) = middle(&d) {
+                marks.push_str(&format!(
+                    "<text class=\"graph-map-edge-mark\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" x=\"{mx:.1}\" y=\"{my:.1}\">{mark_symbol}</text>"
                 ));
-                if let Some((mx, my)) = middle(&d) {
-                    marks.push_str(&format!(
-                        "<text class=\"graph-map-edge-mark\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" x=\"{mx:.1}\" y=\"{my:.1}\">{mark_symbol}</text>"
-                    ));
-                }
-            };
+            }
+        };
+        if let Some(sel_idx) = lookup.selected_idx {
             for target in &lookup.uses_added {
                 if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
                     add_synthetic(
@@ -5474,6 +6104,7 @@ pub fn canvas_with_overlays(
                         "added",
                         "added dependency",
                         lookup.dep_kind(target, true),
+                        None,
                     );
                 }
             }
@@ -5485,17 +6116,67 @@ pub fn canvas_with_overlays(
                         "removed",
                         "removed dependency",
                         lookup.dep_kind(target, false),
+                        None,
                     );
                 }
             }
             for caller in &lookup.callers_added {
                 if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
-                    add_synthetic(caller_idx, sel_idx, "added", "added caller", "calls");
+                    add_synthetic(caller_idx, sel_idx, "added", "added caller", "calls", None);
                 }
             }
             for caller in &lookup.callers_risk {
                 if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
-                    add_synthetic(caller_idx, sel_idx, "removed", "caller at risk", "calls");
+                    add_synthetic(
+                        caller_idx,
+                        sel_idx,
+                        "removed",
+                        "caller at risk",
+                        "calls",
+                        Some("broken_risk"),
+                    );
+                }
+            }
+        }
+        if commit_changes_active {
+            for (from, to, kind) in &lookup.commit_edges_added {
+                if let (Some(from_idx), Some(to_idx)) = (
+                    resolve_canvas_node_by_path(&nodes, from),
+                    resolve_canvas_node_by_path(&nodes, to),
+                ) {
+                    add_synthetic(from_idx, to_idx, "added", "added dependency", kind, None);
+                }
+            }
+            for (from, to, kind) in &lookup.commit_edges_removed {
+                if let (Some(from_idx), Some(to_idx)) = (
+                    resolve_canvas_node_by_path(&nodes, from),
+                    resolve_canvas_node_by_path(&nodes, to),
+                ) {
+                    add_synthetic(
+                        from_idx,
+                        to_idx,
+                        "removed",
+                        "removed dependency",
+                        kind,
+                        None,
+                    );
+                }
+            }
+            for (from, to, imp) in &lookup.commit_risk_callers {
+                if imp == "broken_risk" && !to.is_empty() {
+                    if let (Some(from_idx), Some(to_idx)) = (
+                        resolve_canvas_node_by_path(&nodes, from),
+                        resolve_canvas_node_by_path(&nodes, to),
+                    ) {
+                        add_synthetic(
+                            from_idx,
+                            to_idx,
+                            "removed",
+                            "caller at risk",
+                            "calls",
+                            Some("broken_risk"),
+                        );
+                    }
                 }
             }
         }
@@ -5878,11 +6559,8 @@ pub fn canvas_with_overlays(
         } else {
             String::new()
         };
-        let node_change_status = changes_lookup
-            .as_ref()
-            .and_then(|lookup| lookup.status_for(&m::text(node, "path"), folder));
+        let node_change_status = node_change_statuses[index].as_deref();
         let node_change_attr = node_change_status
-            .as_deref()
             .map(|status| format!(" data-change-status=\"{}\"", escape(status)))
             .unwrap_or_default();
         let node_impact_attr = impact_lookup
@@ -5987,15 +6665,34 @@ pub fn canvas_with_overlays(
             // A changed file carries Git's letter and a folder how many
             // changed. So does a symbol: the letter where its own lines
             // changed, else how many symbols changed inside it.
-            html.push_str(&format!(
-                "<span class=\"graph-map-node-status\" aria-hidden=\"true\">{}</span>",
-                match node["status"].as_str() {
-                    Some(status) => escape(status),
-                    None if symbol => count(node["touched"].as_u64().unwrap_or(0)),
-                    None => count(changed),
+            let pill_kind = node_change_status
+                .filter(|s| matches!(*s, "created" | "modified" | "deleted" | "renamed"))
+                .map(str::to_owned)
+                .or_else(|| {
+                    node["status"]
+                        .as_str()
+                        .map(normalize_change_status)
+                        .filter(|s| {
+                            matches!(
+                                s.as_str(),
+                                "created" | "modified" | "deleted" | "renamed"
+                            )
+                        })
+                })
+                .unwrap_or_else(|| "modified".to_owned());
+            let pill_text = match node["status"].as_str() {
+                Some(status) => escape(status),
+                None if symbol => count(node["touched"].as_u64().unwrap_or(0)),
+                None if node_change_status.is_some() && changed == 1 && !folder => {
+                    change_status_letter(node_change_status.unwrap_or("")).to_owned()
                 }
+                None => count(changed),
+            };
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{pill_text}</span>",
+                escape(&pill_kind),
             ));
-        } else if let Some(status) = node_change_status.as_deref() {
+        } else if let Some(status) = node_change_status {
             let (badge, _) = change_status_badge(status);
             if !badge.is_empty() {
                 html.push_str(&format!(
@@ -6245,7 +6942,10 @@ pub fn canvas_with_overlays(
         .map(|(index, (node, placed))| {
             let state = if selected_idx == Some(index) {
                 "selected"
-            } else if node["changed"].as_u64().unwrap_or(0) > 0 || node["status"].is_string() {
+            } else if node["changed"].as_u64().unwrap_or(0) > 0
+                || node["status"].is_string()
+                || node_change_statuses[index].is_some()
+            {
                 "changed"
             } else if placed.cycle && cycles {
                 "cycle"
@@ -8804,8 +9504,23 @@ fn legend(view: &V, change: bool) -> String {
         }
         _ => LEGEND.to_owned(),
     };
+    let diff_key = if change || changes(view) {
+        format!(
+            " Diff: {} Added/Created, {} Modified, {} Deleted, {} Renamed, {} Caller risk, {} Touched, {} Added / {} Removed edges.",
+            patch("diff-added"),
+            patch("diff-modified"),
+            patch("diff-removed"),
+            patch("diff-renamed"),
+            patch("diff-risk"),
+            patch("diff-touched"),
+            patch("diff-added"),
+            patch("diff-removed"),
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name. Thicker: more links. {particular}{}",
+        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name. Thicker: more links.{diff_key} {particular}{}",
         patch("uses"),
         patch("used"),
         if view["patterns"].is_object() {
@@ -8904,6 +9619,24 @@ pub fn offered(pick: &V) -> Vec<V> {
 pub fn options(pick: &V, now: i64) -> String {
     let active = pick["active"].as_u64().unwrap_or(0) as usize;
     let tab = pick["tab"].as_str().unwrap_or("commits");
+    if tab == "commits" {
+        let rows = offered(pick);
+        let active_idx = (!rows.is_empty()).then(|| active.min(rows.len() - 1));
+        let selected_target = pick["selected"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| m::text(&state(), "target"));
+        let selected_sha = selected_target.strip_prefix("commit:");
+        return crate::git_commit_graph::render_commit_graph_rows(
+            &rows,
+            active_idx,
+            selected_sha,
+            m::yes(&pick["more"]),
+            now,
+            crate::git_commit_graph::CommitGraphSurface::Picker,
+        );
+    }
     let badge = |text: &str, kind: &str| {
         format!(
             "<span class=\"graph-pick-badge\" data-kind=\"{kind}\">{}</span>",
@@ -11087,6 +11820,191 @@ fn find_key(e: &web_sys::KeyboardEvent) -> bool {
         _ => false,
     }
 }
+fn fresh_commit_dock(scope_key: &str) -> V {
+    json!({
+        "open": false,
+        "query": "",
+        "scope": "",
+        "rows": [],
+        "more": false,
+        "loading": false,
+        "failed": null,
+        "scope_key": scope_key,
+    })
+}
+fn commit_dock() -> V {
+    let dock = m::data("graph-commit-graph");
+    if dock.is_object() {
+        dock
+    } else {
+        fresh_commit_dock("")
+    }
+}
+fn commit_dock_note(dock: &V) -> String {
+    if let Some(failed) = dock["failed"].as_str().filter(|s| !s.is_empty()) {
+        return failed.to_owned();
+    }
+    let rows = m::array(&dock["rows"]);
+    if m::yes(&dock["loading"]) {
+        return if rows.is_empty() {
+            "Reading commit history…".to_owned()
+        } else {
+            "Loading older commits…".to_owned()
+        };
+    }
+    if rows.is_empty() {
+        return "No commit matches.".to_owned();
+    }
+    format!(
+        "{} · click a commit to inspect its changes",
+        plural(rows.len() as u64, "commit", "commits")
+    )
+}
+fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String {
+    let rows = m::array(&dock["rows"]);
+    let selected_sha = selected_target.strip_prefix("commit:");
+    crate::git_commit_graph::render_commit_graph_rows(
+        &rows,
+        None,
+        selected_sha,
+        m::yes(&dock["more"]),
+        now,
+        crate::git_commit_graph::CommitGraphSurface::Dock,
+    )
+}
+fn is_commit_view(view: &V) -> bool {
+    view["chosen"]["kind"] == "commit"
+        || view.get("commit_info").is_some_and(V::is_object)
+}
+fn render_commit_banner_for_view(view: &V, changes: Option<&V>) -> String {
+    if !is_commit_view(view) {
+        return String::new();
+    }
+    crate::git_commit_graph::render_commit_banner(
+        view.get("commit_info"),
+        &view["chosen"],
+        changes,
+    )
+}
+fn commit_action_target(action: &str, payload: &V) -> Option<String> {
+    match action {
+        "graph-commit-select" => payload
+            .as_str()
+            .or_else(|| payload["target"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        "graph-commit-reset" => Some(String::new()),
+        _ => None,
+    }
+}
+fn show_commit_dock() {
+    let dock = commit_dock();
+    let opened = m::yes(&dock["open"]);
+    dom::hidden("graph-commit-graph-panel", !opened);
+    dom::attr(
+        "graph-commit-graph-toggle",
+        "aria-expanded",
+        if opened { "true" } else { "false" },
+    );
+    if !opened {
+        return;
+    }
+    let target = m::text(&state(), "target");
+    let list_html = render_commit_dock_list(&dock, &target, (js_sys::Date::now() / 1000.0) as i64);
+    html("graph-commit-graph-list", &list_html);
+    dom::text("graph-commit-graph-note", &commit_dock_note(&dock));
+}
+fn shut_commit_dock() {
+    let mut dock = commit_dock();
+    if !m::yes(&dock["open"]) {
+        return;
+    }
+    dock["open"] = json!(false);
+    m::set("graph-commit-graph", dock);
+    dom::cancel_timer("graph-commit-graph-search");
+    show_commit_dock();
+}
+fn reset_commit_dock_for_scope() {
+    dom::cancel_timer("graph-commit-graph-search");
+    m::next("graph-commit-graph");
+    let scope_key = surface_scope(MODAL_SURFACE).scope_key();
+    let mut dock = commit_dock();
+    if m::text(&dock, "scope_key") != scope_key {
+        dock = fresh_commit_dock(&scope_key);
+    } else {
+        dock["open"] = json!(false);
+    }
+    m::set("graph-commit-graph", dock);
+    show_commit_dock();
+}
+async fn fetch_commit_dock(further: bool) {
+    let dock = commit_dock();
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() || !m::yes(&dock["open"]) {
+        return;
+    }
+    let scope_key = scope.scope_key();
+    let had = if further {
+        m::array(&dock["rows"])
+    } else {
+        vec![]
+    };
+    let path = build_scoped_picker_path(&scope, "commits", &dock, had.len());
+    let mut reading = dock;
+    reading["loading"] = json!(true);
+    reading["scope_key"] = json!(scope_key.clone());
+    dom::text("graph-commit-graph-note", &commit_dock_note(&reading));
+    m::set("graph-commit-graph", reading);
+    let found = api::scoped("graph-commit-graph", &path).await;
+    let mut dock = commit_dock();
+    match found {
+        Ok((epoch, found)) => {
+            if !m::current("graph-commit-graph", epoch)
+                || surface_scope(MODAL_SURFACE).scope_key() != scope_key
+            {
+                return;
+            }
+            let mut rows = had;
+            rows.extend(m::array(&found["commits"]));
+            dock["rows"] = json!(rows);
+            dock["more"] = json!(m::yes(&found["more"]));
+            dock["failed"] = V::Null;
+            dock["scope_key"] = json!(scope_key);
+        }
+        Err(error) if error.aborted => return,
+        Err(error) => {
+            dock["rows"] = json!([]);
+            dock["more"] = json!(false);
+            dock["failed"] = json!(error.message);
+        }
+    }
+    dock["loading"] = json!(false);
+    m::set("graph-commit-graph", dock);
+    show_commit_dock();
+}
+async fn dock_histories() {
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() {
+        return;
+    }
+    let scope_key = scope.scope_key();
+    let path = format_scoped_endpoint(&scope, "branches", Vec::new());
+    let Ok(found) = api::get(&path).await else {
+        return;
+    };
+    if surface_scope(MODAL_SURFACE).scope_key() == scope_key {
+        m::set("graph-pick-branches", found["branches"].clone());
+        html(
+            "graph-commit-graph-scope",
+            &scopes(
+                &m::data("graph-map-place"),
+                &found["branches"],
+                &m::text(&commit_dock(), "scope"),
+            ),
+        );
+    }
+}
 fn picker() -> V {
     let pick = m::data("graph-pick");
     if pick.is_object() {
@@ -11103,6 +12021,8 @@ fn blank() {
     html("graph-map-canvas", "");
     html("graph-map-side", "");
     html("graph-map-arrow-legend", "");
+    html("graph-commit-banner", "");
+    dom::hidden("graph-commit-banner", true);
     dom::hidden("graph-map-launches", true);
     dom::hidden("graph-map-agent", true);
     dom::hidden("graph-map-agent-field", true);
@@ -11331,14 +12251,21 @@ async fn histories() {
     };
     if surface_scope(MODAL_SURFACE).scope_key() == scope_key {
         m::set("graph-pick-branches", found["branches"].clone());
+        let place = m::data("graph-map-place");
         html(
             "graph-pick-scope",
-            &scopes(
-                &m::data("graph-map-place"),
-                &found["branches"],
-                &m::text(&picker(), "scope"),
-            ),
+            &scopes(&place, &found["branches"], &m::text(&picker(), "scope")),
         );
+        if m::yes(&commit_dock()["open"]) {
+            html(
+                "graph-commit-graph-scope",
+                &scopes(
+                    &place,
+                    &found["branches"],
+                    &m::text(&commit_dock(), "scope"),
+                ),
+            );
+        }
     }
 }
 fn shut() {
@@ -14389,6 +15316,14 @@ fn render(view: &V) {
     );
     // A chosen change stays chosen while one of its files is open.
     let change = view["chosen"].is_object();
+    let modal_state = state();
+    let modal_changes = surface_changes_doc(MODAL_SURFACE, &modal_state);
+    let banner_html = render_commit_banner_for_view(view, modal_changes.as_ref());
+    html("graph-commit-banner", &banner_html);
+    dom::hidden("graph-commit-banner", banner_html.trim().is_empty());
+    if m::yes(&commit_dock()["open"]) {
+        show_commit_dock();
+    }
     dom::text("graph-map-chosen", &chosen(view));
     let building = change && view["state"] == "building";
     dom::hidden("graph-map-progress", !building);
@@ -14420,6 +15355,8 @@ fn render(view: &V) {
     if change && !view["nodes"].is_array() {
         // Neither the commit's own graph nor the project's to draw on.
         blank();
+        html("graph-commit-banner", &banner_html);
+        dom::hidden("graph-commit-banner", banner_html.trim().is_empty());
         dom::text(
             "graph-map-note",
             if before.is_empty() && view["state"] != "failed" {
@@ -14473,8 +15410,6 @@ fn render(view: &V) {
                     .unwrap_or(false)
         })
         .and_then(|node| node.get_attribute("data-payload"));
-    let modal_state = state();
-    let modal_changes = surface_changes_doc(MODAL_SURFACE, &modal_state);
     let modal_impact = cached_impact_for_selection(MODAL_SURFACE, &modal_state, Some(view));
     let modal_key = key_now(&modal_state);
     let rendered = canvas_with_overlays(
@@ -14838,8 +15773,18 @@ async fn place() {
         return;
     };
     if surface_scope(MODAL_SURFACE).scope_key() == scope_key {
-        m::set("graph-map-place", found);
+        m::set("graph-map-place", found.clone());
         list();
+        if m::yes(&commit_dock()["open"]) {
+            html(
+                "graph-commit-graph-scope",
+                &scopes(
+                    &found,
+                    &m::data("graph-pick-branches"),
+                    &m::text(&commit_dock(), "scope"),
+                ),
+            );
+        }
     }
 }
 fn parent(path: &str) -> &str {
@@ -15446,6 +16391,7 @@ pub async fn event(
                 },
             );
             shut();
+            reset_commit_dock_for_scope();
             list();
             dom::dialog("graph-map", true);
             watch();
@@ -15483,6 +16429,7 @@ pub async fn event(
                 dom::text("graph-map-chosen", "");
                 dom::text("graph-map-note", "Reading the graph…");
                 shut();
+                reset_commit_dock_for_scope();
                 list();
                 spawn_local(place());
                 load(false).await;
@@ -15500,6 +16447,8 @@ pub async fn event(
         }
         ("click", "graph-map-close", _) => {
             dom::cancel_timer("graph-map-poll");
+            dom::cancel_timer("graph-commit-graph-search");
+            m::next("graph-commit-graph");
             shut();
             close_found();
             dom::dialog("graph-map", false);
@@ -15694,6 +16643,71 @@ pub async fn event(
             if target.starts_with("sysrun:") && !prev_agent.is_empty() {
                 state["agent"] = json!(prev_agent);
             }
+            chosen = true;
+        }
+        ("click", "graph-commit-graph-toggle", _)
+        | ("click", _, "graph-commit-graph-toggle") => {
+            let mut dock = commit_dock();
+            if m::yes(&dock["open"]) {
+                shut_commit_dock();
+                return true;
+            }
+            let scope_key = surface_scope(MODAL_SURFACE).scope_key();
+            if m::text(&dock, "scope_key") != scope_key {
+                dock = fresh_commit_dock(&scope_key);
+            }
+            dock["open"] = json!(true);
+            m::set("graph-commit-graph", dock.clone());
+            dom::set_value("graph-commit-graph-search", &m::text(&dock, "query"));
+            html(
+                "graph-commit-graph-scope",
+                &scopes(
+                    &m::data("graph-map-place"),
+                    &m::data("graph-pick-branches"),
+                    &m::text(&dock, "scope"),
+                ),
+            );
+            show_commit_dock();
+            if m::array(&m::data("graph-pick-branches")).is_empty() {
+                spawn_local(dock_histories());
+            }
+            if m::array(&dock["rows"]).is_empty() {
+                fetch_commit_dock(false).await;
+            }
+            return true;
+        }
+        ("click", "graph-commit-graph-close", _)
+        | ("click", _, "graph-commit-graph-close") => {
+            shut_commit_dock();
+            dom::focus("graph-commit-graph-toggle");
+            return true;
+        }
+        ("input", "graph-commit-graph-search", _) => {
+            let mut dock = commit_dock();
+            dock["query"] = json!(value);
+            m::set("graph-commit-graph", dock);
+            dom::later("graph-commit-graph-search", 220, || {
+                spawn_local(fetch_commit_dock(false));
+            });
+            return true;
+        }
+        ("change", "graph-commit-graph-scope", _) => {
+            let mut dock = commit_dock();
+            dock["scope"] = json!(value);
+            m::set("graph-commit-graph", dock);
+            fetch_commit_dock(false).await;
+            return true;
+        }
+        ("click", _, "graph-commit-graph-more") => {
+            fetch_commit_dock(true).await;
+            return true;
+        }
+        ("click", _, "graph-commit-select" | "graph-commit-reset") => {
+            let Some(target) = commit_action_target(action, payload) else {
+                return true;
+            };
+            shut();
+            state = anew(&target);
             chosen = true;
         }
         ("change", "graph-map-target", _) => {
@@ -15955,6 +16969,9 @@ pub async fn event(
         // The filter field follows: it is emptied where the place changed.
         dom::set_value("graph-map-filter", &m::text(&state, "filter"));
         list();
+        if m::yes(&commit_dock()["open"]) {
+            show_commit_dock();
+        }
     }
     if chosen && target.contains(':') && !target.starts_with("sysrun:") && !choose(&target).await {
         return true;
@@ -17145,6 +18162,7 @@ async fn open_full_from_surface(surface: MapSurface) {
         },
     );
     shut();
+    reset_commit_dock_for_scope();
     list();
     dom::dialog("graph-map", true);
     watch();
@@ -17197,6 +18215,7 @@ pub(crate) fn open_system_service_map(scope: GraphTargetScope, initial_target: O
         },
     );
     shut();
+    reset_commit_dock_for_scope();
     list();
     dom::dialog("graph-map", true);
     watch();
@@ -18831,8 +19850,9 @@ mod tests {
         );
         let html = options(&pick, 1_794_400_000);
         assert!(html.starts_with(
-            "<li class=\"graph-pick-row\" id=\"graph-pick-row-0\" role=\"option\" aria-selected=\"false\" data-action=\"graph-pick-choose\" data-payload=\"&quot;commit:1a2b3c4d5e6f&quot;\"><span class=\"graph-pick-main\"><span class=\"graph-pick-title\">Round &lt;totals&gt; once</span><span class=\"graph-pick-badges\"><span class=\"graph-pick-badge\" data-kind=\"head\">main</span><span class=\"graph-pick-badge\" data-kind=\"remote\">origin/main</span><span class=\"graph-pick-badge\" data-kind=\"tag\">v2</span></span></span><span class=\"graph-pick-who\">Ann</span><span class=\"graph-pick-when\">1 hour ago</span><code class=\"graph-pick-code\">1a2b3c4</code></li>"
+            "<li class=\"graph-pick-row has-git-graph\" id=\"graph-pick-row-0\" role=\"option\" aria-selected=\"false\" data-action=\"graph-pick-choose\" data-payload=\"&quot;commit:1a2b3c4d5e6f&quot;\"><span class=\"git-graph-rail\"><svg class=\"git-graph-svg\""
         ), "{html}");
+        assert!(html.contains("<span class=\"graph-pick-main\"><span class=\"graph-pick-title\">Round &lt;totals&gt; once</span><span class=\"graph-pick-badges\"><span class=\"graph-pick-badge\" data-kind=\"head\">main</span><span class=\"graph-pick-badge\" data-kind=\"remote\">origin/main</span><span class=\"graph-pick-badge\" data-kind=\"tag\">v2</span></span></span><span class=\"graph-pick-who\">Ann</span><span class=\"graph-pick-when\">1 hour ago</span><code class=\"graph-pick-code\">1a2b3c4</code></li>"));
         // The marked row, a merge, and a history that goes on.
         assert!(html.contains("id=\"graph-pick-row-1\" role=\"option\" aria-selected=\"true\""));
         assert!(html.contains("<span class=\"graph-pick-badge\" data-kind=\"merge\">merge</span>"));
@@ -19030,7 +20050,7 @@ mod tests {
         );
         assert_eq!(html.matches("data-changed=\"true\"").count(), 1);
         assert!(
-            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">M</span>")
+            html.contains("<span class=\"graph-map-node-status\" data-status=\"modified\" aria-hidden=\"true\">M</span>")
         );
         assert!(html.contains("aria-label=\"Cart.php, file, uses others through 2 links, is used through 2 links, modified\""));
         assert!(html.contains("aria-label=\"Price.php, file, uses others through 0 links, is used through 2 links, used by the change\""));
@@ -19041,7 +20061,7 @@ mod tests {
         wide["edges"] = json!([]);
         let html = canvas(&wide);
         assert!(
-            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">15</span>")
+            html.contains("<span class=\"graph-map-node-status\" data-status=\"modified\" aria-hidden=\"true\">15</span>")
         );
         assert!(!html.contains("graph-map-node-count"));
         assert!(html.contains("15 changed files inside"));
@@ -19209,7 +20229,7 @@ mod tests {
             "data-kind=\"file\" data-open=\"true\" data-outside=\"true\" data-changed=\"true\""
         ));
         assert!(
-            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">A</span>")
+            html.contains("<span class=\"graph-map-node-status\" data-status=\"created\" aria-hidden=\"true\">A</span>")
         );
         assert!(html.contains("title=\"Cart.total() · src/Cart/Cart.php:19\" aria-label=\"Cart.total(), method of Cart, line 19, uses others through 2 links, is used through 3 links\""), "{html}");
         assert!(html.contains("aria-label=\"Cart, type, line 12, uses others through 0 links, is used through 0 links\""));
@@ -19247,10 +20267,10 @@ mod tests {
         }
         let html = canvas(&view);
         assert_eq!(html.matches("data-changed=\"true\"").count(), 4);
-        assert!(html.contains("line 19, uses others through 2 links, is used through 3 links, modified\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\">Cart.total()</span><span class=\"graph-map-node-status\" aria-hidden=\"true\">M</span>"), "{html}");
+        assert!(html.contains("line 19, uses others through 2 links, is used through 3 links, modified\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\">Cart.total()</span><span class=\"graph-map-node-status\" data-status=\"modified\" aria-hidden=\"true\">M</span>"), "{html}");
         // A class shows how many of its symbols changed, a new function
         // Git's letter for added.
-        assert!(html.contains("is used through 0 links, 1 changed inside\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">T</span><span class=\"graph-map-node-name\">Cart</span><span class=\"graph-map-node-status\" aria-hidden=\"true\">1</span>"), "{html}");
+        assert!(html.contains("is used through 0 links, 1 changed inside\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">T</span><span class=\"graph-map-node-name\">Cart</span><span class=\"graph-map-node-status\" data-status=\"modified\" aria-hidden=\"true\">1</span>"), "{html}");
         assert!(html.contains("is used through 1 link, added\">"));
         assert_eq!(
             note(&view),
@@ -20576,7 +21596,7 @@ mod tests {
         assert!(html.contains("data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\" data-folder=\"false\" data-kind=\"method\" data-open=\"false\" data-outside=\"false\" data-changed=\"true\""), "{html}");
         assert!(html.contains("aria-label=\"Cart.total(), method of Cart, line 19, uses others through 2 links, is used through 3 links, the links are followed from here, modified\""), "{html}");
         assert!(
-            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">M</span>")
+            html.contains("<span class=\"graph-map-node-status\" data-status=\"modified\" aria-hidden=\"true\">M</span>")
         );
         assert_eq!(html.matches("data-open=\"true\"").count(), 0);
         // The handles unfold and fold by the name of the symbol.
@@ -20593,7 +21613,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">2</span>")
+            html.contains("<span class=\"graph-map-node-status\" data-status=\"modified\" aria-hidden=\"true\">2</span>")
         );
         // Files that are followed are drawn as before.
         let files = canvas(&trail());
@@ -26764,5 +27784,256 @@ mod tests {
         assert!(build_map_path("p", &asked, false).contains("failing="));
         asked["target"] = json!("");
         assert!(!build_map_path("p", &asked, false).contains("failing="));
+    }
+
+    #[test]
+    fn changes_lookup_handles_renamed_folder_deleted_false_positive_and_untouched_symbols() {
+        let changes = json!({
+            "files": [
+                { "path": "src/NewName.php", "previous_path": "src/OldName.php", "status": "renamed" },
+                { "path": "src/surviving_dir/Gone.php", "status": "deleted" },
+                { "path": "src/dead_dir/Legacy.php", "status": "deleted" },
+                { "path": "src/mixed_dir/Added.php", "status": "created" },
+                { "path": "src/mixed_dir/Removed.php", "status": "deleted" },
+                {
+                    "path": "src/Cart.php",
+                    "status": "modified",
+                    "entities": [
+                        { "id": "m1", "kind": "method", "name": "total", "line": 19, "change": "modified" }
+                    ]
+                }
+            ]
+        });
+        let lookup = ChangesLookup::from_value(&changes).expect("lookup");
+        assert_eq!(
+            lookup.status_for("src/NewName.php", false).as_deref(),
+            Some("renamed")
+        );
+
+        let surviving_folder = json!({ "path": "src/surviving_dir", "folder": true, "files": 3, "changed": 0 });
+        let dead_folder = json!({ "path": "src/dead_dir", "folder": true, "files": 0, "changed": 0 });
+        let mixed_folder = json!({ "path": "src/mixed_dir", "folder": true, "files": 2, "changed": 1 });
+        let touched_sym = json!({ "path": "src/Cart.php#L19:.total()", "name": "Cart.total()", "kind": "symbol", "symbol": true, "line": 19, "changed": 0 });
+        let untouched_sym = json!({ "path": "src/Cart.php#L12:Cart", "name": "Cart", "kind": "symbol", "symbol": true, "line": 12, "changed": 0 });
+        let all_nodes = vec![
+            surviving_folder.clone(),
+            dead_folder.clone(),
+            mixed_folder.clone(),
+            touched_sym.clone(),
+            untouched_sym.clone(),
+        ];
+
+        assert_eq!(
+            lookup.status_for_node(&surviving_folder, &all_nodes).as_deref(),
+            Some("modified")
+        );
+        assert_eq!(
+            lookup.status_for_node(&dead_folder, &all_nodes).as_deref(),
+            Some("deleted")
+        );
+        assert_eq!(
+            lookup.status_for_node(&mixed_folder, &all_nodes).as_deref(),
+            Some("modified")
+        );
+        assert_eq!(
+            lookup.status_for_node(&touched_sym, &all_nodes).as_deref(),
+            Some("modified")
+        );
+        assert_eq!(lookup.status_for_node(&untouched_sym, &all_nodes), None);
+    }
+
+    #[test]
+    fn canvas_renders_renamed_pill_untouched_symbols_synthetic_deleted_and_commit_edge_diffs() {
+        // 1. Renamed file + surviving folder vs deleted-only + synthetic deleted file + commit edge_diffs
+        let view = json!({
+            "mode": "changes",
+            "scope": "",
+            "chosen": { "kind": "commit", "head": { "commit": "abc123456789" } },
+            "nodes": [
+                { "path": "src/NewName.php", "name": "NewName.php", "folder": false, "changed": 1, "status": "R", "links": 1 },
+                { "path": "src/Caller.php", "name": "Caller.php", "folder": false, "changed": 0, "status": null, "links": 2 },
+                { "path": "src/Dep.php", "name": "Dep.php", "folder": false, "changed": 0, "status": null, "links": 1 },
+                { "path": "src/surviving", "name": "surviving", "folder": true, "files": 4, "changed": 0, "status": null, "links": 0 }
+            ],
+            "edges": [
+                { "from": "src/NewName.php", "to": "src/Dep.php", "links": 1, "kinds": [{ "kind": "calls", "links": 1 }] }
+            ],
+            "frames": []
+        });
+        let changes = json!({
+            "target": "commit:abc123456789",
+            "files": [
+                { "path": "src/NewName.php", "previous_path": "src/OldName.php", "status": "renamed" },
+                { "path": "src/Removed.php", "status": "deleted", "callers": ["src/Caller.php"] },
+                { "path": "src/surviving/Gone.php", "status": "deleted" }
+            ],
+            "edge_diffs": {
+                "added": [{ "from": "src/NewName.php", "to": "src/Dep.php", "kinds": ["calls"] }],
+                "removed": [{ "from": "src/Caller.php", "to": "src/Dep.php", "kinds": ["imports"] }],
+                "risk_callers": [{ "from": "src/Caller.php", "to": "src/Removed.php", "impact": "broken_risk" }]
+            }
+        });
+        let rendered = canvas_with_overlays(
+            &view,
+            "graph-map",
+            CanvasOverlayContext {
+                changes: Some(&changes),
+                ..Default::default()
+            },
+        );
+        assert!(rendered.html.contains("data-commit-changes=\"true\""), "{}", rendered.html);
+        assert!(rendered.html.contains("data-change-status=\"renamed\""));
+        assert!(rendered.html.contains("<span class=\"graph-map-node-status\" data-status=\"renamed\" aria-hidden=\"true\">R</span>"));
+        assert!(rendered.html.contains("data-payload=\"&quot;src/Removed.php&quot;\""), "{}", rendered.html);
+        assert!(rendered.html.contains("data-change-status=\"deleted\""));
+        assert!(rendered.html.contains("<span class=\"graph-map-node-status\" data-status=\"deleted\" aria-hidden=\"true\">D</span>"));
+        assert!(rendered.html.contains("data-impact=\"caller-risk\""));
+        assert!(rendered.html.contains("data-impact=\"broken_risk\""));
+        assert!(rendered.html.contains("data-commit-touched=\"true\""));
+        assert!(rendered.html.contains("data-diff=\"added\""));
+        assert!(rendered.html.contains("data-diff=\"removed\""));
+        // Surviving folder with a deleted file inside must be modified, not deleted!
+        assert!(!rendered.html.contains("data-payload=\"&quot;src/surviving&quot;\" data-folder=\"true\" data-kind=\"\" data-open=\"true\" data-outside=\"false\" data-changed=\"false\" data-selected=\"false\" data-dim=\"false\" data-cycle=\"false\" data-flow=\"\" data-out=\"false\" data-in=\"false\" data-start=\"false\" data-change-status=\"deleted\""));
+
+        // 2. Symbol over-highlighting fix in mode == "file"
+        let file_view = json!({
+            "mode": "file",
+            "scope": "src/Cart.php",
+            "chosen": { "kind": "commit", "head": { "commit": "abc123456789" } },
+            "file": { "path": "src/Cart.php", "name": "Cart.php", "status": "M", "symbols": 2, "types": 1, "methods": 1, "functions": 0, "others": 0, "inside": 0, "out": 0, "in": 0, "uses": 0, "used_by": 0 },
+            "nodes": [
+                { "path": "src/Cart.php#L19:.total()", "name": "Cart.total()", "kind": "symbol", "line": 19, "symbol": true, "folder": false, "changed": 1, "status": "M" },
+                { "path": "src/Cart.php#L12:Cart", "name": "Cart", "kind": "symbol", "line": 12, "symbol": true, "folder": false, "changed": 0, "status": null }
+            ],
+            "edges": [],
+            "frames": []
+        });
+        let file_changes = json!({
+            "target": "commit:abc123456789",
+            "files": [
+                {
+                    "path": "src/Cart.php",
+                    "status": "modified",
+                    "entities": [{ "id": "m1", "name": "total", "line": 19, "change": "modified" }]
+                }
+            ]
+        });
+        let file_rendered = canvas_with_overlays(
+            &file_view,
+            "graph-map",
+            CanvasOverlayContext {
+                changes: Some(&file_changes),
+                ..Default::default()
+            },
+        );
+        assert_eq!(file_rendered.html.matches("data-change-status=\"modified\"").count(), 1, "{}", file_rendered.html);
+        assert_eq!(file_rendered.html.matches("graph-map-node-status").count(), 1, "{}", file_rendered.html);
+
+        // 3. Fallback safety when edge_diffs is absent
+        let no_edge_diffs = json!({
+            "target": "commit:abc123456789",
+            "files": [{ "path": "src/NewName.php", "status": "renamed" }]
+        });
+        assert!(ImpactLookup::from_sources(None, Some(&no_edge_diffs), &view["nodes"].as_array().cloned().unwrap()).is_none());
+    }
+
+    #[test]
+    fn legend_shows_all_diff_swatches_when_change_highlights_are_active() {
+        let html = legend(&change(), true);
+        for class in [
+            "graph-map-key-uses",
+            "graph-map-key-used",
+            "graph-map-key-diff-added",
+            "graph-map-key-diff-modified",
+            "graph-map-key-diff-removed",
+            "graph-map-key-diff-renamed",
+            "graph-map-key-diff-risk",
+            "graph-map-key-diff-touched",
+        ] {
+            assert!(html.contains(class), "missing {class} in {html}");
+        }
+        assert!(html.contains("Added/Created"));
+        assert!(html.contains("Modified"));
+        assert!(html.contains("Deleted"));
+        assert!(html.contains("Renamed"));
+        assert!(html.contains("Caller risk"));
+
+        let plain = legend(&view(), false);
+        assert!(!plain.contains("graph-map-key-diff-"));
+    }
+
+    #[test]
+    fn commit_graph_dock_and_banner_helpers_render_and_handle_actions() {
+        let mut dock = fresh_commit_dock("project:p1");
+        dock["rows"] = json!([
+            {
+                "commit": "aaaa1111bbbb2222",
+                "short": "aaaa111",
+                "subject": "Add commit graph",
+                "author": "Alice",
+                "at": 1_794_396_400,
+                "refs": [{ "name": "main", "kind": "head" }],
+                "merge": false,
+                "parents": ["cccc3333dddd4444"]
+            },
+            {
+                "commit": "cccc3333dddd4444",
+                "short": "cccc333",
+                "subject": "Base commit",
+                "author": "Bob",
+                "at": 1_794_313_600,
+                "refs": [],
+                "merge": false,
+                "parents": []
+            }
+        ]);
+        dock["more"] = json!(true);
+
+        let list_html = render_commit_dock_list(&dock, "commit:aaaa1111bbbb2222", 1_794_400_000);
+        assert!(list_html.contains("class=\"git-graph-row\""), "{list_html}");
+        assert!(list_html.contains("data-action=\"graph-commit-select\""), "{list_html}");
+        assert!(list_html.contains("aria-selected=\"true\""), "{list_html}");
+        assert!(list_html.contains("data-action=\"graph-commit-graph-more\""), "{list_html}");
+        assert_eq!(
+            commit_dock_note(&dock),
+            "2 commits · click a commit to inspect its changes"
+        );
+
+        let commit_view = json!({
+            "chosen": { "kind": "commit", "head": { "commit": "aaaa1111bbbb2222" } },
+            "commit_info": {
+                "commit": "aaaa1111bbbb2222",
+                "short": "aaaa111",
+                "subject": "Add commit graph",
+                "author": "Alice",
+                "parents": ["cccc3333dddd4444"],
+                "refs": [{ "name": "main", "kind": "head" }]
+            }
+        });
+        let changes_catalog = json!({
+            "created_files": 1,
+            "modified_files": 2,
+            "deleted_files": 1,
+            "renamed_files": 1
+        });
+        let banner = render_commit_banner_for_view(&commit_view, Some(&changes_catalog));
+        assert!(banner.contains("aaaa111"), "{banner}");
+        assert!(banner.contains("Add commit graph"), "{banner}");
+        assert!(banner.contains("data-action=\"graph-commit-select\""), "{banner}");
+        assert!(banner.contains("data-action=\"graph-commit-reset\""), "{banner}");
+        assert_eq!(render_commit_banner_for_view(&view(), None), "");
+
+        assert_eq!(
+            commit_action_target("graph-commit-select", &json!("commit:cccc3333dddd4444")),
+            Some("commit:cccc3333dddd4444".to_owned())
+        );
+        assert_eq!(
+            commit_action_target("graph-commit-reset", &V::Null),
+            Some(String::new())
+        );
+        assert_eq!(
+            commit_action_target("graph-commit-select", &V::Null),
+            None
+        );
     }
 }

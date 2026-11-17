@@ -943,6 +943,10 @@ fn logged(bytes: &[u8], remotes: &[&str]) -> Vec<Value> {
                 fields.next()?,
                 fields.next()?,
             );
+            let parents = parents
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
             Some(json!({
                 "commit": commit,
                 "short": short,
@@ -950,7 +954,8 @@ fn logged(bytes: &[u8], remotes: &[&str]) -> Vec<Value> {
                 "author": author,
                 "at": at.trim().parse::<i64>().ok(),
                 "refs": carried(names, remotes),
-                "merge": parents.split_whitespace().count() > 1,
+                "merge": parents.len() > 1,
+                "parents": parents,
             }))
         })
         .collect()
@@ -1090,7 +1095,15 @@ pub fn log(root: &Path, scope: &str, query: &str, skip: usize) -> Result<(Vec<Va
     let count = format!("--max-count={}", PAGE + 1);
     let skipped = format!("--skip={skip}");
     let wanted = format!("--grep={query}");
-    let mut arguments = vec!["log", "--no-color", "-z", LOGGED, &count, &skipped];
+    let mut arguments = vec![
+        "log",
+        "--no-color",
+        "--topo-order",
+        "-z",
+        LOGGED,
+        &count,
+        &skipped,
+    ];
     if !query.is_empty() {
         arguments.extend(["--fixed-strings", "--regexp-ignore-case", &wanted]);
     }
@@ -1140,6 +1153,23 @@ pub fn log(root: &Path, scope: &str, query: &str, skip: usize) -> Result<(Vec<Va
         }
     }
     Ok((commits, more))
+}
+/// Metadata for a single resolved commit (`commit`, `short`, `subject`,
+/// `author`, `at`, `refs`, `merge`, `parents`), independent of the checked-out
+/// branch or subproject prefix.
+pub(crate) fn commit_info(root: &Path, revision: &str) -> Result<Option<Value>> {
+    let remotes = line(root, &["remote"])?.unwrap_or_default();
+    let remotes = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    let bytes = raw(
+        root,
+        &["log", "--no-color", "-z", "-1", LOGGED, revision, "--"],
+        QUERY,
+    )?;
+    Ok(bytes.and_then(|bytes| logged(&bytes, &remotes).into_iter().next()))
 }
 /// The branches for the picker: local ones, then the remote ones that no
 /// local branch of the same name stands at, each most recent first. `pulls`
@@ -1750,6 +1780,60 @@ mod tests {
         let (rest, more) = log(&repository.folder, "", "", PAGE).unwrap();
         assert_eq!((rest.len(), more), (3, false));
         assert_eq!(rest[2]["commit"], first);
+        assert_eq!(rest[2]["parents"], json!([]));
+    }
+    #[test]
+    fn log_returns_parents_and_topological_order_across_merged_branches() {
+        let repository = Repository::new();
+        let root_commit = repository.git(&["rev-parse", "HEAD"]);
+        repository.git(&["switch", "--quiet", "--create", "side"]);
+        repository.write("src/side.php", "<?php // side 1\n");
+        let side_one = repository.commit("Side one");
+        repository.git(&["switch", "--quiet", "main"]);
+        repository.write("src/main_a.php", "<?php // main 1\n");
+        let main_one = repository.commit("Main one");
+        repository.git(&["switch", "--quiet", "side"]);
+        repository.write("src/side.php", "<?php // side 2\n");
+        let side_two = repository.commit("Side two");
+        repository.git(&["switch", "--quiet", "main"]);
+        repository.git(&["merge", "--no-ff", "--quiet", "-m", "Merge side", "side"]);
+        let merged = repository.git(&["rev-parse", "HEAD"]);
+
+        let (commits, more) = log(&repository.folder, "*", "", 0).unwrap();
+        assert!(!more);
+        assert_eq!(commits.len(), 5);
+        assert_eq!(commits[0]["commit"], merged);
+        assert_eq!(commits[0]["merge"], true);
+        assert_eq!(commits[0]["parents"], json!([main_one, side_two]));
+
+        // Topological order guarantees every commit precedes its parents and
+        // avoids interleaving branch commits before their tips.
+        let pos = |hash: &str| {
+            commits
+                .iter()
+                .position(|c| c["commit"] == hash)
+                .expect("commit present")
+        };
+        assert!(pos(&merged) < pos(&main_one));
+        assert!(pos(&merged) < pos(&side_two));
+        assert!(pos(&side_two) < pos(&side_one));
+        assert!(pos(&main_one) < pos(&root_commit));
+        assert!(pos(&side_one) < pos(&root_commit));
+
+        let side_two_row = &commits[pos(&side_two)];
+        assert_eq!(side_two_row["merge"], false);
+        assert_eq!(side_two_row["parents"], json!([side_one]));
+        let root_row = &commits[pos(&root_commit)];
+        assert_eq!(root_row["parents"], json!([]));
+
+        // `commit_info` works from any subdir and returns the same metadata.
+        let info = commit_info(&repository.folder.join("src"), &side_two)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info["commit"], side_two);
+        assert_eq!(info["subject"], "Side two");
+        assert_eq!(info["parents"], json!([side_one]));
+        assert_eq!(info["merge"], false);
     }
     #[test]
     fn branches_are_listed_local_first_and_a_remote_twin_is_left_out() {
