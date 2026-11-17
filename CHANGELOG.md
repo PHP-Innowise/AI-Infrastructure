@@ -24,6 +24,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness knowledge operations lock per project: one project's Brain or
+  Memory Bank work no longer answers `knowledge-busy` for every other
+  project. Fleet lenses that report progress at once no longer lose the race:
+  a write refused for a stale revision reads the task again (up to eight
+  times). Memory usage gives curation what it needs without carrying Brain
+  text: each promotion proposal its `id`, `source_ids` and an outcome code
+  (`reason`), each retrieval row its `manifest_id`, and `feedback_supported`
+  with the recorded `feedback`. The
+  `retrieval-feedback` action keeps a person's `helped`, `stale` or
+  `harmful` verdict on one delivered item (or `clear`s it) in the Harness
+  store as telemetry only: nothing reads it to rank, admit or pack memory.
 - Say when a running Harness session was not told about an Omnigraph import
   or link: the inbox notice used to be dropped without a word. Each live
   session's outcome comes back in `inbox_notifications` (`notified`, or a

@@ -1560,7 +1560,8 @@ attention.
 
 Opening the view reads project files in the server process. It takes no knowledge
 lock and runs no project code, so it cannot make a linked launch's freshness check
-fail. Only counts, dates, chunk IDs and chunk titles reach the page. Project Brain
+fail. Only counts, dates, chunk IDs, chunk titles, promotion and record IDs,
+outcome codes and retrieval manifest IDs reach the page. Project Brain
 titles and bodies, retrieval queries and non-chunk paths stay on the server, and
 private or restricted records count without their type or status. A Harness
 launch re-checks its context before running, and that re-check counts with its
@@ -1568,6 +1569,11 @@ retrieval. **Check eligibility** is the one request that runs the installed
 runtime's own rules. It names the rule that held back each resolved record and why
 retrieval skips each chunk, writes nothing, and returns 409 while another
 knowledge operation holds the lock.
+
+A person may mark what one retrieval delivered as helped, stale or harmful
+(`retrieval-feedback`, or `clear` to take the mark back). The marks stay in this
+Harness's database, keyed by manifest and item, and come back with the view as
+`feedback`; nothing reads them to rank, admit or pack memory.
 
 Retrieval history outlives the 200 manifests a project keeps. This Harness folds
 each manifest once into a daily rollup in its own database, either when Memory use

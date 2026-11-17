@@ -57,7 +57,9 @@ type ExportCache = VecDeque<(String, Vec<u8>)>;
 pub struct KnowledgeDomain {
     pub store: SessionStore,
     pub source: PathBuf,
-    operation: Arc<Mutex<()>>,
+    /// One operation at a time per project: another project's work is no
+    /// reason to answer "busy".
+    operations: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
     exports: Arc<Mutex<ExportCache>>,
 }
 impl KnowledgeDomain {
@@ -65,9 +67,20 @@ impl KnowledgeDomain {
         Self {
             store,
             source,
-            operation: Arc::new(Mutex::new(())),
+            operations: Arc::new(Mutex::new(BTreeMap::new())),
             exports: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+    /// The lock of one project's knowledge operations.
+    pub fn project_lock(&self, project_id: &str) -> Result<Arc<Mutex<()>>> {
+        let mut locks = self
+            .operations
+            .lock()
+            .map_err(|_| HarnessError::unavailable("Knowledge locks unavailable."))?;
+        Ok(locks
+            .entry(project_id.trim().to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
     }
     pub fn context(
         &self,
@@ -272,7 +285,8 @@ impl KnowledgeDomain {
         work: impl FnOnce(&RuntimeContext) -> Result<T>,
     ) -> Result<T> {
         let _source_frame = core::git::source_frame_scope();
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(session["project_id"].as_str().unwrap_or(""))?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let context = self.bound_context(session)?;
         work(&context)
     }
@@ -448,8 +462,13 @@ impl KnowledgeDomain {
         let _source_frame = core::git::source_frame_scope();
         let action = required(data, "action", 80)?;
         validate_action(action, data)?;
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(project_id)?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let (context, info) = self.selected(project_id, data["bank"].as_str(), workspace)?;
+        if action == "retrieval-feedback" {
+            let bank = info["bank_id"].as_str().unwrap_or("");
+            return record_retrieval_feedback(&self.store, project_id, bank, data);
+        }
         if info["runtime_available"] != true {
             return Err(HarnessError::missing(
                 "The selected knowledge root has no installed native runtime.",
@@ -695,7 +714,8 @@ impl KnowledgeDomain {
         if guard.is_some_and(|(_, cancel)| cancel.load(std::sync::atomic::Ordering::Acquire)) {
             return Err(HarnessError::conflict("Cancellation requested."));
         }
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(session["project_id"].as_str().unwrap_or(""))?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         text(query, "query", 4000)?;
         let project = required(session, "project_id", 200)?;
         let workspace = PathBuf::from(required(session, "project_path", 32768)?);
@@ -810,7 +830,8 @@ impl KnowledgeDomain {
     }
     pub fn verify_prepared(&self, session: &V) -> Result<()> {
         let _source_frame = core::git::source_frame_scope();
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(session["project_id"].as_str().unwrap_or(""))?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let brain = &session["brain"];
         if !brain["context_id"]
             .as_str()
@@ -1074,6 +1095,9 @@ impl KnowledgeDomain {
         let history = self.history(project, info["bank_id"].as_str().unwrap_or(""), &rows)?;
         let found = rows.len();
         payload["retrievals"] = json!({"items":rows.into_iter().rev().take(200).collect::<Vec<_>>().into_iter().rev().map(|mut v|{if let Some(o)=v.as_object_mut(){o.remove("key");}v}).collect::<Vec<_>>(),"found":found,"merged":merged,"limit":200});
+        payload["feedback_supported"] = json!(true);
+        payload["feedback"] =
+            retrieval_feedback(&self.store, project, info["bank_id"].as_str().unwrap_or(""))?;
         payload["history"] = json!({"days":history,"horizon":120});
         payload["health"] = usage_health(&mut files)?;
         payload["check_available"] = json!(info["runtime_available"] == true && !chunks.is_null());
@@ -1218,7 +1242,8 @@ impl KnowledgeDomain {
     }
     fn check(&self, project: &str, bank: Option<&str>) -> Result<V> {
         let (context, info) = self.selected(project, bank, None)?;
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(project)?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let service = BankService::new(context.clone());
         let config = RuntimeConfig::load(&context.roots)?;
         let mut held = BTreeMap::<String, u64>::new();
@@ -1986,7 +2011,8 @@ impl KnowledgeDomain {
             None => "team",
         };
 
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(&effective_project)?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let (context, info) =
             self.selected(&effective_project, bank.as_deref(), workspace.as_deref())?;
         if info["runtime_available"] != true || context.mode != "governed" {
@@ -2320,6 +2346,7 @@ fn validate_action(action: &str, v: &V) -> Result<()> {
         ],
         "export" => &["include_archive", "include_superseded"],
         "turn" => &["task_id"],
+        "retrieval-feedback" => &["manifest_id", "chunk_id", "vote", "note"],
         _ => {
             return Err(HarnessError::invalid(
                 "Select a supported knowledge operation.",
@@ -2983,7 +3010,33 @@ fn usage_promotions(
             })
             .map(|s| json!(s))
             .unwrap_or(V::Null);
-        items.push(json!({"status":p["status"],"mode":if p["review_mode"]=="automatic"{"automatic"}else{"human"},"created_at":usage_moment(&p["created_at"]),"reviewed_at":usage_moment(&p["reviewed_at"]),"applied_at":if p["status"]=="applied"{usage_moment(&p["updated_at"])}else{V::Null},"memory_id":memory}));
+        // What a person needs to act on a proposal: its id and the ids of
+        // the records it comes from. Brain titles and paths stay on the
+        // server, so an outcome reaches the page only as a short code.
+        let id = p["id"]
+            .as_str()
+            .filter(|id| core::domain::is_uuid4(id))
+            .map(|id| json!(id))
+            .unwrap_or(V::Null);
+        let source_ids = p["source_records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["id"].as_str())
+            .filter(|id| core::domain::is_uuid4(id))
+            .collect::<Vec<_>>();
+        let reason = p["outcome"]
+            .as_str()
+            .filter(|reason| {
+                !reason.is_empty()
+                    && reason.len() <= 64
+                    && reason
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            })
+            .map(|reason| json!(reason))
+            .unwrap_or(V::Null);
+        items.push(json!({"id":id,"source_ids":source_ids,"reason":reason,"status":p["status"],"mode":if p["review_mode"]=="automatic"{"automatic"}else{"human"},"created_at":usage_moment(&p["created_at"]),"reviewed_at":usage_moment(&p["reviewed_at"]),"applied_at":if p["status"]=="applied"{usage_moment(&p["updated_at"])}else{V::Null},"memory_id":memory}));
     }
     Ok((json!({"items":items,"truncated":truncated}), promoted))
 }
@@ -3215,7 +3268,12 @@ fn usage_retrievals(
         let task_key = manifest["task_id"].to_string();
         let next = tasks.len();
         let task = *tasks.entry(task_key).or_insert(next);
-        let row = json!({"key":source,"at":at,"version":manifest["schema_version"].as_i64(),"route":route,"task":task,"brain":counts["brain"],"bank":counts["bank"],"rules":counts["rules"],"chunks":chunks,"cuts":cuts,"merged":0});
+        let manifest_id = manifest["id"]
+            .as_str()
+            .filter(|id| retrieval_manifest_id(id))
+            .map(|id| json!(id))
+            .unwrap_or(V::Null);
+        let row = json!({"key":source,"manifest_id":manifest_id,"at":at,"version":manifest["schema_version"].as_i64(),"route":route,"task":task,"brain":counts["brain"],"bank":counts["bank"],"rules":counts["rules"],"chunks":chunks,"cuts":cuts,"merged":0});
         if store == "governed" && reviewed {
             prepared.insert(key, rows.len());
         }
@@ -3260,6 +3318,91 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
     value
 }
 
+/// A retrieval manifest's own id as the runtime writes it.
+fn retrieval_manifest_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+const FEEDBACK_TABLE: &str = "CREATE TABLE IF NOT EXISTS retrieval_feedback(project_id TEXT NOT NULL,bank TEXT NOT NULL,manifest_id TEXT NOT NULL,chunk_id TEXT NOT NULL,vote TEXT NOT NULL,note TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,bank,manifest_id,chunk_id));";
+/// A person's verdict on one delivered item of one retrieval: kept as
+/// Harness telemetry only. Nothing reads it to rank, admit or pack memory.
+fn record_retrieval_feedback(
+    store: &SessionStore,
+    project: &str,
+    bank: &str,
+    data: &V,
+) -> Result<V> {
+    let manifest = data["manifest_id"]
+        .as_str()
+        .filter(|id| retrieval_manifest_id(id))
+        .ok_or_else(|| HarnessError::invalid("Choose a recorded retrieval."))?;
+    let chunk = data["chunk_id"].as_str().unwrap_or("").trim();
+    if chunk.len() > 512 || chunk.chars().any(char::is_control) {
+        return Err(HarnessError::invalid("Choose a delivered item."));
+    }
+    let vote = data["vote"].as_str().unwrap_or("");
+    let note = match data.get("note") {
+        None | Some(V::Null) => None,
+        Some(note) => Some(text(
+            note.as_str()
+                .ok_or_else(|| HarnessError::invalid("Enter a bounded note."))?,
+            "note",
+            500,
+        )?),
+    };
+    let db = store.connection()?;
+    db.execute_batch(FEEDBACK_TABLE).map_err(db_error)?;
+    let updated_at = crate::store::now();
+    if vote == "clear" {
+        db.execute(
+            "DELETE FROM retrieval_feedback WHERE project_id=?1 AND bank=?2 AND manifest_id=?3 AND chunk_id=?4",
+            rusqlite::params![project, bank, manifest, chunk],
+        )
+        .map_err(db_error)?;
+    } else if matches!(vote, "helped" | "stale" | "harmful") {
+        db.execute(
+            "INSERT INTO retrieval_feedback(project_id,bank,manifest_id,chunk_id,vote,note,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(project_id,bank,manifest_id,chunk_id) DO UPDATE SET vote=excluded.vote,note=excluded.note,updated_at=excluded.updated_at",
+            rusqlite::params![project, bank, manifest, chunk, vote, note, updated_at],
+        )
+        .map_err(db_error)?;
+    } else {
+        return Err(HarnessError::invalid(
+            "Choose helped, stale, harmful or clear.",
+        ));
+    }
+    Ok(
+        json!({"ok":true,"action":"retrieval-feedback","result":{"manifest_id":manifest,"chunk_id":chunk,"vote":vote,"note":note,"updated_at":updated_at}}),
+    )
+}
+/// The verdicts recorded for a project's bank, keyed by retrieval and item.
+fn retrieval_feedback(store: &SessionStore, project: &str, bank: &str) -> Result<V> {
+    let db = store.connection()?;
+    db.execute_batch(FEEDBACK_TABLE).map_err(db_error)?;
+    let mut query = db
+        .prepare("SELECT manifest_id,chunk_id,vote,note,updated_at FROM retrieval_feedback WHERE project_id=?1 AND bank=?2 ORDER BY updated_at DESC LIMIT 2000")
+        .map_err(db_error)?;
+    let rows = query
+        .query_map(rusqlite::params![project, bank], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(db_error)?;
+    let mut feedback = serde_json::Map::new();
+    for row in rows {
+        let (manifest, chunk, vote, note, updated_at) = row.map_err(db_error)?;
+        let entry = feedback.entry(manifest).or_insert_with(|| json!({}));
+        entry[chunk] = json!({"vote":vote,"note":note,"updated_at":updated_at});
+    }
+    Ok(V::Object(feedback))
+}
 /// The most items one `knowledge.sync_collect` page carries.
 pub const SYNC_PAGE_LIMIT: usize = 1000;
 fn sync_page(
@@ -3556,6 +3699,86 @@ mod tests {
         assert_eq!(mem_atom["authority"], "verified");
         assert_eq!(mem_atom["memory_id"], "MEM-20261117-aaaa1111");
         assert_eq!(mem_atom["files"], json!(["src/fresh.rs"]));
+    }
+
+    #[test]
+    fn operation_lock_isolates_distinct_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_store, knowledge, project_id, _ctx) =
+            setup_governed_knowledge_project(&tmp.path().join("project"));
+        let other = knowledge.project_lock("another-project").unwrap();
+        let _held = other.try_lock().unwrap();
+        // Another project's operation does not make this one busy.
+        let status = knowledge
+            .run(&project_id, &json!({"action": "retrieval-feedback", "manifest_id": "m-1", "chunk_id": "docs/a.md", "vote": "helped"}), None, true)
+            .unwrap();
+        assert_eq!(status["ok"], true);
+        let own = knowledge.project_lock(&project_id).unwrap();
+        let _held = own.try_lock().unwrap();
+        let busy = knowledge
+            .run(&project_id, &json!({"action": "retrieval-feedback", "manifest_id": "m-1", "chunk_id": "docs/a.md", "vote": "stale"}), None, true)
+            .unwrap_err();
+        assert_eq!(busy.code, "knowledge-busy");
+    }
+
+    #[test]
+    fn usage_promotions_and_retrieval_feedback_carry_what_curation_needs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        let finding = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({"type": "finding", "external_id": "finding-curate-1", "title": "Validate session TTL", "goal": "Short-lived tokens reduce replay risk.", "files": ["src/fresh.rs"], "sources": ["src/fresh.rs"], "privacy": "public", "authority": "verified", "attestation": "person", "json": true}),
+                &[],
+            )
+            .unwrap();
+        let finding_id = finding["id"].as_str().unwrap().to_string();
+        let proposal = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "promote-propose",
+                &json!({"source_ids": [finding_id], "title": "Session TTL rule", "content": "Session tokens live for an hour.", "json": true}),
+                &[],
+            )
+            .unwrap();
+        let usage = knowledge.usage(&project_id, None).unwrap();
+        let item = &usage["promotions"]["items"][0];
+        assert_eq!(item["id"], proposal["id"]);
+        assert_eq!(item["source_ids"], json!([finding_id]));
+        // The proposal's text stays on the server.
+        assert!(item.get("title").is_none());
+        assert!(!usage.to_string().contains("Session TTL rule"));
+        assert_eq!(item["status"], "proposed");
+        assert_eq!(usage["feedback_supported"], true);
+        assert_eq!(usage["feedback"], json!({}));
+
+        let feedback = |vote: &str| {
+            knowledge.run(
+                &project_id,
+                &json!({"action": "retrieval-feedback", "manifest_id": "manifest-1", "chunk_id": "memory-bank/chunks/MEM-1.md", "vote": vote, "note": "Out of date since the TTL change."}),
+                None,
+                true,
+            )
+        };
+        assert_eq!(feedback("harmful").unwrap()["result"]["vote"], "harmful");
+        let recorded = &knowledge.usage(&project_id, None).unwrap()["feedback"];
+        assert_eq!(
+            recorded["manifest-1"]["memory-bank/chunks/MEM-1.md"]["vote"],
+            "harmful"
+        );
+        assert!(feedback("useful").is_err());
+        feedback("clear").unwrap();
+        assert_eq!(
+            knowledge.usage(&project_id, None).unwrap()["feedback"],
+            json!({})
+        );
+        let bad_manifest = knowledge.run(
+            &project_id,
+            &json!({"action": "retrieval-feedback", "manifest_id": "../escape", "chunk_id": "x", "vote": "helped"}),
+            None,
+            true,
+        );
+        assert!(bad_manifest.is_err());
     }
 
     #[test]
