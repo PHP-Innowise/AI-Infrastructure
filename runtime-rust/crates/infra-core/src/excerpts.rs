@@ -461,17 +461,40 @@ pub fn section(
         prefer_head,
     )
 }
+thread_local! {
+    /// One in-memory FTS5 table per thread marks every held image of a
+    /// retrieval; creating the table cost more than marking the text.
+    static HELD_MARKER: std::cell::RefCell<Option<Connection>> =
+        const { std::cell::RefCell::new(None) };
+}
 fn held_marked(image: &IndexedImage, tokens: &[String]) -> Result<String> {
-    let conn = Connection::open_in_memory()?;
-    conn.execute_batch("CREATE VIRTUAL TABLE held USING fts5(path UNINDEXED,layer UNINDEXED,kind UNINDEXED,title,summary,content,tokenize='porter unicode61')")?;
-    conn.execute(
-        "INSERT INTO held VALUES('','','',?1,?2,?3)",
-        params![image.title, image.summary, image.content],
-    )?;
+    HELD_MARKER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let conn = match slot.take() {
+            Some(conn) => conn,
+            None => {
+                let conn = Connection::open_in_memory()?;
+                conn.execute_batch("CREATE VIRTUAL TABLE held USING fts5(path UNINDEXED,layer UNINDEXED,kind UNINDEXED,title,summary,content,tokenize='porter unicode61')")?;
+                conn
+            }
+        };
+        let marked = mark_held(&conn, image, tokens);
+        // A failed statement may leave the row behind: the next image gets a
+        // new table rather than a second row.
+        if marked.is_ok() {
+            *slot = Some(conn);
+        }
+        marked
+    })
+}
+fn mark_held(conn: &Connection, image: &IndexedImage, tokens: &[String]) -> Result<String> {
     use rusqlite::OptionalExtension;
-    Ok(conn
+    conn.prepare_cached("DELETE FROM held")?.execute([])?;
+    conn.prepare_cached("INSERT INTO held VALUES('','','',?1,?2,?3)")?
+        .execute(params![image.title, image.summary, image.content])?;
+    let marked = conn
+        .prepare_cached("SELECT highlight(held,5,?1,?2) FROM held WHERE held MATCH ?3")?
         .query_row(
-            "SELECT highlight(held,5,?1,?2) FROM held WHERE held MATCH ?3",
             params![
                 OPEN.to_string(),
                 CLOSE.to_string(),
@@ -479,8 +502,9 @@ fn held_marked(image: &IndexedImage, tokens: &[String]) -> Result<String> {
             ],
             |row| row.get(0),
         )
-        .optional()?
-        .unwrap_or_else(|| image.content.clone()))
+        .optional()?;
+    conn.prepare_cached("DELETE FROM held")?.execute([])?;
+    Ok(marked.unwrap_or_else(|| image.content.clone()))
 }
 fn answering_stretch(text: &str, tokens: &[String]) -> String {
     let characters = text.chars().collect::<Vec<_>>();
@@ -1423,5 +1447,64 @@ mod constant_pattern_tests {
                 )
             );
         }
+    }
+}
+#[cfg(test)]
+mod held_marker_tests {
+    use super::*;
+
+    /// The marker as it was: a new table for every image.
+    fn fresh(image: &IndexedImage, tokens: &[String]) -> Result<String> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("CREATE VIRTUAL TABLE held USING fts5(path UNINDEXED,layer UNINDEXED,kind UNINDEXED,title,summary,content,tokenize='porter unicode61')")?;
+        mark_held(&conn, image, tokens)
+    }
+
+    #[test]
+    fn held_marked_reuses_thread_local_connection_across_success_and_error() {
+        let image = |title: &str, content: &str| IndexedImage {
+            title: title.into(),
+            summary: String::new(),
+            content: content.into(),
+        };
+        let images = [
+            image("Retry", "The retry queue backs off; queues retry twice."),
+            image("Sessions", "Sessions expire after an hour of inactivity."),
+            image("Straße", "Die Straße wird beim Wiederholen gesperrt."),
+        ];
+        let queries = [
+            vec!["retry".to_string()],
+            vec!["absent".to_string()],
+            vec!["queue".to_string(), "sessions".to_string()],
+            vec!["straße".to_string()],
+        ];
+        for _ in 0..2 {
+            for image in &images {
+                for tokens in &queries {
+                    assert_eq!(
+                        held_marked(image, tokens).unwrap(),
+                        fresh(image, tokens).unwrap()
+                    );
+                }
+            }
+        }
+        // The table is kept between images, and empty between them.
+        HELD_MARKER.with(|cell| {
+            let held = cell.borrow();
+            let conn = held.as_ref().unwrap();
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM held", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 0);
+            conn.execute_batch("DROP TABLE held").unwrap();
+        });
+        // A failed statement gives the connection up, and the next image
+        // gets a new table.
+        assert!(held_marked(&images[0], &queries[0]).is_err());
+        HELD_MARKER.with(|cell| assert!(cell.borrow().is_none()));
+        assert_eq!(
+            held_marked(&images[0], &queries[0]).unwrap(),
+            fresh(&images[0], &queries[0]).unwrap()
+        );
     }
 }

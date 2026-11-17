@@ -149,8 +149,9 @@ fn assert_inventory_find_parity(brain: &BrainRepository, identifiers: &[&str]) {
     for identifier in identifiers {
         for record_type in [None, Some("task"), Some("finding")] {
             for include_archive in [false, true] {
+                let found = find_outcome(brain.find(identifier, record_type, include_archive));
                 assert_eq!(
-                    find_outcome(brain.find(identifier, record_type, include_archive)),
+                    found,
                     find_outcome(inventory_find(
                         brain,
                         identifier,
@@ -158,6 +159,16 @@ fn assert_inventory_find_parity(brain: &BrainRepository, identifiers: &[&str]) {
                         include_archive
                     )),
                     "identifier={identifier:?}, type={record_type:?}, archive={include_archive}",
+                );
+                // A turn's held inventory answers every lookup as a scan does;
+                // a scan that fails fails the lookup the same way.
+                let held = brain
+                    .inventory(include_archive)
+                    .and_then(|inventory| brain.find_in(&inventory, identifier, record_type));
+                assert_eq!(
+                    found,
+                    find_outcome(held),
+                    "held: identifier={identifier:?}, type={record_type:?}, archive={include_archive}",
                 );
             }
         }

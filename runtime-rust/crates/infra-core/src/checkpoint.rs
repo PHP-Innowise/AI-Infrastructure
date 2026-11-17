@@ -35,6 +35,13 @@ impl Default for TurnRequest {
 }
 pub fn active_claimants(context: &RuntimeContext, id: &str) -> Result<Vec<Value>> {
     let inventory = BrainRepository::new(context.clone())?.inventory(false)?;
+    active_claimants_in(&inventory, id)
+}
+/// `active_claimants` over an inventory of the active records.
+pub fn active_claimants_in(
+    inventory: &crate::brain::RecordInventory,
+    id: &str,
+) -> Result<Vec<Value>> {
     if inventory.problems.iter().any(|problem| {
         problem.id.as_deref() == Some(id) || problem.external_id.as_deref() == Some(id)
     }) {
@@ -44,13 +51,13 @@ pub fn active_claimants(context: &RuntimeContext, id: &str) -> Result<Vec<Value>
     }
     let mut tasks = inventory
         .records
-        .into_iter()
+        .iter()
         .filter(|image| {
             image.record["type"] == "task"
                 && image.record["external_id"] == id
                 && !domain::is_terminal("task", image.record["status"].as_str().unwrap_or(""))
         })
-        .map(|image| image.record)
+        .map(|image| image.record.clone())
         .collect::<Vec<_>>();
     tasks.sort_by(|left, right| {
         left["created_at"]
@@ -66,10 +73,24 @@ pub fn served_uuid(
     id: &str,
 ) -> Result<Option<String>> {
     let brain = BrainRepository::new(context.clone())?;
+    let inventory = brain.inventory(false)?;
+    served_uuid_in(store, &brain, &inventory, id)
+}
+/// `served_uuid` over an inventory of the active records, so a turn that
+/// also looks the task up reads the Brain once.
+pub fn served_uuid_in(
+    store: Option<&Store>,
+    brain: &BrainRepository,
+    inventory: &crate::brain::RecordInventory,
+    id: &str,
+) -> Result<Option<String>> {
     if let Some(store) = store
         && let Some(binding) = store.binding(id)?
     {
-        match brain.get_task(&binding.task_uuid) {
+        match brain
+            .find_in(inventory, &binding.task_uuid, Some("task"))
+            .map(|image| image.record)
+        {
             Ok(task) => {
                 if task["external_id"] != binding.external_id {
                     return Err(RuntimeError::conflict(
@@ -84,7 +105,7 @@ pub fn served_uuid(
             Err(error) => return Err(error),
         }
     }
-    Ok(active_claimants(context, id)?
+    Ok(active_claimants_in(inventory, id)?
         .first()
         .and_then(|task| task["id"].as_str())
         .map(String::from))

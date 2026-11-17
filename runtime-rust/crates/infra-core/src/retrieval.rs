@@ -939,10 +939,13 @@ fn retrieve_inner(
         // The record of the bound task was removed with uncommitted files: the
         // turn is served as for a task not recorded yet, knowledge included,
         // and says so.
+        // One read of the active records serves the binding check, the
+        // served task and its lookup.
+        let inventory = brain.inventory(false)?;
         if request.allow_unprovisioned
             && let Some(binding) = store.binding(id)?
             && brain
-                .find(&binding.task_uuid, Some("task"), false)
+                .find_in(&inventory, &binding.task_uuid, Some("task"))
                 .is_err_and(|error| error.kind == ErrorKind::NotFound)
         {
             binding_notices.push(format!(
@@ -950,7 +953,7 @@ fn retrieve_inner(
                 binding.task_uuid
             ));
         }
-        let served = match crate::checkpoint::served_uuid(Some(store), context, id) {
+        let served = match crate::checkpoint::served_uuid_in(Some(store), &brain, &inventory, id) {
             Ok(served) => served.unwrap_or_else(|| id.clone()),
             Err(error) if request.allow_unprovisioned && unreadable_record(&error) => {
                 binding_notices.push(unreadable_notice(&error));
@@ -962,7 +965,7 @@ fn retrieve_inner(
         let found = if unreadable {
             None
         } else {
-            Some(brain.find(&served, Some("task"), false))
+            Some(brain.find_in(&inventory, &served, Some("task")))
         };
         match found {
             None => {}

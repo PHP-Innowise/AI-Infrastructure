@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Read the Project Brain once per retrieval: the binding check, the served
+  task and its lookup share one inventory of the active records
+  (`BrainRepository::find_in`, `checkpoint::served_uuid_in`) instead of
+  scanning it up to three times; a held lookup answers as `find` does,
+  ambiguity, invalid claimants and admission errors included. At 160 records
+  a scan costs about 7 ms in a debug build. Held excerpts are marked in one
+  in-memory FTS5 table per thread instead of a new one per item (204 to 93 µs
+  per item).
 - Recognize a class name after an acronym in a request (`HTTPClient`,
   `APIV2Handler`, `HTTP2Client`) when seeding files the request names; an
   acronym alone (`HTTP`) or plural (`URLs`) is still no class name. Count the
