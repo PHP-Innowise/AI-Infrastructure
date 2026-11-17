@@ -333,8 +333,54 @@ fn clear_knowledge_detail(scope: &str) {
     for field in ["detail-header", "content", "metadata", "content-notice"] {
         dom::hidden(&format!("{scope}-{field}"), true);
     }
+    dom::clear(&format!("{scope}-detail-actions"));
     dom::text(&format!("{scope}-message"), "Choose a record to read.");
     dom::hidden(&format!("{scope}-message"), false);
+}
+
+pub async fn open_from_omnigraph(scope: &str, project_id: &str, target_id: &str) {
+    if !project_id.is_empty() && dom::value(&format!("{scope}-project")) != project_id {
+        session::sync_project(project_id);
+    }
+    if scope == "brain" {
+        dom::set_value("brain-category", "");
+    }
+    dom::set_value(&format!("{scope}-filter"), target_id);
+    m::set(&format!("{scope}-jump-target"), json!(target_id));
+    session::open_view(scope, true).await;
+}
+
+pub fn knowledge_omnigraph_atom_id(scope: &str, record: &V) -> Option<String> {
+    let id = record["id"]
+        .as_str()
+        .or_else(|| record["metadata"]["id"].as_str())
+        .unwrap_or("")
+        .trim();
+    if id.is_empty() {
+        return None;
+    }
+    match scope {
+        "brain" => Some(format!("brain-{id}")),
+        "memory" => Some(format!("mem-{id}")),
+        _ => None,
+    }
+}
+
+pub fn render_detail_omnigraph_action_html(scope: &str, project_id: &str, record: &V) -> String {
+    let Some(atom_id) = knowledge_omnigraph_atom_id(scope, record) else {
+        return String::new();
+    };
+    let payload = json!({
+        "project_id": project_id,
+        "atom_id": atom_id,
+    })
+    .to_string();
+    format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"knowledge-open-omnigraph\" data-project-id=\"{}\" data-atom-id=\"{}\" data-payload=\"{}\">Open in Context Graph</button>",
+        crate::omnigraph::esc(project_id),
+        crate::omnigraph::esc(&atom_id),
+        crate::omnigraph::esc(&payload)
+    )
 }
 fn clear_knowledge_summary(scope: &str, clear_banks: bool) {
     if scope == "memory" {
@@ -482,10 +528,21 @@ pub async fn load(scope: &str, bank_changed: bool) {
             if !knowledge_current(scope, &p, &current_bank, view_generation) {
                 return;
             }
+            let jump = m::take(&format!("{scope}-jump-target"))
+                .as_str()
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty());
             let entries = m::array(&v["entries"]);
-            let selected = entries
-                .iter()
-                .find(|x| x["path"] == selected)
+            let selected = jump
+                .as_deref()
+                .and_then(|target| {
+                    entries.iter().find(|x| {
+                        x["id"].as_str() == Some(target)
+                            || x["external_id"].as_str() == Some(target)
+                            || m::text(x, "path").contains(target)
+                    })
+                })
+                .or_else(|| entries.iter().find(|x| x["path"] == selected))
                 .or_else(|| {
                     entries.iter().find(|x| {
                         if scope == "memory" {
@@ -682,6 +739,9 @@ async fn select(scope: &str, path: &str) {
                     m::string(&v["revision"])
                 ),
             );
+            if let Some(el) = dom::get(&format!("{scope}-detail-actions")) {
+                el.set_inner_html(&render_detail_omnigraph_action_html(scope, &project, &v));
+            }
             let content = m::text(&v, "content");
             let normalized = content.replace("\r\n", "\n");
             let (metadata, body) = if let Some(after) = normalized.strip_prefix("---\n") {
@@ -1040,13 +1100,67 @@ pub fn linked_controls() {
         },
     );
 }
+pub fn render_linked_omnigraph_html(session: &V) -> (bool, String) {
+    let metrics = crate::omnigraph::session_bar_metrics(session);
+    if !metrics.enabled {
+        return (false, String::new());
+    }
+    let waiting = session["status"] == "awaiting_context";
+    let capsule_text = m::text(&session["omnigraph"], "capsule_text");
+    let mut badges = format!(
+        "<span class=\"omni-badge\" data-kind=\"branch\">{}</span><span class=\"omni-meta-pill\">{} atom(s)</span><span class=\"omni-meta-pill\">{} / {} chars</span>",
+        crate::omnigraph::esc(&metrics.branch),
+        metrics.atom_count,
+        crate::omnigraph::format_count(metrics.capsule_chars),
+        crate::omnigraph::format_count(metrics.capsule_limit)
+    );
+    if metrics.verified_count > 0 {
+        badges.push_str(&format!(
+            "<span class=\"omni-badge\" data-kind=\"success\">{} verified</span>",
+            metrics.verified_count
+        ));
+    }
+    if metrics.unverified_count > 0 {
+        badges.push_str(&format!(
+            "<span class=\"omni-badge\" data-kind=\"warning\">{} unverified reference</span>",
+            metrics.unverified_count
+        ));
+    }
+    if waiting {
+        badges.push_str("<span class=\"omni-meta-pill\">Included before run</span>");
+    }
+    let warning_note = if metrics.unverified_count > 0 {
+        "<p class=\"knowledge-note linked-omnigraph-warning\">Contains unverified reference atoms; verify claims against repository files, Project Brain, and Memory Bank.</p>"
+    } else {
+        ""
+    };
+    let preview = if capsule_text.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<details class=\"linked-omnigraph-preview\"><summary>Omnigraph capsule preview ({} / {} chars)</summary><pre class=\"knowledge-result\" tabindex=\"0\">{}</pre></details>",
+            crate::omnigraph::format_count(metrics.capsule_chars),
+            crate::omnigraph::format_count(metrics.capsule_limit),
+            crate::omnigraph::esc(&capsule_text)
+        )
+    };
+    let html = format!(
+        "<div class=\"linked-omnigraph-head\"><div class=\"linked-omnigraph-title\"><strong>Brain + Omnigraph context</strong><div class=\"linked-omnigraph-badges\">{badges}</div></div><button type=\"button\" class=\"button compact\" data-action=\"session-omnigraph-open\">Open in Graph ↗</button></div>{warning_note}{preview}"
+    );
+    (true, html)
+}
+
 pub fn render_linked(session: &V) {
     let brain = &session["brain"];
     dom::hidden("linked-context", !brain.is_object());
     if !brain.is_object() {
+        dom::class("linked-context", "linked-context-review", false);
+        dom::hidden("linked-omnigraph-summary", true);
+        dom::clear("linked-omnigraph-summary");
         return;
     }
     let waiting = session["status"] == "awaiting_context";
+    dom::class("linked-context", "linked-context-review", waiting);
     dom::text(
         "linked-context-title",
         if waiting {
@@ -1079,6 +1193,11 @@ pub fn render_linked(session: &V) {
             serde_json::to_string_pretty(&brain["capsule"]).unwrap_or_default()
         },
     );
+    let (show_omni, omni_html) = render_linked_omnigraph_html(session);
+    dom::hidden("linked-omnigraph-summary", !show_omni);
+    if let Some(el) = dom::get("linked-omnigraph-summary") {
+        el.set_inner_html(&omni_html);
+    }
     dom::hidden("linked-context-form", brain["review"] == false);
     dom::hidden("linked-context-run", !waiting);
     dom::disabled(
@@ -1498,7 +1617,7 @@ fn render_memory() {
         m::set("memory-visible-since", json!(js_sys::Date::now()));
     }
 }
-pub fn usage(v: &V) {
+pub fn context_turns_model(v: &V) -> Vec<V> {
     let launches = m::array(&v["launches"]);
     let mut turns = vec![];
     let mut earlier = 0.0;
@@ -1516,7 +1635,8 @@ pub fn usage(v: &V) {
         let brain = m::number(&capsule["kinds"]["brain"]).unwrap_or(0.) / 3.6;
         let bank = m::number(&capsule["kinds"]["bank"]).unwrap_or(0.) / 3.6;
         let rules = m::number(&capsule["kinds"]["rules"]).unwrap_or(0.) / 3.6 + chars / 4.7;
-        let memory = brain + bank + rules;
+        let omnigraph = m::number(&ledger["omnigraph"]).unwrap_or(0.) / 3.6;
+        let memory = brain + bank + rules + omnigraph;
         let start = m::number(&fill["start"]);
         let end = m::number(&fill["end"]);
         let window = m::number(&fill["window"]);
@@ -1528,7 +1648,7 @@ pub fn usage(v: &V) {
             start.zip(end).map(|(a, b)| b - a)
         };
         let free = window.zip(end).map(|(w, e)| w - e);
-        let t = json!({"id":launch["id"],"ordinal":turns.len()+1,"at":launch["started_at"],"start":fill["start"],"end":fill["end"],"window":fill["window"],"peak":fill["peak"],"calls":fill["calls"],"cache":fill["cache_share"],"recorded":ledger.is_object(),"memory":memory,"parts":{"brain":brain,"bank":bank,"rules":rules,"rest":rest,"added":added,"free":free},"earlier_memory_upper_bound":if prior_unknown{V::Null}else{json!(earlier)},"compactions":fill["compactions"],"ledger":ledger,"hooks":context["hooks"],"cli_files":context["cli_files"]});
+        let t = json!({"id":launch["id"],"ordinal":turns.len()+1,"at":launch["started_at"],"start":fill["start"],"end":fill["end"],"window":fill["window"],"peak":fill["peak"],"calls":fill["calls"],"cache":fill["cache_share"],"recorded":ledger.is_object(),"memory":memory,"parts":{"brain":brain,"bank":bank,"rules":rules,"omnigraph":omnigraph,"rest":rest,"added":added,"free":free},"earlier_memory_upper_bound":if prior_unknown{V::Null}else{json!(earlier)},"compactions":fill["compactions"],"ledger":ledger,"hooks":context["hooks"],"cli_files":context["cli_files"]});
         if compacted {
             earlier = 0.;
             prior_unknown = false;
@@ -1540,6 +1660,10 @@ pub fn usage(v: &V) {
         }
         turns.push(t);
     }
+    turns
+}
+pub fn usage(v: &V) {
+    let turns = context_turns_model(v);
     m::set("context-turns", json!(turns));
     render_usage();
 }
@@ -1574,7 +1698,7 @@ fn render_usage() {
     dom::append("context-usage",&dom::el("p","knowledge-note",&format!("Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",turn["memory"].as_f64().unwrap_or(0.))));
     let bar = dom::el("div", "context-bar", "");
     let _ = bar.set_attribute("role", "img");
-    for kind in ["brain", "bank", "rules", "rest", "added"] {
+    for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
         let compacted = !m::array(&turn["compactions"]).is_empty();
         let value = if compacted {
             if kind == "added" {
@@ -1582,7 +1706,9 @@ fn render_usage() {
             } else {
                 0.
             }
-        } else if turn["parts"]["rest"].is_null() && ["brain", "bank", "rules"].contains(&kind) {
+        } else if turn["parts"]["rest"].is_null()
+            && ["brain", "bank", "rules", "omnigraph"].contains(&kind)
+        {
             0.
         } else {
             m::number(&turn["parts"][kind]).unwrap_or(0.)
@@ -1603,7 +1729,15 @@ fn render_usage() {
     }
     dom::append("context-usage", &bar);
     let legend = dom::el("table", "context-legend", "");
-    for kind in ["brain", "bank", "rules", "rest", "added", "free"] {
+    for kind in [
+        "brain",
+        "bank",
+        "rules",
+        "omnigraph",
+        "rest",
+        "added",
+        "free",
+    ] {
         let row = dom::el("tr", "", "");
         dom::add(&row, &dom::el("th", "", &m::label(kind)));
         dom::add(
@@ -1615,7 +1749,7 @@ fn render_usage() {
                     .map(|n| {
                         format!(
                             "{} {n:.0}",
-                            if ["brain", "bank", "rules", "rest"].contains(&kind) {
+                            if ["brain", "bank", "rules", "omnigraph", "rest"].contains(&kind) {
                                 "≈"
                             } else {
                                 ""
@@ -1931,6 +2065,22 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             render_usage();
         }
         "context-meter" => session::open_view("usage", true).await,
+        "knowledge-open-omnigraph" => {
+            let project = payload["project_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    let p = dom::value("brain-project");
+                    if p.is_empty() {
+                        dom::value("memory-project")
+                    } else {
+                        p
+                    }
+                });
+            let atom_id = payload["atom_id"].as_str().unwrap_or("").trim().to_owned();
+            crate::omnigraph::open_knowledge_atom(&project, &atom_id).await;
+        }
         _ => return false,
     }
     true
@@ -2664,7 +2814,10 @@ fn memory_changes(data: &V, before: &V) {
 
 #[cfg(test)]
 mod tests {
-    use super::memory_stage_metrics;
+    use super::{
+        context_turns_model, memory_stage_metrics, render_detail_omnigraph_action_html,
+        render_linked_omnigraph_html,
+    };
     use serde_json::json;
 
     #[test]
@@ -2719,5 +2872,98 @@ mod tests {
             ]
         );
         assert!(memory_stage_metrics("brain", &json!(null)).is_none());
+    }
+
+    #[test]
+    fn context_turns_model_includes_omnigraph_ledger_characters() {
+        let usage = json!({
+            "launches": [
+                {
+                    "id": "l1",
+                    "kind": "native",
+                    "started_at": "2026-11-17T09:00:00Z",
+                    "context": {
+                        "fill": { "start": 5000, "end": 6200, "window": 100000 },
+                        "ledger": {
+                            "capsule": { "kinds": { "brain": 360, "bank": 720, "rules": 180 } },
+                            "excerpts": [],
+                            "omnigraph": 1800
+                        }
+                    }
+                },
+                {
+                    "id": "l2",
+                    "kind": "native",
+                    "started_at": "2026-11-17T09:05:00Z",
+                    "context": {
+                        "fill": { "start": 1000, "end": 1200, "window": 100000 },
+                        "ledger": {
+                            "capsule": { "kinds": { "brain": 360, "bank": 0, "rules": 0 } },
+                            "excerpts": []
+                        }
+                    }
+                }
+            ]
+        });
+        let turns = context_turns_model(&usage);
+        assert_eq!(turns.len(), 2);
+        let t1 = &turns[0];
+        assert!((t1["parts"]["brain"].as_f64().unwrap() - 100.0).abs() < 1e-6);
+        assert!((t1["parts"]["bank"].as_f64().unwrap() - 200.0).abs() < 1e-6);
+        assert!((t1["parts"]["rules"].as_f64().unwrap() - 50.0).abs() < 1e-6);
+        assert!((t1["parts"]["omnigraph"].as_f64().unwrap() - 500.0).abs() < 1e-6);
+        assert!((t1["memory"].as_f64().unwrap() - 850.0).abs() < 1e-6);
+        assert!((t1["parts"]["rest"].as_f64().unwrap() - 4150.0).abs() < 1e-6);
+
+        let t2 = &turns[1];
+        assert!((t2["parts"]["omnigraph"].as_f64().unwrap() - 0.0).abs() < 1e-6);
+        assert!((t2["memory"].as_f64().unwrap() - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linked_omnigraph_summary_renders_review_metrics_and_unverified_warning() {
+        let disabled = json!({ "status": "awaiting_context", "omnigraph": { "enabled": false } });
+        assert!(!render_linked_omnigraph_html(&disabled).0);
+
+        let session = json!({
+            "status": "awaiting_context",
+            "omnigraph": {
+                "enabled": true,
+                "branch": "session/auth-1",
+                "capsule_text": "## Omnigraph Shared Context\n- [unverified reference] Avoid raw tokens",
+                "injected_atoms": [
+                    { "id": "a1", "title": "Brain rule", "verified": true },
+                    { "id": "a2", "title": "Draft note", "verified": false }
+                ]
+            }
+        });
+        let (show, html) = render_linked_omnigraph_html(&session);
+        assert!(show);
+        assert!(html.contains("session/auth-1"));
+        assert!(html.contains("2 atom(s)"));
+        assert!(html.contains("69 / 6,000 chars"));
+        assert!(html.contains("1 verified"));
+        assert!(html.contains("1 unverified reference"));
+        assert!(html.contains("Included before run"));
+        assert!(html.contains("Omnigraph capsule preview"));
+    }
+
+    #[test]
+    fn knowledge_detail_action_renders_open_in_context_graph_button() {
+        let brain_rec = json!({ "id": "rec-uuid-123", "title": "Auth decision" });
+        let brain_html = render_detail_omnigraph_action_html("brain", "proj-1", &brain_rec);
+        assert!(brain_html.contains("data-action=\"knowledge-open-omnigraph\""));
+        assert!(brain_html.contains("data-project-id=\"proj-1\""));
+        assert!(brain_html.contains("data-atom-id=\"brain-rec-uuid-123\""));
+        assert!(brain_html.contains("Open in Context Graph"));
+
+        let mem_chunk = json!({ "id": "MEM-20261117-abcd1234-auth", "title": "Token rules" });
+        let mem_html = render_detail_omnigraph_action_html("memory", "proj-1", &mem_chunk);
+        assert!(mem_html.contains("data-action=\"knowledge-open-omnigraph\""));
+        assert!(mem_html.contains("data-project-id=\"proj-1\""));
+        assert!(mem_html.contains("data-atom-id=\"mem-MEM-20261117-abcd1234-auth\""));
+
+        let no_id = json!({ "title": "INDEX.md" });
+        assert!(render_detail_omnigraph_action_html("memory", "proj-1", &no_id).is_empty());
     }
 }

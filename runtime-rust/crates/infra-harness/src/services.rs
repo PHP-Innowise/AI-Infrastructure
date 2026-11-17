@@ -41,6 +41,53 @@ impl NativeServices {
                 .await;
         }
     }
+    async fn best_effort_sync_knowledge(
+        &self,
+        project_id: &str,
+        bank: Option<&str>,
+        session_id: Option<&str>,
+    ) {
+        if project_id.trim().is_empty() {
+            return;
+        }
+        let (Some(knowledge), Some(omnigraph)) =
+            (self.domains.get("knowledge"), self.domains.get("omnigraph"))
+        else {
+            return;
+        };
+        if let Ok(Payload::Json(status)) = omnigraph
+            .execute(
+                "omnigraph.status",
+                json!({"params":{},"body":{},"query":{"project_id":project_id}}),
+            )
+            .await
+            && (status["mode"] == "off" || status["state"] == "unconfigured")
+        {
+            return;
+        }
+        let mut collect_body = json!({"project_id": project_id});
+        if let Some(b) = bank.map(str::trim).filter(|s| !s.is_empty()) {
+            collect_body["bank"] = json!(b);
+        }
+        if let Some(s) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            collect_body["session_id"] = json!(s);
+        }
+        let Ok(Payload::Json(collected)) = knowledge
+            .execute(
+                "knowledge.sync_collect",
+                json!({"params":{"project_id":project_id},"query":{},"body":collect_body}),
+            )
+            .await
+        else {
+            return;
+        };
+        let _ = omnigraph
+            .execute(
+                "omnigraph.sync_items",
+                json!({"params":{},"query":{},"body":{"project_id":project_id,"items":collected["items"]}}),
+            )
+            .await;
+    }
     pub fn new(
         store: SessionStore,
         domains: BTreeMap<String, Arc<dyn Domain>>,
@@ -89,257 +136,474 @@ impl Services for NativeServices {
     }
     fn request<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
         Box::pin(async move {
-            if let Some(domain) = self.overrides.get(operation) {
-                return domain.execute(operation, request).await;
-            }
             let params = &request["params"];
             let query = &request["query"];
             let body = &request["body"];
             let sid = params["session_id"].as_str().unwrap_or("");
-            match operation {
-                "bootstrap" => {
-                    let mut data = (self.bootstrap)()?;
-                    if let Some(graph) = self.domains.get("graph") {
-                        let _ = graph
-                            .execute(
-                                "graph.auto_start_all",
-                                json!({"params":{},"body":{},"query":{}}),
-                            )
-                            .await;
+            let payload = if let Some(domain) = self.overrides.get(operation) {
+                domain.execute(operation, request.clone()).await?
+            } else {
+                match operation {
+                    "bootstrap" => {
+                        let mut data = (self.bootstrap)()?;
+                        if let Some(graph) = self.domains.get("graph") {
+                            let _ = graph
+                                .execute(
+                                    "graph.auto_start_all",
+                                    json!({"params":{},"body":{},"query":{}}),
+                                )
+                                .await;
+                        }
+                        if let Some(omnigraph) = self.domains.get("omnigraph")
+                            && let Ok(Payload::Json(status)) = omnigraph
+                                .execute(
+                                    "omnigraph.status",
+                                    json!({"params":{},"body":{},"query":{}}),
+                                )
+                                .await
+                            && status.get("state").is_some()
+                        {
+                            data["omnigraph"] = status;
+                        }
+                        Payload::Json(data)
                     }
-                    if let Some(omnigraph) = self.domains.get("omnigraph")
-                        && let Ok(Payload::Json(status)) = omnigraph
-                            .execute(
-                                "omnigraph.status",
-                                json!({"params":{},"body":{},"query":{}}),
-                            )
-                            .await
-                        && status.get("state").is_some()
-                    {
-                        data["omnigraph"] = status;
-                    }
-                    Ok(Payload::Json(data))
-                }
-                "sessions.list" => {
-                    if let Some(project_id) = query["project_id"]
-                        .as_str()
-                        .or_else(|| params["project_id"].as_str())
-                        .filter(|id| !id.is_empty())
-                    {
-                        self.auto_start_graph(project_id).await;
-                    }
-                    Ok(Payload::Json(json!({"sessions":self.store.summaries()?})))
-                }
-                "sessions.get" => {
-                    let after = query["after"]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse::<i64>()
-                        .map_err(|_| HarnessError::invalid("Invalid event cursor."))?;
-                    let (mut session, events) = self.store.session_events(sid, after)?;
-                    session["graph_focus"] =
-                        crate::graph_live::session_focus_value(&self.store, sid)?;
-                    if after == 0
-                        && let Some(project_id) = session["project_id"].as_str()
-                    {
-                        self.auto_start_graph(project_id).await;
-                    }
-                    Ok(Payload::Json(json!({"session":session,"events":events})))
-                }
-                "sessions.merge_archive" => Ok(Payload::Json(self.store.merge_archive(sid)?)),
-                "sessions.delete_merge" => {
-                    if !crate::store::exact(body, &[], &[]) {
-                        return Err(HarnessError::invalid(
-                            "Invalid saved context deletion request.",
-                        ));
-                    }
-                    Ok(Payload::Json(
-                        json!({"session":self.store.delete_merge(sid)?}),
-                    ))
-                }
-                "sessions.report" => {
-                    let session = self.store.get(sid)?;
-                    if session["status"] != "completed" {
-                        return Err(HarnessError::conflict(
-                            "An approved Fleet report is not available.",
-                        ));
-                    }
-                    let text = session["fleet_result"]["report"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| {
-                            HarnessError::missing("An approved Fleet report is not available.")
-                        })?;
-                    Ok(Payload::Bytes {
-                        bytes: text.as_bytes().to_vec(),
-                        content_type: "text/markdown; charset=utf-8".into(),
-                        filename: None,
-                        etag: None,
-                        cache: None,
-                    })
-                }
-                "attachments.read" => {
-                    let (item, bytes, _) = crate::attachments::read(
-                        &self.store,
-                        sid,
-                        params["id"].as_str().unwrap_or(""),
-                    )?;
-                    Ok(Payload::Bytes {
-                        bytes,
-                        content_type: "application/octet-stream".into(),
-                        filename: item["name"].as_str().map(String::from),
-                        etag: None,
-                        cache: None,
-                    })
-                }
-                "projects.list" => Ok(Payload::Json(
-                    json!({"projects":(self.bootstrap)()?["projects"]}),
-                )),
-                "projects.add" => {
-                    if !crate::store::exact(body, &["path"], &[]) {
-                        return Err(HarnessError::invalid(
-                            "Invalid project registration request.",
-                        ));
-                    }
-                    let project = self.store.register(std::path::Path::new(
-                        body["path"]
+                    "sessions.list" => {
+                        if let Some(project_id) = query["project_id"]
                             .as_str()
-                            .ok_or_else(|| HarnessError::invalid("Invalid project folder."))?,
-                    ))?;
-                    self.domains["accelerators"]
-                        .execute(
-                            "accelerators.registered",
-                            json!({"params":{"project_id":project["id"]},"body":{},"query":{}}),
-                        )
-                        .await?;
-                    self.auto_start_graph(project["id"].as_str().unwrap_or(""))
-                        .await;
-                    Ok(Payload::Json(
-                        json!({"project":project,"projects":(self.bootstrap)()?["projects"]}),
-                    ))
-                }
-                "projects.select" => {
-                    let project_id = params["project_id"]
-                        .as_str()
-                        .or_else(|| body["project_id"].as_str())
-                        .ok_or_else(|| HarnessError::invalid("Invalid project selection."))?;
-                    let project = self.store.project(project_id)?;
-                    self.auto_start_graph(project_id).await;
-                    Ok(Payload::Json(json!({"project":project})))
-                }
-                "graph.status" => {
-                    if query["check"].as_str() == Some("1") {
-                        self.auto_start_graph(params["project_id"].as_str().unwrap_or(""))
-                            .await;
+                            .or_else(|| params["project_id"].as_str())
+                            .filter(|id| !id.is_empty())
+                        {
+                            self.auto_start_graph(project_id).await;
+                        }
+                        Payload::Json(json!({"sessions":self.store.summaries()?}))
                     }
-                    self.domains
-                        .get("graph")
-                        .ok_or_else(|| {
-                            HarnessError::unavailable("Required native service is unavailable.")
-                        })?
-                        .execute(operation, request)
-                        .await
-                }
-                "sdd.artifacts" => {
-                    let session = self.store.get(sid)?;
-                    if session["sdd"].is_null() {
-                        return Err(HarnessError::invalid("This session does not use SDD."));
+                    "sessions.get" => {
+                        let after = query["after"]
+                            .as_str()
+                            .unwrap_or("0")
+                            .parse::<i64>()
+                            .map_err(|_| HarnessError::invalid("Invalid event cursor."))?;
+                        let (mut session, events) = self.store.session_events(sid, after)?;
+                        session["graph_focus"] =
+                            crate::graph_live::session_focus_value(&self.store, sid)?;
+                        if after == 0
+                            && let Some(project_id) = session["project_id"].as_str()
+                        {
+                            self.auto_start_graph(project_id).await;
+                        }
+                        Payload::Json(json!({"session":session,"events":events}))
                     }
-                    Ok(Payload::Json(
-                        json!({"session_id":sid,"sdd":session["sdd"],"files":crate::sdd::artifacts(std::path::Path::new(session["project_path"].as_str().unwrap_or("")),&session["sdd"])?}),
-                    ))
-                }
-                "omnigraph.branch_act" => {
-                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
-                        HarnessError::unavailable("Required native service is unavailable.")
-                    })?;
-                    let mut payload = domain.execute(operation, request.clone()).await?;
-                    if let Payload::Json(ref mut val) = payload
-                        && let Some(updated_session) =
-                            crate::sessions::sync_omnigraph_merge_to_session(
-                                &self.store,
-                                &request["body"],
-                                val,
-                            )
-                    {
-                        val["session"] = updated_session;
+                    "sessions.merge_archive" => Payload::Json(self.store.merge_archive(sid)?),
+                    "sessions.delete_merge" => {
+                        if !crate::store::exact(body, &[], &[]) {
+                            return Err(HarnessError::invalid(
+                                "Invalid saved context deletion request.",
+                            ));
+                        }
+                        Payload::Json(json!({"session":self.store.delete_merge(sid)?}))
                     }
-                    Ok(payload)
-                }
-                "omnigraph.share" => {
-                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
-                        HarnessError::unavailable("Required native service is unavailable.")
-                    })?;
-                    let mut payload = domain.execute(operation, request.clone()).await?;
-                    if let Payload::Json(ref mut val) = payload
-                        && let Some(updated_session) =
-                            crate::sessions::sync_omnigraph_share_to_session(
-                                &self.store,
-                                domain.as_ref(),
-                                &request["body"],
-                                val,
-                            )
-                            .await
-                    {
-                        val["session"] = updated_session;
+                    "sessions.report" => {
+                        let session = self.store.get(sid)?;
+                        if session["status"] != "completed" {
+                            return Err(HarnessError::conflict(
+                                "An approved Fleet report is not available.",
+                            ));
+                        }
+                        let text = session["fleet_result"]["report"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| {
+                                HarnessError::missing("An approved Fleet report is not available.")
+                            })?;
+                        Payload::Bytes {
+                            bytes: text.as_bytes().to_vec(),
+                            content_type: "text/markdown; charset=utf-8".into(),
+                            filename: None,
+                            etag: None,
+                            cache: None,
+                        }
                     }
-                    Ok(payload)
-                }
-                "omnigraph.import" => {
-                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
-                        HarnessError::unavailable("Required native service is unavailable.")
-                    })?;
-                    let mut payload = domain.execute(operation, request.clone()).await?;
-                    if let Payload::Json(ref mut val) = payload {
-                        let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
-                        let updated_sessions = crate::sessions::sync_omnigraph_import_to_sessions(
+                    "attachments.read" => {
+                        let (item, bytes, _) = crate::attachments::read(
                             &self.store,
-                            sessions_domain,
-                            &request["body"],
-                            val,
+                            sid,
+                            params["id"].as_str().unwrap_or(""),
+                        )?;
+                        Payload::Bytes {
+                            bytes,
+                            content_type: "application/octet-stream".into(),
+                            filename: item["name"].as_str().map(String::from),
+                            etag: None,
+                            cache: None,
+                        }
+                    }
+                    "projects.list" => {
+                        Payload::Json(json!({"projects":(self.bootstrap)()?["projects"]}))
+                    }
+                    "projects.add" => {
+                        if !crate::store::exact(body, &["path"], &[]) {
+                            return Err(HarnessError::invalid(
+                                "Invalid project registration request.",
+                            ));
+                        }
+                        let project = self.store.register(std::path::Path::new(
+                            body["path"]
+                                .as_str()
+                                .ok_or_else(|| HarnessError::invalid("Invalid project folder."))?,
+                        ))?;
+                        self.domains["accelerators"]
+                            .execute(
+                                "accelerators.registered",
+                                json!({"params":{"project_id":project["id"]},"body":{},"query":{}}),
+                            )
+                            .await?;
+                        self.auto_start_graph(project["id"].as_str().unwrap_or(""))
+                            .await;
+                        Payload::Json(
+                            json!({"project":project,"projects":(self.bootstrap)()?["projects"]}),
                         )
-                        .await;
-                        if !updated_sessions.is_empty() {
-                            val["session"] = updated_sessions[0].clone();
+                    }
+                    "projects.select" => {
+                        let project_id = params["project_id"]
+                            .as_str()
+                            .or_else(|| body["project_id"].as_str())
+                            .ok_or_else(|| HarnessError::invalid("Invalid project selection."))?;
+                        let project = self.store.project(project_id)?;
+                        self.auto_start_graph(project_id).await;
+                        Payload::Json(json!({"project":project}))
+                    }
+                    "graph.status" => {
+                        if query["check"].as_str() == Some("1") {
+                            self.auto_start_graph(params["project_id"].as_str().unwrap_or(""))
+                                .await;
+                        }
+                        self.domains
+                            .get("graph")
+                            .ok_or_else(|| {
+                                HarnessError::unavailable("Required native service is unavailable.")
+                            })?
+                            .execute(operation, request.clone())
+                            .await?
+                    }
+                    "sdd.artifacts" => {
+                        let session = self.store.get(sid)?;
+                        if session["sdd"].is_null() {
+                            return Err(HarnessError::invalid("This session does not use SDD."));
+                        }
+                        Payload::Json(
+                            json!({"session_id":sid,"sdd":session["sdd"],"files":crate::sdd::artifacts(std::path::Path::new(session["project_path"].as_str().unwrap_or("")),&session["sdd"])?}),
+                        )
+                    }
+                    "omnigraph.branch_act" => {
+                        let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let mut payload = domain.execute(operation, request.clone()).await?;
+                        if let Payload::Json(ref mut val) = payload
+                            && let Some(updated_session) =
+                                crate::sessions::sync_omnigraph_merge_to_session(
+                                    &self.store,
+                                    &request["body"],
+                                    val,
+                                )
+                        {
+                            val["session"] = updated_session;
+                        }
+                        payload
+                    }
+                    "omnigraph.share" => {
+                        let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let mut payload = domain.execute(operation, request.clone()).await?;
+                        if let Payload::Json(ref mut val) = payload
+                            && let Some(updated_session) =
+                                crate::sessions::sync_omnigraph_share_to_session(
+                                    &self.store,
+                                    domain.as_ref(),
+                                    &request["body"],
+                                    val,
+                                )
+                                .await
+                        {
+                            val["session"] = updated_session;
+                        }
+                        payload
+                    }
+                    "omnigraph.import" => {
+                        let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let mut payload = domain.execute(operation, request.clone()).await?;
+                        if let Payload::Json(ref mut val) = payload {
+                            let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
+                            let updated_sessions =
+                                crate::sessions::sync_omnigraph_import_to_sessions(
+                                    &self.store,
+                                    sessions_domain,
+                                    &request["body"],
+                                    val,
+                                )
+                                .await;
+                            if !updated_sessions.is_empty() {
+                                val["session"] = updated_sessions[0].clone();
+                                val["sessions"] = Value::Array(updated_sessions);
+                            }
+                        }
+                        payload
+                    }
+                    "omnigraph.link_sessions" => {
+                        let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let mut payload = domain.execute(operation, request.clone()).await?;
+                        if let Payload::Json(ref mut val) = payload {
+                            let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
+                            let updated_sessions =
+                                crate::sessions::sync_omnigraph_link_to_sessions(
+                                    &self.store,
+                                    sessions_domain,
+                                    &request["body"],
+                                    val,
+                                )
+                                .await;
+                            if let Some(first) = updated_sessions.first() {
+                                val["session"] = first.clone();
+                            }
                             val["sessions"] = Value::Array(updated_sessions);
                         }
+                        payload
                     }
-                    Ok(payload)
-                }
-                "omnigraph.link_sessions" => {
-                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
-                        HarnessError::unavailable("Required native service is unavailable.")
-                    })?;
-                    let mut payload = domain.execute(operation, request.clone()).await?;
-                    if let Payload::Json(ref mut val) = payload {
-                        let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
-                        let updated_sessions = crate::sessions::sync_omnigraph_link_to_sessions(
-                            &self.store,
-                            sessions_domain,
-                            &request["body"],
-                            val,
-                        )
-                        .await;
-                        if let Some(first) = updated_sessions.first() {
-                            val["session"] = first.clone();
-                        }
-                        val["sessions"] = Value::Array(updated_sessions);
-                    }
-                    Ok(payload)
-                }
-                _ => {
-                    let (group, _) = operation.split_once('.').ok_or_else(|| {
-                        HarnessError::missing("Unknown native service operation.")
-                    })?;
-                    self.domains
-                        .get(group)
-                        .ok_or_else(|| {
+                    "omnigraph.sync_knowledge" => {
+                        let project_id = body["project_id"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| {
+                                params["project_id"]
+                                    .as_str()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                            })
+                            .ok_or_else(|| HarnessError::invalid("Missing project_id."))?;
+                        let knowledge = self.domains.get("knowledge").ok_or_else(|| {
                             HarnessError::unavailable("Required native service is unavailable.")
-                        })?
-                        .execute(operation, request)
-                        .await
+                        })?;
+                        let omnigraph = self.domains.get("omnigraph").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let Payload::Json(collected) = knowledge
+                            .execute(
+                                "knowledge.sync_collect",
+                                json!({
+                                    "params": { "project_id": project_id },
+                                    "query": query,
+                                    "body": body,
+                                }),
+                            )
+                            .await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected knowledge sync payload.",
+                            ));
+                        };
+                        let Payload::Json(synced) = omnigraph
+                            .execute(
+                                "omnigraph.sync_items",
+                                json!({
+                                    "params": {},
+                                    "query": {},
+                                    "body": {
+                                        "project_id": project_id,
+                                        "items": collected["items"],
+                                    },
+                                }),
+                            )
+                            .await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected omnigraph sync payload.",
+                            ));
+                        };
+                        Payload::Json(json!({
+                            "ok": synced["ok"] == true,
+                            "branch": synced["branch"].as_str().unwrap_or("knowledge/canonical"),
+                            "synced": synced["synced"].as_u64().unwrap_or(0),
+                            "brain_count": collected["brain_count"].as_u64().unwrap_or(0),
+                            "memory_count": collected["memory_count"].as_u64().unwrap_or(0),
+                            "skipped": collected["skipped"].as_u64().unwrap_or(0),
+                            "atom_ids": synced["atom_ids"].as_array().cloned().unwrap_or_default(),
+                        }))
+                    }
+                    "omnigraph.promote" => {
+                        let project_id = body["project_id"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| {
+                                params["project_id"]
+                                    .as_str()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                            })
+                            .ok_or_else(|| HarnessError::invalid("Missing project_id."))?;
+                        let atom_id = body["atom_id"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| HarnessError::invalid("Missing atom_id."))?;
+                        let knowledge = self.domains.get("knowledge").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let omnigraph = self.domains.get("omnigraph").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let Payload::Json(fetched) = omnigraph
+                            .execute(
+                                "omnigraph.fetch_atom",
+                                json!({
+                                    "params": {},
+                                    "query": {},
+                                    "body": {
+                                        "project_id": project_id,
+                                        "atom_id": atom_id,
+                                        "branch": body.get("branch").cloned().unwrap_or(Value::Null),
+                                    },
+                                }),
+                            )
+                            .await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected omnigraph atom payload.",
+                            ));
+                        };
+                        let Payload::Json(promoted) = knowledge
+                            .execute(
+                                "knowledge.promote_atom",
+                                json!({
+                                    "params": { "project_id": project_id },
+                                    "query": {},
+                                    "body": {
+                                        "project_id": project_id,
+                                        "bank": body.get("bank").cloned().unwrap_or(Value::Null),
+                                        "session_id": body.get("session_id").cloned().unwrap_or(Value::Null),
+                                        "workspace": body.get("workspace").cloned().unwrap_or(Value::Null),
+                                        "atom": fetched["atom"],
+                                        "files": fetched["files"],
+                                        "kind": body.get("kind").cloned().unwrap_or(Value::Null),
+                                        "privacy": body.get("privacy").cloned().unwrap_or(Value::Null),
+                                    },
+                                }),
+                            )
+                            .await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected knowledge promote payload.",
+                            ));
+                        };
+                        let branch = fetched["branch"].as_str().unwrap_or("main");
+                        let brain_record_id = promoted["record_id"].as_str().unwrap_or("");
+                        let revision = promoted["revision"].as_i64().unwrap_or(1);
+                        let Payload::Json(linked) = omnigraph
+                            .execute(
+                                "omnigraph.link_brain",
+                                json!({
+                                    "params": {},
+                                    "query": {},
+                                    "body": {
+                                        "project_id": project_id,
+                                        "branch": branch,
+                                        "atom": fetched["atom"],
+                                        "brain_record_id": brain_record_id,
+                                        "revision": revision,
+                                    },
+                                }),
+                            )
+                            .await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected omnigraph link payload.",
+                            ));
+                        };
+                        let linked_atom = if linked["atom"].is_object() {
+                            linked["atom"].clone()
+                        } else if linked["atom_id"].is_string() {
+                            linked
+                        } else {
+                            let mut patched = fetched["atom"].clone();
+                            if let Some(obj) = patched.as_object_mut() {
+                                obj.insert("brain_record_id".into(), json!(brain_record_id));
+                                obj.insert("record_revision".into(), json!(revision));
+                                obj.insert("origin_layer".into(), json!("project-brain"));
+                                obj.insert("authority".into(), json!("verified"));
+                                obj.insert("verified".into(), json!(true));
+                            }
+                            patched
+                        };
+                        Payload::Json(json!({
+                            "ok": true,
+                            "atom_id": atom_id,
+                            "branch": branch,
+                            "brain_record_id": brain_record_id,
+                            "record_type": promoted["record_type"],
+                            "revision": revision,
+                            "origin_layer": "project-brain",
+                            "authority": "verified",
+                            "verified_files": promoted["verified_files"],
+                            "atom": linked_atom,
+                        }))
+                    }
+                    _ => {
+                        let (group, _) = operation.split_once('.').ok_or_else(|| {
+                            HarnessError::missing("Unknown native service operation.")
+                        })?;
+                        self.domains
+                            .get(group)
+                            .ok_or_else(|| {
+                                HarnessError::unavailable("Required native service is unavailable.")
+                            })?
+                            .execute(operation, request.clone())
+                            .await?
+                    }
+                }
+            };
+            if let Payload::Json(ref val) = payload
+                && val["ok"] == true
+            {
+                if operation == "knowledge.run"
+                    && matches!(
+                        body["action"].as_str(),
+                        Some(
+                            "complete"
+                                | "promote-apply"
+                                | "promote-auto"
+                                | "bank-retire"
+                                | "brain-update"
+                                | "record-result"
+                        )
+                    )
+                {
+                    self.best_effort_sync_knowledge(
+                        params["project_id"].as_str().unwrap_or(""),
+                        body["bank"].as_str(),
+                        None,
+                    )
+                    .await;
+                } else if matches!(operation, "brain.act" | "memory.save")
+                    && !sid.is_empty()
+                    && let Ok(session) = self.store.get(sid)
+                    && session["omnigraph"]["enabled"] == true
+                    && let Some(project_id) = session["project_id"].as_str()
+                {
+                    self.best_effort_sync_knowledge(
+                        project_id,
+                        session["brain"]["bank"].as_str(),
+                        Some(sid),
+                    )
+                    .await;
                 }
             }
+            Ok(payload)
         })
     }
 }
@@ -461,5 +725,289 @@ mod tests {
         }));
 
         services.close().await.unwrap();
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingDomain {
+        calls: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+        promote_error: bool,
+    }
+    impl Domain for RecordingDomain {
+        fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
+            let op = operation.to_owned();
+            let calls = self.calls.clone();
+            let promote_error = self.promote_error;
+            Box::pin(async move {
+                calls.lock().unwrap().push((op.clone(), request.clone()));
+                let val = match op.as_str() {
+                    "knowledge.sync_collect" => json!({
+                        "items": [
+                            {"atom_id": "brain-b1", "kind": "finding", "title": "Brain rule"},
+                            {"atom_id": "mem-MEM-0001", "kind": "insight", "title": "Bank chunk"}
+                        ],
+                        "brain_count": 1,
+                        "memory_count": 1,
+                        "skipped": 2
+                    }),
+                    "omnigraph.status" => json!({"state": "connected", "mode": "external"}),
+                    "omnigraph.sync_items" => json!({
+                        "ok": true,
+                        "branch": "knowledge/canonical",
+                        "synced": 2,
+                        "atom_ids": ["brain-b1", "mem-MEM-0001"]
+                    }),
+                    "omnigraph.fetch_atom" => json!({
+                        "branch": "session/s1",
+                        "files": ["src/auth.rs"],
+                        "atom": {
+                            "atom_id": "atom-1",
+                            "kind": "finding",
+                            "title": "Validate token",
+                            "summary": "Check exp claim",
+                            "files": ["src/auth.rs"]
+                        }
+                    }),
+                    "knowledge.promote_atom" => {
+                        if promote_error {
+                            return Err(HarnessError::conflict("Cited file missing."));
+                        }
+                        json!({
+                            "record_id": "11111111-1111-4111-8111-111111111111",
+                            "record_type": "finding",
+                            "revision": 1,
+                            "verified_files": ["src/auth.rs"],
+                            "privacy": "team",
+                            "authority": "verified",
+                            "origin_layer": "project-brain"
+                        })
+                    }
+                    "omnigraph.link_brain" => json!({
+                        "atom": {
+                            "atom_id": "atom-1",
+                            "brain_record_id": "11111111-1111-4111-8111-111111111111",
+                            "record_revision": 1,
+                            "origin_layer": "project-brain",
+                            "authority": "verified",
+                            "verified": true
+                        }
+                    }),
+                    "knowledge.run" | "brain.act" | "memory.save" => json!({"ok": true}),
+                    _ => json!({}),
+                };
+                Ok(Payload::Json(val))
+            })
+        }
+    }
+
+    fn build_services_with_recording(
+        store: SessionStore,
+        rec: Arc<RecordingDomain>,
+        override_memory_save: bool,
+    ) -> NativeServices {
+        let stub: Arc<dyn Domain> = Arc::new(StubDomain);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "results",
+            "delivery",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "knowledge",
+            "omnigraph",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), Arc::clone(&stub)))
+        .collect();
+        domains.insert("knowledge".into(), rec.clone());
+        domains.insert("omnigraph".into(), rec.clone());
+        domains.insert("brain".into(), rec.clone());
+        let mut overrides = BTreeMap::new();
+        if override_memory_save {
+            overrides.insert("memory.save".into(), rec as Arc<dyn Domain>);
+        }
+        NativeServices::new(
+            store,
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            overrides,
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn omnigraph_sync_knowledge_promote_and_post_sync_wire_domains() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_dir = root.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project = store.register(&project_dir).unwrap();
+        let pid = project["id"].as_str().unwrap().to_owned();
+        let sess = store
+            .create(
+                &json!({
+                    "project_id": pid,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "workflow": "native",
+                    "project_context": false,
+                    "omnigraph": {"enabled": true}
+                }),
+                "Sync test",
+                &[],
+            )
+            .unwrap();
+        let sid = sess["id"].as_str().unwrap().to_owned();
+
+        let rec = Arc::new(RecordingDomain::default());
+        let services = build_services_with_recording(store.clone(), rec.clone(), true);
+
+        // 1. omnigraph.sync_knowledge
+        let Payload::Json(sync_res) = services
+            .request(
+                "omnigraph.sync_knowledge",
+                json!({"params":{},"query":{},"body":{"project_id": pid}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(sync_res["ok"], true);
+        assert_eq!(sync_res["branch"], "knowledge/canonical");
+        assert_eq!(sync_res["synced"], 2);
+        assert_eq!(sync_res["brain_count"], 1);
+        assert_eq!(sync_res["memory_count"], 1);
+        assert_eq!(sync_res["skipped"], 2);
+        assert_eq!(sync_res["atom_ids"], json!(["brain-b1", "mem-MEM-0001"]));
+
+        // 2. omnigraph.promote happy path
+        let Payload::Json(promote_res) = services
+            .request(
+                "omnigraph.promote",
+                json!({"params":{},"query":{},"body":{"project_id": pid, "atom_id": "atom-1"}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(promote_res["ok"], true);
+        assert_eq!(
+            promote_res["brain_record_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(promote_res["record_type"], "finding");
+        assert_eq!(promote_res["revision"], 1);
+        assert_eq!(promote_res["origin_layer"], "project-brain");
+        assert_eq!(promote_res["authority"], "verified");
+        assert_eq!(promote_res["verified_files"], json!(["src/auth.rs"]));
+        assert_eq!(
+            promote_res["atom"]["brain_record_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+
+        // 3. Best-effort sync triggers after knowledge.run(complete), brain.act, and memory.save
+        rec.calls.lock().unwrap().clear();
+        services
+            .request(
+                "knowledge.run",
+                json!({"params":{"project_id": pid},"query":{},"body":{"action":"status"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rec.calls.lock().unwrap().len(),
+            1,
+            "status must not trigger sync"
+        );
+
+        rec.calls.lock().unwrap().clear();
+        services
+            .request(
+                "knowledge.run",
+                json!({"params":{"project_id": pid},"query":{},"body":{"action":"complete"}}),
+            )
+            .await
+            .unwrap();
+        let ops: Vec<String> = rec
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert!(
+            ops.contains(&"knowledge.sync_collect".to_string()),
+            "{ops:?}"
+        );
+        assert!(ops.contains(&"omnigraph.sync_items".to_string()), "{ops:?}");
+
+        for op in ["brain.act", "memory.save"] {
+            rec.calls.lock().unwrap().clear();
+            services
+                .request(
+                    op,
+                    json!({"params":{"session_id": sid},"query":{},"body":{"action":"brain-update"}}),
+                )
+                .await
+                .unwrap();
+            let ops: Vec<String> = rec
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(op, _)| op.clone())
+                .collect();
+            assert!(
+                ops.contains(&"knowledge.sync_collect".to_string()),
+                "{op}: {ops:?}"
+            );
+            assert!(
+                ops.contains(&"omnigraph.sync_items".to_string()),
+                "{op}: {ops:?}"
+            );
+        }
+
+        // 4. Promote error aborts before omnigraph.link_brain
+        let failing_rec = Arc::new(RecordingDomain {
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            promote_error: true,
+        });
+        let failing_services = build_services_with_recording(store, failing_rec.clone(), false);
+        let err = failing_services
+            .request(
+                "omnigraph.promote",
+                json!({"params":{},"query":{},"body":{"project_id": pid, "atom_id": "atom-1"}}),
+            )
+            .await
+            .err()
+            .expect("promote error");
+        assert_eq!(err.status, 409);
+        let ops: Vec<String> = failing_rec
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert!(
+            !ops.contains(&"omnigraph.link_brain".to_string()),
+            "{ops:?}"
+        );
+
+        services.close().await.unwrap();
+        failing_services.close().await.unwrap();
     }
 }

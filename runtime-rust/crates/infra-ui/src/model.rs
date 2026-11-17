@@ -142,7 +142,10 @@ pub fn summary(v: &V) -> String {
         .into()
 }
 pub fn label(s: &str) -> String {
-    s.replace(['_', '-'], " ")
+    match s {
+        "omnigraph" => "Omnigraph".into(),
+        _ => s.replace(['_', '-'], " "),
+    }
 }
 pub fn request_identity() -> String {
     secure_request_identity().unwrap_or_else(|| format_identity([0; 16]))
@@ -267,6 +270,7 @@ pub fn project_for_reentry(
 pub fn omnigraph_enabled(session: &V) -> bool {
     let omni = &session["omnigraph"];
     omni.is_object()
+        && omni["enabled"].as_bool() != Some(false)
         && (yes(&omni["enabled"])
             || omni["branch"].is_string()
             || !text(omni, "shared_space").is_empty()
@@ -579,6 +583,11 @@ mod omnigraph_model_tests {
         assert!(!omnigraph_enabled(
             &serde_json::json!({"omnigraph": {"enabled": false}})
         ));
+        assert!(!omnigraph_enabled(
+            &serde_json::json!({"omnigraph": {"enabled": false, "branch": "main"}})
+        ));
+        assert_eq!(label("omnigraph"), "Omnigraph");
+        assert_eq!(label("cut_total"), "cut total");
         let active = serde_json::json!({"omnigraph": {"enabled": true, "branch": "session/s2"}});
         assert!(omnigraph_enabled(&active));
         assert_eq!(omnigraph_branch(&active), "session/s2");
