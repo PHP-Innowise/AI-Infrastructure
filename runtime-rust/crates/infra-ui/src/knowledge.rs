@@ -235,7 +235,20 @@ fn fields(scope: &str) {
         dom::add(&wrap, &input);
         dom::append(&container, &wrap);
     }
-    dom::text(&format!("{scope}-knowledge-note"),match action.as_str(){"bank-reverify"=>"By running this action you attest that you checked this chunk against its current sources.","brain-update"=>"Revision must match the current record; refresh if it changed.","complete"=>"Record the task outcome and verification evidence.","reindex-bank"=>"This regenerates the shared INDEX.md.","compact"=>"Archive eligible terminal records.","export"=>"Create a downloadable knowledge ZIP.",_=>"Run the selected operation against the selected knowledge root."});
+    dom::text(
+        &format!("{scope}-knowledge-note"),
+        match action.as_str() {
+            "bank-reverify" => {
+                "By running this action you attest that you checked this chunk against its current sources."
+            }
+            "brain-update" => "Revision must match the current record; refresh if it changed.",
+            "complete" => "Record the task outcome and verification evidence.",
+            "reindex-bank" => "This regenerates the shared INDEX.md.",
+            "compact" => "Archive eligible terminal records.",
+            "export" => "Create a downloadable knowledge ZIP.",
+            _ => "Run the selected operation against the selected knowledge root.",
+        },
+    );
 }
 pub async fn load_context() {
     let p = dom::value("context-project");
@@ -345,9 +358,23 @@ pub async fn open_from_omnigraph(scope: &str, project_id: &str, target_id: &str)
     if scope == "brain" {
         dom::set_value("brain-category", "");
     }
-    dom::set_value(&format!("{scope}-filter"), target_id);
+    // The jump target chooses the record; its id is no filter to leave in
+    // the list, and a filter typed earlier could hide it.
+    dom::set_value(&format!("{scope}-filter"), "");
     m::set(&format!("{scope}-jump-target"), json!(target_id));
     session::open_view(scope, true).await;
+}
+/// The listing entry an Omnigraph jump names: by record id, external id or
+/// path.
+pub(crate) fn jump_entry<'a>(entries: &'a [V], target: &str) -> Option<&'a V> {
+    if target.is_empty() {
+        return None;
+    }
+    entries.iter().find(|x| {
+        x["id"].as_str() == Some(target)
+            || x["external_id"].as_str() == Some(target)
+            || m::text(x, "path").contains(target)
+    })
 }
 
 pub fn knowledge_omnigraph_atom_id(scope: &str, record: &V) -> Option<String> {
@@ -535,13 +562,7 @@ pub async fn load(scope: &str, bank_changed: bool) {
             let entries = m::array(&v["entries"]);
             let selected = jump
                 .as_deref()
-                .and_then(|target| {
-                    entries.iter().find(|x| {
-                        x["id"].as_str() == Some(target)
-                            || x["external_id"].as_str() == Some(target)
-                            || m::text(x, "path").contains(target)
-                    })
-                })
+                .and_then(|target| jump_entry(&entries, target))
                 .or_else(|| entries.iter().find(|x| x["path"] == selected))
                 .or_else(|| {
                     entries.iter().find(|x| {
@@ -614,17 +635,8 @@ fn render_list(scope: &str) {
         }
         count += 1;
         let p = m::text(v, "path");
-        let b = dom::button(
-            &format!(
-                "{} · {} · {} · {}",
-                m::summary(v),
-                p,
-                m::text(v, "status"),
-                bytes(&v["bytes"])
-            ),
-            "knowledge-file",
-            json!({"scope":scope,"path":p}),
-        );
+        let b = dom::button("", "knowledge-file", json!({"scope":scope,"path":p}));
+        b.set_inner_html(&render_list_entry_inner_html(v));
         b.set_class_name("memory-entry");
         if state["selected_path"] == p {
             let _ = b.set_attribute("aria-current", "true");
@@ -1099,6 +1111,120 @@ pub fn linked_controls() {
             "Named task"
         },
     );
+    // A selected session's follow-up may change its task context instead.
+    let (selected, session, locked) = m::read(|s| {
+        (
+            !s.sid.is_empty(),
+            s.selected.clone(),
+            s.pending || m::active(&s.selected),
+        )
+    });
+    let follow = selected && session["brain"].is_object();
+    dom::hidden("brain-followup-config", !follow);
+    if selected {
+        let review = follow && dom::checked("brain-followup-review");
+        dom::disabled("brain-followup-review", locked);
+        dom::disabled("brain-followup-query", locked);
+        dom::hidden("brain-followup-query-field", !review);
+        dom::text("brain-followup-hint", brain_followup_hint(review));
+        dom::text(
+            "brain-link-summary",
+            if !follow {
+                "Off"
+            } else if review {
+                "Review"
+            } else {
+                "Automatic"
+            },
+        );
+    }
+}
+fn brain_followup_hint(review: bool) -> &'static str {
+    if review {
+        "The next run waits until you approve the context this query retrieves."
+    } else {
+        "The next message is the retrieval query, as in every automatic turn."
+    }
+}
+/// The follow-up controls for a session's linked Brain task: whether its
+/// next context is reviewed by hand, and the query a reviewed context
+/// retrieves with. The task, knowledge root and goal stay as the session
+/// started them.
+pub(crate) fn render_brain_followup_html(task: &str, review: bool, query: &str) -> String {
+    let esc = crate::omnigraph::esc;
+    format!(
+        "<p class=\"knowledge-note\">Linked task <code>{}</code>. A follow-up may change how its context is retrieved.</p><label class=\"checkbox brain-link-review\"><input id=\"brain-followup-review\" type=\"checkbox\"{}>Review context by hand</label><div class=\"knowledge-form-grid\" id=\"brain-followup-query-field\"{}><label class=\"field wide\">Context query<textarea id=\"brain-followup-query\" maxlength=\"4000\" rows=\"2\" placeholder=\"A concise topic, files, or question for retrieval\">{}</textarea></label></div><p class=\"knowledge-note\" id=\"brain-followup-hint\">{}</p>",
+        esc(task),
+        if review { " checked" } else { "" },
+        if review { "" } else { " hidden" },
+        esc(query),
+        brain_followup_hint(review)
+    )
+}
+/// What a follow-up changes in its session's task context: `review`, and
+/// the query a reviewed context retrieves with. An automatic context takes
+/// the next message as its query, so it gets none; `None` when nothing
+/// changed.
+pub(crate) fn followup_brain_from_fields(
+    brain: &V,
+    review: bool,
+    query: &str,
+) -> Result<Option<V>, &'static str> {
+    if !brain.is_object() {
+        return Ok(None);
+    }
+    let mut changes = serde_json::Map::new();
+    if review != (brain["review"] == true) {
+        changes.insert("review".into(), json!(review));
+    }
+    if review {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err("Enter a context query to review, or turn off Review context by hand.");
+        }
+        if query != brain["query"].as_str().unwrap_or("").trim() {
+            changes.insert("query".into(), json!(query));
+        }
+    }
+    Ok((!changes.is_empty()).then_some(V::Object(changes)))
+}
+/// The selected session's follow-up change to its task context.
+pub fn followup_brain(session: &V) -> Result<Option<V>, &'static str> {
+    if dom::get("brain-followup-review").is_none() {
+        return Ok(None);
+    }
+    followup_brain_from_fields(
+        &session["brain"],
+        dom::checked("brain-followup-review"),
+        &dom::value("brain-followup-query"),
+    )
+}
+/// Render the follow-up controls when the selection or the session's own
+/// task context changes, and keep what the person typed between polls.
+fn sync_brain_followup(session: &V) {
+    let brain = &session["brain"];
+    let signature = json!([
+        m::read(|s| s.epoch),
+        session["id"],
+        brain["task_id"],
+        brain["review"],
+        brain["query"]
+    ]);
+    if m::data("brain-followup-signature") == signature {
+        return;
+    }
+    m::set("brain-followup-signature", signature);
+    if let Some(host) = dom::get("brain-followup-config") {
+        host.set_inner_html(&if brain.is_object() {
+            render_brain_followup_html(
+                &m::text(brain, "task_id"),
+                brain["review"] == true,
+                brain["query"].as_str().unwrap_or(""),
+            )
+        } else {
+            String::new()
+        });
+    }
 }
 pub fn render_linked_omnigraph_html(session: &V) -> (bool, String) {
     let metrics = crate::omnigraph::session_bar_metrics(session);
@@ -1151,6 +1277,7 @@ pub fn render_linked_omnigraph_html(session: &V) -> (bool, String) {
 }
 
 pub fn render_linked(session: &V) {
+    sync_brain_followup(session);
     let brain = &session["brain"];
     dom::hidden("linked-context", !brain.is_object());
     if !brain.is_object() {
@@ -1211,11 +1338,24 @@ pub fn render_linked(session: &V) {
     if dom::value("linked-context-query").is_empty() {
         dom::set_value("linked-context-query", &m::text(brain, "query"));
     }
-    let meter = session["capsule_delivery_meter"]
-        .as_object()
-        .map(|_| &session["capsule_delivery_meter"])
-        .unwrap_or(&session["capsule_meter"]);
+    // The server measures the capsule as the runtime caps it.
+    let meter = [
+        &brain["capsule_meter"],
+        &session["capsule_delivery_meter"],
+        &session["capsule_meter"],
+    ]
+    .into_iter()
+    .find(|meter| meter.is_object())
+    .cloned()
+    .unwrap_or(V::Null);
     dom::hidden("capsule-meter", !meter.is_object());
+    if !meter.is_object() {
+        return;
+    }
+    if let Some(bar) = dom::get("capsule-bar") {
+        bar.set_inner_html(&render_capsule_bar_html(&meter));
+        let _ = bar.set_attribute("aria-label", &capsule_bar_label(&meter));
+    }
     dom::text(
         "capsule-facts",
         &format!(
@@ -1224,11 +1364,458 @@ pub fn render_linked(session: &V) {
             m::string(&meter["limit"])
         ),
     );
-    dom::pretty("capsule-legend", &meter["kinds"]);
+    if let Some(legend) = dom::get("capsule-legend") {
+        legend.set_inner_html(&render_capsule_legend_html(&meter));
+    }
     dom::text(
         "capsule-repeats",
         &format!("{} characters repeat", m::string(&meter["repeats"])),
     );
+}
+const CAPSULE_KINDS: [(&str, &str); 3] = [
+    ("brain", "Project Brain"),
+    ("bank", "Memory bank"),
+    ("rules", "Rules & docs"),
+];
+/// Each memory kind's characters and share of the capsule bar, which stands
+/// for the runtime's cap.
+pub(crate) fn capsule_segments(meter: &V) -> Vec<(&'static str, &'static str, u64, f64)> {
+    let limit = meter["limit"]
+        .as_u64()
+        .filter(|limit| *limit > 0)
+        .unwrap_or(8000) as f64;
+    CAPSULE_KINDS
+        .iter()
+        .map(|(kind, label)| {
+            let characters = meter["kinds"][*kind].as_u64().unwrap_or(0);
+            (
+                *kind,
+                *label,
+                characters,
+                (characters as f64 / limit * 100.).min(100.),
+            )
+        })
+        .collect()
+}
+pub(crate) fn render_capsule_bar_html(meter: &V) -> String {
+    capsule_segments(meter)
+        .into_iter()
+        .map(|(kind, label, characters, share)| {
+            if characters == 0 {
+                format!("<span class=\"capsule-part\" data-kind=\"{kind}\" hidden></span>")
+            } else {
+                format!(
+                    "<span class=\"capsule-part\" data-kind=\"{kind}\" style=\"width:{share:.2}%\" title=\"{label}: {characters} characters\"></span>"
+                )
+            }
+        })
+        .collect()
+}
+fn capsule_bar_label(meter: &V) -> String {
+    let parts = capsule_segments(meter)
+        .into_iter()
+        .filter(|(_, _, characters, _)| *characters > 0)
+        .map(|(_, label, characters, _)| format!("{label} {characters}"))
+        .collect::<Vec<_>>();
+    format!(
+        "{} of {} characters",
+        if parts.is_empty() {
+            "Nothing".to_string()
+        } else {
+            parts.join(", ")
+        },
+        m::string(&meter["limit"])
+    )
+}
+pub(crate) fn render_capsule_legend_html(meter: &V) -> String {
+    let mut html = String::new();
+    for (kind, label, characters, _) in capsule_segments(meter) {
+        if characters == 0 {
+            continue;
+        }
+        let items = meter["items"][kind].as_u64().unwrap_or(0);
+        html.push_str(&format!(
+            "<span><i class=\"capsule-swatch\" data-kind=\"{kind}\" aria-hidden=\"true\"></i>{label} · {characters} characters · {items} item{}</span>",
+            if items == 1 { "" } else { "s" }
+        ));
+    }
+    let dropped = meter["dropped"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(layer, count)| {
+            count
+                .as_u64()
+                .filter(|count| *count > 0)
+                .map(|count| format!("{count} {}", crate::omnigraph::esc(layer)))
+        })
+        .collect::<Vec<_>>();
+    if !dropped.is_empty() {
+        html.push_str(&format!(
+            "<span>Dropped to fit: {}</span>",
+            dropped.join(", ")
+        ));
+    }
+    html
+}
+/// A day's bar of retrievals: those that delivered a Memory Bank chunk at the
+/// foot, the rest above them, as shares of the busiest day.
+pub(crate) fn history_day_heights(day: &V, most: u64) -> (f64, f64) {
+    let retrievals = day["retrievals"].as_u64().unwrap_or(0);
+    let with_chunk = day["with_chunk"].as_u64().unwrap_or(0).min(retrievals);
+    let most = most.max(1) as f64;
+    (
+        (retrievals - with_chunk) as f64 / most * 100.,
+        with_chunk as f64 / most * 100.,
+    )
+}
+const USAGE_KINDS: [(&str, &str); 7] = [
+    ("brain", "Project Brain"),
+    ("bank", "Memory bank"),
+    ("rules", "Rules & docs"),
+    ("omnigraph", "Omnigraph"),
+    ("rest", "Conversation and tools"),
+    ("added", "Added this turn"),
+    ("free", "Free"),
+];
+/// The tokens a turn's bar shows for one kind: a compacted turn shows its
+/// whole fill as added, and a turn without a measured rest no memory split.
+fn turn_part(turn: &V, kind: &str) -> f64 {
+    if !m::array(&turn["compactions"]).is_empty() {
+        return if kind == "added" {
+            m::number(&turn["end"]).unwrap_or(0.)
+        } else {
+            0.
+        };
+    }
+    if turn["parts"]["rest"].is_null() && ["brain", "bank", "rules", "omnigraph"].contains(&kind) {
+        return 0.;
+    }
+    m::number(&turn["parts"][kind]).unwrap_or(0.)
+}
+/// A turn's button in the strip: a small track of what filled its window and
+/// its number.
+pub(crate) fn render_usage_turn_button_html(turn: &V) -> String {
+    let window = m::number(&turn["window"]).unwrap_or(0.);
+    let mut parts = String::new();
+    if window > 0. {
+        for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
+            let value = turn_part(turn, kind);
+            if value > 0. {
+                parts.push_str(&format!(
+                    "<span class=\"context-turn-part\" data-kind=\"{kind}\" style=\"height:{:.2}%\"></span>",
+                    (value / window * 100.).clamp(0., 100.)
+                ));
+            }
+        }
+    }
+    format!(
+        "<span class=\"context-turn-track\" aria-hidden=\"true\">{parts}</span><span class=\"context-turn-label\">{}</span>",
+        crate::omnigraph::esc(&m::string(&turn["ordinal"]))
+    )
+}
+/// The legend rows of the selected turn, each with its swatch.
+pub(crate) fn render_usage_legend_html(turn: &V) -> String {
+    let mut rows = String::new();
+    for (kind, label) in USAGE_KINDS {
+        let value = m::number(&turn["parts"][kind])
+            .map(|n| {
+                format!(
+                    "{}{n:.0}",
+                    if ["brain", "bank", "rules", "omnigraph", "rest"].contains(&kind) {
+                        "≈ "
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .unwrap_or_else(|| "—".into());
+        rows.push_str(&format!(
+            "<tr><th scope=\"row\"><i class=\"context-swatch\" data-kind=\"{kind}\" aria-hidden=\"true\"></i>{label}</th><td class=\"context-number\">{value}</td></tr>"
+        ));
+    }
+    format!("<tbody>{rows}</tbody>")
+}
+const FEEDBACK_VOTES: [(&str, &str); 3] = [
+    ("helped", "Helped"),
+    ("stale", "Stale"),
+    ("harmful", "Harmful"),
+];
+/// One retrieval's delivered chunks and cuts, with the verdict a person
+/// recorded on each delivered chunk and buttons to change it. A verdict is
+/// telemetry: nothing ranks, admits or packs memory by it.
+pub(crate) fn render_retrieval_trace_html(row: &V, feedback: &V, supported: bool) -> String {
+    let esc = crate::omnigraph::esc;
+    let manifest = row["manifest_id"].as_str().unwrap_or("");
+    let mut html = format!(
+        "<p class=\"knowledge-note\">{} Project Brain · {} Memory Bank · {} rules and docs</p><ul class=\"retrieval-trace-items\">",
+        m::string(&row["brain"]),
+        m::string(&row["bank"]),
+        m::string(&row["rules"])
+    );
+    for chunk in m::array(&row["chunks"]) {
+        let chunk = chunk.as_str().unwrap_or("");
+        if chunk.is_empty() {
+            continue;
+        }
+        let vote = feedback[manifest][chunk]["vote"].as_str().unwrap_or("");
+        html.push_str(&format!("<li><code>{}</code>", esc(chunk)));
+        if supported && !manifest.is_empty() {
+            html.push_str("<span class=\"retrieval-votes\" role=\"group\" aria-label=\"Was this chunk right?\">");
+            for (choice, label) in FEEDBACK_VOTES {
+                let pressed = vote == choice;
+                let payload = json!({
+                    "manifest_id": manifest,
+                    "chunk_id": chunk,
+                    // A second press takes the verdict back.
+                    "vote": if pressed { "clear" } else { choice },
+                });
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"button compact\" data-action=\"memory-feedback\" data-payload=\"{}\" aria-pressed=\"{pressed}\">{label}</button>",
+                    esc(&payload.to_string())
+                ));
+            }
+            html.push_str("</span>");
+        }
+        html.push_str("</li>");
+    }
+    for cut in m::array(&row["cuts"]) {
+        let (id, reason) = (cut[0].as_str().unwrap_or(""), cut[1].as_str().unwrap_or(""));
+        if !id.is_empty() {
+            html.push_str(&format!(
+                "<li class=\"retrieval-cut\">{} — cut: {}</li>",
+                esc(id),
+                esc(reason)
+            ));
+        }
+    }
+    html.push_str("</ul>");
+    html
+}
+/// A Brain or Memory Bank listing row: its title, its path and its state.
+pub(crate) fn render_list_entry_inner_html(v: &V) -> String {
+    let meta = [m::text(v, "status"), bytes(&v["bytes"])]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!(
+        "<span class=\"memory-entry-title\">{}</span><span class=\"memory-entry-path\">{}</span><span class=\"memory-entry-meta\">{}</span>",
+        crate::omnigraph::esc(&m::summary(v)),
+        crate::omnigraph::esc(&m::text(v, "path")),
+        crate::omnigraph::esc(&meta)
+    )
+}
+/// Where a proposal stands in the Memory use queue: `waiting` for a person,
+/// an automatic one that `stalled`, or `auto` once applied without review.
+fn promotion_group(item: &V) -> Option<&'static str> {
+    let automatic = item["mode"] == "automatic";
+    match item["status"].as_str() {
+        Some("proposed" | "reviewed") => Some(if automatic { "stalled" } else { "waiting" }),
+        Some("applied") if automatic => Some("auto"),
+        _ => None,
+    }
+}
+fn promotion_id(item: &V) -> Option<&str> {
+    item["id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+/// How many automatic promotions the queue lists, newest first.
+const PROMOTION_AUTO_SHOWN: usize = 20;
+/// The promotion queue on Memory use. Proposals, their source records and
+/// the chunks they made appear by ID only, so no Project Brain title or path
+/// reaches the page; a person reads a source in Project Brain before
+/// approving. Approve and Reject sign a human proposal with the reviewer's
+/// name, and Apply publishes an approved one. An automatic proposal takes no
+/// signature, so one that stalled before its review waits for the next
+/// automatic run. `since` keeps the automatic promotions applied at or after
+/// that UTC moment, and an empty `since` keeps them all.
+pub(crate) fn render_promotion_queue_html(
+    items: &[V],
+    since: &str,
+    reviewer: &str,
+    busy: bool,
+    status: &str,
+) -> String {
+    let esc = crate::omnigraph::esc;
+    let moment = |item: &V, key: &str| item[key].as_str().unwrap_or("").to_owned();
+    // RFC 3339 moments compare as text to the second.
+    let second = |at: &str| at.get(..19).unwrap_or(at).to_owned();
+    let (mut waiting, mut stalled, mut auto) = (vec![], vec![], vec![]);
+    for item in items {
+        match promotion_group(item) {
+            Some("waiting") => waiting.push(item),
+            Some("stalled") => stalled.push(item),
+            Some("auto")
+                if since.is_empty() || second(&moment(item, "applied_at")) >= second(since) =>
+            {
+                auto.push(item)
+            }
+            _ => {}
+        }
+    }
+    waiting.sort_by_key(|item| moment(item, "created_at"));
+    stalled.sort_by_key(|item| moment(item, "created_at"));
+    auto.sort_by_key(|item| std::cmp::Reverse(moment(item, "applied_at")));
+    let mut html = format!(
+        "<section class=\"memory-section promotion-queue\" aria-labelledby=\"promotion-queue-title\"><div class=\"memory-section-head\"><h3 id=\"promotion-queue-title\">Promotion queue</h3><span class=\"memory-range\">{} waiting · {} stalled · {} auto-promoted</span></div><p class=\"knowledge-note\">Proposals appear by ID only. Read a source record in Project Brain before you approve; Apply writes the approved chunk to the Memory Bank.</p>",
+        waiting.len(),
+        stalled.len(),
+        auto.len()
+    );
+    if waiting
+        .iter()
+        .any(|item| item["status"] == "proposed" && promotion_id(item).is_some())
+    {
+        html.push_str(&format!(
+            "<label class=\"field promotion-reviewer\">Reviewer<input id=\"memory-promotion-reviewer\" type=\"text\" maxlength=\"200\" autocomplete=\"name\" spellcheck=\"false\" value=\"{}\"></label>",
+            esc(reviewer)
+        ));
+    }
+    if !status.is_empty() {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note promotion-status\" role=\"status\">{}</p>",
+            esc(status)
+        ));
+    }
+    for (group, title, list) in [
+        ("waiting", "Waiting for review", &waiting),
+        ("stalled", "Stalled automatic promotions", &stalled),
+        ("auto", "Auto-promoted in this window", &auto),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        html.push_str(&format!(
+            "<h4 class=\"promotion-group-title\">{title} · {}</h4><ul class=\"promotion-list\">",
+            list.len()
+        ));
+        let shown = if group == "auto" {
+            PROMOTION_AUTO_SHOWN
+        } else {
+            list.len()
+        };
+        for item in list.iter().take(shown) {
+            html.push_str(&render_promotion_item_html(item, group, busy));
+        }
+        html.push_str("</ul>");
+        if list.len() > shown {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">Showing the {shown} newest of {}.</p>",
+                list.len()
+            ));
+        }
+    }
+    if waiting.is_empty() && stalled.is_empty() && auto.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">Nothing waits for review, no automatic promotion stalled, and none was applied automatically in this window.</p>");
+    }
+    html.push_str("</section>");
+    html
+}
+fn render_promotion_item_html(item: &V, group: &str, busy: bool) -> String {
+    let esc = crate::omnigraph::esc;
+    let id = promotion_id(item);
+    let status = item["status"].as_str().unwrap_or("");
+    let sources = item["source_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(V::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .collect::<Vec<_>>();
+    let mut html = format!(
+        "<li class=\"promotion-item\" data-group=\"{group}\" data-status=\"{}\"><div class=\"promotion-head\">",
+        esc(status)
+    );
+    match id {
+        Some(id) => html.push_str(&format!("<code class=\"promotion-id\">{}</code>", esc(id))),
+        None => html.push_str("<span class=\"promotion-id\">Proposal without a readable ID</span>"),
+    }
+    html.push_str(&format!(
+        "<span class=\"promotion-state\">{}</span></div>",
+        match status {
+            "proposed" => "Proposed",
+            "reviewed" => "Approved, not applied",
+            _ => "Applied",
+        }
+    ));
+    let mut facts = vec![if sources.is_empty() {
+        "No source record ID".to_owned()
+    } else {
+        format!(
+            "{} {}",
+            if sources.len() == 1 {
+                "Source"
+            } else {
+                "Sources"
+            },
+            sources
+                .iter()
+                .map(|source| format!("<code>{}</code>", esc(source)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }];
+    for (key, label) in [
+        ("created_at", "proposed"),
+        ("reviewed_at", "reviewed"),
+        ("applied_at", "applied"),
+    ] {
+        if let Some(at) = item[key].as_str().filter(|at| !at.is_empty()) {
+            facts.push(format!("{label} {}", esc(at.get(..10).unwrap_or(at))));
+        }
+    }
+    if let Some(reason) = item["reason"].as_str().filter(|reason| !reason.is_empty()) {
+        facts.push(format!("outcome <code>{}</code>", esc(reason)));
+    }
+    if let Some(memory) = item["memory_id"]
+        .as_str()
+        .filter(|memory| !memory.is_empty())
+    {
+        facts.push(format!("chunk <code>{}</code>", esc(memory)));
+    }
+    html.push_str(&format!(
+        "<p class=\"promotion-facts\">{}</p><div class=\"promotion-actions\">",
+        facts.join(" · ")
+    ));
+    let button = |label: &str, action: &str, payload: V| {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"{action}\" data-payload=\"{}\"{}>{label}</button>",
+            esc(&payload.to_string()),
+            if id.is_none() || busy { " disabled" } else { "" }
+        )
+    };
+    let promotion = id.unwrap_or("");
+    match (group, status) {
+        ("waiting", "proposed") => {
+            for (label, reject) in [("Approve", false), ("Reject", true)] {
+                html.push_str(&button(
+                    label,
+                    "memory-promotion-review",
+                    json!({"promotion_id": promotion, "reject": reject}),
+                ));
+            }
+        }
+        ("waiting" | "stalled", "reviewed") => html.push_str(&button(
+            "Apply",
+            "memory-promotion-apply",
+            json!({"promotion_id": promotion}),
+        )),
+        ("stalled", "proposed") => html.push_str("<span class=\"promotion-note\">An automatic proposal takes no reviewer; the next automatic promotion retries it.</span>"),
+        _ => {}
+    }
+    html.push_str(&format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"memory-promotion-brain\" data-payload=\"{}\">Review in Project Brain</button>",
+        esc(&json!({"record_id": sources.first().copied().unwrap_or("")}).to_string())
+    ));
+    if id.is_none() && group != "auto" {
+        html.push_str("<span class=\"promotion-note\">Without a readable ID this proposal can only be reviewed in Project Brain.</span>");
+    }
+    html.push_str("</div></li>");
+    html
 }
 fn memory_model(v: &V, window: u64) -> V {
     let now = js_sys::Date::now();
@@ -1349,6 +1936,7 @@ pub async fn load_memory_use() {
             "memory-selected-chunk",
             "memory-filters",
             "memory-active",
+            "memory-promotion-status",
         ] {
             m::take(key);
         }
@@ -1498,6 +2086,28 @@ fn render_memory() {
         dom::add(&flow, &card);
     }
     dom::append("memory-use-body", &flow);
+    if v["promotions"].is_object() {
+        let since = if window == 0 {
+            String::new()
+        } else {
+            js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+                js_sys::Date::now() - window as f64 * 86_400_000.,
+            ))
+            .to_iso_string()
+            .as_string()
+            .unwrap_or_default()
+        };
+        let html = render_promotion_queue_html(
+            &m::array(&v["promotions"]["items"]),
+            &since,
+            &promotion_reviewer(),
+            m::yes(&m::data("memory-promotion-busy")),
+            m::data("memory-promotion-status").as_str().unwrap_or(""),
+        );
+        if let Some(body) = dom::get("memory-use-body") {
+            let _ = body.insert_adjacent_html("beforeend", &html);
+        }
+    }
     if m::yes(&v["check_available"]) {
         dom::append(
             "memory-use-body",
@@ -1584,19 +2194,30 @@ fn render_memory() {
         &serde_json::to_string_pretty(&v["history"]).unwrap_or_default(),
     );
     dom::append("memory-use-body", &history);
+    let supported = v["feedback_supported"] == true;
     for row in m::array(&v["retrievals"]["items"]) {
-        dom::append(
-            "memory-use-body",
-            &dom::details(
+        let block = dom::el("details", "setup-file retrieval-trace", "");
+        dom::add(
+            &block,
+            &dom::el(
+                "summary",
+                "",
                 &format!(
                     "{} · {} · {} chunks",
                     m::text(&row, "at"),
                     m::text(&row, "route"),
                     m::array(&row["chunks"]).len()
                 ),
-                &serde_json::to_string_pretty(&row).unwrap_or_default(),
             ),
         );
+        let body = dom::el("div", "", "");
+        body.set_inner_html(&render_retrieval_trace_html(
+            &row,
+            &v["feedback"],
+            supported,
+        ));
+        dom::add(&block, &body);
+        dom::append("memory-use-body", &block);
     }
     memory_changes(&v, &before);
     let mut snapshot = json!({"at":js_sys::Date::new_0().to_iso_string().as_string(),"today":v["today"],"chunks":{},"promotions":{},"newest":m::array(&v["retrievals"]["items"]).last().map(|r|r["at"].clone())});
@@ -1695,24 +2316,21 @@ fn render_usage() {
         "context-usage",
         &dom::el("p", "context-headline", &headline),
     );
-    dom::append("context-usage",&dom::el("p","knowledge-note",&format!("Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",turn["memory"].as_f64().unwrap_or(0.))));
+    dom::append(
+        "context-usage",
+        &dom::el(
+            "p",
+            "knowledge-note",
+            &format!(
+                "Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",
+                turn["memory"].as_f64().unwrap_or(0.)
+            ),
+        ),
+    );
     let bar = dom::el("div", "context-bar", "");
     let _ = bar.set_attribute("role", "img");
     for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
-        let compacted = !m::array(&turn["compactions"]).is_empty();
-        let value = if compacted {
-            if kind == "added" {
-                m::number(&turn["end"]).unwrap_or(0.)
-            } else {
-                0.
-            }
-        } else if turn["parts"]["rest"].is_null()
-            && ["brain", "bank", "rules", "omnigraph"].contains(&kind)
-        {
-            0.
-        } else {
-            m::number(&turn["parts"][kind]).unwrap_or(0.)
-        };
+        let value = turn_part(&turn, kind);
         let window = m::number(&turn["window"]).unwrap_or(0.);
         if value <= 0. || window <= 0. {
             continue;
@@ -1729,38 +2347,7 @@ fn render_usage() {
     }
     dom::append("context-usage", &bar);
     let legend = dom::el("table", "context-legend", "");
-    for kind in [
-        "brain",
-        "bank",
-        "rules",
-        "omnigraph",
-        "rest",
-        "added",
-        "free",
-    ] {
-        let row = dom::el("tr", "", "");
-        dom::add(&row, &dom::el("th", "", &m::label(kind)));
-        dom::add(
-            &row,
-            &dom::el(
-                "td",
-                "",
-                &m::number(&turn["parts"][kind])
-                    .map(|n| {
-                        format!(
-                            "{} {n:.0}",
-                            if ["brain", "bank", "rules", "omnigraph", "rest"].contains(&kind) {
-                                "≈"
-                            } else {
-                                ""
-                            }
-                        )
-                    })
-                    .unwrap_or_else(|| "—".into()),
-            ),
-        );
-        dom::add(&legend, &row);
-    }
+    legend.set_inner_html(&render_usage_legend_html(&turn));
     dom::append("context-usage", &legend);
     let page = m::data("context-page").as_u64().unwrap_or(0) as usize;
     let size = if dom::window()
@@ -1793,11 +2380,10 @@ fn render_usage() {
     let _ = strip.set_attribute("id", "context-turns");
     let _ = strip.set_attribute("role", "radiogroup");
     for t in shown {
-        let b = dom::button(
-            &format!("Turn {}", m::string(&t["ordinal"])),
-            "context-turn",
-            t["id"].clone(),
-        );
+        let b = dom::button("", "context-turn", t["id"].clone());
+        b.set_class_name("context-turn");
+        b.set_inner_html(&render_usage_turn_button_html(t));
+        let _ = b.set_attribute("aria-label", &format!("Turn {}", m::string(&t["ordinal"])));
         let _ = b.set_attribute("role", "radio");
         let _ = b.set_attribute(
             "aria-checked",
@@ -1849,7 +2435,106 @@ fn render_usage() {
     }
     dom::append("context-usage", &all);
 }
+/// Where this browser keeps the reviewer name a person last typed on Memory
+/// use.
+const PROMOTION_REVIEWER_KEY: &str = "harness.memory-reviewer.v1";
+fn promotion_reviewer() -> String {
+    match m::data("memory-promotion-reviewer").as_str() {
+        Some(name) => name.to_owned(),
+        None => dom::storage(PROMOTION_REVIEWER_KEY).unwrap_or_default(),
+    }
+}
+/// Approve, reject or apply one proposal through the knowledge operation,
+/// then read Memory use again.
+async fn promotion_action(action: &str, payload: &V) {
+    let Some(id) = payload["promotion_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let project = dom::value("memory-use-project");
+    let data = m::data("memory-use");
+    if project.is_empty()
+        || data["project_id"] != project
+        || m::yes(&m::data("memory-promotion-busy"))
+    {
+        return;
+    }
+    let review = action == "memory-promotion-review";
+    let reject = payload["reject"] == true;
+    let mut body = if review {
+        let reviewer = dom::value("memory-promotion-reviewer").trim().to_owned();
+        if reviewer.is_empty() {
+            dom::error(
+                "memory-use-error",
+                "Enter your name as the reviewer before you approve or reject a proposal.",
+            );
+            dom::focus("memory-promotion-reviewer");
+            return;
+        }
+        json!({"action": "promote-review", "promotion_id": id, "reviewer": reviewer, "reject": reject})
+    } else {
+        json!({"action": "promote-apply", "promotion_id": id})
+    };
+    if data["bank_id"].is_string() {
+        body["bank"] = data["bank_id"].clone();
+    }
+    dom::error("memory-use-error", "");
+    m::take("memory-promotion-status");
+    m::set("memory-promotion-busy", json!(true));
+    render_memory();
+    let result = api::post(
+        &format!("/api/projects/{}/knowledge", dom::enc(&project)),
+        body,
+    )
+    .await;
+    m::take("memory-promotion-busy");
+    match result {
+        Ok(v) if m::yes(&v["ok"]) => m::set(
+            "memory-promotion-status",
+            json!(format!(
+                "{} promotion {id}.",
+                if !review {
+                    "Applied"
+                } else if reject {
+                    "Rejected"
+                } else {
+                    "Approved"
+                }
+            )),
+        ),
+        Ok(v) => {
+            let error = v["error"]
+                .as_str()
+                .filter(|error| !error.is_empty())
+                .unwrap_or("The promotion operation failed.");
+            dom::error(
+                "memory-use-error",
+                &match v["error_code"].as_str().filter(|code| !code.is_empty()) {
+                    Some(code) => format!("{error} ({code})"),
+                    None => error.to_owned(),
+                },
+            );
+        }
+        Err(e) => dom::error("memory-use-error", &e.message),
+    }
+    if dom::value("memory-use-project") == project {
+        // Drawn again at once, so a failed reload leaves no button waiting.
+        render_memory();
+        load_memory_use().await;
+    }
+}
 pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str) -> bool {
+    if kind == "input" && id == "memory-promotion-reviewer" {
+        m::set("memory-promotion-reviewer", json!(value));
+        dom::save(
+            PROMOTION_REVIEWER_KEY,
+            Some(value.trim()).filter(|name| !name.is_empty()),
+        );
+        return true;
+    }
     if kind == "input" && (id == "memory-filter" || id == "brain-filter") {
         render_list(if id.starts_with("brain") {
             "brain"
@@ -1861,6 +2546,10 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
     if kind == "change" {
         if id == "brain-category" {
             render_list("brain");
+            return true;
+        }
+        if id == "brain-followup-review" {
+            linked_controls();
             return true;
         }
         if id == "context-project" {
@@ -2027,6 +2716,46 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
                 }
                 Err(e) => dom::error("memory-use-error", &e.message),
             }
+        }
+        "memory-feedback" => {
+            let project = dom::value("memory-use-project");
+            let bank = m::data("memory-use")["bank_id"].clone();
+            let mut body = json!({
+                "action": "retrieval-feedback",
+                "manifest_id": payload["manifest_id"],
+                "chunk_id": payload["chunk_id"],
+                "vote": payload["vote"],
+            });
+            if bank.is_string() {
+                body["bank"] = bank;
+            }
+            match api::post(
+                &format!("/api/projects/{}/knowledge", dom::enc(&project)),
+                body,
+            )
+            .await
+            {
+                Ok(_) => load_memory_use().await,
+                Err(e) => dom::error("memory-use-error", &e.message),
+            }
+        }
+        "memory-promotion-review" | "memory-promotion-apply" => {
+            promotion_action(action, payload).await
+        }
+        "memory-promotion-brain" => {
+            // Project Brain shows the source record Memory use names only by ID.
+            let project = dom::value("memory-use-project");
+            if let Some(bank) = m::data("memory-use")["bank_id"].as_str() {
+                if dom::value("brain-project") == project {
+                    dom::set_value("brain-bank", bank);
+                }
+            }
+            open_from_omnigraph(
+                "brain",
+                &project,
+                payload["record_id"].as_str().unwrap_or(""),
+            )
+            .await;
         }
         "memory-chunk-open" => {
             let p = dom::value("memory-use-project");
@@ -2441,7 +3170,11 @@ fn analytics(data: &V, _model: &V) {
     {
         chunk_detail(chunk);
     }
+    let section = dom::el("section", "memory-history", "");
+    dom::add(&section, &dom::el("h4", "", "Retrievals per day"));
+    let plot = dom::el("div", "memory-history-plot", "");
     let history = dom::el("div", "memory-history-chart", "");
+    let _ = history.set_attribute("role", "img");
     let days = m::array(&data["history"]["days"]);
     let most = days
         .iter()
@@ -2449,27 +3182,51 @@ fn analytics(data: &V, _model: &V) {
         .max()
         .unwrap_or(1)
         .max(1);
-    for day in days {
+    let total = days
+        .iter()
+        .filter_map(|d| d["retrievals"].as_u64())
+        .sum::<u64>();
+    let delivered = days
+        .iter()
+        .filter_map(|d| d["with_chunk"].as_u64())
+        .sum::<u64>();
+    let _ = history.set_attribute(
+        "aria-label",
+        &format!(
+            "{total} retrievals over {} days, {delivered} of them with a Memory Bank chunk",
+            days.len()
+        ),
+    );
+    for day in &days {
         let column = dom::el("div", "memory-history-day", "");
         let _ = column.set_attribute(
             "title",
             &format!(
-                "{} · {} retrievals",
-                m::text(&day, "day"),
-                m::string(&day["retrievals"])
+                "{} · {} retrievals · {} with a chunk",
+                m::text(day, "day"),
+                m::string(&day["retrievals"]),
+                day["with_chunk"].as_u64().unwrap_or(0)
             ),
         );
-        style(
-            &column,
-            "--height",
-            &format!(
-                "{}%",
-                day["retrievals"].as_u64().unwrap_or(0) as f64 / most as f64 * 100.
-            ),
-        );
+        let (rest, bank) = history_day_heights(day, most);
+        for (class, height) in [("memory-history-rest", rest), ("memory-history-bank", bank)] {
+            if height > 0. {
+                let part = dom::el("span", class, "");
+                style(&part, "height", &format!("{height:.2}%"));
+                dom::add(&column, &part);
+            }
+        }
         dom::add(&history, &column);
     }
-    dom::append("memory-use-body", &history);
+    dom::add(&plot, &history);
+    if let (Some(first), Some(last)) = (days.first(), days.last()) {
+        let axis = dom::el("div", "memory-history-axis", "");
+        dom::add(&axis, &dom::el("span", "", &m::text(first, "day")));
+        dom::add(&axis, &dom::el("span", "", &m::text(last, "day")));
+        dom::add(&plot, &axis);
+    }
+    dom::add(&section, &plot);
+    dom::append("memory-use-body", &section);
     sortable(
         "chunk",
         &chunks,
@@ -2815,10 +3572,331 @@ fn memory_changes(data: &V, before: &V) {
 #[cfg(test)]
 mod tests {
     use super::{
-        context_turns_model, memory_stage_metrics, render_detail_omnigraph_action_html,
-        render_linked_omnigraph_html,
+        capsule_segments, context_turns_model, history_day_heights, memory_stage_metrics,
+        render_capsule_bar_html, render_capsule_legend_html, render_detail_omnigraph_action_html,
+        render_linked_omnigraph_html, render_list_entry_inner_html, render_promotion_queue_html,
+        render_usage_legend_html, render_usage_turn_button_html,
     };
+    use crate::test_support::{assert_no_inline_hex_colors, payloads};
     use serde_json::json;
+
+    #[test]
+    fn promotion_queue_offers_review_apply_and_brain_by_id_only() {
+        let id = |n: u8| format!("{n}{n}{n}{n}{n}{n}{n}{n}-0000-4000-8000-00000000000{n}");
+        let source = |n: u8| format!("aaaaaaa{n}-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+        let items = vec![
+            json!({"id": id(1), "source_ids": [source(1)], "reason": null, "status": "proposed", "mode": "human", "created_at": "2026-11-10T09:00:00+00:00", "reviewed_at": null, "applied_at": null, "memory_id": null, "title": "Rotate <session> keys", "path": "project-brain/dynamic/findings/rotate.md"}),
+            json!({"id": id(2), "source_ids": [source(2), source(3)], "reason": "approved", "status": "reviewed", "mode": "human", "created_at": "2026-11-09T09:00:00+00:00", "reviewed_at": "2026-11-11T09:00:00+00:00"}),
+            json!({"id": id(3), "source_ids": [source(4)], "status": "proposed", "mode": "automatic", "created_at": "2026-11-12T09:00:00+00:00"}),
+            json!({"id": id(4), "source_ids": [source(5)], "reason": "approved-without-review", "status": "reviewed", "mode": "automatic", "created_at": "2026-11-12T10:00:00+00:00", "reviewed_at": "2026-11-12T10:00:01+00:00"}),
+            json!({"id": id(5), "source_ids": [source(6)], "reason": "approved-without-review", "status": "applied", "mode": "automatic", "applied_at": "2026-11-15T10:00:00+00:00", "memory_id": "MEM-20261115-aabbccdd"}),
+            json!({"id": id(6), "source_ids": [source(7)], "status": "applied", "mode": "automatic", "applied_at": "2026-09-01T10:00:00+00:00", "memory_id": "MEM-20260901-00112233"}),
+            json!({"id": null, "source_ids": [], "status": "proposed", "mode": "human", "created_at": "2026-11-13T09:00:00+00:00"}),
+            json!({"id": id(7), "source_ids": [source(8)], "status": "rejected", "mode": "human"}),
+            json!({"id": id(8), "source_ids": [source(9)], "status": "applied", "mode": "human", "applied_at": "2026-11-16T10:00:00+00:00"}),
+        ];
+        let html = render_promotion_queue_html(
+            &items,
+            "2026-10-18T09:30:00.000Z",
+            "Jane \"QA\"",
+            false,
+            "Approved promotion x.",
+        );
+        assert!(
+            html.contains("3 waiting · 2 stalled · 1 auto-promoted"),
+            "{html}"
+        );
+        // A person signs only a human proposal, oldest first; one without a
+        // readable ID shows its buttons disabled.
+        assert_eq!(
+            payloads(&html, "memory-promotion-review"),
+            vec![
+                json!({"promotion_id": id(1), "reject": false}),
+                json!({"promotion_id": id(1), "reject": true}),
+                json!({"promotion_id": "", "reject": false}),
+                json!({"promotion_id": "", "reject": true}),
+            ]
+        );
+        assert_eq!(html.matches(" disabled>").count(), 2, "{html}");
+        assert!(html.contains("Without a readable ID"), "{html}");
+        // Apply publishes an approved proposal, a stalled automatic one too.
+        assert_eq!(
+            payloads(&html, "memory-promotion-apply"),
+            vec![
+                json!({"promotion_id": id(2)}),
+                json!({"promotion_id": id(4)})
+            ]
+        );
+        // An automatic proposal is never signed by a person.
+        assert!(
+            html.contains("An automatic proposal takes no reviewer"),
+            "{html}"
+        );
+        // Every listed proposal opens its first source record in Project Brain.
+        assert_eq!(
+            payloads(&html, "memory-promotion-brain"),
+            [
+                source(2),
+                source(1),
+                String::new(),
+                source(4),
+                source(5),
+                source(6)
+            ]
+            .map(|record| json!({"record_id": record}))
+            .to_vec()
+        );
+        // IDs, outcome codes, dates and chunk IDs only: no Brain title or path.
+        assert!(!html.contains("Rotate"), "{html}");
+        assert!(!html.contains("project-brain/"), "{html}");
+        assert!(
+            html.contains("outcome <code>approved-without-review</code>"),
+            "{html}"
+        );
+        assert!(html.contains("chunk <code>MEM-20261115-aabbccdd</code>"));
+        assert!(html.contains("proposed 2026-11-10"), "{html}");
+        // Outside the window, rejected and applied-after-review proposals stay off.
+        for absent in ["MEM-20260901-00112233".to_owned(), id(7), id(8)] {
+            assert!(!html.contains(&absent), "{absent}: {html}");
+        }
+        assert!(html.contains("value=\"Jane &quot;QA&quot;\""), "{html}");
+        assert!(html.contains("role=\"status\">Approved promotion x.</p>"));
+        assert_no_inline_hex_colors(&html);
+
+        // While one action runs, every review and apply button waits.
+        let busy = render_promotion_queue_html(&items, "", "", true, "");
+        assert!(busy.contains("2 auto-promoted"), "{busy}");
+        assert_eq!(busy.matches(" disabled>").count(), 6, "{busy}");
+        assert!(!busy.contains("promotion-status"), "{busy}");
+
+        let empty = render_promotion_queue_html(&[], "", "", false, "");
+        assert!(empty.contains("Nothing waits for review"), "{empty}");
+        assert!(!empty.contains("memory-promotion-reviewer"), "{empty}");
+    }
+
+    #[test]
+    fn brain_followup_changes_review_and_reviewed_query_only() {
+        use super::{followup_brain_from_fields, render_brain_followup_html};
+        let automatic = json!({"task_id": "harness/fix-login-abc123", "review": false, "query": "fix login redirect"});
+        // An automatic turn takes the next message as its query.
+        assert_eq!(
+            followup_brain_from_fields(&automatic, false, "anything"),
+            Ok(None)
+        );
+        assert_eq!(
+            followup_brain_from_fields(&automatic, true, " fix login redirect "),
+            Ok(Some(json!({"review": true})))
+        );
+        assert_eq!(
+            followup_brain_from_fields(&automatic, true, "session cookie expiry"),
+            Ok(Some(
+                json!({"review": true, "query": "session cookie expiry"})
+            ))
+        );
+        assert!(followup_brain_from_fields(&automatic, true, "  ").is_err());
+        let reviewed = json!({"task_id": "TASK-7", "review": true, "query": "retry policy"});
+        assert_eq!(
+            followup_brain_from_fields(&reviewed, true, "retry policy"),
+            Ok(None)
+        );
+        assert_eq!(
+            followup_brain_from_fields(&reviewed, true, "backoff caps"),
+            Ok(Some(json!({"query": "backoff caps"})))
+        );
+        assert_eq!(
+            followup_brain_from_fields(&reviewed, false, ""),
+            Ok(Some(json!({"review": false})))
+        );
+        assert_eq!(
+            followup_brain_from_fields(&json!(null), true, "x"),
+            Ok(None)
+        );
+
+        let html = render_brain_followup_html("TASK-<7>", true, "retry & backoff");
+        assert!(html.contains("<code>TASK-&lt;7&gt;</code>"), "{html}");
+        assert!(
+            html.contains("id=\"brain-followup-review\" type=\"checkbox\" checked>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"brain-followup-query-field\">"),
+            "{html}"
+        );
+        assert!(html.contains(">retry &amp; backoff</textarea>"), "{html}");
+        assert!(html.contains("waits until you approve"), "{html}");
+        let automatic_html = render_brain_followup_html("TASK-7", false, "");
+        assert!(automatic_html.contains("type=\"checkbox\">Review context by hand"));
+        assert!(automatic_html.contains("id=\"brain-followup-query-field\" hidden>"));
+        assert!(automatic_html.contains("The next message is the retrieval query"));
+        assert_no_inline_hex_colors(&html);
+    }
+
+    #[test]
+    fn promotion_queue_lists_the_newest_automatic_promotions() {
+        let items = (0..25)
+            .map(|day| {
+                json!({"id": format!("00000000-0000-4000-8000-0000000000{day:02}"), "status": "applied", "mode": "automatic", "applied_at": format!("2026-11-{:02}T08:00:00+00:00", day + 1), "source_ids": []})
+            })
+            .collect::<Vec<_>>();
+        let html = render_promotion_queue_html(&items, "", "", false, "");
+        assert!(html.contains("Showing the 20 newest of 25."), "{html}");
+        assert!(html.contains("applied 2026-11-25"), "{html}");
+        assert!(!html.contains("applied 2026-11-05"), "{html}");
+        // Nothing to sign, so no reviewer field.
+        assert!(!html.contains("memory-promotion-reviewer"), "{html}");
+    }
+
+    #[test]
+    fn capsule_segments_and_legend_format_nonzero_parts_and_swatches() {
+        let meter = json!({"characters": 1577, "limit": 8000, "kinds": {"brain": 752, "rules": 423, "bank": 0}, "items": {"brain": 1, "rules": 2, "bank": 0}, "repeats": 824, "dropped": {"episodic": 1}});
+        let segments = capsule_segments(&meter);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(kind, _, characters, _)| (*kind, *characters))
+                .collect::<Vec<_>>(),
+            [("brain", 752), ("bank", 0), ("rules", 423)]
+        );
+        assert!((segments[0].3 - 9.4).abs() < 1e-9);
+        let bar = render_capsule_bar_html(&meter);
+        assert!(
+            bar.contains("data-kind=\"brain\" style=\"width:9.40%\""),
+            "{bar}"
+        );
+        assert!(bar.contains("data-kind=\"bank\" hidden"), "{bar}");
+        let legend = render_capsule_legend_html(&meter);
+        assert!(
+            legend.contains("<i class=\"capsule-swatch\" data-kind=\"brain\""),
+            "{legend}"
+        );
+        assert!(
+            legend.contains("Rules &amp; docs · 423 characters · 2 items")
+                || legend.contains("Rules & docs · 423 characters · 2 items"),
+            "{legend}"
+        );
+        assert!(!legend.contains("Memory bank"), "{legend}");
+        assert!(legend.contains("Dropped to fit: 1 episodic"), "{legend}");
+        // No raw JSON reaches the legend.
+        assert!(!legend.contains('{'), "{legend}");
+    }
+
+    #[test]
+    fn retrieval_trace_renders_chunks_cuts_and_feedback_toggles() {
+        let row = json!({"manifest_id": "manifest-1", "brain": 1, "bank": 2, "rules": 0, "chunks": ["MEM-20261117-aabbccdd", "MEM-20261117-eeff0011"], "cuts": [["MEM-20261117-99998888", "budget"]]});
+        let feedback = json!({"manifest-1": {"MEM-20261117-aabbccdd": {"vote": "stale"}}});
+        let html = super::render_retrieval_trace_html(&row, &feedback, true);
+        assert!(
+            html.contains("<code>MEM-20261117-aabbccdd</code>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("MEM-20261117-99998888 — cut: budget"),
+            "{html}"
+        );
+        // The recorded verdict is pressed, and pressing it again clears it.
+        assert!(
+            html.contains(
+                "&quot;vote&quot;:&quot;clear&quot;}\" aria-pressed=\"true\">Stale</button>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "&quot;vote&quot;:&quot;helped&quot;}\" aria-pressed=\"false\">Helped</button>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("data-action=\"memory-feedback\""));
+        // Without the server's support, or without a manifest, nothing is offered.
+        assert!(!super::render_retrieval_trace_html(&row, &feedback, false).contains("<button"));
+        let mut anonymous = row.clone();
+        anonymous["manifest_id"] = json!(null);
+        assert!(
+            !super::render_retrieval_trace_html(&anonymous, &feedback, true).contains("<button")
+        );
+    }
+
+    #[test]
+    fn open_from_omnigraph_finds_its_record_without_a_filter() {
+        let entries = vec![
+            json!({"id": "11111111-2222-4333-8444-555555555555", "external_id": "finding-1", "path": "dynamic/a.md"}),
+            json!({"id": "MEM-20261117-aabbccdd", "path": "memory-bank/chunks/MEM-20261117-aabbccdd-ttl.md"}),
+        ];
+        assert_eq!(
+            super::jump_entry(&entries, "finding-1").map(|v| &v["path"]),
+            Some(&json!("dynamic/a.md"))
+        );
+        assert!(super::jump_entry(&entries, "MEM-20261117-aabbccdd").is_some());
+        assert!(super::jump_entry(&entries, "").is_none());
+        assert!(super::jump_entry(&entries, "missing").is_none());
+    }
+
+    #[test]
+    fn history_day_heights_stacks_with_chunk_under_retrievals() {
+        let (rest, bank) = history_day_heights(&json!({"retrievals": 6, "with_chunk": 2}), 8);
+        assert_eq!((rest, bank), (50.0, 25.0));
+        // A count above the day's retrievals is held to them; an empty day is flat.
+        assert_eq!(
+            history_day_heights(&json!({"retrievals": 2, "with_chunk": 5}), 4),
+            (0.0, 50.0)
+        );
+        assert_eq!(history_day_heights(&json!({}), 0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn render_usage_turn_and_legend_emit_track_parts_and_swatches() {
+        let turn = json!({"ordinal": 3, "window": 200000, "end": 50000, "parts": {"brain": 1000, "bank": 500, "rules": 0, "rest": 40000, "added": 8500, "free": 150000}, "compactions": []});
+        let button = render_usage_turn_button_html(&turn);
+        assert!(button.contains("class=\"context-turn-track\""), "{button}");
+        assert!(
+            button.contains("data-kind=\"brain\" style=\"height:0.50%\""),
+            "{button}"
+        );
+        assert!(!button.contains("data-kind=\"rules\""), "{button}");
+        assert!(
+            button.ends_with("<span class=\"context-turn-label\">3</span>"),
+            "{button}"
+        );
+        let compacted = json!({"ordinal": 4, "window": 200000, "end": 20000, "parts": {"brain": 1000, "rest": 1}, "compactions": [{"at": "x"}]});
+        let only_added = render_usage_turn_button_html(&compacted);
+        assert!(
+            only_added.contains("data-kind=\"added\" style=\"height:10.00%\""),
+            "{only_added}"
+        );
+        assert!(!only_added.contains("data-kind=\"brain\""), "{only_added}");
+        let legend = render_usage_legend_html(&turn);
+        assert!(
+            legend.contains("<i class=\"context-swatch\" data-kind=\"bank\""),
+            "{legend}"
+        );
+        assert!(
+            legend.contains("<td class=\"context-number\">≈ 1000</td>"),
+            "{legend}"
+        );
+        assert!(
+            legend.contains("<td class=\"context-number\">—</td>"),
+            "{legend}"
+        );
+    }
+
+    #[test]
+    fn render_list_entry_inner_html_separates_title_path_and_meta() {
+        let html = render_list_entry_inner_html(
+            &json!({"title": "Retry <policy>", "path": "memory-bank/chunks/MEM-1.md", "status": "active", "bytes": 2048}),
+        );
+        assert!(
+            html.starts_with("<span class=\"memory-entry-title\">Retry &lt;policy&gt;</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"memory-entry-path\">memory-bank/chunks/MEM-1.md</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"memory-entry-meta\">active · "),
+            "{html}"
+        );
+    }
 
     #[test]
     fn selected_stage_metrics_follow_semantic_order_and_sentence_case() {

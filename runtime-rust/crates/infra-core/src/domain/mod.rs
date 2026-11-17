@@ -11,7 +11,8 @@ pub use privacy::policy_pattern_matches;
 pub use config::RuntimeConfig;
 pub use privacy::{
     guard_shared_text, indexed_secret_policy_reason, mask_secrets, sanitize_automatic_query,
-    secret_label, secret_policy_fingerprint, sensitive_label, source_path_problem,
+    screen_rendered_text, secret_label, secret_policy_fingerprint, sensitive_label,
+    source_path_problem,
 };
 pub use record::{
     AUTHORITIES, PHASES, PRIVACY, RECORD_TYPES, initial_state, is_terminal, lifecycle_states,

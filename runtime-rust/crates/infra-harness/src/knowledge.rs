@@ -57,17 +57,127 @@ type ExportCache = VecDeque<(String, Vec<u8>)>;
 pub struct KnowledgeDomain {
     pub store: SessionStore,
     pub source: PathBuf,
-    operation: Arc<Mutex<()>>,
+    /// One operation at a time per project: another project's work is no
+    /// reason to answer "busy".
+    operations: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
     exports: Arc<Mutex<ExportCache>>,
+    /// The code graphs a session's change is measured on, for the risk-caller
+    /// hints `HARNESS_GRAPH_RISK_CALLER_HINTS=1` turns on.
+    graphs: Arc<std::sync::OnceLock<Arc<crate::graph::Graphs>>>,
+}
+/// Tier B, off by default: `HARNESS_GRAPH_RISK_CALLER_HINTS=1` also hints the
+/// memory that cites a caller a session's change puts at risk
+/// (`edge_diffs.risk_callers` of its run). No retrieval heuristic ships on
+/// before a held-out measurement of its own (`docs/MEMORY-EVAL.md`,
+/// "Accepting a retrieval change"), and this one has none.
+pub const GRAPH_RISK_CALLER_HINTS: &str = "HARNESS_GRAPH_RISK_CALLER_HINTS";
+/// At most this many risk callers are offered as hint files.
+const RISK_CALLER_HINT_FILES: usize = 8;
+/// Whether the risk-caller hints are on for this value of
+/// `HARNESS_GRAPH_RISK_CALLER_HINTS`: only an explicit `1` turns them on.
+pub fn graph_risk_caller_hints(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("1")
+}
+/// The caller files `edge_diffs.risk_callers` names, those at risk of
+/// breaking first, each once, at most `limit`.
+pub fn risk_caller_files(edge_diffs: &V, limit: usize) -> Vec<String> {
+    let rank = |impact: &str| match impact {
+        "broken_risk" => 0u8,
+        "impacted" => 1,
+        _ => 2,
+    };
+    let mut callers = edge_diffs["risk_callers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|caller| {
+            let path = clean_relative_path(caller["from"].as_str()?)?;
+            Some((rank(caller["impact"].as_str().unwrap_or("")), path))
+        })
+        .collect::<Vec<_>>();
+    callers.sort();
+    let mut files: Vec<String> = Vec::new();
+    for (_, path) in callers {
+        if files.len() >= limit {
+            break;
+        }
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    files
 }
 impl KnowledgeDomain {
     pub fn new(store: SessionStore, source: PathBuf) -> Self {
         Self {
             store,
             source,
-            operation: Arc::new(Mutex::new(())),
+            operations: Arc::new(Mutex::new(BTreeMap::new())),
             exports: Arc::new(Mutex::new(VecDeque::new())),
+            graphs: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+    /// The code graphs a session's change is measured on; only the
+    /// risk-caller hints read them, and only when they are turned on.
+    pub fn install_graphs(&self, graphs: Arc<crate::graph::Graphs>) {
+        let _ = self.graphs.set(graphs);
+    }
+    /// The source hints of a retrieval for `session`: the Omnigraph atoms
+    /// injected into it and, with `HARNESS_GRAPH_RISK_CALLER_HINTS=1` only,
+    /// the callers its run puts at risk.
+    pub fn session_source_hints(&self, context: &RuntimeContext, session: &V) -> Option<V> {
+        let enabled =
+            graph_risk_caller_hints(std::env::var(GRAPH_RISK_CALLER_HINTS).ok().as_deref());
+        self.session_source_hints_with(context, session, enabled, || {
+            self.session_risk_callers(session)
+        })
+    }
+    /// `session_source_hints` with the flag and the risk callers given:
+    /// when the hints are off, `risk_callers` is never asked, so the
+    /// session's graph is not measured either.
+    fn session_source_hints_with(
+        &self,
+        context: &RuntimeContext,
+        session: &V,
+        enabled: bool,
+        risk_callers: impl FnOnce() -> Vec<String>,
+    ) -> Option<V> {
+        let atoms = if session["omnigraph"]["enabled"] == true {
+            session["omnigraph"]["injected_atoms"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let callers = if enabled { risk_callers() } else { Vec::new() };
+        self.build_source_hints(context, &atoms, &callers)
+    }
+    /// The callers the session's run puts at risk, from its code graph.
+    fn session_risk_callers(&self, session: &V) -> Vec<String> {
+        let (Some(graphs), Some(project), Some(sid)) = (
+            self.graphs.get(),
+            session["project_id"].as_str(),
+            session["id"].as_str(),
+        ) else {
+            return Vec::new();
+        };
+        let run = crate::graph_changes::Target::Run(sid.to_owned());
+        graphs
+            .changes_catalog(project, Some(&run), Some(sid), true)
+            .map(|catalog| risk_caller_files(&catalog["edge_diffs"], RISK_CALLER_HINT_FILES))
+            .unwrap_or_default()
+    }
+    /// The lock of one project's knowledge operations.
+    pub fn project_lock(&self, project_id: &str) -> Result<Arc<Mutex<()>>> {
+        let mut locks = self
+            .operations
+            .lock()
+            .map_err(|_| HarnessError::unavailable("Knowledge locks unavailable."))?;
+        Ok(locks
+            .entry(project_id.trim().to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
     }
     pub fn context(
         &self,
@@ -272,7 +382,8 @@ impl KnowledgeDomain {
         work: impl FnOnce(&RuntimeContext) -> Result<T>,
     ) -> Result<T> {
         let _source_frame = core::git::source_frame_scope();
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(session["project_id"].as_str().unwrap_or(""))?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let context = self.bound_context(session)?;
         work(&context)
     }
@@ -448,8 +559,13 @@ impl KnowledgeDomain {
         let _source_frame = core::git::source_frame_scope();
         let action = required(data, "action", 80)?;
         validate_action(action, data)?;
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(project_id)?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let (context, info) = self.selected(project_id, data["bank"].as_str(), workspace)?;
+        if action == "retrieval-feedback" {
+            let bank = info["bank_id"].as_str().unwrap_or("");
+            return record_retrieval_feedback(&self.store, project_id, bank, data);
+        }
         if info["runtime_available"] != true {
             return Err(HarnessError::missing(
                 "The selected knowledge root has no installed native runtime.",
@@ -695,7 +811,8 @@ impl KnowledgeDomain {
         if guard.is_some_and(|(_, cancel)| cancel.load(std::sync::atomic::Ordering::Acquire)) {
             return Err(HarnessError::conflict("Cancellation requested."));
         }
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(session["project_id"].as_str().unwrap_or(""))?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         text(query, "query", 4000)?;
         let project = required(session, "project_id", 200)?;
         let workspace = PathBuf::from(required(session, "project_path", 32768)?);
@@ -740,6 +857,7 @@ impl KnowledgeDomain {
         brain["approved"] = json!(false);
         brain["context_id"] = V::Null;
         brain["capsule"] = V::Null;
+        brain["capsule_meter"] = V::Null;
         let sid = required(session, "id", 100)?;
         let current = self.store.get(sid)?;
         if current["brain"]["task_id"] != task {
@@ -771,10 +889,7 @@ impl KnowledgeDomain {
             "capsule_profile": if automatic { "recall" } else { "full" },
             "json": true,
         });
-        if session["omnigraph"]["enabled"] == true
-            && let Some(atoms) = session["omnigraph"]["injected_atoms"].as_array()
-            && let Some(hints) = self.build_omnigraph_source_hints(&context, atoms)
-        {
+        if let Some(hints) = self.session_source_hints(&context, session) {
             request["source_hints"] = hints;
         }
         let refreshed = service.execute(
@@ -796,6 +911,7 @@ impl KnowledgeDomain {
         }
         brain["context_id"] = json!(Uuid::new_v4().to_string());
         brain["capsule"] = capsule.clone();
+        brain["capsule_meter"] = crate::context_usage::capsule_meter(&capsule);
         brain["capsule_text"] = refreshed["capsule_text"].clone();
         brain["task"] = current;
         brain["source_hashes"] = prepared_sources(
@@ -810,7 +926,8 @@ impl KnowledgeDomain {
     }
     pub fn verify_prepared(&self, session: &V) -> Result<()> {
         let _source_frame = core::git::source_frame_scope();
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(session["project_id"].as_str().unwrap_or(""))?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let brain = &session["brain"];
         if !brain["context_id"]
             .as_str()
@@ -855,10 +972,7 @@ impl KnowledgeDomain {
             "json": true,
             "provenance_response": true,
         });
-        if session["omnigraph"]["enabled"] == true
-            && let Some(atoms) = session["omnigraph"]["injected_atoms"].as_array()
-            && let Some(hints) = self.build_omnigraph_source_hints(&context, atoms)
-        {
+        if let Some(hints) = self.session_source_hints(&context, session) {
             verify_req["source_hints"] = hints;
         }
         let refreshed =
@@ -1074,6 +1188,9 @@ impl KnowledgeDomain {
         let history = self.history(project, info["bank_id"].as_str().unwrap_or(""), &rows)?;
         let found = rows.len();
         payload["retrievals"] = json!({"items":rows.into_iter().rev().take(200).collect::<Vec<_>>().into_iter().rev().map(|mut v|{if let Some(o)=v.as_object_mut(){o.remove("key");}v}).collect::<Vec<_>>(),"found":found,"merged":merged,"limit":200});
+        payload["feedback_supported"] = json!(true);
+        payload["feedback"] =
+            retrieval_feedback(&self.store, project, info["bank_id"].as_str().unwrap_or(""))?;
         payload["history"] = json!({"days":history,"horizon":120});
         payload["health"] = usage_health(&mut files)?;
         payload["check_available"] = json!(info["runtime_available"] == true && !chunks.is_null());
@@ -1218,7 +1335,8 @@ impl KnowledgeDomain {
     }
     fn check(&self, project: &str, bank: Option<&str>) -> Result<V> {
         let (context, info) = self.selected(project, bank, None)?;
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(project)?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let service = BankService::new(context.clone());
         let config = RuntimeConfig::load(&context.roots)?;
         let mut held = BTreeMap::<String, u64>::new();
@@ -1409,7 +1527,17 @@ impl KnowledgeDomain {
         })
     }
     pub fn build_omnigraph_source_hints(&self, context: &RuntimeContext, atoms: &[V]) -> Option<V> {
-        if atoms.is_empty() {
+        self.build_source_hints(context, atoms, &[])
+    }
+    /// Source hints from Omnigraph atoms and, after the files the atoms
+    /// name, `caller_files`: the indexed memory that cites them.
+    fn build_source_hints(
+        &self,
+        context: &RuntimeContext,
+        atoms: &[V],
+        caller_files: &[String],
+    ) -> Option<V> {
+        if atoms.is_empty() && caller_files.is_empty() {
             return None;
         }
         let mut memory_ids = Vec::new();
@@ -1462,6 +1590,13 @@ impl KnowledgeDomain {
                         files.push(clean);
                     }
                 }
+            }
+        }
+        for raw in caller_files {
+            if let Some(clean) = clean_relative_path(raw)
+                && seen_files.insert(clean.clone())
+            {
+                files.push(clean);
             }
         }
         if memory_ids.is_empty() && brain_record_ids.is_empty() && files.is_empty() {
@@ -1623,19 +1758,22 @@ impl KnowledgeDomain {
         Ok((effective_project, bank, workspace))
     }
 
+    /// One page of the knowledge the canonical Omnigraph branch carries,
+    /// sorted by atom id before it is cut (`offset`, `limit` up to
+    /// `SYNC_PAGE_LIMIT`). `complete_layers` names each layer read whole, the
+    /// only layers a sync may prune atoms from.
     pub fn sync_collect(&self, project_id: &str, body: &V, query_bank: Option<&str>) -> Result<V> {
         let _source_frame = core::git::source_frame_scope();
+        let offset = body["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = body["limit"].as_u64().map_or(SYNC_PAGE_LIMIT, |limit| {
+            (limit as usize).clamp(1, SYNC_PAGE_LIMIT)
+        });
         let (effective_project, bank, workspace) =
             self.resolve_knowledge_scope(project_id, body, query_bank)?;
         let (context, info) =
             self.selected(&effective_project, bank.as_deref(), workspace.as_deref())?;
         if info["bank_id"].is_null() && info["brain_available"] != true {
-            return Ok(json!({
-                "items": [],
-                "brain_count": 0,
-                "memory_count": 0,
-                "skipped": 0,
-            }));
+            return Ok(sync_page(Vec::new(), (0, 0, 0), offset, limit, &[]));
         }
         let config = RuntimeConfig::load(&context.roots)?;
         let allowed_privacy = config.strings("allowed_privacy")?;
@@ -1643,13 +1781,11 @@ impl KnowledgeDomain {
         let mut brain_count = 0usize;
         let mut memory_count = 0usize;
         let mut skipped = 0usize;
+        let mut complete_layers = Vec::new();
 
         if info["brain_available"] == true && context.mode == "governed" {
-            for image in BrainRepository::new(context.clone())?
-                .records(false)?
-                .into_iter()
-                .take(1000)
-            {
+            complete_layers.push("project-brain");
+            for image in BrainRepository::new(context.clone())?.records(false)? {
                 let r = &image.record;
                 let kind = r["type"].as_str().unwrap_or("");
                 if !["finding", "decision", "bug", "incident"].contains(&kind) {
@@ -1777,6 +1913,11 @@ impl KnowledgeDomain {
             }
         }
 
+        // A selected bank without chunks, or whose chunks no allowed privacy
+        // admits, is read whole too: none of its atoms belongs on the branch.
+        if info["bank_id"].is_string() {
+            complete_layers.push("memory-bank");
+        }
         if info["bank_id"].is_string()
             && core::fs::admit_directory(&context.roots.state.join("memory-bank/chunks"))?
             && allowed_privacy.iter().any(|p| p == "public")
@@ -1784,10 +1925,7 @@ impl KnowledgeDomain {
             let bank_service = BankService::new(context.clone());
             let mut state_files = PublicationFiles::new(&context.roots.state)?;
             let mut project_files = PublicationFiles::new(&context.roots.project)?;
-            for path in core::bank::codec::paths(&bank_service)?
-                .into_iter()
-                .take(1000)
-            {
+            for path in core::bank::codec::paths(&bank_service)? {
                 let chunk = match core::bank::codec::read(&mut state_files, &path) {
                     Ok(c) => c,
                     Err(_) => {
@@ -1915,12 +2053,207 @@ impl KnowledgeDomain {
             state_files.check()?;
         }
 
+        Ok(sync_page(
+            items,
+            (brain_count, memory_count, skipped),
+            offset,
+            limit,
+            &complete_layers,
+        ))
+    }
+
+    /// The project's memory that cites one file: active Project Brain records
+    /// naming it among their files or sources, and active Memory Bank chunks
+    /// citing it, within the privacy the project allows. A file that is gone,
+    /// or a `previous_path` a commit renamed it from, raises a warning for a
+    /// person to review; nothing is retired or changed here.
+    pub fn memory_links(&self, project_id: &str, query: &V) -> Result<V> {
+        let _source_frame = core::git::source_frame_scope();
+        let path = query["path"]
+            .as_str()
+            .and_then(clean_relative_path)
+            .ok_or_else(|| HarnessError::invalid("Choose a file of the project."))?;
+        let previous = query["previous_path"]
+            .as_str()
+            .filter(|previous| !previous.trim().is_empty())
+            .map(|previous| {
+                clean_relative_path(previous)
+                    .ok_or_else(|| HarnessError::invalid("Choose a file of the project."))
+            })
+            .transpose()?
+            .filter(|previous| *previous != path);
+        let (context, info) = self.selected(project_id, None, None)?;
+        let config = RuntimeConfig::load(&context.roots)?;
+        let allowed_privacy = config.strings("allowed_privacy")?;
+        let names = std::iter::once(path.clone())
+            .chain(previous.clone())
+            .collect::<Vec<_>>();
+        let cites = |values: &V| -> Option<String> {
+            values
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(V::as_str)
+                .filter_map(|raw| clean_relative_path(raw.split('#').next().unwrap_or(raw)))
+                .find(|cited| names.contains(cited))
+        };
+        let mut brain_records = Vec::new();
+        if info["brain_available"] == true && context.mode == "governed" {
+            for image in BrainRepository::new(context.clone())?.records(false)? {
+                let r = &image.record;
+                let privacy = r["privacy"].as_str().unwrap_or("");
+                if !allowed_privacy.iter().any(|allowed| allowed == privacy) {
+                    continue;
+                }
+                let Some(cited) = cites(&r["files"]).or_else(|| cites(&r["sources"])) else {
+                    continue;
+                };
+                brain_records.push(json!({
+                    "id": r["id"],
+                    "external_id": r["external_id"],
+                    "type": r["type"],
+                    "title": collapse_preview(r["title"].as_str().unwrap_or(""), 240),
+                    "status": r["status"],
+                    "authority": r["authority"],
+                    "cited_path": cited,
+                }));
+            }
+        }
+        let mut memory_chunks = Vec::new();
+        if info["bank_id"].is_string()
+            && core::fs::admit_directory(&context.roots.state.join("memory-bank/chunks"))?
+        {
+            let bank_service = BankService::new(context.clone());
+            let mut state_files = PublicationFiles::new(&context.roots.state)?;
+            for chunk_path in core::bank::codec::paths(&bank_service)? {
+                let Ok(chunk) = core::bank::codec::read(&mut state_files, &chunk_path) else {
+                    continue;
+                };
+                let m = &chunk.metadata;
+                if m["status"] != "active" || core::index::memory_temporal_reason(m).is_some() {
+                    continue;
+                }
+                let Some(cited) = cites(&m["sources"]) else {
+                    continue;
+                };
+                memory_chunks.push(json!({
+                    "id": m["id"],
+                    "title": collapse_preview(m["title"].as_str().unwrap_or(""), 240),
+                    "type": m["type"],
+                    "review_after": m["review_after"],
+                    "auto_promoted": m["tags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "auto-promoted")),
+                    "cited_path": cited,
+                }));
+            }
+            state_files.check()?;
+        }
+        let linked = |name: &str| {
+            brain_records
+                .iter()
+                .chain(&memory_chunks)
+                .filter(|row| row["cited_path"] == name)
+                .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        let mut hygiene_warnings = Vec::new();
+        let gone = !context.roots.project.join(&path).exists();
+        let here = linked(&path);
+        if gone && !here.is_empty() {
+            hygiene_warnings.push(json!({"kind":"cited-file-missing","path":path,"linked":here,"recommended_action":"review","text":"This file is gone from the workspace; the memory that cites it may be stale."}));
+        }
+        if let Some(previous) = &previous {
+            let before = linked(previous);
+            if !before.is_empty() {
+                hygiene_warnings.push(json!({"kind":"cited-file-renamed","path":path,"previous_path":previous,"linked":before,"recommended_action":"review","text":format!("This file was {previous}; the memory that cites the old name may need its citation updated.")}));
+            }
+        }
         Ok(json!({
-            "items": items,
-            "brain_count": brain_count,
-            "memory_count": memory_count,
-            "skipped": skipped,
+            "project_id": project_id,
+            "path": path,
+            "previous_path": previous,
+            "brain_records": brain_records,
+            "memory_chunks": memory_chunks,
+            "hygiene_warnings": hygiene_warnings,
+            // The shared graph's `contradicts` relations among the file's
+            // atoms are added beside these, where Omnigraph answers.
+            "contradiction_warnings": [],
         }))
+    }
+
+    /// Review-only warnings for the `contradicts` relations among a file's
+    /// Omnigraph atoms (`contradictions` and `atoms` of
+    /// `omnigraph.file_context`). Each names both atoms and, where an end is
+    /// a Project Brain record or a Memory Bank chunk, that record or chunk to
+    /// open. Nothing is retired or changed.
+    pub fn contradiction_warnings(contradictions: &V, atoms: &V) -> Vec<V> {
+        let atoms = atoms.as_array().map(Vec::as_slice).unwrap_or_default();
+        let opens = |atom_id: &str| -> Option<(&'static str, String)> {
+            let atom = atoms
+                .iter()
+                .find(|atom| atom["atom_id"].as_str() == Some(atom_id));
+            let field = |key: &str| {
+                atom.and_then(|atom| atom[key].as_str())
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            };
+            field("brain_record_id")
+                .or_else(|| atom_id.strip_prefix("brain-"))
+                .map(|id| ("brain", id.to_owned()))
+                .or_else(|| {
+                    field("memory_id")
+                        .or_else(|| {
+                            atom_id
+                                .strip_prefix("mem-")
+                                .filter(|id| id.starts_with("MEM-"))
+                        })
+                        .map(|id| ("memory", id.to_owned()))
+                })
+        };
+        let mut warnings = Vec::new();
+        let id = |relation: &V, key: &str| {
+            relation[key]
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+        };
+        for relation in contradictions.as_array().into_iter().flatten().take(24) {
+            let (Some(source), Some(target)) =
+                (id(relation, "source_id"), id(relation, "target_id"))
+            else {
+                continue;
+            };
+            let (source, target) = (source.as_str(), target.as_str());
+            let source_title = relation["source_title"].as_str().unwrap_or(source);
+            let target_title = relation["target_title"].as_str().unwrap_or(target);
+            let mut linked = Vec::new();
+            let mut open = Vec::new();
+            for (end, title) in [(source, source_title), (target, target_title)] {
+                if let Some((scope, id)) = opens(end)
+                    && !linked.contains(&id)
+                {
+                    open.push(json!({"scope": scope, "target_id": id, "title": collapse_preview(title, 240)}));
+                    linked.push(id);
+                }
+            }
+            let text = relation["text"].as_str().map(str::to_owned).unwrap_or_else(|| {
+                format!("\"{source_title}\" contradicts \"{target_title}\"; check both against the code before relying on either.")
+            });
+            warnings.push(json!({
+                "kind": "atom-contradiction",
+                "source_id": source,
+                "source_title": collapse_preview(source_title, 240),
+                "target_id": target,
+                "target_title": collapse_preview(target_title, 240),
+                "note": relation["note"],
+                "branch": relation["branch"],
+                "linked": linked,
+                "open": open,
+                "recommended_action": "review",
+                "text": collapse_preview(&text, 600),
+            }));
+        }
+        warnings
     }
 
     pub fn promote_atom(&self, project_id: &str, body: &V, query_bank: Option<&str>) -> Result<V> {
@@ -1982,7 +2315,8 @@ impl KnowledgeDomain {
             None => "team",
         };
 
-        let _guard = self.operation.try_lock().map_err(|_| knowledge_busy())?;
+        let lock = self.project_lock(&effective_project)?;
+        let _guard = lock.try_lock().map_err(|_| knowledge_busy())?;
         let (context, info) =
             self.selected(&effective_project, bank.as_deref(), workspace.as_deref())?;
         if info["runtime_available"] != true || context.mode != "governed" {
@@ -2174,6 +2508,7 @@ impl KnowledgeDomain {
             "memory.check" => self.check(project, request["body"]["bank"].as_str().or(bank))?,
             "knowledge.run" => self.run(project, &request["body"], None, true)?,
             "knowledge.sync_collect" => self.sync_collect(project, &request["body"], bank)?,
+            "knowledge.memory_links" => self.memory_links(project, &request["query"])?,
             "knowledge.promote_atom" => self.promote_atom(project, &request["body"], bank)?,
             "knowledge.download" => {
                 return self.download(request["params"]["id"].as_str().unwrap_or(""));
@@ -2316,6 +2651,7 @@ fn validate_action(action: &str, v: &V) -> Result<()> {
         ],
         "export" => &["include_archive", "include_superseded"],
         "turn" => &["task_id"],
+        "retrieval-feedback" => &["manifest_id", "chunk_id", "vote", "note"],
         _ => {
             return Err(HarnessError::invalid(
                 "Select a supported knowledge operation.",
@@ -2979,7 +3315,33 @@ fn usage_promotions(
             })
             .map(|s| json!(s))
             .unwrap_or(V::Null);
-        items.push(json!({"status":p["status"],"mode":if p["review_mode"]=="automatic"{"automatic"}else{"human"},"created_at":usage_moment(&p["created_at"]),"reviewed_at":usage_moment(&p["reviewed_at"]),"applied_at":if p["status"]=="applied"{usage_moment(&p["updated_at"])}else{V::Null},"memory_id":memory}));
+        // What a person needs to act on a proposal: its id and the ids of
+        // the records it comes from. Brain titles and paths stay on the
+        // server, so an outcome reaches the page only as a short code.
+        let id = p["id"]
+            .as_str()
+            .filter(|id| core::domain::is_uuid4(id))
+            .map(|id| json!(id))
+            .unwrap_or(V::Null);
+        let source_ids = p["source_records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["id"].as_str())
+            .filter(|id| core::domain::is_uuid4(id))
+            .collect::<Vec<_>>();
+        let reason = p["outcome"]
+            .as_str()
+            .filter(|reason| {
+                !reason.is_empty()
+                    && reason.len() <= 64
+                    && reason
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            })
+            .map(|reason| json!(reason))
+            .unwrap_or(V::Null);
+        items.push(json!({"id":id,"source_ids":source_ids,"reason":reason,"status":p["status"],"mode":if p["review_mode"]=="automatic"{"automatic"}else{"human"},"created_at":usage_moment(&p["created_at"]),"reviewed_at":usage_moment(&p["reviewed_at"]),"applied_at":if p["status"]=="applied"{usage_moment(&p["updated_at"])}else{V::Null},"memory_id":memory}));
     }
     Ok((json!({"items":items,"truncated":truncated}), promoted))
 }
@@ -3211,7 +3573,12 @@ fn usage_retrievals(
         let task_key = manifest["task_id"].to_string();
         let next = tasks.len();
         let task = *tasks.entry(task_key).or_insert(next);
-        let row = json!({"key":source,"at":at,"version":manifest["schema_version"].as_i64(),"route":route,"task":task,"brain":counts["brain"],"bank":counts["bank"],"rules":counts["rules"],"chunks":chunks,"cuts":cuts,"merged":0});
+        let manifest_id = manifest["id"]
+            .as_str()
+            .filter(|id| retrieval_manifest_id(id))
+            .map(|id| json!(id))
+            .unwrap_or(V::Null);
+        let row = json!({"key":source,"manifest_id":manifest_id,"at":at,"version":manifest["schema_version"].as_i64(),"route":route,"task":task,"brain":counts["brain"],"bank":counts["bank"],"rules":counts["rules"],"chunks":chunks,"cuts":cuts,"merged":0});
         if store == "governed" && reviewed {
             prepared.insert(key, rows.len());
         }
@@ -3256,6 +3623,122 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
     value
 }
 
+/// A retrieval manifest's own id as the runtime writes it.
+fn retrieval_manifest_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+const FEEDBACK_TABLE: &str = "CREATE TABLE IF NOT EXISTS retrieval_feedback(project_id TEXT NOT NULL,bank TEXT NOT NULL,manifest_id TEXT NOT NULL,chunk_id TEXT NOT NULL,vote TEXT NOT NULL,note TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,bank,manifest_id,chunk_id));";
+/// A person's verdict on one delivered item of one retrieval: kept as
+/// Harness telemetry only. Nothing reads it to rank, admit or pack memory.
+fn record_retrieval_feedback(
+    store: &SessionStore,
+    project: &str,
+    bank: &str,
+    data: &V,
+) -> Result<V> {
+    let manifest = data["manifest_id"]
+        .as_str()
+        .filter(|id| retrieval_manifest_id(id))
+        .ok_or_else(|| HarnessError::invalid("Choose a recorded retrieval."))?;
+    let chunk = data["chunk_id"].as_str().unwrap_or("").trim();
+    if chunk.len() > 512 || chunk.chars().any(char::is_control) {
+        return Err(HarnessError::invalid("Choose a delivered item."));
+    }
+    let vote = data["vote"].as_str().unwrap_or("");
+    let note = match data.get("note") {
+        None | Some(V::Null) => None,
+        Some(note) => Some(text(
+            note.as_str()
+                .ok_or_else(|| HarnessError::invalid("Enter a bounded note."))?,
+            "note",
+            500,
+        )?),
+    };
+    let db = store.connection()?;
+    db.execute_batch(FEEDBACK_TABLE).map_err(db_error)?;
+    let updated_at = crate::store::now();
+    if vote == "clear" {
+        db.execute(
+            "DELETE FROM retrieval_feedback WHERE project_id=?1 AND bank=?2 AND manifest_id=?3 AND chunk_id=?4",
+            rusqlite::params![project, bank, manifest, chunk],
+        )
+        .map_err(db_error)?;
+    } else if matches!(vote, "helped" | "stale" | "harmful") {
+        db.execute(
+            "INSERT INTO retrieval_feedback(project_id,bank,manifest_id,chunk_id,vote,note,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(project_id,bank,manifest_id,chunk_id) DO UPDATE SET vote=excluded.vote,note=excluded.note,updated_at=excluded.updated_at",
+            rusqlite::params![project, bank, manifest, chunk, vote, note, updated_at],
+        )
+        .map_err(db_error)?;
+    } else {
+        return Err(HarnessError::invalid(
+            "Choose helped, stale, harmful or clear.",
+        ));
+    }
+    Ok(
+        json!({"ok":true,"action":"retrieval-feedback","result":{"manifest_id":manifest,"chunk_id":chunk,"vote":vote,"note":note,"updated_at":updated_at}}),
+    )
+}
+/// The verdicts recorded for a project's bank, keyed by retrieval and item.
+fn retrieval_feedback(store: &SessionStore, project: &str, bank: &str) -> Result<V> {
+    let db = store.connection()?;
+    db.execute_batch(FEEDBACK_TABLE).map_err(db_error)?;
+    let mut query = db
+        .prepare("SELECT manifest_id,chunk_id,vote,note,updated_at FROM retrieval_feedback WHERE project_id=?1 AND bank=?2 ORDER BY updated_at DESC LIMIT 2000")
+        .map_err(db_error)?;
+    let rows = query
+        .query_map(rusqlite::params![project, bank], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(db_error)?;
+    let mut feedback = serde_json::Map::new();
+    for row in rows {
+        let (manifest, chunk, vote, note, updated_at) = row.map_err(db_error)?;
+        let entry = feedback.entry(manifest).or_insert_with(|| json!({}));
+        entry[chunk] = json!({"vote":vote,"note":note,"updated_at":updated_at});
+    }
+    Ok(V::Object(feedback))
+}
+/// The most items one `knowledge.sync_collect` page carries.
+pub const SYNC_PAGE_LIMIT: usize = 1000;
+fn sync_page(
+    mut items: Vec<V>,
+    (brain_count, memory_count, skipped): (usize, usize, usize),
+    offset: usize,
+    limit: usize,
+    complete_layers: &[&str],
+) -> V {
+    items.sort_by(|left, right| left["atom_id"].as_str().cmp(&right["atom_id"].as_str()));
+    let total = items.len();
+    let page = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next = offset.saturating_add(page.len());
+    let has_more = !page.is_empty() && next < total;
+    json!({
+        "items": page,
+        "brain_count": brain_count,
+        "memory_count": memory_count,
+        "skipped": skipped,
+        "total_items": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": if has_more { json!(next) } else { V::Null },
+        "complete_layers": complete_layers,
+    })
+}
 fn clean_relative_path(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -3521,6 +4004,364 @@ mod tests {
         assert_eq!(mem_atom["authority"], "verified");
         assert_eq!(mem_atom["memory_id"], "MEM-20261117-aaaa1111");
         assert_eq!(mem_atom["files"], json!(["src/fresh.rs"]));
+    }
+
+    #[test]
+    fn linked_memory_for_files_emits_non_destructive_rename_and_delete_warnings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        let finding = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({"type": "finding", "external_id": "finding-links-1", "title": "Fresh fn must stay pure", "goal": "Callers rely on it.", "files": ["src/fresh.rs"], "sources": ["src/fresh.rs#L1"], "privacy": "public", "authority": "verified", "attestation": "person", "json": true}),
+                &[],
+            )
+            .unwrap();
+        std::fs::write(project.join("src/old.rs"), "pub fn old() {}\n").unwrap();
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-aaaa1111",
+            "fresh",
+            "Fresh is pure",
+            "No side effects.",
+            &["src/fresh.rs"],
+        );
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-bbbb2222",
+            "old",
+            "Old helper",
+            "Kept for the API.",
+            &["src/old.rs"],
+        );
+        let snapshot = || {
+            let mut files = Vec::new();
+            for dir in ["project-brain/dynamic", "memory-bank/chunks"] {
+                for entry in walkdir_files(&project.join(dir)) {
+                    files.push((entry.clone(), std::fs::read(&entry).unwrap()));
+                }
+            }
+            files.sort();
+            files
+        };
+        let before = snapshot();
+        let links = knowledge
+            .memory_links(&project_id, &json!({"path": "./src/fresh.rs"}))
+            .unwrap();
+        assert_eq!(links["path"], "src/fresh.rs");
+        assert_eq!(links["brain_records"][0]["id"], finding["id"]);
+        assert_eq!(links["brain_records"][0]["cited_path"], "src/fresh.rs");
+        assert_eq!(links["memory_chunks"][0]["id"], "MEM-20261117-aaaa1111");
+        assert_eq!(links["hygiene_warnings"], json!([]));
+        // Omnigraph's contradictions are composed beside these by the route.
+        assert_eq!(links["contradiction_warnings"], json!([]));
+        // A rename leaves the old name's citations to review.
+        let renamed = knowledge
+            .memory_links(
+                &project_id,
+                &json!({"path": "src/new.rs", "previous_path": "src/old.rs"}),
+            )
+            .unwrap();
+        let warning = &renamed["hygiene_warnings"][0];
+        assert_eq!(warning["kind"], "cited-file-renamed");
+        assert_eq!(warning["linked"], json!(["MEM-20261117-bbbb2222"]));
+        assert_eq!(warning["recommended_action"], "review");
+        // A deleted file's citations are flagged, never retired.
+        std::fs::remove_file(project.join("src/fresh.rs")).unwrap();
+        let gone = knowledge
+            .memory_links(&project_id, &json!({"path": "src/fresh.rs"}))
+            .unwrap();
+        assert_eq!(gone["hygiene_warnings"][0]["kind"], "cited-file-missing");
+        assert_eq!(
+            gone["hygiene_warnings"][0]["linked"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(snapshot(), before);
+        assert!(
+            knowledge
+                .memory_links(&project_id, &json!({"path": "../etc/passwd"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn contradiction_warnings_name_both_atoms_and_the_records_behind_them() {
+        let atoms = json!([
+            {"atom_id": "atom-session-7", "brain_record_id": "11111111-2222-4333-8444-555555555555", "title": "Tokens live a day"},
+            {"atom_id": "mem-MEM-20261117-aabbccdd", "title": "Tokens live 15 minutes"}
+        ]);
+        let contradictions = json!([
+            {"source_id": "atom-session-7", "source_title": "Tokens live a day", "target_id": "mem-MEM-20261117-aabbccdd", "target_title": "Tokens live 15 minutes", "note": "TTL changed", "branch": "main", "text": "\"Tokens live a day\" contradicts \"Tokens live 15 minutes\" (TTL changed); check both against the code before relying on either."},
+            {"source_id": "brain-99999999-8888-4777-8666-555555555555", "target_id": "atom-plain"},
+            {"source_id": "", "target_id": "x"},
+            "not a relation"
+        ]);
+        let warnings = KnowledgeDomain::contradiction_warnings(&contradictions, &atoms);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        let first = &warnings[0];
+        assert_eq!(first["kind"], "atom-contradiction");
+        assert_eq!(first["recommended_action"], "review");
+        assert_eq!(
+            first["linked"],
+            json!([
+                "11111111-2222-4333-8444-555555555555",
+                "MEM-20261117-aabbccdd"
+            ])
+        );
+        assert_eq!(first["open"][0]["scope"], "brain");
+        assert_eq!(first["open"][1]["scope"], "memory");
+        assert!(first["text"].as_str().unwrap().contains("TTL changed"));
+        // A canonical id still opens its record; a plain atom opens nothing,
+        // and a relation without titles is described by its ids.
+        let second = &warnings[1];
+        assert_eq!(
+            second["open"],
+            json!([{"scope": "brain", "target_id": "99999999-8888-4777-8666-555555555555", "title": "brain-99999999-8888-4777-8666-555555555555"}])
+        );
+        assert!(second["text"].as_str().unwrap().starts_with(
+            "\"brain-99999999-8888-4777-8666-555555555555\" contradicts \"atom-plain\""
+        ));
+        assert!(KnowledgeDomain::contradiction_warnings(&json!(null), &atoms).is_empty());
+    }
+
+    #[test]
+    fn risk_caller_hints_are_off_unless_the_flag_says_1() {
+        // The variable unset is the default, and the default is off.
+        assert!(!graph_risk_caller_hints(None));
+        for value in ["", "0", "true", "yes", "on", "01", "2"] {
+            assert!(!graph_risk_caller_hints(Some(value)), "{value:?}");
+        }
+        assert!(graph_risk_caller_hints(Some("1")));
+        assert!(graph_risk_caller_hints(Some(" 1\n")));
+        assert_eq!(GRAPH_RISK_CALLER_HINTS, "HARNESS_GRAPH_RISK_CALLER_HINTS");
+
+        // Callers at risk of breaking come first, each once, within the limit.
+        let edge_diffs = json!({"risk_callers": [
+            {"from": "src/z_added.rs", "to": "src/core.rs", "impact": "added_caller"},
+            {"from": "src/b_impacted.rs", "to": "src/core.rs", "impact": "impacted"},
+            {"from": "./src/a_broken.rs", "to": "src/core.rs", "impact": "broken_risk"},
+            {"from": "src/a_broken.rs", "to": "src/other.rs", "impact": "impacted"},
+            {"from": "../outside.rs", "to": "src/core.rs", "impact": "broken_risk"},
+            {"to": "src/core.rs", "impact": "broken_risk"}
+        ]});
+        assert_eq!(
+            risk_caller_files(&edge_diffs, 8),
+            vec!["src/a_broken.rs", "src/b_impacted.rs", "src/z_added.rs"]
+        );
+        assert_eq!(risk_caller_files(&edge_diffs, 1), vec!["src/a_broken.rs"]);
+        assert!(risk_caller_files(&json!({}), 8).is_empty());
+    }
+
+    #[test]
+    fn risk_callers_reach_source_hints_only_when_turned_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        std::fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-cccc3333",
+            "caller",
+            "Caller keeps the old signature",
+            "The caller depends on the two-argument form.",
+            &["src/caller.rs"],
+        );
+        MemoryService::new(ctx.clone(), None)
+            .execute("index", &json!({}), &[])
+            .unwrap();
+        let session =
+            json!({"id": "s-1", "project_id": project_id, "omnigraph": {"enabled": false}});
+        let asked = std::cell::Cell::new(false);
+        let callers = || {
+            asked.set(true);
+            vec!["src/caller.rs".to_string()]
+        };
+        // Off: nothing is hinted, and the session's graph is not measured.
+        assert_eq!(
+            knowledge.session_source_hints_with(&ctx, &session, false, callers),
+            None
+        );
+        assert!(!asked.get());
+        // On: the memory citing a caller at risk is hinted.
+        let on = knowledge
+            .session_source_hints_with(&ctx, &session, true, callers)
+            .expect("a chunk citing the caller is hinted");
+        assert!(asked.get());
+        let paths = on["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reference| reference["path"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec!["memory-bank/chunks/MEM-20261117-cccc3333-caller.md"]
+        );
+        // The public path reads the flag; with no graph installed it adds
+        // nothing either way.
+        assert_eq!(knowledge.session_source_hints(&ctx, &session), None);
+    }
+
+    fn walkdir_files(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn operation_lock_isolates_distinct_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_store, knowledge, project_id, _ctx) =
+            setup_governed_knowledge_project(&tmp.path().join("project"));
+        let other = knowledge.project_lock("another-project").unwrap();
+        let _held = other.try_lock().unwrap();
+        // Another project's operation does not make this one busy.
+        let status = knowledge
+            .run(&project_id, &json!({"action": "retrieval-feedback", "manifest_id": "m-1", "chunk_id": "docs/a.md", "vote": "helped"}), None, true)
+            .unwrap();
+        assert_eq!(status["ok"], true);
+        let own = knowledge.project_lock(&project_id).unwrap();
+        let _held = own.try_lock().unwrap();
+        let busy = knowledge
+            .run(&project_id, &json!({"action": "retrieval-feedback", "manifest_id": "m-1", "chunk_id": "docs/a.md", "vote": "stale"}), None, true)
+            .unwrap_err();
+        assert_eq!(busy.code, "knowledge-busy");
+    }
+
+    #[test]
+    fn usage_promotions_and_retrieval_feedback_carry_what_curation_needs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        let finding = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({"type": "finding", "external_id": "finding-curate-1", "title": "Validate session TTL", "goal": "Short-lived tokens reduce replay risk.", "files": ["src/fresh.rs"], "sources": ["src/fresh.rs"], "privacy": "public", "authority": "verified", "attestation": "person", "json": true}),
+                &[],
+            )
+            .unwrap();
+        let finding_id = finding["id"].as_str().unwrap().to_string();
+        let proposal = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "promote-propose",
+                &json!({"source_ids": [finding_id], "title": "Session TTL rule", "content": "Session tokens live for an hour.", "json": true}),
+                &[],
+            )
+            .unwrap();
+        let usage = knowledge.usage(&project_id, None).unwrap();
+        let item = &usage["promotions"]["items"][0];
+        assert_eq!(item["id"], proposal["id"]);
+        assert_eq!(item["source_ids"], json!([finding_id]));
+        // The proposal's text stays on the server.
+        assert!(item.get("title").is_none());
+        assert!(!usage.to_string().contains("Session TTL rule"));
+        assert_eq!(item["status"], "proposed");
+        assert_eq!(usage["feedback_supported"], true);
+        assert_eq!(usage["feedback"], json!({}));
+
+        let feedback = |vote: &str| {
+            knowledge.run(
+                &project_id,
+                &json!({"action": "retrieval-feedback", "manifest_id": "manifest-1", "chunk_id": "memory-bank/chunks/MEM-1.md", "vote": vote, "note": "Out of date since the TTL change."}),
+                None,
+                true,
+            )
+        };
+        assert_eq!(feedback("harmful").unwrap()["result"]["vote"], "harmful");
+        let recorded = &knowledge.usage(&project_id, None).unwrap()["feedback"];
+        assert_eq!(
+            recorded["manifest-1"]["memory-bank/chunks/MEM-1.md"]["vote"],
+            "harmful"
+        );
+        assert!(feedback("useful").is_err());
+        feedback("clear").unwrap();
+        assert_eq!(
+            knowledge.usage(&project_id, None).unwrap()["feedback"],
+            json!({})
+        );
+        let bad_manifest = knowledge.run(
+            &project_id,
+            &json!({"action": "retrieval-feedback", "manifest_id": "../escape", "chunk_id": "x", "vote": "helped"}),
+            None,
+            true,
+        );
+        assert!(bad_manifest.is_err());
+    }
+
+    #[test]
+    fn sync_collect_sorts_and_paginates_past_1000_items() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, _ctx) = setup_governed_knowledge_project(&project);
+        // Written in descending order, so the files list them unsorted too.
+        for number in (0..1005u32).rev() {
+            write_mem_chunk(
+                &project,
+                &format!("MEM-20261117-{number:08x}"),
+                "rule",
+                &format!("Rule {number}"),
+                "Audience validation prevents token replay.",
+                &["src/fresh.rs"],
+            );
+        }
+        let first = knowledge
+            .sync_collect(&project_id, &json!({}), None)
+            .unwrap();
+        assert_eq!(first["total_items"], 1005);
+        assert_eq!(first["memory_count"], 1005);
+        assert_eq!(first["offset"], 0);
+        assert_eq!(first["limit"], SYNC_PAGE_LIMIT);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["next_offset"], 1000);
+        let layers = first["complete_layers"].as_array().unwrap();
+        assert!(layers.contains(&json!("project-brain")), "{layers:?}");
+        assert!(layers.contains(&json!("memory-bank")), "{layers:?}");
+        let second = knowledge
+            .sync_collect(&project_id, &json!({"offset": 1000}), None)
+            .unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(), 5);
+        assert_eq!(second["has_more"], false);
+        assert!(second["next_offset"].is_null());
+        let ids = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["items"].as_array().unwrap())
+            .map(|item| item["atom_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(ids, sorted, "pages are cut from one sorted list");
+        assert_eq!(ids.len(), 1005);
+        // A small limit cuts the same list.
+        let small = knowledge
+            .sync_collect(&project_id, &json!({"offset": 3, "limit": 2}), None)
+            .unwrap();
+        assert_eq!(
+            small["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["atom_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ids[3..5].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(small["next_offset"], 5);
     }
 
     #[test]

@@ -323,6 +323,7 @@ impl RunnerLifecycle {
                         brain["context_id"] = Value::Null;
                         brain["capsule"] = Value::Null;
                         brain["capsule_text"] = Value::Null;
+                        brain["capsule_meter"] = Value::Null;
                         brain["source_hashes"] = json!({});
                         if reviewed {
                             brain["approved"] = json!(false);
@@ -456,9 +457,9 @@ impl RunnerLifecycle {
         self.with_memory_operation(session,generation,cancel,|context|{
    current(&self.store,&sid,generation,cancel)?;let mut brain=session["brain"].clone();brain["query"]=json!(query);let task_alias=string(&brain,"task_id")?;let service=core::MemoryService::new(context.clone(),None);
    let binding=if brain["create"]==true{measured_core(accounting,"start",||service.execute("start",&json!({"task_id":task_alias,"goal":brain["goal"]}),&[]))?}else{measured_core(accounting,"rebind",||service.execute("rebind",&json!({"task_id":task_alias,"record_id":brain["record_id"]}),&[]))?};let id=binding["task_uuid"].as_str().filter(|id|core::domain::is_uuid4(id)).ok_or_else(||HarnessError::invalid("The Brain runtime did not return the task identity."))?.to_string();
-   brain["record_id"]=json!(id);brain["create"]=json!(false);brain["approved"]=json!(false);brain["context_id"]=Value::Null;brain["capsule"]=Value::Null;patch(&self.store,&sid,generation,cancel,&json!({"brain":brain}))?;
-   current(&self.store,&sid,generation,cancel)?;let task=ResultService::new(context.clone()).task(&id,false)?.record;let mut request=json!({"query":query,"task_id":task_alias,"host":if automatic{session["provider"].clone()}else{json!("cli")},"limit":3,"ephemeral":automatic,"sanitize":false,"provenance_response":automatic,"gate":"off","json":true});if session["omnigraph"]["enabled"]==true&&let Some(atoms)=session["omnigraph"]["injected_atoms"].as_array()&&let Some(hints)=self.knowledge.build_omnigraph_source_hints(context,atoms){request["source_hints"]=hints;}let action=if automatic{"refresh"}else{"retrieve"};let refreshed=measured_core(accounting,action,||service.execute(action,&request,&[]))?;let capsule=if automatic{refreshed["capsule"].clone()}else{refreshed.clone()};let provenance=automatic.then(||refreshed.get("source_provenance")).flatten();let hashes=self.knowledge.prepared_sources(context,&capsule,&task,provenance,automatic)?;
-   brain["context_id"]=json!(uuid::Uuid::new_v4().to_string());brain["capsule"]=capsule;brain["capsule_text"]=if automatic{refreshed["capsule_text"].clone()}else{Value::Null};brain["task"]=task;brain["source_hashes"]=hashes;for field in ["funnel_diagnosis","ordinary_receipt"]{if let Some(value)=refreshed.get(field){brain[field]=value.clone();}}current(&self.store,&sid,generation,cancel)?;Ok(brain)
+   brain["record_id"]=json!(id);brain["create"]=json!(false);brain["approved"]=json!(false);brain["context_id"]=Value::Null;brain["capsule"]=Value::Null;brain["capsule_meter"]=Value::Null;patch(&self.store,&sid,generation,cancel,&json!({"brain":brain}))?;
+   current(&self.store,&sid,generation,cancel)?;let task=ResultService::new(context.clone()).task(&id,false)?.record;let mut request=json!({"query":query,"task_id":task_alias,"host":if automatic{session["provider"].clone()}else{json!("cli")},"limit":3,"ephemeral":automatic,"sanitize":false,"provenance_response":automatic,"gate":"off","json":true});if let Some(hints)=self.knowledge.session_source_hints(context,session){request["source_hints"]=hints;}let action=if automatic{"refresh"}else{"retrieve"};let refreshed=measured_core(accounting,action,||service.execute(action,&request,&[]))?;let capsule=if automatic{refreshed["capsule"].clone()}else{refreshed.clone()};let provenance=automatic.then(||refreshed.get("source_provenance")).flatten();let hashes=self.knowledge.prepared_sources(context,&capsule,&task,provenance,automatic)?;
+   brain["context_id"]=json!(uuid::Uuid::new_v4().to_string());brain["capsule_meter"]=crate::context_usage::capsule_meter(&capsule);brain["capsule"]=capsule;brain["capsule_text"]=if automatic{refreshed["capsule_text"].clone()}else{Value::Null};brain["task"]=task;brain["source_hashes"]=hashes;for field in ["funnel_diagnosis","ordinary_receipt"]{if let Some(value)=refreshed.get(field){brain[field]=value.clone();}}current(&self.store,&sid,generation,cancel)?;Ok(brain)
   })
     }
     pub fn set_prompt_ledger(
@@ -1211,7 +1212,10 @@ impl RunnerLifecycle {
                         &generation,
                         json!({"kind":"memory","ok":result["ok"],"text":notice,"delivered_sources":provenance["delivered"],"opened_delivered_sources":provenance["opened"],"opened_observation":provenance["observation"],"reported_used_sources":provenance["reported_used"].as_array().map(Vec::len).unwrap_or(0),"attestation":provenance["attestation"]}),
                     )?;
-                    memory = json!({"state":"drafted","ok":result["ok"],"records":result["saved"]["records"].as_array().map(Vec::len).unwrap_or(0),"skipped":result["skipped"].as_array().map(Vec::len).unwrap_or(0)});
+                    let promotion = &result["saved"]["promotion"];
+                    let count =
+                        |field: &str| promotion[field].as_array().map(Vec::len).unwrap_or(0);
+                    memory = json!({"state":"drafted","ok":result["ok"],"records":result["saved"]["records"].as_array().map(Vec::len).unwrap_or(0),"skipped":result["skipped"].as_array().map(Vec::len).unwrap_or(0),"bank_promoted":count("promoted")>0,"promotion":{"promoted":count("promoted"),"blocked":count("blocked"),"failed":count("failed")}});
                 }
             } else if latest.state != "none" {
                 event(

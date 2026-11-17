@@ -640,6 +640,88 @@ pub fn extract_declarations(rel_path: &str, source: &str) -> Vec<CreatedEntity> 
         .collect()
 }
 
+/// The declarations of `source` (the file `rel_path`) that `text` names, in
+/// file order, at most `limit`. A name with a capital, an underscore or a
+/// digit in it counts wherever it stands as a whole word; a plain lowercase
+/// one (`check`, `render`) only where the text writes it as code: in
+/// backticks, called, or after `::`, `->` or `.`. Matching is case-sensitive.
+pub(crate) fn declarations_named_in(
+    rel_path: &str,
+    source: &str,
+    text: &str,
+    limit: usize,
+) -> Vec<CreatedEntity> {
+    if limit == 0 || text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<CreatedEntity> = Vec::new();
+    for decl in extract_declaration_spans(rel_path, source) {
+        let entity = decl.entity;
+        if entity.kind == "file"
+            || entity.name.chars().count() < 3
+            || !names_declaration(text, &entity.name)
+        {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|seen| seen.name == entity.name && seen.parent == entity.parent)
+        {
+            continue;
+        }
+        out.push(entity);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+fn names_declaration(text: &str, name: &str) -> bool {
+    let distinctive = name.contains('_')
+        || name.chars().any(|c| c.is_ascii_digit())
+        || (name.chars().any(|c| c.is_ascii_uppercase())
+            && name.chars().any(|c| c.is_ascii_lowercase()));
+    let mut from = 0;
+    while let Some(at) = text[from..].find(name) {
+        let start = from + at;
+        let end = start + name.len();
+        let head = &text[..start];
+        let tail = &text[end..];
+        let before = head.chars().next_back();
+        let after = tail.chars().next();
+        if !before.is_some_and(is_ident_char)
+            && !after.is_some_and(is_ident_char)
+            && (distinctive
+                || (before == Some('`') && after == Some('`'))
+                || after == Some('(')
+                || head.ends_with("::")
+                || head.ends_with("->")
+                || before == Some('.'))
+        {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// A project file read for its declarations: inside `root` once links are
+/// followed, a regular file, at most the live scan's size, UTF-8. `rel_path`
+/// may carry a `#L12` anchor.
+pub(crate) fn read_workspace_file(root: &Path, rel_path: &str) -> Option<(String, String)> {
+    let rel = clean_rel_key(rel_path.split('#').next().unwrap_or(rel_path));
+    if rel.is_empty() || root.as_os_str().is_empty() {
+        return None;
+    }
+    let real_root = fs::canonicalize(root).ok()?;
+    let real = fs::canonicalize(root.join(&rel)).ok()?;
+    if !real.starts_with(&real_root) {
+        return None;
+    }
+    read_bounded_utf8(&real).map(|source| (rel, source))
+}
+
 /// Computes declarations modified (signature or own body changed) between `before` and `after`.
 pub(crate) fn diff_modified_entities(
     rel_path: &str,

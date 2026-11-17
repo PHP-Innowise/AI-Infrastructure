@@ -1164,6 +1164,8 @@ pub fn reset() {
     dom::clear("run-tree");
     dom::clear("run-pane-plan");
     dom::clear("run-pane-commands");
+    dom::clear("run-pane-memory");
+    dom::clear("run-pane-omnigraph");
     // The away summary belongs to the session being left.
     away(false);
     // The session being left closes its strip now, not when the next one answers.
@@ -1671,14 +1673,100 @@ fn mode(session: &V, run: &V, before: &V, after: &V, idle: &V) -> Mode {
     }
 }
 
-const TABS: [&str; 3] = ["files", "plan", "commands"];
+const TABS: [&str; 5] = ["files", "plan", "commands", "memory", "omnigraph"];
 
 /// The launch recorded something for this tab.
 fn has(run: &V, tab: &str) -> bool {
     match tab {
         "files" => run["files"].as_object().is_some_and(|map| !map.is_empty()),
+        "memory" | "omnigraph" => run[tab].is_object(),
         _ => run[tab].as_array().is_some_and(|list| !list.is_empty()),
     }
+}
+
+/// What the turn's memory save did: the launch's last `memory` event.
+pub(crate) fn render_run_memory_pane_html(event: &V) -> String {
+    if !event.is_object() {
+        return String::new();
+    }
+    let state = match event["ok"].as_bool() {
+        Some(true) => "Saved",
+        Some(false) => "Not saved",
+        None => "Memory",
+    };
+    let mut facts = Vec::new();
+    for (field, label) in [
+        ("delivered_sources", "sources delivered"),
+        ("opened_delivered_sources", "delivered sources opened"),
+        ("reported_used_sources", "sources reported as used"),
+    ] {
+        if let Some(count) = event[field].as_u64() {
+            facts.push(format!("<li>{count} {label}</li>"));
+        }
+    }
+    if let Some(attestation) = event["attestation"].as_str().filter(|s| !s.is_empty()) {
+        facts.push(format!(
+            "<li>Attested by {}</li>",
+            crate::omnigraph::esc(attestation)
+        ));
+    }
+    format!(
+        "<p class=\"run-pane-state\" data-ok=\"{}\">{state}</p><p class=\"run-pane-text\">{}</p>{}",
+        event["ok"]
+            .as_bool()
+            .map_or("unknown", |ok| if ok { "true" } else { "false" }),
+        crate::omnigraph::esc(event["text"].as_str().unwrap_or("")),
+        if facts.is_empty() {
+            String::new()
+        } else {
+            format!("<ul class=\"run-pane-facts\">{}</ul>", facts.concat())
+        }
+    )
+}
+
+/// What the turn did with the shared Omnigraph context: the launch's last
+/// `omnigraph` event.
+pub(crate) fn render_run_omnigraph_pane_html(event: &V) -> String {
+    if !event.is_object() {
+        return String::new();
+    }
+    let phase = event["phase"].as_str().unwrap_or("update");
+    let mut facts = Vec::new();
+    for (field, label) in [
+        ("published_atoms", "atoms published"),
+        ("imported_atoms", "atoms imported"),
+        ("synced_atoms", "atoms synced"),
+    ] {
+        let count = event[field]
+            .as_u64()
+            .or_else(|| event[field].as_array().map(|list| list.len() as u64));
+        if let Some(count) = count {
+            facts.push(format!("<li>{count} {label}</li>"));
+        }
+    }
+    if let Some(branch) = event["branch"]
+        .as_str()
+        .or_else(|| event["target_branch"].as_str())
+        .filter(|s| !s.is_empty())
+    {
+        facts.push(format!(
+            "<li>Branch <code>{}</code></li>",
+            crate::omnigraph::esc(branch)
+        ));
+    }
+    format!(
+        "<p class=\"run-pane-state\" data-ok=\"{}\">{}</p><p class=\"run-pane-text\">{}</p>{}",
+        event["ok"]
+            .as_bool()
+            .map_or("unknown", |ok| if ok { "true" } else { "false" }),
+        crate::omnigraph::esc(&m::label(phase)),
+        crate::omnigraph::esc(event["text"].as_str().unwrap_or("")),
+        if facts.is_empty() {
+            String::new()
+        } else {
+            format!("<ul class=\"run-pane-facts\">{}</ul>", facts.concat())
+        }
+    )
 }
 
 /// The tabs a finished turn can open from the line under the conversation: none while a turn
@@ -2564,6 +2652,17 @@ pub fn render() {
             dom::el("p", "run-plan-item", &label)
         },
     );
+    for (tab, pane) in [
+        ("memory", render_run_memory_pane_html(&run["memory"])),
+        (
+            "omnigraph",
+            render_run_omnigraph_pane_html(&run["omnigraph"]),
+        ),
+    ] {
+        if let Some(element) = dom::get(&format!("run-pane-{tab}")) {
+            element.set_inner_html(&pane);
+        }
+    }
     let commands = m::array(&run["commands"]);
     dom::text("run-badge-commands", &commands.len().to_string());
     dom::keyed_render(
@@ -2607,7 +2706,8 @@ pub fn render() {
     for name in TABS {
         let selected = name == tab;
         let button = format!("run-tab-{name}");
-        // Plan and Commands ship hidden: each joins the tab list once the launch has one.
+        // Plan, Commands, Memory and Omnigraph ship hidden: each joins the tab list once the
+        // launch has one.
         dom::hidden(&button, name != "files" && !has(&run, name));
         dom::attr(&button, "aria-selected", truth(selected));
         // Every shown tab is a tab stop: the page has no arrow-key handling for the tab list.
@@ -2731,7 +2831,8 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
         "run-compact" | "run-now" => detail(!m::yes(&m::data("run-detailed"))),
         "run-close" => close(),
         "run-open" => open(payload.as_str().unwrap_or("files")),
-        "run-tab-files" | "run-tab-plan" | "run-tab-commands" => {
+        "run-tab-files" | "run-tab-plan" | "run-tab-commands" | "run-tab-memory"
+        | "run-tab-omnigraph" => {
             m::set("run-tab", json!(action.trim_start_matches("run-tab-")));
             // The file card belongs to the Files tab.
             hide_card(false);
@@ -3151,6 +3252,31 @@ mod mode_tests {
         // A plan event without a list leaves the tab out, as the pane would be empty.
         run["plan"] = json!({"note":"no items"});
         assert_eq!(shown_tab(&run, "plan"), "files");
+    }
+
+    #[test]
+    fn openers_and_shown_tab_include_memory_and_omnigraph_when_present() {
+        let done = session("completed");
+        let mut run = launch("a", &["tool", "text"]);
+        run["files"] = json!({"a.php":{"path":"a.php","reads":1,"edits":0}});
+        assert_eq!(openers(&done, &run), ["files"]);
+        assert_eq!(shown_tab(&run, "memory"), "files");
+        run["memory"] = json!({"kind":"memory","ok":true,"text":"Saved 2 learnings.","delivered_sources":3,"opened_delivered_sources":1});
+        run["omnigraph"] =
+            json!({"kind":"omnigraph","phase":"inbox_notify","ok":false,"text":"Not told <now>."});
+        assert_eq!(openers(&done, &run), ["files", "memory", "omnigraph"]);
+        assert_eq!(shown_tab(&run, "memory"), "memory");
+        assert_eq!(shown_tab(&run, "omnigraph"), "omnigraph");
+        let memory = render_run_memory_pane_html(&run["memory"]);
+        assert!(memory.contains("data-ok=\"true\">Saved</p>"), "{memory}");
+        assert!(memory.contains("<li>3 sources delivered</li>"), "{memory}");
+        let omnigraph = render_run_omnigraph_pane_html(&run["omnigraph"]);
+        assert!(
+            omnigraph.contains("data-ok=\"false\">inbox notify</p>"),
+            "{omnigraph}"
+        );
+        assert!(omnigraph.contains("Not told &lt;now&gt;."), "{omnigraph}");
+        assert_eq!(render_run_memory_pane_html(&json!(null)), "");
     }
 }
 

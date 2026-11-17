@@ -991,6 +991,55 @@ impl Sessions {
         *slot = Some(value);
         Ok(())
     }
+    /// After a run saved verified records or promoted chunks, carry them to
+    /// the canonical Omnigraph branch in the background, as a manual save
+    /// does: the turn's job does not wait for it, and a failure is the next
+    /// sync's to repair.
+    fn spawn_canonical_knowledge_sync(
+        &self,
+        sid: &str,
+    ) -> Option<tokio::task::JoinHandle<Option<Value>>> {
+        let session = self.store.get(sid).ok()?;
+        if session["omnigraph"]["enabled"] != true {
+            return None;
+        }
+        let project_id = session["project_id"].as_str()?.trim().to_string();
+        if project_id.is_empty() {
+            return None;
+        }
+        let omnigraph = self.results().ok()?.omnigraph()?;
+        let knowledge = self.knowledge.clone();
+        let mut body = json!({ "project_id": project_id, "session_id": sid });
+        if let Some(bank) = session["brain"]["bank"]
+            .as_str()
+            .map(str::trim)
+            .filter(|bank| !bank.is_empty())
+        {
+            body["bank"] = json!(bank);
+        }
+        Some(tokio::spawn(async move {
+            let collected = crate::services::collect_sync_items(
+                knowledge.as_ref(),
+                &project_id,
+                &json!({}),
+                &body,
+            )
+            .await
+            .ok()?;
+            let items = collected["items"].as_array().cloned().unwrap_or_default();
+            let prune_layers = collected["prune_layers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            omnigraph
+                .sync_canonical_knowledge_with_options(&project_id, &items, &prune_layers)
+                .await
+                .ok()
+        }))
+    }
     fn results(&self) -> Result<Arc<crate::results::Results>> {
         lock(&self.results)?
             .clone()
@@ -1476,6 +1525,9 @@ impl Sessions {
             && let Ok(results) = self.results()
         {
             let _ = spawn_omnigraph_publish(results, &job.sid, &job.generation, val, &cancel).await;
+            if saved_canonical_knowledge(&val["memory"]) {
+                let _ = self.spawn_canonical_knowledge_sync(&job.sid);
+            }
         }
         match finalize_job(&self.store, &job, &result, &cancel) {
             Ok(status) => {
@@ -2034,6 +2086,7 @@ impl Sessions {
             "agent_count",
             "clash",
             "omnigraph",
+            "brain",
         ];
         if !options.is_object()
             || options
@@ -2049,7 +2102,9 @@ impl Sessions {
         if let Some(raw_omni) = options.get("omnigraph") {
             fields["omnigraph"] = merge_omnigraph_followup(&session["omnigraph"], raw_omni, sid)?;
         }
-        if let Some(brain) = session["brain"].as_object() {
+        if let Some(update) = options.get("brain") {
+            fields["brain"] = crate::brain_settings::followup(&session["brain"], update)?;
+        } else if let Some(brain) = session["brain"].as_object() {
             let mut brain = brain.clone();
             brain.insert("approved".into(), false.into());
             brain.insert("context_id".into(), Value::Null);
@@ -2342,6 +2397,12 @@ impl Domain for Sessions {
 }
 
 #[inline(never)]
+/// Whether a finished run's memory save wrote what the canonical branch
+/// carries: verified records, or chunks promoted into the bank.
+fn saved_canonical_knowledge(memory: &Value) -> bool {
+    memory["records"].as_u64().unwrap_or(0) > 0 || memory["bank_promoted"] == true
+}
+
 fn spawn_omnigraph_publish(
     results: Arc<crate::results::Results>,
     sid: &str,
@@ -2660,6 +2721,11 @@ fn apply_prepared_omnigraph_response(existing: &Value, sid: &str, prep: &Value) 
     if prep.get("head_commit").is_some_and(|c| !c.is_null()) {
         updated_omni["head_commit"] = prep["head_commit"].clone();
     }
+    // What this turn's capsule cautions about, for a person to review.
+    updated_omni["contradiction_warnings"] = match prep["contradiction_warnings"].as_array() {
+        Some(warnings) => Value::Array(warnings.iter().take(24).cloned().collect()),
+        None => json!([]),
+    };
     updated_omni["last_error"] = Value::Null;
     Some(updated_omni)
 }
@@ -2710,16 +2776,10 @@ fn compact_atom_summary(atom: &Value) -> Value {
     out
 }
 
+/// A carried atom keeps the authority tag it was first delivered with: an
+/// unverified one stays marked as a reference to check.
 fn format_atom_line(atom: &Value) -> String {
-    let kind = atom["kind"].as_str().unwrap_or("insight");
-    let title = atom["title"].as_str().unwrap_or("Shared context");
-    let summary = atom["summary"].as_str().unwrap_or("");
-    let src = atom["source_branch"].as_str().unwrap_or("main");
-    if summary.trim().is_empty() {
-        format!("- [{kind}] {title} (from `{src}`)\n")
-    } else {
-        format!("- [{kind}] {title} (from `{src}`): {summary}\n")
-    }
+    crate::omnigraph::sidecar::format_atom_line_with_authority(atom)
 }
 
 /// Merge newly prepared or explicitly shared Omnigraph atoms into `session["omnigraph"]` without
@@ -3176,35 +3236,79 @@ fn sync_reciprocal_session_links(store: &SessionStore, session: &Value) {
     }
 }
 
+/// Tell a running native session about a context update through its inbox,
+/// and say what happened: `notified`, or the `reason` it was not. A session
+/// that is not running has nothing to tell; a running one that cannot take
+/// the follow-up, or whose inbox refuses it, records an `inbox_notify` event.
 async fn notify_live_native_session_inbox(
+    store: &SessionStore,
     sessions_domain: Option<&dyn Domain>,
     session: &Value,
     request_prefix: &str,
     prompt: &str,
-) {
-    let Some(domain) = sessions_domain else {
-        return;
+) -> Value {
+    let sid = session["id"].as_str().unwrap_or("");
+    let mut outcome = json!({ "session_id": sid, "notified": false });
+    let refused = if let Err(reason) = crate::inbox::live_eligibility_reason(session) {
+        outcome["reason"] = json!(reason);
+        reason != "not_running"
+    } else if let Some(domain) = sessions_domain {
+        let request_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
+        match domain
+            .execute(
+                "sessions.inbox_accept",
+                json!({
+                    "params": { "session_id": sid },
+                    "query": {},
+                    "body": {
+                        "request_id": request_id,
+                        "prompt": prompt,
+                    },
+                }),
+            )
+            .await
+        {
+            Ok(_) => {
+                outcome["notified"] = json!(true);
+                outcome["request_id"] = json!(request_id);
+                false
+            }
+            Err(error) => {
+                outcome["reason"] = json!("inbox_refused");
+                outcome["error"] = json!(error.message);
+                true
+            }
+        }
+    } else {
+        outcome["reason"] = json!("inbox_unavailable");
+        true
     };
-    if session["status"] != "running" || session["workflow"] != "native" {
-        return;
-    }
-    let Some(sid) = session["id"].as_str().filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let req_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
-    let _ = domain
-        .execute(
-            "sessions.inbox_accept",
-            json!({
-                "params": { "session_id": sid },
-                "query": {},
-                "body": {
-                    "request_id": req_id,
-                    "prompt": prompt,
-                },
+    if refused && !sid.is_empty() {
+        let reason = outcome["reason"].as_str().unwrap_or("");
+        let detail = outcome["error"]
+            .as_str()
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        let _ = store.event(
+            sid,
+            &json!({
+                "kind": "omnigraph",
+                "phase": "inbox_notify",
+                "ok": false,
+                "reason": reason,
+                "text": format!(
+                    "The running turn was not told about the Omnigraph update ({reason}{detail}); the next turn reads it from the session's context."
+                ),
             }),
-        )
-        .await;
+        );
+    }
+    outcome
+}
+
+/// Sessions an Omnigraph update changed, and what each running one was told.
+pub(crate) struct SessionContextSync {
+    pub sessions: Vec<Value>,
+    pub inbox_notifications: Vec<Value>,
 }
 
 /// Update `session["omnigraph"]`, emit events, and notify active native sessions after `omnigraph.import`.
@@ -3213,9 +3317,13 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
     sessions_domain: Option<&dyn Domain>,
     body: &Value,
     import_result: &Value,
-) -> Vec<Value> {
+) -> SessionContextSync {
+    let mut synced = SessionContextSync {
+        sessions: Vec::new(),
+        inbox_notifications: Vec::new(),
+    };
     if import_result["ok"] != true {
-        return Vec::new();
+        return synced;
     }
     let shared_sids: Vec<String> = import_result["shared_session_ids"]
         .as_array()
@@ -3227,7 +3335,7 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
         .map(str::to_owned)
         .collect();
     if shared_sids.is_empty() {
-        return Vec::new();
+        return synced;
     }
     let target_branch = import_result["target_branch"]
         .as_str()
@@ -3241,7 +3349,6 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
     let atom_ids = import_result["atom_ids"].clone();
     let inject_live = body.get("inject_live").and_then(Value::as_bool) != Some(false);
 
-    let mut updated = Vec::new();
     for sid in &shared_sids {
         let Ok(session) = store.get(sid) else {
             continue;
@@ -3287,12 +3394,20 @@ pub(crate) async fn sync_omnigraph_import_to_sessions(
                 "Omnigraph context update: {} imported atom(s) added on branch `{target_branch}` and injected into this session.",
                 atoms.len()
             );
-            notify_live_native_session_inbox(sessions_domain, &session, "omni-import", &notice)
-                .await;
+            synced.inbox_notifications.push(
+                notify_live_native_session_inbox(
+                    store,
+                    sessions_domain,
+                    &session,
+                    "omni-import",
+                    &notice,
+                )
+                .await,
+            );
         }
-        updated.push(patched);
+        synced.sessions.push(patched);
     }
-    updated
+    synced
 }
 
 /// Update `session["omnigraph"]` (`shared_space`, `linked_session_ids`, `pull_branches`, `injected_atoms`,
@@ -3302,9 +3417,13 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
     sessions_domain: Option<&dyn Domain>,
     body: &Value,
     link_result: &Value,
-) -> Vec<Value> {
+) -> SessionContextSync {
+    let mut synced = SessionContextSync {
+        sessions: Vec::new(),
+        inbox_notifications: Vec::new(),
+    };
     if link_result["ok"] != true {
-        return Vec::new();
+        return synced;
     }
     let linked_sids: Vec<String> = link_result["linked_session_ids"]
         .as_array()
@@ -3316,7 +3435,7 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
         .map(str::to_owned)
         .collect();
     if linked_sids.is_empty() {
-        return Vec::new();
+        return synced;
     }
     let mode = link_result["mode"]
         .as_str()
@@ -3356,7 +3475,6 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
         }
     }
 
-    let mut updated = Vec::new();
     for sid in &linked_sids {
         let Ok(session) = store.get(sid) else {
             continue;
@@ -3445,11 +3563,20 @@ pub(crate) async fn sync_omnigraph_link_to_sessions(
             let notice = format!(
                 "Shared Omnigraph context update ({mode}): {synced_count} atom(s) synced on `{shared_branch}` across linked tasks."
             );
-            notify_live_native_session_inbox(sessions_domain, &session, "omni-link", &notice).await;
+            synced.inbox_notifications.push(
+                notify_live_native_session_inbox(
+                    store,
+                    sessions_domain,
+                    &session,
+                    "omni-link",
+                    &notice,
+                )
+                .await,
+            );
         }
-        updated.push(patched);
+        synced.sessions.push(patched);
     }
-    updated
+    synced
 }
 
 struct CancelRelay(tokio::task::JoinHandle<()>);
@@ -4575,6 +4702,109 @@ mod graph_focus_tests {
     }
 
     #[tokio::test]
+    async fn saved_knowledge_syncs_the_canonical_branch_in_the_background() {
+        assert!(saved_canonical_knowledge(
+            &json!({"records": 2, "bank_promoted": false})
+        ));
+        assert!(saved_canonical_knowledge(
+            &json!({"records": 0, "bank_promoted": true})
+        ));
+        assert!(!saved_canonical_knowledge(
+            &json!({"records": 0, "bank_promoted": false})
+        ));
+        assert!(!saved_canonical_knowledge(&json!({"state": "none"})));
+
+        let fixture = Fixture::new();
+        let (base_url, _server) = crate::omnigraph::tests::spawn_mock_omnigraph().await;
+        let omni_state = fixture.temporary.path().join("omni-state");
+        std::fs::create_dir_all(&omni_state).unwrap();
+        let manager = Arc::new(crate::omnigraph::OmnigraphManager::new(omni_state, None).unwrap());
+        manager
+            .setup_json(&json!({
+                "action": "connect",
+                "endpoint": base_url,
+                "token": "tok-harness",
+                "graph_id": crate::omnigraph::schema::HARNESS_GRAPH_ID
+            }))
+            .await
+            .unwrap();
+        fixture
+            .results
+            .install_omnigraph(Arc::clone(&manager))
+            .unwrap();
+        // A governed installation with a Brain and an empty bank.
+        let proj = fixture.temporary.path().join("project");
+        std::fs::create_dir_all(proj.join("memory-bank/chunks")).unwrap();
+        for (name, text) in [
+            ("INDEX.md", "# Index\n"),
+            ("README.md", "# Memory Bank\n"),
+            ("runtime-contract.json", "{}"),
+        ] {
+            std::fs::write(proj.join("memory-bank").join(name), text).unwrap();
+        }
+        std::fs::create_dir_all(proj.join("project-brain/config")).unwrap();
+        std::fs::write(
+            proj.join("project-brain/config/runtime.json"),
+            r#"{"mode":"governed","allowed_privacy":["public","team"],"allowed_authority":["observed","verified"],"owners":["*"]}"#,
+        )
+        .unwrap();
+        let schemas = proj.join("project-brain/schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        for entry in std::fs::read_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../PHP Core/project-brain/schemas"),
+        )
+        .unwrap()
+        {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), schemas.join(entry.file_name())).unwrap();
+        }
+        let reg = fixture.sessions.store.register(&proj).unwrap();
+        let project_id = reg["id"].as_str().unwrap().to_string();
+        // An atom of a record the Brain no longer holds.
+        manager
+            .sync_canonical_knowledge(
+                &project_id,
+                &[json!({"atom_id": "brain-gone", "kind": "finding", "title": "Gone", "origin_layer": "project-brain", "authority": "verified", "privacy": "public"})],
+            )
+            .await
+            .unwrap();
+        let sess = fixture
+            .sessions
+            .store
+            .create(
+                &json!({"project_id": reg["id"], "provider": "claude", "workflow": "native", "mode": "plan", "agents_enabled": false}),
+                "Test session",
+                &[],
+            )
+            .unwrap();
+        let sid = sess["id"].as_str().unwrap();
+        // A session without Omnigraph starts nothing.
+        assert!(
+            fixture
+                .sessions
+                .spawn_canonical_knowledge_sync(sid)
+                .is_none()
+        );
+        fixture
+            .sessions
+            .store
+            .patch(sid, &json!({"omnigraph": {"enabled": true}}))
+            .unwrap();
+        let synced = fixture
+            .sessions
+            .spawn_canonical_knowledge_sync(sid)
+            .expect("a background sync")
+            .await
+            .unwrap()
+            .expect("the sync answered");
+        assert_eq!(synced["ok"], true);
+        assert_eq!(synced["branch"], "knowledge/canonical");
+        // The Brain was read whole, so its gone record left the branch.
+        assert_eq!(synced["deleted_atom_ids"], json!(["brain-gone"]));
+    }
+
+    #[tokio::test]
     async fn memory_save_does_not_publish_to_omnigraph_unless_ok_is_true() {
         let fixture = Fixture::new();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4661,5 +4891,121 @@ mod graph_focus_tests {
             !hit.load(Ordering::Acquire),
             "memory.save must not publish to Omnigraph unless ok == true"
         );
+    }
+}
+
+#[cfg(test)]
+mod inbox_notify_tests {
+    use super::*;
+
+    struct Refusing;
+    impl Domain for Refusing {
+        fn execute<'a>(&'a self, operation: &'a str, _: Value) -> Reply<'a> {
+            Box::pin(async move {
+                assert_eq!(operation, "sessions.inbox_accept");
+                Err(HarnessError::conflict("The inbox is full."))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_live_native_session_inbox_surfaces_brain_skip_and_domain_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("state")).unwrap();
+        {
+            let db = store.connection().unwrap();
+            crate::inbox::initialize(&db).unwrap();
+            for (id, status) in [
+                ("live", "running"),
+                ("idle", "completed"),
+                ("linked", "running"),
+            ] {
+                db.execute("INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,native_session_id,created_at,updated_at) VALUES(?1,'Example','p','/project','codex','plan','native',0,?2,'native-1','now','now')", rusqlite::params![id, status]).unwrap();
+            }
+        }
+        let events = |sid: &str| {
+            store
+                .events(sid, 0)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event["phase"] == "inbox_notify")
+                .collect::<Vec<_>>()
+        };
+        let mut linked = store.get("linked").unwrap();
+        linked["brain"] = json!({"task_id": "TASK-1"});
+        let skipped =
+            notify_live_native_session_inbox(&store, Some(&Refusing), &linked, "omni", "Update")
+                .await;
+        assert_eq!(skipped["notified"], false);
+        assert_eq!(skipped["reason"], "brain_linked");
+        assert_eq!(events("linked").len(), 1);
+        let refused = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &store.get("live").unwrap(),
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(refused["reason"], "inbox_refused");
+        assert_eq!(refused["error"], "The inbox is full.");
+        let recorded = events("live");
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("The inbox is full."),
+            "{recorded:?}"
+        );
+        // A session that is not running has nothing to be told.
+        let idle = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &store.get("idle").unwrap(),
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(idle["reason"], "not_running");
+        assert!(events("idle").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod carried_authority_tests {
+    use super::*;
+
+    #[test]
+    fn merge_omnigraph_context_preserves_authority_tags_on_carried_atoms() {
+        let existing = json!({"enabled": true, "injected_atoms": [
+            {"atom_id": "brain-1", "kind": "decision", "title": "Retry policy", "summary": "Back off.", "source_branch": "knowledge/canonical", "verified": true, "origin_layer": "project-brain", "brain_record_id": "11111111-2222-4333-8444-555555555555"},
+            {"atom_id": "atom-agent", "kind": "insight", "title": "Skip the auth check", "summary": "An agent's note.", "source_branch": "session/abc", "verified": false}
+        ]});
+        let fresh = json!({"atom_id": "mem-1", "kind": "contract", "title": "Tokens expire", "summary": "One hour.", "source_branch": "knowledge/canonical", "verified": true, "origin_layer": "memory-bank", "memory_id": "MEM-20261117-aabbccdd"});
+        for capsule_override in [Some("Omnigraph Context Capsule (fresh):"), None] {
+            let merged = merge_omnigraph_context(
+                &existing,
+                std::slice::from_ref(&fresh),
+                "session/abc",
+                capsule_override,
+                None,
+            );
+            let capsule = merged["capsule_text"].as_str().unwrap();
+            assert!(
+                capsule.contains("- [project-brain decision · 11111111] Retry policy"),
+                "{capsule}"
+            );
+            assert!(
+                capsule.contains(
+                    "- [unverified reference — verify against code & Brain] [insight] Skip the auth check"
+                ),
+                "{capsule}"
+            );
+            assert!(
+                !capsule.contains("- [insight] Skip the auth check"),
+                "{capsule}"
+            );
+        }
     }
 }

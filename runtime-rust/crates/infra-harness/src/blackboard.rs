@@ -128,6 +128,11 @@ impl Blackboard for CoreBlackboard {
             return Ok(());
         }
         let brain = BrainRepository::new(self.context.clone())?;
+        // Fleet lenses report at once. Each reads and writes the task under the
+        // Brain's mutation lock (the update takes it again on this thread), so
+        // none writes over a revision another just replaced, and none reads the
+        // task while another replaces its file, which Windows can show as gone.
+        let _guard = brain.lock()?;
         let record = brain.get_task(task)?;
         brain.update(
             record["id"]
@@ -141,5 +146,70 @@ impl Blackboard for CoreBlackboard {
             },
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn progress_survives_concurrent_lenses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("project-brain/config")).unwrap();
+        std::fs::write(
+            root.join("project-brain/config/runtime.json"),
+            r#"{"mode":"governed"}"#,
+        )
+        .unwrap();
+        let schemas = root.join("project-brain/schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        for entry in std::fs::read_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../PHP Core/project-brain/schemas"),
+        )
+        .unwrap()
+        {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), schemas.join(entry.file_name())).unwrap();
+        }
+        let context =
+            RuntimeContext::new(Roots::installed(&root).unwrap(), "local", "governed").unwrap();
+        BrainRepository::new(context.clone())
+            .unwrap()
+            .create(infra_core::CreateRecord {
+                external_id: "TASK-FLEET".into(),
+                title: "Review the change".into(),
+                ..infra_core::CreateRecord::default()
+            })
+            .unwrap();
+        let board = Arc::new(CoreBlackboard {
+            context: context.clone(),
+            available: true,
+        });
+        let lenses = (0..4)
+            .map(|lens| {
+                let board = board.clone();
+                std::thread::spawn(move || {
+                    (0..2)
+                        .map(|turn| {
+                            board.progress("TASK-FLEET", &format!("lens {lens} turn {turn}"))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        for lens in lenses {
+            for report in lens.join().unwrap() {
+                report.unwrap();
+            }
+        }
+        let task = BrainRepository::new(context)
+            .unwrap()
+            .get_task("TASK-FLEET")
+            .unwrap();
+        // Every report landed: the task moved past its first revision by each.
+        assert!(task["revision"].as_u64().unwrap() >= 9, "{task}");
     }
 }

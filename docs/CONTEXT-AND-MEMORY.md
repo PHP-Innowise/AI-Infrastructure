@@ -1108,7 +1108,10 @@ text is chosen to hold the answer:
   of declared citation paths when another section contains prose. Explicit
   requests for those headings, annotated references and source-only records
   retain their content. The remaining sections keep the same weighted window
-  selection. Headings receive the excerpt body's privacy screen.
+  selection. Headings receive the excerpt body's privacy screen. That screen
+  is the query's, except that a customer identifier loses only its value
+  (`Customer id: …`): a query is cut at the identifier, while an excerpt keeps
+  the sentences after it.
 - Windows are 800, 600 and 400 characters by rank, 600 for a history item; the
   rendered capsule stays under 3,600.
 - The item line names the section: `- memory specs/auth.md § Sessions — Auth`.
@@ -2071,6 +2074,15 @@ the task-outcome measurement sealed for it (`docs/MEMORY-EVAL.md`, "The
 read after the turn is recorded, for a second at most; each checkout of an
 attached project keeps its own list; and excerpt growth leaves the line its
 720 characters.
+
+`capsule_pack_deduplicated` is another experiment, off unless it is `true` in
+`runtime.json` or `CONTEXT_CAPSULE_PACK_DEDUP=1` (`0` turns a configured one
+off). The JSON capsule repeats each delivered item's snippet in `selected` and
+in `categories`, and a capsule over its 8,000 characters gives up its last
+turn, ticket files and then items. With the experiment, such a capsule first
+empties those repeated snippets; the layer item keeps its own. A capsule
+within the limit is unchanged. It changes which items a full capsule keeps, so
+it waits for its own held-out measurement (`docs/MEMORY-EVAL.md`).
 
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.

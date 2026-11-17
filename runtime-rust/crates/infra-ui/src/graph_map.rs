@@ -4207,9 +4207,7 @@ impl ChangesLookup {
             other_path.starts_with(&prefix)
                 && self.exact.get(&other_path).map(String::as_str) != Some("deleted")
         });
-        if has_surviving_child
-            || node.is_some_and(|n| n["changed"].as_u64().unwrap_or(0) > 0)
-        {
+        if has_surviving_child || node.is_some_and(|n| n["changed"].as_u64().unwrap_or(0) > 0) {
             Some("modified".to_owned())
         } else {
             Some("deleted".to_owned())
@@ -4411,11 +4409,7 @@ impl ImpactLookup {
                     if let Some(caller_str) = caller.as_str() {
                         let from = normalize_rel_path(strip_symbol_suffix(caller_str));
                         if !from.is_empty() {
-                            let key = (
-                                from.clone(),
-                                del_path.clone(),
-                                "broken_risk".to_owned(),
-                            );
+                            let key = (from.clone(), del_path.clone(), "broken_risk".to_owned());
                             if seen_risk.insert(key) {
                                 commit_risk_callers.push((
                                     from,
@@ -4474,7 +4468,13 @@ impl ImpactLookup {
             .any(|path| path_matches_node(&node_path, is_folder, path))
     }
 
-    fn pair_matches(nodes: &[V], from: usize, to: usize, expected_from: &str, expected_to: &str) -> bool {
+    fn pair_matches(
+        nodes: &[V],
+        from: usize,
+        to: usize,
+        expected_from: &str,
+        expected_to: &str,
+    ) -> bool {
         let from_node = &nodes[from];
         let to_node = &nodes[to];
         path_matches_node(
@@ -4563,11 +4563,9 @@ impl ImpactLookup {
                 return Some("broken_risk");
             }
         }
-        if self
-            .commit_risk_callers
-            .iter()
-            .any(|(cf, ct, imp)| imp == "broken_risk" && Self::pair_matches(nodes, from, to, cf, ct))
-        {
+        if self.commit_risk_callers.iter().any(|(cf, ct, imp)| {
+            imp == "broken_risk" && Self::pair_matches(nodes, from, to, cf, ct)
+        }) {
             return Some("broken_risk");
         }
         None
@@ -4594,11 +4592,9 @@ impl ImpactLookup {
         }
         let node_path = m::text(node, "path");
         let is_folder = m::yes(&node["folder"]);
-        if self
-            .commit_risk_callers
-            .iter()
-            .any(|(cf, _, imp)| imp == "broken_risk" && path_matches_node(&node_path, is_folder, cf))
-        {
+        if self.commit_risk_callers.iter().any(|(cf, _, imp)| {
+            imp == "broken_risk" && path_matches_node(&node_path, is_folder, cf)
+        }) {
             return Some("caller-risk");
         }
         if self.commit_risk_callers.iter().any(|(cf, _, imp)| {
@@ -5362,9 +5358,7 @@ fn inject_synthetic_deleted_nodes_and_edges(
     let commit_or_change_view = view["chosen"].is_object()
         || self::changes(view)
         || matches!(changes_doc["target"].as_str(), None | Some(""))
-        || changes_doc["target"]
-            .as_str()
-            .is_some_and(|t| t != "work");
+        || changes_doc["target"].as_str().is_some_and(|t| t != "work");
     if !commit_or_change_view {
         return;
     }
@@ -5511,7 +5505,13 @@ pub fn canvas_with_overlays(
     let mut nodes = m::array(&view["nodes"]);
     let mut edges = m::array(&view["edges"]);
     let frames = m::array(&view["frames"]);
-    inject_synthetic_deleted_nodes_and_edges(view, overlay.changes, &mut nodes, &mut edges, &frames);
+    inject_synthetic_deleted_nodes_and_edges(
+        view,
+        overlay.changes,
+        &mut nodes,
+        &mut edges,
+        &frames,
+    );
     let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
     let impact_lookup = ImpactLookup::from_sources(overlay.impact, overlay.changes, &nodes);
     let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
@@ -6078,12 +6078,13 @@ pub fn canvas_with_overlays(
             let impact_attr = impact
                 .map(|imp| format!(" data-impact=\"{imp}\""))
                 .unwrap_or_default();
-            let touched_attr =
-                if commit_changes_active && (node_is_changed[from_idx] || node_is_changed[to_idx]) {
-                    " data-commit-touched=\"true\""
-                } else {
-                    ""
-                };
+            let touched_attr = if commit_changes_active
+                && (node_is_changed[from_idx] || node_is_changed[to_idx])
+            {
+                " data-commit-touched=\"true\""
+            } else {
+                ""
+            };
             html.push_str(&format!(
                 "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
                 arrow_marker_suffix(kind, false),
@@ -6673,10 +6674,7 @@ pub fn canvas_with_overlays(
                         .as_str()
                         .map(normalize_change_status)
                         .filter(|s| {
-                            matches!(
-                                s.as_str(),
-                                "created" | "modified" | "deleted" | "renamed"
-                            )
+                            matches!(s.as_str(), "created" | "modified" | "deleted" | "renamed")
                         })
                 })
                 .unwrap_or_else(|| "modified".to_owned());
@@ -11861,7 +11859,18 @@ fn commit_dock_note(dock: &V) -> String {
     )
 }
 fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String {
-    let rows = m::array(&dock["rows"]);
+    // A row shows how much memory to review only once its commit's banner
+    // has the answers; rows are never asked for a count each.
+    let counts = m::data(COMMIT_MEMORY_COUNTS);
+    let rows = m::array(&dock["rows"])
+        .into_iter()
+        .map(|mut row| {
+            if let Some(count) = row["commit"].as_str().and_then(|sha| counts[sha].as_u64()) {
+                row["memory_review"] = json!(count);
+            }
+            row
+        })
+        .collect::<Vec<_>>();
     let selected_sha = selected_target.strip_prefix("commit:");
     crate::git_commit_graph::render_commit_graph_rows(
         &rows,
@@ -11873,18 +11882,148 @@ fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String 
     )
 }
 fn is_commit_view(view: &V) -> bool {
-    view["chosen"]["kind"] == "commit"
-        || view.get("commit_info").is_some_and(V::is_object)
+    view["chosen"]["kind"] == "commit" || view.get("commit_info").is_some_and(V::is_object)
 }
 fn render_commit_banner_for_view(view: &V, changes: Option<&V>) -> String {
     if !is_commit_view(view) {
         return String::new();
     }
-    crate::git_commit_graph::render_commit_banner(
+    let banner = crate::git_commit_graph::render_commit_banner(
         view.get("commit_info"),
         &view["chosen"],
         changes,
+    );
+    if crate::git_commit_graph::renamed_files(changes, 1).is_empty() {
+        return banner;
+    }
+    let project = view["project_id"]
+        .as_str()
+        .filter(|project| !project.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| surface_scope(MODAL_SURFACE).project_id().to_owned());
+    let commit = view["commit_info"]["commit"]
+        .as_str()
+        .or_else(|| view["chosen"]["head"]["commit"].as_str())
+        .or_else(|| {
+            view["chosen"]["target"]
+                .as_str()
+                .and_then(|target| target.strip_prefix("commit:"))
+        })
+        .unwrap_or("");
+    format!(
+        "{banner}{}",
+        commit_memory_section(&project, commit, changes)
     )
+}
+/// The commit-dock counts of memory to review, by commit, from the answers
+/// its banner received.
+const COMMIT_MEMORY_COUNTS: &str = "graph-commit-memory-counts";
+/// At most this many renamed files of one commit are asked about.
+const COMMIT_MEMORY_FILES: usize = 12;
+/// What the project's memory says about the files a commit renamed: the
+/// warnings to review, filled in as answers arrive. Nothing is retired or
+/// changed; once every answer is in, the commit's dock row shows the count.
+fn commit_memory_section(project: &str, commit: &str, changes: Option<&V>) -> String {
+    let renamed = crate::git_commit_graph::renamed_files(changes, COMMIT_MEMORY_FILES);
+    if project.is_empty() || renamed.is_empty() {
+        return String::new();
+    }
+    let answers = renamed
+        .iter()
+        .map(|(path, previous)| rename_memory_links(project, path, previous))
+        .collect::<Vec<_>>();
+    if !commit.is_empty()
+        && answers
+            .iter()
+            .all(|answer| answer.is_object() && answer["pending"] != true)
+    {
+        let count = crate::git_commit_graph::rename_review_count(&answers);
+        let mut counts = m::data(COMMIT_MEMORY_COUNTS);
+        if !counts.is_object() {
+            counts = json!({});
+        }
+        if counts[commit] != count {
+            counts[commit] = json!(count);
+            m::set(COMMIT_MEMORY_COUNTS, counts);
+        }
+    }
+    let total = changes
+        .and_then(|catalog| catalog["renamed_files"].as_u64())
+        .map_or(renamed.len(), |count| count as usize);
+    let body = crate::git_commit_graph::render_rename_memory_warnings(
+        &renamed,
+        &answers,
+        total.saturating_sub(renamed.len()),
+    );
+    if body.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<div class=\"graph-commit-memory\" data-commit=\"{}\" aria-live=\"polite\">{body}</div>",
+        escape(commit)
+    )
+}
+/// The memory-links answer for a file a commit renamed from `previous`, or
+/// `{"pending": true}` while it is asked: one request per file at a time,
+/// fresh for a minute, as the side panel's.
+fn rename_memory_links(project: &str, path: &str, previous: &str) -> V {
+    let key = format!("{project}\u{1f}{path}\u{1f}{previous}");
+    let cached = m::data(MEMORY_LINKS)[&key].clone();
+    if cached.is_object() && memory_links_fresh(&cached) {
+        return cached;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut cache = m::data(MEMORY_LINKS);
+        if !cache.is_object() {
+            cache = json!({});
+        }
+        cache[&key] = json!({"pending": true, "at": js_sys::Date::now()});
+        m::set(MEMORY_LINKS, cache);
+        let url = format!(
+            "/api/projects/{}/graph/memory-links?path={}&previous_path={}",
+            dom::enc(project),
+            dom::enc(path),
+            dom::enc(previous)
+        );
+        spawn_local(async move {
+            let mut links = match crate::api::get(&url).await {
+                Ok(links) => links,
+                Err(error) => json!({"error": error.message}),
+            };
+            links["at"] = json!(js_sys::Date::now());
+            let mut cache = m::data(MEMORY_LINKS);
+            if !cache.is_object() {
+                cache = json!({});
+            }
+            cache[&key] = links;
+            m::set(MEMORY_LINKS, cache);
+            refresh_commit_memory();
+        });
+    }
+    json!({"pending": true})
+}
+/// Redraws the commit banner, and the dock's counts, once an answer about a
+/// renamed file arrives.
+#[cfg(target_arch = "wasm32")]
+fn refresh_commit_memory() {
+    let view = m::data(MODAL_SURFACE.view_key);
+    if !view.is_object() {
+        return;
+    }
+    let changes = surface_changes_doc(MODAL_SURFACE, &state());
+    let banner_html = render_commit_banner_for_view(&view, changes.as_ref());
+    html("graph-commit-banner", &banner_html);
+    dom::hidden("graph-commit-banner", banner_html.trim().is_empty());
+    show_commit_dock();
+}
+/// Opens the dependency map of `project_id` at one Git commit, as its
+/// history lists it.
+pub(crate) fn open_project_commit(project_id: &str, sha: &str) {
+    open_system_service_map(
+        GraphTargetScope::single(project_id),
+        Some(&format!("commit:{sha}")),
+    );
 }
 fn commit_action_target(action: &str, payload: &V) -> Option<String> {
     match action {
@@ -15277,7 +15416,224 @@ fn map_side_html(
             found_patterns(view, &unfolded(state, "kinds")),
         )
     };
-    format!("{header}<div class=\"graph-side-panel\" data-tab=\"details\">{details_body}</div>")
+    // What the project's memory says about the selected file fills in when
+    // it arrives; the map does not wait for it.
+    let memory = active_focus
+        .as_deref()
+        .map(|path| normalize_rel_path(strip_symbol_suffix(path)))
+        .filter(|path| !path.is_empty() && !path.ends_with('/'))
+        .map(|path| {
+            let project = view["project_id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| scope.project_id().to_string());
+            memory_links_section(&project, &path)
+        })
+        .unwrap_or_default();
+    format!(
+        "{header}<div class=\"graph-side-panel\" data-tab=\"details\">{details_body}{memory}</div>"
+    )
+}
+const MEMORY_LINKS: &str = "graph-memory-links";
+const MEMORY_LINKS_LOOKING: &str = "<h4>Linked memory</h4><p class=\"knowledge-note\">Looking for Project Brain records and Memory Bank chunks that cite this file…</p>";
+/// A file's links, or a request for them, are good for a minute: a record
+/// saved since then shows on the next selection.
+fn memory_links_fresh(cached: &V) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        cached["at"]
+            .as_f64()
+            .is_none_or(|at| js_sys::Date::now() - at < 60_000.)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = cached;
+        true
+    }
+}
+/// The linked-memory section of a selected file: drawn from what an earlier
+/// request returned, or a placeholder a request fills in.
+fn memory_links_section(project: &str, path: &str) -> String {
+    let key = format!("{project}\u{1f}{path}");
+    let cached = m::data(MEMORY_LINKS)[&key].clone();
+    let fresh = cached.is_object() && memory_links_fresh(&cached);
+    let body = if fresh && cached["pending"] != true {
+        render_side_memory_bridge_html(project, &cached)
+    } else if fresh {
+        // The map redraws often; one request per file is in flight at a time.
+        MEMORY_LINKS_LOOKING.to_owned()
+    } else {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut cache = m::data(MEMORY_LINKS);
+            if !cache.is_object() {
+                cache = json!({});
+            }
+            cache[&key] = json!({"pending": true, "at": js_sys::Date::now()});
+            m::set(MEMORY_LINKS, cache);
+            let (project, path, key) = (project.to_owned(), path.to_owned(), key.clone());
+            spawn_local(async move {
+                let url = format!(
+                    "/api/projects/{}/graph/memory-links?path={}",
+                    dom::enc(&project),
+                    dom::enc(&path)
+                );
+                let mut links = match crate::api::get(&url).await {
+                    Ok(links) => links,
+                    Err(error) => json!({"error": error.message}),
+                };
+                links["at"] = json!(js_sys::Date::now());
+                let mut cache = m::data(MEMORY_LINKS);
+                if !cache.is_object() {
+                    cache = json!({});
+                }
+                cache[&key] = links.clone();
+                m::set(MEMORY_LINKS, cache);
+                for section in dom::all(".graph-memory-links") {
+                    if section.get_attribute("data-path").as_deref() == Some(path.as_str()) {
+                        section.set_inner_html(&render_side_memory_bridge_html(&project, &links));
+                    }
+                }
+            });
+        }
+        MEMORY_LINKS_LOOKING.to_owned()
+    };
+    format!(
+        "<section class=\"graph-memory-links\" data-path=\"{}\" aria-live=\"polite\" aria-label=\"Linked memory\">{body}</section>",
+        escape(path)
+    )
+}
+/// What the project's memory says about one file, with a way to open each
+/// record or chunk and warnings to review. A failed request says so and
+/// leaves the rest of the panel alone.
+pub(crate) fn render_side_memory_bridge_html(project: &str, links: &V) -> String {
+    let mut html = String::from("<h4>Linked memory</h4>");
+    if let Some(error) = links["error"].as_str() {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">Linked memory is unavailable: {}</p>",
+            escape(error)
+        ));
+        return html;
+    }
+    for warning in m::array(&links["hygiene_warnings"]) {
+        html.push_str(&format!(
+            "<p class=\"graph-memory-warning\" data-kind=\"{}\" role=\"note\">Review: {}</p>",
+            escape(warning["kind"].as_str().unwrap_or("")),
+            escape(warning["text"].as_str().unwrap_or(""))
+        ));
+    }
+    // Two atoms of the file that contradict each other: both stay as they
+    // are, and the record or chunk behind either opens for a person to judge.
+    for warning in m::array(&links["contradiction_warnings"]) {
+        let opens = m::array(&warning["open"])
+            .iter()
+            .filter_map(|open| {
+                let scope = open["scope"].as_str().filter(|s| matches!(*s, "brain" | "memory"))?;
+                let target = open["target_id"].as_str().filter(|t| !t.is_empty())?;
+                Some(format!(
+                    " <button type=\"button\" class=\"button compact\" data-action=\"graph-map-open-memory\" data-payload=\"{}\">Open {}</button>",
+                    payload(&json!({"scope": scope, "project_id": project, "target_id": target})),
+                    escape(open["title"].as_str().unwrap_or(target))
+                ))
+            })
+            .collect::<String>();
+        html.push_str(&format!(
+            "<p class=\"graph-memory-warning\" data-kind=\"{}\" role=\"note\">Review: {}{opens}</p>",
+            escape(warning["kind"].as_str().unwrap_or("atom-contradiction")),
+            escape(warning["text"].as_str().unwrap_or(""))
+        ));
+    }
+    let open = |scope: &str, target: &str, label: String| {
+        format!(
+            "<li><button type=\"button\" class=\"graph-memory-link\" data-action=\"graph-map-open-memory\" data-payload=\"{}\">{label}</button></li>",
+            payload(&json!({"scope": scope, "project_id": project, "target_id": target}))
+        )
+    };
+    let records = m::array(&links["brain_records"]);
+    let chunks = m::array(&links["memory_chunks"]);
+    let atoms = m::array(&links["omnigraph_atoms"]);
+    if records.is_empty() && chunks.is_empty() && atoms.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">No Project Brain record, Memory Bank chunk or shared context atom cites this file.</p>");
+        return html;
+    }
+    if !records.is_empty() {
+        html.push_str(
+            "<p class=\"graph-memory-group\">Project Brain</p><ul class=\"graph-memory-list\">",
+        );
+        for record in &records {
+            let target = record["external_id"]
+                .as_str()
+                .or_else(|| record["id"].as_str())
+                .unwrap_or("");
+            html.push_str(&open(
+                "brain",
+                target,
+                format!(
+                    "<span class=\"graph-memory-kind\">{}</span> {}",
+                    escape(record["type"].as_str().unwrap_or("record")),
+                    escape(record["title"].as_str().unwrap_or(target))
+                ),
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    if !chunks.is_empty() {
+        html.push_str(
+            "<p class=\"graph-memory-group\">Memory Bank</p><ul class=\"graph-memory-list\">",
+        );
+        for chunk in &chunks {
+            let id = chunk["id"].as_str().unwrap_or("");
+            html.push_str(&open(
+                "memory",
+                id,
+                format!(
+                    "<span class=\"graph-memory-kind\">{}</span> {}{}",
+                    escape(id),
+                    escape(chunk["title"].as_str().unwrap_or("")),
+                    if chunk["auto_promoted"] == true {
+                        " <span class=\"graph-memory-badge\">auto-promoted</span>"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    if !atoms.is_empty() {
+        html.push_str(
+            "<p class=\"graph-memory-group\">Shared context</p><ul class=\"graph-memory-list\">",
+        );
+        for atom in &atoms {
+            // The declarations of this file the atom names, as it named them.
+            let symbols = m::array(&atom["symbols"])
+                .iter()
+                .filter_map(V::as_str)
+                .take(6)
+                .map(escape)
+                .collect::<Vec<_>>();
+            html.push_str(&format!(
+                "<li class=\"graph-memory-atom\">{}{}</li>",
+                escape(
+                    atom["capsule_line"]
+                        .as_str()
+                        .or_else(|| atom["title"].as_str())
+                        .unwrap_or("")
+                        .trim_start_matches("- ")
+                ),
+                if symbols.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " <span class=\"graph-memory-badge\">names {}</span>",
+                        symbols.join(", ")
+                    )
+                }
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    html
 }
 fn set_surface_attrs(surface: MapSurface, view: &V) {
     let side_family = if patterned(view) {
@@ -16291,6 +16647,15 @@ pub async fn event(
     value: &str,
     checked: bool,
 ) -> bool {
+    if kind == "click" && action == "graph-map-open-memory" {
+        crate::knowledge::open_from_omnigraph(
+            payload["scope"].as_str().unwrap_or("brain"),
+            payload["project_id"].as_str().unwrap_or(""),
+            payload["target_id"].as_str().unwrap_or(""),
+        )
+        .await;
+        return true;
+    }
     // The key of the links is the same in every picture.
     if kind == "click"
         && matches!(
@@ -16645,8 +17010,7 @@ pub async fn event(
             }
             chosen = true;
         }
-        ("click", "graph-commit-graph-toggle", _)
-        | ("click", _, "graph-commit-graph-toggle") => {
+        ("click", "graph-commit-graph-toggle", _) | ("click", _, "graph-commit-graph-toggle") => {
             let mut dock = commit_dock();
             if m::yes(&dock["open"]) {
                 shut_commit_dock();
@@ -16676,8 +17040,7 @@ pub async fn event(
             }
             return true;
         }
-        ("click", "graph-commit-graph-close", _)
-        | ("click", _, "graph-commit-graph-close") => {
+        ("click", "graph-commit-graph-close", _) | ("click", _, "graph-commit-graph-close") => {
             shut_commit_dock();
             dom::focus("graph-commit-graph-toggle");
             return true;
@@ -27810,9 +28173,12 @@ mod tests {
             Some("renamed")
         );
 
-        let surviving_folder = json!({ "path": "src/surviving_dir", "folder": true, "files": 3, "changed": 0 });
-        let dead_folder = json!({ "path": "src/dead_dir", "folder": true, "files": 0, "changed": 0 });
-        let mixed_folder = json!({ "path": "src/mixed_dir", "folder": true, "files": 2, "changed": 1 });
+        let surviving_folder =
+            json!({ "path": "src/surviving_dir", "folder": true, "files": 3, "changed": 0 });
+        let dead_folder =
+            json!({ "path": "src/dead_dir", "folder": true, "files": 0, "changed": 0 });
+        let mixed_folder =
+            json!({ "path": "src/mixed_dir", "folder": true, "files": 2, "changed": 1 });
         let touched_sym = json!({ "path": "src/Cart.php#L19:.total()", "name": "Cart.total()", "kind": "symbol", "symbol": true, "line": 19, "changed": 0 });
         let untouched_sym = json!({ "path": "src/Cart.php#L12:Cart", "name": "Cart", "kind": "symbol", "symbol": true, "line": 12, "changed": 0 });
         let all_nodes = vec![
@@ -27824,7 +28190,9 @@ mod tests {
         ];
 
         assert_eq!(
-            lookup.status_for_node(&surviving_folder, &all_nodes).as_deref(),
+            lookup
+                .status_for_node(&surviving_folder, &all_nodes)
+                .as_deref(),
             Some("modified")
         );
         assert_eq!(
@@ -27881,10 +28249,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(rendered.html.contains("data-commit-changes=\"true\""), "{}", rendered.html);
+        assert!(
+            rendered.html.contains("data-commit-changes=\"true\""),
+            "{}",
+            rendered.html
+        );
         assert!(rendered.html.contains("data-change-status=\"renamed\""));
         assert!(rendered.html.contains("<span class=\"graph-map-node-status\" data-status=\"renamed\" aria-hidden=\"true\">R</span>"));
-        assert!(rendered.html.contains("data-payload=\"&quot;src/Removed.php&quot;\""), "{}", rendered.html);
+        assert!(
+            rendered
+                .html
+                .contains("data-payload=\"&quot;src/Removed.php&quot;\""),
+            "{}",
+            rendered.html
+        );
         assert!(rendered.html.contains("data-change-status=\"deleted\""));
         assert!(rendered.html.contains("<span class=\"graph-map-node-status\" data-status=\"deleted\" aria-hidden=\"true\">D</span>"));
         assert!(rendered.html.contains("data-impact=\"caller-risk\""));
@@ -27926,15 +28304,33 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(file_rendered.html.matches("data-change-status=\"modified\"").count(), 1, "{}", file_rendered.html);
-        assert_eq!(file_rendered.html.matches("graph-map-node-status").count(), 1, "{}", file_rendered.html);
+        assert_eq!(
+            file_rendered
+                .html
+                .matches("data-change-status=\"modified\"")
+                .count(),
+            1,
+            "{}",
+            file_rendered.html
+        );
+        assert_eq!(
+            file_rendered.html.matches("graph-map-node-status").count(),
+            1,
+            "{}",
+            file_rendered.html
+        );
 
         // 3. Fallback safety when edge_diffs is absent
         let no_edge_diffs = json!({
             "target": "commit:abc123456789",
             "files": [{ "path": "src/NewName.php", "status": "renamed" }]
         });
-        assert!(ImpactLookup::from_sources(None, Some(&no_edge_diffs), &view["nodes"].as_array().cloned().unwrap()).is_none());
+        assert!(ImpactLookup::from_sources(
+            None,
+            Some(&no_edge_diffs),
+            &view["nodes"].as_array().cloned().unwrap()
+        )
+        .is_none());
     }
 
     #[test]
@@ -27991,9 +28387,15 @@ mod tests {
 
         let list_html = render_commit_dock_list(&dock, "commit:aaaa1111bbbb2222", 1_794_400_000);
         assert!(list_html.contains("class=\"git-graph-row\""), "{list_html}");
-        assert!(list_html.contains("data-action=\"graph-commit-select\""), "{list_html}");
+        assert!(
+            list_html.contains("data-action=\"graph-commit-select\""),
+            "{list_html}"
+        );
         assert!(list_html.contains("aria-selected=\"true\""), "{list_html}");
-        assert!(list_html.contains("data-action=\"graph-commit-graph-more\""), "{list_html}");
+        assert!(
+            list_html.contains("data-action=\"graph-commit-graph-more\""),
+            "{list_html}"
+        );
         assert_eq!(
             commit_dock_note(&dock),
             "2 commits · click a commit to inspect its changes"
@@ -28019,8 +28421,14 @@ mod tests {
         let banner = render_commit_banner_for_view(&commit_view, Some(&changes_catalog));
         assert!(banner.contains("aaaa111"), "{banner}");
         assert!(banner.contains("Add commit graph"), "{banner}");
-        assert!(banner.contains("data-action=\"graph-commit-select\""), "{banner}");
-        assert!(banner.contains("data-action=\"graph-commit-reset\""), "{banner}");
+        assert!(
+            banner.contains("data-action=\"graph-commit-select\""),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("data-action=\"graph-commit-reset\""),
+            "{banner}"
+        );
         assert_eq!(render_commit_banner_for_view(&view(), None), "");
 
         assert_eq!(
@@ -28031,9 +28439,165 @@ mod tests {
             commit_action_target("graph-commit-reset", &V::Null),
             Some(String::new())
         );
-        assert_eq!(
-            commit_action_target("graph-commit-select", &V::Null),
-            None
+        assert_eq!(commit_action_target("graph-commit-select", &V::Null), None);
+    }
+}
+
+#[cfg(test)]
+mod memory_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn render_side_memory_bridge_surfaces_links_and_rename_warnings() {
+        let links = json!({
+            "path": "src/Auth/TokenService.php",
+            "brain_records": [{"id": "11111111-2222-4333-8444-555555555555", "external_id": "finding-7", "type": "finding", "title": "Tokens <expire>"}],
+            "memory_chunks": [{"id": "MEM-20261117-aabbccdd", "title": "TTL rule", "auto_promoted": true}],
+            "omnigraph_atoms": [{"capsule_line": "- [project-brain decision · 11111111] Tokens expire (from `knowledge/canonical`)"}],
+            "hygiene_warnings": [{"kind": "cited-file-renamed", "text": "This file was src/Auth/Tokens.php; the memory that cites the old name may need its citation updated.", "recommended_action": "review"}]
+        });
+        let html = render_side_memory_bridge_html("proj-1", &links);
+        assert!(html.contains("data-kind=\"cited-file-renamed\" role=\"note\">Review: This file was src/Auth/Tokens.php"), "{html}");
+        assert!(
+            html.contains("data-action=\"graph-map-open-memory\""),
+            "{html}"
         );
+        assert!(
+            html.contains("&quot;target_id&quot;:&quot;finding-7&quot;"),
+            "{html}"
+        );
+        assert!(html.contains("Tokens &lt;expire&gt;"), "{html}");
+        assert!(html.contains("MEM-20261117-aabbccdd</span> TTL rule <span class=\"graph-memory-badge\">auto-promoted</span>"), "{html}");
+        assert!(
+            html.contains("[project-brain decision · 11111111] Tokens expire"),
+            "{html}"
+        );
+        assert!(!html.contains('#') || !html.contains("color:#"), "{html}");
+        // An empty answer says so; a failed one says why and draws nothing else.
+        let empty = render_side_memory_bridge_html(
+            "proj-1",
+            &json!({"brain_records": [], "memory_chunks": [], "omnigraph_atoms": []}),
+        );
+        assert!(empty.contains("No Project Brain record"), "{empty}");
+        let failed =
+            render_side_memory_bridge_html("proj-1", &json!({"error": "Project not found"}));
+        assert!(
+            failed.contains("Linked memory is unavailable: Project not found"),
+            "{failed}"
+        );
+        assert!(!failed.contains("<button"), "{failed}");
+    }
+
+    #[test]
+    fn a_selected_file_gets_a_placeholder_until_its_links_arrive() {
+        let html = memory_links_section("proj-1", "src/Auth/TokenService.php");
+        assert!(
+            html.contains("class=\"graph-memory-links\" data-path=\"src/Auth/TokenService.php\""),
+            "{html}"
+        );
+        assert!(html.contains("Looking for Project Brain records"), "{html}");
+        m::set(
+            MEMORY_LINKS,
+            json!({"proj-1\u{1f}src/Auth/TokenService.php": {"brain_records": [], "memory_chunks": [], "omnigraph_atoms": []}}),
+        );
+        let cached = memory_links_section("proj-1", "src/Auth/TokenService.php");
+        assert!(cached.contains("No Project Brain record"), "{cached}");
+        m::take(MEMORY_LINKS);
+    }
+
+    #[test]
+    fn contradictions_and_named_declarations_are_shown_for_review() {
+        let links = json!({
+            "brain_records": [],
+            "memory_chunks": [],
+            "omnigraph_atoms": [{
+                "capsule_line": "- [unverified reference — verify against code & Brain] [finding] Replay is fine (from `main`)",
+                "symbols": ["TokenGuard::check", "<b>"]
+            }],
+            "hygiene_warnings": [],
+            "contradiction_warnings": [{
+                "kind": "atom-contradiction",
+                "text": "\"Replay is fine\" contradicts \"Tokens <expire>\"; check both against the code before relying on either.",
+                "open": [
+                    {"scope": "brain", "target_id": "11111111-2222-4333-8444-555555555555", "title": "Tokens <expire>"},
+                    {"scope": "shell", "target_id": "rm -rf"},
+                    {"scope": "memory", "target_id": ""}
+                ]
+            }]
+        });
+        let html = render_side_memory_bridge_html("proj-1", &links);
+        assert!(
+            html.contains("<p class=\"graph-memory-warning\" data-kind=\"atom-contradiction\" role=\"note\">Review: &quot;Replay is fine&quot; contradicts &quot;Tokens &lt;expire&gt;&quot;; check both against the code before relying on either. <button type=\"button\" class=\"button compact\" data-action=\"graph-map-open-memory\""),
+            "{html}"
+        );
+        assert!(
+            html.contains(">Open Tokens &lt;expire&gt;</button></p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("&quot;target_id&quot;:&quot;11111111-2222-4333-8444-555555555555&quot;"),
+            "{html}"
+        );
+        // Only a Knowledge record or chunk opens; nothing else is offered.
+        assert_eq!(
+            html.matches("data-action=\"graph-map-open-memory\"")
+                .count(),
+            1,
+            "{html}"
+        );
+        assert!(!html.contains("rm -rf"), "{html}");
+        assert!(
+            html.contains(
+                "<span class=\"graph-memory-badge\">names TokenGuard::check, &lt;b&gt;</span>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_commit_banner_reviews_memory_citing_the_names_it_renamed() {
+        let view = json!({
+            "project_id": "proj-1",
+            "chosen": {"kind": "commit", "head": {"commit": "aaaa1111bbbb2222"}},
+            "commit_info": {"commit": "aaaa1111bbbb2222", "short": "aaaa111", "subject": "Rename the guard", "parents": []}
+        });
+        let changes = json!({
+            "renamed_files": 1,
+            "files": [{"path": "src/Auth/Guard.php", "previous_path": "src/Auth/TokenGuard.php", "status": "renamed"}]
+        });
+        // Until the answer is in, the banner says it is checking and no
+        // dock count is recorded.
+        let asking = render_commit_banner_for_view(&view, Some(&changes));
+        assert!(
+            asking.contains("<div class=\"graph-commit-memory\" data-commit=\"aaaa1111bbbb2222\" aria-live=\"polite\"><p class=\"knowledge-note\">Checking the memory that cites 1 renamed file…</p></div>"),
+            "{asking}"
+        );
+        assert!(m::data(COMMIT_MEMORY_COUNTS)["aaaa1111bbbb2222"].is_null());
+        m::set(
+            MEMORY_LINKS,
+            json!({"proj-1\u{1f}src/Auth/Guard.php\u{1f}src/Auth/TokenGuard.php": {
+                "hygiene_warnings": [{"kind": "cited-file-renamed", "linked": ["MEM-20261117-aabbccdd"], "recommended_action": "review", "text": "This file was src/Auth/TokenGuard.php; the memory that cites the old name may need its citation updated."}]
+            }}),
+        );
+        let answered = render_commit_banner_for_view(&view, Some(&changes));
+        assert!(
+            answered.contains(
+                "Review: <code>src/Auth/TokenGuard.php</code> → <code>src/Auth/Guard.php</code>"
+            ),
+            "{answered}"
+        );
+        // The commit's dock row now shows the count; another row shows none.
+        assert_eq!(m::data(COMMIT_MEMORY_COUNTS)["aaaa1111bbbb2222"], 1);
+        let dock = json!({"rows": [
+            {"commit": "aaaa1111bbbb2222", "short": "aaaa111", "subject": "Rename the guard", "parents": ["cccc3333dddd4444"]},
+            {"commit": "cccc3333dddd4444", "short": "cccc333", "subject": "Base", "parents": []}
+        ]});
+        let rows = render_commit_dock_list(&dock, "", 0);
+        assert_eq!(rows.matches("1 to review").count(), 1, "{rows}");
+        // A commit that renamed nothing asks nothing and adds nothing.
+        let plain = render_commit_banner_for_view(&view, Some(&json!({"modified_files": 1})));
+        assert!(!plain.contains("graph-commit-memory"), "{plain}");
+        m::take(MEMORY_LINKS);
+        m::take(COMMIT_MEMORY_COUNTS);
     }
 }

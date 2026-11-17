@@ -99,7 +99,10 @@ pub fn render_commit_graph_rows(
                 };
                 let when_html = match &when {
                     Some(label) => {
-                        format!("<span class=\"graph-pick-when\">{}</span>", escape_html(label))
+                        format!(
+                            "<span class=\"graph-pick-when\">{}</span>",
+                            escape_html(label)
+                        )
                     }
                     None => String::new(),
                 };
@@ -115,6 +118,14 @@ pub fn render_commit_graph_rows(
                 ));
             }
             CommitGraphSurface::Dock => {
+                // A count of memory to review is drawn only where one was
+                // supplied: rows are never asked for one each.
+                let badges = match commit["memory_review"].as_u64().filter(|count| *count > 0) {
+                    Some(count) => format!(
+                        "{badges}<span class=\"graph-pick-badge\" data-kind=\"memory\" title=\"Memory citing a file this commit renamed\">{count} to review</span>"
+                    ),
+                    None => badges,
+                };
                 let badges_html = if badges.is_empty() {
                     String::new()
                 } else {
@@ -130,7 +141,10 @@ pub fn render_commit_graph_rows(
                 };
                 let when_html = match &when {
                     Some(label) => {
-                        format!("<span class=\"git-graph-when\">{}</span>", escape_html(label))
+                        format!(
+                            "<span class=\"git-graph-when\">{}</span>",
+                            escape_html(label)
+                        )
                     }
                     None => String::new(),
                 };
@@ -271,6 +285,93 @@ pub fn render_commit_banner(
     html.push_str("<button type=\"button\" class=\"button compact graph-commit-reset-btn\" data-action=\"graph-commit-reset\">Whole project</button>");
     html.push_str("</div>");
 
+    html
+}
+
+/// The renamed files of a commit's changes catalog as `(path, previous_path)`,
+/// at most `limit`.
+pub fn renamed_files(catalog: Option<&Value>, limit: usize) -> Vec<(String, String)> {
+    catalog
+        .and_then(|catalog| catalog["files"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|file| file["status"].as_str() == Some("renamed"))
+        .filter_map(|file| {
+            let path = file["path"].as_str()?.trim();
+            let previous = file["previous_path"].as_str()?.trim();
+            (!path.is_empty() && !previous.is_empty() && path != previous)
+                .then(|| (path.to_owned(), previous.to_owned()))
+        })
+        .take(limit)
+        .collect()
+}
+
+/// How many warnings to review the memory-links answers for a commit's
+/// renamed files raised.
+pub fn rename_review_count(answers: &[Value]) -> u64 {
+    answers
+        .iter()
+        .flat_map(|answer| answer["hygiene_warnings"].as_array().into_iter().flatten())
+        .filter(|warning| warning["recommended_action"].as_str() == Some("review"))
+        .count() as u64
+}
+
+/// The banner's word on the memory that cites a commit's renamed files under
+/// their old names: `answers[i]` is the memory-links answer for `renamed[i]`
+/// (`{"pending": true}` while it is asked). Warnings are for review only;
+/// nothing is retired or changed. `unchecked` renamed files were not asked.
+pub fn render_rename_memory_warnings(
+    renamed: &[(String, String)],
+    answers: &[Value],
+    unchecked: usize,
+) -> String {
+    if renamed.is_empty() {
+        return String::new();
+    }
+    let mut html = String::new();
+    let mut pending = 0usize;
+    for ((path, previous), answer) in renamed.iter().zip(answers) {
+        if !answer.is_object() || answer["pending"] == true {
+            pending += 1;
+            continue;
+        }
+        if let Some(error) = answer["error"].as_str() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">Could not check the memory citing {}: {}</p>",
+                escape_html(previous),
+                escape_html(error)
+            ));
+            continue;
+        }
+        for warning in answer["hygiene_warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|warning| warning["recommended_action"].as_str() == Some("review"))
+        {
+            let linked = warning["linked"].as_array().map_or(0, Vec::len);
+            html.push_str(&format!(
+                "<p class=\"graph-memory-warning\" data-kind=\"{}\" role=\"note\">Review: <code>{}</code> → <code>{}</code>: {} ({linked} cited)</p>",
+                escape_html(warning["kind"].as_str().unwrap_or("")),
+                escape_html(previous),
+                escape_html(path),
+                escape_html(warning["text"].as_str().unwrap_or(""))
+            ));
+        }
+    }
+    if pending > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">Checking the memory that cites {} renamed {}…</p>",
+            pending,
+            if pending == 1 { "file" } else { "files" }
+        ));
+    }
+    if unchecked > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">{unchecked} more renamed {} not checked for memory citing the old name.</p>",
+            if unchecked == 1 { "file was" } else { "files were" }
+        ));
+    }
     html
 }
 
@@ -713,16 +814,10 @@ fn is_commit_selected(sha: &str, short: &str, selected_commit: Option<&str>) -> 
         if sha.eq_ignore_ascii_case(sel) {
             return true;
         }
-        if sel.len() >= 4
-            && sha.len() >= sel.len()
-            && sha[..sel.len()].eq_ignore_ascii_case(sel)
-        {
+        if sel.len() >= 4 && sha.len() >= sel.len() && sha[..sel.len()].eq_ignore_ascii_case(sel) {
             return true;
         }
-        if sha.len() >= 4
-            && sel.len() >= sha.len()
-            && sel[..sha.len()].eq_ignore_ascii_case(sha)
-        {
+        if sha.len() >= 4 && sel.len() >= sha.len() && sel[..sha.len()].eq_ignore_ascii_case(sha) {
             return true;
         }
     }
@@ -803,7 +898,9 @@ fn render_catalog_stats(catalog: &Value) -> String {
         ));
     }
     if out.is_empty() {
-        out.push_str("<span class=\"graph-commit-stat\" data-status=\"unchanged\">0 file changes</span>");
+        out.push_str(
+            "<span class=\"graph-commit-stat\" data-status=\"unchanged\">0 file changes</span>",
+        );
     }
     out
 }
@@ -1161,9 +1258,11 @@ mod tests {
         assert!(html.contains("<div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">Add DAG renderer</span><span class=\"git-graph-badges\"><span class=\"graph-pick-badge\" data-kind=\"branch\">feat/dag</span></span></div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">abcdef1</code><span class=\"git-graph-who\">Ada</span><span class=\"git-graph-when\">just now</span></div></div>"));
         assert!(html.contains("<li class=\"git-graph-row\" id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"false\" data-current=\"false\" data-action=\"graph-commit-select\""));
         assert!(html.contains("data-selected=\"true\""));
-        assert!(html.ends_with("data-action=\"graph-commit-graph-more\">Show older commits</button></li>"));
+        assert!(html
+            .ends_with("data-action=\"graph-commit-graph-more\">Show older commits</button></li>"));
 
-        let empty_no_more = render_commit_graph_rows(&[], None, None, false, 0, CommitGraphSurface::Dock);
+        let empty_no_more =
+            render_commit_graph_rows(&[], None, None, false, 0, CommitGraphSurface::Dock);
         assert_eq!(empty_no_more, "");
     }
 
@@ -1194,14 +1293,24 @@ mod tests {
 
         let html = render_commit_banner(Some(&commit_info), &chosen, Some(&catalog));
         assert!(html.contains("<code class=\"graph-commit-banner-sha\">abc1234</code>"));
-        assert!(html.contains("<span class=\"graph-commit-banner-subject\">Merge &lt;feature&gt; branch</span>"));
+        assert!(html.contains(
+            "<span class=\"graph-commit-banner-subject\">Merge &lt;feature&gt; branch</span>"
+        ));
         assert!(html.contains("<span class=\"graph-commit-banner-author\">Linus</span>"));
         assert!(html.contains("<span class=\"graph-pick-badge\" data-kind=\"head\">main</span>"));
         assert!(html.contains("<span class=\"graph-pick-badge\" data-kind=\"tag\">v1.0</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"created\">+2 created</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"modified\">~3 modified</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"deleted\">-1 deleted</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"renamed\">→4 renamed</span>"));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"created\">+2 created</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"modified\">~3 modified</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"deleted\">-1 deleted</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"renamed\">→4 renamed</span>"
+        ));
         assert!(html.contains("data-action=\"graph-commit-select\" data-payload=\"&quot;commit:1111111aaaa&quot;\">Parent 1 1111111</button>"));
         assert!(html.contains("data-action=\"graph-commit-select\" data-payload=\"&quot;commit:2222222bbbb&quot;\">Parent 2 2222222</button>"));
         assert!(html.contains("<button type=\"button\" class=\"button compact graph-commit-reset-btn\" data-action=\"graph-commit-reset\">Whole project</button>"));
@@ -1226,6 +1335,116 @@ mod tests {
         );
         assert!(fallback.contains("deadbeef"));
         assert!(fallback.contains("Fix bug"));
-        assert!(fallback.contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>"));
+        assert!(fallback
+            .contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>"));
+    }
+
+    #[test]
+    fn dock_rows_show_a_memory_count_only_where_one_is_supplied() {
+        let row = |extra: Value| {
+            let mut commit = json!({
+                "commit": "abcdef1234567890",
+                "short": "abcdef1",
+                "subject": "Rename the guard",
+                "refs": [],
+                "parents": []
+            });
+            if let (Some(base), Some(more)) = (commit.as_object_mut(), extra.as_object()) {
+                base.extend(more.clone());
+            }
+            render_commit_graph_rows(&[commit], None, None, false, 0, CommitGraphSurface::Dock)
+        };
+        let counted = row(json!({"memory_review": 2}));
+        assert!(
+            counted.contains("<span class=\"git-graph-badges\"><span class=\"graph-pick-badge\" data-kind=\"memory\" title=\"Memory citing a file this commit renamed\">2 to review</span></span>"),
+            "{counted}"
+        );
+        // No count, a zero count, or a count that is not a number: no badge.
+        for extra in [
+            json!({}),
+            json!({"memory_review": 0}),
+            json!({"memory_review": "2"}),
+        ] {
+            let html = row(extra.clone());
+            assert!(!html.contains("data-kind=\"memory\""), "{extra}: {html}");
+            assert!(!html.contains("git-graph-badges"), "{extra}: {html}");
+        }
+        // The picker never shows it.
+        let picker = render_commit_graph_rows(
+            &[json!({"commit": "abcdef1234567890", "memory_review": 3})],
+            None,
+            None,
+            false,
+            0,
+            CommitGraphSurface::Picker,
+        );
+        assert!(!picker.contains("to review"), "{picker}");
+    }
+
+    #[test]
+    fn renamed_files_feed_review_only_memory_warnings() {
+        let catalog = json!({
+            "renamed_files": 3,
+            "files": [
+                {"path": "src/Auth/Guard.php", "previous_path": "src/Auth/TokenGuard.php", "status": "renamed"},
+                {"path": "src/new.rs", "previous_path": "src/new.rs", "status": "renamed"},
+                {"path": "src/kept.rs", "status": "modified"},
+                {"path": "src/b.rs", "previous_path": "src/a.rs", "status": "renamed"},
+                {"path": "src/d.rs", "previous_path": "src/c.rs", "status": "renamed"}
+            ]
+        });
+        let renamed = renamed_files(Some(&catalog), 2);
+        assert_eq!(
+            renamed,
+            vec![
+                (
+                    "src/Auth/Guard.php".to_owned(),
+                    "src/Auth/TokenGuard.php".to_owned()
+                ),
+                ("src/b.rs".to_owned(), "src/a.rs".to_owned()),
+            ]
+        );
+        assert!(renamed_files(None, 8).is_empty());
+
+        // Pending answers say so; nothing else is drawn for them.
+        let pending = render_rename_memory_warnings(
+            &renamed,
+            &[json!({"pending": true}), json!({"pending": true})],
+            0,
+        );
+        assert_eq!(
+            pending,
+            "<p class=\"knowledge-note\">Checking the memory that cites 2 renamed files…</p>"
+        );
+        let answers = [
+            json!({"hygiene_warnings": [{"kind": "cited-file-renamed", "linked": ["MEM-20261117-aabbccdd", "finding-<7>"], "recommended_action": "review", "text": "This file was src/Auth/TokenGuard.php; the memory that cites the old name may need its citation updated."}]}),
+            json!({"error": "Project not found"}),
+        ];
+        let html = render_rename_memory_warnings(&renamed, &answers, 1);
+        assert!(
+            html.contains("<p class=\"graph-memory-warning\" data-kind=\"cited-file-renamed\" role=\"note\">Review: <code>src/Auth/TokenGuard.php</code> → <code>src/Auth/Guard.php</code>: This file was src/Auth/TokenGuard.php; the memory that cites the old name may need its citation updated. (2 cited)</p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("Could not check the memory citing src/a.rs: Project not found"),
+            "{html}"
+        );
+        assert!(
+            html.ends_with("<p class=\"knowledge-note\">1 more renamed file was not checked for memory citing the old name.</p>"),
+            "{html}"
+        );
+        // Nothing here acts on the memory: no buttons, no actions.
+        assert!(!html.contains("data-action"), "{html}");
+        assert_eq!(rename_review_count(&answers), 1);
+        // Answers with nothing to review draw nothing.
+        assert_eq!(
+            render_rename_memory_warnings(
+                &renamed,
+                &[json!({"hygiene_warnings": []}), json!({})],
+                0
+            ),
+            ""
+        );
+        assert_eq!(render_rename_memory_warnings(&[], &[], 4), "");
     }
 }

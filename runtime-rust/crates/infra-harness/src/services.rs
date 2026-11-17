@@ -28,6 +28,84 @@ pub struct NativeServices {
     pub overrides: BTreeMap<String, Arc<dyn Domain>>,
     pub closer: Arc<dyn Fn() -> CloseFuture<'static> + Send + Sync>,
 }
+/// The most `knowledge.sync_collect` pages one sync reads.
+const SYNC_PAGES: usize = 64;
+/// Every page of `knowledge.sync_collect` as one collection. `prune_layers`
+/// names the layers every page reported read whole, and is empty when the
+/// pages disagree on the total (knowledge changed between them) or run past
+/// `SYNC_PAGES`: a sync prunes only with the whole collection in hand.
+pub(crate) async fn collect_sync_items(
+    knowledge: &dyn Domain,
+    project_id: &str,
+    query: &Value,
+    body: &Value,
+) -> Result<Value> {
+    let mut items = Vec::new();
+    let mut first = None::<Value>;
+    let mut layers = None::<std::collections::BTreeSet<String>>;
+    let mut offset = 0u64;
+    let mut whole = false;
+    for _ in 0..SYNC_PAGES {
+        let mut page_body = body.clone();
+        if !page_body.is_object() {
+            page_body = json!({});
+        }
+        page_body["offset"] = json!(offset);
+        let Payload::Json(page) = knowledge
+            .execute(
+                "knowledge.sync_collect",
+                json!({"params":{"project_id":project_id},"query":query,"body":page_body}),
+            )
+            .await?
+        else {
+            return Err(HarnessError::unavailable(
+                "Unexpected knowledge sync payload.",
+            ));
+        };
+        items.extend(page["items"].as_array().cloned().unwrap_or_default());
+        let reported = page["complete_layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>();
+        layers = Some(match layers {
+            None => reported,
+            Some(held) => held.intersection(&reported).cloned().collect(),
+        });
+        let consistent = first
+            .as_ref()
+            .is_none_or(|first| first["total_items"] == page["total_items"]);
+        if first.is_none() {
+            first = Some(page.clone());
+        }
+        if !consistent {
+            break;
+        }
+        match page["next_offset"].as_u64() {
+            Some(next) if page["has_more"] == true && next > offset => offset = next,
+            _ => {
+                whole = true;
+                break;
+            }
+        }
+    }
+    let first = first.unwrap_or_else(|| json!({}));
+    let prune_layers = if whole {
+        layers.unwrap_or_default().into_iter().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    Ok(json!({
+        "items": items,
+        "brain_count": first["brain_count"],
+        "memory_count": first["memory_count"],
+        "skipped": first["skipped"],
+        "total_items": first["total_items"],
+        "prune_layers": prune_layers,
+    }))
+}
 impl NativeServices {
     async fn auto_start_graph(&self, project_id: &str) {
         if !project_id.is_empty()
@@ -72,19 +150,15 @@ impl NativeServices {
         if let Some(s) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
             collect_body["session_id"] = json!(s);
         }
-        let Ok(Payload::Json(collected)) = knowledge
-            .execute(
-                "knowledge.sync_collect",
-                json!({"params":{"project_id":project_id},"query":{},"body":collect_body}),
-            )
-            .await
+        let Ok(collected) =
+            collect_sync_items(knowledge.as_ref(), project_id, &json!({}), &collect_body).await
         else {
             return;
         };
         let _ = omnigraph
             .execute(
                 "omnigraph.sync_items",
-                json!({"params":{},"query":{},"body":{"project_id":project_id,"items":collected["items"]}}),
+                json!({"params":{},"query":{},"body":{"project_id":project_id,"items":collected["items"],"prune_layers":collected["prune_layers"]}}),
             )
             .await;
     }
@@ -337,14 +411,18 @@ impl Services for NativeServices {
                         let mut payload = domain.execute(operation, request.clone()).await?;
                         if let Payload::Json(ref mut val) = payload {
                             let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
-                            let updated_sessions =
-                                crate::sessions::sync_omnigraph_import_to_sessions(
-                                    &self.store,
-                                    sessions_domain,
-                                    &request["body"],
-                                    val,
-                                )
-                                .await;
+                            let synced = crate::sessions::sync_omnigraph_import_to_sessions(
+                                &self.store,
+                                sessions_domain,
+                                &request["body"],
+                                val,
+                            )
+                            .await;
+                            if !synced.inbox_notifications.is_empty() {
+                                val["inbox_notifications"] =
+                                    Value::Array(synced.inbox_notifications);
+                            }
+                            let updated_sessions = synced.sessions;
                             if !updated_sessions.is_empty() {
                                 val["session"] = updated_sessions[0].clone();
                                 val["sessions"] = Value::Array(updated_sessions);
@@ -359,20 +437,66 @@ impl Services for NativeServices {
                         let mut payload = domain.execute(operation, request.clone()).await?;
                         if let Payload::Json(ref mut val) = payload {
                             let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
-                            let updated_sessions =
-                                crate::sessions::sync_omnigraph_link_to_sessions(
-                                    &self.store,
-                                    sessions_domain,
-                                    &request["body"],
-                                    val,
-                                )
-                                .await;
+                            let synced = crate::sessions::sync_omnigraph_link_to_sessions(
+                                &self.store,
+                                sessions_domain,
+                                &request["body"],
+                                val,
+                            )
+                            .await;
+                            if !synced.inbox_notifications.is_empty() {
+                                val["inbox_notifications"] =
+                                    Value::Array(synced.inbox_notifications);
+                            }
+                            let updated_sessions = synced.sessions;
                             if let Some(first) = updated_sessions.first() {
                                 val["session"] = first.clone();
                             }
                             val["sessions"] = Value::Array(updated_sessions);
                         }
                         payload
+                    }
+                    "knowledge.memory_links" => {
+                        let knowledge = self.domains.get("knowledge").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let Payload::Json(mut links) =
+                            knowledge.execute(operation, request.clone()).await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected memory links payload.",
+                            ));
+                        };
+                        // The shared graph's atoms are a companion: an
+                        // unreachable Omnigraph leaves the Brain and Bank
+                        // links standing.
+                        links["omnigraph_atoms"] = json!([]);
+                        if let Some(omnigraph) = self.domains.get("omnigraph") {
+                            let file = json!({
+                                "params": {},
+                                "body": {},
+                                "query": {"project_id": params["project_id"], "path": links["path"]},
+                            });
+                            match omnigraph.execute("omnigraph.file_context", file).await {
+                                Ok(Payload::Json(found)) if found["ok"] == true => {
+                                    links["omnigraph_atoms"] = found["atoms"].clone();
+                                    links["contradiction_warnings"] = json!(
+                                        crate::knowledge::KnowledgeDomain::contradiction_warnings(
+                                            &found["contradictions"],
+                                            &found["atoms"],
+                                        )
+                                    );
+                                }
+                                Ok(Payload::Json(found)) => {
+                                    links["omnigraph_skipped"] = found["skipped"].clone();
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    links["omnigraph_error"] = json!(error.message);
+                                }
+                            }
+                        }
+                        Payload::Json(links)
                     }
                     "omnigraph.sync_knowledge" => {
                         let project_id = body["project_id"]
@@ -392,21 +516,8 @@ impl Services for NativeServices {
                         let omnigraph = self.domains.get("omnigraph").ok_or_else(|| {
                             HarnessError::unavailable("Required native service is unavailable.")
                         })?;
-                        let Payload::Json(collected) = knowledge
-                            .execute(
-                                "knowledge.sync_collect",
-                                json!({
-                                    "params": { "project_id": project_id },
-                                    "query": query,
-                                    "body": body,
-                                }),
-                            )
-                            .await?
-                        else {
-                            return Err(HarnessError::unavailable(
-                                "Unexpected knowledge sync payload.",
-                            ));
-                        };
+                        let collected =
+                            collect_sync_items(knowledge.as_ref(), project_id, query, body).await?;
                         let Payload::Json(synced) = omnigraph
                             .execute(
                                 "omnigraph.sync_items",
@@ -416,6 +527,7 @@ impl Services for NativeServices {
                                     "body": {
                                         "project_id": project_id,
                                         "items": collected["items"],
+                                        "prune_layers": collected["prune_layers"],
                                     },
                                 }),
                             )
@@ -437,7 +549,13 @@ impl Services for NativeServices {
                             "memory_count": collected["memory_count"].as_u64().unwrap_or(0),
                             "skipped": skip_reason.as_deref().map(|r| json!(r)).unwrap_or_else(|| json!(collected["skipped"].as_u64().unwrap_or(0))),
                             "atom_ids": synced["atom_ids"].as_array().cloned().unwrap_or_default(),
+                            "deleted": synced["deleted"].as_u64().unwrap_or(0),
+                            "deleted_atom_ids": synced["deleted_atom_ids"].as_array().cloned().unwrap_or_default(),
+                            "symbols": synced["symbols"].as_u64().unwrap_or(0),
                         });
+                        if let Some(error) = synced["prune_error"].as_str() {
+                            out["prune_error"] = json!(error);
+                        }
                         if !ok {
                             let err_msg = synced["error"]
                                 .as_str()
@@ -661,6 +779,84 @@ impl Services for NativeServices {
             }
             Ok(payload)
         })
+    }
+}
+
+#[cfg(test)]
+mod sync_page_tests {
+    use super::*;
+
+    /// A knowledge domain serving `pages` in turn, by the requested offset.
+    struct Pages(Vec<Value>, std::sync::Mutex<Vec<u64>>);
+    impl Domain for Pages {
+        fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
+            Box::pin(async move {
+                assert_eq!(operation, "knowledge.sync_collect");
+                let offset = request["body"]["offset"].as_u64().unwrap();
+                self.1.lock().unwrap().push(offset);
+                assert_eq!(request["body"]["bank"], "team");
+                Ok(Payload::Json(
+                    self.0
+                        .iter()
+                        .find(|page| page["offset"] == offset)
+                        .cloned()
+                        .unwrap(),
+                ))
+            })
+        }
+    }
+    fn page(offset: u64, ids: &[&str], total: u64, next: Option<u64>, layers: &[&str]) -> Value {
+        json!({"items": ids.iter().map(|id| json!({"atom_id": id})).collect::<Vec<_>>(), "offset": offset, "total_items": total, "has_more": next.is_some(), "next_offset": next, "complete_layers": layers, "brain_count": 2, "memory_count": 1, "skipped": 4})
+    }
+
+    #[tokio::test]
+    async fn collects_every_page_and_prunes_only_whole_consistent_layers() {
+        let body = json!({"project_id": "p", "bank": "team"});
+        let both = ["project-brain", "memory-bank"];
+        let whole = Pages(
+            vec![
+                page(0, &["brain-a", "brain-b"], 3, Some(2), &both),
+                page(2, &["mem-c"], 3, None, &both),
+            ],
+            Default::default(),
+        );
+        let collected = collect_sync_items(&whole, "p", &json!({}), &body)
+            .await
+            .unwrap();
+        assert_eq!(*whole.1.lock().unwrap(), vec![0, 2]);
+        assert_eq!(
+            collected["items"],
+            json!([{"atom_id":"brain-a"},{"atom_id":"brain-b"},{"atom_id":"mem-c"}])
+        );
+        assert_eq!(
+            collected["prune_layers"],
+            json!(["memory-bank", "project-brain"])
+        );
+        assert_eq!(collected["brain_count"], 2);
+        // A layer one page does not report whole is not pruned.
+        let partial = Pages(
+            vec![
+                page(0, &["brain-a"], 2, Some(1), &both),
+                page(1, &["mem-c"], 2, None, &["memory-bank"]),
+            ],
+            Default::default(),
+        );
+        let collected = collect_sync_items(&partial, "p", &json!({}), &body)
+            .await
+            .unwrap();
+        assert_eq!(collected["prune_layers"], json!(["memory-bank"]));
+        // Knowledge that changed between pages prunes nothing.
+        let moved = Pages(
+            vec![
+                page(0, &["brain-a"], 2, Some(1), &both),
+                page(1, &["brain-b", "mem-c"], 3, None, &both),
+            ],
+            Default::default(),
+        );
+        let collected = collect_sync_items(&moved, "p", &json!({}), &body)
+            .await
+            .unwrap();
+        assert_eq!(collected["prune_layers"], json!([]));
     }
 }
 

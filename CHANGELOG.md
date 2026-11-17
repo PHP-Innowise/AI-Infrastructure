@@ -24,6 +24,185 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Fleet progress reads and writes its task under the Project Brain mutation
+  lock instead of retrying a stale revision: on Windows a lens reading the task
+  while another replaced its file could see it as missing. A System
+  Orchestration run's overlapping files are shown with `/` between their parts
+  on Windows too, the system graph test brings its own Graphify instead of
+  needing one on the machine, and the local Omnigraph install test, whose
+  stand-in executables are shell and Python scripts, runs on Unix only.
+- The Context Graph's **Keep source** and **Keep target** settle a conflict
+  on a live Omnigraph. Its own merge conflicts name an atom without its
+  values, which left both buttons disabled; the branch diff and a
+  conflicting merge (`GET /api/omnigraph/branches/diff`, the `merge` action of
+  `POST /api/omnigraph/branches`) now add to each `ContextAtom`
+  `divergent_update` the whole atom as the source and the target branch hold
+  it (`source_value`, `target_value`), with one read of each branch whatever
+  the number of conflicts. A request without a `project_id` and an atom of
+  another project get no values, and other conflicts pass through unchanged.
+  Omnigraph v0.15.0, checked with its release binary, compares whole rows:
+  content that agrees under another `updated_at` or `source_branch` still
+  conflicts and only identical rows converge, as in the fake Omnigraph. A
+  Keep therefore no longer sends an atom update, which stamps its own branch
+  and time and left the conflict in place, but the new `keep` action of
+  `POST /api/omnigraph/branches`, which copies the kept atom onto the other
+  branch exactly as stored and refuses (`409`) when either branch holds
+  another version than the preview showed. An atom update through
+  `POST /api/omnigraph/atoms` without `session_id` keeps the stored
+  `source_session_id` and links no session; an explicit `session_id` still
+  takes the atom over and links it, and `null` clears.
+- Harness curation from the page. Memory use lists a promotion queue:
+  proposals waiting for review, automatic ones that stalled and the newest
+  promoted automatically in the window, by ID, source record IDs, dates,
+  outcome code and chunk ID only, so no Brain title or path reaches the page.
+  **Approve** and **Reject** sign a waiting proposal with the reviewer's name
+  (`promote-review`) and **Apply** publishes an approved one
+  (`promote-apply`), through the knowledge operation and only with the
+  proposal's ID; an automatic proposal is never signed by a person, and
+  **Review in Project Brain** opens a source record to read first. The
+  Context Graph's merge preview offers **Keep source** and **Keep target** on
+  a `ContextAtom` `divergent_update` conflict that carries both values: the
+  kept atom goes onto the other branch (see the entry above), and the
+  preview runs again; a `delete_vs_update`, an edge conflict or one without
+  both values shows the buttons disabled with the reason. A follow-up may
+  change its session's Omnigraph pull branches, focus query and
+  auto-publish, and its linked task's review and reviewed query, sending
+  only what changed; a poll no longer overwrites what the person typed
+  there. The session bar shows ten shared atoms, then `+N more` /
+  `Show fewer`.
+- Bridge the dependency map and project memory. `GET
+  /api/projects/{project_id}/graph/memory-links?path=` lists the active
+  Project Brain records and Memory Bank chunks that cite a file and the
+  shared Omnigraph atoms touching it (`GET /api/omnigraph/file-context`), and
+  warns, for review only, when the file is gone or a commit renamed it
+  (`previous_path`). The map's side panel shows the links of a selected file
+  once they arrive, opens each record or chunk in Knowledge, and keeps the map
+  when the request fails.
+- The bridge goes further, still for review only. Publishing an Omnigraph
+  atom (`POST /api/omnigraph/atoms`, a session's learnings, the canonical
+  sync) links the declarations its text names in the files it touches as
+  `SymbolRef` nodes with `MentionsSymbol` edges, read from the session's
+  workspace or the registered project and never from a path in the request;
+  an edit that names others replaces them. An atom injected into a session
+  that a `contradicts` relation links to another gets a caution line in the
+  capsule and a `contradiction_warnings` entry on the session;
+  `memory-links` returns the same relations among a file's atoms with the
+  Brain record or chunk behind each end, and the map's side panel shows them
+  beside each atom's named declarations. A commit's banner asks the memory
+  that cites each file it renamed by its old name and shows what to review;
+  its dock row then shows the count. In the Omnigraph atom inspector a Git
+  commit the atom names opens the Code Map at that commit, apart from
+  Omnigraph snapshots. Nothing retires or changes a record or chunk.
+- `HARNESS_GRAPH_RISK_CALLER_HINTS=1` adds to the source hints the memory
+  citing a caller that a session's run puts at risk (`edge_diffs.risk_callers`).
+  It is off by default and stays off until a held-out measurement of its own
+  (`docs/MEMORY-EVAL.md`); a test holds the default.
+- Updating an Omnigraph atom through `POST /api/omnigraph/atoms` keeps what
+  the update leaves out: its six provenance fields (`origin_layer`,
+  `authority`, `privacy`, `brain_record_id`, `memory_id`,
+  `record_revision`), its verification and its creation time. An edit of the
+  text had turned a Project Brain atom into an unverified one with no source;
+  a field sent as `null` still clears. Memory use lists each retrieval's
+  delivered chunks and cuts instead of its JSON, with Helped, Stale and
+  Harmful marks on each chunk (`retrieval-feedback`, telemetry only). A jump
+  from the Context Graph to a Brain record or chunk selects it without
+  writing its id into the list's filter. The page's next-message inbox
+  follows the server's rules (a System explain session and a mode other than
+  Plan or Edit are refused), and a session with a linked task says why its
+  next message waits.
+- Bring back Harness memory views the Rust port left as placeholders, on the
+  markup their styles were written for. The linked task card's capsule meter
+  shows again: the server measures the capsule with the runtime's own
+  serializer (`capsule_meter`: characters against the 8,000 cap, Project
+  Brain / Memory bank / Rules & docs, items, repeats, dropped), which no code
+  had produced since the port, and the bar and its legend draw it instead of
+  raw JSON. Memory use's retrievals-per-day chart stacks the retrievals that
+  delivered a chunk under the rest (its columns had been empty). Usage's turn
+  strip draws each turn's fill as a track, its legend has swatches, and Brain
+  and Memory Bank listings show title, path and state on separate lines. The
+  run panel gains Memory and Omnigraph tabs for a launch that saved memory or
+  touched the shared graph.
+- Harness knowledge operations lock per project: one project's Brain or
+  Memory Bank work no longer answers `knowledge-busy` for every other
+  project. Fleet lenses that report progress at once no longer lose the race:
+  a write refused for a stale revision reads the task again (up to eight
+  times). Memory usage gives curation what it needs without carrying Brain
+  text: each promotion proposal its `id`, `source_ids` and an outcome code
+  (`reason`), each retrieval row its `manifest_id`, and `feedback_supported`
+  with the recorded `feedback`. The
+  `retrieval-feedback` action keeps a person's `helped`, `stale` or
+  `harmful` verdict on one delivered item (or `clear`s it) in the Harness
+  store as telemetry only: nothing reads it to rank, admit or pack memory.
+- Say when a running Harness session was not told about an Omnigraph import
+  or link: the inbox notice used to be dropped without a word. Each live
+  session's outcome comes back in `inbox_notifications` (`notified`, or a
+  reason code: `brain_linked`, `specialized_workflow`, `agents_enabled`,
+  `unsupported_provider_or_mode`, `missing_native_session_id`,
+  `missing_binding`, `inbox_refused`), and a running session that could not
+  take it records an `inbox_notify` event. The inbox now refuses a System
+  explain session too, as chat follow-ups already did.
+- Harness Omnigraph sessions: the text a session searches with and leaves
+  on its shared `Session` node is screened as an automatic memory query
+  (secrets, personal data and transcript markers removed) instead of the raw
+  prompt; a canonical atom a session consumes gets its `ConsumedBy` edge on
+  `knowledge/canonical`, where the atom stays, instead of none; a
+  `SessionFollows` edge names the kind of link (`shared_branch`, `linked`,
+  `broadcast`) rather than the shared space's name, and older edges read as
+  `shared_branch`; each published turn snapshot takes the next `turn_index`
+  instead of 1; atoms carried into a later capsule keep their authority tag,
+  so an unverified one is still marked for checking. A chat follow-up may
+  change the session's task-context `review` and `query`
+  (`brain_settings::followup`): a reviewed query is the person's bounded
+  text, an automatic one is screened, and the task, bank and goal stay.
+- Prune the Omnigraph `knowledge/canonical` branch: a canonical sync now
+  deletes the project's synced Project Brain and Memory Bank atoms whose
+  record or chunk is gone (retired, archived, superseded, stale), with every
+  edge naming them (`GQ_DELETE_CANONICAL_ATOM`), and reports `deleted` and
+  `deleted_atom_ids`. It prunes a layer only when that layer was read whole
+  and every page of it is in hand; another project's or a session's atoms are
+  never touched. `knowledge.sync_collect` sorts its items by atom id and pages
+  them (`offset`, `limit`, `total_items`, `has_more`, `next_offset`,
+  `complete_layers`) instead of keeping the first 1,000 records and chunks in
+  file order. A run whose automatic save wrote verified records or promoted
+  chunks starts the sync in the background, as a manual save did.
+- Read the Project Brain once per retrieval: the binding check, the served
+  task and its lookup share one inventory of the active records
+  (`BrainRepository::find_in`, `checkpoint::served_uuid_in`) instead of
+  scanning it up to three times; a held lookup answers as `find` does,
+  ambiguity, invalid claimants and admission errors included. At 160 records
+  a scan costs about 7 ms in a debug build. Held excerpts are marked in one
+  in-memory FTS5 table per thread instead of a new one per item (204 to 93 µs
+  per item).
+- Recognize a class name after an acronym in a request (`HTTPClient`,
+  `APIV2Handler`, `HTTP2Client`) when seeding files the request names; an
+  acronym alone (`HTTP`) or plural (`URLs`) is still no class name. Count the
+  edition's `AGENTS.md` of an attached overlay as host-loaded only for Claude
+  Code and Codex, which receive it; Cursor, the CLI and a linked worktree's
+  host do not, and their traces now say so. Add the
+  `capsule_pack_deduplicated` experiment, off by default
+  (`CONTEXT_CAPSULE_PACK_DEDUP=1`): a JSON capsule over its size limit empties
+  the snippets `selected` and `categories` repeat before it evicts anything.
+- Keep a capsule excerpt's text after a customer identifier. The renderer ran
+  each excerpt body, heading and snippet through the inbound query screen,
+  which cuts a query at the first `customer id: …`, so a schema note that
+  opened with one rendered as a pointer only (`sanitized-empty`). The rendered
+  text now has its own screen (`screen_rendered_text`): the identifier keeps
+  its label and loses its value (`Customer id: …`); secrets, e-mail addresses,
+  phone numbers and customer numbers are still removed, and queries keep the
+  old screen.
+- Withhold an `auto-promoted` Memory Bank chunk whose title or body reads as
+  instructions to the agent, as `docs/MEMORY-WRITE-PATH.md` describes and the
+  retired runtime did; the native port had lost it. Indexing excludes such a
+  chunk with the reason `provenance`, and the fresh source read behind every
+  admission path (`filter_in_scope`, `unscoped_reason`) refuses it, so an
+  index built by an older engine cannot serve it either. A reviewed chunk with
+  the same text is served, and `memory bank-audit --provenance` still lists
+  the withheld one. The instruction patterns add `override … instructions`,
+  revealing hidden instructions or a developer prompt, the end-of-text control
+  token and the `[INST]` and `<<SYS>>` template markers; a bracketed `SYSTEM`
+  stays project text (a Markdown link, a log prefix). A literal screen runs
+  first: text with none of `instruction`, `prompt`, `<|`, `<<` or `[INST` skips
+  the expressions, 1.2 ms to 5 µs for a 3 KB chunk in a debug build.
 - Integrate Omnigraph with Harness project memory (`Project Brain`, `Memory Bank`, `Local Context Engine`): add `ContextAtom` provenance fields (`origin_layer`, `authority`, `privacy`, `brain_record_id`, `memory_id`, `record_revision`), filter auto-published `memory-draft` learnings through source/usability/safety gates (`verified: false` by default), inject Omnigraph-discovered local references into `infra-core` via `source-hints-v1`, unify `awaiting_context` review and `#context-usage` budget tracking (`ledger["omnigraph"]`), add `POST /api/omnigraph/sync-knowledge` (`knowledge/canonical`) and human-gated `POST /api/omnigraph/promote` (`PublicationFiles`, `sensitive_label`, `instruction_like`), and add Context Graph/Knowledge UI provenance badges, sync/promote controls, and bidirectional jump links.
 - Extend Omnigraph Harness backend (`infra-harness`) with scoped task/branch/graph context export and import (`GET|POST /api/omnigraph/export`, `POST /api/omnigraph/import` supporting `harness.omnigraph.bundle.v1` and raw Omnigraph NDJSON via `/export` + `/load/ndjson`) and multi-task session context linking (`POST /api/omnigraph/sessions/link` in `shared_branch` and `broadcast` modes, `omnigraph.shared_space` / `omnigraph.linked_session_ids` on `POST /api/sessions`, `SessionFollows` graph edges, and best-effort live native `session_inbox` updates).
 - Wire Omnigraph (`v0.15.0` CLI/server HTTP API `0.14`) cross-session context sharing into `infra-harness`, `infra-ui`, and `harness/web`: add `OmnigraphManager` lifecycle management (`off`, managed `local_sidecar`, `docker`, and `external`), `/api/omnigraph/*` HTTP endpoints (`status`, `setup`, `graph`, `search`, `branches/diff`, `branches`, `atoms`, `share`, `changes`, `commits/{commit_id}`), SQLite `session["omnigraph"]` persistence/migration, pre-run branch preparation and bounded `Shared Omnigraph Context` prompt injection with `PromptLedger` accounting, post-turn learnings/Clash/Fleet/file publication and optional `auto_merge`, and the Context Graph Studio UI.

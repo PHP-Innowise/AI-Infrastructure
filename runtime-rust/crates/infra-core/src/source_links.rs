@@ -286,7 +286,12 @@ pub fn prompt_path_seeds(
             }
         })
         .collect::<Vec<_>>();
-    let symbol_pattern = expression(r"([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)")?;
+    // A class name: PascalCase, also after an acronym (`HTTPClient`,
+    // `APIV2Handler`, `HTTP2Client`). An acronym alone (`HTTP`) or with a
+    // plural `s` (`URLs`) is no class name.
+    let symbol_pattern = expression(
+        r"([A-Z]+(?:[A-Z][a-z0-9]{2,}|[A-Z][0-9]+[A-Z][A-Za-z0-9]*)(?:[A-Z][a-z0-9]*)*|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)",
+    )?;
     let symbols = symbol_pattern
         .captures_iter(&text)
         .filter_map(|capture| {
@@ -1019,4 +1024,55 @@ pub fn path_candidates(
             query::estimated_tokens(&format!("{}{}", item.document.title, item.snippet));
     }
     Ok((candidates, excluded))
+}
+
+#[cfg(test)]
+mod symbol_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_path_seeds_match_acronym_pascalcase_without_plain_acronyms() {
+        let root = std::env::temp_dir().join(format!("infra-symbols-{}", crate::domain::uuid4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let context =
+            RuntimeContext::new(crate::Roots::installed(&root).unwrap(), "local", "governed")
+                .unwrap();
+        let store = crate::Store::open(root.join("context.db"), Default::default()).unwrap();
+        let files = [
+            "src/HTTPClient.php",
+            "src/APIV2Handler.php",
+            "src/HTTP2Client.php",
+            "src/UserService.php",
+            "src/HTTP.php",
+            "src/URLs.php",
+        ];
+        for file in files {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO document_links(path,ref_path,ref_kind) VALUES('docs/a.md',?1,'source')",
+                    [file],
+                )
+                .unwrap();
+        }
+        let seeds = prompt_path_seeds(
+            &store.conn,
+            &context,
+            "Retry in HTTPClient, APIV2Handler and HTTP2Client as UserService does; \
+             HTTP and URLs stay as they are.",
+        )
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            seeds,
+            files[..4]
+                .iter()
+                .map(|file| file.to_string())
+                .collect::<BTreeSet<_>>(),
+            "{seeds:?}"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

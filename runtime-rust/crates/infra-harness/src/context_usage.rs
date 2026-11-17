@@ -50,6 +50,81 @@ fn lines_with_ends(value: &str) -> Vec<&str> {
     }
     lines
 }
+/// A task capsule against the runtime's 8,000-character cap, by memory kind,
+/// measured with the runtime's own serializer so the counts are the cap's.
+/// Policy and evidence items are rules and docs, durable ones the Memory Bank,
+/// and everything else (working state, records, episodes) the Project Brain.
+/// An item counts once per copy: in its layer, among the selected items and
+/// under its category; the last two copies are `repeats`.
+pub fn capsule_meter(capsule: &Value) -> Value {
+    if !capsule.is_object() {
+        return Value::Null;
+    }
+    let size = |value: &Value| {
+        infra_core::domain::json::serialize(value, false, false, false, false)
+            .map(|text| text.chars().count() as u64)
+            .unwrap_or(0)
+    };
+    let kind = |item: &Value| match item["category"].as_str() {
+        Some("policy" | "evidence") => "rules",
+        Some("durable") => "bank",
+        _ => "brain",
+    };
+    fn items(value: &Value) -> Vec<&Value> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item.is_object())
+            .collect()
+    }
+    let layers = ["procedural", "semantic", "episodic"]
+        .iter()
+        .flat_map(|layer| items(&capsule[*layer]))
+        .collect::<Vec<_>>();
+    let views = items(&capsule["selected"])
+        .into_iter()
+        .chain(
+            capsule["categories"]
+                .as_object()
+                .into_iter()
+                .flat_map(|groups| groups.values())
+                .flat_map(items),
+        )
+        .collect::<Vec<_>>();
+    let (mut rules, mut bank) = (0u64, 0u64);
+    for item in layers.iter().chain(&views) {
+        match kind(item) {
+            "rules" => rules += size(item),
+            "bank" => bank += size(item),
+            _ => {}
+        }
+    }
+    let mut counts = object!({"brain":0,"rules":0,"bank":0});
+    for item in &layers {
+        let kind = kind(item);
+        counts[kind] = (counts[kind].as_u64().unwrap_or(0) + 1).into();
+    }
+    let repeats = views.iter().map(|item| size(item)).sum::<u64>();
+    let total = size(capsule);
+    let mut dropped = serde_json::Map::new();
+    for layer in ["procedural", "semantic", "episodic"] {
+        if let Some(count) = capsule["omitted"][layer]
+            .as_u64()
+            .filter(|count| *count > 0)
+        {
+            dropped.insert(layer.into(), count.into());
+        }
+    }
+    object!({
+        "characters": total,
+        "limit": infra_core::capsule::CAPSULE_CHARACTER_LIMIT,
+        "kinds": {"brain": total.saturating_sub(rules + bank), "rules": rules, "bank": bank},
+        "items": counts,
+        "repeats": repeats,
+        "dropped": Value::Object(dropped),
+    })
+}
 pub fn capsule_text_parts(text: &str) -> Value {
     let mut brain = 0usize;
     let mut bank = 0usize;
@@ -630,4 +705,51 @@ impl Default for PromptLedger {
 }
 pub fn unix_now() -> f64 {
     now()
+}
+
+#[cfg(test)]
+mod capsule_meter_tests {
+    use super::*;
+
+    #[test]
+    fn capsule_meter_splits_the_capped_json_by_kind_and_counts_repeats() {
+        let rule =
+            object!({"path":"AGENTS.md","category":"policy","snippet":"Keep handlers thin."});
+        let chunk = object!({"path":"memory-bank/chunks/MEM-1.md","category":"durable","snippet":"Tokens live an hour."});
+        let record = object!({"path":"project-brain/dynamic/a.md","category":"finding","snippet":"Retries back off."});
+        let capsule = object!({
+            "working": {"goal": "Fix retries"},
+            "procedural": [rule.clone()],
+            "semantic": [chunk.clone(), record.clone()],
+            "episodic": [],
+            "selected": [rule.clone(), chunk.clone(), record.clone()],
+            "categories": {"rules": [rule.clone()], "memory": [chunk.clone(), record.clone()]},
+            "omitted": {"episodic": 2, "semantic": 0},
+        });
+        let meter = capsule_meter(&capsule);
+        let size = |value: &Value| {
+            infra_core::domain::json::serialize(value, false, false, false, false)
+                .unwrap()
+                .chars()
+                .count() as u64
+        };
+        assert_eq!(meter["characters"], size(&capsule));
+        assert_eq!(meter["limit"], 8000);
+        assert_eq!(meter["kinds"]["rules"], 3 * size(&rule));
+        assert_eq!(meter["kinds"]["bank"], 3 * size(&chunk));
+        let kinds = &meter["kinds"];
+        assert_eq!(
+            kinds["brain"].as_u64().unwrap()
+                + kinds["rules"].as_u64().unwrap()
+                + kinds["bank"].as_u64().unwrap(),
+            size(&capsule)
+        );
+        assert_eq!(meter["items"], object!({"brain":1,"rules":1,"bank":1}));
+        assert_eq!(
+            meter["repeats"],
+            2 * (size(&rule) + size(&chunk) + size(&record))
+        );
+        assert_eq!(meter["dropped"], object!({"episodic": 2}));
+        assert!(capsule_meter(&Value::Null).is_null());
+    }
 }

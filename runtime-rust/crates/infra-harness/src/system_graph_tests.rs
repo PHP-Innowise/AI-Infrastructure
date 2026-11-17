@@ -229,7 +229,14 @@ fn setup_harbor_fixture() -> HarborFixture {
     let fake_graphify = tmp.path().join("fake-graphify");
     fs::write(&fake_graphify, "#!/bin/sh\nexit 0\n").unwrap();
 
-    let graphs = Graphs::new(store.clone());
+    // The fixture's own Graphify stands in for an installed one, so the
+    // states it reports do not depend on what the machine has on its PATH;
+    // the gap is the automatic one `Graphs::new` uses.
+    let graphs = Graphs::with(
+        store.clone(),
+        Some(fake_graphify.clone()),
+        std::time::Duration::from_secs(30),
+    );
     let bridge = HarnessCodeGraphBridge::new(store.clone(), graphs.clone());
     let domain = SystemGraphDomain::new(store.clone(), graphs.clone(), bridge.clone(), None);
 

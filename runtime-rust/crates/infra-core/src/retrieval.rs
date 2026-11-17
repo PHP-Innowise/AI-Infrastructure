@@ -939,10 +939,13 @@ fn retrieve_inner(
         // The record of the bound task was removed with uncommitted files: the
         // turn is served as for a task not recorded yet, knowledge included,
         // and says so.
+        // One read of the active records serves the binding check, the
+        // served task and its lookup.
+        let inventory = brain.inventory(false)?;
         if request.allow_unprovisioned
             && let Some(binding) = store.binding(id)?
             && brain
-                .find(&binding.task_uuid, Some("task"), false)
+                .find_in(&inventory, &binding.task_uuid, Some("task"))
                 .is_err_and(|error| error.kind == ErrorKind::NotFound)
         {
             binding_notices.push(format!(
@@ -950,7 +953,7 @@ fn retrieve_inner(
                 binding.task_uuid
             ));
         }
-        let served = match crate::checkpoint::served_uuid(Some(store), context, id) {
+        let served = match crate::checkpoint::served_uuid_in(Some(store), &brain, &inventory, id) {
             Ok(served) => served.unwrap_or_else(|| id.clone()),
             Err(error) if request.allow_unprovisioned && unreadable_record(&error) => {
                 binding_notices.push(unreadable_notice(&error));
@@ -962,7 +965,7 @@ fn retrieve_inner(
         let found = if unreadable {
             None
         } else {
-            Some(brain.find(&served, Some("task"), false))
+            Some(brain.find_in(&inventory, &served, Some("task")))
         };
         match found {
             None => {}
@@ -1037,7 +1040,11 @@ fn retrieve_inner(
         capsule.0["categories"] = json!({});
         capsule.0["token_estimates"] =
             json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0});
-        return capsule::pack(capsule, request.delivery_profile);
+        return capsule::pack_with_options(
+            capsule,
+            request.delivery_profile,
+            capsule::pack_deduplicated(&config),
+        );
     }
     warnings.extend(binding_notices);
     let (mut candidates, diagnostics) = query::rank_candidates_observed(
@@ -1571,7 +1578,11 @@ fn retrieve_inner(
     trace.boundary("pack_input", &selected);
     capsule.1 = prepared;
     let pack_started = Instant::now();
-    capsule = capsule::pack(capsule, request.delivery_profile)?;
+    capsule = capsule::pack_with_options(
+        capsule,
+        request.delivery_profile,
+        capsule::pack_deduplicated(&config),
+    )?;
     pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();
@@ -1686,7 +1697,11 @@ fn retrieve_inner(
     }
     capsule::synchronize(&mut capsule);
     let pack_started = Instant::now();
-    capsule = capsule::pack(capsule, request.delivery_profile)?;
+    capsule = capsule::pack_with_options(
+        capsule,
+        request.delivery_profile,
+        capsule::pack_deduplicated(&config),
+    )?;
     pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();

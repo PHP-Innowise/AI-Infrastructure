@@ -371,12 +371,15 @@ fn point_reason_for(
         return Ok(Some("secret-policy".into()));
     }
     if document.kind == "memory" {
-        let metadata = match index::parse_memory_metadata(&content) {
-            Ok(metadata) => metadata,
+        let (metadata, body) = match index::parse_memory_chunk(&content) {
+            Ok(chunk) => chunk,
             Err(_) => return Ok(Some("invalid".into())),
         };
         if let Some(reason) = index::memory_temporal_reason(&metadata) {
             return Ok(Some(reason));
+        }
+        if crate::bank::promotion::auto_promoted_instruction_like(&metadata, body)? {
+            return Ok(Some("provenance".into()));
         }
     }
     if document.kind == "codebase" {
@@ -553,4 +556,91 @@ fn metadata_reason_for(
         return Ok(Some("lifecycle".into()));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod provenance_withholding_tests {
+    use super::*;
+    use crate::index::provenance_withholding_tests::{
+        AUTOMATIC, Fixture, INJECTED, LOOKALIKE, REVIEWED, TEMPLATE,
+    };
+
+    fn candidate(fixture: &Fixture, number: u32, tags: &[&str], body: &str) -> Candidate {
+        let (key, raw) = fixture.chunk(number, tags, body);
+        // Index the reviewed form, then give the document the text on disk,
+        // as an index built before the policy would hold it.
+        let reviewed = fixture.chunk(number, REVIEWED, body).1;
+        let discovery =
+            index::discover_sources(&fixture.context, &index::SourceState::new()).unwrap();
+        let mut document = discovery
+            .documents
+            .into_iter()
+            .find(|document| document.path == key)
+            .unwrap();
+        assert_eq!(document.content, reviewed);
+        std::fs::write(fixture.root.join(&key), &raw).unwrap();
+        document.content = raw.clone();
+        document.source_hash = query::sha256(raw.as_bytes());
+        Candidate::linked(document, "")
+    }
+
+    #[test]
+    fn admission_withholds_automatic_instruction_like_chunks_only() {
+        let fixture = Fixture::new();
+        let config = RuntimeConfig::load(&fixture.context.roots).unwrap();
+        let injected = candidate(&fixture, 1, AUTOMATIC, INJECTED);
+        let template = candidate(&fixture, 2, AUTOMATIC, TEMPLATE);
+        let reviewed = candidate(&fixture, 3, REVIEWED, INJECTED);
+        let lookalike = candidate(&fixture, 4, AUTOMATIC, LOOKALIKE);
+        for (item, expected) in [
+            (&injected, Some("provenance")),
+            (&template, Some("provenance")),
+            (&reviewed, None),
+            (&lookalike, None),
+        ] {
+            assert_eq!(
+                unscoped_reason(&fixture.context, &config, item)
+                    .unwrap()
+                    .as_deref(),
+                expected,
+                "{}",
+                item.document.path
+            );
+        }
+        let store =
+            crate::Store::open(fixture.root.join("context.db"), Default::default()).unwrap();
+        let mut policy = CurrentSourcePolicy::default();
+        let (selected, excluded) = filter_in_scope(
+            &fixture.context,
+            &config,
+            &store.conn,
+            &mut policy,
+            vec![
+                injected.clone(),
+                template.clone(),
+                reviewed.clone(),
+                lookalike.clone(),
+            ],
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.document.path.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([reviewed.document.path, lookalike.document.path])
+        );
+        assert_eq!(
+            excluded
+                .iter()
+                .map(|row| (row.path.clone(), row.reason.clone()))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                (injected.document.path.clone(), "provenance".to_owned()),
+                (template.document.path, "provenance".to_owned()),
+            ])
+        );
+    }
 }

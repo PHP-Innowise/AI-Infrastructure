@@ -74,6 +74,9 @@ struct MockGraphState {
     commit_order: Vec<String>,
     next_seq: u64,
     expired_cursor: Option<String>,
+    /// Every query and export served, as `name@branch`, so a test can
+    /// bound how many reads a call makes.
+    reads: Vec<String>,
 }
 
 impl MockGraphState {
@@ -116,6 +119,7 @@ impl MockGraphState {
             commit_order: vec!["c-0001".into()],
             next_seq: 2,
             expired_cursor: Some("expired-cursor".into()),
+            reads: Vec::new(),
         }
     }
 
@@ -921,6 +925,26 @@ async fn mock_mutate(
         }));
     } else if query_text.contains("delete ContextAtom") {
         let aid = params["atom_id"].as_str().unwrap_or("").to_string();
+        // As `GQ_DELETE_CANONICAL_ATOM`: every edge naming the atom goes too.
+        let named = |key: &String, props: &Value| {
+            props["source_id"].as_str() == Some(aid.as_str())
+                || props["target_id"].as_str() == Some(aid.as_str())
+                || key.starts_with(&format!("{aid}->"))
+                || key.starts_with(&format!("{aid}:"))
+                || key.ends_with(&format!(":{aid}"))
+        };
+        for edges in [
+            &mut snap.published_by,
+            &mut snap.consumed_by,
+            &mut snap.touches_file,
+            &mut snap.mentions_symbol,
+            &mut snap.relates_to,
+            &mut snap.derived_from,
+        ] {
+            let before = edges.len();
+            edges.retain(|key, props| !named(key, props));
+            affected_edges += before - edges.len();
+        }
         if let Some(prev) = snap.atoms.remove(&aid) {
             affected_nodes += 1;
             changes.push(json!({
@@ -1024,6 +1048,16 @@ async fn mock_mutate(
         props["target_id"] = json!(dst);
         snap.mentions_symbol.insert(format!("{src}->{dst}"), props);
         affected_edges += 1;
+    } else if query_name == "clear_atom_symbols"
+        || (query_text.contains("delete MentionsSymbol")
+            && !query_text.contains("delete ContextAtom"))
+    {
+        // As `GQ_CLEAR_ATOM_SYMBOLS`: the atom's mentions only.
+        let aid = params["atom_id"].as_str().unwrap_or("");
+        let before = snap.mentions_symbol.len();
+        snap.mentions_symbol
+            .retain(|_, props| props["source_id"].as_str() != Some(aid));
+        affected_edges += before - snap.mentions_symbol.len();
     } else if query_name == "clear_branch_context" {
         affected_nodes = snap.atoms.len()
             + snap.files.len()
@@ -1118,6 +1152,31 @@ fn evaluate_mock_query(
         );
     }
 
+    if query_name == "file_context" || query_text.contains("query file_context") {
+        let path = params["path"].as_str().unwrap_or("");
+        let rows: Vec<Value> = snap
+            .touches_file
+            .values()
+            .filter(|edge| edge["target_id"].as_str() == Some(path))
+            .filter_map(|edge| edge["source_id"].as_str())
+            .filter_map(|aid| snap.atoms.get(aid).cloned())
+            .collect();
+        return (rows, None);
+    }
+    if query_name == "list_session_turn_snapshots"
+        || query_text.contains("list_session_turn_snapshots")
+    {
+        let sid = params["session_id"].as_str().unwrap_or("");
+        let mut rows: Vec<Value> = snap
+            .turn_snapshots
+            .values()
+            .filter(|t| t["session_id"].as_str() == Some(sid))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|t| std::cmp::Reverse(t["turn_index"].as_i64().unwrap_or(0)));
+        rows.truncate(1);
+        return (rows, None);
+    }
     if query_name == "recent_atoms" || query_text.contains("recent_atoms") {
         let rows: Vec<Value> = snap
             .atoms
@@ -1160,12 +1219,49 @@ fn evaluate_mock_query(
     if query_name == "list_session_follows" || query_text.contains("list_session_follows") {
         return (snap.session_follows.values().cloned().collect(), None);
     }
+    if query_name == "list_symbol_edges" || query_text.contains("list_symbol_edges") {
+        let rows: Vec<Value> = snap
+            .mentions_symbol
+            .values()
+            .filter_map(|edge| {
+                let atom = snap.atoms.get(edge["source_id"].as_str()?)?;
+                let symbol = snap.symbols.get(edge["target_id"].as_str()?)?;
+                match_proj(atom).then(|| {
+                    json!({
+                        "source_id": edge["source_id"],
+                        "target_id": edge["target_id"],
+                        "name": symbol["name"],
+                        "kind": symbol["kind"],
+                        "file_path": symbol["file_path"],
+                        "role": edge["role"],
+                    })
+                })
+            })
+            .collect();
+        return (rows, None);
+    }
     if query_name == "contradictions" || query_text.contains("contradictions") {
+        // As `QUERY_CONTRADICTIONS`: both ends are atoms of the branch and
+        // the source is the project's.
         let rows: Vec<Value> = snap
             .relates_to
             .values()
             .filter(|e| e["relation"].as_str() == Some("contradicts"))
-            .cloned()
+            .filter_map(|e| {
+                let source = snap.atoms.get(e["source_id"].as_str()?)?;
+                let target = snap.atoms.get(e["target_id"].as_str()?)?;
+                match_proj(source).then(|| {
+                    json!({
+                        "source_id": e["source_id"],
+                        "source_title": source["title"],
+                        "target_id": e["target_id"],
+                        "target_title": target["title"],
+                        "note": e["note"],
+                        "confidence": e["confidence"],
+                        "created_at": e["created_at"],
+                    })
+                })
+            })
             .collect();
         return (rows, None);
     }
@@ -1178,7 +1274,7 @@ async fn mock_query(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let st = srv.state.lock().unwrap();
+    let mut st = srv.state.lock().unwrap();
     if let Err(resp) = check_auth_and_contract(&headers, &st) {
         return *resp;
     }
@@ -1199,6 +1295,9 @@ async fn mock_query(
         };
         (b.head_commit.clone(), Some(bname.to_string()), None)
     };
+    let qname = body["name"].as_str().unwrap_or("inline_query");
+    let read = format!("{qname}@{}", branch_out.as_ref().unwrap_or(&commit_id));
+    st.reads.push(read);
     let Some(commit) = st.commits.get(&commit_id) else {
         return json_err(
             StatusCode::NOT_FOUND,
@@ -1207,7 +1306,6 @@ async fn mock_query(
             None,
         );
     };
-    let qname = body["name"].as_str().unwrap_or("inline_query");
     let qtext = body["query"].as_str().unwrap_or("");
     let (rows, ranking) = evaluate_mock_query(&commit.snapshot, qname, qtext, &body["params"]);
     axum::Json(json!({
@@ -1228,7 +1326,7 @@ async fn mock_stored_query(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let st = srv.state.lock().unwrap();
+    let mut st = srv.state.lock().unwrap();
     if let Err(resp) = check_auth_and_contract(&headers, &st) {
         return *resp;
     }
@@ -1257,6 +1355,8 @@ async fn mock_stored_query(
         };
         (b.head_commit.clone(), Some(bname.to_string()), None)
     };
+    let read = format!("{query_name}@{}", branch_out.as_ref().unwrap_or(&commit_id));
+    st.reads.push(read);
     let Some(commit) = st.commits.get(&commit_id) else {
         return json_err(
             StatusCode::NOT_FOUND,
@@ -1655,7 +1755,7 @@ async fn mock_export(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let st = srv.state.lock().unwrap();
+    let mut st = srv.state.lock().unwrap();
     if let Err(resp) = check_auth_and_contract(&headers, &st) {
         return *resp;
     }
@@ -1663,6 +1763,7 @@ async fn mock_export(
         return json_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
     }
     let bname = body["branch"].as_str().unwrap_or("main");
+    st.reads.push(format!("export@{bname}"));
     let Some(branch) = st.branches.get(bname) else {
         return json_err(
             StatusCode::NOT_FOUND,
@@ -2066,9 +2167,20 @@ async fn mock_load_json(
     apply_mock_ndjson_load(&mut st, actor, branch, from, mode, data, true)
 }
 
-async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
+pub(crate) async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
+    let (base_url, handle, _state) = spawn_mock_omnigraph_with_state().await;
+    (base_url, handle)
+}
+
+/// The fake Omnigraph and its state, for a test that inspects what it served.
+async fn spawn_mock_omnigraph_with_state() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<MockGraphState>>,
+) {
+    let state = Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID)));
     let srv = MockServer {
-        state: Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID))),
+        state: state.clone(),
     };
     let app = Router::new()
         .route("/healthz", get(mock_healthz))
@@ -2116,7 +2228,7 @@ async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), handle)
+    (format!("http://{addr}"), handle, state)
 }
 
 #[test]
@@ -2945,6 +3057,9 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     mgr.close().await.unwrap();
 }
 
+// The release is a Linux tarball and the stand-in executables are shell and
+// Python scripts, which Windows cannot run by name.
+#[cfg(unix)]
 #[tokio::test]
 async fn install_local_extracts_tarball_and_local_sidecar_lifecycle_works() {
     // Build a tiny `.tar.gz` containing mock `omnigraph` and `omnigraph-server` executables
@@ -3946,7 +4061,9 @@ async fn sidecar_link_sessions_shared_branch_and_broadcast_via_mock() {
     );
 
     let synced_rows =
-        crate::sessions::sync_omnigraph_link_to_sessions(&store, None, &link_req, &shared).await;
+        crate::sessions::sync_omnigraph_link_to_sessions(&store, None, &link_req, &shared)
+            .await
+            .sessions;
     assert_eq!(synced_rows.len(), 2);
 
     // Graph view and status reflect `SessionFollows` and `shared_space`.
@@ -4368,6 +4485,812 @@ async fn real_omnigraph_binary_export_import_and_share_round_trip() {
     assert_eq!(imported_mem["memory_id"], "MEM-20261117-aabbccdd-pkce");
     assert_eq!(imported_mem["record_revision"], 4);
 
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn prepare_session_context_emits_canonical_consumed_by_sanitizes_prompt_and_normalizes_follows()
+ {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let proj_dir = state_dir.path().join("project");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let project_id = store.register(&proj_dir).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    mgr.sync_canonical_knowledge(
+        &project_id,
+        &[json!({"atom_id": "brain-retry", "kind": "decision", "title": "Retry backoff policy", "summary": "Retries back off exponentially.", "verified": true, "origin_layer": "project-brain", "authority": "verified", "privacy": "public", "brain_record_id": "11111111-2222-4333-8444-555555555555"})],
+    )
+    .await
+    .unwrap();
+    let sid = "aabbccddeeff0011";
+    let session = json!({
+        "id": sid,
+        "project_id": project_id,
+        "title": "Retry work",
+        "provider": "claude",
+        "workflow": "native",
+        "status": "running",
+        "prompt": "retry backoff with API_KEY=Sup3rS3cret99 for jane.doe@example.com",
+        "omnigraph": {
+            "enabled": true,
+            "branch": "auto",
+            "shared_space": "shared/team-space",
+            "linked_session_ids": ["9988776655443322"]
+        }
+    });
+    let prep = mgr
+        .prepare_session_context(&session, &proj_dir)
+        .await
+        .unwrap();
+    assert!(
+        prep["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|atom| atom["atom_id"] == "brain-retry"),
+        "{prep}"
+    );
+    // The canonical atom's consumption is recorded on its own branch.
+    assert_eq!(prep["consumed_count"], 1);
+    let canonical = mgr
+        .graph_view_json(
+            &project_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        canonical["edges"].as_array().unwrap().iter().any(|edge| {
+            edge["kind"] == "consumed_by"
+                && edge["source"] == "brain-retry"
+                && edge["target"] == sid
+        }),
+        "{}",
+        canonical["edges"]
+    );
+    let own = mgr
+        .graph_view_json(
+            &project_id,
+            Some("session/aabbccddeeff"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // The atom is not copied onto the session branch.
+    assert!(
+        !own["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|atom| atom["atom_id"] == "brain-retry")
+    );
+    // The prompt reached the shared graph screened.
+    let written = own.to_string();
+    assert!(!written.contains("Sup3rS3cret99"), "{written}");
+    assert!(!written.contains("jane.doe@example.com"), "{written}");
+    assert!(written.contains("retry backoff"), "{written}");
+    // Linked sessions follow each other by kind of link, not by space name.
+    let follows = own["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["kind"] == "session_follows")
+        .collect::<Vec<_>>();
+    assert!(!follows.is_empty());
+    assert!(
+        follows
+            .iter()
+            .all(|edge| edge["relation"] == "shared_branch"),
+        "{follows:?}"
+    );
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publish_session_outputs_increments_turn_snapshot_turn_index() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let session = json!({"id": "1234567890abcdef", "project_id": "proj-1", "omnigraph": {"enabled": true, "branch": "auto"}});
+    for turn in ["First turn done", "Second turn done", "Third turn done"] {
+        mgr.publish_session_outputs(&session, &[], &[], turn)
+            .await
+            .unwrap();
+    }
+    let ndjson = mgr
+        .client()
+        .await
+        .unwrap()
+        .export_branch(Some("session/1234567890ab"), &["TurnSnapshot"], None)
+        .await
+        .unwrap();
+    let mut turns = ndjson
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["type"] == "TurnSnapshot")
+        .map(|row| {
+            (
+                row["data"]["turn_index"].as_i64().unwrap(),
+                row["data"]["summary"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    turns.sort();
+    assert_eq!(
+        turns,
+        vec![
+            (1, "First turn done".to_string()),
+            (2, "Second turn done".to_string()),
+            (3, "Third turn done".to_string()),
+        ]
+    );
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn file_context_lists_main_and_canonical_atoms_with_authority_lines() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    let off = mgr
+        .file_context_json("proj-1", "src/auth.rs")
+        .await
+        .unwrap();
+    assert_eq!(off["skipped"], "omnigraph-off");
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-note", "kind": "insight", "title": "Auth note", "files": ["src/auth.rs"]}))
+        .await
+        .unwrap();
+    mgr.sync_canonical_knowledge(
+        "proj-1",
+        &[json!({"atom_id": "brain-auth", "kind": "decision", "title": "Tokens expire", "files": ["src/auth.rs"], "verified": true, "origin_layer": "project-brain", "authority": "verified", "brain_record_id": "11111111-2222-4333-8444-555555555555"})],
+    )
+    .await
+    .unwrap();
+    let found = mgr
+        .file_context_json("proj-1", "./src/auth.rs")
+        .await
+        .unwrap();
+    let lines = found["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|atom| atom["capsule_line"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{found}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("- [project-brain decision · 11111111] Tokens expire")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("- [unverified reference")),
+        "{lines:?}"
+    );
+    assert!(mgr.file_context_json("proj-1", "../secret").await.is_err());
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn atom_update_payload_preserves_brain_and_memory_provenance() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let first = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "brain-ttl", "kind": "decision", "title": "Session TTL", "summary": "One hour.", "verified": true, "origin_layer": "project-brain", "authority": "verified", "privacy": "team", "brain_record_id": "11111111-2222-4333-8444-555555555555", "record_revision": 3}))
+        .await
+        .unwrap();
+    let created = first["atom"]["created_at"].clone();
+    // Editing the text alone keeps where the atom came from.
+    let edited = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "brain-ttl", "kind": "decision", "title": "Session TTL", "summary": "Ninety minutes."}))
+        .await
+        .unwrap();
+    let atom = &edited["atom"];
+    assert_eq!(atom["summary"], "Ninety minutes.");
+    assert_eq!(atom["verified"], true);
+    assert_eq!(atom["origin_layer"], "project-brain");
+    assert_eq!(atom["authority"], "verified");
+    assert_eq!(atom["privacy"], "team");
+    assert_eq!(
+        atom["brain_record_id"],
+        "11111111-2222-4333-8444-555555555555"
+    );
+    assert_eq!(atom["record_revision"], 3);
+    assert_eq!(atom["created_at"], created);
+    // A field sent as null is cleared; a new atom starts unverified.
+    let cleared = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "brain-ttl", "kind": "decision", "title": "Session TTL", "verified": false, "privacy": null}))
+        .await
+        .unwrap();
+    assert_eq!(cleared["atom"]["verified"], false);
+    assert!(cleared["atom"]["privacy"].is_null());
+    assert_eq!(cleared["atom"]["origin_layer"], "project-brain");
+    let fresh = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "kind": "insight", "title": "New note"}))
+        .await
+        .unwrap();
+    assert_eq!(fresh["atom"]["verified"], false);
+    assert!(fresh["atom"]["origin_layer"].is_null());
+    mgr.close().await.unwrap();
+}
+
+/// What `branch` holds now in the fake Omnigraph.
+fn mock_head(state: &Arc<Mutex<MockGraphState>>, branch: &str) -> MockSnapshot {
+    let st = state.lock().unwrap();
+    st.commits[&st.branches[branch].head_commit]
+        .snapshot
+        .clone()
+}
+
+#[tokio::test]
+async fn atom_update_without_session_keeps_its_session_and_links_none() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server, mock) = spawn_mock_omnigraph_with_state().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let authored = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "summary": "One hour.", "session_id": "sess-author"}))
+        .await
+        .unwrap();
+    assert_eq!(authored["atom"]["source_session_id"], "sess-author");
+    let published = |snap: &MockSnapshot| {
+        snap.published_by
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(
+        published(&mock_head(&mock, "main")),
+        "atom-ttl->sess-author"
+    );
+
+    // An update that names no session (a Keep button's) keeps the author
+    // and links no session.
+    let edited = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "summary": "Ninety minutes."}))
+        .await
+        .unwrap();
+    assert_eq!(edited["atom"]["summary"], "Ninety minutes.");
+    assert_eq!(edited["atom"]["source_session_id"], "sess-author");
+    assert_eq!(edited["atom"]["session_id"], "sess-author");
+    let head = mock_head(&mock, "main");
+    assert_eq!(head.atoms["atom-ttl"]["source_session_id"], "sess-author");
+    assert_eq!(published(&head), "atom-ttl->sess-author");
+
+    // A named session takes the atom over and is linked, as before.
+    let taken = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "summary": "Two hours.", "session_id": "sess-editor"}))
+        .await
+        .unwrap();
+    assert_eq!(taken["atom"]["source_session_id"], "sess-editor");
+    assert_eq!(
+        published(&mock_head(&mock, "main")),
+        "atom-ttl->sess-author atom-ttl->sess-editor"
+    );
+
+    // `session_id: null` clears it, like any field sent as null.
+    let cleared = mgr
+        .publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-ttl", "kind": "decision", "title": "Session TTL", "session_id": null}))
+        .await
+        .unwrap();
+    assert!(cleared["atom"]["source_session_id"].is_null(), "{cleared}");
+    assert!(mock_head(&mock, "main").atoms["atom-ttl"]["source_session_id"].is_null());
+    mgr.close().await.unwrap();
+}
+
+/// `atom-keys` and `atom-ttl` updated differently on `session/keep` and on
+/// `main` after the branch split, and `atom-twin` created on both.
+async fn publish_divergent_atoms(mgr: &OmnigraphManager) {
+    for atom_id in ["atom-keys", "atom-ttl"] {
+        mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": atom_id, "kind": "decision", "title": format!("Title of {atom_id}"), "summary": "Base"}))
+            .await
+            .unwrap();
+    }
+    mgr.branch_action_json(&json!({"action": "create", "name": "session/keep", "from": "main"}))
+        .await
+        .unwrap();
+    for (branch, side, session) in [
+        ("session/keep", "Source", "sess-source"),
+        ("main", "Target", "sess-target"),
+    ] {
+        for atom_id in ["atom-keys", "atom-ttl"] {
+            mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": branch, "atom_id": atom_id, "kind": "decision", "title": format!("Title of {atom_id}"), "summary": format!("{side} {atom_id}"), "session_id": session}))
+                .await
+                .unwrap();
+        }
+        // Created on both branches: a `divergent_insert`, not for Keep.
+        mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": branch, "atom_id": "atom-twin", "kind": "insight", "title": format!("{side} twin")}))
+            .await
+            .unwrap();
+    }
+}
+
+/// The fake Omnigraph and a manager connected to it.
+async fn connected_mock() -> (
+    tempfile::TempDir,
+    OmnigraphManager,
+    Arc<Mutex<MockGraphState>>,
+) {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server, mock) = spawn_mock_omnigraph_with_state().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    (state_dir, mgr, mock)
+}
+
+#[tokio::test]
+async fn divergent_atom_conflicts_carry_both_branches_atoms() {
+    let (_state_dir, mgr, mock) = connected_mock().await;
+    publish_divergent_atoms(&mgr).await;
+
+    mock.lock().unwrap().reads.clear();
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    assert_eq!(diff["outcome"], "conflict");
+    let conflicts = diff["conflicts"].as_array().unwrap();
+    let ids: Vec<&str> = conflicts
+        .iter()
+        .map(|c| c["entity_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["atom-keys", "atom-ttl", "atom-twin"], "{diff}");
+    for conflict in conflicts {
+        let atom_id = conflict["entity_id"].as_str().unwrap();
+        // Omnigraph's own fields pass through as it sent them.
+        assert_eq!(conflict["entity_kind"], "node");
+        assert_eq!(conflict["type_name"], "ContextAtom");
+        assert!(
+            conflict["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(atom_id)),
+            "{conflict}"
+        );
+        if atom_id == "atom-twin" {
+            assert_eq!(conflict["kind"], "divergent_insert");
+            assert!(conflict.get("source_value").is_none(), "{conflict}");
+            assert!(conflict.get("target_value").is_none(), "{conflict}");
+            continue;
+        }
+        assert_eq!(conflict["kind"], "divergent_update");
+        for (key, branch, side, session) in [
+            ("source_value", "session/keep", "Source", "sess-source"),
+            ("target_value", "main", "Target", "sess-target"),
+        ] {
+            let atom = &conflict[key];
+            assert_eq!(atom["atom_id"], atom_id, "{key}: {conflict}");
+            assert_eq!(atom["project_id"], "proj-1");
+            assert_eq!(atom["title"], format!("Title of {atom_id}"));
+            assert_eq!(atom["summary"], format!("{side} {atom_id}"));
+            assert_eq!(atom["source_branch"], branch);
+            assert_eq!(atom["source_session_id"], session);
+            assert_eq!(atom["verified"], false);
+        }
+    }
+    // One read of each branch, however many atoms are in conflict.
+    let mut reads = std::mem::take(&mut mock.lock().unwrap().reads);
+    reads.sort();
+    assert_eq!(reads, ["recent_atoms@main", "recent_atoms@session/keep"]);
+
+    // A merge that stops on the same conflicts returns the same atoms.
+    let merge = mgr
+        .branch_action_json(&json!({"action": "merge", "project_id": "proj-1", "source": "session/keep", "target": "main"}))
+        .await
+        .unwrap();
+    assert_eq!(merge["ok"], false);
+    assert_eq!(merge["outcome"], "conflict");
+    assert_eq!(merge["conflicts"], diff["conflicts"]);
+
+    // Another project's atoms, or any atom when no project is named, are
+    // not offered to keep: a Keep writes under the caller's project.
+    for project_id in ["proj-2", ""] {
+        let unscoped = mgr
+            .branch_diff_json(project_id, "session/keep", Some("main"))
+            .await
+            .unwrap();
+        let unscoped = unscoped["conflicts"].as_array().unwrap();
+        assert_eq!(unscoped.len(), 3, "{project_id}");
+        for conflict in unscoped {
+            assert!(conflict.get("source_value").is_none(), "{conflict}");
+            assert!(conflict.get("target_value").is_none(), "{conflict}");
+        }
+    }
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn keep_copies_the_kept_atom_and_settles_its_conflict() {
+    let (_state_dir, mgr, mock) = connected_mock().await;
+    publish_divergent_atoms(&mgr).await;
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    let ttl = diff["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entity_id"] == "atom-ttl")
+        .cloned()
+        .unwrap();
+
+    // Keep source: main gets the source's atom exactly as the branch
+    // stores it, its branch and time included.
+    let kept = mgr
+        .branch_action_json(&json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-ttl", "from": "session/keep", "to": "main", "expected_updated_at": ttl["source_value"]["updated_at"], "replaced_updated_at": ttl["target_value"]["updated_at"]}))
+        .await
+        .unwrap();
+    assert_eq!(kept["ok"], true);
+    assert_eq!(kept["atom"]["summary"], "Source atom-ttl");
+    assert_eq!(kept["atom"]["source_branch"], "session/keep");
+    assert_eq!(kept["atom"]["source_session_id"], "sess-source");
+    assert_eq!(
+        mock_head(&mock, "main").atoms["atom-ttl"],
+        mock_head(&mock, "session/keep").atoms["atom-ttl"]
+    );
+    // Keep target for the other atom: the source branch gets main's.
+    mgr.branch_action_json(&json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-keys", "from": "main", "to": "session/keep"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        mock_head(&mock, "session/keep").atoms["atom-keys"],
+        mock_head(&mock, "main").atoms["atom-keys"]
+    );
+
+    // Both updates are settled; the atom created twice is left.
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/keep", Some("main"))
+        .await
+        .unwrap();
+    let left: Vec<&str> = diff["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["entity_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, ["atom-twin"], "{diff}");
+
+    // Refused: another version than the preview showed on either branch
+    // (409), an atom the branch or the project does not hold (404), and a
+    // request that names no project or one branch twice (400). Nothing is
+    // written.
+    let before = mock_head(&mock, "main");
+    for (status, body) in [
+        (
+            409,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "session/keep", "to": "main", "expected_updated_at": "2000-01-01T00:00:00.000Z"}),
+        ),
+        (
+            409,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "session/keep", "to": "main", "replaced_updated_at": "2000-01-01T00:00:00.000Z"}),
+        ),
+        (
+            404,
+            json!({"project_id": "proj-1", "atom_id": "atom-gone", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            404,
+            json!({"project_id": "proj-2", "atom_id": "atom-twin", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            400,
+            json!({"atom_id": "atom-twin", "from": "session/keep", "to": "main"}),
+        ),
+        (
+            400,
+            json!({"project_id": "proj-1", "atom_id": "atom-twin", "from": "main", "to": "main"}),
+        ),
+    ] {
+        let mut body = body;
+        body["action"] = json!("keep");
+        let err = mgr.branch_action_json(&body).await.unwrap_err();
+        assert_eq!(err.status, status, "{body}: {}", err.message);
+    }
+    assert_eq!(
+        mock_head(&mock, "main").atoms,
+        before.atoms,
+        "a refused keep wrote"
+    );
+    mgr.close().await.unwrap();
+}
+
+/// The same against the Omnigraph release when `/tmp/omnigraph-v0.15.0`
+/// holds it. Its conflict names the atom by its key and the diff carries
+/// both atoms, each keeping the author an update without a session left
+/// alone. A `divergent_update` compares whole rows, as the fake's
+/// `three_way_merge` does: an atom update with the source's text, which
+/// stamps the target's own `source_branch` and a new `updated_at`, still
+/// conflicts, and only `keep`, which copies the source's row as stored,
+/// lets the branches merge.
+#[tokio::test]
+async fn real_omnigraph_binary_divergent_update_carries_both_atoms() {
+    let bin_cli = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph");
+    let bin_srv = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph-server");
+    if !bin_cli.is_file() || !bin_srv.is_file() {
+        eprintln!(
+            "skipping real_omnigraph_binary_divergent_update_carries_both_atoms: /tmp/omnigraph-v0.15.0 not present"
+        );
+        return;
+    }
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    std::fs::create_dir_all(mgr.tools_dir()).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::os::unix::fs::symlink(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::fs::copy(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+    let started = mgr.start_local(None).await.unwrap();
+    assert_eq!(started["connected"], true);
+
+    let update = |branch: &str, summary: &str| json!({"project_id": "proj-1", "branch": branch, "atom_id": "atom-real-keep", "kind": "decision", "title": "Token TTL", "summary": summary});
+    let mut authored = update("main", "One hour.");
+    authored["session_id"] = json!("sess-author");
+    mgr.publish_atom_json(&authored).await.unwrap();
+    for name in ["session/real-src", "session/real-tgt"] {
+        mgr.branch_action_json(&json!({"action": "create", "name": name, "from": "main"}))
+            .await
+            .unwrap();
+    }
+    mgr.publish_atom_json(&update("session/real-src", "Ninety minutes."))
+        .await
+        .unwrap();
+    mgr.publish_atom_json(&update("session/real-tgt", "Two hours."))
+        .await
+        .unwrap();
+
+    let diff = mgr
+        .branch_diff_json("proj-1", "session/real-src", Some("session/real-tgt"))
+        .await
+        .unwrap();
+    assert_eq!(diff["outcome"], "conflict", "{diff}");
+    let conflict = &diff["conflicts"][0];
+    assert_eq!(conflict["kind"], "divergent_update", "{diff}");
+    assert_eq!(conflict["entity_id"], "atom-real-keep");
+    let source = conflict["source_value"].clone();
+    assert_eq!(source["summary"], "Ninety minutes.", "{conflict}");
+    assert_eq!(source["source_branch"], "session/real-src");
+    // Omnigraph leaves null columns and the project out of the row; the
+    // value names them, so keeping the whole atom keeps its empty tags.
+    assert_eq!(source.get("tags"), Some(&Value::Null), "{conflict}");
+    assert_eq!(source["project_id"], "proj-1");
+    assert_eq!(conflict["target_value"]["summary"], "Two hours.");
+    for key in ["source_value", "target_value"] {
+        assert_eq!(conflict[key]["source_session_id"], "sess-author", "{key}");
+    }
+
+    let client = mgr.client().await.unwrap();
+    let dry_run = || {
+        let client = client.clone();
+        async move {
+            client
+                .merge_branches(&BranchMergeRequest {
+                    source: "session/real-src".into(),
+                    target: Some("session/real-tgt".into()),
+                    delete_branch: false,
+                    as_commit: false,
+                    dry_run: true,
+                    settings: None,
+                })
+                .await
+        }
+    };
+    mgr.publish_atom_json(&update("session/real-tgt", "Ninety minutes."))
+        .await
+        .unwrap();
+    let still = dry_run().await.unwrap_err();
+    assert!(still.is_merge_conflict(), "{still}");
+
+    // That update came after the preview, so keeping the source over the
+    // target version the preview showed is refused; a fresh preview's
+    // versions are accepted and the branches merge.
+    let keep = |diff: &Value| json!({"action": "keep", "project_id": "proj-1", "atom_id": "atom-real-keep", "from": "session/real-src", "to": "session/real-tgt", "expected_updated_at": diff["conflicts"][0]["source_value"]["updated_at"], "replaced_updated_at": diff["conflicts"][0]["target_value"]["updated_at"]});
+    let stale = mgr.branch_action_json(&keep(&diff)).await.unwrap_err();
+    assert_eq!(stale.status, 409, "{}", stale.message);
+    let fresh = mgr
+        .branch_diff_json("proj-1", "session/real-src", Some("session/real-tgt"))
+        .await
+        .unwrap();
+    let kept = mgr.branch_action_json(&keep(&fresh)).await.unwrap();
+    assert_eq!(kept["atom"]["source_branch"], "session/real-src");
+    assert_eq!(dry_run().await.unwrap().outcome, BranchMergeOutcome::Merged);
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn sync_canonical_knowledge_deletes_retired_archived_and_stale_atoms() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let mut projects = Vec::new();
+    for name in ["project", "other"] {
+        let dir = state_dir.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        projects.push(
+            store.register(&dir).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let (project_id, other_id) = (projects[0].clone(), projects[1].clone());
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let atom = |id: &str, layer: &str, files: &[&str]| json!({"atom_id": id, "kind": "finding", "title": id, "files": files, "verified": true, "origin_layer": layer, "authority": "verified", "privacy": "public"});
+    let first = mgr
+        .sync_canonical_knowledge_with_options(
+            &project_id,
+            &[
+                atom("brain-kept", "project-brain", &["src/kept.rs"]),
+                atom("brain-retired", "project-brain", &["src/retired.rs"]),
+                atom("mem-archived", "memory-bank", &[]),
+            ],
+            &["project-brain".into(), "memory-bank".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["synced"], 3);
+    assert_eq!(first["deleted"], 0);
+    // Atoms the sync does not own: another project's, and one a session
+    // published onto the branch.
+    mgr.sync_canonical_knowledge(&other_id, &[atom("brain-elsewhere", "project-brain", &[])])
+        .await
+        .unwrap();
+    mgr.sync_canonical_knowledge(&project_id, &[atom("brain-session-copy", "session", &[])])
+        .await
+        .unwrap();
+
+    // Without pruning nothing leaves the branch.
+    let plain = mgr
+        .sync_canonical_knowledge(
+            &project_id,
+            &[atom("brain-kept", "project-brain", &["src/kept.rs"])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(plain["deleted"], 0);
+    // A Brain read whole prunes its own gone records only.
+    let brain_only = mgr
+        .sync_canonical_knowledge_with_options(
+            &project_id,
+            &[atom("brain-kept", "project-brain", &["src/kept.rs"])],
+            &["project-brain".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(brain_only["deleted_atom_ids"], json!(["brain-retired"]));
+    let both = mgr
+        .sync_canonical_knowledge_with_options(
+            &project_id,
+            &[atom("brain-kept", "project-brain", &["src/kept.rs"])],
+            &["project-brain".into(), "memory-bank".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(both["deleted_atom_ids"], json!(["mem-archived"]));
+
+    let view = mgr
+        .graph_view_json(
+            &project_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let ids = view["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|atom| atom["atom_id"].as_str())
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
+    assert!(ids.contains("brain-kept"), "{ids:?}");
+    assert!(ids.contains("brain-session-copy"), "{ids:?}");
+    assert!(!ids.contains("brain-retired"), "{ids:?}");
+    assert!(!ids.contains("mem-archived"), "{ids:?}");
+    // The retired atom's file edge left with it.
+    let edges = view["edges"].as_array().unwrap();
+    assert!(
+        !edges
+            .iter()
+            .any(|edge| edge.to_string().contains("brain-retired")),
+        "{edges:?}"
+    );
+    let other = mgr
+        .graph_view_json(
+            &other_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        other["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|atom| atom["atom_id"] == "brain-elsewhere")
+    );
     mgr.close().await.unwrap();
 }
 
@@ -4929,5 +5852,343 @@ async fn transfer_round_trip_with_and_without_provenance_fields() {
         "atom-legacy-noprovenance"
     );
 
+    mgr.close().await.unwrap();
+}
+
+/// A project with a PHP class and a Rust file whose declarations a learning
+/// can name, registered in a store the manager reads it from.
+fn symbol_project(
+    state: &std::path::Path,
+) -> (crate::store::SessionStore, String, std::path::PathBuf) {
+    let store = crate::store::SessionStore::open(state).unwrap();
+    let dir = state.join("project");
+    std::fs::create_dir_all(dir.join("src/Auth")).unwrap();
+    std::fs::write(
+        dir.join("src/Auth/TokenGuard.php"),
+        "<?php\nnamespace App\\Auth;\n\nclass TokenGuard\n{\n    public function check(string $token): bool\n    {\n        return $token !== '';\n    }\n\n    public function refresh(): void\n    {\n    }\n\n    public function rejects(): bool\n    {\n        return false;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/retry.rs"),
+        "pub fn backoff_delay(attempt: u32) -> u64 {\n    1 << attempt\n}\n\npub fn wait() {}\n",
+    )
+    .unwrap();
+    let project_id = store.register(&dir).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (store, project_id, dir)
+}
+
+async fn symbol_rows(mgr: &OmnigraphManager, project_id: &str, branch: &str) -> Vec<Value> {
+    let client = mgr.client().await.unwrap();
+    client
+        .query(&QueryRequest {
+            query: schema::GQ_LIST_SYMBOL_EDGES.to_string(),
+            name: Some("list_symbol_edges".into()),
+            params: Some(json!({ "project_id": project_id })),
+            branch: Some(branch.to_string()),
+            snapshot: None,
+            settings: None,
+        })
+        .await
+        .unwrap()
+        .rows
+}
+
+fn fqns(rows: &[Value], atom_id: &str) -> BTreeSet<String> {
+    rows.iter()
+        .filter(|row| row["source_id"] == atom_id)
+        .filter_map(|row| row["target_id"].as_str().map(String::from))
+        .collect()
+}
+
+#[tokio::test]
+async fn published_atoms_mention_the_declarations_they_name_in_touched_files() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, _dir) = symbol_project(state_dir.path());
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+
+    // A class named as written, a lowercase method only where it is code
+    // (`refresh`, check()), and an English word that is also a method name
+    // ("rejects") not at all.
+    let published = mgr
+        .publish_atom_json(&json!({
+            "project_id": project_id,
+            "branch": "main",
+            "atom_id": "atom-guard",
+            "kind": "finding",
+            "title": "TokenGuard rejects empty tokens",
+            "body": "Call `refresh` before check() when a token is stale.",
+            "files": ["src/Auth/TokenGuard.php#L6", "src/missing.php", "../outside.php"]
+        }))
+        .await
+        .unwrap();
+    let named = published["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["fqn"].as_str().unwrap().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        named,
+        BTreeSet::from([
+            "src/Auth/TokenGuard.php::TokenGuard".to_string(),
+            "src/Auth/TokenGuard.php::TokenGuard::check".to_string(),
+            "src/Auth/TokenGuard.php::TokenGuard::refresh".to_string(),
+        ]),
+        "{published}"
+    );
+    let rows = symbol_rows(&mgr, &project_id, "main").await;
+    assert_eq!(fqns(&rows, "atom-guard"), named);
+    assert!(
+        rows.iter()
+            .all(|row| row["file_path"] == "src/Auth/TokenGuard.php" && row["role"] == "named"),
+        "{rows:?}"
+    );
+
+    // An edit that names other declarations replaces the mentions; the
+    // provenance-keeping update path is the same.
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-guard",
+        "kind": "finding",
+        "title": "Guard refresh",
+        "body": "Only `refresh` is involved now.",
+        "files": ["src/Auth/TokenGuard.php"]
+    }))
+    .await
+    .unwrap();
+    let rows = symbol_rows(&mgr, &project_id, "main").await;
+    assert_eq!(
+        fqns(&rows, "atom-guard"),
+        BTreeSet::from(["src/Auth/TokenGuard.php::TokenGuard::refresh".to_string()])
+    );
+
+    // Without a project root nothing is read, and the atom is still published.
+    let unknown = mgr
+        .publish_atom_json(&json!({
+            "project_id": "not-registered",
+            "branch": "main",
+            "title": "TokenGuard elsewhere",
+            "files": ["src/Auth/TokenGuard.php"]
+        }))
+        .await
+        .unwrap();
+    assert_eq!(unknown["symbols"], json!([]));
+    assert_eq!(unknown["ok"], true);
+
+    // The file context lists, per atom, the declarations of that file it names.
+    let context = mgr
+        .file_context_json(&project_id, "src/Auth/TokenGuard.php")
+        .await
+        .unwrap();
+    let atom = context["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|atom| atom["atom_id"] == "atom-guard")
+        .unwrap();
+    assert_eq!(atom["symbols"], json!(["TokenGuard::refresh"]), "{context}");
+    assert_eq!(context["contradictions"], json!([]));
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn canonical_sync_and_session_outputs_link_named_declarations() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, dir) = symbol_project(state_dir.path());
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let record = |title: &str| json!({"atom_id": "brain-retry", "kind": "decision", "title": title, "files": ["src/retry.rs"], "verified": true, "origin_layer": "project-brain", "authority": "verified", "brain_record_id": "11111111-2222-4333-8444-555555555555"});
+    let synced = mgr
+        .sync_canonical_knowledge(&project_id, &[record("backoff_delay doubles per attempt")])
+        .await
+        .unwrap();
+    assert_eq!(synced["symbols"], 1, "{synced}");
+    let canonical = schema::CANONICAL_KNOWLEDGE_BRANCH;
+    assert_eq!(
+        fqns(
+            &symbol_rows(&mgr, &project_id, canonical).await,
+            "brain-retry"
+        ),
+        BTreeSet::from(["src/retry.rs::backoff_delay".to_string()])
+    );
+    // The same record again changes nothing; a record that names another
+    // declaration drops the old mention.
+    mgr.sync_canonical_knowledge(&project_id, &[record("backoff_delay doubles per attempt")])
+        .await
+        .unwrap();
+    mgr.sync_canonical_knowledge(&project_id, &[record("Callers must wait() between tries")])
+        .await
+        .unwrap();
+    assert_eq!(
+        fqns(
+            &symbol_rows(&mgr, &project_id, canonical).await,
+            "brain-retry"
+        ),
+        BTreeSet::from(["src/retry.rs::wait".to_string()])
+    );
+
+    // A session's learnings name declarations of its own workspace.
+    let session = json!({
+        "id": "ffeeddccbbaa9988",
+        "project_id": project_id,
+        "project_path": dir.to_string_lossy(),
+        "title": "Guard work",
+        "provider": "claude",
+        "omnigraph": {"enabled": true, "branch": "auto"}
+    });
+    let out = mgr
+        .publish_session_outputs(
+            &session,
+            &[json!({"kind": "finding", "title": "TokenGuard::check trims nothing", "files": ["src/Auth/TokenGuard.php"]})],
+            &["src/Auth/TokenGuard.php".to_string()],
+            "Checked the guard.",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["symbol_count"], 2, "{out}");
+    let branch = out["branch"].as_str().unwrap().to_string();
+    let atom_id = out["published_atom_ids"][0].as_str().unwrap().to_string();
+    assert_eq!(
+        fqns(&symbol_rows(&mgr, &project_id, &branch).await, &atom_id),
+        BTreeSet::from([
+            "src/Auth/TokenGuard.php::TokenGuard".to_string(),
+            "src/Auth/TokenGuard.php::TokenGuard::check".to_string(),
+        ])
+    );
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn contradicted_atoms_carry_a_caution_and_a_review_warning_without_change() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, dir) = symbol_project(state_dir.path());
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({"project_id": project_id, "branch": "main", "atom_id": "atom-ttl-short", "kind": "decision", "title": "Tokens live 15 minutes", "files": ["src/Auth/TokenGuard.php"]}))
+        .await
+        .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-ttl-long",
+        "kind": "decision",
+        "title": "Tokens live a day",
+        "files": ["src/Auth/TokenGuard.php"],
+        "relates_to": [{"target_id": "atom-ttl-short", "relation": "contradicts", "note": "TTL changed in October"}]
+    }))
+    .await
+    .unwrap();
+    // An unrelated atom with no relation gets no caution.
+    mgr.publish_atom_json(&json!({"project_id": project_id, "branch": "main", "atom_id": "atom-retry", "kind": "insight", "title": "Retries back off", "files": ["src/retry.rs"]}))
+        .await
+        .unwrap();
+
+    let session = json!({
+        "id": "0011223344556677",
+        "project_id": project_id,
+        "title": "Token lifetime",
+        "provider": "claude",
+        "workflow": "native",
+        "status": "running",
+        "omnigraph": {"enabled": true, "branch": "auto"}
+    });
+    let prep = mgr.prepare_session_context(&session, &dir).await.unwrap();
+    let warnings = prep["contradiction_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{prep}");
+    assert_eq!(warnings[0]["source_id"], "atom-ttl-long");
+    assert_eq!(warnings[0]["target_id"], "atom-ttl-short");
+    assert_eq!(warnings[0]["recommended_action"], "review");
+    let capsule = prep["capsule_text"].as_str().unwrap();
+    let lines = capsule.lines().collect::<Vec<_>>();
+    // The line after an atom's own line (a caution line may name the other).
+    let caution_after = |title: &str| {
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with("- ") && line.contains(title))
+            .unwrap_or_else(|| panic!("{title} missing from {capsule}"));
+        lines.get(at + 1).copied().unwrap_or("")
+    };
+    assert_eq!(
+        caution_after("Tokens live a day"),
+        "  Caution: this contradicts \"Tokens live 15 minutes\" (`atom-ttl-short`: TTL changed in October) — verify both against code and `project-brain/` before relying on either."
+    );
+    assert!(
+        caution_after("Tokens live 15 minutes").starts_with(
+            "  Caution: this is contradicted by \"Tokens live a day\" (`atom-ttl-long`"
+        ),
+        "{capsule}"
+    );
+    assert!(
+        !caution_after("Retries back off").contains("Caution"),
+        "{capsule}"
+    );
+
+    // The file both touch lists the relation; a file neither touches none.
+    let context = mgr
+        .file_context_json(&project_id, "src/Auth/TokenGuard.php")
+        .await
+        .unwrap();
+    let relations = context["contradictions"].as_array().unwrap();
+    assert_eq!(relations.len(), 1, "{context}");
+    assert_eq!(relations[0]["kind"], "atom-contradiction");
+    assert_eq!(relations[0]["source_title"], "Tokens live a day");
+    let elsewhere = mgr
+        .file_context_json(&project_id, "src/retry.rs")
+        .await
+        .unwrap();
+    assert_eq!(elsewhere["contradictions"], json!([]));
+
+    // Nothing was retired: both atoms and their relation remain.
+    let view = mgr
+        .graph_view_json(&project_id, Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    let ids = view["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|atom| atom["atom_id"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        ids.contains("atom-ttl-long") && ids.contains("atom-ttl-short"),
+        "{ids:?}"
+    );
+    assert!(
+        view["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge.to_string().contains("contradicts")),
+        "{view}"
+    );
     mgr.close().await.unwrap();
 }

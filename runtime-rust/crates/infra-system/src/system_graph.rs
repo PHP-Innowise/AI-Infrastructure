@@ -3054,6 +3054,16 @@ pub fn load_run_evidence(execution_dir: &Path, state: &Value) -> Result<Vec<Disp
     Ok(dispatches)
 }
 
+/// A path as the page shows and opens it, with `/` between its parts on
+/// every system.
+fn slashed(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
 /// Summarizes per-dispatch [`DispatchEvidence`] records for `systems.get` (`GET /api/system-runs/{id}`),
 /// including `cross_service_unopened` reach across downstream contract consumers.
 pub fn summarize_run_evidence(
@@ -3254,7 +3264,7 @@ fn edited_by_several(state: &Value, dispatches: &[DispatchEvidence]) -> Vec<Valu
             let inside = place
                 .strip_prefix(lexical(&root))
                 .ok()
-                .map(|inside| (service.to_owned(), inside.to_string_lossy().into_owned()));
+                .map(|inside| (service.to_owned(), slashed(inside)));
             let entry = files.entry(place).or_insert_with(|| (inside, Vec::new()));
             if !entry.1.iter().any(|(phase, _)| *phase == ev.phase) {
                 entry.1.push((ev.phase.clone(), ev.service.clone()));
@@ -3279,11 +3289,7 @@ fn edited_by_several(state: &Value, dispatches: &[DispatchEvidence]) -> Vec<Valu
         .map(|(place, (inside, steps))| {
             let shown = match &inside {
                 Some((service, path)) => qualify_service_path(service, path),
-                None => place
-                    .strip_prefix(&common)
-                    .unwrap_or(&place)
-                    .to_string_lossy()
-                    .into_owned(),
+                None => slashed(place.strip_prefix(&common).unwrap_or(&place)),
             };
             (shown, inside, steps)
         })

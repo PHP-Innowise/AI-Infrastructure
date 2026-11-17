@@ -248,7 +248,29 @@ fn json_size(capsule: &Capsule) -> Result<usize> {
             .count(),
     )
 }
-pub fn pack(mut capsule: Capsule, profile: DeliveryProfile) -> Result<Capsule> {
+pub fn pack(capsule: Capsule, profile: DeliveryProfile) -> Result<Capsule> {
+    pack_with_options(capsule, profile, false)
+}
+/// Whether retrieval packs with `deduplicate_json`: the
+/// `capsule_pack_deduplicated` experiment, off unless
+/// `CONTEXT_CAPSULE_PACK_DEDUP=1` or the runtime configuration enables it.
+pub fn pack_deduplicated(config: &crate::RuntimeConfig) -> bool {
+    std::env::var("CONTEXT_CAPSULE_PACK_DEDUP")
+        .ok()
+        .map(|value| value == "1")
+        .unwrap_or_else(|| config.enabled("capsule_pack_deduplicated"))
+}
+/// A `selected` or `categories` entry repeats the snippet of the layer item
+/// with its path; with `deduplicate_json`, a capsule over the size limit
+/// gives those copies up (an empty snippet) before the limit evicts the last
+/// turn, ticket files or an item. A capsule within the limit is unchanged.
+/// It changes which items a full capsule keeps, so it stays off until its
+/// own held-out measurement (docs/MEMORY-EVAL.md).
+pub fn pack_with_options(
+    mut capsule: Capsule,
+    profile: DeliveryProfile,
+    deduplicate_json: bool,
+) -> Result<Capsule> {
     if !capsule.0.is_object() {
         return Err(RuntimeError::invalid("Capsule must be an object"));
     }
@@ -333,6 +355,9 @@ pub fn pack(mut capsule: Capsule, profile: DeliveryProfile) -> Result<Capsule> {
         }
     }
     synchronize(&mut capsule);
+    if deduplicate_json && json_size(&capsule)? > CAPSULE_CHARACTER_LIMIT {
+        deduplicate_snippets(&mut capsule);
+    }
     while json_size(&capsule)? > CAPSULE_CHARACTER_LIMIT {
         if let Some(index) = capsule.0["semantic"].as_array().and_then(|items| {
             items
@@ -403,6 +428,34 @@ pub fn pack(mut capsule: Capsule, profile: DeliveryProfile) -> Result<Capsule> {
     }
     synchronize(&mut capsule);
     Ok(capsule)
+}
+fn deduplicate_snippets(capsule: &mut Capsule) {
+    let mut held = BTreeMap::new();
+    for layer in ["procedural", "semantic", "episodic"] {
+        for item in capsule.0[layer].as_array().into_iter().flatten() {
+            if let (Some(path), Some(snippet)) = (item["path"].as_str(), item["snippet"].as_str())
+                && !snippet.is_empty()
+            {
+                held.entry(path.to_string())
+                    .or_insert_with(|| snippet.to_string());
+            }
+        }
+    }
+    let compact = |items: &mut Value| {
+        for item in items.as_array_mut().into_iter().flatten() {
+            let repeated = item["path"]
+                .as_str()
+                .and_then(|path| held.get(path))
+                .is_some_and(|snippet| item["snippet"].as_str() == Some(snippet.as_str()));
+            if repeated {
+                item["snippet"] = json!("");
+            }
+        }
+    };
+    compact(&mut capsule.0["selected"]);
+    if let Some(categories) = capsule.0["categories"].as_object_mut() {
+        categories.values_mut().for_each(compact);
+    }
 }
 pub fn whole_paths(label: &str, paths: &[String], limit: usize) -> Vec<String> {
     let mut kept = Vec::new();
@@ -793,13 +846,11 @@ pub fn render_plan(capsule: &Capsule, profile: DeliveryProfile) -> Result<Render
                 .map(|excerpt| excerpt.limit)
                 .unwrap_or(if layer == "semantic" { 800 } else { 600 });
             let body = bounded(
-                &domain::sanitize_automatic_query(raw).unwrap_or_default(),
+                &domain::screen_rendered_text(raw).unwrap_or_default(),
                 limit,
             );
             let heading = excerpt
-                .map(|excerpt| {
-                    domain::sanitize_automatic_query(&excerpt.heading).unwrap_or_default()
-                })
+                .map(|excerpt| domain::screen_rendered_text(&excerpt.heading).unwrap_or_default())
                 .unwrap_or_default();
             entries.push(Entry {
                 layer: layer.into(),
@@ -881,9 +932,8 @@ pub fn render_plan(capsule: &Capsule, profile: DeliveryProfile) -> Result<Render
     let mut shown = Vec::new();
     for entry in entries {
         shown.push((entry.layer.clone(), entry.path.clone()));
-        let snippet =
-            domain::sanitize_automatic_query(entry.item["snippet"].as_str().unwrap_or(""))
-                .unwrap_or_default();
+        let snippet = domain::screen_rendered_text(entry.item["snippet"].as_str().unwrap_or(""))
+            .unwrap_or_default();
         let section = if entry.heading.is_empty() {
             "none"
         } else if ["Sources", "Goal", "Progress", "Files", "Next Steps"]
@@ -931,7 +981,7 @@ pub fn describe_excerpt_windows(capsule: &Capsule) -> BTreeMap<String, Value> {
                 .map(|excerpt| excerpt.limit)
                 .unwrap_or(if layer == "semantic" { 800 } else { 600 });
             let body = bounded(
-                &domain::sanitize_automatic_query(raw).unwrap_or_default(),
+                &domain::screen_rendered_text(raw).unwrap_or_default(),
                 limit,
             );
             output.insert(path.to_string(),json!({"sha256":sha256(body.as_bytes()),"bytes":body.len(),"state":if !body.is_empty(){"excerpt"}else if !raw.is_empty(){"sanitized-empty"}else{"no-excerpt"}}));
@@ -943,6 +993,112 @@ pub fn describe_excerpt_windows(capsule: &Capsule) -> BTreeMap<String, Value> {
 #[cfg(test)]
 mod native_guidance_tests {
     use super::*;
+
+    fn crowded(last_turn: usize) -> Capsule {
+        let items = (1..=3)
+            .map(|number| {
+                json!({"path":format!("docs/area-{number}.md"),"title":format!("Area {number}"),"layer":"semantic","match":"strong","snippet":format!("{number} {}", "retry backoff ".repeat(30))})
+            })
+            .collect::<Vec<_>>();
+        Capsule::new(json!({
+            "working":null,
+            "semantic":items,
+            "episodic":[],
+            "procedural":[],
+            "selected":items,
+            "categories":{"memory":items},
+            "last_turn":"x".repeat(last_turn),
+            "ticket_files":{"tickets":["CMS-1"],"paths":["src/Order.php"]},
+        }))
+    }
+
+    #[test]
+    fn pack_compacts_duplicate_snippets_before_evicting_items_or_last_turn() {
+        let capsule = crowded(4800);
+        let legacy = pack(capsule.clone(), DeliveryProfile::Ordinary).unwrap();
+        // Without the experiment the size limit evicts the last turn first.
+        assert!(legacy.0["last_turn"].is_null());
+        assert!(legacy.0["ticket_files"].is_object());
+        assert_eq!(
+            legacy.0,
+            pack_with_options(capsule.clone(), DeliveryProfile::Ordinary, false)
+                .unwrap()
+                .0
+        );
+        let compacted = pack_with_options(capsule, DeliveryProfile::Ordinary, true).unwrap();
+        assert!(json_size(&compacted).unwrap() <= CAPSULE_CHARACTER_LIMIT);
+        assert_eq!(compacted.0["last_turn"].as_str().unwrap().len(), 4800);
+        assert!(compacted.0["ticket_files"].is_object());
+        assert_eq!(compacted.0["semantic"].as_array().unwrap().len(), 3);
+        assert!(
+            compacted.0["semantic"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| !item["snippet"].as_str().unwrap().is_empty())
+        );
+        for copies in [
+            &compacted.0["selected"],
+            &compacted.0["categories"]["memory"],
+        ] {
+            let copies = copies.as_array().unwrap();
+            assert_eq!(copies.len(), 3);
+            assert!(copies.iter().all(|item| item["snippet"] == ""));
+        }
+        // Within the limit the experiment changes nothing.
+        let small = crowded(100);
+        assert_eq!(
+            pack(small.clone(), DeliveryProfile::Ordinary).unwrap().0,
+            pack_with_options(small, DeliveryProfile::Ordinary, true)
+                .unwrap()
+                .0
+        );
+    }
+
+    #[test]
+    fn a_rendered_excerpt_keeps_its_text_after_a_customer_identifier() {
+        let path = "docs/orders.md";
+        let text = "Customer id: 48213\nlog: retry succeeded after the order total was \
+            recomputed. API_KEY=Sup3rS3cret99";
+        let excerpts = BTreeMap::from([(
+            path.to_string(),
+            crate::excerpts::Excerpt {
+                text: text.into(),
+                heading: "Customer id: 48213".into(),
+                limit: 800,
+                cut: false,
+            },
+        )]);
+        let capsule = Capsule(
+            json!({"working":null,"semantic":[{"path":path,"title":"Orders","match":"strong"}],"episodic":[],"procedural":[]}),
+            Some(crate::excerpts::PreparedRender {
+                images: BTreeMap::new(),
+                excerpts,
+            }),
+            None,
+        );
+        let plan = render_plan(&capsule, DeliveryProfile::Ordinary).unwrap();
+        assert!(
+            plan.text
+                .contains("retry succeeded after the order total was recomputed"),
+            "{}",
+            plan.text
+        );
+        assert!(plan.text.contains("Customer id: \u{2026}"), "{}", plan.text);
+        for withheld in ["48213", "Sup3rS3cret99"] {
+            assert!(!plan.text.contains(withheld), "{}", plan.text);
+        }
+        let windows = describe_excerpt_windows(&capsule);
+        assert_eq!(windows[path]["state"], "excerpt");
+        let record = plan
+            .records
+            .iter()
+            .find(|record| record["path"] == path)
+            .unwrap();
+        assert_eq!(record["body_reason"], "excerpt");
+        assert_eq!(record["body_bytes"], windows[path]["bytes"]);
+        assert_eq!(record["body_sha256"], windows[path]["sha256"]);
+    }
 
     #[test]
     fn closed_task_recovery_uses_the_installed_native_command() {

@@ -184,7 +184,84 @@ fn render_provenance_jump_buttons_html(atom: &V) -> String {
             esc(memory_id)
         ));
     }
+    // A Git commit the atom names opens in the Code Map; an Omnigraph
+    // snapshot (`commit_id`) keeps `omnigraph-select-commit`.
+    for sha in git_commits_named(atom) {
+        let payload = json!({ "sha": sha }).to_string();
+        buttons.push(format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-git-commit\" data-payload=\"{}\" title=\"Open Git commit {} in the Code Map\">Git: {}</button>",
+            esc(&payload),
+            esc(&sha),
+            esc(&sha.chars().take(10).collect::<String>())
+        ));
+    }
     buttons.join("")
+}
+
+/// A Git commit id as the Code Map takes it: 7 to 40 lowercase hex digits.
+fn is_git_sha(text: &str) -> bool {
+    (7..=40).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The Git commits an atom names, at most four: its `git_commit` field, or
+/// a lowercase hex word of 7 to 40 characters with a letter and a digit
+/// standing alone in its tags, title, summary or body (not part of a path,
+/// an id like `MEM-…-a1b2c3d4`, or a file name).
+fn git_commits_named(atom: &V) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut add = |sha: &str| {
+        if found.len() < 4 && is_git_sha(sha) && !found.iter().any(|seen| seen == sha) {
+            found.push(sha.to_owned());
+        }
+    };
+    if let Some(sha) = atom["git_commit"].as_str() {
+        add(sha.trim());
+    }
+    let texts = m::array(&atom["tags"])
+        .iter()
+        .filter_map(V::as_str)
+        .map(str::to_owned)
+        .chain(
+            ["title", "summary", "body"]
+                .iter()
+                .filter_map(|key| atom[*key].as_str().map(str::to_owned)),
+        )
+        .collect::<Vec<_>>();
+    for text in &texts {
+        let chars = text.char_indices().collect::<Vec<_>>();
+        let mut i = 0;
+        while i < chars.len() {
+            if !chars[i].1.is_ascii_hexdigit() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && chars[i].1.is_ascii_hexdigit() {
+                i += 1;
+            }
+            let before = start.checked_sub(1).map(|at| chars[at].1);
+            let after = chars.get(i).map(|c| c.1);
+            let after_next = chars.get(i + 1).map(|c| c.1);
+            let opens = before.is_none_or(|c| c.is_whitespace() || "([{<'\"`:,;".contains(c));
+            let closes = match after {
+                None => true,
+                Some('.') => after_next.is_none_or(char::is_whitespace),
+                Some(c) => c.is_whitespace() || ")]}>'\"`,;:!?".contains(c),
+            };
+            let word = &text[chars[start].0..chars.get(i).map_or(text.len(), |c| c.0)];
+            if opens
+                && closes
+                && word.bytes().any(|b| b.is_ascii_digit())
+                && word.bytes().any(|b| (b'a'..=b'f').contains(&b))
+            {
+                add(word);
+            }
+        }
+    }
+    found
 }
 
 fn response_error_message(res: &V, fallback: &str) -> String {
@@ -337,6 +414,56 @@ pub fn session_payload_with_links(
         payload["shared_space"] = json!(resolved_space_branch(space));
     }
     Some(payload)
+}
+
+/// What a follow-up changes in its session's Omnigraph settings: the
+/// branches the next turn pulls (blank means `main`, as when the session
+/// started), its focus query and auto-publish. `None` for a session without
+/// Omnigraph context, which a follow-up must not switch on, or when nothing
+/// changed.
+pub fn followup_payload_from_fields(
+    session: &V,
+    pull_raw: &str,
+    query: &str,
+    auto_publish: bool,
+) -> Option<V> {
+    if !m::omnigraph_enabled(session) {
+        return None;
+    }
+    let omni = &session["omnigraph"];
+    let or_main = |branches: Vec<String>| {
+        if branches.is_empty() {
+            vec!["main".to_owned()]
+        } else {
+            branches
+        }
+    };
+    let pulls = or_main(parse_csv_list(pull_raw));
+    let current = or_main(
+        m::array(&omni["pull_branches"])
+            .iter()
+            .filter_map(|branch| branch.as_str().map(str::to_owned))
+            .collect(),
+    );
+    let mut changes = serde_json::Map::new();
+    if pulls != current {
+        changes.insert("pull_branches".into(), json!(pulls));
+    }
+    let query = query.trim();
+    if query != m::text(omni, "query").trim() {
+        changes.insert(
+            "query".into(),
+            if query.is_empty() {
+                V::Null
+            } else {
+                json!(query)
+            },
+        );
+    }
+    if auto_publish != omni["auto_publish"].as_bool().unwrap_or(true) {
+        changes.insert("auto_publish".into(), json!(auto_publish));
+    }
+    (!changes.is_empty()).then_some(V::Object(changes))
 }
 
 pub fn percent_encode(raw: &str) -> String {
@@ -3028,6 +3155,49 @@ async fn preview_merge(source: &str, target: &str) {
     }
 }
 
+/// Settle one Context Atom conflict by copying the kept side's atom onto
+/// the other branch as it is stored, then preview the merge again.
+async fn keep_conflict_side(payload: &V) {
+    let project = current_project_id();
+    dom::error("omnigraph-error", "");
+    for button in dom::all("[data-action=\"omnigraph-conflict-keep\"]") {
+        let _ = button.set_attribute("disabled", "");
+    }
+    let outcome = match omnigraph_canvas::conflict_keep_request(&project, payload) {
+        Ok(body) => match api::post("/api/omnigraph/branches", body).await {
+            Ok(res) if res["ok"].as_bool() != Some(false) => Ok(()),
+            Ok(res) => Err(res["error"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Could not keep the atom.")
+                .to_owned()),
+            Err(e) => Err(e.message),
+        },
+        Err(message) => Err(message),
+    };
+    if let Err(message) = outcome {
+        dom::error("omnigraph-error", &message);
+        render_merge();
+        return;
+    }
+    dom::text(
+        "omnigraph-status-message",
+        &format!(
+            "Copied the {} atom {} to {}.",
+            m::text(payload, "keep"),
+            m::text(payload, "atom_id"),
+            m::text(payload, "write_branch")
+        ),
+    );
+    dom::hidden("omnigraph-status-message", false);
+    preview_merge(
+        &m::text(payload, "source_branch"),
+        &m::text(payload, "target_branch"),
+    )
+    .await;
+    refresh_graph().await;
+}
+
 pub fn branch_merge_outcome(res: &V) -> Result<(), String> {
     let outcome = res["outcome"].as_str().unwrap_or("");
     let ok = res["ok"].as_bool();
@@ -3419,19 +3589,31 @@ pub fn apply_session_settings(session: &V) {
         dom::set_value("omnigraph-branch-mode", "existing");
         dom::set_value("omnigraph-existing-branch", &branch);
     }
-    let pulls: Vec<String> = m::array(&omni["pull_branches"])
-        .into_iter()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect();
-    dom::set_value("omnigraph-pull-branches", &pulls.join(", "));
-    dom::set_value("omnigraph-session-query", &m::text(omni, "query"));
+    // A follow-up may edit these three, so a poll keeps what the person
+    // typed until the session's own values or the selection change.
+    let signature = json!([
+        m::read(|s| s.epoch),
+        session["id"],
+        omni["pull_branches"],
+        omni["query"],
+        omni["auto_publish"]
+    ]);
+    if m::data("omnigraph-followup-signature") != signature {
+        m::set("omnigraph-followup-signature", signature);
+        let pulls: Vec<String> = m::array(&omni["pull_branches"])
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        dom::set_value("omnigraph-pull-branches", &pulls.join(", "));
+        dom::set_value("omnigraph-session-query", &m::text(omni, "query"));
+        dom::set_checked(
+            "omnigraph-auto-publish",
+            omni["auto_publish"].as_bool().unwrap_or(true),
+        );
+    }
     dom::set_value(
         "omnigraph-shared-space",
         &m::omnigraph_shared_space(session),
-    );
-    dom::set_checked(
-        "omnigraph-auto-publish",
-        omni["auto_publish"].as_bool().unwrap_or(true),
     );
     dom::set_checked("omnigraph-auto-merge", m::yes(&omni["auto_merge"]));
     let linked: Vec<V> = m::omnigraph_linked_session_ids(session)
@@ -3454,6 +3636,8 @@ pub fn session_controls() {
     );
 
     let disable_edit = locked || !sid.is_empty();
+    // A follow-up may change what the next turn pulls and publishes.
+    let follow_edit = !locked && !sid.is_empty() && m::read(|s| m::omnigraph_enabled(&s.selected));
     for id in [
         "omnigraph-enabled",
         "omnigraph-branch-mode",
@@ -3464,7 +3648,10 @@ pub fn session_controls() {
         "omnigraph-auto-publish",
         "omnigraph-auto-merge",
     ] {
-        dom::disabled(id, disable_edit);
+        dom::disabled(
+            id,
+            disable_edit && !(follow_edit && FOLLOWUP_FIELDS.contains(&id)),
+        );
     }
     dom::disabled(
         "omnigraph-existing-branch",
@@ -3546,6 +3733,23 @@ pub fn session_payload() -> Option<V> {
         dom::checked("omnigraph-auto-merge"),
         &linked,
         &dom::value("omnigraph-shared-space"),
+    )
+}
+
+/// The composer fields a follow-up may change for its session.
+const FOLLOWUP_FIELDS: [&str; 3] = [
+    "omnigraph-pull-branches",
+    "omnigraph-session-query",
+    "omnigraph-auto-publish",
+];
+
+/// The selected session's follow-up change to its Omnigraph settings.
+pub fn followup_payload(session: &V) -> Option<V> {
+    followup_payload_from_fields(
+        session,
+        &dom::value("omnigraph-pull-branches"),
+        &dom::value("omnigraph-session-query"),
+        dom::checked("omnigraph-auto-publish"),
     )
 }
 
@@ -3658,32 +3862,55 @@ pub fn render_session_bar(session: &V) {
     }
 
     if let Some(host) = dom::get("session-omnigraph-atoms") {
-        if atoms.is_empty() {
-            host.set_inner_html(
-                "<span class=\"knowledge-note\">No shared atoms injected yet.</span>",
-            );
-        } else {
-            let mut html = String::new();
-            for atom in atoms.iter().take(10) {
-                let id = atom_id(atom);
-                let kind = atom["kind"].as_str().unwrap_or("finding");
-                let title = atom["title"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&id);
-                let verified = atom_is_verified(atom);
-                html.push_str(&format!(
-                    "<button type=\"button\" class=\"omni-session-atom-chip\" data-action=\"omnigraph-open-atom\" data-atom-id=\"{}\" data-branch=\"{}\" data-verified=\"{}\"><span aria-hidden=\"true\">{}</span> {}</button>",
-                    esc(&id),
-                    esc(&branch),
-                    if verified { "true" } else { "false" },
-                    kind_glyph(kind),
-                    esc(title)
-                ));
-            }
-            host.set_inner_html(&html);
-        }
+        let expanded = !sid.is_empty()
+            && m::data("omnigraph-session-atoms-expanded").as_str() == Some(sid.as_str());
+        host.set_inner_html(&render_session_atoms_html(&atoms, &branch, expanded));
     }
+}
+
+/// How many shared atoms the session bar shows before `+N more`.
+const SESSION_ATOMS_SHOWN: usize = 10;
+
+/// The session bar's shared atoms: the first ten, then a `+N more` toggle
+/// that shows the rest and `Show fewer` that folds them again.
+pub fn render_session_atoms_html(atoms: &[V], branch: &str, expanded: bool) -> String {
+    if atoms.is_empty() {
+        return "<span class=\"knowledge-note\">No shared atoms injected yet.</span>".into();
+    }
+    let shown = if expanded {
+        atoms.len()
+    } else {
+        atoms.len().min(SESSION_ATOMS_SHOWN)
+    };
+    let mut html = String::new();
+    for atom in &atoms[..shown] {
+        let id = atom_id(atom);
+        let kind = atom["kind"].as_str().unwrap_or("finding");
+        let title = atom["title"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&id);
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"omni-session-atom-chip\" data-action=\"omnigraph-open-atom\" data-atom-id=\"{}\" data-branch=\"{}\" data-verified=\"{}\"><span aria-hidden=\"true\">{}</span> {}</button>",
+            esc(&id),
+            esc(branch),
+            if atom_is_verified(atom) { "true" } else { "false" },
+            kind_glyph(kind),
+            esc(title)
+        ));
+    }
+    if atoms.len() > SESSION_ATOMS_SHOWN {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"omni-session-atom-more\" data-action=\"omnigraph-session-atoms-toggle\" data-payload=\"{}\" aria-controls=\"session-omnigraph-atoms\" aria-expanded=\"{expanded}\">{}</button>",
+            esc(&json!({"expanded": !expanded}).to_string()),
+            if expanded {
+                "Show fewer".to_owned()
+            } else {
+                format!("+{} more", atoms.len() - SESSION_ATOMS_SHOWN)
+            }
+        ));
+    }
+    html
 }
 
 pub fn attach_wheel_listeners() {
@@ -5407,6 +5634,17 @@ pub async fn event(
             }
             true
         }
+        "omnigraph-open-git-commit" => {
+            let sha = payload["sha"].as_str().unwrap_or("").trim().to_owned();
+            let project = current_project_id();
+            if is_git_sha(&sha) && !project.is_empty() {
+                if dom::value("project") != project {
+                    crate::session::sync_project(&project);
+                }
+                crate::graph_map::open_project_commit(&project, &sha);
+            }
+            true
+        }
         "omnigraph-select-commit" => {
             let commit_id = payload["commit_id"].as_str().unwrap_or("").to_owned();
             let branch = payload["branch"].as_str().unwrap_or("").to_owned();
@@ -5528,6 +5766,10 @@ pub async fn event(
                     }
                 }
             }
+            true
+        }
+        "omnigraph-conflict-keep" => {
+            keep_conflict_side(payload).await;
             true
         }
         "omnigraph-share-atom" => {
@@ -5720,6 +5962,24 @@ pub async fn event(
         }
         "omni-pulse-poll" => {
             poll_changes(true).await;
+            true
+        }
+        "omnigraph-session-atoms-toggle" => {
+            let session = m::read(|s| s.selected.clone());
+            if payload["expanded"] == true {
+                m::set("omnigraph-session-atoms-expanded", session["id"].clone());
+            } else {
+                m::take("omnigraph-session-atoms-expanded");
+            }
+            render_session_bar(&session);
+            // The toggle was drawn again; keep the keyboard on it.
+            if let Some(toggle) = dom::all("#session-omnigraph-atoms .omni-session-atom-more")
+                .into_iter()
+                .next()
+                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = toggle.focus();
+            }
             true
         }
         "omnigraph-open-atom" => {
@@ -6696,6 +6956,63 @@ mod tests {
     }
 
     #[test]
+    fn a_git_commit_an_atom_names_opens_the_code_map_apart_from_snapshots() {
+        let atom = json!({
+            "id": "atom-git",
+            "kind": "finding",
+            "title": "Regression from 3f2a9c1",
+            "summary": "Fixed again in (deadbeef0123); see commit:0a1b2c3d4e5f60718293a4b5c6d7e8f901234567.",
+            "tags": ["sha 7e57ab1"],
+            "commit_id": "c-0042",
+            "branch": "main"
+        });
+        assert_eq!(
+            git_commits_named(&atom),
+            vec![
+                "7e57ab1".to_owned(),
+                "3f2a9c1".to_owned(),
+                "deadbeef0123".to_owned(),
+                "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567".to_owned(),
+            ]
+        );
+        let graph = json!({"atoms": [atom]});
+        let html = render_node_inspector_html(&graph, "atom-git", &[], "main");
+        assert!(
+            html.contains("data-action=\"omnigraph-open-git-commit\" data-payload=\"{&quot;sha&quot;:&quot;3f2a9c1&quot;}\" title=\"Open Git commit 3f2a9c1 in the Code Map\">Git: 3f2a9c1</button>"),
+            "{html}"
+        );
+        assert!(html.contains(">Git: 0a1b2c3d4e</button>"), "{html}");
+        // The Omnigraph snapshot keeps its own action.
+        assert!(
+            html.contains("data-action=\"omnigraph-select-commit\" data-commit-id=\"c-0042\""),
+            "{html}"
+        );
+        assert!(!html.contains("&quot;sha&quot;:&quot;c-0042"), "{html}");
+        // Words that only look like hex: ids, paths, numbers, words, capitals.
+        let lookalikes = json!({"body": "Not commits: MEM-20261117-a1b2c3d4, src/abc1234.rs, 2026111712, facade, DEADBEEF1, abc123, 11111111-2222-4333-8444-555555555555, x9abcdef12, abc1234.rs and abc1234-fix."});
+        assert!(
+            git_commits_named(&lookalikes).is_empty(),
+            "{:?}",
+            git_commits_named(&lookalikes)
+        );
+        assert_eq!(
+            git_commits_named(&json!({"git_commit": " abcdef1234 "})),
+            vec!["abcdef1234"]
+        );
+        // At most four in all, and only a real id.
+        let explicit =
+            json!({"git_commit": "ABCDEF1", "title": "a1b2c3d e4f5a6b 0000000a 1111111b 2222222c"});
+        assert_eq!(
+            git_commits_named(&explicit),
+            vec!["a1b2c3d", "e4f5a6b", "0000000a", "1111111b"]
+        );
+        assert!(is_git_sha("abcdef1"));
+        assert!(!is_git_sha("abcdef"));
+        assert!(!is_git_sha("ABCDEF1"));
+        assert!(!is_git_sha(&"a".repeat(41)));
+    }
+
+    #[test]
     fn inspector_and_search_render_provenance_jump_links_and_promote_button() {
         let graph = json!({
             "atoms": [
@@ -6840,5 +7157,80 @@ mod tests {
             matching_project_session_id(&selected_p1, "", "proj-1"),
             None
         );
+    }
+
+    #[test]
+    fn followup_payload_sends_only_changed_pull_query_and_auto_publish() {
+        let session = json!({"id": "s1", "omnigraph": {"enabled": true, "branch": "session/s1", "pull_branches": ["main"], "query": "auth tokens", "auto_publish": true, "auto_merge": false}});
+        // Unchanged fields send nothing, and blank pull branches mean main.
+        assert_eq!(
+            followup_payload_from_fields(&session, "main", " auth tokens ", true),
+            None
+        );
+        assert_eq!(
+            followup_payload_from_fields(&session, "", "auth tokens", true),
+            None
+        );
+        assert_eq!(
+            followup_payload_from_fields(&session, "main, session/auth-fix, main", "", false),
+            Some(
+                json!({"pull_branches": ["main", "session/auth-fix"], "query": null, "auto_publish": false})
+            )
+        );
+        assert_eq!(
+            followup_payload_from_fields(&session, "main", "refresh flow", true),
+            Some(json!({"query": "refresh flow"}))
+        );
+        // A follow-up never switches Omnigraph on for a session without it.
+        for off in [
+            json!({"id": "s2", "omnigraph": null}),
+            json!({"id": "s3", "omnigraph": {"enabled": false, "branch": "session/s3"}}),
+        ] {
+            assert_eq!(
+                followup_payload_from_fields(&off, "main, dev", "x", false),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn session_atoms_show_ten_then_a_more_toggle() {
+        use crate::test_support::{assert_no_inline_hex_colors, payloads};
+        let atoms = (0..13)
+            .map(|n| json!({"id": format!("atom-{n}"), "kind": "finding", "title": format!("Atom <{n}>"), "verified": n % 2 == 0}))
+            .collect::<Vec<_>>();
+        let folded = render_session_atoms_html(&atoms, "session/s1", false);
+        assert_eq!(
+            folded.matches("class=\"omni-session-atom-chip\"").count(),
+            10
+        );
+        assert!(folded.contains("Atom &lt;9&gt;"), "{folded}");
+        assert!(!folded.contains("atom-10"), "{folded}");
+        assert!(
+            folded.contains("aria-expanded=\"false\">+3 more</button>"),
+            "{folded}"
+        );
+        assert_eq!(
+            payloads(&folded, "omnigraph-session-atoms-toggle"),
+            vec![json!({"expanded": true})]
+        );
+        let open = render_session_atoms_html(&atoms, "session/s1", true);
+        assert_eq!(open.matches("class=\"omni-session-atom-chip\"").count(), 13);
+        assert!(
+            open.contains("aria-expanded=\"true\">Show fewer</button>"),
+            "{open}"
+        );
+        assert_eq!(
+            payloads(&open, "omnigraph-session-atoms-toggle"),
+            vec![json!({"expanded": false})]
+        );
+        // Ten or fewer need no toggle, and none shows the empty note.
+        assert!(!render_session_atoms_html(&atoms[..10], "main", false)
+            .contains("omni-session-atom-more"));
+        assert!(
+            render_session_atoms_html(&[], "main", false).contains("No shared atoms injected yet.")
+        );
+        assert_no_inline_hex_colors(&folded);
+        assert_no_inline_hex_colors(&open);
     }
 }

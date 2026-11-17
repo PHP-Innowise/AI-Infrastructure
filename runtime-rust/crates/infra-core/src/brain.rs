@@ -117,6 +117,12 @@ pub struct RecordProblem {
     pub id: Option<String>,
     pub external_id: Option<String>,
 }
+/// Whether `record` answers a lookup of `identifier`, by UUID or external ID.
+fn claims(record: &Value, identifier: &str, record_type: Option<&str>) -> bool {
+    record_type.is_none_or(|kind| record["type"].as_str() == Some(kind))
+        && (record["id"].as_str() == Some(identifier)
+            || record["external_id"].as_str() == Some(identifier))
+}
 #[derive(Clone, Debug, Default)]
 pub struct RecordInventory {
     pub records: Vec<RecordImage>,
@@ -301,13 +307,38 @@ impl BrainRepository {
     ) -> Result<RecordImage> {
         let mut matches = Vec::new();
         let (_, problems) = self.inventory_map(include_archive, |image, _raw| {
-            if record_type.is_none_or(|kind| image.record["type"].as_str() == Some(kind))
-                && (image.record["id"].as_str() == Some(identifier)
-                    || image.record["external_id"].as_str() == Some(identifier))
-            {
+            if claims(&image.record, identifier, record_type) {
                 matches.push(image);
             }
         })?;
+        self.resolve(identifier, record_type, matches, &problems)
+    }
+
+    /// `find` over an inventory the caller already holds, read with the same
+    /// `include_archive`: one scan of the Brain serves every lookup of a turn,
+    /// and all of them see the same records.
+    pub fn find_in(
+        &self,
+        inventory: &RecordInventory,
+        identifier: &str,
+        record_type: Option<&str>,
+    ) -> Result<RecordImage> {
+        let matches = inventory
+            .records
+            .iter()
+            .filter(|image| claims(&image.record, identifier, record_type))
+            .cloned()
+            .collect();
+        self.resolve(identifier, record_type, matches, &inventory.problems)
+    }
+
+    fn resolve(
+        &self,
+        identifier: &str,
+        record_type: Option<&str>,
+        matches: Vec<RecordImage>,
+        problems: &[RecordProblem],
+    ) -> Result<RecordImage> {
         let claimants: Vec<_> = problems
             .iter()
             .filter(|problem| {

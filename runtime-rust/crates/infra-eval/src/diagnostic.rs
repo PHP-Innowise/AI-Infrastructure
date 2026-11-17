@@ -62,7 +62,8 @@ fn reason(reason: &str) -> &'static str {
         | "conflict-unavailable"
         | "ticket-mismatch"
         | "invalid"
-        | "explicit-context-only" => "runtime-exclusion",
+        | "explicit-context-only"
+        | "provenance" => "runtime-exclusion",
         _ => "unknown",
     }
 }

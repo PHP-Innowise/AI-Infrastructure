@@ -379,6 +379,22 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "GET",
+        pattern: "/api/projects/{project_id}/graph/memory-links",
+        operation: "knowledge.memory_links",
+        status: 200,
+        token: false,
+        query: &["path", "previous_path"],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/file-context",
+        operation: "omnigraph.file_context",
+        status: 200,
+        token: false,
+        query: &["project_id", "path"],
+    },
+    Route {
+        method: "GET",
         pattern: "/api/systems/service-graph",
         operation: "system_graph.service_status",
         status: 200,
@@ -1742,6 +1758,31 @@ pub async fn serve_listener(listener: tokio::net::TcpListener, app: App) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_memory_links_and_omnigraph_file_context_routes_registered() {
+        for (pattern, op, query) in [
+            (
+                "/api/projects/{project_id}/graph/memory-links",
+                "knowledge.memory_links",
+                &["path", "previous_path"][..],
+            ),
+            (
+                "/api/omnigraph/file-context",
+                "omnigraph.file_context",
+                &["project_id", "path"][..],
+            ),
+        ] {
+            let found = ROUTES
+                .iter()
+                .find(|r| r.method == "GET" && r.pattern == pattern)
+                .unwrap_or_else(|| panic!("missing route {pattern}"));
+            assert_eq!(found.operation, op);
+            assert_eq!(found.query, query);
+            // Reading links changes nothing.
+            assert!(!found.token);
+        }
+    }
 
     #[test]
     fn omnigraph_sync_and_promote_routes_are_registered_with_csrf_tokens() {

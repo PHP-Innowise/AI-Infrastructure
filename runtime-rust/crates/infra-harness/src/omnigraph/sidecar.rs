@@ -5,14 +5,16 @@ use super::{
     client::{
         BranchCreateRequest, BranchDiffQuery, BranchMergeRequest, ChangeBaselineRequest,
         ChangeFeedQuery, ChangeOp, ChangeRequest, CommitListQuery, CommitOutput, EntityKind,
-        OmnigraphClient, QueryRequest, StoredQueryRequest,
+        MergeConflict, MergeConflictKind, OmnigraphClient, QueryRequest, StoredQueryRequest,
     },
     schema::{
-        self, CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_BRANCH_CONTEXT, GQ_LINK_CONSUMED_BY,
-        GQ_LINK_DERIVED_FROM, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO, GQ_LINK_SESSION_FOLLOWS,
+        self, CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_ATOM_SYMBOLS, GQ_CLEAR_BRANCH_CONTEXT,
+        GQ_DELETE_CANONICAL_ATOM, GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM,
+        GQ_LINK_MENTIONS_SYMBOL, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO, GQ_LINK_SESSION_FOLLOWS,
         GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS, GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES,
-        GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSION_FOLLOWS, GQ_LIST_SESSIONS,
-        GQ_UPSERT_ATOM, GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT,
+        GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSION_FOLLOWS,
+        GQ_LIST_SESSION_TURN_SNAPSHOTS, GQ_LIST_SESSIONS, GQ_LIST_SYMBOL_EDGES, GQ_UPSERT_ATOM,
+        GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_SYMBOL, GQ_UPSERT_TURN_SNAPSHOT,
         HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE, OMNIGRAPH_RELEASE_URL_LINUX_X86_64,
         OMNIGRAPH_VERSION,
     },
@@ -56,6 +58,10 @@ const VALID_RELATIONS: &[&str] = &[
     "depends_on",
     "refines",
 ];
+/// At most this many declarations are linked to one atom, read from at most
+/// this many of the files it touches.
+const MAX_ATOM_SYMBOLS: usize = 12;
+const MAX_SYMBOL_FILES: usize = 8;
 
 /// Operating mode for Harness Omnigraph integration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1281,7 +1287,12 @@ impl OmnigraphManager {
             if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
                 && sid_filter.is_none_or(|sid| src == sid || dst == sid)
             {
-                let rel = e["relation"].as_str().unwrap_or("shared_branch");
+                // Edges written before the relation was normalized carry a
+                // shared space's name.
+                let rel = e["relation"]
+                    .as_str()
+                    .filter(|rel| matches!(*rel, "broadcast" | "shared_branch" | "linked"))
+                    .unwrap_or("shared_branch");
                 edges.push(json!({
                     "id": format!("follow:{src}->{dst}"),
                     "kind": "session_follows",
@@ -1455,7 +1466,7 @@ impl OmnigraphManager {
     /// Compare `source` branch against `target` (default `main`), including 3-way dry-run conflict checks.
     pub async fn branch_diff_json(
         &self,
-        _project_id: &str,
+        project_id: &str,
         source: &str,
         target: Option<&str>,
     ) -> Result<Value> {
@@ -1519,7 +1530,11 @@ impl OmnigraphManager {
             .await
         {
             Ok(resp) => (resp.outcome.as_str().to_string(), Vec::new()),
-            Err(err) if err.is_merge_conflict() => ("conflict".to_string(), err.merge_conflicts),
+            Err(err) if err.is_merge_conflict() => (
+                "conflict".to_string(),
+                conflicts_with_values(&client, project_id, source, target, &err.merge_conflicts)
+                    .await,
+            ),
             Err(err) => return Err(err.into()),
         };
 
@@ -1599,23 +1614,105 @@ impl OmnigraphManager {
                         "commit": resp.commit,
                         "conflicts": [],
                     })),
-                    Err(err) if err.is_merge_conflict() => Ok(json!({
-                        "ok": false,
-                        "action": "merge",
-                        "source": source,
-                        "target": target,
-                        "outcome": "conflict",
-                        "dry_run": dry_run,
-                        "added_atoms": [],
-                        "updated_atoms": [],
-                        "deleted_atoms": [],
-                        "added_edges": [],
-                        "deleted_edges": [],
-                        "conflicts": err.merge_conflicts,
-                        "error": err.message,
-                    })),
+                    Err(err) if err.is_merge_conflict() => {
+                        // A conflicting merge publishes nothing, so both
+                        // branches still hold the atoms in conflict.
+                        let project_id = clean_opt(body["project_id"].as_str()).unwrap_or("");
+                        let conflicts = conflicts_with_values(
+                            &client,
+                            project_id,
+                            &source,
+                            &target,
+                            &err.merge_conflicts,
+                        )
+                        .await;
+                        Ok(json!({
+                            "ok": false,
+                            "action": "merge",
+                            "source": source,
+                            "target": target,
+                            "outcome": "conflict",
+                            "dry_run": dry_run,
+                            "added_atoms": [],
+                            "updated_atoms": [],
+                            "deleted_atoms": [],
+                            "added_edges": [],
+                            "deleted_edges": [],
+                            "conflicts": conflicts,
+                            "error": err.message,
+                        }))
+                    }
                     Err(err) => Err(err.into()),
                 }
+            }
+            "keep" => {
+                // Copy one atom onto `to` exactly as `from` stores it.
+                // Omnigraph settles a `divergent_update` only once both
+                // branches hold the same row; an ordinary update stamps its
+                // own branch and time, so it would leave the conflict.
+                let required = |key: &str| {
+                    clean_opt(body[key].as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            HarnessError::invalid(format!("Keeping an atom needs `{key}`."))
+                        })
+                };
+                let project_id = required("project_id")?;
+                let atom_id = required("atom_id")?;
+                let from = required("from")?;
+                let to = required("to")?;
+                if from == to {
+                    return Err(HarnessError::invalid(
+                        "Keep copies an atom from one branch to another.",
+                    ));
+                }
+                let kept = find_atom_on_branch(&client, &project_id, &from, &atom_id)
+                    .await
+                    .ok_or_else(|| {
+                        HarnessError::missing(format!("The atom {atom_id} is not on {from}."))
+                    })?;
+                // The person chose between the two versions the preview
+                // showed; a session may have published a newer one on either
+                // branch since, and neither is copied or overwritten unseen.
+                let changed = |branch: &str| {
+                    HarnessError::conflict(format!(
+                        "The atom {atom_id} changed on {branch} after the merge preview. Preview the merge again."
+                    ))
+                };
+                if let Some(expected) = clean_opt(body["expected_updated_at"].as_str())
+                    && kept["updated_at"].as_str() != Some(expected)
+                {
+                    return Err(changed(&from));
+                }
+                if let Some(replaced) = clean_opt(body["replaced_updated_at"].as_str()) {
+                    let current = find_atom_on_branch(&client, &project_id, &to, &atom_id).await;
+                    if current
+                        .as_ref()
+                        .and_then(|atom| atom["updated_at"].as_str())
+                        != Some(replaced)
+                    {
+                        return Err(changed(&to));
+                    }
+                }
+                let params = stored_atom_params(&kept, &project_id);
+                let resp = client
+                    .mutate(&ChangeRequest {
+                        query: GQ_UPSERT_ATOM.into(),
+                        name: Some("upsert_atom".into()),
+                        params: Some(params.clone()),
+                        branch: Some(to.clone()),
+                        settings: None,
+                    })
+                    .await?;
+                Ok(json!({
+                    "ok": true,
+                    "action": "keep",
+                    "atom_id": atom_id,
+                    "from": from,
+                    "to": to,
+                    "atom": normalize_atom_row(&params),
+                    "commit": resp.commit,
+                }))
             }
             "delete" => {
                 let name = store::text(&body["name"], "branch name", 128)?;
@@ -1637,7 +1734,36 @@ impl OmnigraphManager {
     }
 
     /// Publish a new or updated `ContextAtom` (with optional linked files, session provenance, and relations).
+    /// The declarations it names are read from the project the store knows
+    /// for it, never from a path in the request.
     pub async fn publish_atom_json(&self, body: &Value) -> Result<Value> {
+        let root = self.project_root(
+            clean_opt(body["project_id"].as_str()).unwrap_or(""),
+            clean_opt(body["session_id"].as_str()),
+        );
+        self.publish_atom_in(body, root.as_deref()).await
+    }
+
+    /// The folder a project's files are read from: the session's workspace
+    /// when the session is the project's, else the registered project.
+    fn project_root(&self, project_id: &str, session_id: Option<&str>) -> Option<PathBuf> {
+        let store = self.store.as_ref()?;
+        if project_id.is_empty() {
+            return None;
+        }
+        if let Some(session) = session_id.and_then(|sid| store.get(sid).ok())
+            && session["project_id"].as_str() == Some(project_id)
+            && let Some(path) = clean_opt(session["project_path"].as_str())
+        {
+            return Some(PathBuf::from(path));
+        }
+        store
+            .project(project_id)
+            .ok()
+            .and_then(|project| clean_opt(project["path"].as_str()).map(PathBuf::from))
+    }
+
+    async fn publish_atom_in(&self, body: &Value, root: Option<&Path>) -> Result<Value> {
         let project_id = clean_opt(body["project_id"].as_str())
             .unwrap_or("")
             .to_string();
@@ -1668,12 +1794,56 @@ impl OmnigraphManager {
         let files = parse_string_list(&body["files"]);
         let confidence = body["confidence"].as_f64().unwrap_or(0.85).clamp(0.0, 1.0);
         let pin_priority = body["pin_priority"].as_i64().unwrap_or(10) as i32;
-        let verified = body["verified"].as_bool().unwrap_or(false);
-        let provenance = AtomProvenance::from_value(body);
         let expected_commit = clean_opt(body["expected_commit"].as_str()).map(str::to_string);
         let ts = now_utc_iso_ms();
 
         let client = self.client().await?;
+        // An update that leaves out a provenance field, the verification or
+        // the creation time keeps the atom's own: the upsert writes every
+        // field, and an edit of the text must not turn a Project Brain atom
+        // into an unverified one with no source. A field sent as null clears.
+        let named = clean_opt(body["atom_id"].as_str())
+            .or_else(|| clean_opt(body["id"].as_str()))
+            .is_some();
+        let existing = if named {
+            find_atom_on_branch(&client, &project_id, &branch, &atom_id).await
+        } else {
+            None
+        };
+        let mut merged = body.clone();
+        if let Some(existing) = &existing
+            && merged.is_object()
+        {
+            for key in [
+                "origin_layer",
+                "authority",
+                "privacy",
+                "brain_record_id",
+                "memory_id",
+                "record_revision",
+                "verified",
+            ] {
+                if body.get(key).is_none() && !existing[key].is_null() {
+                    merged[key] = existing[key].clone();
+                }
+            }
+        }
+        let verified = merged["verified"].as_bool().unwrap_or(false);
+        let provenance = AtomProvenance::from_value(&merged);
+        let created_at = existing
+            .as_ref()
+            .and_then(|atom| clean_opt(atom["created_at"].as_str()).map(str::to_string))
+            .unwrap_or_else(|| ts.clone());
+        // So does the session that wrote it: an update without `session_id`
+        // keeps the stored one and links no session, so the Keep buttons of
+        // the merge preview do not erase who published the atom.
+        let source_session_id = if body.get("session_id").is_some() {
+            session_id.clone()
+        } else {
+            existing
+                .as_ref()
+                .and_then(|atom| clean_opt(atom["source_session_id"].as_str()).map(str::to_string))
+        };
         let atom_params = build_upsert_atom_params(
             &atom_id,
             &project_id,
@@ -1683,12 +1853,12 @@ impl OmnigraphManager {
             &atom_body,
             tags,
             &branch,
-            session_id.as_deref(),
+            source_session_id.as_deref(),
             confidence,
             pin_priority,
             verified,
             &provenance,
-            &ts,
+            &created_at,
             &ts,
         );
         let req = ChangeRequest {
@@ -1732,6 +1902,28 @@ impl OmnigraphManager {
             last_commit = Some(commit);
         }
 
+        let symbols = atom_symbols(root, &files, &format!("{title}\n{summary}\n{atom_body}"));
+        let previous_symbols = if existing.is_some() {
+            list_atom_symbols(&client, &project_id, &branch)
+                .await
+                .remove(&atom_id)
+                .unwrap_or_default()
+        } else {
+            BTreeSet::new()
+        };
+        if let Some(commit) = upsert_atom_symbols(
+            &client,
+            &project_id,
+            &branch,
+            &atom_id,
+            &symbols,
+            &previous_symbols,
+        )
+        .await
+        {
+            last_commit = Some(commit);
+        }
+
         if let Some(relations) = body["relates_to"].as_array() {
             for rel in relations {
                 let Some((target_id, relation, note, rel_confidence)) = parse_relation_entry(rel)
@@ -1769,6 +1961,7 @@ impl OmnigraphManager {
             "branch": branch,
             "atom": atom_resp,
             "files": files,
+            "symbols": symbols,
             "commit": last_commit,
         }))
     }
@@ -2053,11 +2246,19 @@ impl OmnigraphManager {
         }
 
         let ts = now_utc_iso_ms();
-        let goal = clean_opt(omni_opts["query"].as_str())
-            .or_else(|| clean_opt(session["goal"].as_str()))
-            .or_else(|| clean_opt(session["prompt"].as_str()))
-            .or_else(|| clean_opt(session["title"].as_str()))
-            .unwrap_or("");
+        // The search text is written into the shared graph's Session node, so
+        // it is screened as an automatic memory query first.
+        let goal = [
+            omni_opts["query"].as_str(),
+            session["goal"].as_str(),
+            session["prompt"].as_str(),
+            session["title"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(graph_session_text)
+        .unwrap_or_default();
+        let goal = goal.as_str();
         let title = session["title"].as_str().unwrap_or("Harness Session");
         let provider = session["provider"].as_str().unwrap_or("codex");
         let workflow = session["workflow"].as_str().unwrap_or("native");
@@ -2088,7 +2289,7 @@ impl OmnigraphManager {
         if let Some(peers) = omni_opts["linked_session_ids"].as_array()
             && !peers.is_empty()
         {
-            let rel = clean_opt(omni_opts["shared_space"].as_str()).unwrap_or("linked");
+            let rel = canonical_session_follows_relation(omni_opts);
             for peer_id in peers.iter().filter_map(Value::as_str) {
                 let peer_id = peer_id.trim();
                 if peer_id.is_empty() || peer_id == sid {
@@ -2247,6 +2448,7 @@ impl OmnigraphManager {
         }
 
         let mut consumed_count = 0usize;
+        let mut canonical_consumed = Vec::new();
         let mut atoms_out = Vec::new();
         for (raw_atom, score, origin_query_branch) in ranked_atoms {
             let mut atom = normalize_atom_row(&raw_atom);
@@ -2274,14 +2476,66 @@ impl OmnigraphManager {
                         })
                         .await;
                     consumed_count += 1;
+                } else if origin_query_branch == CANONICAL_KNOWLEDGE_BRANCH {
+                    canonical_consumed.push((aid, score));
                 }
             } else {
                 atom["files"] = json!([]);
             }
             atoms_out.push(atom);
         }
+        // A canonical atom stays on its branch: the session that consumed it
+        // is recorded there, not copied onto the session branch.
+        if !canonical_consumed.is_empty()
+            && upsert_session_node(
+                &client,
+                Some(session),
+                sid,
+                project_id,
+                CANONICAL_KNOWLEDGE_BRANCH,
+                &ts,
+            )
+            .await
+            .is_ok()
+        {
+            for (aid, score) in canonical_consumed {
+                if client
+                    .mutate(&ChangeRequest {
+                        query: GQ_LINK_CONSUMED_BY.into(),
+                        name: Some("link_consumed_by".into()),
+                        params: Some(json!({
+                            "atom_id": aid,
+                            "session_id": sid,
+                            "consumed_at": ts,
+                            "injection_mode": "auto_capsule",
+                            "relevance": score,
+                        })),
+                        branch: Some(CANONICAL_KNOWLEDGE_BRANCH.to_string()),
+                        settings: None,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    consumed_count += 1;
+                }
+            }
+        }
 
-        let capsule_text = format_context_capsule(&cfg.graph_id, &branch, project_path, &atoms_out);
+        // An injected atom that another contradicts is delivered with a
+        // caution; the relation itself is left for a person to resolve.
+        let injected_ids = atoms_out
+            .iter()
+            .filter_map(|atom| str_field(atom, "atom_id"))
+            .collect::<BTreeSet<_>>();
+        let contradiction_warnings =
+            contradictions_touching(&client, project_id, &queried_branches, &injected_ids).await;
+        let capsule_text = format_context_capsule(
+            &cfg.graph_id,
+            &branch,
+            project_path,
+            &atoms_out,
+            &contradiction_warnings,
+        );
         Ok(json!({
             "enabled": true,
             "graph_id": cfg.graph_id,
@@ -2290,6 +2544,7 @@ impl OmnigraphManager {
             "capsule_text": capsule_text,
             "atoms": atoms_out,
             "consumed_count": consumed_count,
+            "contradiction_warnings": contradiction_warnings,
         }))
     }
 
@@ -2321,6 +2576,11 @@ impl OmnigraphManager {
             .map(str::to_string)
             .unwrap_or_else(|| session_branch_name(sid));
         ensure_branch_exists(&client, &branch, Some("main")).await?;
+        // The learnings name declarations of the files in the session's own
+        // workspace, which may be a worktree of the project.
+        let root = clean_opt(session["project_path"].as_str())
+            .map(PathBuf::from)
+            .or_else(|| self.project_root(project_id, Some(sid)));
 
         let ts = now_utc_iso_ms();
         let mut last_commit = None;
@@ -2352,6 +2612,11 @@ impl OmnigraphManager {
 
         let snapshot_id =
             (!summary.trim().is_empty()).then(|| format!("snap-{}", &store::hexid()[..12]));
+        let turn_index = if snapshot_id.is_some() {
+            next_turn_index(&client, sid, &branch).await
+        } else {
+            1
+        };
         if let Some(ref snap_id) = snapshot_id
             && let Ok(r) = client
                 .mutate(&ChangeRequest {
@@ -2360,7 +2625,7 @@ impl OmnigraphManager {
                     params: Some(json!({
                         "snapshot_id": snap_id,
                         "session_id": sid,
-                        "turn_index": 1,
+                        "turn_index": turn_index,
                         "summary": summary.trim(),
                         "created_at": ts,
                     })),
@@ -2374,6 +2639,7 @@ impl OmnigraphManager {
         }
 
         let mut published_atom_ids = Vec::new();
+        let mut symbol_count = 0usize;
         for learning in learnings {
             let raw_kind = learning["kind"]
                 .as_str()
@@ -2410,7 +2676,7 @@ impl OmnigraphManager {
             }
 
             let published = self
-                .publish_atom_json(&json!({
+                .publish_atom_in(&json!({
                     "project_id": project_id,
                     "branch": branch,
                     "session_id": sid,
@@ -2429,8 +2695,9 @@ impl OmnigraphManager {
                     "brain_record_id": learning.get("brain_record_id").cloned().unwrap_or(Value::Null),
                     "memory_id": learning.get("memory_id").cloned().unwrap_or(Value::Null),
                     "record_revision": learning.get("record_revision").cloned().unwrap_or(Value::Null),
-                }))
+                }), root.as_deref())
                 .await?;
+            symbol_count += published["symbols"].as_array().map_or(0, Vec::len);
             if let Some(aid) = published["atom"]["atom_id"].as_str() {
                 published_atom_ids.push(aid.to_string());
                 if let Some(ref snap_id) = snapshot_id {
@@ -2480,6 +2747,7 @@ impl OmnigraphManager {
             "ok": true,
             "branch": branch,
             "published_atom_ids": published_atom_ids,
+            "symbol_count": symbol_count,
             "file_count": files.len(),
             "snapshot_id": snapshot_id,
             "merged": merged,
@@ -3445,7 +3713,7 @@ impl OmnigraphManager {
         let ts = now_utc_iso_ms();
         ensure_branch_exists(&client, &branch, Some("main")).await?;
         upsert_session_node(&client, Some(session), sid, project_id, &branch, &ts).await?;
-        let rel = clean_opt(session["omnigraph"]["shared_space"].as_str()).unwrap_or("linked");
+        let rel = canonical_session_follows_relation(&session["omnigraph"]);
         for peer_id in &peers {
             if peer_id == sid {
                 continue;
@@ -3505,6 +3773,21 @@ impl OmnigraphManager {
         project_id: &str,
         items: &[Value],
     ) -> Result<Value> {
+        self.sync_canonical_knowledge_with_options(project_id, items, &[])
+            .await
+    }
+
+    /// `sync_canonical_knowledge` that also deletes, for each of
+    /// `prune_layers` (`project-brain`, `memory-bank`), the project's synced
+    /// atoms of that layer that `items` no longer carries: a retired,
+    /// archived, superseded or stale record or chunk leaves the branch. Pass
+    /// only a layer read whole, with every page of it in `items`.
+    pub async fn sync_canonical_knowledge_with_options(
+        &self,
+        project_id: &str,
+        items: &[Value],
+        prune_layers: &[String],
+    ) -> Result<Value> {
         let cfg = self.config().await;
         if cfg.mode == OmnigraphMode::Off {
             return Ok(json!({
@@ -3519,6 +3802,11 @@ impl OmnigraphManager {
         ensure_branch_exists(&client, branch, Some("main")).await?;
 
         let mut existing_ids = collect_branch_atom_ids(&client, project_id, branch).await;
+        // A record or chunk names declarations of the project's own files;
+        // what each synced atom named before is replaced only when it changed.
+        let root = self.project_root(project_id, None);
+        let mut previous_symbols = list_atom_symbols(&client, project_id, branch).await;
+        let mut symbol_count = 0usize;
         let ts = now_utc_iso_ms();
         let mut atom_ids = Vec::new();
         let mut pending_supersedes: Vec<(String, Vec<String>)> = Vec::new();
@@ -3584,6 +3872,21 @@ impl OmnigraphManager {
                 .await?;
 
             upsert_atom_files(&client, effective_project_id, branch, &atom_id, &files, &ts).await;
+            let symbols = atom_symbols(
+                root.as_deref(),
+                &files,
+                &format!("{title}\n{summary}\n{body}"),
+            );
+            symbol_count += symbols.len();
+            upsert_atom_symbols(
+                &client,
+                effective_project_id,
+                branch,
+                &atom_id,
+                &symbols,
+                &previous_symbols.remove(&atom_id).unwrap_or_default(),
+            )
+            .await;
             existing_ids.insert(atom_id.clone());
             let supersedes = parse_string_list(&item["supersedes_atom_ids"]);
             if !supersedes.is_empty() {
@@ -3615,11 +3918,129 @@ impl OmnigraphManager {
             }
         }
 
-        Ok(json!({
+        let mut deleted_atom_ids = Vec::new();
+        let mut prune_error = None;
+        if !prune_layers.is_empty() {
+            let current = atom_ids.iter().cloned().collect::<BTreeSet<_>>();
+            match collect_branch_atom_rows(&client, project_id, branch).await {
+                Ok(rows) => {
+                    for row in rows {
+                        let Some(atom_id) = str_field(&row, "atom_id") else {
+                            continue;
+                        };
+                        if current.contains(&atom_id)
+                            || !synced_atom_of(&row, &atom_id, project_id, prune_layers)
+                        {
+                            continue;
+                        }
+                        match client
+                            .mutate(&ChangeRequest {
+                                query: GQ_DELETE_CANONICAL_ATOM.into(),
+                                name: Some("delete_canonical_atom".into()),
+                                params: Some(json!({ "atom_id": atom_id })),
+                                branch: Some(branch.to_string()),
+                                settings: None,
+                            })
+                            .await
+                        {
+                            Ok(_) => deleted_atom_ids.push(atom_id),
+                            Err(error) => {
+                                prune_error = Some(error.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => prune_error = Some(error.to_string()),
+            }
+        }
+
+        let mut synced = json!({
             "ok": true,
             "branch": branch,
             "synced": atom_ids.len(),
+            "symbols": symbol_count,
             "atom_ids": atom_ids,
+            "deleted": deleted_atom_ids.len(),
+            "deleted_atom_ids": deleted_atom_ids,
+        });
+        if let Some(error) = prune_error {
+            synced["prune_error"] = json!(error);
+        }
+        Ok(synced)
+    }
+
+    /// The context atoms that touch one file, on `main` and on the canonical
+    /// knowledge branch, each once: what the shared graph knows about it,
+    /// the declarations of the file each names (`symbols`), and the
+    /// `contradicts` relations with one of them at either end.
+    pub async fn file_context_json(&self, project_id: &str, path: &str) -> Result<Value> {
+        let path = path.trim().trim_start_matches("./");
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path.split('/').any(|part| part == "..")
+        {
+            return Err(HarnessError::invalid("Choose a file of the project."));
+        }
+        let cfg = self.config().await;
+        if cfg.mode == OmnigraphMode::Off {
+            return Ok(json!({"ok": false, "skipped": "omnigraph-off", "atoms": []}));
+        }
+        let client = self.client().await?;
+        let branches = ["main".to_string(), CANONICAL_KNOWLEDGE_BRANCH.to_string()];
+        let mut atoms = Vec::new();
+        let mut seen = BTreeSet::new();
+        for branch in &branches {
+            let Ok(found) = run_stored_or_inline(
+                &client,
+                "file_context",
+                schema::QUERY_FILE_CONTEXT,
+                json!({ "path": path }),
+                Some(branch.clone()),
+                None,
+            )
+            .await
+            else {
+                continue;
+            };
+            if found.rows.is_empty() {
+                continue;
+            }
+            let mut named: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let prefix = format!("{path}::");
+            for edge in symbol_edges(&client, project_id, branch).await {
+                if edge["file_path"].as_str() == Some(path)
+                    && let (Some(aid), Some(fqn)) =
+                        (str_field(&edge, "source_id"), str_field(&edge, "target_id"))
+                {
+                    let label = fqn.strip_prefix(&prefix).unwrap_or(&fqn).to_string();
+                    let labels = named.entry(aid).or_default();
+                    if !labels.contains(&label) {
+                        labels.push(label);
+                    }
+                }
+            }
+            for row in &found.rows {
+                let mut atom = normalize_atom_row(row);
+                if let Some(aid) = str_field(&atom, "atom_id")
+                    && seen.insert(aid.clone())
+                {
+                    if atom["source_branch"].is_null() {
+                        atom["source_branch"] = json!(branch);
+                    }
+                    atom["capsule_line"] = json!(format_atom_line_with_authority(&atom).trim_end());
+                    atom["symbols"] = json!(named.remove(&aid).unwrap_or_default());
+                    atoms.push(atom);
+                }
+            }
+        }
+        let contradictions = contradictions_touching(&client, project_id, &branches, &seen).await;
+        Ok(json!({
+            "ok": true,
+            "path": path,
+            "atoms": atoms,
+            "contradictions": contradictions,
         }))
     }
 
@@ -3894,7 +4315,30 @@ impl Domain for OmnigraphDomain {
                     let items = body["items"].as_array().ok_or_else(|| {
                         HarnessError::invalid("`items` must be an array for omnigraph.sync_items.")
                     })?;
-                    self.manager.sync_canonical_knowledge(pid, items).await?
+                    let prune_layers = body["prune_layers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|layer| matches!(*layer, "project-brain" | "memory-bank"))
+                        .map(String::from)
+                        .collect::<Vec<_>>();
+                    self.manager
+                        .sync_canonical_knowledge_with_options(pid, items, &prune_layers)
+                        .await?
+                }
+                "omnigraph.file_context" => {
+                    let pid = query["project_id"]
+                        .as_str()
+                        .or_else(|| body["project_id"].as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(project_id);
+                    let path = query["path"]
+                        .as_str()
+                        .or_else(|| body["path"].as_str())
+                        .unwrap_or("");
+                    self.manager.file_context_json(pid, path).await?
                 }
                 "omnigraph.fetch_atom" => {
                     let pid = body["project_id"]
@@ -4130,6 +4574,45 @@ async fn run_stored_or_inline(
     }
 }
 
+/// Session text the shared graph may hold: screened as an automatic memory
+/// query (secrets, personal data and transcript markers removed), or none.
+fn graph_session_text(raw: &str) -> Option<String> {
+    crate::brain_settings::query(raw)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// `SessionFollows.relation` says how two sessions are linked: sessions that
+/// share a space are on a shared branch, others are linked. The space's own
+/// name stays on the session, never on the edge.
+pub(crate) fn canonical_session_follows_relation(omnigraph: &Value) -> &'static str {
+    if clean_opt(omnigraph["shared_space"].as_str()).is_some() {
+        "shared_branch"
+    } else {
+        "linked"
+    }
+}
+
+/// The `turn_index` after the session's latest snapshot on `branch`, or 1.
+async fn next_turn_index(client: &OmnigraphClient, sid: &str, branch: &str) -> i32 {
+    query_edges_safe(
+        client,
+        GQ_LIST_SESSION_TURN_SNAPSHOTS,
+        "list_session_turn_snapshots",
+        &json!({ "session_id": sid }),
+        Some(branch),
+        None,
+    )
+    .await
+    .iter()
+    .filter_map(|row| row["turn_index"].as_i64())
+    .max()
+    .map_or(1, |latest| {
+        i32::try_from(latest.saturating_add(1)).unwrap_or(i32::MAX)
+    })
+}
+
 async fn query_edges_safe(
     client: &OmnigraphClient,
     query: &str,
@@ -4181,11 +4664,12 @@ async fn upsert_session_node(
         .filter(|b| *b != "auto")
         .map(str::to_string)
         .unwrap_or_else(|| session_branch_name(sid));
-    let goal = session_meta
-        .and_then(|s| {
-            clean_opt(s["omnigraph"]["query"].as_str()).or_else(|| clean_opt(s["goal"].as_str()))
-        })
-        .map(str::to_string);
+    let goal = session_meta.and_then(|s| {
+        [s["omnigraph"]["query"].as_str(), s["goal"].as_str()]
+            .into_iter()
+            .flatten()
+            .find_map(graph_session_text)
+    });
     client
         .mutate(&ChangeRequest {
             query: GQ_UPSERT_SESSION.into(),
@@ -4530,6 +5014,251 @@ async fn upsert_atom_files(
     last_commit
 }
 
+/// The declarations `text` names in the files an atom touches, read from the
+/// project at `root`: rows for `SymbolRef`, keyed by file, owner and name.
+fn atom_symbols(root: Option<&Path>, files: &[String], text: &str) -> Vec<Value> {
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let mut symbols = Vec::new();
+    for file in files.iter().take(MAX_SYMBOL_FILES) {
+        let Some((rel, source)) = crate::graph_live::read_workspace_file(root, file) else {
+            continue;
+        };
+        let room = MAX_ATOM_SYMBOLS - symbols.len();
+        for entity in crate::graph_live::declarations_named_in(&rel, &source, text, room) {
+            let fqn = match entity
+                .parent
+                .as_deref()
+                .filter(|owner| !owner.is_empty() && *owner != rel)
+            {
+                Some(owner) => format!("{rel}::{owner}::{}", entity.name),
+                None => format!("{rel}::{}", entity.name),
+            };
+            symbols.push(json!({
+                "fqn": fqn,
+                "file_path": rel,
+                "kind": entity.kind,
+                "name": entity.name,
+            }));
+        }
+        if symbols.len() >= MAX_ATOM_SYMBOLS {
+            break;
+        }
+    }
+    symbols
+}
+
+/// Links `atom_id` to `symbols` on `branch`. The mentions it had
+/// (`previous`) are replaced when the set differs; the same set writes
+/// nothing.
+async fn upsert_atom_symbols(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+    atom_id: &str,
+    symbols: &[Value],
+    previous: &BTreeSet<String>,
+) -> Option<CommitOutput> {
+    let wanted = symbols
+        .iter()
+        .filter_map(|symbol| str_field(symbol, "fqn"))
+        .collect::<BTreeSet<_>>();
+    if wanted == *previous {
+        return None;
+    }
+    let mut last_commit = None;
+    if !previous.is_empty()
+        && let Ok(r) = client
+            .mutate(&ChangeRequest {
+                query: GQ_CLEAR_ATOM_SYMBOLS.into(),
+                name: Some("clear_atom_symbols".into()),
+                params: Some(json!({ "atom_id": atom_id })),
+                branch: Some(branch.to_string()),
+                settings: None,
+            })
+            .await
+        && r.commit.is_some()
+    {
+        last_commit = r.commit;
+    }
+    for symbol in symbols {
+        let Some(fqn) = str_field(symbol, "fqn") else {
+            continue;
+        };
+        let _ = client
+            .mutate(&ChangeRequest {
+                query: GQ_UPSERT_SYMBOL.into(),
+                name: Some("upsert_symbol".into()),
+                params: Some(json!({
+                    "fqn": fqn,
+                    "project_id": project_id,
+                    "file_path": symbol["file_path"],
+                    "kind": symbol["kind"],
+                    "name": symbol["name"],
+                })),
+                branch: Some(branch.to_string()),
+                settings: None,
+            })
+            .await;
+        if let Ok(r) = client
+            .mutate(&ChangeRequest {
+                query: GQ_LINK_MENTIONS_SYMBOL.into(),
+                name: Some("link_mentions_symbol".into()),
+                params: Some(json!({
+                    "atom_id": atom_id,
+                    "fqn": fqn,
+                    "role": "named",
+                })),
+                branch: Some(branch.to_string()),
+                settings: None,
+            })
+            .await
+            && r.commit.is_some()
+        {
+            last_commit = r.commit;
+        }
+    }
+    last_commit
+}
+
+/// The `MentionsSymbol` rows of the project's atoms on `branch`.
+async fn symbol_edges(client: &OmnigraphClient, project_id: &str, branch: &str) -> Vec<Value> {
+    query_edges_safe(
+        client,
+        GQ_LIST_SYMBOL_EDGES,
+        "list_symbol_edges",
+        &json!({ "project_id": project_id }),
+        Some(branch),
+        None,
+    )
+    .await
+}
+
+/// The declarations each of the project's atoms names on `branch`.
+async fn list_atom_symbols(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut named: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for edge in symbol_edges(client, project_id, branch).await {
+        if let (Some(atom_id), Some(fqn)) =
+            (str_field(&edge, "source_id"), str_field(&edge, "target_id"))
+        {
+            named.entry(atom_id).or_default().insert(fqn);
+        }
+    }
+    named
+}
+
+/// The `contradicts` relations on `branches` with one of `atom_ids` at
+/// either end, each pair once: what a person checks before relying on
+/// either atom. Nothing is retired or changed.
+async fn contradictions_touching(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branches: &[String],
+    atom_ids: &BTreeSet<String>,
+) -> Vec<Value> {
+    let mut found = Vec::new();
+    if atom_ids.is_empty() {
+        return found;
+    }
+    let mut seen = BTreeSet::new();
+    for branch in branches {
+        let Ok(rows) = run_stored_or_inline(
+            client,
+            "contradictions",
+            schema::QUERY_CONTRADICTIONS,
+            json!({ "project_id": project_id }),
+            Some(branch.clone()),
+            None,
+        )
+        .await
+        else {
+            continue;
+        };
+        for row in &rows.rows {
+            let (Some(source), Some(target)) =
+                (str_field(row, "source_id"), str_field(row, "target_id"))
+            else {
+                continue;
+            };
+            if source == target
+                || !(atom_ids.contains(&source) || atom_ids.contains(&target))
+                || !seen.insert((source.clone(), target.clone()))
+            {
+                continue;
+            }
+            let source_title = str_field(row, "source_title").unwrap_or_else(|| source.clone());
+            let target_title = str_field(row, "target_title").unwrap_or_else(|| target.clone());
+            let note = str_field(row, "note");
+            let text = match &note {
+                Some(note) => format!(
+                    "\"{source_title}\" contradicts \"{target_title}\" ({note}); check both against the code before relying on either."
+                ),
+                None => format!(
+                    "\"{source_title}\" contradicts \"{target_title}\"; check both against the code before relying on either."
+                ),
+            };
+            found.push(json!({
+                "kind": "atom-contradiction",
+                "source_id": source,
+                "source_title": source_title,
+                "target_id": target,
+                "target_title": target_title,
+                "note": note,
+                "confidence": row["confidence"],
+                "branch": branch,
+                "recommended_action": "review",
+                "text": text,
+            }));
+        }
+    }
+    found
+}
+
+/// The caution line under an injected atom that a `contradicts` relation
+/// links to another atom, in either direction.
+fn contradiction_caution(atom_id: &str, warnings: &[Value]) -> Option<String> {
+    let parts = warnings
+        .iter()
+        .filter_map(|warning| {
+            let (source, target) = (
+                warning["source_id"].as_str()?,
+                warning["target_id"].as_str()?,
+            );
+            let (verb, other, title) = if source == atom_id {
+                ("contradicts", target, warning["target_title"].as_str())
+            } else if target == atom_id {
+                (
+                    "is contradicted by",
+                    source,
+                    warning["source_title"].as_str(),
+                )
+            } else {
+                return None;
+            };
+            let title = title
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or(other);
+            Some(
+                match warning["note"].as_str().filter(|n| !n.trim().is_empty()) {
+                    Some(note) => format!("{verb} \"{title}\" (`{other}`: {note})"),
+                    None => format!("{verb} \"{title}\" (`{other}`)"),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| {
+        format!(
+            "  Caution: this {} — verify both against code and `project-brain/` before relying on either.\n",
+            parts.join("; ")
+        )
+    })
+}
+
 async fn list_atom_files(
     client: &OmnigraphClient,
     project_id: &str,
@@ -4588,33 +5317,224 @@ async fn collect_branch_atom_ids(
     ids
 }
 
+/// Every atom of `project_id` on `branch`, or an error where the listing may
+/// be partial: pruning acts only on a whole listing.
+async fn collect_branch_atom_rows(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+) -> Result<Vec<Value>> {
+    let mut rows = BTreeMap::new();
+    let recent = fetch_branch_atoms(client, project_id, branch).await?;
+    // `recent_atoms` stops at 100 rows; past that the export has them all.
+    let capped = recent.len() >= 100;
+    for mut row in recent {
+        if row["project_id"].as_str().is_none() {
+            // The query is scoped to the project.
+            row["project_id"] = json!(project_id);
+        }
+        if let Some(atom_id) = str_field(&row, "atom_id") {
+            rows.insert(atom_id, row);
+        }
+    }
+    if capped {
+        let ndjson = client
+            .export_branch(Some(branch), &["ContextAtom"], None)
+            .await?;
+        for (atom_id, row) in parse_ndjson_records(&ndjson)?.atoms {
+            if str_field(&row, "project_id").as_deref() == Some(project_id) {
+                rows.insert(atom_id, row);
+            }
+        }
+    }
+    Ok(rows.into_values().collect())
+}
+
+/// Whether `row` is an atom the canonical sync wrote for `project_id` from
+/// one of `layers`: its layer, its id prefix and its project all agree.
+fn synced_atom_of(row: &Value, atom_id: &str, project_id: &str, layers: &[String]) -> bool {
+    let layer = row["origin_layer"].as_str().unwrap_or("");
+    let prefix = match layer {
+        "project-brain" => "brain-",
+        "memory-bank" => "mem-",
+        _ => return false,
+    };
+    layers.iter().any(|held| held == layer)
+        && atom_id.starts_with(prefix)
+        && row["project_id"].as_str() == Some(project_id)
+}
+
 async fn find_atom_on_branch(
     client: &OmnigraphClient,
     project_id: &str,
     branch: &str,
     atom_id: &str,
 ) -> Option<Value> {
+    let ids = BTreeSet::from([atom_id.to_string()]);
+    atoms_on_branch(client, project_id, branch, &ids)
+        .await
+        .remove(atom_id)
+}
+
+/// The atoms of `ids` as `branch` holds them for `project_id`, by id: one
+/// `recent_atoms` read, and one export of the branch's atoms only when an
+/// id is missing from a listing that may be partial (100 rows, no project
+/// to scope it, or a failed read). An id the branch does not hold is left
+/// out.
+async fn atoms_on_branch(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+    ids: &BTreeSet<String>,
+) -> BTreeMap<String, Value> {
+    let mut found = BTreeMap::new();
+    if ids.is_empty() {
+        return found;
+    }
+    let mut whole = false;
     if let Ok(rows) = fetch_branch_atoms(client, project_id, branch).await {
-        if let Some(found) = rows
-            .iter()
-            .find(|a| str_field(a, "atom_id").as_deref() == Some(atom_id))
-        {
-            return Some(found.clone());
-        }
-        if rows.len() < 100 && !project_id.is_empty() {
-            return None;
+        whole = rows.len() < 100 && !project_id.is_empty();
+        for row in rows {
+            if let Some(atom_id) = str_field(&row, "atom_id").filter(|id| ids.contains(id)) {
+                found.entry(atom_id).or_insert(row);
+            }
         }
     }
-    let ndjson = client
+    if whole || found.len() == ids.len() {
+        return found;
+    }
+    let Ok(ndjson) = client
         .export_branch(Some(branch), &["ContextAtom"], None)
         .await
-        .ok()?;
-    let parsed = parse_ndjson_records(&ndjson).ok()?;
-    let row = parsed.atoms.get(atom_id)?;
-    if !project_id.is_empty() && str_field(row, "project_id").is_some_and(|p| p != project_id) {
-        return None;
+    else {
+        return found;
+    };
+    let Ok(parsed) = parse_ndjson_records(&ndjson) else {
+        return found;
+    };
+    for atom_id in ids {
+        if found.contains_key(atom_id) {
+            continue;
+        }
+        if let Some(row) = parsed.atoms.get(atom_id)
+            && (project_id.is_empty()
+                || str_field(row, "project_id").is_none_or(|p| p == project_id))
+        {
+            found.insert(atom_id.clone(), normalize_atom_row(row));
+        }
     }
-    Some(normalize_atom_row(row))
+    found
+}
+
+/// Omnigraph's merge conflicts, each Context Atom `divergent_update` with
+/// the atom as the source and the target branch hold it (`source_value`,
+/// `target_value`), which the merge preview's Keep source and Keep target
+/// need. The atoms come from one read per branch whatever the number of
+/// conflicts. A Keep writes the atom back under the caller's project, so
+/// there are values only for an atom the branch holds for a named
+/// `project_id`; every other conflict passes through as Omnigraph returned
+/// it.
+async fn conflicts_with_values(
+    client: &OmnigraphClient,
+    project_id: &str,
+    source: &str,
+    target: &str,
+    conflicts: &[MergeConflict],
+) -> Vec<Value> {
+    let ids: BTreeSet<String> = if project_id.is_empty() {
+        BTreeSet::new()
+    } else {
+        conflicts
+            .iter()
+            .filter_map(updated_atom_id)
+            .map(str::to_string)
+            .collect()
+    };
+    let (source_atoms, target_atoms) = tokio::join!(
+        atoms_on_branch(client, project_id, source, &ids),
+        atoms_on_branch(client, project_id, target, &ids),
+    );
+    conflicts
+        .iter()
+        .map(|conflict| {
+            let mut out = json!(conflict);
+            if let Some(atom_id) = updated_atom_id(conflict) {
+                for (key, atoms) in [
+                    ("source_value", &source_atoms),
+                    ("target_value", &target_atoms),
+                ] {
+                    if let Some(atom) = atoms.get(atom_id) {
+                        out[key] = whole_atom(atom, project_id);
+                    }
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// `atom` with every column a branch may hold, as null where it holds none:
+/// Omnigraph leaves null columns out of a row and `recent_atoms` returns no
+/// project, and a Keep of the whole atom carries what the kept side holds.
+fn whole_atom(atom: &Value, project_id: &str) -> Value {
+    let mut whole = atom.clone();
+    if let Some(columns) = whole.as_object_mut() {
+        columns
+            .entry("project_id")
+            .or_insert_with(|| json!(project_id));
+        for key in ["tags", "source_session_id", "session_id"] {
+            columns.entry(key).or_insert(Value::Null);
+        }
+    }
+    whole
+}
+
+/// Every `ContextAtom` property, as `GQ_UPSERT_ATOM` takes them.
+const ATOM_COLUMNS: [&str; 20] = [
+    "atom_id",
+    "project_id",
+    "kind",
+    "title",
+    "summary",
+    "body",
+    "tags",
+    "source_branch",
+    "source_session_id",
+    "confidence",
+    "pin_priority",
+    "verified",
+    "origin_layer",
+    "authority",
+    "privacy",
+    "brain_record_id",
+    "memory_id",
+    "record_revision",
+    "created_at",
+    "updated_at",
+];
+
+/// The upsert parameters that write `atom` back as a branch stores it,
+/// every property included and nothing restamped.
+fn stored_atom_params(atom: &Value, project_id: &str) -> Value {
+    let atom = whole_atom(atom, project_id);
+    let columns = ATOM_COLUMNS
+        .iter()
+        .map(|key| {
+            (
+                key.to_string(),
+                atom.get(*key).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+    Value::Object(columns)
+}
+
+/// The Context Atom a merge conflict names when both branches updated it.
+fn updated_atom_id(conflict: &MergeConflict) -> Option<&str> {
+    let both_updated = conflict.entity_kind == EntityKind::Node
+        && conflict.type_name == "ContextAtom"
+        && conflict.kind == MergeConflictKind::DivergentUpdate;
+    clean_opt(conflict.entity_id.as_deref()).filter(|_| both_updated)
 }
 
 fn normalize_atom_row(row: &Value) -> Value {
@@ -4883,6 +5803,7 @@ fn format_context_capsule(
     branch: &str,
     project_path: &Path,
     atoms: &[Value],
+    contradictions: &[Value],
 ) -> String {
     if atoms.is_empty() {
         return String::new();
@@ -4892,6 +5813,21 @@ fn format_context_capsule(
         project_path.display()
     );
     for atom in atoms {
+        out.push_str(&format_atom_line_with_authority(atom));
+        if let Some(atom_id) = str_field(atom, "atom_id")
+            && let Some(caution) = contradiction_caution(&atom_id, contradictions)
+        {
+            out.push_str(&caution);
+        }
+    }
+    out
+}
+
+/// One capsule line with the atom's authority tag: a verified Memory Bank or
+/// Project Brain atom names its source, and anything else is marked as an
+/// unverified reference to check against code and the Brain.
+pub(crate) fn format_atom_line_with_authority(atom: &Value) -> String {
+    {
         let kind = atom["kind"].as_str().unwrap_or("insight");
         let title = atom["title"].as_str().unwrap_or("Untitled");
         let summary = atom["summary"].as_str().unwrap_or("");
@@ -4931,12 +5867,11 @@ fn format_context_capsule(
         };
 
         if summary.trim().is_empty() {
-            out.push_str(&format!("- {tag} {title} (from `{src}`)\n"));
+            format!("- {tag} {title} (from `{src}`)\n")
         } else {
-            out.push_str(&format!("- {tag} {title} (from `{src}`): {summary}\n"));
+            format!("- {tag} {title} (from `{src}`): {summary}\n")
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -4946,7 +5881,7 @@ pub(super) fn format_context_capsule_for_test(
     project_path: &Path,
     atoms: &[Value],
 ) -> String {
-    format_context_capsule(graph_id, branch, project_path, atoms)
+    format_context_capsule(graph_id, branch, project_path, atoms, &[])
 }
 
 fn str_field(v: &Value, key: &str) -> Option<String> {

@@ -1560,7 +1560,8 @@ attention.
 
 Opening the view reads project files in the server process. It takes no knowledge
 lock and runs no project code, so it cannot make a linked launch's freshness check
-fail. Only counts, dates, chunk IDs and chunk titles reach the page. Project Brain
+fail. Only counts, dates, chunk IDs, chunk titles, promotion and record IDs,
+outcome codes and retrieval manifest IDs reach the page. Project Brain
 titles and bodies, retrieval queries and non-chunk paths stay on the server, and
 private or restricted records count without their type or status. A Harness
 launch re-checks its context before running, and that re-check counts with its
@@ -1568,6 +1569,21 @@ retrieval. **Check eligibility** is the one request that runs the installed
 runtime's own rules. It names the rule that held back each resolved record and why
 retrieval skips each chunk, writes nothing, and returns 409 while another
 knowledge operation holds the lock.
+
+A person may mark what one retrieval delivered as helped, stale or harmful
+(`retrieval-feedback`, or `clear` to take the mark back). The marks stay in this
+Harness's database, keyed by manifest and item, and come back with the view as
+`feedback`; nothing reads them to rank, admit or pack memory.
+
+The **Promotion queue** lists proposals waiting for review, automatic ones that
+stalled, and up to 20 promoted automatically in the chosen window, each by its
+ID, source record IDs, dates, outcome code and chunk ID. **Approve** and
+**Reject** sign a waiting proposal with the name typed under **Reviewer**
+(`promote-review`); **Apply** publishes an approved one (`promote-apply`). Both
+run through the knowledge operation and need the proposal's ID. An automatic
+proposal takes no reviewer, so one that stalled before its review waits for the
+next automatic promotion. Since the page shows no Brain text, **Review in
+Project Brain** opens the first source record there to read before approving.
 
 Retrieval history outlives the 200 manifests a project keeps. This Harness folds
 each manifest once into a daily rollup in its own database, either when Memory use
@@ -1678,6 +1694,12 @@ contents again before launching it. Changed context requires a fresh preview. Ea
 chat follow-up also prepares a new capsule. These explicit retrievals disable the
 runtime's repeat-query heuristic while retaining its privacy and source eligibility
 rules. Sessions linked before memory ran by itself keep this flow.
+
+On an open session, **Memory** holds the next turn's settings instead: **Review
+context by hand** and, when it is ticked, the context query. A follow-up sends
+only what changed (`brain: {review, query}`); the task, knowledge root and goal
+stay as the session started them. With review off, the next message is the
+query again.
 
 A reviewed run's memory draft is saved when the run completes, as in any other
 session, and the conversation says what was saved. Task actions stay in the
@@ -2623,10 +2645,13 @@ Operating modes persisted at `<state>/omnigraph.json` (plus auto-generated clust
 
 ### Session lifecycle
 
-- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`, `shared_space`, `linked_session_ids`), persisted on the SQLite `sessions.omnigraph` column. Passing `linked_session_ids` automatically adds peer branches to `pull_branches`, updates reciprocal `linked_session_ids`, and records `SessionFollows` edges in Omnigraph.
+- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`, `shared_space`, `linked_session_ids`), persisted on the SQLite `sessions.omnigraph` column. Passing `linked_session_ids` automatically adds peer branches to `pull_branches`, updates reciprocal `linked_session_ids`, and records `SessionFollows` edges in Omnigraph. In the composer, a follow-up to an Omnigraph session may change **Pull context from branches**, **Focus query** and **Auto-publish**, and sends only the fields that changed; the branch, shared space, links and auto-merge stay as the session started, and a follow-up never turns Omnigraph on for a session without it.
 - Before a run launches, when `omnigraph.enabled` is `true`, Harness ensures the session branch (`session/<sid12>` or configured branch) exists, pulls any configured `pull_branches` (defaulting to `["main"]`), queries shared context atoms (plus read-only `knowledge/canonical` hits), attaches touched `files`, resolves eligible local `Project Brain` / `Memory Bank` references into `infra-core` `source-hints-v1`, and stores `injected_atoms` and a bounded capsule on the session prior to `awaiting_context` review (preserving the approved capsule after `context.run`). Unreachable Omnigraph servers record a session warning/event without blocking the Harness turn.
+- An injected atom that a `contradicts` relation links to another atom, in either direction (the `contradictions` stored query on the session branch and `knowledge/canonical`), gets a `Caution:` line under it in the capsule, naming the other atom and the relation's note, and the relation is kept on `session.omnigraph.contradiction_warnings` (`recommended_action: "review"`). Neither atom, nor the Brain record or chunk behind it, is retired or changed; a person resolves the relation.
+- `HARNESS_GRAPH_RISK_CALLER_HINTS=1` (Tier B, off by default) also adds to the source hints the indexed memory citing a caller that the session's run puts at risk (`edge_diffs.risk_callers` of the `run:<sid>` change, breaking risks first, at most eight files), after the files the atoms name. Any other value, or none, leaves the hints as they were and does not measure the run's graph. It has no held-out measurement of its own, so it stays off (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
 - `prompt::build` inserts the bounded `Shared Omnigraph Context` section (6,000-character cap, distinguishing verified canonical atoms from unverified reference context) and records it under the `"omnigraph"` bucket in `PromptLedger` (charted alongside Brain/Bank/Rules in `#context-usage`).
-- After a turn completes (including manual `/api/sessions/{id}/memory` saves, Clash, and Fleet runs), when `auto_publish` is not `false`, Harness validates `memory-draft` learnings against workspace sources and safety checks (`sensitive_label`, `instruction_like`), collects Clash/Fleet findings, touched files, and the turn outcome summary, publishes `ContextAtom` nodes with provenance metadata (`origin_layer`, `authority`, `privacy`, `brain_record_id`, `memory_id`, `record_revision`) and edges (`PublishedBy`, `TouchesFile`, `DerivedFrom`), optionally merges into `main` when `auto_merge` is `true`, and records a session `omnigraph` event. Canonical Knowledge/Brain/Memory mutations also trigger best-effort sync onto `knowledge/canonical`.
+- After a turn completes (including manual `/api/sessions/{id}/memory` saves, Clash, and Fleet runs), when `auto_publish` is not `false`, Harness validates `memory-draft` learnings against workspace sources and safety checks (`sensitive_label`, `instruction_like`), collects Clash/Fleet findings, touched files, and the turn outcome summary, publishes `ContextAtom` nodes with provenance metadata (`origin_layer`, `authority`, `privacy`, `brain_record_id`, `memory_id`, `record_revision`) and edges (`PublishedBy`, `TouchesFile`, `DerivedFrom`, and `MentionsSymbol` to a `SymbolRef` for each declaration a learning names in a file it touches, read from the session's workspace), optionally merges into `main` when `auto_merge` is `true`, and records a session `omnigraph` event. Canonical Knowledge/Brain/Memory mutations also trigger best-effort sync onto `knowledge/canonical`.
+- Publishing an atom — a turn's learnings, `POST /api/omnigraph/atoms`, or the canonical sync — links the declarations its title, summary or body names in the files it touches as `SymbolRef` nodes (`fqn` `<path>::<Owner>::<name>`) with `MentionsSymbol` edges (`role: "named"`); `POST /api/omnigraph/atoms` lists them as `symbols` in its reply. A name with a capital, an underscore or a digit counts wherever it stands as a word, a plain lowercase one only as code (in backticks, called, or after `::`, `->` or `.`), at most 12 from 8 files. The files are read from the session's workspace or the registered project — never from a path in the request — and only inside it. An edit that names other declarations replaces the atom's mentions.
 
 ### HTTP endpoints
 
@@ -2637,14 +2662,16 @@ All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in
 - `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...` — constellation nodes/edges, branches, and commits.
 - `GET /api/omnigraph/search?project_id=...&q=...&branch=...&kind=...&limit=...` — BM25/lexical hybrid search across atoms and neighbor context.
 - `GET /api/omnigraph/branches/diff?project_id=...&source=...&target=...` — 3-way branch diff (`added_atoms`, `updated_atoms`, `deleted_atoms`, `added_edges`, `deleted_edges`, dry-run conflict preview).
-- `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts), or `delete` branches.
-- `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links.
+- `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts) or `delete` branches, or `keep` one atom of a conflict. Omnigraph's own 409 conflicts name an atom without its values, so the diff and a conflicting merge add to each `ContextAtom` `divergent_update` the whole atom as the source and the target branch hold it, null columns included (`source_value`, `target_value`): one read of each branch whatever the number of conflicts (the branch's export only when an atom is past its 100 most recent), nothing without a `project_id` or for an atom of another project, and every other conflict as Omnigraph returned it. Omnigraph v0.15.0 compares whole rows: two branches that both changed an atom conflict while any property differs, `updated_at` and `source_branch` included, and converge only on identical rows, so an atom update, which stamps its branch and time, cannot settle one. `keep` (`project_id`, `atom_id`, `from`, `to`, optional `expected_updated_at` and `replaced_updated_at`) copies the atom onto `to` exactly as `from` stores it, every property included, and refuses with `409` when `from` holds another version than `expected_updated_at` or `to` another than `replaced_updated_at`. In the merge preview such a conflict offers **Keep source**, which keeps the source's atom on the target branch, and **Keep target**, which keeps the target's on the source; each names the two versions the preview showed, so a version a session published since is neither copied nor overwritten unseen, and the preview runs again. A `delete_vs_update`, an edge conflict, or a conflict without both values shows the buttons disabled with the reason.
+- `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links. An update of a named atom keeps what it leaves out: the six provenance fields, the verification, the creation time and the publishing session (`source_session_id`); only an explicit `session_id` takes the atom over and links that session (`PublishedBy`), and a field sent as `null` clears.
 - `POST /api/omnigraph/share` — inject/share selected `atom_ids` into a target session (`inject`, `reference`, `inject_and_link`, or `copy`), updating `session["omnigraph"]` and emitting a session event.
-- `POST /api/omnigraph/sync-knowledge` — project verified `Project Brain` records and active `Memory Bank` chunks onto the `knowledge/canonical` branch (with `TouchesFile` and `supersedes` edges).
+- `GET /api/omnigraph/file-context?project_id=…&path=…` — the context atoms that touch one file on `main` and `knowledge/canonical`, each once, with its capsule line and authority tag, the declarations of this file each names (`symbols`, as `Owner::name`), and the `contradictions` with one of them at either end.
+- `GET /api/projects/{project_id}/graph/memory-links?path=…[&previous_path=…]` — the project's memory that cites one file: active Project Brain records naming it among their files or sources, active Memory Bank chunks citing it (within the allowed privacy), and the Omnigraph atoms touching it. A file gone from the workspace, or a `previous_path` a commit renamed it from, adds a `hygiene_warnings` entry with `recommended_action: "review"`; nothing is retired or changed. `contradiction_warnings` lists the `contradicts` relations among the file's atoms (from `omnigraph.file_context`), each naming both atoms and, where an end is a Project Brain record or Memory Bank chunk, `linked` ids and `open` targets — also for review only. The dependency map's side panel shows these links for a selected file once they arrive, with each atom's named declarations and an **Open** button per contradicting record or chunk, opens a record or chunk in Knowledge, and says so when the request fails without touching the map. A commit's banner asks this route with `previous_path` for each file the commit renamed (at most 12, one request per file at a time, fresh for a minute) and shows the review warnings under the commit; once its answers are in, that commit's row in the commit dock shows **N to review**. Rows are never asked for a count of their own.
+- `POST /api/omnigraph/sync-knowledge` — project verified `Project Brain` records and active `Memory Bank` chunks onto the `knowledge/canonical` branch (with `TouchesFile` and `supersedes` edges, and `MentionsSymbol` edges for the declarations a record or chunk names in its files, read from the registered project; `symbols` counts them, and a synced atom whose named set did not change is not rewritten). The collection is read in pages of at most 1,000 items sorted by atom id; once every page is in hand, a layer read whole (`project-brain`, `memory-bank`) also loses the project's synced atoms it no longer carries — a retired, archived, superseded or stale record or chunk — with their edges (`deleted`, `deleted_atom_ids`). Atoms another project or a session put on the branch are never pruned, and pages that disagree on the total prune nothing. A run whose automatic save wrote verified records or promoted chunks starts the same sync in the background.
 - `POST /api/omnigraph/promote` — human-gated promotion of a `ContextAtom` into `Project Brain` (`attestation: "person"`) after `sensitive_label`, `instruction_like`, `provenance_problems`, and workspace `PublicationFiles` freshness checks, linking `brain_record_id` back onto the graph atom.
 - `GET|POST /api/omnigraph/export` — export scoped task, branch, or main Omnigraph context (`bundle` `harness.omnigraph.bundle.v1` JSON or raw `ndjson`, with optional `download=1` attachment download).
 - `POST /api/omnigraph/import` — import an exported JSON bundle or raw Omnigraph NDJSON onto a branch (creating from `from_branch` if requested, in `merge` or `replace` mode) and optionally inject `ConsumedBy` context into target sessions.
 - `POST /api/omnigraph/sessions/link` — link multiple Harness sessions in `shared_branch` (mutual) or `broadcast` mode, syncing branches/atoms, creating `SessionFollows` and `ConsumedBy` edges, updating `session["omnigraph"]`, and best-effort queuing live native `session_inbox` context notices.
 - `GET /api/omnigraph/changes?project_id=...&cursor=...&branch=...` — incremental commit/entity pulse feed.
-- `GET /api/omnigraph/commits/{commit_id}?project_id=...` — inspect commit metadata, `changes`, and affected `atoms`.
+- `GET /api/omnigraph/commits/{commit_id}?project_id=...` — inspect commit metadata, `changes`, and affected `atoms`. In the atom inspector, an Omnigraph snapshot (`commit_id`) opens here (`omnigraph-select-commit`), while a Git commit the atom names — its `git_commit` field, or a lowercase hex word of 7–40 characters with a letter and a digit standing alone in its tags, title, summary or body — gets a **Git:** button that opens the Code Map at that commit (`omnigraph-open-git-commit`).
 
