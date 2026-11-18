@@ -3,7 +3,6 @@ use serde_json::{json, Value as V};
 use std::collections::BTreeMap;
 use wasm_bindgen::JsCast;
 
-#[allow(dead_code)]
 pub(crate) mod files_map {
     use crate::{dom, model as m};
     use serde_json::{json, Value as V};
@@ -108,6 +107,7 @@ pub(crate) mod files_map {
         pub blocks: Vec<BlockGroup>,
     }
 
+    #[cfg(test)]
     #[derive(Clone, Debug)]
     pub(crate) struct FilesSurfaceOptions {
         pub group_by_service: bool,
@@ -120,6 +120,7 @@ pub(crate) mod files_map {
         pub root_id: Option<String>,
     }
 
+    #[cfg(test)]
     impl Default for FilesSurfaceOptions {
         fn default() -> Self {
             Self {
@@ -159,6 +160,7 @@ pub(crate) mod files_map {
         clean_bidi(path).replace('\\', "/")
     }
 
+    #[cfg(test)]
     pub(crate) fn escape_html(s: &str) -> String {
         let cleaned = clean_bidi(s);
         let mut out = String::with_capacity(cleaned.len());
@@ -623,6 +625,7 @@ pub(crate) mod files_map {
         (format!("{before}{lead}{text}{trail}{after}"), caret as u32)
     }
 
+    #[cfg(test)]
     pub(crate) fn render_files_surface(
         entries: &[FileTouchEntry],
         view: &str,
@@ -813,6 +816,7 @@ pub(crate) mod files_map {
         html
     }
 
+    #[cfg(test)]
     pub(crate) fn render_file_card_html(
         entry: &FileTouchEntry,
         actions: &[FileCardAction],
@@ -1140,6 +1144,8 @@ thread_local! {
         wasm_bindgen::closure::Closure::new(|_: web_sys::Event| {
             hide_card(false);
         });
+    static CARD_OPENER: std::cell::RefCell<Option<web_sys::Element>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn clean(s: &str) -> String {
@@ -2797,6 +2803,13 @@ fn run_card_actions(file: &V) -> Vec<FileCardAction> {
         data_service: None,
         data_path: None,
     });
+    actions.push(FileCardAction {
+        label: "Close".into(),
+        action: "run-card-close".into(),
+        payload: V::Null,
+        data_service: None,
+        data_path: None,
+    });
     actions
 }
 
@@ -2826,6 +2839,12 @@ fn show_card(run: &V, path: &str) {
     let Some(file) = run["files"].get(path) else {
         return;
     };
+    if let Some(active) = dom::document().active_element() {
+        let inside_card = dom::get(CARD).is_some_and(|card| card.contains(Some(&active)));
+        if !inside_card {
+            CARD_OPENER.with(|cell| *cell.borrow_mut() = Some(active));
+        }
+    }
     m::set("run-card", json!(path));
     if let Some(card) = dom::get(CARD) {
         let _ = card.remove_attribute("data-signature");
@@ -2838,11 +2857,14 @@ fn show_card(run: &V, path: &str) {
     let selector = format!("#{CARD} button");
     if let Ok(Some(first)) = dom::document().query_selector(&selector) {
         focus_node(&first);
+    } else if let Some(card) = dom::get(CARD) {
+        focus_node(&card);
     }
 }
 
-/// Puts the card away; `restore` gives the focus back to the chip it belongs to.
+/// Puts the card away; `restore` gives the focus back to the control that opened it (or its chip).
 fn hide_card(restore: bool) {
+    let opener = CARD_OPENER.with(|cell| cell.borrow_mut().take());
     let path = m::take("run-card");
     if path.is_string()
         || dom::get(CARD)
@@ -2853,7 +2875,9 @@ fn hide_card(restore: bool) {
         dom::hidden(CARD, true);
     }
     if restore {
-        if let Some(chip) = path.as_str().and_then(chip_of) {
+        if let Some(el) = opener.filter(|el| dom::document().contains(Some(el))) {
+            focus_node(&el);
+        } else if let Some(chip) = path.as_str().and_then(chip_of) {
             focus_node(&chip);
         }
     }
@@ -2925,14 +2949,15 @@ fn files_pane(run: &V, running: bool) {
             let _ = d.set_attribute("open", "");
             let _ = d.set_attribute("data-restore-key", &m::text(v, "name"));
             let files = m::array(&v["files"]);
-            dom::add(
-                &d,
-                &dom::el(
-                    "summary",
-                    "",
-                    &format!("{} · {}", m::text(v, "name"), files.len()),
-                ),
+            let summary = dom::el(
+                "summary",
+                "",
+                &format!("{} · {}", m::text(v, "name"), files.len()),
             );
+            let _ = summary.set_attribute("role", "treeitem");
+            let _ = summary.set_attribute("aria-expanded", "true");
+            let _ = summary.set_attribute("tabindex", "-1");
+            dom::add(&d, &summary);
             for file in files {
                 let path = m::text(&file, "path");
                 let outside = m::yes(&file["outside"]);
@@ -2945,11 +2970,14 @@ fn files_pane(run: &V, running: bool) {
                 );
                 let b = dom::button(&label, "run-reveal", file["event_id"].clone());
                 let _ = b.set_attribute("data-focus-key", &path);
+                let _ = b.set_attribute("role", "treeitem");
+                let _ = b.set_attribute("tabindex", "-1");
                 dom::add(&row, &b);
                 if !outside && !path.is_empty() {
                     let map_btn = dom::button("Map", "inspect-file-graph", json!({"path": path}));
                     map_btn.set_class_name("button compact");
                     let _ = map_btn.set_attribute("data-path", &path);
+                    let _ = map_btn.set_attribute("tabindex", "-1");
                     let _ = map_btn
                         .set_attribute("aria-label", &format!("Show {path} on dependency map"));
                     dom::add(&row, &map_btn);
@@ -2959,6 +2987,9 @@ fn files_pane(run: &V, running: bool) {
             d
         },
     );
+    if let Some(tree) = dom::get("run-tree") {
+        dom::sync_roving_widget(&tree);
+    }
     // An open card follows its file; a file that is gone, or a map that is, takes it along.
     if let Some(path) = card_path() {
         match run["files"].get(&path) {
@@ -3196,8 +3227,7 @@ pub fn render() {
         // launch has one.
         dom::hidden(&button, name != "files" && !has(&run, name));
         dom::attr(&button, "aria-selected", truth(selected));
-        // Every shown tab is a tab stop: the page has no arrow-key handling for the tab list.
-        dom::attr(&button, "tabindex", "0");
+        dom::attr(&button, "tabindex", if selected { "0" } else { "-1" });
         dom::hidden(&format!("run-pane-{name}"), !selected);
     }
 }
@@ -3234,12 +3264,397 @@ pub fn activity(event: &V) {
     crate::activity::observe_session(&sid, event);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutcomeFindingCard {
+    key: String,
+    severity_class: String,
+    severity_label: String,
+    state_class: Option<String>,
+    state_label: Option<String>,
+    heading: String,
+    location: Option<String>,
+    claim: String,
+    evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClashTurnCard {
+    key: String,
+    state_class: String,
+    state_label: String,
+    heading: String,
+    meta: Option<String>,
+    summary: String,
+    error: Option<String>,
+}
+
+fn sanitize_token(raw: &str, fallback: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = true;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if (ch == '-' || ch == '_' || ch.is_ascii_whitespace()) && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        fallback.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn format_finding_location(file: &str, line: &V) -> Option<String> {
+    let file = file.trim();
+    if file.is_empty() {
+        return None;
+    }
+    if let Some(num) = line.as_u64().filter(|&n| n > 0) {
+        Some(format!("{file}:{num}"))
+    } else if let Some(text) = line
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "0")
+    {
+        Some(format!("{file}:{text}"))
+    } else {
+        Some(file.to_owned())
+    }
+}
+
+fn non_empty_summary_text(v: &V, keys: &[&str]) -> String {
+    for key in keys {
+        let text = m::text(v, key);
+        if !text.trim().is_empty() {
+            return text.trim().to_owned();
+        }
+    }
+    if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return s.to_owned();
+    }
+    m::summary(v)
+}
+
+fn format_clash_history(item: &V) -> Option<String> {
+    let history = m::array(&item["history"]);
+    let last = history.last()?;
+    let cycle = last["cycle"].as_u64().map(|n| format!("c{n}"));
+    let round = last["round"].as_u64().map(|n| format!("r{n}"));
+    let actor = m::label(m::text(last, "actor").trim());
+    let action = m::label(m::text(last, "action").trim());
+    let note = m::text(last, "note");
+    let head = [
+        cycle,
+        round,
+        (!actor.is_empty()).then_some(actor),
+        (!action.is_empty()).then_some(action),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
+    let tail = note.trim();
+    let entry = match (head.is_empty(), tail.is_empty()) {
+        (false, false) => format!("{head} — {tail}"),
+        (false, true) => head,
+        (true, false) => tail.to_owned(),
+        (true, true) => String::new(),
+    };
+    if entry.is_empty() {
+        None
+    } else {
+        Some(format!("History ({}): {entry}", history.len()))
+    }
+}
+
+fn build_fleet_finding_card(item: &V, idx: usize) -> OutcomeFindingCard {
+    let raw_sev = m::text(item, "severity");
+    let severity_class = sanitize_token(&raw_sev, "info");
+    let severity_label = if raw_sev.trim().is_empty() {
+        "info".to_owned()
+    } else {
+        m::label(raw_sev.trim())
+    };
+    let lens = m::label(m::text(item, "lens").trim());
+    let heading = if lens.is_empty() {
+        "Finding".to_owned()
+    } else {
+        lens
+    };
+    let location = format_finding_location(&m::text(item, "file"), &item["line"]);
+    let claim = non_empty_summary_text(item, &["claim", "summary", "title"]);
+    let evidence = m::text(item, "evidence");
+    let evidence = (!evidence.trim().is_empty()).then(|| evidence.trim().to_owned());
+    let key = format!(
+        "{idx}:{severity_class}:{}:{claim}",
+        location.as_deref().unwrap_or("")
+    );
+    OutcomeFindingCard {
+        key,
+        severity_class,
+        severity_label,
+        state_class: None,
+        state_label: None,
+        heading,
+        location,
+        claim,
+        evidence,
+    }
+}
+
+fn build_clash_item_card(item: &V, idx: usize) -> OutcomeFindingCard {
+    let raw_sev = m::text(item, "severity");
+    let severity_class = sanitize_token(&raw_sev, "unrated");
+    let severity_label = if raw_sev.trim().is_empty() {
+        "unrated".to_owned()
+    } else {
+        m::label(raw_sev.trim())
+    };
+    let raw_status = m::text(item, "status");
+    let state_class = sanitize_token(&raw_status, "open");
+    let state_label = if raw_status.trim().is_empty() {
+        "open".to_owned()
+    } else {
+        m::label(raw_status.trim())
+    };
+    let id = m::text(item, "id");
+    let origin = m::label(m::text(item, "origin").trim());
+    let kind = m::label(m::text(item, "kind").trim());
+    let role_kind = [origin, kind]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let heading = match (id.trim().is_empty(), role_kind.is_empty()) {
+        (false, false) => format!("{} · {role_kind}", id.trim()),
+        (false, true) => id.trim().to_owned(),
+        (true, false) => role_kind,
+        (true, true) => "Clash item".to_owned(),
+    };
+    let location = format_finding_location(&m::text(item, "file"), &item["line"]);
+    let claim = non_empty_summary_text(item, &["claim", "summary", "title"]);
+    let raw_ev = m::text(item, "evidence");
+    let evidence = match (raw_ev.trim().is_empty(), format_clash_history(item)) {
+        (false, Some(hist)) => Some(format!("{}\n{hist}", raw_ev.trim())),
+        (false, None) => Some(raw_ev.trim().to_owned()),
+        (true, Some(hist)) => Some(hist),
+        (true, None) => None,
+    };
+    let key = format!(
+        "{idx}:{id}:{state_class}:{}:{claim}",
+        location.as_deref().unwrap_or("")
+    );
+    OutcomeFindingCard {
+        key,
+        severity_class,
+        severity_label,
+        state_class: Some(state_class),
+        state_label: Some(state_label),
+        heading,
+        location,
+        claim,
+        evidence,
+    }
+}
+
+fn build_clash_turn_card(turn: &V, idx: usize) -> ClashTurnCard {
+    let (state_class, state_label) = match turn["ok"].as_bool() {
+        Some(true) => ("resolved".to_owned(), "ok".to_owned()),
+        Some(false) => ("disputed".to_owned(), "failed".to_owned()),
+        None => {
+            let status = m::text(turn, "status");
+            let cls = sanitize_token(&status, "open");
+            let lbl = if status.trim().is_empty() {
+                "recorded".to_owned()
+            } else {
+                m::label(status.trim())
+            };
+            (cls, lbl)
+        }
+    };
+    let cycle = turn["cycle"].as_u64().map(|n| format!("Cycle {n}"));
+    let round = turn["round"].as_u64().map(|n| format!("Round {n}"));
+    let role = m::label(m::text(turn, "role").trim());
+    let provider = m::text(turn, "provider");
+    let actor = match (role.is_empty(), provider.trim().is_empty()) {
+        (false, false) => Some(format!("{role} ({})", provider.trim())),
+        (false, true) => Some(role),
+        (true, false) => Some(provider.trim().to_owned()),
+        (true, true) => None,
+    };
+    let heading = [cycle, round, actor]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let heading = if heading.is_empty() {
+        format!("Turn {}", idx + 1)
+    } else {
+        heading
+    };
+    let duration = turn["seconds"].as_f64().map(|s| format!("{s:.1}s"));
+    let cost = turn["cost_usd"].as_f64().map(|c| format!("${c:.4}"));
+    let meta = [duration, cost]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let meta = (!meta.is_empty()).then_some(meta);
+    let summary_text = m::text(turn, "summary");
+    let error_text = m::text(turn, "error");
+    let (summary, error) = if !summary_text.trim().is_empty() {
+        (
+            summary_text.trim().to_owned(),
+            (!error_text.trim().is_empty()).then(|| error_text.trim().to_owned()),
+        )
+    } else if !error_text.trim().is_empty() {
+        (error_text.trim().to_owned(), None)
+    } else {
+        (non_empty_summary_text(turn, &["title", "status"]), None)
+    };
+    let key = format!("{idx}:{state_class}:{heading}");
+    ClashTurnCard {
+        key,
+        state_class,
+        state_label,
+        heading,
+        meta,
+        summary,
+        error,
+    }
+}
+
+fn fleet_summary_text(findings: &[V], cost: &V) -> String {
+    let finding_count = count(findings.len() as u64, "finding");
+    let cost_text = cost.as_f64().map(|c| format!("${c:.4}")).or_else(|| {
+        let s = m::string(cost);
+        (!s.trim().is_empty()).then(|| s.trim().to_owned())
+    });
+    match cost_text {
+        Some(c) => format!("{finding_count} · reported cost {c}"),
+        None => finding_count,
+    }
+}
+
+fn fleet_skipped_text(result: &V) -> String {
+    let skipped = m::array(&result["skipped"])
+        .into_iter()
+        .filter_map(|item| {
+            let text = item
+                .as_str()
+                .map(str::trim)
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::summary(&item));
+            (!text.is_empty()).then_some(text)
+        })
+        .collect::<Vec<_>>();
+    if skipped.is_empty() {
+        String::new()
+    } else {
+        format!("Skipped lenses: {}", skipped.join(", "))
+    }
+}
+
+fn clash_outcome_summary(r: &V, items: &[V], turns: &[V]) -> String {
+    let direct = m::text(r, "summary");
+    if !direct.trim().is_empty() {
+        return direct.trim().to_owned();
+    }
+    let verdict = m::label(m::text(r, "verdict").trim());
+    let status = m::label(m::text(r, "status").trim());
+    let head = if !verdict.is_empty() {
+        verdict
+    } else if !status.is_empty() {
+        status
+    } else {
+        String::new()
+    };
+    let mut parts = Vec::new();
+    if !head.is_empty() {
+        parts.push(head);
+    }
+    if let Some(cycles) = r["cycles"].as_u64() {
+        parts.push(count(cycles, "cycle"));
+    }
+    parts.push(count(items.len() as u64, "item"));
+    parts.push(count(turns.len() as u64, "turn"));
+    if let Some(cost) = r["cost_usd"].as_f64() {
+        parts.push(format!("${cost:.4}"));
+    }
+    parts.join(" · ")
+}
+
+fn render_outcome_finding_card(card: &OutcomeFindingCard) -> web_sys::Element {
+    let article = dom::el("article", "fleet-finding", "");
+    let heading = dom::el("div", "fleet-finding-heading", "");
+    dom::add(
+        &heading,
+        &dom::el(
+            "span",
+            &format!("fleet-severity {}", card.severity_class),
+            &card.severity_label,
+        ),
+    );
+    if let (Some(sc), Some(sl)) = (&card.state_class, &card.state_label) {
+        dom::add(&heading, &dom::el("span", &format!("clash-state {sc}"), sl));
+    }
+    dom::add(&heading, &dom::el("strong", "", &card.heading));
+    if let Some(location) = &card.location {
+        dom::add(
+            &heading,
+            &dom::el("span", "fleet-finding-location", location),
+        );
+    }
+    dom::add(&article, &heading);
+    dom::add(&article, &dom::el("p", "fleet-finding-claim", &card.claim));
+    if let Some(evidence) = &card.evidence {
+        dom::add(&article, &dom::el("p", "fleet-evidence", evidence));
+    }
+    article
+}
+
+fn render_clash_turn_card(card: &ClashTurnCard) -> web_sys::Element {
+    let article = dom::el("article", "clash-turn", "");
+    let heading = dom::el("div", "fleet-finding-heading", "");
+    dom::add(
+        &heading,
+        &dom::el(
+            "span",
+            &format!("clash-state {}", card.state_class),
+            &card.state_label,
+        ),
+    );
+    dom::add(&heading, &dom::el("strong", "", &card.heading));
+    if let Some(meta) = &card.meta {
+        dom::add(&heading, &dom::el("span", "fleet-finding-location", meta));
+    }
+    dom::add(&article, &heading);
+    dom::add(
+        &article,
+        &dom::el("p", "fleet-finding-claim", &card.summary),
+    );
+    if let Some(error) = &card.error {
+        dom::add(&article, &dom::el("p", "fleet-evidence", error));
+    }
+    article
+}
+
 pub fn outcomes(session: &V) {
     let fleet = session["workflow"] == "fleet-review";
     let result = &session["fleet_result"];
     dom::hidden("fleet-progress", !fleet);
     dom::hidden("fleet-outcome", !fleet || result.is_null());
     if fleet {
+        let findings = m::array(&result["findings"]);
+        let cards = findings
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| json!({"idx": idx, "item": item}))
+            .collect::<Vec<_>>();
         dom::text(
             "fleet-stage",
             &format!(
@@ -3250,20 +3665,37 @@ pub fn outcomes(session: &V) {
         );
         dom::text(
             "fleet-result-summary",
-            &format!(
-                "{} findings · reported cost {}",
-                m::array(&result["findings"]).len(),
-                m::string(&result["cost_usd"])
-            ),
+            &fleet_summary_text(&findings, &result["cost_usd"]),
         );
-        dom::rows("fleet-findings", &m::array(&result["findings"]));
-        dom::text(
-            "fleet-report-text",
-            result["report"]
-                .as_str()
-                .or_else(|| result["preview"].as_str())
-                .unwrap_or(""),
+        let skipped_text = fleet_skipped_text(result);
+        dom::text("fleet-skipped", &skipped_text);
+        dom::hidden("fleet-skipped", skipped_text.is_empty());
+        dom::keyed_render(
+            "fleet-findings",
+            &cards,
+            |entry| {
+                let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+                build_fleet_finding_card(&entry["item"], idx).key
+            },
+            |entry| {
+                let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+                let card = build_fleet_finding_card(&entry["item"], idx);
+                render_outcome_finding_card(&card)
+            },
         );
+        if findings.is_empty() {
+            dom::append(
+                "fleet-findings",
+                &dom::el("p", "fleet-note", "No findings recorded."),
+            );
+        }
+        let report_text = result["report"]
+            .as_str()
+            .or_else(|| result["preview"].as_str())
+            .unwrap_or("")
+            .trim();
+        dom::text("fleet-report-text", report_text);
+        dom::hidden("fleet-report", report_text.is_empty());
         dom::hidden(
             "fleet-decision-actions",
             session["status"] != "awaiting_approval",
@@ -3284,10 +3716,70 @@ pub fn outcomes(session: &V) {
     dom::hidden("clash-outcome", !clash || session["clash_result"].is_null());
     if clash {
         let r = &session["clash_result"];
-        dom::text("clash-outcome-summary", &m::summary(r));
-        dom::rows("clash-items", &m::array(&r["findings"]));
-        dom::rows("clash-turn-list", &m::array(&r["turns"]));
-        dom::text("clash-report-text", &m::text(r, "report"));
+        let items = if r["items"].is_array() {
+            m::array(&r["items"])
+        } else {
+            m::array(&r["findings"])
+        };
+        let turns = m::array(&r["turns"]);
+        dom::text(
+            "clash-outcome-summary",
+            &clash_outcome_summary(r, &items, &turns),
+        );
+        let verdict_note = m::text(r, "verdict_note");
+        dom::text("clash-verdict-note", verdict_note.trim());
+        dom::hidden("clash-verdict-note", verdict_note.trim().is_empty());
+        let item_cards = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| json!({"idx": idx, "item": item}))
+            .collect::<Vec<_>>();
+        dom::keyed_render(
+            "clash-items",
+            &item_cards,
+            |entry| {
+                let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+                build_clash_item_card(&entry["item"], idx).key
+            },
+            |entry| {
+                let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+                let card = build_clash_item_card(&entry["item"], idx);
+                render_outcome_finding_card(&card)
+            },
+        );
+        if items.is_empty() {
+            dom::append(
+                "clash-items",
+                &dom::el("p", "fleet-note", "No clash items recorded."),
+            );
+        }
+        let turn_cards = turns
+            .iter()
+            .enumerate()
+            .map(|(idx, turn)| json!({"idx": idx, "turn": turn}))
+            .collect::<Vec<_>>();
+        dom::keyed_render(
+            "clash-turn-list",
+            &turn_cards,
+            |entry| {
+                let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+                build_clash_turn_card(&entry["turn"], idx).key
+            },
+            |entry| {
+                let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+                let card = build_clash_turn_card(&entry["turn"], idx);
+                render_clash_turn_card(&card)
+            },
+        );
+        if turns.is_empty() {
+            dom::append(
+                "clash-turn-list",
+                &dom::el("p", "fleet-note", "No turns recorded."),
+            );
+        }
+        let report = m::text(r, "report");
+        dom::text("clash-report-text", report.trim());
+        dom::hidden("clash-report", report.trim().is_empty());
     }
     if session["merge"].is_object() {
         dom::hidden("merge-context", false);
@@ -3368,6 +3860,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
                 show_card(&shown(), path);
             }
         }
+        "run-card-close" => hide_card(true),
         "run-add-path" => {
             hide_card(false);
             insert_draft(payload.as_str().unwrap_or(""));
@@ -4744,5 +5237,74 @@ mod permission_tests {
         assert_eq!(expired["summary"], "touch out.txt");
         assert_eq!(expired["detail"], "Not in allowlist");
         assert_eq!(permission_heading(&expired), "No longer waiting · Shell");
+    }
+
+    #[test]
+    fn outcome_cards_format_fleet_findings_clash_items_and_turns() {
+        let finding = json!({
+            "lens": "security_audit",
+            "severity": "high",
+            "claim": "Unsanitized path parameter",
+            "file": "src/api.rs",
+            "line": 42,
+            "evidence": "User input passes directly to fs::read"
+        });
+        let fleet_card = build_fleet_finding_card(&finding, 0);
+        assert_eq!(fleet_card.severity_class, "high");
+        assert_eq!(fleet_card.heading, "security audit");
+        assert_eq!(fleet_card.location.as_deref(), Some("src/api.rs:42"));
+        assert_eq!(fleet_card.claim, "Unsanitized path parameter");
+        assert_eq!(
+            fleet_card.evidence.as_deref(),
+            Some("User input passes directly to fs::read")
+        );
+
+        let clash_item = json!({
+            "id": "CL-1",
+            "kind": "objection",
+            "origin": "challenger",
+            "severity": "medium",
+            "status": "disputed",
+            "file": "src/auth.rs",
+            "line": 17,
+            "claim": "Token expiry check skipped on refresh",
+            "evidence": "branch misses exp check",
+            "history": [
+                {"cycle": 1, "round": 2, "actor": "implementer", "action": "defended", "note": "checked upstream"}
+            ]
+        });
+        let clash_card = build_clash_item_card(&clash_item, 1);
+        assert_eq!(clash_card.severity_class, "medium");
+        assert_eq!(clash_card.state_class.as_deref(), Some("disputed"));
+        assert_eq!(clash_card.heading, "CL-1 · challenger objection");
+        assert_eq!(clash_card.location.as_deref(), Some("src/auth.rs:17"));
+        assert!(clash_card
+            .evidence
+            .as_deref()
+            .unwrap()
+            .contains("History (1): c1 r2 implementer defended"));
+
+        let turn = json!({
+            "cycle": 1,
+            "round": 2,
+            "role": "challenger",
+            "provider": "codex",
+            "ok": true,
+            "summary": "Verified boundary guard",
+            "seconds": 3.45,
+            "cost_usd": 0.0125
+        });
+        let turn_card = build_clash_turn_card(&turn, 0);
+        assert_eq!(turn_card.state_class, "resolved");
+        assert_eq!(turn_card.state_label, "ok");
+        assert_eq!(turn_card.heading, "Cycle 1 · Round 2 · challenger (codex)");
+        assert_eq!(turn_card.meta.as_deref(), Some("3.5s · $0.0125"));
+        assert_eq!(turn_card.summary, "Verified boundary guard");
+
+        let card_actions = run_card_actions(&json!({"path": "src/lib.rs", "event_id": "e1"}));
+        assert_eq!(
+            card_actions.last().map(|a| a.action.as_str()),
+            Some("run-card-close")
+        );
     }
 }

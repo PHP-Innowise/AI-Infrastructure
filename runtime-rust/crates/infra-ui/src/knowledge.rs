@@ -1,8 +1,88 @@
 use crate::{api, dom, model as m, session};
 use serde_json::{json, Value as V};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use wasm_bindgen::JsCast;
+use std::rc::Rc;
+use wasm_bindgen::{closure::Closure, JsCast};
+
+const MOBILE_BREAKPOINT_QUERY: &str = "(max-width:760px)";
+
+fn viewport_is_mobile() -> bool {
+    dom::window()
+        .match_media(MOBILE_BREAKPOINT_QUERY)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.matches())
+}
+
+fn usage_page_size(mobile: bool) -> usize {
+    if mobile {
+        6
+    } else {
+        12
+    }
+}
+
+fn analytics_slice(raw: &[V], mobile: bool) -> &[V] {
+    if mobile && raw.len() > 80 {
+        &raw[raw.len() - 80..]
+    } else {
+        raw
+    }
+}
+
+fn horizon_bin_days(mobile: bool) -> i64 {
+    if mobile {
+        14
+    } else {
+        7
+    }
+}
+
+fn horizon_ticks(mobile: bool) -> &'static [i64] {
+    if mobile {
+        &[0, 180, 365]
+    } else {
+        &[-30, 0, 90, 180, 270, 365]
+    }
+}
+
+fn reflow_responsive_views() {
+    if m::data("memory-use").is_object() {
+        render_memory();
+    }
+    if !m::array(&m::data("context-turns")).is_empty() {
+        render_usage();
+    }
+}
+
+fn sync_responsive_viewport(last_mobile: &Cell<bool>) {
+    let mobile = viewport_is_mobile();
+    if last_mobile.replace(mobile) != mobile {
+        reflow_responsive_views();
+    }
+}
+
+fn wire_responsive_reflow() {
+    let last_mobile = Rc::new(Cell::new(viewport_is_mobile()));
+    if let Ok(Some(media)) = dom::window().match_media(MOBILE_BREAKPOINT_QUERY) {
+        let tracked = Rc::clone(&last_mobile);
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            sync_responsive_viewport(&tracked);
+        });
+        let _ = media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    let resize_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        sync_responsive_viewport(&last_mobile);
+    });
+    let _ = dom::window()
+        .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref());
+    resize_cb.forget();
+}
+
 pub fn initialize() {
+    wire_responsive_reflow();
     m::set("memory-window", json!(30));
     for (days, label) in [(7, "7 d"), (30, "30 d"), (90, "90 d"), (0, "All")] {
         let b = dom::button(label, "memory-window", json!(days));
@@ -2798,17 +2878,7 @@ fn render_usage() {
     }
 
     let page = m::data("context-page").as_u64().unwrap_or(0) as usize;
-    let size = if dom::window()
-        .match_media("(max-width:760px)")
-        .ok()
-        .flatten()
-        .map(|m| m.matches())
-        .unwrap_or(false)
-    {
-        6
-    } else {
-        12
-    };
+    let size = usage_page_size(viewport_is_mobile());
     let page = page.min(turns.len().saturating_sub(1) / size);
     let end = turns.len() - page * size;
     let shown = &turns[end.saturating_sub(size)..end];
@@ -3372,17 +3442,8 @@ fn memory_table_sort_dir(sort: &V, default_field: &str, field: &str) -> Option<&
 
 fn analytics(data: &V, _model: &V) {
     let raw = m::array(&data["retrievals"]["items"]);
-    let mobile = dom::window()
-        .match_media("(max-width:760px)")
-        .ok()
-        .flatten()
-        .map(|m| m.matches())
-        .unwrap_or(false);
-    let shown = if mobile && raw.len() > 80 {
-        &raw[raw.len() - 80..]
-    } else {
-        &raw[..]
-    };
+    let mobile = viewport_is_mobile();
+    let shown = analytics_slice(&raw, mobile);
     let offset = raw.len() - shown.len();
 
     if let Some(section) = dom::get("memory-use-strip") {
@@ -3609,7 +3670,7 @@ fn analytics(data: &V, _model: &V) {
             let bins = dom::el("div", "memory-horizon-bins", "");
             let _ = bins.set_attribute("role", "group");
             let _ = bins.set_attribute("data-memory-options", "chunks");
-            let bin = if mobile { 14 } else { 7 };
+            let bin = horizon_bin_days(mobile);
             let mut groups: BTreeMap<i64, Vec<V>> = BTreeMap::new();
             for chunk in &chunks {
                 if let Some(day) = day_distance(
@@ -3695,11 +3756,7 @@ fn analytics(data: &V, _model: &V) {
             dom::add(&chart, &bins);
             dom::add(&horizon, &chart);
             let ticks = dom::el("div", "memory-horizon-ticks", "");
-            for day in if mobile {
-                vec![0, 180, 365]
-            } else {
-                vec![-30, 0, 90, 180, 270, 365]
-            } {
+            for &day in horizon_ticks(mobile) {
                 let tick = dom::el(
                     "span",
                     "",
@@ -4755,5 +4812,21 @@ mod tests {
             super::memory_table_sort_dir(&json!({"field": "bytes", "desc": true}), "id", "id"),
             None
         );
+    }
+
+    #[test]
+    fn responsive_knowledge_density_scales_by_breakpoint() {
+        assert_eq!(super::usage_page_size(true), 6);
+        assert_eq!(super::usage_page_size(false), 12);
+        assert_eq!(super::horizon_bin_days(true), 14);
+        assert_eq!(super::horizon_bin_days(false), 7);
+        assert_eq!(super::horizon_ticks(true), &[0, 180, 365]);
+        assert_eq!(super::horizon_ticks(false), &[-30, 0, 90, 180, 270, 365]);
+
+        let items: Vec<_> = (0..100).map(|i| json!(i)).collect();
+        let mobile_slice = super::analytics_slice(&items, true);
+        assert_eq!(mobile_slice.len(), 80);
+        assert_eq!(mobile_slice[0], json!(20));
+        assert_eq!(super::analytics_slice(&items, false).len(), 100);
     }
 }

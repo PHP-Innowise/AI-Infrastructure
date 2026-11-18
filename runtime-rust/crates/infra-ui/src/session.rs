@@ -278,7 +278,195 @@ const PREF_FIELDS: &[&str] = &[
     "omnigraph-auto-publish",
     "omnigraph-auto-merge",
 ];
+fn template_content_node(id: &str) -> Option<web_sys::Node> {
+    let template = dom::get(id)?;
+    js_sys::Reflect::get(&template, &"content".into())
+        .ok()
+        .and_then(|v| v.dyn_into::<web_sys::Node>().ok())
+}
+
+fn hydrate_rabbit_svgs() {
+    let Some(content) = template_content_node("rabbit-svg-template") else {
+        return;
+    };
+    for slot in dom::all(".composer-rabbit") {
+        if slot.first_element_child().is_some() {
+            continue;
+        }
+        if let Ok(cloned) = content.clone_node_with_deep(true) {
+            let _ = slot.append_child(&cloned);
+        }
+    }
+}
+
+fn hydrate_embedded_graph_panels() {
+    let Some(content) = template_content_node("embedded-graph-panel-template") else {
+        return;
+    };
+    for host in dom::all("[data-graph-prefix]") {
+        if host.first_element_child().is_some() {
+            continue;
+        }
+        let Some(prefix) = host
+            .get_attribute("data-graph-prefix")
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let heading_tag = host
+            .get_attribute("data-graph-heading")
+            .filter(|s| matches!(s.as_str(), "h2" | "h3" | "h4"))
+            .unwrap_or_else(|| "h4".into());
+        let title = host
+            .get_attribute("data-graph-title")
+            .unwrap_or_else(|| "Code graph".into());
+        let scope = host
+            .get_attribute("data-graph-scope")
+            .unwrap_or_else(|| "Code graph".into());
+        let Ok(cloned) = content.clone_node_with_deep(true) else {
+            continue;
+        };
+        if host.append_child(&cloned).is_err() {
+            continue;
+        }
+        if let Ok(nodes) = host.query_selector_all("[data-graph-id]") {
+            for i in 0..nodes.length() {
+                if let Some(el) = nodes
+                    .item(i)
+                    .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                {
+                    if let Some(suffix) = el.get_attribute("data-graph-id") {
+                        let _ = el.set_attribute("id", &format!("{prefix}-{suffix}"));
+                        let _ = el.remove_attribute("data-graph-id");
+                    }
+                }
+            }
+        }
+        for (source_attr, target_attr) in [
+            ("data-graph-controls", "aria-controls"),
+            ("data-graph-labelledby", "aria-labelledby"),
+        ] {
+            let selector = format!("[{source_attr}]");
+            if let Ok(nodes) = host.query_selector_all(&selector) {
+                for i in 0..nodes.length() {
+                    if let Some(el) = nodes
+                        .item(i)
+                        .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                    {
+                        if let Some(suffix) = el.get_attribute(source_attr) {
+                            let _ = el.set_attribute(target_attr, &format!("{prefix}-{suffix}"));
+                            let _ = el.remove_attribute(source_attr);
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(nodes) = host.query_selector_all("[data-graph-role]") {
+            for i in 0..nodes.length() {
+                let Some(el) = nodes
+                    .item(i)
+                    .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                else {
+                    continue;
+                };
+                let role = el.get_attribute("data-graph-role").unwrap_or_default();
+                let _ = el.remove_attribute("data-graph-role");
+                match role.as_str() {
+                    "title" => {
+                        if heading_tag != "h4" {
+                            let heading = dom::el(&heading_tag, "session-graph-title", &title);
+                            let _ = heading.set_attribute("id", &format!("{prefix}-title"));
+                            let _ = el.replace_with_with_node_1(&heading);
+                        } else {
+                            el.set_text_content(Some(&title));
+                        }
+                    }
+                    "toolbar" => {
+                        let _ = el.set_attribute("aria-label", &format!("{scope} controls"));
+                    }
+                    "filter-label" => {
+                        el.set_text_content(Some(if prefix == "session-graph" {
+                            "Filter graph names"
+                        } else {
+                            "Filter service graph names"
+                        }));
+                    }
+                    "crumbs" => {
+                        let label = match prefix.as_str() {
+                            "session-graph" => "Graph breadcrumbs",
+                            "system-member-graph" => "Service graph breadcrumbs",
+                            _ => "Change service graph breadcrumbs",
+                        };
+                        let _ = el.set_attribute("aria-label", label);
+                    }
+                    "canvas" => {
+                        let label = match prefix.as_str() {
+                            "session-graph" => "Interactive code graph canvas",
+                            "system-member-graph" => "Interactive service code graph canvas",
+                            _ => "Interactive change service code graph canvas",
+                        };
+                        let _ = el.set_attribute("aria-label", label);
+                    }
+                    "side" => {
+                        let label = match prefix.as_str() {
+                            "session-graph" => "Selected code unit details",
+                            "system-member-graph" => "Selected service code unit details",
+                            _ => "Selected change service code unit details",
+                        };
+                        let _ = el.set_attribute("aria-label", label);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn hydrate_templates() {
+    hydrate_rabbit_svgs();
+    hydrate_embedded_graph_panels();
+}
+
+pub fn normalize_mobile_pane(pane: &str) -> &'static str {
+    if pane == "graph" {
+        "graph"
+    } else {
+        "chat"
+    }
+}
+
+pub fn set_mobile_pane(pane: &str) {
+    let pane = normalize_mobile_pane(pane);
+    dom::attr("sessions-view", "data-mobile-pane", pane);
+    dom::attr("sessions-workspace", "data-mobile-pane", pane);
+    let is_graph = pane == "graph";
+    dom::attr(
+        "session-mobile-tab-chat",
+        "aria-selected",
+        if is_graph { "false" } else { "true" },
+    );
+    dom::attr(
+        "session-mobile-tab-chat",
+        "tabindex",
+        if is_graph { "-1" } else { "0" },
+    );
+    dom::attr(
+        "session-mobile-tab-graph",
+        "aria-selected",
+        if is_graph { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-mobile-tab-graph",
+        "tabindex",
+        if is_graph { "0" } else { "-1" },
+    );
+    if is_graph {
+        crate::graph_map::sync_embedded(false);
+    }
+}
+
 pub fn initialize() {
+    hydrate_templates();
     for prefix in ["session-budgets", "creator-budgets", "creator-run-budgets"] {
         budget_editor(prefix);
     }
@@ -319,6 +507,16 @@ pub fn initialize() {
         let _ = media.add_event_listener_with_callback("change", c.as_ref().unchecked_ref());
         c.forget();
     }
+    if let Ok(Some(mobile_media)) = dom::window().match_media("(max-width:920px)") {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+            if m::read(|s| s.view == "sessions") {
+                crate::graph_map::sync_embedded(false);
+            }
+        });
+        let _ =
+            mobile_media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
     let capture_click = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
         if let Some(target) = event
             .target()
@@ -335,6 +533,7 @@ pub fn initialize() {
         true,
     );
     capture_click.forget();
+    dom::wire_a11y_widgets();
 }
 fn apply_theme(preference: &str) {
     let dark = dom::window()
@@ -3827,6 +4026,7 @@ pub async fn event(
                 crate::graph::load(true).await;
             });
         }
+        set_mobile_pane("graph");
         dom::attr("session-graph-workspace", "tabindex", "-1");
         if let Some(el) = dom::get("session-graph-workspace") {
             el.scroll_into_view();
@@ -3905,6 +4105,19 @@ pub async fn event(
                 });
                 render_files();
             }
+        }
+        "session-mobile-pane" => {
+            let pane = payload
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if id == "session-mobile-tab-graph" {
+                        "graph"
+                    } else {
+                        "chat"
+                    }
+                });
+            set_mobile_pane(pane);
         }
         "session-settings-toggle" => {
             let open = dom::get("session-settings")
@@ -4144,6 +4357,7 @@ pub async fn event(
                 if m::read(|s| s.view != "sessions") {
                     open_view("sessions", true).await;
                 }
+                set_mobile_pane("graph");
                 crate::graph_map::focus_file_in_session(&path);
             }
         }
@@ -5209,5 +5423,13 @@ mod update_tests {
         );
         assert_eq!(extract_inspect_file_path(&json!({"path": "   "})), None);
         assert_eq!(extract_inspect_file_path(&V::Null), None);
+    }
+
+    #[test]
+    fn normalize_mobile_pane_defaults_to_chat_and_accepts_graph() {
+        assert_eq!(normalize_mobile_pane("graph"), "graph");
+        assert_eq!(normalize_mobile_pane("chat"), "chat");
+        assert_eq!(normalize_mobile_pane(""), "chat");
+        assert_eq!(normalize_mobile_pane("unknown"), "chat");
     }
 }

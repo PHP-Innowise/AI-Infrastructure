@@ -226,10 +226,244 @@ fn file_list(id: &str, files: &[V]) {
         dom::append(id, &dom::details(&label, &body));
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupCheckCard {
+    key: String,
+    title: String,
+    state: String,
+    detail: String,
+    ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreatorReportView {
+    key: String,
+    summary: String,
+    text: String,
+}
+
+fn readiness_cards(readiness: &V) -> Vec<SetupCheckCard> {
+    const KNOWN: [(&str, &str, &str); 3] = [
+        ("policy", "Policy guide", "AGENTS.md and stack policy rules"),
+        (
+            "memory_runtime",
+            "Memory runtime",
+            "memory-bank runtime & database",
+        ),
+        (
+            "brain_runtime",
+            "Project brain",
+            "project-brain runtime & state",
+        ),
+    ];
+    if let Some(obj) = readiness.as_object() {
+        let mut cards = Vec::new();
+        for (key, title, detail) in KNOWN {
+            if let Some(val) = obj.get(key) {
+                let ok = val.as_bool().unwrap_or_else(|| m::yes(&val["ok"]));
+                let state = if let Some(s) = val
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    m::label(s)
+                } else if ok {
+                    "Ready".to_owned()
+                } else {
+                    "Not detected".to_owned()
+                };
+                cards.push(SetupCheckCard {
+                    key: key.to_owned(),
+                    title: title.to_owned(),
+                    state,
+                    detail: detail.to_owned(),
+                    ok,
+                });
+            }
+        }
+        let mut extras = obj
+            .keys()
+            .filter(|k| !KNOWN.iter().any(|(known, _, _)| known == &k.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        extras.sort();
+        for key in extras {
+            if let Some(val) = obj.get(&key) {
+                let ok = val.as_bool().unwrap_or_else(|| m::yes(&val["ok"]));
+                cards.push(SetupCheckCard {
+                    key: key.clone(),
+                    title: m::label(&key),
+                    state: if ok {
+                        "Ready".to_owned()
+                    } else {
+                        "Not detected".to_owned()
+                    },
+                    detail: m::text(val, "detail"),
+                    ok,
+                });
+            }
+        }
+        return cards;
+    }
+    m::array(readiness)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let key = m::text(&item, "id");
+            let key = if key.trim().is_empty() {
+                format!("check-{idx}")
+            } else {
+                key
+            };
+            let title = [
+                m::text(&item, "title"),
+                m::text(&item, "name"),
+                m::text(&item, "label"),
+            ]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| m::label(&key));
+            let ok = item["ok"]
+                .as_bool()
+                .unwrap_or_else(|| m::yes(&item["ready"]) || m::yes(&item["installed"]));
+            let status = m::text(&item, "status");
+            let state = if !status.trim().is_empty() {
+                m::label(status.trim())
+            } else if ok {
+                "Ready".to_owned()
+            } else {
+                "Not detected".to_owned()
+            };
+            let detail = m::text(&item, "detail");
+            SetupCheckCard {
+                key,
+                title,
+                state,
+                detail,
+                ok,
+            }
+        })
+        .collect()
+}
+
+fn setup_provider_card(item: &V, idx: usize) -> SetupCheckCard {
+    let id = m::text(item, "id");
+    let name = m::text(item, "name");
+    let title = if !name.trim().is_empty() {
+        name.trim().to_owned()
+    } else if !id.trim().is_empty() {
+        id.trim().to_owned()
+    } else if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        s.to_owned()
+    } else {
+        format!("Provider {}", idx + 1)
+    };
+    let ok = item["available"]
+        .as_bool()
+        .unwrap_or_else(|| m::yes(&item["ok"]));
+    let state = if ok {
+        "Available".to_owned()
+    } else {
+        "Unavailable".to_owned()
+    };
+    let detail = [
+        m::text(item, "detail"),
+        m::text(item, "agent_control_detail"),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_owned())
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    SetupCheckCard {
+        key: if id.trim().is_empty() {
+            title.clone()
+        } else {
+            id
+        },
+        title,
+        state,
+        detail,
+        ok,
+    }
+}
+
+fn format_setup_diagnostic(item: &V) -> String {
+    if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return s.to_owned();
+    }
+    let head = [
+        m::text(item, "severity"),
+        m::text(item, "code"),
+        m::text(item, "title"),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_owned())
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let body = [
+        m::text(item, "message"),
+        m::text(item, "detail"),
+        m::text(item, "summary"),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_owned())
+    .find(|s| !s.is_empty())
+    .unwrap_or_default();
+    match (head.is_empty(), body.is_empty()) {
+        (false, false) => format!("{head}: {body}"),
+        (false, true) => head,
+        (true, false) => body,
+        (true, true) => m::summary(item),
+    }
+}
+
+fn creator_report_view(item: &V, idx: usize) -> CreatorReportView {
+    let raw_name = m::text(item, "name");
+    let name = if raw_name.trim().is_empty() {
+        format!("report-{}", idx + 1)
+    } else {
+        raw_name.trim().to_owned()
+    };
+    let text = if !m::text(item, "text").is_empty() {
+        m::text(item, "text")
+    } else {
+        m::summary(item)
+    };
+    let mut meta = vec![format!("{} chars", text.chars().count())];
+    if m::yes(&item["truncated"]) {
+        meta.push("truncated".to_owned());
+    }
+    let hash = m::text(item, "hash");
+    if !hash.trim().is_empty() {
+        let short: String = hash.trim().chars().take(8).collect();
+        meta.push(format!("#{short}"));
+    }
+    CreatorReportView {
+        key: format!("{idx}:{name}"),
+        summary: format!("{name} ({})", meta.join(" · ")),
+        text,
+    }
+}
+
+fn render_setup_card(class: &str, card: &SetupCheckCard) -> web_sys::Element {
+    let el = dom::el("div", class, "");
+    let _ = el.set_attribute("data-ok", if card.ok { "true" } else { "false" });
+    dom::add(&el, &dom::el("strong", "", &card.title));
+    dom::add(&el, &dom::el("span", "setup-check-state", &card.state));
+    if !card.detail.trim().is_empty() {
+        dom::add(&el, &dom::el("span", "", &card.detail));
+    }
+    el
+}
+
 pub async fn load_setup() {
     invalidate("setup");
     let project = dom::value("setup-project");
     if project.is_empty() {
+        dom::hidden("setup-readiness", true);
         return;
     }
     match api::scoped(
@@ -240,12 +474,15 @@ pub async fn load_setup() {
     {
         Ok((e, v)) if m::current("setup", e) && dom::value("setup-project") == project => {
             if v["project_id"] != project || !v["editions"].is_array() || !v["tools"].is_array() {
+                dom::hidden("setup-readiness", true);
                 dom::error(
                     "setup-readiness-error",
                     "Incomplete project setup information. Refresh before installing.",
                 );
                 return;
             }
+            dom::text("setup-readiness-error", "");
+            dom::hidden("setup-readiness-error", true);
             m::set("setup", v.clone());
             dom::text("setup-project-location", &m::text(&v, "path"));
             dom::options(
@@ -276,9 +513,48 @@ pub async fn load_setup() {
                     ),
                 );
             }
-            dom::rows("setup-readiness-grid", &m::array(&v["readiness"]));
-            dom::rows("setup-providers", &m::array(&v["providers"]));
-            dom::rows("setup-diagnostics", &m::array(&v["diagnostics"]));
+            dom::clear("setup-readiness-grid");
+            let readiness = readiness_cards(&v["readiness"]);
+            if readiness.is_empty() {
+                dom::append(
+                    "setup-readiness-grid",
+                    &dom::el("p", "fleet-note", "No readiness checks reported."),
+                );
+            } else {
+                for card in &readiness {
+                    dom::append(
+                        "setup-readiness-grid",
+                        &render_setup_card("setup-check", card),
+                    );
+                }
+            }
+            dom::clear("setup-providers");
+            let providers = m::array(&v["providers"]);
+            if providers.is_empty() {
+                dom::append(
+                    "setup-providers",
+                    &dom::el("p", "fleet-note", "No providers reported."),
+                );
+            } else {
+                for (idx, item) in providers.iter().enumerate() {
+                    let card = setup_provider_card(item, idx);
+                    dom::append(
+                        "setup-providers",
+                        &render_setup_card("setup-provider", &card),
+                    );
+                }
+            }
+            dom::clear("setup-diagnostics");
+            for item in m::array(&v["diagnostics"]) {
+                let text = format_setup_diagnostic(&item);
+                if !text.trim().is_empty() {
+                    let callout =
+                        dom::el("div", "system-side-callout system-side-callout-warn", "");
+                    dom::add(&callout, &dom::el("p", "", text.trim()));
+                    dom::append("setup-diagnostics", &callout);
+                }
+            }
+            dom::hidden("setup-readiness", false);
             dom::text(
                 "setup-readiness-status",
                 if v["available"] == false {
@@ -290,7 +566,10 @@ pub async fn load_setup() {
             dom::disabled("setup-preview-button", v["available"] == false);
         }
         Ok(_) => {}
-        Err(e) if !e.aborted => dom::error("setup-readiness-error", &e.message),
+        Err(e) if !e.aborted => {
+            dom::hidden("setup-readiness", true);
+            dom::error("setup-readiness-error", &e.message);
+        }
         Err(_) => {}
     }
 }
@@ -1189,7 +1468,34 @@ fn render_creator() {
     );
     dom::text("creator-message", &m::text(run, "message"));
     session::restore_budgets("creator-run-budgets", &run["budgets"]);
-    dom::rows("creator-reports", &m::array(&v["reports"]));
+    let reports = m::array(&v["reports"])
+        .into_iter()
+        .enumerate()
+        .map(|(idx, item)| json!({"idx": idx, "item": item}))
+        .collect::<Vec<_>>();
+    dom::keyed_render(
+        "creator-reports",
+        &reports,
+        |entry| {
+            let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+            creator_report_view(&entry["item"], idx).key
+        },
+        |entry| {
+            let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+            let report = creator_report_view(&entry["item"], idx);
+            let details = dom::el("details", "setup-file creator-report", "");
+            let _ = details.set_attribute("data-restore-key", &report.key);
+            dom::add(&details, &dom::el("summary", "", &report.summary));
+            dom::add(&details, &dom::el("pre", "knowledge-result", &report.text));
+            details
+        },
+    );
+    if reports.is_empty() {
+        dom::append(
+            "creator-reports",
+            &dom::el("p", "fleet-note", "No reports recorded yet."),
+        );
+    }
     dom::text(
         "creator-events",
         &m::array(&v["events"])
@@ -1608,4 +1914,59 @@ pub async fn event(
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        creator_report_view, format_setup_diagnostic, readiness_cards, setup_provider_card,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn setup_readiness_providers_diagnostics_and_creator_reports_format_cleanly() {
+        let readiness = json!({
+            "policy": true,
+            "memory_runtime": false,
+            "brain_runtime": true
+        });
+        let checks = readiness_cards(&readiness);
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].title, "Policy guide");
+        assert!(checks[0].ok);
+        assert_eq!(checks[0].state, "Ready");
+        assert_eq!(checks[1].title, "Memory runtime");
+        assert!(!checks[1].ok);
+        assert_eq!(checks[1].state, "Not detected");
+
+        let provider = json!({
+            "id": "codex",
+            "name": "Codex",
+            "available": true,
+            "detail": "CLI ready",
+            "agent_control_detail": "Interactive TTY"
+        });
+        let provider_card = setup_provider_card(&provider, 0);
+        assert_eq!(provider_card.title, "Codex");
+        assert!(provider_card.ok);
+        assert_eq!(provider_card.state, "Available");
+        assert_eq!(provider_card.detail, "CLI ready · Interactive TTY");
+
+        assert_eq!(
+            format_setup_diagnostic(&json!("Missing PHP binary on PATH")),
+            "Missing PHP binary on PATH"
+        );
+
+        let report = json!({
+            "name": "infra-scan-project-profile.md",
+            "text": "# Scan\nAll good",
+            "truncated": true,
+            "hash": "abcdef123456"
+        });
+        let view = creator_report_view(&report, 0);
+        assert!(view
+            .summary
+            .contains("infra-scan-project-profile.md (15 chars · truncated · #abcdef12)"));
+        assert_eq!(view.text, "# Scan\nAll good");
+    }
 }

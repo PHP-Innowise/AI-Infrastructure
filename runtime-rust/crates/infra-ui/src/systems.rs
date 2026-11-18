@@ -1408,6 +1408,140 @@ fn shown_status(step: &V, receipts: &V, active: bool) -> String {
         status
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemRelationshipView {
+    provider: String,
+    consumer: String,
+    contract: String,
+    version: String,
+    provenance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemStepView {
+    key: String,
+    id: String,
+    stage_class: String,
+    row_state: String,
+    status_label: String,
+    service: String,
+    mode: String,
+    attempt: Option<String>,
+    goal: String,
+    depends_on: Option<String>,
+    task_reference: Option<String>,
+}
+
+fn build_relationship_view(edge: &V) -> SystemRelationshipView {
+    let raw_version = m::text(edge, "version");
+    let trimmed_ver = raw_version.trim();
+    let version = if trimmed_ver.is_empty() {
+        String::new()
+    } else if trimmed_ver.starts_with('v') {
+        trimmed_ver.to_owned()
+    } else {
+        format!("v{trimmed_ver}")
+    };
+    let raw_prov = m::text(edge, "provenance");
+    let provenance = if raw_prov.trim().is_empty() {
+        String::new()
+    } else {
+        m::label(raw_prov.trim())
+    };
+    let provider = m::text(edge, "provider");
+    let consumer = m::text(edge, "consumer");
+    let contract = m::text(edge, "contract");
+    SystemRelationshipView {
+        provider: if provider.trim().is_empty() {
+            "provider".to_owned()
+        } else {
+            provider.trim().to_owned()
+        },
+        consumer: if consumer.trim().is_empty() {
+            "consumer".to_owned()
+        } else {
+            consumer.trim().to_owned()
+        },
+        contract: if contract.trim().is_empty() {
+            "contract".to_owned()
+        } else {
+            contract.trim().to_owned()
+        },
+        version,
+        provenance,
+    }
+}
+
+fn step_stage_class(status: &str) -> &'static str {
+    match status {
+        "running" | "in_progress" | "active" => "system-stage running",
+        "blocked" | "failed" | "error" => "system-stage blocked",
+        "interrupted" | "reported" | "stopped" => "system-stage interrupted",
+        _ => "system-stage",
+    }
+}
+
+fn step_row_state(status: &str) -> &'static str {
+    match status {
+        "running" | "in_progress" | "active" => "running",
+        "failed" | "blocked" | "error" => "failed",
+        _ => "idle",
+    }
+}
+
+fn build_system_step_view(step: &V, receipts: &V, running: bool, idx: usize) -> SystemStepView {
+    let raw_status = shown_status(step, receipts, running);
+    let stage_class = step_stage_class(raw_status.trim()).to_owned();
+    let row_state = step_row_state(raw_status.trim()).to_owned();
+    let status_label = if raw_status == "reported" {
+        "reported complete; resume to record it".to_owned()
+    } else if raw_status.trim().is_empty() {
+        "planned".to_owned()
+    } else {
+        m::label(raw_status.trim())
+    };
+    let raw_id = m::text(step, "id");
+    let id = if raw_id.trim().is_empty() {
+        format!("step-{}", idx + 1)
+    } else {
+        raw_id.trim().to_owned()
+    };
+    let service = m::text(step, "service").trim().to_owned();
+    let mode = m::label(m::text(step, "mode").trim());
+    let attempt = step["attempt"]
+        .as_u64()
+        .filter(|&n| n > 0)
+        .map(|n| format!("attempt {n}"));
+    let goal = m::text(step, "goal").trim().to_owned();
+    let deps = m::array(&step["depends_on"])
+        .into_iter()
+        .filter_map(|dep| {
+            let s = dep
+                .as_str()
+                .map(str::trim)
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::summary(&dep));
+            (!s.is_empty()).then_some(s)
+        })
+        .collect::<Vec<_>>();
+    let depends_on = (!deps.is_empty()).then(|| format!("Depends on: {}", deps.join(", ")));
+    let task_ref = m::text(step, "task_reference");
+    let task_reference = (!task_ref.trim().is_empty()).then(|| task_ref.trim().to_owned());
+    SystemStepView {
+        key: format!("{idx}:{id}"),
+        id,
+        stage_class,
+        row_state,
+        status_label,
+        service,
+        mode,
+        attempt,
+        goal,
+        depends_on,
+        task_reference,
+    }
+}
 /// Why a dispatch receipt did or did not complete, naming what to inspect: the
 /// validator's rejection, the agent's own block, the checks that failed (or,
 /// for verification, did not run), or the files a read-only worker wrote.
@@ -1848,28 +1982,37 @@ fn render_catalog(v: &V) {
     system_map::refresh_services_map(&project, &config, catalog, &graph_status);
     sync_changes_map_workspace();
 
-    dom::rows(
-        "system-relationships",
-        &edges
-            .iter()
-            .map(|edge| {
-                let mut edge = edge.clone();
-                edge["title"] = json!(format!(
-                    "{} → {} · {} v{}",
-                    m::text(&edge, "provider"),
-                    m::text(&edge, "consumer"),
-                    m::text(&edge, "contract"),
-                    m::text(&edge, "version")
-                ));
-                edge
-            })
-            .collect::<Vec<_>>(),
-    );
-    for warning in m::array(&catalog["warnings"]) {
+    dom::clear("system-relationships");
+    let warnings = m::array(&catalog["warnings"]);
+    if edges.is_empty() && warnings.is_empty() {
         dom::append(
             "system-relationships",
-            &dom::el("p", "system-warning", &warning_text(&warning)),
+            &dom::el("p", "system-note", "No cross-service contracts declared."),
         );
+    } else {
+        for edge in &edges {
+            let view = build_relationship_view(edge);
+            let wrap = dom::el("div", "system-contract-row", "");
+            let row = dom::el("div", "step-row", "");
+            dom::add(&row, &dom::el("span", "system-chip", &view.provider));
+            dom::add(&row, &dom::el("span", "step-target", "→"));
+            dom::add(&row, &dom::el("span", "system-chip", &view.consumer));
+            dom::add(&row, &dom::el("strong", "step-name", &view.contract));
+            if !view.version.is_empty() {
+                dom::add(&row, &dom::el("span", "system-badge", &view.version));
+            }
+            if !view.provenance.is_empty() {
+                dom::add(&row, &dom::el("span", "system-chip", &view.provenance));
+            }
+            dom::add(&wrap, &row);
+            dom::append("system-relationships", &wrap);
+        }
+        for warning in warnings {
+            dom::append(
+                "system-relationships",
+                &dom::el("p", "system-warning", &warning_text(&warning)),
+            );
+        }
     }
     dom::clear("system-banks");
     for service in services {
@@ -2138,27 +2281,56 @@ fn render_run() {
         m::array(&v["plan"]["steps"])
     };
     let running = m::yes(&v["active"]);
-    dom::rows(
+    let step_entries = steps
+        .iter()
+        .enumerate()
+        .map(|(idx, step)| json!({"idx": idx, "step": step}))
+        .collect::<Vec<_>>();
+    dom::keyed_render(
         "system-flow",
-        &steps
-            .iter()
-            .map(|step| {
-                let mut step = step.clone();
-                let status = shown_status(&step, &v["receipts"], running);
-                let status = if status == "reported" {
-                    "reported complete; resume to record it".to_owned()
-                } else {
-                    status
-                };
-                step["title"] = json!([m::text(&step, "id"), m::label(&status)]
-                    .into_iter()
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · "));
-                step
-            })
-            .collect::<Vec<_>>(),
+        &step_entries,
+        |entry| {
+            let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+            build_system_step_view(&entry["step"], &v["receipts"], running, idx).key
+        },
+        |entry| {
+            let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+            let view = build_system_step_view(&entry["step"], &v["receipts"], running, idx);
+            let item = dom::el("li", &view.stage_class, "");
+            dom::add(&item, &dom::el("strong", "", &view.id));
+            let body = dom::el("div", "system-stage-body", "");
+            let row = dom::el("div", "step-row", "");
+            let _ = row.set_attribute("data-state", &view.row_state);
+            if !view.service.is_empty() {
+                dom::add(&row, &dom::el("span", "system-chip", &view.service));
+            }
+            dom::add(&row, &dom::el("span", "step-state", &view.status_label));
+            if !view.mode.is_empty() {
+                dom::add(&row, &dom::el("span", "system-badge", &view.mode));
+            }
+            if let Some(attempt) = &view.attempt {
+                dom::add(&row, &dom::el("span", "system-badge", attempt));
+            }
+            if let Some(task_ref) = &view.task_reference {
+                dom::add(&row, &dom::el("span", "system-chip", task_ref));
+            }
+            dom::add(&body, &row);
+            if !view.goal.is_empty() {
+                dom::add(&body, &dom::el("p", "system-stage-goal", &view.goal));
+            }
+            if let Some(deps) = &view.depends_on {
+                dom::add(&body, &dom::el("p", "system-note", deps));
+            }
+            dom::add(&item, &body);
+            item
+        },
     );
+    if steps.is_empty() {
+        dom::append(
+            "system-flow",
+            &dom::el("li", "system-stage", "No planned steps yet."),
+        );
+    }
     dom::options(
         "system-provider",
         &m::array(&v["providers"]),
@@ -4842,6 +5014,58 @@ mod display_tests {
         assert_eq!(
             resolve_agent_launch_selection(&launches, 2, "missing"),
             ("s2".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn system_relationship_and_flow_cards_preserve_badges_and_stage_state() {
+        let edge = json!({
+            "provider": "orders",
+            "consumer": "billing",
+            "contract": "OrderPaid",
+            "version": "2",
+            "provenance": "composer_json"
+        });
+        let rel = super::build_relationship_view(&edge);
+        assert_eq!(rel.provider, "orders");
+        assert_eq!(rel.consumer, "billing");
+        assert_eq!(rel.contract, "OrderPaid");
+        assert_eq!(rel.version, "v2");
+        assert_eq!(rel.provenance, "composer json");
+
+        let step = json!({
+            "id": "verify",
+            "service": "billing",
+            "status": "running",
+            "mode": "write_patch",
+            "attempt": 2,
+            "goal": "Validate invoice webhook",
+            "depends_on": ["implement"],
+            "task_reference": "TASK-042"
+        });
+        let active_step = super::build_system_step_view(&step, &json!([]), true, 0);
+        assert_eq!(active_step.stage_class, "system-stage running");
+        assert_eq!(active_step.row_state, "running");
+        assert_eq!(active_step.status_label, "running");
+        assert_eq!(active_step.service, "billing");
+        assert_eq!(active_step.mode, "write patch");
+        assert_eq!(active_step.attempt.as_deref(), Some("attempt 2"));
+        assert_eq!(
+            active_step.depends_on.as_deref(),
+            Some("Depends on: implement")
+        );
+        assert_eq!(active_step.task_reference.as_deref(), Some("TASK-042"));
+
+        let reported = super::build_system_step_view(
+            &step,
+            &json!([{"phase": "verify", "attempt": 2, "ok": true}]),
+            false,
+            0,
+        );
+        assert_eq!(reported.stage_class, "system-stage interrupted");
+        assert_eq!(
+            reported.status_label,
+            "reported complete; resume to record it"
         );
     }
 }

@@ -38,8 +38,12 @@
       <h2 class="sr-only" id="view-heading" tabindex="-1"></h2>
       <div class="banner" id="connection-banner" role="alert" hidden><p id="connection-message"></p><button type="button" class="button compact" id="reconnect">Reconnect</button></div><div class="banner update-banner" id="app-update-banner" role="status" hidden><p id="app-update-note"></p></div>
       <div class="connection-loading" id="connecting" role="status">Loading projects and native providers…</div>
-      <section class="view" id="sessions-view" aria-label="Agent sessions">
-        <div class="sessions-workspace" id="sessions-workspace">
+      <section class="view" id="sessions-view" aria-label="Agent sessions" data-mobile-pane="chat">
+        <div class="session-mobile-tabs" id="session-mobile-tabs" role="tablist" aria-label="Session workspace pane">
+          <button type="button" class="session-mobile-tab" id="session-mobile-tab-chat" role="tab" data-action="session-mobile-pane" data-payload='"chat"' data-pane="chat" aria-controls="sessions-chat-column" aria-selected="true" tabindex="0">Chat</button>
+          <button type="button" class="session-mobile-tab" id="session-mobile-tab-graph" role="tab" data-action="session-mobile-pane" data-payload='"graph"' data-pane="graph" aria-controls="session-graph-workspace" aria-selected="false" tabindex="-1">Code graph</button>
+        </div>
+        <div class="sessions-workspace" id="sessions-workspace" data-mobile-pane="chat">
           <div class="sessions-chat-column" id="sessions-chat-column">
         <div class="configuration">
           <div class="session-summary" id="session-summary" hidden><p class="session-summary-text" id="session-summary-text"></p><button class="button compact" id="session-settings-toggle" type="button" aria-expanded="false" aria-controls="session-settings">Next-turn settings</button></div>
@@ -230,60 +234,9 @@
           </div>
         </div></div></div></section>
         <p class="sr-only" id="run-announcer" role="status"></p>
-        <div class="composer-area" id="composer-area"><div class="composer-wrap"><section class="merge-context" id="merge-context" aria-labelledby="merge-context-title" hidden><div class="merge-context-head"><h3 id="merge-context-title">Merged chats</h3><div class="merge-context-actions"><button class="button compact" id="merge-archive" type="button" aria-expanded="false" aria-controls="merge-archive-content" hidden>View saved context</button><button class="button compact primary" id="merge-restart" type="button" hidden>Restart merged task</button><button class="button compact" id="merge-delete" type="button" hidden>Delete saved context</button><button class="button compact" id="merge-delete-keep" type="button" hidden>Keep it</button><button class="button compact" id="merge-clear" type="button" hidden>Cancel merge</button></div></div><p class="knowledge-note" id="merge-context-note"></p><div class="merge-sources" id="merge-context-sources"></div><div class="merge-archive" id="merge-archive-content" tabindex="0" role="region" aria-label="Saved merged context" hidden></div></section><p class="knowledge-note inbox-hint" id="inbox-hint" role="status" hidden></p><p class="error-text" id="inbox-error" role="alert" hidden></p><section class="session-inbox" id="session-inbox" aria-labelledby="inbox-title" hidden><h3 id="inbox-title">Next messages</h3><ul id="inbox-receipts" class="inbox-receipts" aria-label="Recent next-message receipts"></ul></section><p class="error-text" id="composer-error" role="alert" hidden></p><p class="composer-notice" id="composer-notice" role="status" hidden></p><form class="composer" id="session-form" data-working="false" novalidate><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><div class="skill-hints" id="skill-hints-panel" hidden><ul class="skill-hints-list" id="skill-hints" role="listbox" aria-label="Commands and skills"></ul><p class="skill-hints-note" id="skill-hints-note" hidden></p></div><p class="sr-only" id="skill-hints-status" role="status"></p><div class="composer-working" id="composer-working" data-working="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" id="composer-rabbit" aria-hidden="true"><svg class="rabbit-svg" viewBox="0 0 72 52" fill="none"><ellipse class="rabbit-shadow" cx="32" cy="48" rx="18" ry="2.2"/><g class="rabbit-body"><circle class="rabbit-fur rabbit-tail" cx="13" cy="36" r="4.5"/><ellipse class="rabbit-fur rabbit-foot" cx="25" cy="44.5" rx="7" ry="3.2"/><ellipse class="rabbit-fur" cx="26.5" cy="35.5" rx="12" ry="10.5"/><ellipse class="rabbit-fur-shade" cx="24" cy="37.5" rx="7.5" ry="6.5"/><g class="rabbit-head"><g class="rabbit-ear-back"><ellipse class="rabbit-fur" cx="30.5" cy="10.5" rx="3.5" ry="9.5" transform="rotate(-14 30.5 10.5)"/><ellipse class="rabbit-ear-inner" cx="30.8" cy="11" rx="1.7" ry="6.2" transform="rotate(-14 30.8 11)"/></g><g class="rabbit-ear-front"><ellipse class="rabbit-fur" cx="38" cy="10.5" rx="3.7" ry="10" transform="rotate(10 38 10.5)"/><ellipse class="rabbit-ear-inner" cx="38.1" cy="11" rx="1.8" ry="6.6" transform="rotate(10 38.1 11)"/></g><ellipse class="rabbit-fur" cx="36" cy="23.5" rx="9.8" ry="8.6"/><ellipse class="rabbit-cheek" cx="38.5" cy="26.5" rx="3.4" ry="2.2"/><g class="rabbit-jaw"><ellipse class="rabbit-fur rabbit-jaw-pad" cx="42.2" cy="27.8" rx="3.5" ry="2.3"/><path class="rabbit-mouth" d="M40.8 27.2 Q43 28.8 45 27.2"/></g><path class="rabbit-whisker" d="M39 24.8 L34.5 24 M39 26 L34.8 26.8"/><g class="rabbit-eye-group"><ellipse class="rabbit-eye" cx="39.8" cy="21.5" rx="1.6" ry="2.1"/><circle class="rabbit-eye-shine" cx="40.3" cy="20.7" r="0.6"/></g><ellipse class="rabbit-nose" cx="45.2" cy="24.2" rx="1.6" ry="1.15"/></g><g class="rabbit-carrot-group"><path class="carrot-leaf-dark" d="M60 28.5 C63 23.5 67 23 66 26.5 C65 28.5 62.5 29.5 60 29.5 Z"/><path class="carrot-leaf" d="M60.5 29.5 C65.5 26 70 28 67.5 31 C65.5 32.5 62.5 31.5 60.5 30 Z"/><path class="carrot-leaf-dark" d="M59.8 30.5 C64.5 31.5 68 35 64.5 36 C62 36.5 60.2 33 59.8 31 Z"/><path class="carrot-body" d="M43.8 25.4 C42.8 25.7 42.7 27.8 43.9 28.2 L59.5 33.4 C62 34 63.2 28.4 60.5 27.6 Z"/><path class="carrot-highlight" d="M46.5 26.4 L58.5 29.2"/><path class="carrot-stripe" d="M50.5 27.2 L49.9 29.5 M54.5 28.2 L53.8 31 M58 29.2 L57.2 32.2"/><ellipse class="rabbit-fur rabbit-paw" cx="39.8" cy="31.5" rx="4.4" ry="2.7" transform="rotate(-18 39.8 31.5)"/></g><circle class="carrot-crumb rabbit-crumb-a" cx="44" cy="29.5" r="1.1"/><circle class="carrot-crumb rabbit-crumb-b" cx="45.8" cy="30.5" r="0.9"/></g></svg></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="composer-working-text">Agent is working…</span><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div><textarea id="prompt" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="skill-hints" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="context-meter" id="context-meter" type="button" hidden><meter id="context-meter-bar" min="0" max="1" value="0"></meter><span id="context-meter-text"></span></button><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint" hidden>Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption" hidden></p></div></div>
+        <div class="composer-area" id="composer-area"><div class="composer-wrap"><section class="merge-context" id="merge-context" aria-labelledby="merge-context-title" hidden><div class="merge-context-head"><h3 id="merge-context-title">Merged chats</h3><div class="merge-context-actions"><button class="button compact" id="merge-archive" type="button" aria-expanded="false" aria-controls="merge-archive-content" hidden>View saved context</button><button class="button compact primary" id="merge-restart" type="button" hidden>Restart merged task</button><button class="button compact" id="merge-delete" type="button" hidden>Delete saved context</button><button class="button compact" id="merge-delete-keep" type="button" hidden>Keep it</button><button class="button compact" id="merge-clear" type="button" hidden>Cancel merge</button></div></div><p class="knowledge-note" id="merge-context-note"></p><div class="merge-sources" id="merge-context-sources"></div><div class="merge-archive" id="merge-archive-content" tabindex="0" role="region" aria-label="Saved merged context" hidden></div></section><p class="knowledge-note inbox-hint" id="inbox-hint" role="status" hidden></p><p class="error-text" id="inbox-error" role="alert" hidden></p><section class="session-inbox" id="session-inbox" aria-labelledby="inbox-title" hidden><h3 id="inbox-title">Next messages</h3><ul id="inbox-receipts" class="inbox-receipts" aria-label="Recent next-message receipts"></ul></section><p class="error-text" id="composer-error" role="alert" hidden></p><p class="composer-notice" id="composer-notice" role="status" hidden></p><form class="composer" id="session-form" data-working="false" novalidate><label class="sr-only" id="prompt-label" for="prompt">Task or follow-up message</label><div class="skill-hints" id="skill-hints-panel" hidden><ul class="skill-hints-list" id="skill-hints" role="listbox" aria-label="Commands and skills"></ul><p class="skill-hints-note" id="skill-hints-note" hidden></p></div><p class="sr-only" id="skill-hints-status" role="status"></p><div class="composer-working" id="composer-working" data-working="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" id="composer-rabbit" aria-hidden="true"></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="composer-working-text">Agent is working…</span><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div><textarea id="prompt" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="skill-hints" placeholder="Describe a task for this project…" required rows="3"></textarea><input id="attachment-input" type="file" multiple hidden><div class="attachment-list" id="attachment-list" aria-label="Files to attach" hidden></div><p class="error-text" id="attachment-error" role="alert" hidden></p><div class="composer-actions"><button class="button attach-button" id="attach-files" type="button" aria-describedby="attachment-hint">Attach files</button><span class="composer-note" id="composer-note">Ctrl / ⌘ + Enter to send</span><button class="context-meter" id="context-meter" type="button" hidden><meter id="context-meter-bar" min="0" max="1" value="0"></meter><span id="context-meter-text"></span></button><button class="button primary" id="send" type="submit" disabled><span id="send-label">Start session</span><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 19V5 M6 11l6-6 6 6"/></svg></button></div><p class="composer-note" id="attachment-hint" hidden>Up to 5 files · 4 MiB each · 8 MiB total. Files are sent with your message.</p></form><p class="composer-caption" id="composer-caption" hidden></p></div></div>
           </div>
-          <section class="session-graph-workspace" id="session-graph-workspace" aria-label="Code graph and dependency map" data-motion-paused="false" data-expanded="false">
-            <header class="session-graph-toolbar">
-              <div class="session-graph-heading">
-                <h2 class="session-graph-title">Code graph</h2>
-                <span class="session-graph-summary" id="session-graph-summary"></span>
-              </div>
-              <div class="session-graph-controls" role="toolbar" aria-label="Code graph controls" aria-controls="session-graph-canvas" focusgroup="toolbar wrap">
-                <div class="session-graph-mode-group" role="group" aria-label="Graph view mode">
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="session-graph-mode-whole" aria-pressed="true" title="Show the whole project graph">Whole graph</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="session-graph-mode-changes" aria-pressed="false" title="Show changed files and entities">Changes <span class="session-graph-badge" id="session-graph-changes-count" hidden>0</span></button>
-                </div>
-                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="session-graph-unfold" aria-pressed="false" title="Unfold all project folders to view the entire graph">Unfold all</button>
-                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
-                <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
-                  <button type="button" class="button compact session-graph-btn" id="session-graph-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="session-graph-zoom-level" title="Reset zoom and refit map" aria-label="Reset zoom level">100%</button>
-                  <button type="button" class="button compact session-graph-btn" id="session-graph-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
-                </div>
-                <button type="button" class="button compact session-graph-btn" id="session-graph-fit" title="Fit graph to view">Fit</button>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="session-graph-follow" aria-pressed="true" title="Automatically pan and zoom to prompt targets and created symbols">Follow focus</button>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="session-graph-pause-motion" aria-pressed="false" title="Pause pulsing animations on new symbols">Pause pulse</button>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="session-graph-expand" aria-expanded="false" title="Expand code graph across Sessions workspace">Expand</button>
-                <button type="button" class="button compact session-graph-btn" id="session-graph-open-full" title="Open full interactive dependency map dialog">Full map</button>
-              </div>
-            </header>
-            <div class="session-graph-subbar">
-              <label class="session-graph-filter"><span class="sr-only">Filter graph names</span><input id="session-graph-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter files, folders, entities…"></label>
-              <label class="checkbox session-graph-check"><input id="session-graph-notests" type="checkbox">Without tests</label>
-            </div>
-            <div class="session-graph-progress" id="session-graph-progress" role="status" aria-live="polite" hidden>
-              <div class="session-graph-progress-head">
-                <span class="session-graph-progress-text" id="session-graph-progress-text">Building code graph…</span>
-                <span class="session-graph-progress-amount" id="session-graph-progress-amount">0%</span>
-              </div>
-              <progress class="session-graph-progress-bar" id="session-graph-progress-bar" max="100" aria-labelledby="session-graph-progress-text"></progress>
-              <p class="session-graph-progress-left" id="session-graph-progress-left"></p>
-            </div>
-            <div class="session-graph-focus" id="session-graph-focus" role="status" aria-live="polite" hidden>
-              <span class="session-graph-focus-label" id="session-graph-focus-label"></span>
-              <div class="session-graph-focus-entities" id="session-graph-focus-entities"></div>
-            </div>
-            <nav class="graph-map-crumbs session-graph-crumbs" id="session-graph-crumbs" aria-label="Graph breadcrumbs" hidden></nav>
-            <div class="session-graph-body">
-              <div class="graph-map-canvas session-graph-canvas" id="session-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive code graph canvas"></div>
-              <div class="graph-map-radar" id="session-graph-canvas-radar" aria-hidden="true" hidden></div>
-              <aside class="graph-map-side session-graph-side" id="session-graph-side" aria-label="Selected code unit details"></aside>
-            </div>
-            <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="session-graph-arrow-legend" hidden></div>
-            <p class="session-graph-note" id="session-graph-note" hidden></p>
-            <p class="error-text session-graph-error" id="session-graph-error" role="alert" hidden></p>
-          </section>
+          <section class="session-graph-workspace" id="session-graph-workspace" aria-label="Code graph and dependency map" data-motion-paused="false" data-expanded="false" data-graph-prefix="session-graph" data-graph-heading="h2" data-graph-title="Code graph" data-graph-scope="Code graph"></section>
         </div>
       </section>
       <section class="view" id="results-view" aria-label="Results and verification" hidden><div class="page-scroll"><div class="page-content">
@@ -323,7 +276,7 @@
           <button class="button" type="button" id="system-edit">Edit system</button>
           <button class="button" type="button" id="system-choose-project">Choose system folder…</button>
         </div>
-        <div class="composer-working system-working" id="system-working" data-working="false" data-motion-paused="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" aria-hidden="true"><svg class="rabbit-svg" viewBox="0 0 72 52" fill="none"><ellipse class="rabbit-shadow" cx="32" cy="48" rx="18" ry="2.2"/><g class="rabbit-body"><circle class="rabbit-fur rabbit-tail" cx="13" cy="36" r="4.5"/><ellipse class="rabbit-fur rabbit-foot" cx="25" cy="44.5" rx="7" ry="3.2"/><ellipse class="rabbit-fur" cx="26.5" cy="35.5" rx="12" ry="10.5"/><ellipse class="rabbit-fur-shade" cx="24" cy="37.5" rx="7.5" ry="6.5"/><g class="rabbit-head"><g class="rabbit-ear-back"><ellipse class="rabbit-fur" cx="30.5" cy="10.5" rx="3.5" ry="9.5" transform="rotate(-14 30.5 10.5)"/><ellipse class="rabbit-ear-inner" cx="30.8" cy="11" rx="1.7" ry="6.2" transform="rotate(-14 30.8 11)"/></g><g class="rabbit-ear-front"><ellipse class="rabbit-fur" cx="38" cy="10.5" rx="3.7" ry="10" transform="rotate(10 38 10.5)"/><ellipse class="rabbit-ear-inner" cx="38.1" cy="11" rx="1.8" ry="6.6" transform="rotate(10 38.1 11)"/></g><ellipse class="rabbit-fur" cx="36" cy="23.5" rx="9.8" ry="8.6"/><ellipse class="rabbit-cheek" cx="38.5" cy="26.5" rx="3.4" ry="2.2"/><g class="rabbit-jaw"><ellipse class="rabbit-fur rabbit-jaw-pad" cx="42.2" cy="27.8" rx="3.5" ry="2.3"/><path class="rabbit-mouth" d="M40.8 27.2 Q43 28.8 45 27.2"/></g><path class="rabbit-whisker" d="M39 24.8 L34.5 24 M39 26 L34.8 26.8"/><g class="rabbit-eye-group"><ellipse class="rabbit-eye" cx="39.8" cy="21.5" rx="1.6" ry="2.1"/><circle class="rabbit-eye-shine" cx="40.3" cy="20.7" r="0.6"/></g><ellipse class="rabbit-nose" cx="45.2" cy="24.2" rx="1.6" ry="1.15"/></g><g class="rabbit-carrot-group"><path class="carrot-leaf-dark" d="M60 28.5 C63 23.5 67 23 66 26.5 C65 28.5 62.5 29.5 60 29.5 Z"/><path class="carrot-leaf" d="M60.5 29.5 C65.5 26 70 28 67.5 31 C65.5 32.5 62.5 31.5 60.5 30 Z"/><path class="carrot-leaf-dark" d="M59.8 30.5 C64.5 31.5 68 35 64.5 36 C62 36.5 60.2 33 59.8 31 Z"/><path class="carrot-body" d="M43.8 25.4 C42.8 25.7 42.7 27.8 43.9 28.2 L59.5 33.4 C62 34 63.2 28.4 60.5 27.6 Z"/><path class="carrot-highlight" d="M46.5 26.4 L58.5 29.2"/><path class="carrot-stripe" d="M50.5 27.2 L49.9 29.5 M54.5 28.2 L53.8 31 M58 29.2 L57.2 32.2"/><ellipse class="rabbit-fur rabbit-paw" cx="39.8" cy="31.5" rx="4.4" ry="2.7" transform="rotate(-18 39.8 31.5)"/></g><circle class="carrot-crumb rabbit-crumb-a" cx="44" cy="29.5" r="1.1"/><circle class="carrot-crumb rabbit-crumb-b" cx="45.8" cy="30.5" r="0.9"/></g></svg></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="system-working-text">System is working…</span><button type="button" class="button compact system-working-pause" id="system-working-pause" aria-pressed="false">Pause</button><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div>
+        <div class="composer-working system-working" id="system-working" data-working="false" data-motion-paused="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" aria-hidden="true"></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="system-working-text">System is working…</span><button type="button" class="button compact system-working-pause" id="system-working-pause" aria-pressed="false">Pause</button><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div>
         <p class="error-text" id="system-error" role="alert" hidden></p><p class="skills-action-status" id="system-message" role="status"></p>
         <div class="system-empty" id="system-empty"><h3>No system loaded</h3><p class="system-note">Load this project's system file, or create the system from its service folders. <strong>Choose system folder…</strong> adds another folder to your projects and makes it the working project in every view.</p></div>
         <form id="system-editor" class="system-editor" hidden aria-labelledby="system-editor-title" novalidate>
@@ -395,58 +348,7 @@
               <p class="session-graph-note" id="system-map-note" hidden></p>
               <p class="error-text session-graph-error" id="system-map-error" role="alert" hidden></p>
             </div>
-            <div id="system-member-graph-workspace" class="system-embedded-graph" data-motion-paused="false" data-expanded="false" hidden>
-              <header class="session-graph-toolbar">
-                <div class="session-graph-heading">
-                  <h4 class="session-graph-title" id="system-member-graph-title">Service code graph</h4>
-                  <span class="session-graph-summary" id="system-member-graph-summary"></span>
-                </div>
-                <div class="session-graph-controls" role="toolbar" aria-label="Service code graph controls" aria-controls="system-member-graph-canvas">
-                  <div class="session-graph-mode-group" role="group" aria-label="Graph view mode">
-                    <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-mode-whole" aria-pressed="true">Whole graph</button>
-                    <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-mode-changes" aria-pressed="false">Changes <span class="session-graph-badge" id="system-member-graph-changes-count" hidden>0</span></button>
-                  </div>
-                  <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-unfold" aria-pressed="false">Unfold all</button>
-                  <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
-                  <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
-                    <button type="button" class="button compact session-graph-btn" id="system-member-graph-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
-                    <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="system-member-graph-zoom-level" title="Reset zoom level" aria-label="Reset zoom level">100%</button>
-                    <button type="button" class="button compact session-graph-btn" id="system-member-graph-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
-                  </div>
-                  <button type="button" class="button compact session-graph-btn" id="system-member-graph-fit">Fit</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-follow" aria-pressed="true">Follow focus</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-pause-motion" aria-pressed="false">Pause pulse</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-expand" aria-expanded="false">Expand</button>
-                  <button type="button" class="button compact session-graph-btn" id="system-member-graph-open-full">Full map</button>
-                </div>
-              </header>
-              <div class="session-graph-subbar">
-                <label class="session-graph-filter"><span class="sr-only">Filter service graph names</span><input id="system-member-graph-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter files, folders, entities…"></label>
-                <label class="checkbox session-graph-check"><input id="system-member-graph-notests" type="checkbox">Without tests</label>
-              </div>
-              <div class="session-graph-progress" id="system-member-graph-progress" role="status" aria-live="polite" hidden>
-                <div class="session-graph-progress-head">
-                  <span class="session-graph-progress-text" id="system-member-graph-progress-text">Building code graph…</span>
-                  <span class="session-graph-progress-amount" id="system-member-graph-progress-amount">0%</span>
-                </div>
-                <progress class="session-graph-progress-bar" id="system-member-graph-progress-bar" max="100" aria-labelledby="system-member-graph-progress-text"></progress>
-                <p class="session-graph-progress-left" id="system-member-graph-progress-left"></p>
-              </div>
-              <div class="session-graph-focus" id="system-member-graph-focus" role="status" aria-live="polite" hidden>
-                <span class="session-graph-focus-label" id="system-member-graph-focus-label"></span>
-                <div class="session-graph-focus-entities" id="system-member-graph-focus-entities"></div>
-              </div>
-              <nav class="graph-map-crumbs session-graph-crumbs" id="system-member-graph-crumbs" aria-label="Service graph breadcrumbs" hidden></nav>
-              <div class="session-graph-body" id="system-member-graph-body">
-                <div class="graph-map-canvas session-graph-canvas" id="system-member-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive service code graph canvas"></div>
-                <div class="graph-map-radar" id="system-member-graph-canvas-radar" aria-hidden="true" hidden></div>
-                <aside class="graph-map-side session-graph-side" id="system-member-graph-side" aria-label="Selected service code unit details"></aside>
-              </div>
-              <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-member-graph-arrow-legend" hidden></div>
-              <p class="session-graph-note" id="system-member-graph-note" hidden></p>
-              <p class="error-text session-graph-error" id="system-member-graph-error" role="alert" hidden></p>
-            </div>
+            <div id="system-member-graph-workspace" class="system-embedded-graph" data-motion-paused="false" data-expanded="false" data-graph-prefix="system-member-graph" data-graph-heading="h4" data-graph-title="Service code graph" data-graph-scope="Service code graph" hidden></div>
           </section>
           <div class="system-cards" id="system-services"></div>
           <details class="system-details"><summary>Contracts and memory ownership</summary><div id="system-relationships"></div><p class="system-note">System Brain coordinates the change. Each service owns its tasks and Memory Bank. Local SQLite indexes are disposable. Receipts become durable knowledge only through the owning runtime’s review and promotion workflow.</p><div id="system-banks" class="system-cards"></div></details>
@@ -454,7 +356,7 @@
       </div></div></section>
       <section class="view" id="system-changes-view" aria-label="System changes" hidden><div class="page-scroll"><div class="page-content">
         <div class="page-toolbar system-runs-bar"><label class="field">Change<select id="system-runs"><option value="">No changes yet</option></select></label><button type="button" class="button" id="system-refresh">Refresh</button><button type="button" class="button" id="system-new-change" aria-controls="system-plan-form" aria-expanded="false">New change</button></div>
-        <div class="composer-working system-working" id="system-changes-working" data-working="false" data-motion-paused="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" aria-hidden="true"><svg class="rabbit-svg" viewBox="0 0 72 52" fill="none"><ellipse class="rabbit-shadow" cx="32" cy="48" rx="18" ry="2.2"/><g class="rabbit-body"><circle class="rabbit-fur rabbit-tail" cx="13" cy="36" r="4.5"/><ellipse class="rabbit-fur rabbit-foot" cx="25" cy="44.5" rx="7" ry="3.2"/><ellipse class="rabbit-fur" cx="26.5" cy="35.5" rx="12" ry="10.5"/><ellipse class="rabbit-fur-shade" cx="24" cy="37.5" rx="7.5" ry="6.5"/><g class="rabbit-head"><g class="rabbit-ear-back"><ellipse class="rabbit-fur" cx="30.5" cy="10.5" rx="3.5" ry="9.5" transform="rotate(-14 30.5 10.5)"/><ellipse class="rabbit-ear-inner" cx="30.8" cy="11" rx="1.7" ry="6.2" transform="rotate(-14 30.8 11)"/></g><g class="rabbit-ear-front"><ellipse class="rabbit-fur" cx="38" cy="10.5" rx="3.7" ry="10" transform="rotate(10 38 10.5)"/><ellipse class="rabbit-ear-inner" cx="38.1" cy="11" rx="1.8" ry="6.6" transform="rotate(10 38.1 11)"/></g><ellipse class="rabbit-fur" cx="36" cy="23.5" rx="9.8" ry="8.6"/><ellipse class="rabbit-cheek" cx="38.5" cy="26.5" rx="3.4" ry="2.2"/><g class="rabbit-jaw"><ellipse class="rabbit-fur rabbit-jaw-pad" cx="42.2" cy="27.8" rx="3.5" ry="2.3"/><path class="rabbit-mouth" d="M40.8 27.2 Q43 28.8 45 27.2"/></g><path class="rabbit-whisker" d="M39 24.8 L34.5 24 M39 26 L34.8 26.8"/><g class="rabbit-eye-group"><ellipse class="rabbit-eye" cx="39.8" cy="21.5" rx="1.6" ry="2.1"/><circle class="rabbit-eye-shine" cx="40.3" cy="20.7" r="0.6"/></g><ellipse class="rabbit-nose" cx="45.2" cy="24.2" rx="1.6" ry="1.15"/></g><g class="rabbit-carrot-group"><path class="carrot-leaf-dark" d="M60 28.5 C63 23.5 67 23 66 26.5 C65 28.5 62.5 29.5 60 29.5 Z"/><path class="carrot-leaf" d="M60.5 29.5 C65.5 26 70 28 67.5 31 C65.5 32.5 62.5 31.5 60.5 30 Z"/><path class="carrot-leaf-dark" d="M59.8 30.5 C64.5 31.5 68 35 64.5 36 C62 36.5 60.2 33 59.8 31 Z"/><path class="carrot-body" d="M43.8 25.4 C42.8 25.7 42.7 27.8 43.9 28.2 L59.5 33.4 C62 34 63.2 28.4 60.5 27.6 Z"/><path class="carrot-highlight" d="M46.5 26.4 L58.5 29.2"/><path class="carrot-stripe" d="M50.5 27.2 L49.9 29.5 M54.5 28.2 L53.8 31 M58 29.2 L57.2 32.2"/><ellipse class="rabbit-fur rabbit-paw" cx="39.8" cy="31.5" rx="4.4" ry="2.7" transform="rotate(-18 39.8 31.5)"/></g><circle class="carrot-crumb rabbit-crumb-a" cx="44" cy="29.5" r="1.1"/><circle class="carrot-crumb rabbit-crumb-b" cx="45.8" cy="30.5" r="0.9"/></g></svg></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="system-changes-working-text">System is working…</span><button type="button" class="button compact system-working-pause" id="system-changes-working-pause" aria-pressed="false">Pause</button><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div>
+        <div class="composer-working system-working" id="system-changes-working" data-working="false" data-motion-paused="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" aria-hidden="true"></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="system-changes-working-text">System is working…</span><button type="button" class="button compact system-working-pause" id="system-changes-working-pause" aria-pressed="false">Pause</button><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div>
         <p class="error-text" id="system-run-error" role="alert" hidden></p><p class="skills-action-status" id="system-run-message" role="status"></p><p class="system-warning" id="system-editor-lock" role="status" hidden></p>
         <div class="system-empty" id="system-runs-empty" hidden><h3>No changes yet</h3><p class="system-note">A change starts as a plan. You review its context and impact before any agent runs.</p></div>
         <section class="session-graph-workspace system-map-workspace system-change-map-workspace" id="system-change-map-workspace" aria-label="Blast-radius and live multi-service code map" data-motion-paused="false" data-expanded="false" hidden>
@@ -497,58 +399,7 @@
             <p class="session-graph-note" id="system-change-topology-note" hidden></p>
             <p class="error-text session-graph-error" id="system-change-topology-error" role="alert" hidden></p>
           </div>
-          <div id="system-change-graph-workspace" class="system-embedded-graph" data-motion-paused="false" data-expanded="false" hidden>
-            <header class="session-graph-toolbar">
-              <div class="session-graph-heading">
-                <h4 class="session-graph-title" id="system-change-graph-title">Service live code map</h4>
-                <span class="session-graph-summary" id="system-change-graph-summary"></span>
-              </div>
-              <div class="session-graph-controls" role="toolbar" aria-label="Change service code graph controls" aria-controls="system-change-graph-canvas">
-                <div class="session-graph-mode-group" role="group" aria-label="Graph view mode">
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-mode-whole" aria-pressed="true">Whole graph</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-mode-changes" aria-pressed="false">Changes <span class="session-graph-badge" id="system-change-graph-changes-count" hidden>0</span></button>
-                </div>
-                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-unfold" aria-pressed="false">Unfold all</button>
-                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
-                <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
-                  <button type="button" class="button compact session-graph-btn" id="system-change-graph-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
-                  <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="system-change-graph-zoom-level" title="Reset zoom level" aria-label="Reset zoom level">100%</button>
-                  <button type="button" class="button compact session-graph-btn" id="system-change-graph-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
-                </div>
-                <button type="button" class="button compact session-graph-btn" id="system-change-graph-fit">Fit</button>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-follow" aria-pressed="true">Follow focus</button>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-pause-motion" aria-pressed="false">Pause pulse</button>
-                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-expand" aria-expanded="false">Expand</button>
-                <button type="button" class="button compact session-graph-btn" id="system-change-graph-open-full">Full map</button>
-              </div>
-            </header>
-            <div class="session-graph-subbar">
-              <label class="session-graph-filter"><span class="sr-only">Filter service graph names</span><input id="system-change-graph-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter files, folders, entities…"></label>
-              <label class="checkbox session-graph-check"><input id="system-change-graph-notests" type="checkbox">Without tests</label>
-            </div>
-            <div class="session-graph-progress" id="system-change-graph-progress" role="status" aria-live="polite" hidden>
-              <div class="session-graph-progress-head">
-                <span class="session-graph-progress-text" id="system-change-graph-progress-text">Building code graph…</span>
-                <span class="session-graph-progress-amount" id="system-change-graph-progress-amount">0%</span>
-              </div>
-              <progress class="session-graph-progress-bar" id="system-change-graph-progress-bar" max="100" aria-labelledby="system-change-graph-progress-text"></progress>
-              <p class="session-graph-progress-left" id="system-change-graph-progress-left"></p>
-            </div>
-            <div class="session-graph-focus" id="system-change-graph-focus" role="status" aria-live="polite" hidden>
-              <span class="session-graph-focus-label" id="system-change-graph-focus-label"></span>
-              <div class="session-graph-focus-entities" id="system-change-graph-focus-entities"></div>
-            </div>
-            <nav class="graph-map-crumbs session-graph-crumbs" id="system-change-graph-crumbs" aria-label="Change service graph breadcrumbs" hidden></nav>
-            <div class="session-graph-body" id="system-change-graph-body">
-              <div class="graph-map-canvas session-graph-canvas" id="system-change-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive change service code graph canvas"></div>
-              <div class="graph-map-radar" id="system-change-graph-canvas-radar" aria-hidden="true" hidden></div>
-              <aside class="graph-map-side session-graph-side" id="system-change-graph-side" aria-label="Selected change service code unit details"></aside>
-            </div>
-            <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-change-graph-arrow-legend" hidden></div>
-            <p class="session-graph-note" id="system-change-graph-note" hidden></p>
-            <p class="error-text session-graph-error" id="system-change-graph-error" role="alert" hidden></p>
-          </div>
+          <div id="system-change-graph-workspace" class="system-embedded-graph" data-motion-paused="false" data-expanded="false" data-graph-prefix="system-change-graph" data-graph-heading="h4" data-graph-title="Service live code map" data-graph-scope="Change service code graph" hidden></div>
         </section>
         <form id="system-plan-form" class="system-plan" hidden aria-labelledby="system-plan-title">
           <h3 id="system-plan-title">New change</h3>
@@ -791,7 +642,7 @@
             <div class="omni-studio-grid">
               <div class="omni-stage">
                 <div class="omni-stage-header">
-                  <div class="omni-tabs" id="omni-stage-tabs" role="tablist" aria-label="Context Graph views" focusgroup="tablist nomemory">
+                  <div class="omni-tabs" id="omni-stage-tabs" role="tablist" aria-label="Context Graph views">
                     <button type="button" class="omni-tab" role="tab" id="omni-tab-constellation" data-action="omnigraph-stage-tab" data-tab="constellation" aria-controls="omni-pane-constellation" aria-selected="true">Constellation</button>
                     <button type="button" class="omni-tab" role="tab" id="omni-tab-dag" data-action="omnigraph-stage-tab" data-tab="dag" aria-controls="omni-pane-dag" aria-selected="false">Branch &amp; Time-Travel DAG</button>
                     <button type="button" class="omni-tab" role="tab" id="omni-tab-merge" data-action="omnigraph-stage-tab" data-tab="merge" aria-controls="omni-pane-merge" aria-selected="false">3-Way Merge &amp; Diff</button>
@@ -857,7 +708,7 @@
                 </section>
               </div>
               <aside class="omni-drawer" aria-label="Context Inspector, Live Pulse, and Publishing">
-                <div class="omni-tabs omni-drawer-tabs" id="omni-drawer-tabs" role="tablist" aria-label="Studio drawer panels" focusgroup="tablist nomemory">
+                <div class="omni-tabs omni-drawer-tabs" id="omni-drawer-tabs" role="tablist" aria-label="Studio drawer panels">
                   <button type="button" class="omni-tab" role="tab" id="omni-drawer-tab-inspector" data-action="omnigraph-drawer-tab" data-tab="inspector" aria-controls="omni-drawer-inspector" aria-selected="true">Inspector</button>
                   <button type="button" class="omni-tab" role="tab" id="omni-drawer-tab-pulse" data-action="omnigraph-drawer-tab" data-tab="pulse" aria-controls="omni-drawer-pulse" aria-selected="false">Live Pulse <span class="omni-tab-badge" id="omni-pulse-count">0</span></button>
                   <button type="button" class="omni-tab" role="tab" id="omni-drawer-tab-publish" data-action="omnigraph-drawer-tab" data-tab="publish" aria-controls="omni-drawer-publish" aria-selected="false">Publish Atom</button>
@@ -1016,7 +867,7 @@
     <p class="graph-map-legend" id="graph-link-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. The head and the dashes of a link tell its kind, as the key of the links shows. Hollow: only guessed by name. Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
     <div class="graph-arrow-legend-slot" id="graph-link-arrow-legend"></div>
   </dialog>
-  <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>
+  <div class="run-file-card" id="run-file-card" role="dialog" aria-modal="true" aria-label="File details" tabindex="-1" hidden></div>
   <dialog class="graph-map graph-explanation" id="graph-shell-event" aria-labelledby="graph-shell-event-title">
     <div class="graph-map-head"><h2 id="graph-shell-event-title">Shell read evidence</h2><button class="button" type="button" id="graph-shell-event-close">Close</button></div>
     <p class="knowledge-note" id="graph-shell-event-status" role="status"></p>
@@ -1063,7 +914,7 @@
   <dialog class="folder-picker omni-transfer-dialog" id="omnigraph-transfer-dialog" aria-labelledby="omni-transfer-title" aria-describedby="omni-transfer-description">
     <div class="folder-picker-head"><h2 id="omni-transfer-title">Export &amp; Import Omnigraph Context</h2><button class="button" id="omni-transfer-close" type="button">Close</button></div>
     <p class="knowledge-note" id="omni-transfer-description">Export a portable context bundle or NDJSON stream, or import context back into any Omnigraph branch and task.</p>
-    <div class="omni-tabs omni-transfer-tabs" id="omni-transfer-tabs" role="tablist" aria-label="Context transfer mode" focusgroup="tablist nomemory">
+    <div class="omni-tabs omni-transfer-tabs" id="omni-transfer-tabs" role="tablist" aria-label="Context transfer mode">
       <button type="button" class="omni-tab" role="tab" id="omni-transfer-tab-export" data-action="omnigraph-transfer-tab" data-tab="export" aria-controls="omni-transfer-pane-export" aria-selected="true">Export</button>
       <button type="button" class="omni-tab" role="tab" id="omni-transfer-tab-import" data-action="omnigraph-transfer-tab" data-tab="import" aria-controls="omni-transfer-pane-import" aria-selected="false">Import</button>
     </div>
@@ -1229,6 +1080,59 @@
       </div>
     </form>
   </dialog>
+  <template id="rabbit-svg-template"><svg class="rabbit-svg" viewBox="0 0 72 52" fill="none"><ellipse class="rabbit-shadow" cx="32" cy="48" rx="18" ry="2.2"/><g class="rabbit-body"><circle class="rabbit-fur rabbit-tail" cx="13" cy="36" r="4.5"/><ellipse class="rabbit-fur rabbit-foot" cx="25" cy="44.5" rx="7" ry="3.2"/><ellipse class="rabbit-fur" cx="26.5" cy="35.5" rx="12" ry="10.5"/><ellipse class="rabbit-fur-shade" cx="24" cy="37.5" rx="7.5" ry="6.5"/><g class="rabbit-head"><g class="rabbit-ear-back"><ellipse class="rabbit-fur" cx="30.5" cy="10.5" rx="3.5" ry="9.5" transform="rotate(-14 30.5 10.5)"/><ellipse class="rabbit-ear-inner" cx="30.8" cy="11" rx="1.7" ry="6.2" transform="rotate(-14 30.8 11)"/></g><g class="rabbit-ear-front"><ellipse class="rabbit-fur" cx="38" cy="10.5" rx="3.7" ry="10" transform="rotate(10 38 10.5)"/><ellipse class="rabbit-ear-inner" cx="38.1" cy="11" rx="1.8" ry="6.6" transform="rotate(10 38.1 11)"/></g><ellipse class="rabbit-fur" cx="36" cy="23.5" rx="9.8" ry="8.6"/><ellipse class="rabbit-cheek" cx="38.5" cy="26.5" rx="3.4" ry="2.2"/><g class="rabbit-jaw"><ellipse class="rabbit-fur rabbit-jaw-pad" cx="42.2" cy="27.8" rx="3.5" ry="2.3"/><path class="rabbit-mouth" d="M40.8 27.2 Q43 28.8 45 27.2"/></g><path class="rabbit-whisker" d="M39 24.8 L34.5 24 M39 26 L34.8 26.8"/><g class="rabbit-eye-group"><ellipse class="rabbit-eye" cx="39.8" cy="21.5" rx="1.6" ry="2.1"/><circle class="rabbit-eye-shine" cx="40.3" cy="20.7" r="0.6"/></g><ellipse class="rabbit-nose" cx="45.2" cy="24.2" rx="1.6" ry="1.15"/></g><g class="rabbit-carrot-group"><path class="carrot-leaf-dark" d="M60 28.5 C63 23.5 67 23 66 26.5 C65 28.5 62.5 29.5 60 29.5 Z"/><path class="carrot-leaf" d="M60.5 29.5 C65.5 26 70 28 67.5 31 C65.5 32.5 62.5 31.5 60.5 30 Z"/><path class="carrot-leaf-dark" d="M59.8 30.5 C64.5 31.5 68 35 64.5 36 C62 36.5 60.2 33 59.8 31 Z"/><path class="carrot-body" d="M43.8 25.4 C42.8 25.7 42.7 27.8 43.9 28.2 L59.5 33.4 C62 34 63.2 28.4 60.5 27.6 Z"/><path class="carrot-highlight" d="M46.5 26.4 L58.5 29.2"/><path class="carrot-stripe" d="M50.5 27.2 L49.9 29.5 M54.5 28.2 L53.8 31 M58 29.2 L57.2 32.2"/><ellipse class="rabbit-fur rabbit-paw" cx="39.8" cy="31.5" rx="4.4" ry="2.7" transform="rotate(-18 39.8 31.5)"/></g><circle class="carrot-crumb rabbit-crumb-a" cx="44" cy="29.5" r="1.1"/><circle class="carrot-crumb rabbit-crumb-b" cx="45.8" cy="30.5" r="0.9"/></g></svg></template>
+  <template id="embedded-graph-panel-template">
+    <header class="session-graph-toolbar">
+      <div class="session-graph-heading">
+        <h4 class="session-graph-title" data-graph-id="title" data-graph-role="title">Code graph</h4>
+        <span class="session-graph-summary" data-graph-id="summary"></span>
+      </div>
+      <div class="session-graph-controls" role="toolbar" data-graph-role="toolbar" data-graph-controls="canvas">
+        <div class="session-graph-mode-group" role="group" aria-label="Graph view mode">
+          <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="mode-whole" aria-pressed="true" title="Show the whole project graph">Whole graph</button>
+          <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="mode-changes" aria-pressed="false" title="Show changed files and entities">Changes <span class="session-graph-badge" data-graph-id="changes-count" hidden>0</span></button>
+        </div>
+        <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+        <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="unfold" aria-pressed="false" title="Unfold all project folders to view the entire graph">Unfold all</button>
+        <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+        <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
+          <button type="button" class="button compact session-graph-btn" data-graph-id="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+          <button type="button" class="button compact session-graph-btn session-graph-zoom-level" data-graph-id="zoom-level" title="Reset zoom and refit map" aria-label="Reset zoom level">100%</button>
+          <button type="button" class="button compact session-graph-btn" data-graph-id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+        </div>
+        <button type="button" class="button compact session-graph-btn" data-graph-id="fit" title="Fit graph to view">Fit</button>
+        <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="follow" aria-pressed="true" title="Automatically pan and zoom to prompt targets and created symbols">Follow focus</button>
+        <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="pause-motion" aria-pressed="false" title="Pause pulsing animations on new symbols">Pause pulse</button>
+        <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="expand" aria-expanded="false" title="Expand graph workspace">Expand</button>
+        <button type="button" class="button compact session-graph-btn" data-graph-id="open-full" title="Open full interactive dependency map dialog">Full map</button>
+      </div>
+    </header>
+    <div class="session-graph-subbar">
+      <label class="session-graph-filter"><span class="sr-only" data-graph-role="filter-label">Filter graph names</span><input data-graph-id="filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter files, folders, entities…"></label>
+      <label class="checkbox session-graph-check"><input data-graph-id="notests" type="checkbox">Without tests</label>
+    </div>
+    <div class="session-graph-progress" data-graph-id="progress" role="status" aria-live="polite" hidden>
+      <div class="session-graph-progress-head">
+        <span class="session-graph-progress-text" data-graph-id="progress-text">Building code graph…</span>
+        <span class="session-graph-progress-amount" data-graph-id="progress-amount">0%</span>
+      </div>
+      <progress class="session-graph-progress-bar" data-graph-id="progress-bar" max="100" data-graph-labelledby="progress-text"></progress>
+      <p class="session-graph-progress-left" data-graph-id="progress-left"></p>
+    </div>
+    <div class="session-graph-focus" data-graph-id="focus" role="status" aria-live="polite" hidden>
+      <span class="session-graph-focus-label" data-graph-id="focus-label"></span>
+      <div class="session-graph-focus-entities" data-graph-id="focus-entities"></div>
+    </div>
+    <nav class="graph-map-crumbs session-graph-crumbs" data-graph-id="crumbs" data-graph-role="crumbs" aria-label="Graph breadcrumbs" hidden></nav>
+    <div class="session-graph-body" data-graph-id="body">
+      <div class="graph-map-canvas session-graph-canvas" data-graph-id="canvas" data-graph-role="canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive code graph canvas"></div>
+      <div class="graph-map-radar" data-graph-id="canvas-radar" aria-hidden="true" hidden></div>
+      <aside class="graph-map-side session-graph-side" data-graph-id="side" data-graph-role="side" aria-label="Selected code unit details"></aside>
+    </div>
+    <div class="graph-arrow-legend-slot session-graph-arrow-legend" data-graph-id="arrow-legend" hidden></div>
+    <p class="session-graph-note" data-graph-id="note" hidden></p>
+    <p class="error-text session-graph-error" data-graph-id="error" role="alert" hidden></p>
+  </template>
   <script type="module" src="/boot.js"></script>
 </body>
 </html>
