@@ -133,6 +133,12 @@ Alternatively, **Load system** reads an existing relative system file
 (contract kinds, `declared`/`verified`/`undeclared_in_code` provenance, version
 mismatch risks, cross-service cycles, shortest paths, shared providers/consumers,
 service tiers, and drill-down into any member service's Graphify code graph).
+Selecting a link between two services also opens **Code on both sides**, including
+a collapsible **Semantic framework & DB bridges** section (`semantic_bridges`)
+showing discovered cross-service HTTP/RPC `routes`, `events` between producers
+and consumers, `di_bindings`, and shared database `tables` (`shared_read`,
+`cross_read_write`, `shared_write`) with clickable file jumps onto each service's
+code map.
 A file chosen there, from what the search of the system map finds or with **Map**
 beside a file of a receipt, is selected in the code map of its service that is
 embedded in the view: the folders that hold it open in that picture, the picture
@@ -1857,23 +1863,41 @@ fields of a memory draft do.
 ### Code graph
 
 The **Graph** chip switches on an optional code graph for the selected project. It
-is off by default. [Graphify](https://github.com/Graphify-Labs/graphify) builds the
-graph on this machine with its `update` pass, which parses files and calls no
+is off by default. When [Graphify](https://github.com/Graphify-Labs/graphify) is
+installed on `PATH` (or named by `HARNESS_GRAPHIFY`), Harness can build the graph
+on this machine with Graphify's `update` pass, which parses files and calls no
 model; the Harness also removes model provider keys from the tool's environment and
 sets `GRAPHIFY_NO_AUTO_REFRESH=1`, so a Graphify newer than the assistant skills
 installed in your home directory does not rewrite them from a build.
-The Harness does not install Graphify. It looks for `graphify` on `PATH`
-(`HARNESS_GRAPHIFY` names another executable), and the panel says how to install it
-when it is missing.
+When Python `graphify` CLI is not installed (or when native mode is active via
+`HARNESS_GRAPH_BACKEND=native`), Harness automatically falls back to its built-in
+native `tree-sitter` SQLite Code Graph IR (`native-tree-sitter-ir`, shown as
+**Native tree-sitter IR** in the dependency map summary and status text), so code
+maps work out of the box with zero external Python tooling. (Configuring an explicit
+missing executable path still reports `missing`.)
 
-The graph lives in the Harness state directory under `graphs/<project id>/`, not in
-the project. Graphify releases before 0.9 still write a manifest into the project's
+The native extractor parses 14+ code languages via embedded `tree-sitter`
+grammars—PHP (`.php`, `.phtml`, `.inc`), Rust (`.rs`), TypeScript/TSX (`.ts`,
+`.mts`, `.cts`, `.tsx`), JavaScript/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Python
+(`.py`, `.pyi`), Go (`.go`), Java (`.java`), C# (`.cs`), Ruby (`.rb`), Kotlin
+(`.kt`, `.kts`), Swift (`.swift`), and Scala (`.scala`, `.sc`)—alongside workspace
+manifest resolvers (`composer.json` PSR-4 and classmap,
+`tsconfig.json`/`jsconfig.json` `baseUrl`/`paths`/`extends`, `package.json`
+`name`/`exports`/`imports`/`workspaces`, `pyproject.toml`, and `go.mod`),
+cycle-safe Rust `pub use` re-export propagation (`ReexportIndex`), and framework/DB
+semantic edge extraction (`exposes_route`, `di_binds`, `publishes_event`,
+`handles_event`, `reads_table`, `writes_table`).
+
+The graph and its incremental SQLite Code Graph IR (`graphs/<project id>/graph_ir.sqlite3`)
+live in the Harness state directory under `graphs/<project id>/`, not in the
+project. Graphify releases before 0.9 still write a manifest into the project's
 own `graphify-out/`; the Harness puts back the manifest that was there, or removes
-the file and the folder it created, when the build ends. Each build starts without
-the previous graph, so a deleted file leaves
-no nodes behind; it keeps the tool's file cache and replaces the published graph
-only after it succeeds. A failed or interrupted build leaves the previous graph in
-use, and the panel shows the tool's last line.
+the file and the folder it created, when the build ends. Builds replace
+`live/graph.json` atomically only after succeeding so the previous published graph
+stays readable during rebuilds, and a bounded `notify` file-system watcher plus
+live session file-mutation hooks incrementally re-index edited code files without
+discarding the active graph. A failed or interrupted build leaves the previous
+graph in use, and the panel shows the tool's last line.
 
 A build starts when the graph is switched on, when **Rebuild** is pressed, and when
 the project's files changed since the last build and the project is opened, a run
@@ -2394,10 +2418,19 @@ the links it has with the change.
   reach them along directed links, nearest first. Expand a file and select a
   candidate to see the path. The map says when it finds no path, a changed file
   is absent from the graph, or the traversal reaches its limit. It uses test
-  naming conventions and test spans inside Rust files. The paths show what is
-  reachable in the graph. Execution coverage requires running the tests.
-  The section is available on a current change graph with **Without tests**
-  turned off.
+  naming conventions and test spans inside Rust files. When workspace `LCOV`
+  (`lcov.info`, `coverage/lcov.info`, `coverage.info`, `.coverage/lcov.info`,
+  `target/coverage/lcov.info`, `var/coverage/lcov.info`) or `Clover` XML
+  (`clover.xml`, `coverage/clover.xml`, `build/logs/clover.xml`,
+  `target/coverage/clover.xml`, `coverage/coverage.xml`, `coverage.xml`)
+  coverage artifacts exist under the project root (bounded to `<= 8 MiB` per
+  file and `<= 16 MiB` total without following symlinks outside the root),
+  `test_reach` attaches a per-file `coverage` summary (`format`,
+  `covered_lines`, `total_lines`, `rate`), merges LCOV `TN:` per-test hits
+  (`source: "coverage"`, `coverage_verified: true`) alongside static BFS
+  candidates, and displays accessible coverage pills (`LCOV 85% (34/40)`) and
+  `from coverage` / `coverage verified` badges in the side panel. The section
+  is available on a current change graph with **Without tests** turned off.
 - **Failing tests** ranks the changed files by how likely each is behind the
   tests that fail. Paste the failing tests under **Name the failing tests**, one
   on each line: a test, its file, or a line of the output of a test run as a
@@ -2408,7 +2441,11 @@ the links it has with the change.
   files that the failing tests reach along the links and the passing tests do
   not: the share of the failing tests that reach a file, times the share of
   failing among the tests that reach it, under a root, and of files as likely
-  the one nearer to a failing test. A ranked file carries `#1`, `#2` on its box,
+  the one nearer to a failing test. When `LCOV` or `Clover` coverage artifacts
+  are present, `suspects` rows also merge observed `TN:` test hits into the
+  Ochiai ranking, enrich each row with its `coverage` badge (`coverage_verified`
+  and `source: "coverage"` where matched only via coverage), and use coverage to
+  break ties. A ranked file carries `#1`, `#2` on its box,
   and a folder of a change drawn by folder the best rank inside it. The graph
   stands in for what a test runs, so this says where to look first, not what
   broke. Up to 64 tests are taken, the tests are looked for in the whole graph

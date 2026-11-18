@@ -385,6 +385,13 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-suspects-field { display:block; box-sizing:border-box; width:100%; margin:6px 0; padding:6px 8px; border:1px solid var(--field-line); border-radius:var(--radius-sm); background:var(--paper); color:var(--ink); font-family:var(--font-mono); font-size:var(--text-meta); line-height:var(--leading-ui); resize:vertical; }
 .graph-suspects-field:focus-visible { outline:2px solid var(--graph-target-border); outline-offset:1px; }
 .graph-suspects-actions { display:flex; flex-wrap:wrap; gap:6px; }
+/* Observed LCOV / Clover coverage and provenance badges in test reach and suspects rows. */
+.graph-coverage-pill { display:inline-flex; align-items:center; gap:4px; flex:none; padding:0 8px; border:1px solid var(--line); border-radius:var(--radius-pill); background:var(--soft); color:var(--ink-2); font-size:var(--text-meta); font-weight:var(--weight-strong); line-height:var(--leading-ui); font-variant-numeric:tabular-nums; }
+.graph-coverage-pill[data-tone="high"] { border-color:var(--success-line); background:var(--success-soft); color:var(--success); }
+.graph-coverage-pill[data-tone="mid"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
+.graph-coverage-pill[data-tone="low"] { border-color:var(--error-line); background:var(--error-soft); color:var(--error); }
+.graph-coverage-pill[data-kind="verified"] { border-color:var(--success-line); background:var(--success-soft); color:var(--success); }
+.graph-coverage-pill[data-kind="source"] { border-color:var(--arch-line); background:var(--arch-soft); color:var(--arch); }
 /* Of a path, what only a longer way has: drawn lighter, so that the shortest ways are read first. Selecting or resting on a box draws its links in full. */
 .graph-map-edge[data-detour="true"] { opacity:.5; }
 .graph-map-edge[data-detour="true"].graph-map-edge-on { opacity:1; }
@@ -2195,6 +2202,26 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 /* The code on both sides of a link between services. */
 .system-bridge-site { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; padding:4px 0; }
 .system-bridge-site code { overflow-wrap:anywhere; }
+/* Cross-service framework routes, events, DI bindings, and shared database tables. */
+.system-semantic-bridges { margin:8px 0 0; padding:8px; border:1px solid var(--border-subtle); border-radius:var(--radius); background:var(--surface-subtle); }
+.system-semantic-bridges-summary { display:flex; align-items:center; justify-content:space-between; gap:8px; cursor:pointer; font-size:var(--text-ui); font-weight:var(--weight-strong); color:var(--ink-2); }
+.system-semantic-bridges-body { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+.system-semantic-group-title { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:4px 0 0; font-size:var(--text-meta); font-weight:var(--weight-strong); color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+.system-semantic-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+.system-semantic-item { display:flex; flex-direction:column; gap:4px; padding:8px; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--paper); font-size:var(--text-meta); line-height:var(--leading-ui); }
+.system-semantic-item-head { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; }
+.system-semantic-item-head code { font-family:var(--font-mono); color:var(--ink); overflow-wrap:anywhere; }
+.system-semantic-badge { display:inline-flex; align-items:center; padding:0 8px; border:1px solid var(--line); border-radius:var(--radius-pill); background:var(--soft); color:var(--ink-2); font-size:var(--text-meta); font-weight:var(--weight-strong); line-height:var(--leading-ui); }
+.system-semantic-badge[data-kind="route"] { border-color:var(--purple-line); background:var(--purple-soft); color:var(--purple); }
+.system-semantic-badge[data-kind="event"] { border-color:var(--arch-line); background:var(--arch-soft); color:var(--arch); }
+.system-semantic-badge[data-kind="di"] { border-color:var(--design-line); background:var(--design-soft); color:var(--design); }
+.system-semantic-badge[data-kind="table"][data-coupling="shared_write"] { border-color:var(--error-line); background:var(--error-soft); color:var(--error); }
+.system-semantic-badge[data-kind="table"][data-coupling="cross_read_write"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
+.system-semantic-badge[data-kind="table"][data-coupling="shared_read"] { border-color:var(--success-line); background:var(--success-soft); color:var(--success); }
+.system-semantic-files { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
+.system-semantic-file { display:inline-flex; align-items:center; max-width:100%; padding:0 4px; border:1px solid var(--field-line); border-radius:var(--radius-sm); background:var(--soft); color:var(--ink-2); font-family:var(--font-mono); font-size:var(--text-meta); line-height:var(--leading-ui); }
+.system-semantic-file:hover { border-color:var(--purple); background:var(--purple-soft); color:var(--purple); }
+.system-semantic-file code { overflow-wrap:anywhere; }
 /* The waves of a change: as far as the wave shown, what a later wave reaches waits, faint. */
 .system-waves { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin:0 0 4px; color:var(--muted); font-size:var(--text-meta); }
 .system-waves .graph-arrow-legend-preset { min-width:24px; justify-content:center; font-variant-numeric:tabular-nums; }
@@ -2235,7 +2262,7 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 @media (forced-colors:active) {
   .graph-side-tab[aria-selected="true"]::after { background:Highlight; opacity:1; }
   .session-mobile-tab[aria-selected="true"] { outline:2px solid Highlight; }
-  .graph-status-pill,.graph-vis-pill,.graph-member-kind,.graph-member-access,.graph-member-vis-delta,.graph-impact-members,.graph-vis-warning-box,.graph-map-node-badges > *,.system-map-node,.system-contract-row,.system-chip,.system-map-radar { border-color:CanvasText; }
+  .graph-status-pill,.graph-vis-pill,.graph-coverage-pill,.graph-member-kind,.graph-member-access,.graph-member-vis-delta,.graph-impact-members,.graph-vis-warning-box,.graph-map-node-badges > *,.system-map-node,.system-contract-row,.system-chip,.system-semantic-bridges,.system-semantic-item,.system-semantic-badge,.system-semantic-file,.system-map-radar { border-color:CanvasText; }
   .session-graph-mode-group .session-graph-toggle[aria-pressed="true"],.graph-changes-filter[aria-pressed="true"],.graph-member-filter[aria-pressed="true"],.graph-changes-file[data-selected="true"],.graph-changes-entity[data-selected="true"],.graph-member-vis-delta[data-narrowed="true"],.graph-member-vis-delta[data-risk="true"],.graph-member-vis-delta[data-status="broken_risk"],.system-map-node[data-selected="true"],.history-item[data-waiting-approval="true"],.conversation-permission[data-state="pending"],.permission-panel { border-color:Highlight; }
   .permissions-hint[data-mode="bypass"],#system-permissions-hint[data-mode="bypass"],#system-recovery-permissions-hint[data-mode="bypass"],#creator-permissions-hint[data-mode="bypass"] { color:Highlight; font-weight:var(--weight-strong); }
   .system-map-edge { stroke:CanvasText; }

@@ -2507,8 +2507,91 @@ pub fn chosen(view: &V) -> String {
 /// What the map shows, in a line: how much the graph holds, or what the
 /// opened file, the followed place or the change is, and, without tests,
 /// how much that leaves out.
+fn is_native_ir_marker(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    lower.contains("native-tree-sitter-ir")
+        || lower.contains("native tree-sitter sqlite ir")
+        || lower.contains("native-sqlite-ir")
+        || lower.contains("native_tree_sitter_ir")
+}
+
+/// Normalizes internal code-graph backend identifiers into concise user-facing labels.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn format_graph_backend_label(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if is_native_ir_marker(trimmed) {
+        "Native tree-sitter IR".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Replaces raw internal native-IR markers inside status/banner strings with a concise readable label.
+pub(crate) fn format_graph_status_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !is_native_ir_marker(trimmed) {
+        return trimmed.to_owned();
+    }
+    let mut out = trimmed.to_owned();
+    for needle in [
+        "native tree-sitter SQLite IR",
+        "native tree-sitter sqlite ir",
+        "Native tree-sitter SQLite IR",
+        "native-tree-sitter-ir",
+        "native_tree_sitter_ir",
+        "native-sqlite-ir",
+    ] {
+        out = out.replace(needle, "Native tree-sitter IR");
+    }
+    if is_native_ir_marker(&out) {
+        let lower = out.to_ascii_lowercase();
+        for needle in [
+            "native tree-sitter sqlite ir",
+            "native-tree-sitter-ir",
+            "native_tree_sitter_ir",
+            "native-sqlite-ir",
+        ] {
+            if let Some(at) = lower.find(needle) {
+                let end = at + needle.len();
+                if out.is_char_boundary(at) && out.is_char_boundary(end) {
+                    out.replace_range(at..end, "Native tree-sitter IR");
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn graph_backend_label(view: &V) -> Option<String> {
+    let candidates = [
+        view["backend"].as_str(),
+        view["built"]["tool"].as_str(),
+        view["built"]["backend"].as_str(),
+        view["tool"]["backend"].as_str(),
+        view["tool"]["name"].as_str(),
+        view["tool"]["version"].as_str(),
+        view["status"]["backend"].as_str(),
+        view["status"]["tool"]["version"].as_str(),
+        view["message"].as_str(),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if is_native_ir_marker(candidate) {
+            return Some("Native tree-sitter IR".to_owned());
+        }
+    }
+    None
+}
+
 pub fn summary(view: &V) -> String {
-    format!("{}{}", shown(view), left_out(view))
+    let mut text = format!("{}{}", shown(view), left_out(view));
+    if let Some(backend) = graph_backend_label(view) {
+        text.push_str(&format!(" · {backend}"));
+    }
+    text
 }
 /// What a map without tests leaves out: the files that are tests, and the
 /// tests inside the files it keeps. Nothing where tests are not left out.
@@ -10283,6 +10366,7 @@ pub fn scopes(place: &V, branches: &V, chosen: &str) -> String {
 /// What stands before the note of a change whose own graph is not there:
 /// how its build is going, and whose links are drawn meanwhile.
 pub fn interim(view: &V, phase: &str) -> String {
+    let phase = format_graph_status_text(phase);
     let first = m::yes(&view["preliminary"]);
     match (view["state"] == "building", first) {
         (true, true) => format!(
@@ -13312,6 +13396,67 @@ pub fn failing_lines(text: &str) -> Vec<String> {
     }
     lines
 }
+fn format_coverage_summary(cov: &V) -> Option<(String, String, &'static str)> {
+    if !cov.is_object() {
+        return None;
+    }
+    let fmt_raw = m::text(cov, "format").trim().to_ascii_lowercase();
+    let fmt_label = match fmt_raw.as_str() {
+        "lcov" => "LCOV",
+        "clover" => "Clover",
+        _ => "Coverage",
+    };
+    let covered = cov["covered_lines"].as_u64()?;
+    let total = cov["total_lines"].as_u64()?;
+    let rate = cov["rate"].as_f64().unwrap_or_else(|| {
+        if total == 0 {
+            0.0
+        } else {
+            covered as f64 / total as f64
+        }
+    });
+    let pct = (rate * 100.0).round().clamp(0.0, 100.0) as u64;
+    let tone = if total == 0 {
+        "neutral"
+    } else if pct >= 80 {
+        "high"
+    } else if pct >= 50 {
+        "mid"
+    } else {
+        "low"
+    };
+    let label = format!("{fmt_label} {pct}% ({covered}/{total})");
+    let title =
+        format!("Observed {fmt_label} line coverage: {covered} of {total} lines covered ({pct}%)");
+    Some((label, title, tone))
+}
+
+fn coverage_pill_html(cov: &V) -> String {
+    let Some((label, title, tone)) = format_coverage_summary(cov) else {
+        return String::new();
+    };
+    let esc_label = escape(&label);
+    let esc_title = escape(&title);
+    format!(
+        "<span class=\"graph-coverage-pill\" data-tone=\"{tone}\" title=\"{esc_title}\" aria-label=\"Coverage {esc_label}\">{esc_label}</span>"
+    )
+}
+
+fn coverage_provenance_pills_html(item: &V) -> String {
+    let mut html = String::new();
+    if item["source"].as_str() == Some("coverage") {
+        html.push_str(
+            "<span class=\"graph-coverage-pill\" data-kind=\"source\" title=\"Discovered directly from test coverage report\" aria-label=\"Discovered from coverage\">from coverage</span>",
+        );
+    }
+    if m::yes(&item["coverage_verified"]) {
+        html.push_str(
+            "<span class=\"graph-coverage-pill\" data-kind=\"verified\" title=\"Verified hitting this file in test coverage report\" aria-label=\"Coverage verified\">coverage verified</span>",
+        );
+    }
+    html
+}
+
 /// The changed files ranked by the tests that fail: a field to paste the
 /// failing tests into, and what the server made of them.
 fn suspects_side(view: &V, state: &V, surface: MapSurface) -> String {
@@ -13352,8 +13497,10 @@ fn suspects_side(view: &V, state: &V, surface: MapSurface) -> String {
                     row["nearest"].as_u64().unwrap_or(0),
                 );
                 let rank = row["rank"].as_u64().unwrap_or(0);
+                let cov_pill = coverage_pill_html(&row["coverage"]);
+                let provenance = coverage_provenance_pills_html(row);
                 html.push_str(&format!(
-                    "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"{rank}\" data-action=\"graph-map-node\" data-payload=\"{}\" title=\"{} · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{} of {} failing, {} passing · {} from a failing test</span></button></li>",
+                    "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"{rank}\" data-action=\"graph-map-node\" data-payload=\"{}\" title=\"{} · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span><span class=\"graph-map-row-name\">{}</span>{cov_pill}{provenance}<span class=\"graph-map-row-links\">{}{} of {} failing, {} passing · {} from a failing test</span></button></li>",
                     payload(&row["path"]),
                     escape(&path),
                     escape(base(&path)),
@@ -13462,8 +13609,10 @@ fn test_paths(view: &V) -> String {
             _ if tests.is_empty() => "No test path found in the graph".to_owned(),
             _ => plural(total, "candidate", "candidates"),
         };
+        let cov_pill = coverage_pill_html(&row["coverage"]);
+        let cov_sep = if cov_pill.is_empty() { "" } else { " " };
         html.push_str(&format!(
-            "<details><summary>{} · {}</summary><p class=\"graph-map-path\">{}</p>",
+            "<details><summary>{} · {}{cov_sep}{cov_pill}</summary><p class=\"graph-map-path\">{}</p>",
             escape(base(&path)),
             escape(&status),
             escape(&path),
@@ -13472,8 +13621,10 @@ fn test_paths(view: &V) -> String {
             let steps = test["steps"].as_u64().unwrap_or(0);
             let name = m::text(test, "name");
             let file = m::text(test, "file");
+            let provenance = coverage_provenance_pills_html(test);
+            let prov_sep = if provenance.is_empty() { "" } else { " " };
             html.push_str(&format!(
-                "<p class=\"graph-map-path\"><button type=\"button\" class=\"button compact\" data-action=\"graph-map-test-path\" data-payload=\"{}\">{} · {}</button>{}</p>",
+                "<p class=\"graph-map-path\"><button type=\"button\" class=\"button compact\" data-action=\"graph-map-test-path\" data-payload=\"{}\">{} · {}</button>{}{prov_sep}{provenance}</p>",
                 payload(&json!({"from": test["path"], "to": test["to"]})),
                 escape(&name),
                 plural(steps, "link", "links"),
@@ -13877,6 +14028,9 @@ fn map_attachment(view: &V) -> Option<String> {
     {
         lines.push(format!("Graph revision: {}", json!(commit)));
     }
+    if let Some(backend) = graph_backend_label(view) {
+        lines.push(format!("Graph backend: {backend}"));
+    }
     if m::yes(&view["stale"]) || m::yes(&view["preliminary"]) {
         lines.push("The displayed graph was stale or preliminary.".to_owned());
     }
@@ -13912,11 +14066,29 @@ fn map_attachment(view: &V) -> Option<String> {
         if row["state"] == "partial" {
             lines.push("The search for test paths reached its limit.".to_owned());
         }
+        if let Some((cov_label, _, _)) = format_coverage_summary(&row["coverage"]) {
+            lines.push(format!("Observed coverage: {cov_label}"));
+        }
         let tests = m::array(&row["tests"]);
         if !tests.is_empty() {
             lines.push("\nTest candidates from graph links:".to_owned());
             for test in tests {
-                lines.push(format!("- {} ({} links)", test["path"], test["steps"]));
+                let mut tags = Vec::new();
+                if test["source"].as_str() == Some("coverage") {
+                    tags.push("from coverage");
+                }
+                if m::yes(&test["coverage_verified"]) {
+                    tags.push("coverage verified");
+                }
+                let suffix = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", tags.join(", "))
+                };
+                lines.push(format!(
+                    "- {} ({} links){suffix}",
+                    test["path"], test["steps"]
+                ));
             }
         } else if row["state"] == "ready" {
             lines.push("No test path found in the graph.".to_owned());
@@ -16166,17 +16338,19 @@ fn build_map_path(project: &str, state: &V, embedded: bool) -> String {
     build_scoped_map_path(&GraphTargetScope::single(project), state, embedded)
 }
 fn combine_note(before: String, view: &V) -> String {
-    [
-        before,
-        m::text(view, "architecture_error"),
-        note(view),
-        cycle_revision(view),
-    ]
-    .iter()
-    .filter(|part| !part.is_empty())
-    .cloned()
-    .collect::<Vec<_>>()
-    .join(" ")
+    format_graph_status_text(
+        &[
+            before,
+            m::text(view, "architecture_error"),
+            note(view),
+            cycle_revision(view),
+        ]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" "),
+    )
 }
 fn map_side_html(
     surface: MapSurface,
@@ -16609,7 +16783,7 @@ fn render(view: &V) {
             "graph-map-error",
             &format!(
                 "The graph of that commit could not be built: {}",
-                m::text(view, "failure")
+                format_graph_status_text(&m::text(view, "failure"))
             ),
         );
     }
@@ -19279,11 +19453,24 @@ fn render_embedded_surface(
     if !view.is_object() || !view["nodes"].is_array() {
         let view_state = m::text(view, "state");
         let fallback = if view_state == "failed" {
-            format!("Could not build code graph: {}", m::text(view, "failure"))
+            format!(
+                "Could not build code graph: {}",
+                format_graph_status_text(&m::text(view, "failure"))
+            )
         } else if view_state == "building" {
-            "Building code graph and dependency map…".to_owned()
+            let msg = format_graph_status_text(&m::text(&view["build"], "message"));
+            if msg.is_empty() {
+                "Building code graph and dependency map…".to_owned()
+            } else {
+                msg
+            }
         } else {
-            note(view)
+            let note_text = format_graph_status_text(&note(view));
+            if note_text.is_empty() {
+                format_graph_status_text(&m::text(view, "message"))
+            } else {
+                note_text
+            }
         };
         let default_note = if surface_scope(surface).is_system() {
             "Code graph not built yet for this service — click Build graph to index."
@@ -30422,5 +30609,136 @@ mod memory_bridge_tests {
         let changes_tabs = side_tabs_html("changes", 3, "modal");
         assert!(changes_tabs.contains("aria-selected=\"true\" tabindex=\"0\" data-action=\"graph-side-tab\" data-tab=\"changes\""));
         assert!(changes_tabs.contains("aria-selected=\"false\" tabindex=\"-1\" data-action=\"graph-side-tab\" data-tab=\"details\""));
+    }
+
+    #[test]
+    fn phase2c_coverage_badges_and_native_ir_labels_render_cleanly_without_hex_colors() {
+        let view = json!({
+            "mode": "changes",
+            "scope": "",
+            "backend": "native-tree-sitter-ir",
+            "built": {"commit": "deadbeef", "tool": "native-tree-sitter-ir"},
+            "chosen": {"kind": "work", "name": "Uncommitted changes", "target": "work"},
+            "change": {"files": 2, "graphed": 2, "here": 2, "affected": 0, "needed": 0, "removed": 0},
+            "focus": {"path": "src/cart.php", "uses": [], "used_by": []},
+            "nodes": [
+                {"path": "src/cart.php", "name": "cart.php", "folder": false, "changed": 1, "status": "M",
+                 "suspect": {"rank": 1, "score": 1.0}},
+                {"path": "src/price.php", "name": "price.php", "folder": false, "changed": 1, "status": "M"}
+            ],
+            "edges": [],
+            "test_reach": [
+                {
+                    "path": "src/cart.php",
+                    "state": "ready",
+                    "total": 2,
+                    "coverage": {"format": "lcov", "covered_lines": 34, "total_lines": 40, "rate": 0.85},
+                    "tests": [
+                        {"path": "tests/CartTest.php", "to": "src/cart.php", "file": "tests/CartTest.php", "name": "tests/CartTest.php", "steps": 1, "coverage_verified": true},
+                        {"path": "DynamicSuite::testTotal", "to": "src/cart.php", "file": "DynamicSuite::testTotal", "name": "DynamicSuite::testTotal", "steps": 1, "source": "coverage", "coverage_verified": true}
+                    ]
+                },
+                {
+                    "path": "src/price.php",
+                    "state": "ready",
+                    "total": 0,
+                    "coverage": {"format": "clover", "covered_lines": 3, "total_lines": 4, "rate": 0.75},
+                    "tests": []
+                }
+            ],
+            "suspects": {
+                "failing": ["tests/CartTest.php"],
+                "unmatched": [],
+                "tests": 2,
+                "rows": [
+                    {
+                        "path": "src/cart.php",
+                        "status": "M",
+                        "rank": 1,
+                        "score": 1.0,
+                        "failing": 1,
+                        "passing": 0,
+                        "nearest": 1,
+                        "coverage": {"format": "lcov", "covered_lines": 34, "total_lines": 40, "rate": 0.85},
+                        "coverage_verified": true,
+                        "source": "coverage"
+                    }
+                ],
+                "more": 0,
+                "clear": 0,
+                "complete": true
+            }
+        });
+
+        let reach_html = test_paths(&view);
+        crate::test_support::assert_no_inline_hex_colors(&reach_html);
+        assert!(reach_html.contains("LCOV 85% (34/40)"), "{reach_html}");
+        assert!(reach_html.contains("Clover 75% (3/4)"), "{reach_html}");
+        assert!(
+            reach_html.contains("aria-label=\"Coverage LCOV 85% (34/40)\""),
+            "{reach_html}"
+        );
+        assert!(reach_html.contains("data-kind=\"source\""), "{reach_html}");
+        assert!(reach_html.contains("from coverage"), "{reach_html}");
+        assert!(
+            reach_html.contains("data-kind=\"verified\""),
+            "{reach_html}"
+        );
+        assert!(reach_html.contains("coverage verified"), "{reach_html}");
+
+        let suspects_html =
+            suspects_side(&view, &json!({"failing": ["CartTest"]}), SESSION_SURFACE);
+        crate::test_support::assert_no_inline_hex_colors(
+            &suspects_html.replace(">#1<", ">rank-1<"),
+        );
+        assert!(!suspects_html.contains("style="), "{suspects_html}");
+        assert!(
+            suspects_html.contains("LCOV 85% (34/40)"),
+            "{suspects_html}"
+        );
+        assert!(suspects_html.contains("from coverage"), "{suspects_html}");
+        assert!(
+            suspects_html.contains("coverage verified"),
+            "{suspects_html}"
+        );
+
+        let sum = summary(&view);
+        assert!(sum.contains("Native tree-sitter IR"), "{sum}");
+        assert!(!sum.contains("native-tree-sitter-ir"), "{sum}");
+
+        assert_eq!(
+            format_graph_backend_label("native-tree-sitter-ir"),
+            "Native tree-sitter IR"
+        );
+        let status_line = format_graph_status_text(
+            "Code graph & dependency map ready (native tree-sitter SQLite IR).",
+        );
+        assert_eq!(
+            status_line,
+            "Code graph & dependency map ready (Native tree-sitter IR)."
+        );
+        let combined = combine_note(
+            interim(
+                &json!({"state": "building", "preliminary": false}),
+                "Indexing via native-tree-sitter-ir",
+            ),
+            &json!({"mode": "whole"}),
+        );
+        assert!(combined.contains("Native tree-sitter IR"), "{combined}");
+        assert!(!combined.contains("native-tree-sitter-ir"), "{combined}");
+
+        let attachment = map_attachment(&view).expect("map attachment");
+        assert!(
+            attachment.contains("Graph backend: Native tree-sitter IR"),
+            "{attachment}"
+        );
+        assert!(
+            attachment.contains("Observed coverage: LCOV 85% (34/40)"),
+            "{attachment}"
+        );
+        assert!(
+            attachment.contains("[from coverage, coverage verified]"),
+            "{attachment}"
+        );
     }
 }

@@ -3656,7 +3656,224 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
             );
         }
     }
+    html.push_str(&semantic_bridges_html(
+        from,
+        to,
+        &bridge["semantic_bridges"],
+    ));
     html
+}
+
+fn join_text_array(value: &V) -> String {
+    m::array(value)
+        .iter()
+        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn semantic_bridge_file_buttons(service: &str, files: &V) -> String {
+    let mut out = String::new();
+    for item in m::array(files).into_iter().take(6) {
+        let Some(path) = item.as_str().map(str::trim).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let open = payload_attr(&json!({"path": path, "service": service}));
+        out.push_str(&format!(
+            "<button type=\"button\" class=\"system-semantic-file\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" title=\"Show {} on the code map of {}\"><code>{}</code></button>",
+            escape(path),
+            escape(service),
+            escape(path),
+        ));
+    }
+    out
+}
+
+fn wrap_semantic_files(buttons: String) -> String {
+    if buttons.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"system-semantic-files\">{buttons}</div>")
+    }
+}
+
+fn semantic_bridges_html(from: &str, to: &str, sem: &V) -> String {
+    if !sem.is_object() {
+        return String::new();
+    }
+    let routes = m::array(&sem["routes"]);
+    let events = m::array(&sem["events"]);
+    let di_bindings = m::array(&sem["di_bindings"]);
+    let tables = m::array(&sem["tables"]);
+    let total = routes.len() + events.len() + di_bindings.len() + tables.len();
+    if total == 0 {
+        return "<details class=\"system-semantic-bridges\"><summary class=\"system-semantic-bridges-summary\"><span>Semantic framework &amp; DB bridges</span><span class=\"system-chip\">0</span></summary><p class=\"system-note\">No shared routes, events, DI bindings, or tables detected.</p></details>".to_owned();
+    }
+    let mut body = String::new();
+    if !routes.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">Routes <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            routes.len()
+        ));
+        for r in &routes {
+            let route = m::text(r, "route");
+            let methods = {
+                let joined = join_text_array(&r["methods"]);
+                if !joined.is_empty() {
+                    joined
+                } else {
+                    let single = m::text(r, "method");
+                    if single.is_empty() {
+                        "ANY".to_owned()
+                    } else {
+                        single
+                    }
+                }
+            };
+            let caller = {
+                let c = m::text(r, "caller");
+                if c.is_empty() {
+                    from.to_owned()
+                } else {
+                    c
+                }
+            };
+            let provider = {
+                let p = m::text(r, "provider");
+                if p.is_empty() {
+                    to.to_owned()
+                } else {
+                    p
+                }
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(&caller, &r["caller_files"]),
+                semantic_bridge_file_buttons(&provider, &r["provider_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"route\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"route\">{}</span><code>{}</code></div><div class=\"system-note\">{} → {}</div>{}</li>",
+                escape(&methods),
+                escape(&route),
+                escape(&caller),
+                escape(&provider),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    if !events.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">Events <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            events.len()
+        ));
+        for ev in &events {
+            let event_name = m::text(ev, "event");
+            let producer = {
+                let p = m::text(ev, "producer");
+                if p.is_empty() {
+                    from.to_owned()
+                } else {
+                    p
+                }
+            };
+            let consumer = {
+                let c = m::text(ev, "consumer");
+                if c.is_empty() {
+                    to.to_owned()
+                } else {
+                    c
+                }
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(&producer, &ev["producer_files"]),
+                semantic_bridge_file_buttons(&consumer, &ev["consumer_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"event\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"event\">event</span><code>{}</code></div><div class=\"system-note\">{} → {}</div>{}</li>",
+                escape(&event_name),
+                escape(&producer),
+                escape(&consumer),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    if !di_bindings.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">DI bindings <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            di_bindings.len()
+        ));
+        for di in &di_bindings {
+            let service = m::text(di, "service");
+            let from_kinds = join_text_array(&di["from_kinds"]);
+            let to_kinds = join_text_array(&di["to_kinds"]);
+            let left_note = if from_kinds.is_empty() {
+                escape(from)
+            } else {
+                format!("{}: {}", escape(from), escape(&from_kinds))
+            };
+            let right_note = if to_kinds.is_empty() {
+                escape(to)
+            } else {
+                format!("{}: {}", escape(to), escape(&to_kinds))
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(from, &di["from_files"]),
+                semantic_bridge_file_buttons(to, &di["to_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"di\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"di\">DI</span><code>{}</code></div><div class=\"system-note\">{left_note} ↔ {right_note}</div>{}</li>",
+                escape(&service),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    if !tables.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">Shared DB tables <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            tables.len()
+        ));
+        for tbl in &tables {
+            let table_name = m::text(tbl, "table");
+            let coupling_raw = m::text(tbl, "coupling");
+            let (coupling_attr, coupling_label) = match coupling_raw.as_str() {
+                "shared_write" => ("shared_write", "shared write"),
+                "cross_read_write" => ("cross_read_write", "read / write"),
+                "shared_read" => ("shared_read", "shared read"),
+                _ => ("shared_read", "shared"),
+            };
+            let from_access = join_text_array(&tbl["from_access"]);
+            let to_access = join_text_array(&tbl["to_access"]);
+            let left_note = if from_access.is_empty() {
+                escape(from)
+            } else {
+                format!("{} ({})", escape(from), escape(&from_access))
+            };
+            let right_note = if to_access.is_empty() {
+                escape(to)
+            } else {
+                format!("{} ({})", escape(to), escape(&to_access))
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(from, &tbl["from_files"]),
+                semantic_bridge_file_buttons(to, &tbl["to_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"table\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"table\" data-coupling=\"{coupling_attr}\">{coupling_label}</span><code>{}</code></div><div class=\"system-note\">{left_note} · {right_note}</div>{}</li>",
+                escape(&table_name),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    format!(
+        "<details class=\"system-semantic-bridges\" open><summary class=\"system-semantic-bridges-summary\"><span>Semantic framework &amp; DB bridges</span><span class=\"system-chip\">{total}</span></summary><div class=\"system-semantic-bridges-body\">{body}</div></details>"
+    )
 }
 /// Asks for the code on both sides of a link and draws it beside the map.
 async fn fetch_bridge(surface: SysMapSurface, from: String, to: String) {
@@ -6527,5 +6744,84 @@ mod tests {
             1
         );
         assert_eq!(analyze_html.matches("tabindex=\"-1\"").count(), 2);
+    }
+
+    #[test]
+    fn bridge_html_renders_semantic_framework_and_db_bridges_without_inline_hex_colors() {
+        let bridge = json!({
+            "kind": "system_bridge",
+            "from": "web",
+            "to": "orders",
+            "contracts": ["orders-http-v1"],
+            "consumer": {"service": "web", "graph": true, "more": 0, "sites": []},
+            "provider": {"service": "orders", "graph": true, "more": 0, "sites": []},
+            "semantic_bridges": {
+                "routes": [{
+                    "route": "/api/orders/{id}",
+                    "method": "POST",
+                    "methods": ["POST"],
+                    "direction": "from->to",
+                    "caller": "web",
+                    "provider": "orders",
+                    "caller_files": ["src/OrdersClient.ts"],
+                    "provider_files": ["src/OrderController.php"]
+                }],
+                "events": [{
+                    "event": "OrderCreated",
+                    "direction": "to->from",
+                    "producer": "orders",
+                    "consumer": "web",
+                    "producer_files": ["src/OrderService.php"],
+                    "consumer_files": ["src/OrderSyncListener.ts"]
+                }],
+                "di_bindings": [{
+                    "service": "PaymentGateway",
+                    "from_kinds": ["binds"],
+                    "to_kinds": ["implements"],
+                    "from_files": ["src/Providers/AppProvider.ts"],
+                    "to_files": ["src/StripeGateway.php"]
+                }],
+                "tables": [{
+                    "table": "orders",
+                    "coupling": "cross_read_write",
+                    "from_access": ["read"],
+                    "to_access": ["read", "write"],
+                    "from_files": ["src/OrderQuery.ts"],
+                    "to_files": ["src/OrderRepository.php"]
+                }],
+                "summary": {"routes": 1, "events": 1, "di_bindings": 1, "tables": 1, "total": 4}
+            }
+        });
+        let html = bridge_html(SERVICES_SURFACE, "web", "orders", &bridge);
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(
+            html.contains("Semantic framework &amp; DB bridges"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"system-chip\">4</span>"),
+            "{html}"
+        );
+        assert!(html.contains("/api/orders/{id}"), "{html}");
+        assert!(html.contains("POST"), "{html}");
+        assert!(html.contains("OrderCreated"), "{html}");
+        assert!(html.contains("PaymentGateway"), "{html}");
+        assert!(
+            html.contains("data-coupling=\"cross_read_write\""),
+            "{html}"
+        );
+        assert!(html.contains("read / write"), "{html}");
+        assert!(html.contains("<code>orders</code>"), "{html}");
+        let payloads = crate::test_support::payloads(&html, "inspect-system-file-graph");
+        assert!(payloads.contains(&json!({"path": "src/OrderController.php", "service": "orders"})));
+        assert!(payloads.contains(&json!({"path": "src/OrderSyncListener.ts", "service": "web"})));
+
+        let mut empty_sem = bridge.clone();
+        empty_sem["semantic_bridges"] = json!({
+            "routes": [], "events": [], "di_bindings": [], "tables": []
+        });
+        let empty_html = bridge_html(SERVICES_SURFACE, "web", "orders", &empty_sem);
+        crate::test_support::assert_no_inline_hex_colors(&empty_html);
+        assert!(empty_html.contains("No shared routes, events, DI bindings, or tables detected."));
     }
 }

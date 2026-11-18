@@ -15,6 +15,19 @@ use std::{
     time::{Duration, Instant},
 };
 const EDITIONS: [&str; 4] = ["Laravel", "Symfony", "PHP Core", "Cms/wordpress"];
+// Align Setup file read and preview image bounds with `infra_tooling::installer::FILE_LIMIT`
+// so binaries linking embedded tree-sitter grammars fit both initial install and upgrade previews.
+const MAX_INSTALL_IMAGE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_PREVIEW_TOTAL_BYTES: usize = 512 * 1024 * 1024;
+
+fn check_preview_total_bytes(total: usize) -> Result<()> {
+    if total > MAX_PREVIEW_TOTAL_BYTES {
+        return Err(HarnessError::invalid(
+            "The selected source and project images exceed 512 MiB.",
+        ));
+    }
+    Ok(())
+}
 struct Preview {
     at: Instant,
     project: String,
@@ -245,11 +258,7 @@ impl Setup {
             total = total
                 .saturating_add(image.before_bytes as usize)
                 .saturating_add(image.after_bytes as usize);
-            if total > 64 * 1024 * 1024 {
-                return Err(HarnessError::invalid(
-                    "The selected source and project images exceed 64 MiB.",
-                ));
-            }
+            check_preview_total_bytes(total)?;
             let (change, truncated) = if image.before_text.is_some() || image.after_text.is_some() {
                 creator_files::diff(
                     image.before_text.as_deref().unwrap_or("").as_bytes(),
@@ -398,9 +407,11 @@ impl Setup {
                     infra_tooling::installer::PlannedPayload::Inline { sha256, .. } => sha256,
                     infra_tooling::installer::PlannedPayload::Source { image } => &image.sha256,
                 };
-                let bytes = rooted.read(&item.path, 64 * 1024 * 1024)?.ok_or_else(|| {
-                    HarnessError::conflict("A reviewed installed file is missing.")
-                })?;
+                let bytes = rooted
+                    .read(&item.path, MAX_INSTALL_IMAGE_BYTES)?
+                    .ok_or_else(|| {
+                        HarnessError::conflict("A reviewed installed file is missing.")
+                    })?;
                 let mode = rooted.read_mode(&item.path)?;
                 if store::sha(&bytes) != *expected
                     || mode != Some(infra_core::bank::publication::kept_mode(item.mode))
@@ -507,7 +518,7 @@ impl Setup {
                     .is_some_and(|m| !m.is_empty() && m.len() <= 5000);
                 if let Some(images) = receipt["files"].as_object() {
                     for (name, expected) in images {
-                        let actual = files.read(name, 64 * 1024 * 1024)?;
+                        let actual = files.read(name, MAX_INSTALL_IMAGE_BYTES)?;
                         verified &= actual.is_some_and(|b| expected["hash"] == store::sha(&b))
                             && files.read_mode(name)?.map(|m| json!(m))
                                 == Some(expected["mode"].clone());
@@ -607,5 +618,22 @@ mod installation_failure_tests {
     fn ordinary_partial_failure_keeps_existing_partial_response_path() {
         let error = infra_core::RuntimeError::conflict("A confirmed rollback requires inspection");
         assert!(installation_failure(&error, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_and_install_image_bounds_align_with_512_mib_limit() {
+        assert_eq!(MAX_INSTALL_IMAGE_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_PREVIEW_TOTAL_BYTES, 512 * 1024 * 1024);
+        assert!(check_preview_total_bytes(104 * 1024 * 1024).is_ok());
+        assert!(check_preview_total_bytes(180 * 1024 * 1024).is_ok());
+        assert!(check_preview_total_bytes(MAX_PREVIEW_TOTAL_BYTES).is_ok());
+        let exceeded = check_preview_total_bytes(MAX_PREVIEW_TOTAL_BYTES + 1)
+            .expect_err("preview totals above 512 MiB must be refused");
+        assert_eq!(exceeded.status, 400);
+        assert_eq!(exceeded.code, "invalid-request");
+        assert_eq!(
+            exceeded.message,
+            "The selected source and project images exceed 512 MiB."
+        );
     }
 }
