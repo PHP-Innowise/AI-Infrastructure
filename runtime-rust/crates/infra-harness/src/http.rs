@@ -1077,6 +1077,14 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "POST",
+        pattern: "/api/projects/{project_id}/preflight",
+        operation: "knowledge.preflight",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
         pattern: "/api/projects/{project_id}/graph",
         operation: "graph.act",
         status: 200,
@@ -1879,5 +1887,22 @@ mod tests {
         assert_eq!(parsed["limit"], "100");
         assert_eq!(parsed["offset"], "50");
         assert_eq!(parsed["cursor"], "offset:50");
+    }
+
+    #[test]
+    fn project_preflight_route_registered_with_csrf_token() {
+        let found = ROUTES
+            .iter()
+            .find(|r| r.method == "POST" && r.pattern == "/api/projects/{project_id}/preflight")
+            .expect("missing POST /api/projects/{project_id}/preflight route");
+        assert_eq!(found.operation, "knowledge.preflight");
+        assert_eq!(found.status, 200);
+        assert!(found.token, "preflight must require CSRF token");
+        assert!(found.query.is_empty());
+
+        let (matched, params) =
+            route("POST", "/api/projects/demo/preflight").expect("route matches");
+        assert_eq!(matched.operation, "knowledge.preflight");
+        assert_eq!(params["project_id"], "demo");
     }
 }

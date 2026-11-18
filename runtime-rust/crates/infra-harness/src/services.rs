@@ -257,6 +257,115 @@ impl NativeServices {
         }
         Ok(Payload::Json(links))
     }
+    async fn handle_preflight(&self, request: &Value) -> Result<Payload> {
+        let knowledge = self
+            .domains
+            .get("knowledge")
+            .ok_or_else(|| HarnessError::unavailable("Required native service is unavailable."))?;
+        let Payload::Json(mut preflight) = knowledge
+            .execute("knowledge.preflight", request.clone())
+            .await?
+        else {
+            return Err(HarnessError::unavailable("Unexpected preflight payload."));
+        };
+        let project_id = preflight
+            .get("project_id")
+            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| request["params"]["project_id"].clone());
+        let mut contradictions = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(files) = preflight["files"].as_array_mut() {
+            for item in files {
+                self.enrich_memory_links_item(&project_id, item).await;
+                collect_unique_contradictions(item, &mut contradictions, &mut seen);
+            }
+        }
+        if preflight.is_object() {
+            preflight["contradiction_warnings"] = Value::Array(contradictions);
+        }
+        Ok(Payload::Json(preflight))
+    }
+    async fn annotate_delivery_preview(&self, sid: &str, preview: &mut Value) {
+        let mut contradiction_warnings = Vec::new();
+        let mut hygiene_warnings = Vec::new();
+        let mut risk_callers = Vec::new();
+
+        let paths = extract_delivery_preview_paths(preview);
+        let project_id = (!sid.is_empty())
+            .then(|| self.store.get(sid).ok())
+            .flatten()
+            .and_then(|s| s["project_id"].as_str().map(str::to_owned));
+
+        if let Some(project_id) = project_id.filter(|id| !id.is_empty())
+            && !paths.is_empty()
+        {
+            let preflight_req = json!({
+                "params": { "project_id": project_id },
+                "query": {},
+                "body": {
+                    "paths": paths,
+                    "risk_caller_hints": false,
+                },
+            });
+            let mut enriched_via_preflight = false;
+            if let Ok(Payload::Json(pf)) = Box::pin(self.handle_preflight(&preflight_req)).await
+                && pf["files"].is_array()
+            {
+                enriched_via_preflight = true;
+                if let Some(items) = pf["contradiction_warnings"].as_array() {
+                    contradiction_warnings = items.clone();
+                }
+                if let Some(items) = pf["hygiene_warnings"].as_array() {
+                    hygiene_warnings = items.clone();
+                }
+                if let Some(items) = pf["risk_callers"].as_array() {
+                    risk_callers = items.clone();
+                }
+            }
+            if !enriched_via_preflight {
+                let mut seen = std::collections::BTreeSet::new();
+                for path in &paths {
+                    let mut item = json!({ "path": path, "contradiction_warnings": [] });
+                    self.enrich_memory_links_item(&json!(project_id), &mut item)
+                        .await;
+                    collect_unique_contradictions(&item, &mut contradiction_warnings, &mut seen);
+                }
+            }
+        }
+
+        preview["memory_warnings"] = json!({
+            "contradiction_warnings": contradiction_warnings,
+            "hygiene_warnings": hygiene_warnings,
+        });
+        preview["risk_callers"] = Value::Array(risk_callers);
+    }
+    async fn handle_delivery(&self, operation: &str, request: Value) -> Result<Payload> {
+        let domain = self
+            .domains
+            .get("delivery")
+            .ok_or_else(|| HarnessError::unavailable("Required native service is unavailable."))?;
+        let sid = request["params"]["session_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let action = request["body"]["action"].as_str().unwrap_or("").to_owned();
+        let mut payload = domain.execute(operation, request).await?;
+        if let Payload::Json(ref mut val) = payload {
+            if operation == "delivery.preview_commit"
+                || operation == "delivery.preview_transfer"
+                || (operation == "delivery.act"
+                    && matches!(action.as_str(), "preview_commit" | "preview_transfer"))
+            {
+                Box::pin(self.annotate_delivery_preview(&sid, val)).await;
+            } else if operation == "delivery.get"
+                && let Some(preview) = val.get_mut("preview").filter(|v| v.is_object())
+            {
+                Box::pin(self.annotate_delivery_preview(&sid, preview)).await;
+            }
+        }
+        Ok(payload)
+    }
     async fn waiting_permission_counts(&self) -> serde_json::Map<String, Value> {
         let Some(sessions) = self.domains.get("sessions") else {
             return serde_json::Map::new();
@@ -359,6 +468,51 @@ impl NativeServices {
             overrides,
             closer,
         })
+    }
+}
+fn extract_delivery_preview_paths(preview: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(files) = preview["files"].as_array() {
+        for entry in files {
+            let Some(clean) = entry
+                .as_str()
+                .or_else(|| entry["path"].as_str())
+                .and_then(crate::knowledge::clean_relative_path)
+            else {
+                continue;
+            };
+            if seen.insert(clean.clone()) {
+                paths.push(clean);
+                if paths.len() >= 24 {
+                    break;
+                }
+            }
+        }
+    }
+    paths
+}
+fn collect_unique_contradictions(
+    item: &Value,
+    out: &mut Vec<Value>,
+    seen: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    for warning in item["contradiction_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let key = (
+            warning["source_id"].as_str().unwrap_or("").to_owned(),
+            warning["target_id"].as_str().unwrap_or("").to_owned(),
+        );
+        if seen.insert(key) {
+            let mut annotated = warning.clone();
+            if annotated.get("path").is_none() && item["path"].is_string() {
+                annotated["path"] = item["path"].clone();
+            }
+            out.push(annotated);
+        }
     }
 }
 impl Services for NativeServices {
@@ -567,8 +721,15 @@ impl Services for NativeServices {
                         }
                         payload
                     }
+                    "knowledge.preflight" => Box::pin(self.handle_preflight(&request)).await?,
                     "knowledge.memory_links" | "knowledge.memory_links_batch" => {
                         Box::pin(self.handle_memory_links(operation, &request)).await?
+                    }
+                    "delivery.get"
+                    | "delivery.act"
+                    | "delivery.preview_commit"
+                    | "delivery.preview_transfer" => {
+                        Box::pin(self.handle_delivery(operation, request.clone())).await?
                     }
                     "omnigraph.sync_knowledge" => {
                         let project_id = body["project_id"]
@@ -1666,5 +1827,317 @@ mod tests {
 
         services.close().await.unwrap();
         stub_services.close().await.unwrap();
+    }
+
+    struct PreflightAndDeliveryDomain {
+        fail_knowledge: bool,
+        fail_omnigraph: bool,
+    }
+    impl Domain for PreflightAndDeliveryDomain {
+        fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
+            let op = operation.to_owned();
+            let fail_knowledge = self.fail_knowledge;
+            let fail_omnigraph = self.fail_omnigraph;
+            Box::pin(async move {
+                if op == "knowledge.preflight" {
+                    if fail_knowledge {
+                        return Err(HarnessError::unavailable("Knowledge offline."));
+                    }
+                    let pid = request["params"]["project_id"].clone();
+                    return Ok(Payload::Json(json!({
+                        "project_id": pid,
+                        "files": [
+                            {
+                                "path": "src/ok.rs",
+                                "brain_records": [],
+                                "memory_chunks": [],
+                                "hygiene_warnings": [],
+                                "contradiction_warnings": [],
+                            },
+                            {
+                                "path": "src/missing.rs",
+                                "brain_records": [],
+                                "memory_chunks": [],
+                                "hygiene_warnings": [{
+                                    "kind": "cited-file-missing",
+                                    "path": "src/missing.rs",
+                                    "linked": ["rec-m"],
+                                    "recommended_action": "review",
+                                    "text": "Missing file",
+                                }],
+                                "contradiction_warnings": [],
+                            },
+                            {
+                                "path": "src/err.rs",
+                                "brain_records": [],
+                                "memory_chunks": [],
+                                "hygiene_warnings": [],
+                                "contradiction_warnings": [],
+                            },
+                        ],
+                        "contradiction_warnings": [],
+                        "hygiene_warnings": [{
+                            "kind": "cited-file-missing",
+                            "path": "src/missing.rs",
+                            "linked": ["rec-m"],
+                            "recommended_action": "review",
+                            "text": "Missing file",
+                        }],
+                        "risk_callers": [{
+                            "from": "src/caller.rs",
+                            "to": "src/ok.rs",
+                            "impact": "impacted",
+                        }],
+                        "blast_summary": {
+                            "direct_count": 1,
+                            "downstream_count": 0,
+                            "files": [{"path": "src/caller.rs", "hop": 1, "left": 0.85}],
+                        },
+                        "risk_caller_hints": [],
+                    })));
+                }
+                if op == "omnigraph.file_context" {
+                    if fail_omnigraph {
+                        return Err(HarnessError::unavailable("Omnigraph offline."));
+                    }
+                    return match request["query"]["path"].as_str().unwrap_or("") {
+                        "src/ok.rs" => Ok(Payload::Json(json!({
+                            "ok": true,
+                            "atoms": [
+                                {"atom_id": "brain-a1", "title": "Claim A", "brain_record_id": "rec-a"},
+                                {"atom_id": "mem-MEM-1", "title": "Claim B", "memory_id": "MEM-1"}
+                            ],
+                            "contradictions": [{
+                                "source_id": "brain-a1",
+                                "source_title": "Claim A",
+                                "target_id": "mem-MEM-1",
+                                "target_title": "Claim B",
+                            }],
+                        }))),
+                        "src/err.rs" => Err(HarnessError::unavailable("Omnigraph file timeout.")),
+                        _ => Ok(Payload::Json(
+                            json!({"ok": true, "atoms": [], "contradictions": []}),
+                        )),
+                    };
+                }
+                if op == "delivery.preview_commit"
+                    || (op == "delivery.act" && request["body"]["action"] == "preview_commit")
+                {
+                    return Ok(Payload::Json(json!({
+                        "kind": "commit",
+                        "can_apply": true,
+                        "files": [
+                            {"status": "M", "path": "src/ok.rs"},
+                            {"status": "D", "path": "src/missing.rs"},
+                        ],
+                        "preview_id": "p-commit",
+                    })));
+                }
+                if op == "delivery.preview_transfer"
+                    || (op == "delivery.act" && request["body"]["action"] == "preview_transfer")
+                {
+                    return Ok(Payload::Json(json!({
+                        "kind": "transfer",
+                        "can_apply": true,
+                        "files": [{"status": "M", "path": "src/ok.rs"}],
+                        "preview_id": "p-transfer",
+                    })));
+                }
+                if op == "delivery.get" {
+                    return Ok(Payload::Json(json!({
+                        "available": true,
+                        "preview": {
+                            "kind": "transfer",
+                            "can_apply": true,
+                            "files": [{"status": "M", "path": "src/ok.rs"}],
+                            "preview_id": "p-current",
+                        },
+                    })));
+                }
+                Ok(Payload::Json(json!({})))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn knowledge_preflight_and_delivery_previews_enrich_and_degrade_safely() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_dir = root.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project = store.register(&project_dir).unwrap();
+        let pid = project["id"].as_str().unwrap().to_owned();
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at) VALUES('s1','Example',?1,?2,'claude','edit','native',0,'completed','now','now')",
+                rusqlite::params![pid, project_dir.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        }
+        let make_services = |fail_knowledge: bool, fail_omnigraph: bool| {
+            let domain: Arc<dyn Domain> = Arc::new(PreflightAndDeliveryDomain {
+                fail_knowledge,
+                fail_omnigraph,
+            });
+            let stub: Arc<dyn Domain> = Arc::new(StubDomain);
+            let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+                "sessions",
+                "setup",
+                "accelerators",
+                "systems",
+                "discovery",
+                "creator",
+                "skills",
+                "results",
+                "brain",
+                "context",
+                "projects",
+                "commands",
+                "files",
+                "memory",
+                "updates",
+                "providers",
+            ]
+            .into_iter()
+            .map(|name| (name.to_owned(), Arc::clone(&stub)))
+            .collect();
+            domains.insert("knowledge".into(), Arc::clone(&domain));
+            domains.insert("omnigraph".into(), Arc::clone(&domain));
+            domains.insert("delivery".into(), Arc::clone(&domain));
+            NativeServices::new(
+                store.clone(),
+                domains,
+                Arc::new(|| Ok(json!({}))),
+                BTreeMap::new(),
+                Arc::new(|| Box::pin(async { Ok(()) })),
+            )
+            .unwrap()
+        };
+
+        let services = make_services(false, false);
+
+        // 1. knowledge.preflight enriches files via omnigraph.file_context and aggregates contradiction_warnings.
+        let Payload::Json(pf) = services
+            .request(
+                "knowledge.preflight",
+                json!({"params":{"project_id":pid},"query":{},"body":{"paths":["src/ok.rs","src/missing.rs","src/err.rs"]}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(
+            pf["files"][0]["omnigraph_atoms"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            pf["files"][0]["contradiction_warnings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(pf["files"][2]["omnigraph_error"], "Omnigraph file timeout.");
+        assert_eq!(pf["contradiction_warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(pf["contradiction_warnings"][0]["path"], "src/ok.rs");
+        assert_eq!(pf["hygiene_warnings"].as_array().unwrap().len(), 1);
+
+        // 2. delivery.act (preview_commit & preview_transfer), delivery.preview_*, and delivery.get annotate memory_warnings + risk_callers.
+        for (op, body) in [
+            (
+                "delivery.act",
+                json!({"action": "preview_commit", "snapshot_id": "s", "paths": ["src/ok.rs"], "message": "m"}),
+            ),
+            (
+                "delivery.act",
+                json!({"action": "preview_transfer", "commit": "a", "target_branch": "main"}),
+            ),
+            ("delivery.preview_commit", json!({})),
+            ("delivery.preview_transfer", json!({})),
+        ] {
+            let Payload::Json(preview) = services
+                .request(
+                    op,
+                    json!({"params":{"session_id":"s1"},"query":{},"body":body}),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json");
+            };
+            assert_eq!(
+                preview["memory_warnings"]["contradiction_warnings"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{op}: {preview}"
+            );
+            assert_eq!(
+                preview["memory_warnings"]["hygiene_warnings"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{op}: {preview}"
+            );
+            assert_eq!(preview["risk_callers"][0]["from"], "src/caller.rs");
+        }
+        let Payload::Json(got_delivery) = services
+            .request(
+                "delivery.get",
+                json!({"params":{"session_id":"s1"},"query":{},"body":{}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(
+            got_delivery["preview"]["memory_warnings"]["contradiction_warnings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 3. Non-blocking degradation when both Knowledge and Omnigraph fail, or when session is unknown.
+        let degraded = make_services(true, true);
+        let Payload::Json(preview_ok) = degraded
+            .request(
+                "delivery.act",
+                json!({"params":{"session_id":"s1"},"query":{},"body":{"action":"preview_commit"}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(
+            preview_ok["memory_warnings"],
+            json!({"contradiction_warnings": [], "hygiene_warnings": []})
+        );
+        assert_eq!(preview_ok["risk_callers"], json!([]));
+
+        let Payload::Json(unknown_sess) = services
+            .request(
+                "delivery.preview_transfer",
+                json!({"params":{"session_id":"missing-sid"},"query":{},"body":{}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(
+            unknown_sess["memory_warnings"],
+            json!({"contradiction_warnings": [], "hygiene_warnings": []})
+        );
+        assert_eq!(unknown_sess["risk_callers"], json!([]));
+
+        services.close().await.unwrap();
+        degraded.close().await.unwrap();
     }
 }
