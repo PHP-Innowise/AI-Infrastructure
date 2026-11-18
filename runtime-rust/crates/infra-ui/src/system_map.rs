@@ -11,6 +11,7 @@
 
 use crate::{api, dom, model as m, systems};
 use serde_json::{json, Value as V};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
@@ -3796,6 +3797,7 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
     crate::graph_explanation::surface_map_context(surface.canvas_id, &doc, &doc, &explain_scope);
 
     let (canvas_html, pw, ph) = render_canvas_html(surface, &doc, &state);
+    invalidate_hover_cache(surface.canvas_id);
     set_html(surface.canvas_id, &canvas_html);
     set_html(
         surface.legend_id,
@@ -4272,6 +4274,82 @@ pub fn attach_wheel_listeners() {
     attach_canvas_wheel(CHANGES_SURFACE.canvas_id);
 }
 
+#[derive(Default)]
+struct HoverIndex {
+    node_els: BTreeMap<String, Vec<web_sys::Element>>,
+    edge_els: Vec<web_sys::Element>,
+    edges_by_node: BTreeMap<String, Vec<usize>>,
+    edges_by_pair: BTreeMap<(String, String), Vec<usize>>,
+    adjacency: BTreeMap<String, BTreeSet<String>>,
+    lit: Vec<web_sys::Element>,
+}
+
+thread_local! {
+    static HOVER_CACHE: RefCell<BTreeMap<String, HoverIndex>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn invalidate_hover_cache(canvas_id: &str) {
+    HOVER_CACHE.with(|cache| {
+        cache.borrow_mut().remove(canvas_id);
+    });
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn hover_pointed_key(hovered_node: Option<&str>, hovered_edge: Option<(&str, &str)>) -> String {
+    match (hovered_node, hovered_edge) {
+        (Some(nid), _) => format!("n:{nid}"),
+        (None, Some((ef, et))) => format!("e:{ef}\u{1f}{et}"),
+        (None, None) => String::new(),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_edge_adjacency(edges: &[(String, String)]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (from, to) in edges {
+        if !from.is_empty() && !to.is_empty() {
+            adj.entry(from.clone()).or_default().insert(to.clone());
+            adj.entry(to.clone()).or_default().insert(from.clone());
+        }
+    }
+    adj
+}
+
+fn build_hover_index(canvas_id: &str) -> HoverIndex {
+    let mut index = HoverIndex::default();
+    let mut pairs = Vec::new();
+    for el in dom::all(&format!(
+        "#{canvas_id} .system-map-edge, #{canvas_id} .system-map-violation-halo, #{canvas_id} .system-map-edge-label"
+    )) {
+        let f = el.get_attribute("data-from").unwrap_or_default();
+        let t = el.get_attribute("data-to").unwrap_or_default();
+        let idx = index.edge_els.len();
+        index.edge_els.push(el);
+        if !f.is_empty() {
+            index.edges_by_node.entry(f.clone()).or_default().push(idx);
+        }
+        if !t.is_empty() && t != f {
+            index.edges_by_node.entry(t.clone()).or_default().push(idx);
+        }
+        if !f.is_empty() || !t.is_empty() {
+            index
+                .edges_by_pair
+                .entry((f.clone(), t.clone()))
+                .or_default()
+                .push(idx);
+            pairs.push((f, t));
+        }
+    }
+    index.adjacency = build_edge_adjacency(&pairs);
+    for el in dom::all(&format!("#{canvas_id} [data-n]")) {
+        let nid = el.get_attribute("data-n").unwrap_or_default();
+        if !nid.is_empty() {
+            index.node_els.entry(nid).or_default().push(el);
+        }
+    }
+    index
+}
+
 fn apply_hover_lighting(
     canvas_id: &str,
     hovered_node: Option<&str>,
@@ -4283,45 +4361,81 @@ fn apply_hover_lighting(
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
         return;
     };
-    if hovered_node.is_none() && hovered_edge.is_none() {
-        let _ = plane.remove_attribute("data-hover");
-        for el in dom::all(&format!("#{canvas_id} [data-lit]")) {
-            let _ = el.remove_attribute("data-lit");
-        }
+    let pointed_key = hover_pointed_key(hovered_node, hovered_edge);
+    if plane.get_attribute("data-pointed").unwrap_or_default() == pointed_key {
         return;
     }
+    let _ = plane.set_attribute("data-pointed", &pointed_key);
 
-    let _ = plane.set_attribute("data-hover", "true");
-    let mut lit_nodes = BTreeSet::new();
-    for el in dom::all(&format!("#{canvas_id} .system-map-edge, #{canvas_id} .system-map-violation-halo, #{canvas_id} .system-map-edge-label")) {
-        let f = el.get_attribute("data-from").unwrap_or_default();
-        let t = el.get_attribute("data-to").unwrap_or_default();
-        let matches = if let Some(nid) = hovered_node {
-            f == nid || t == nid
-        } else if let Some((ef, et)) = hovered_edge {
-            f == ef && t == et
+    HOVER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let cleared_existing = if let Some(entry) = cache.get_mut(canvas_id) {
+            for el in entry.lit.drain(..) {
+                let _ = el.remove_attribute("data-lit");
+            }
+            true
         } else {
             false
         };
-        if matches {
-            let _ = el.set_attribute("data-lit", "true");
-            lit_nodes.insert(f);
-            lit_nodes.insert(t);
-        } else {
-            let _ = el.remove_attribute("data-lit");
+        if !cleared_existing {
+            for el in dom::all(&format!("#{canvas_id} [data-lit]")) {
+                let _ = el.remove_attribute("data-lit");
+            }
         }
-    }
-    if let Some(nid) = hovered_node {
-        lit_nodes.insert(nid.to_owned());
-    }
-    for el in dom::all(&format!("#{canvas_id} [data-n]")) {
-        let nid = el.get_attribute("data-n").unwrap_or_default();
-        if lit_nodes.contains(&nid) {
-            let _ = el.set_attribute("data-lit", "true");
-        } else {
-            let _ = el.remove_attribute("data-lit");
+
+        if hovered_node.is_none() && hovered_edge.is_none() {
+            let _ = plane.remove_attribute("data-hover");
+            return;
         }
-    }
+
+        let entry = cache
+            .entry(canvas_id.to_owned())
+            .or_insert_with(|| build_hover_index(canvas_id));
+
+        let _ = plane.set_attribute("data-hover", "true");
+        let mut lit_nodes = BTreeSet::new();
+
+        if let Some(nid) = hovered_node {
+            if let Some(edge_indices) = entry.edges_by_node.get(nid) {
+                for &idx in edge_indices {
+                    if let Some(el) = entry.edge_els.get(idx) {
+                        let _ = el.set_attribute("data-lit", "true");
+                        entry.lit.push(el.clone());
+                    }
+                }
+            }
+            lit_nodes.insert(nid.to_owned());
+            if let Some(neighbors) = entry.adjacency.get(nid) {
+                for neighbor in neighbors {
+                    lit_nodes.insert(neighbor.clone());
+                }
+            }
+        } else if let Some((ef, et)) = hovered_edge {
+            if let Some(edge_indices) = entry.edges_by_pair.get(&(ef.to_owned(), et.to_owned())) {
+                for &idx in edge_indices {
+                    if let Some(el) = entry.edge_els.get(idx) {
+                        let _ = el.set_attribute("data-lit", "true");
+                        entry.lit.push(el.clone());
+                    }
+                }
+            }
+            if !ef.is_empty() {
+                lit_nodes.insert(ef.to_owned());
+            }
+            if !et.is_empty() {
+                lit_nodes.insert(et.to_owned());
+            }
+        }
+
+        for nid in &lit_nodes {
+            if let Some(els) = entry.node_els.get(nid) {
+                for el in els {
+                    let _ = el.set_attribute("data-lit", "true");
+                    entry.lit.push(el.clone());
+                }
+            }
+        }
+    });
 }
 
 fn ensure_hover_watch(surface: SysMapSurface) {
@@ -4511,6 +4625,14 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
 }
 
 pub fn key(event: &web_sys::KeyboardEvent) -> bool {
+    if event.is_composing() {
+        return false;
+    }
+    if dom::get("graph-map").is_some_and(|d| d.has_attribute("open"))
+        || dom::get("graph-link").is_some_and(|d| d.has_attribute("open"))
+    {
+        return false;
+    }
     let view = m::read(|s| s.view.clone());
     if view != "systems" && view != "system-changes" {
         return false;
@@ -4520,26 +4642,57 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     } else {
         SERVICES_SURFACE
     };
-    if event.key() == "Escape"
-        && dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden"))
-    {
-        close_finder(surface);
-        return true;
+    let canvas_visible = dom::get(surface.canvas_id)
+        .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none());
+    if !canvas_visible {
+        return false;
     }
-    if event.key() == "/"
-        && !event.ctrl_key()
-        && !event.meta_key()
-        && !event.alt_key()
-        && event
-            .target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            .is_none_or(|el| !matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"))
-        && dom::get(surface.find_input_id)
-            .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
-    {
-        event.prevent_default();
-        dom::focus(surface.find_input_id);
-        return true;
+    if event.key() == "Escape" {
+        if dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden")) {
+            close_finder(surface);
+            return true;
+        }
+        let mut state = surface_state(surface);
+        if m::yes(&state["expanded"]) {
+            state["expanded"] = json!(false);
+            save_surface_state(surface, &state);
+            sync_toolbar_buttons(surface, &state);
+            fit_surface_camera(surface);
+            return true;
+        }
+        return false;
+    }
+    let target = event
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    let in_input = target
+        .as_ref()
+        .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
+    if !in_input && !event.ctrl_key() && !event.meta_key() && !event.alt_key() {
+        match event.key().as_str() {
+            "/" => {
+                if dom::get(surface.find_input_id)
+                    .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
+                {
+                    event.prevent_default();
+                    dom::focus(surface.find_input_id);
+                    return true;
+                }
+            }
+            "+" | "=" => {
+                zoom_surface_at(surface, ZOOM_STEP, None);
+                return true;
+            }
+            "-" => {
+                zoom_surface_at(surface, 1.0 / ZOOM_STEP, None);
+                return true;
+            }
+            "0" => {
+                fit_surface_camera(surface);
+                return true;
+            }
+            _ => {}
+        }
     }
     false
 }
@@ -5459,5 +5612,34 @@ mod tests {
             wave_scrubber_html(CHANGES_SURFACE, &blast_of(&doc, &state), &state),
             ""
         );
+    }
+
+    #[test]
+    fn hover_pointed_key_and_edge_adjacency_dedup_cleanly() {
+        assert_eq!(hover_pointed_key(None, None), "");
+        assert_eq!(hover_pointed_key(Some("orders"), None), "n:orders");
+        assert_ne!(
+            hover_pointed_key(Some("orders"), None),
+            hover_pointed_key(None, Some(("orders", "payments")))
+        );
+        assert_eq!(
+            hover_pointed_key(None, Some(("orders", "payments"))),
+            "e:orders\u{1f}payments"
+        );
+
+        let adj = build_edge_adjacency(&[
+            ("gateway".to_owned(), "orders".to_owned()),
+            ("orders".to_owned(), "payments".to_owned()),
+            ("".to_owned(), "ignored".to_owned()),
+        ]);
+        assert_eq!(
+            adj.get("orders").cloned().unwrap_or_default(),
+            BTreeSet::from(["gateway".to_owned(), "payments".to_owned()])
+        );
+        assert_eq!(
+            adj.get("gateway").cloned().unwrap_or_default(),
+            BTreeSet::from(["orders".to_owned()])
+        );
+        assert!(!adj.contains_key("ignored"));
     }
 }

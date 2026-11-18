@@ -38,6 +38,19 @@ const DAG_ROW_H: f64 = 56.0;
 const DAG_LANE_W: f64 = 24.0;
 const DAG_RAIL_PAD_X: f64 = 20.0;
 
+pub const LOD_LABEL_MIN_SCALE: f64 = 0.95;
+const LOD_FAR_MAX_SCALE: f64 = 0.55;
+
+pub fn lod(scale: f64) -> &'static str {
+    if !scale.is_finite() || scale <= 0.0 || scale >= LOD_LABEL_MIN_SCALE {
+        "near"
+    } else if scale < LOD_FAR_MAX_SCALE {
+        "far"
+    } else {
+        "mid"
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanvasViewport {
@@ -431,8 +444,9 @@ pub fn render_constellation(
         ));
     }
 
+    let plane_lod = lod(vp.scale);
     let mut html = format!(
-        "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{:.0}px;height:{:.0}px\" data-node-count=\"{}\" data-edge-count=\"{}\">",
+        "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{:.0}px;height:{:.0}px\" data-lod=\"{plane_lod}\" data-node-count=\"{}\" data-edge-count=\"{}\">",
         vp.pan_x,
         vp.pan_y,
         vp.scale,
@@ -442,34 +456,18 @@ pub fn render_constellation(
         routed.len()
     );
 
-    // SVG plane (orbital guides, arrow markers, gradient flows, Bezier paths, mid-edge labels)
+    // SVG plane (orbital guides, arrow markers, shared gradient flows, Bezier paths, mid-edge labels)
     html.push_str(&format!(
         "<svg class=\"omni-svg\" width=\"{:.0}\" height=\"{:.0}\" viewBox=\"0 0 {:.0} {:.0}\" aria-hidden=\"true\"><defs>",
         width, height, width, height
     ));
     html.push_str(&render_edge_marker_defs());
-    for (idx, (edge, r)) in routed.iter().enumerate() {
-        let subkind_attr = if edge.subkind.is_empty() {
-            ""
-        } else {
-            edge.subkind.as_str()
-        };
-        html.push_str(&format!(
-            "<linearGradient id=\"omni-flow-{idx}\" class=\"omni-flow omni-flow-{}\" data-rel=\"{}\" data-subkind=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"><stop offset=\"0\" class=\"omni-flow-from\"/><stop offset=\"0.5\" class=\"omni-flow-mid\"/><stop offset=\"1\" class=\"omni-flow-to\"/></linearGradient>",
-            escape_attr_token(&edge.arrow_key),
-            escape_attr_token(&edge.relation),
-            escape_attr_token(subkind_attr),
-            r.p0.0,
-            r.p0.1,
-            r.p3.0,
-            r.p3.1,
-        ));
-    }
+    html.push_str(&render_edge_gradient_defs());
     html.push_str("</defs>");
 
     html.push_str(&render_orbital_guides(&placed_nodes, width, height));
 
-    for (idx, (edge, r)) in routed.iter().enumerate() {
+    for (edge, r) in &routed {
         let spec = edge_spec(&edge.arrow_key);
         let dash_attr = spec
             .dash_array
@@ -480,11 +478,10 @@ pub fn render_constellation(
         } else {
             edge.subkind.as_str()
         };
+        let arrow_key = escape_attr_token(&edge.arrow_key);
         html.push_str(&format!(
-            "<path class=\"omni-edge omni-edge-{}\" d=\"{}\" stroke=\"url(#omni-flow-{idx})\" marker-end=\"url(#omni-arrow-{})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"{dash_attr}/>",
-            escape_attr_token(&edge.arrow_key),
+            "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"{dash_attr}/>",
             r.path_d,
-            escape_attr_token(&edge.arrow_key),
             escape_attr_token(&edge.relation),
             escape_attr_token(subkind_attr),
             esc(&edge.from),
@@ -494,21 +491,16 @@ pub fn render_constellation(
             bool_str(r.dimmed),
         ));
         html.push_str(&format!(
-            "<circle class=\"omni-edge-origin\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" data-rel=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"/>",
+            "<circle class=\"omni-edge-origin\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" data-rel=\"{arrow_key}\" data-lit=\"{}\" data-dimmed=\"{}\"/>",
             r.p0.0,
             r.p0.1,
-            escape_attr_token(&edge.arrow_key),
             bool_str(r.lit),
             bool_str(r.dimmed),
         ));
     }
 
-    // Mid-edge pill labels when zoomed in or connected to selected/highlighted node.
-    let zoomed_in = vp.scale >= 0.95;
+    // Mid-edge pill labels: always emitted so CSS `[data-lod]` toggles visibility on zoom without re-render.
     for (edge, r) in &routed {
-        if !(zoomed_in || r.selected || r.lit) {
-            continue;
-        }
         let pill_w = (edge.label.chars().count() as f64 * 6.2 + 16.0).max(52.0);
         html.push_str(&format!(
             "<g class=\"omni-edge-label\" data-rel=\"{}\" data-subkind=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"18\" rx=\"9\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
@@ -2271,6 +2263,23 @@ fn render_edge_marker_defs() -> String {
     defs
 }
 
+fn render_edge_gradient_defs() -> String {
+    let mut defs = String::new();
+    for spec in EDGE_SPECS {
+        let (rel, subkind) = match spec.key {
+            "supports" | "contradicts" | "supersedes" | "depends_on" | "refines" => {
+                ("relates_to", spec.key)
+            }
+            _ => (spec.key, ""),
+        };
+        defs.push_str(&format!(
+            "<linearGradient id=\"omni-flow-{}\" class=\"omni-flow omni-flow-{}\" data-rel=\"{rel}\" data-subkind=\"{subkind}\" gradientUnits=\"objectBoundingBox\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" class=\"omni-flow-from\"/><stop offset=\"0.5\" class=\"omni-flow-mid\"/><stop offset=\"1\" class=\"omni-flow-to\"/></linearGradient>",
+            spec.key, spec.key,
+        ));
+    }
+    defs
+}
+
 struct CubicCurve {
     p0: (f64, f64),
     p1: (f64, f64),
@@ -2313,20 +2322,31 @@ fn route_bezier_ports(
         let p0 = (u.x + u.w, ucy);
         let p3 = (v.x, vcy);
         let dx = ((p3.0 - p0.0).abs() * 0.46).max(46.0);
+        // Ensure a non-zero SVG bounding box height so `objectBoundingBox` gradients render on horizontal links.
+        let bow = if (p0.1 - p3.1).abs() < 0.2 && lane_offset == 0.0 {
+            0.4
+        } else {
+            0.0
+        };
         CubicCurve {
             p0,
-            p1: (p0.0 + dx, p0.1 + lane_offset),
-            p2: (p3.0 - dx, p3.1 + lane_offset),
+            p1: (p0.0 + dx, p0.1 + lane_offset - bow),
+            p2: (p3.0 - dx, p3.1 + lane_offset + bow),
             p3,
         }
     } else if ucx > vcx + v.w * 0.48 {
         let p0 = (u.x, ucy);
         let p3 = (v.x + v.w, vcy);
         let dx = ((p0.0 - p3.0).abs() * 0.46).max(46.0);
+        let bow = if (p0.1 - p3.1).abs() < 0.2 && lane_offset == 0.0 {
+            0.4
+        } else {
+            0.0
+        };
         CubicCurve {
             p0,
-            p1: (p0.0 - dx, p0.1 + lane_offset),
-            p2: (p3.0 + dx, p3.1 + lane_offset),
+            p1: (p0.0 - dx, p0.1 + lane_offset - bow),
+            p2: (p3.0 + dx, p3.1 + lane_offset + bow),
             p3,
         }
     } else {
@@ -3243,7 +3263,20 @@ mod tests {
             "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:-24.0px;--graph-pan-y:12.0px;--graph-scale:1.1500;"
         ));
         assert!(res.html.contains("<svg class=\"omni-svg\""));
-        assert!(res.html.contains("<linearGradient id=\"omni-flow-0\""));
+        assert_eq!(
+            res.html.matches("<linearGradient ").count(),
+            EDGE_SPECS.len()
+        );
+        for spec in EDGE_SPECS {
+            assert!(
+                res.html
+                    .contains(&format!("<linearGradient id=\"omni-flow-{}\"", spec.key)),
+                "missing gradient def for {}",
+                spec.key
+            );
+        }
+        assert!(res.html.contains("stroke=\"url(#omni-flow-published_by)\""));
+        assert!(res.html.contains("data-lod=\"near\""));
 
         // Distinct marker definitions and mid-edge pill labels when zoomed in
         for marker in [
@@ -3552,7 +3585,12 @@ mod tests {
             .contains("--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;"));
         assert!(!res.html.contains("NaN"));
 
-        // Zoomed out (<0.95) hides mid-edge pills unless connected to selected/highlighted node
+        // Zoomed out (<0.95) sets `data-lod="mid"` / `"far"` so CSS hides unlit mid-edge pills while keeping lit ones visible.
+        assert_eq!(lod(0.4), "far");
+        assert_eq!(lod(0.6), "mid");
+        assert_eq!(lod(0.94), "mid");
+        assert_eq!(lod(0.95), "near");
+        assert_eq!(lod(1.15), "near");
         let zoomed_out = CanvasViewport {
             pan_x: 0.0,
             pan_y: 0.0,
@@ -3564,7 +3602,9 @@ mod tests {
             ..ConstellationFilter::default()
         };
         let far = render_constellation(&graph, &all_filter, &zoomed_out);
-        assert!(!far.html.contains("class=\"omni-edge-label\""));
+        assert!(far.html.contains("data-lod=\"mid\""));
+        assert!(far.html.contains("class=\"omni-edge-label\""));
+        assert!(!far.html.contains("data-lit=\"true\""));
 
         // Highlighted IDs without selected_id dims non-highlighted nodes
         let mut lit = BTreeSet::new();

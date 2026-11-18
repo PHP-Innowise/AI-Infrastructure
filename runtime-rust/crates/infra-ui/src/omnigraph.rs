@@ -2554,12 +2554,15 @@ fn apply_camera(cam: &OmnigraphCamera) {
     let Some(canvas) = dom::get("omnigraph-canvas") else {
         return;
     };
+    let lod = omnigraph_canvas::lod(cam.scale);
+    let _ = canvas.set_attribute("data-lod", lod);
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
         return;
     };
     let Some(plane_el) = plane.dyn_into::<web_sys::HtmlElement>().ok() else {
         return;
     };
+    let _ = plane_el.set_attribute("data-lod", lod);
     let style = format!(
         "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
         cam.plane_w.max(320.0),
@@ -3955,15 +3958,22 @@ pub fn attach_wheel_listeners() {
     }
 }
 
-fn jump_from_radar(client_x: f64, client_y: f64) {
-    let Some(radar) = dom::get("omnigraph-canvas-radar").and_then(|el| {
+fn radar_element() -> Option<web_sys::Element> {
+    dom::get("omnigraph-canvas-radar").and_then(|el| {
         el.query_selector(".omni-radar-svg")
             .ok()
             .flatten()
             .or(Some(el))
-    }) else {
+    })
+}
+
+fn jump_from_radar(client_x: f64, client_y: f64, capture_pointer_id: Option<i32>) {
+    let Some(radar) = radar_element() else {
         return;
     };
+    if let Some(pointer_id) = capture_pointer_id {
+        let _ = radar.set_pointer_capture(pointer_id);
+    }
     let rect = radar.get_bounding_client_rect();
     if rect.width() <= 1.0 || rect.height() <= 1.0 {
         return;
@@ -3994,9 +4004,29 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         .is_some();
     if in_radar {
         if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
-            if kind == "pointerdown" || (kind == "pointermove" && pe.buttons() == 1) {
-                jump_from_radar(pe.client_x() as f64, pe.client_y() as f64);
-                return true;
+            match kind {
+                "pointerdown" if pe.button() == 0 => {
+                    event.prevent_default();
+                    dom::attr("omnigraph-canvas", "data-panning", "true");
+                    jump_from_radar(
+                        pe.client_x() as f64,
+                        pe.client_y() as f64,
+                        Some(pe.pointer_id()),
+                    );
+                    return true;
+                }
+                "pointermove" if pe.buttons() == 1 => {
+                    jump_from_radar(pe.client_x() as f64, pe.client_y() as f64, None);
+                    return true;
+                }
+                "pointerup" | "pointercancel" => {
+                    dom::attr("omnigraph-canvas", "data-panning", "false");
+                    if let Some(radar) = radar_element() {
+                        let _ = radar.release_pointer_capture(pe.pointer_id());
+                    }
+                    return true;
+                }
+                _ => {}
             }
         }
         return false;

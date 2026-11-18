@@ -5,7 +5,8 @@
 use crate::{api, dom, graph::GraphTargetScope, model as m};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as V};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 
@@ -5324,6 +5325,8 @@ pub struct RenderedCanvas {
     pub selected_bbox: Option<(f64, f64, f64, f64)>,
     /// The picture in small, for the corner of its window.
     pub radar: String,
+    pub plan_nodes: Vec<Placed>,
+    pub plan_frames: Vec<Framed>,
 }
 /// Renders a dependency map view using the default `"graph-map"` SVG ID prefix.
 #[cfg(test)]
@@ -6575,8 +6578,16 @@ pub fn canvas_with_overlays(
         } else {
             ""
         };
+        let node_path_attr = {
+            let p = m::text(node, "path");
+            if p.is_empty() {
+                String::new()
+            } else {
+                format!(" data-path=\"{}\"", escape(&p))
+            }
+        };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position}{node_path_attr} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
             payload(&node_payload),
             escape(kind),
             opened && !symbol,
@@ -6961,6 +6972,8 @@ pub fn canvas_with_overlays(
         focus: focus_overlay,
         selected_bbox,
         radar,
+        plan_nodes: plan.nodes,
+        plan_frames: plan.frames,
     }
 }
 /// How far past a corner the second handle of a side hangs.
@@ -10146,11 +10159,10 @@ fn apply_scroll_canvas_scale(
     sync_scroll_radar(canvas_id);
     scale_value
 }
-/// How far the small picture of a map stands from the corner of its window.
-const RADAR_INSET: i32 = 10;
 /// Draws, in the small picture of a map, around what the window of the map
-/// shows, and puts the small picture in the corner of that window. A window
-/// that shows all of its picture has none: there is nowhere else to look.
+/// shows. Positioning lives in CSS (`.graph-map-radar`), avoiding layout reflows
+/// on every pan or zoom tick. A window that shows all of its picture has none:
+/// there is nowhere else to look.
 fn sync_radar(canvas_id: &str, seen: Option<(f64, f64, f64, f64)>) {
     let Some(radar) = dom::get(&format!("{canvas_id}-radar")) else {
         return;
@@ -10169,20 +10181,6 @@ fn sync_radar(canvas_id: &str, seen: Option<(f64, f64, f64, f64)>) {
         let _ = frame.set_attribute(key, &format!("{value:.1}"));
     }
     dom::hide(&radar, false);
-    let (Some(canvas), Ok(radar)) = (
-        dom::get(canvas_id).and_then(|canvas| canvas.dyn_into::<web_sys::HtmlElement>().ok()),
-        radar.dyn_into::<web_sys::HtmlElement>(),
-    ) else {
-        return;
-    };
-    // The corner inside the scroll bars, measured from what both lie in.
-    let left = canvas.offset_left() + canvas.client_left() + canvas.client_width()
-        - radar.offset_width()
-        - RADAR_INSET;
-    let top = canvas.offset_top() + canvas.client_top() + canvas.client_height()
-        - radar.offset_height()
-        - RADAR_INSET;
-    let _ = radar.set_attribute("style", &format!("left:{left}px;top:{top}px"));
 }
 /// Where the corner of a scrolled picture lies from the corner of its
 /// window, the scale it is drawn at, the room of the window and the size
@@ -10560,6 +10558,7 @@ pub fn lit_link(pointed: Pointed, link: (usize, usize)) -> bool {
 }
 /// Whether a box is lit: the box itself and what its links lead to, or the
 /// two ends of the link.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn lit_place(pointed: Pointed, links: &[(usize, usize)], place: usize) -> bool {
     match pointed {
         Pointed::Place(at) => {
@@ -10577,9 +10576,8 @@ pub fn lit_place(pointed: Pointed, links: &[(usize, usize)], place: usize) -> bo
 /// again and the server is asked nothing; once the pointer has left, the
 /// picture is as it was, with what was selected in it.
 fn point(canvas: &str, target: Option<web_sys::Element>) {
-    let Some(plane) = dom::all(&format!("#{canvas} .graph-map-plane"))
-        .into_iter()
-        .next()
+    let Some(plane) =
+        dom::get(canvas).and_then(|el| el.query_selector(".graph-map-plane").ok().flatten())
     else {
         return;
     };
@@ -10615,13 +10613,28 @@ fn point(canvas: &str, target: Option<web_sys::Element>) {
         }
         return;
     };
-    let links = parts
-        .iter()
-        .filter_map(|part| ends_of(&part.get_attribute("data-ends")?))
-        .collect::<Vec<_>>();
+    let mut lit_places = BTreeSet::new();
+    match at {
+        Pointed::Place(place) => {
+            lit_places.insert(place);
+            for part in &parts {
+                if let Some(ends) = part.get_attribute("data-ends").as_deref().and_then(ends_of) {
+                    if ends.0 == place {
+                        lit_places.insert(ends.1);
+                    } else if ends.1 == place {
+                        lit_places.insert(ends.0);
+                    }
+                }
+            }
+        }
+        Pointed::Link(from, to) => {
+            lit_places.insert(from);
+            lit_places.insert(to);
+        }
+    }
     for part in &parts {
         let lit = match stands(part) {
-            Some(Pointed::Place(place)) => lit_place(at, &links, place),
+            Some(Pointed::Place(place)) => lit_places.contains(&place),
             Some(Pointed::Link(from, to)) => lit_link(at, (from, to)),
             None => false,
         };
@@ -10636,17 +10649,21 @@ fn point(canvas: &str, target: Option<web_sys::Element>) {
 /// Highlights all nodes belonging to one architecture layer on `canvas_id`
 /// while the pointer or keyboard rests on that layer's pill in the side panel.
 fn highlight_layer(canvas_id: &str, layer: Option<&str>) {
-    let Some(plane) = dom::all(&format!("#{canvas_id} .graph-map-plane"))
-        .into_iter()
-        .next()
+    let Some(plane) =
+        dom::get(canvas_id).and_then(|el| el.query_selector(".graph-map-plane").ok().flatten())
     else {
         return;
     };
+    let layer = layer.filter(|id| !id.is_empty());
+    let next_attr = layer.unwrap_or("");
+    if plane.get_attribute("data-layer-hover").unwrap_or_default() == next_attr {
+        return;
+    }
     let nodes = dom::all(&format!("#{canvas_id} .graph-map-node[data-arch-layer-id]"));
     for node in &nodes {
         let _ = node.remove_attribute("data-layer-lit");
     }
-    let Some(layer) = layer.filter(|id| !id.is_empty()) else {
+    let Some(layer) = layer else {
         let _ = plane.remove_attribute("data-layer-hover");
         return;
     };
@@ -11823,6 +11840,7 @@ fn fresh_commit_dock(scope_key: &str) -> V {
         "open": false,
         "query": "",
         "scope": "",
+        "active": null,
         "rows": [],
         "more": false,
         "loading": false,
@@ -11872,9 +11890,13 @@ fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String 
         })
         .collect::<Vec<_>>();
     let selected_sha = selected_target.strip_prefix("commit:");
+    let active_index = dock["active"]
+        .as_u64()
+        .map(|idx| idx as usize)
+        .filter(|&idx| idx < rows.len());
     crate::git_commit_graph::render_commit_graph_rows(
         &rows,
-        None,
+        active_index,
         selected_sha,
         m::yes(&dock["more"]),
         now,
@@ -11920,6 +11942,62 @@ fn render_commit_banner_for_view(view: &V, changes: Option<&V>) -> String {
 const COMMIT_MEMORY_COUNTS: &str = "graph-commit-memory-counts";
 /// At most this many renamed files of one commit are asked about.
 const COMMIT_MEMORY_FILES: usize = 12;
+fn rename_memory_key(project: &str, path: &str, previous: &str) -> String {
+    format!("{project}\u{1f}{path}\u{1f}{previous}")
+}
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+fn build_memory_links_batch_payload(files: &[(String, String)]) -> V {
+    json!({
+        "files": files
+            .iter()
+            .map(|(path, previous)| json!({"path": path, "previous_path": previous}))
+            .collect::<Vec<_>>()
+    })
+}
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+fn apply_memory_links_batch_response(
+    cache: &mut V,
+    project: &str,
+    requested: &[(String, String)],
+    result: Result<&V, &str>,
+    now: f64,
+) {
+    if !cache.is_object() {
+        *cache = json!({});
+    }
+    match result {
+        Ok(resp) => {
+            let items = resp["items"].as_array();
+            for (idx, (path, previous)) in requested.iter().enumerate() {
+                let key = rename_memory_key(project, path, previous);
+                let mut links = items
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find(|item| {
+                                item["path"].as_str() == Some(path.as_str())
+                                    && item["previous_path"].as_str().unwrap_or("")
+                                        == previous.as_str()
+                            })
+                            .or_else(|| {
+                                (arr.len() == requested.len())
+                                    .then(|| arr.get(idx))
+                                    .flatten()
+                            })
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| json!({"error": "Missing memory-links batch item"}));
+                links["at"] = json!(now);
+                cache[&key] = links;
+            }
+        }
+        Err(message) => {
+            for (path, previous) in requested {
+                let key = rename_memory_key(project, path, previous);
+                cache[&key] = json!({"error": message, "at": now});
+            }
+        }
+    }
+}
 /// What the project's memory says about the files a commit renamed: the
 /// warnings to review, filled in as answers arrive. Nothing is retired or
 /// changed; once every answer is in, the commit's dock row shows the count.
@@ -11928,10 +12006,65 @@ fn commit_memory_section(project: &str, commit: &str, changes: Option<&V>) -> St
     if project.is_empty() || renamed.is_empty() {
         return String::new();
     }
-    let answers = renamed
-        .iter()
-        .map(|(path, previous)| rename_memory_links(project, path, previous))
-        .collect::<Vec<_>>();
+    let cache = m::data(MEMORY_LINKS);
+    let mut answers = Vec::with_capacity(renamed.len());
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for (path, previous) in &renamed {
+        let key = rename_memory_key(project, path, previous);
+        let cached = cache[&key].clone();
+        if cached.is_object() && memory_links_fresh(&cached) {
+            answers.push(cached);
+        } else {
+            missing.push((path.clone(), previous.clone()));
+            answers.push(json!({"pending": true}));
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    if !missing.is_empty() {
+        let now = js_sys::Date::now();
+        let mut cache = m::data(MEMORY_LINKS);
+        if !cache.is_object() {
+            cache = json!({});
+        }
+        for (path, previous) in &missing {
+            let key = rename_memory_key(project, path, previous);
+            cache[&key] = json!({"pending": true, "at": now});
+        }
+        m::set(MEMORY_LINKS, cache);
+        let project_owned = project.to_owned();
+        let url = format!(
+            "/api/projects/{}/graph/memory-links/batch",
+            dom::enc(&project_owned)
+        );
+        let body = build_memory_links_batch_payload(&missing);
+        spawn_local(async move {
+            let res = crate::api::post(&url, body).await;
+            let now = js_sys::Date::now();
+            let mut cache = m::data(MEMORY_LINKS);
+            match &res {
+                Ok(resp) => {
+                    apply_memory_links_batch_response(
+                        &mut cache,
+                        &project_owned,
+                        &missing,
+                        Ok(resp),
+                        now,
+                    );
+                }
+                Err(err) => {
+                    apply_memory_links_batch_response(
+                        &mut cache,
+                        &project_owned,
+                        &missing,
+                        Err(err.message.as_str()),
+                        now,
+                    );
+                }
+            }
+            m::set(MEMORY_LINKS, cache);
+            refresh_commit_memory();
+        });
+    }
     if !commit.is_empty()
         && answers
             .iter()
@@ -11963,48 +12096,8 @@ fn commit_memory_section(project: &str, commit: &str, changes: Option<&V>) -> St
         escape(commit)
     )
 }
-/// The memory-links answer for a file a commit renamed from `previous`, or
-/// `{"pending": true}` while it is asked: one request per file at a time,
-/// fresh for a minute, as the side panel's.
-fn rename_memory_links(project: &str, path: &str, previous: &str) -> V {
-    let key = format!("{project}\u{1f}{path}\u{1f}{previous}");
-    let cached = m::data(MEMORY_LINKS)[&key].clone();
-    if cached.is_object() && memory_links_fresh(&cached) {
-        return cached;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let mut cache = m::data(MEMORY_LINKS);
-        if !cache.is_object() {
-            cache = json!({});
-        }
-        cache[&key] = json!({"pending": true, "at": js_sys::Date::now()});
-        m::set(MEMORY_LINKS, cache);
-        let url = format!(
-            "/api/projects/{}/graph/memory-links?path={}&previous_path={}",
-            dom::enc(project),
-            dom::enc(path),
-            dom::enc(previous)
-        );
-        spawn_local(async move {
-            let mut links = match crate::api::get(&url).await {
-                Ok(links) => links,
-                Err(error) => json!({"error": error.message}),
-            };
-            links["at"] = json!(js_sys::Date::now());
-            let mut cache = m::data(MEMORY_LINKS);
-            if !cache.is_object() {
-                cache = json!({});
-            }
-            cache[&key] = links;
-            m::set(MEMORY_LINKS, cache);
-            refresh_commit_memory();
-        });
-    }
-    json!({"pending": true})
-}
-/// Redraws the commit banner, and the dock's counts, once an answer about a
-/// renamed file arrives.
+/// Redraws the commit banner, and the dock's counts, once the batched answer
+/// about renamed files arrives.
 #[cfg(target_arch = "wasm32")]
 fn refresh_commit_memory() {
     let view = m::data(MODAL_SURFACE.view_key);
@@ -12052,6 +12145,26 @@ fn show_commit_dock() {
     let target = m::text(&state(), "target");
     let list_html = render_commit_dock_list(&dock, &target, (js_sys::Date::now() / 1000.0) as i64);
     html("graph-commit-graph-list", &list_html);
+    let rows = m::array(&dock["rows"]);
+    let active = dock["active"]
+        .as_u64()
+        .map(|idx| idx as usize)
+        .filter(|&idx| idx < rows.len())
+        .or_else(|| {
+            crate::git_commit_graph::selected_commit_row_index(
+                &rows,
+                target.strip_prefix("commit:"),
+            )
+        });
+    if let Some(idx) = active {
+        dom::attr(
+            "graph-commit-graph-list",
+            "aria-activedescendant",
+            &format!("graph-commit-row-{idx}"),
+        );
+    } else if let Some(list) = dom::get("graph-commit-graph-list") {
+        let _ = list.remove_attribute("aria-activedescendant");
+    }
     dom::text("graph-commit-graph-note", &commit_dock_note(&dock));
 }
 fn shut_commit_dock() {
@@ -12060,9 +12173,46 @@ fn shut_commit_dock() {
         return;
     }
     dock["open"] = json!(false);
+    dock["active"] = V::Null;
     m::set("graph-commit-graph", dock);
     dom::cancel_timer("graph-commit-graph-search");
     show_commit_dock();
+}
+fn mark_commit_dock(next: usize) {
+    let mut dock = commit_dock();
+    let rows = m::array(&dock["rows"]);
+    let Some(last) = rows.len().checked_sub(1) else {
+        return;
+    };
+    let next = next.min(last);
+    let target = m::text(&state(), "target");
+    let prev = dock["active"]
+        .as_u64()
+        .map(|idx| idx as usize)
+        .filter(|&idx| idx < rows.len())
+        .or_else(|| {
+            crate::git_commit_graph::selected_commit_row_index(
+                &rows,
+                target.strip_prefix("commit:"),
+            )
+        });
+    dock["active"] = json!(next);
+    m::set("graph-commit-graph", dock);
+    if let Some(before) = prev.filter(|&before| before != next) {
+        dom::attr(
+            &format!("graph-commit-row-{before}"),
+            "aria-selected",
+            "false",
+        );
+    }
+    let active_id = format!("graph-commit-row-{next}");
+    dom::attr(&active_id, "aria-selected", "true");
+    dom::attr(
+        "graph-commit-graph-list",
+        "aria-activedescendant",
+        &active_id,
+    );
+    into_view("graph-commit-graph-list", &active_id);
 }
 fn reset_commit_dock_for_scope() {
     dom::cancel_timer("graph-commit-graph-search");
@@ -12110,12 +12260,16 @@ async fn fetch_commit_dock(further: bool) {
             dock["more"] = json!(m::yes(&found["more"]));
             dock["failed"] = V::Null;
             dock["scope_key"] = json!(scope_key);
+            if !further {
+                dock["active"] = V::Null;
+            }
         }
         Err(error) if error.aborted => return,
         Err(error) => {
             dock["rows"] = json!([]);
             dock["more"] = json!(false);
             dock["failed"] = json!(error.message);
+            dock["active"] = V::Null;
         }
     }
     dock["loading"] = json!(false);
@@ -12417,9 +12571,167 @@ fn shut() {
     dom::cancel_timer("graph-pick-search");
     show();
 }
-/// Keys of the map: those of the search of the project, and those of the
-/// open picker, where the arrows walk the list, Enter chooses the marked
-/// row and Escape closes the picker, not the map behind it.
+fn is_editable_key_target(target: Option<&web_sys::Element>) -> bool {
+    target.is_some_and(|el| {
+        matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+            || el
+                .closest("[contenteditable=''], [contenteditable='true']")
+                .ok()
+                .flatten()
+                .is_some()
+    })
+}
+fn commit_dock_key(e: &web_sys::KeyboardEvent) -> bool {
+    if !open()
+        || m::yes(&picker()["open"])
+        || dom::get("graph-link").is_some_and(|window| window.has_attribute("open"))
+    {
+        return false;
+    }
+    let dock = commit_dock();
+    if !m::yes(&dock["open"]) {
+        return false;
+    }
+    let target_el = e
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    let within_panel = target_el.as_ref().is_some_and(|el| {
+        el.closest("#graph-commit-graph-panel")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if e.key() == "Escape" && within_panel {
+        shut_commit_dock();
+        dom::focus("graph-commit-graph-toggle");
+        return true;
+    }
+    let within_search = target_el
+        .as_ref()
+        .is_some_and(|el| el.id() == "graph-commit-graph-search");
+    let within_list = target_el.as_ref().is_some_and(|el| {
+        el.closest("#graph-commit-graph-list")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if !within_search && !within_list {
+        return false;
+    }
+    let on_button = target_el
+        .as_ref()
+        .is_some_and(|el| el.closest("button").ok().flatten().is_some());
+    let rows = m::array(&dock["rows"]);
+    let Some(last) = rows.len().checked_sub(1) else {
+        return false;
+    };
+    let current = dock["active"]
+        .as_u64()
+        .map(|idx| idx as usize)
+        .filter(|&idx| idx < rows.len());
+    let target = m::text(&state(), "target");
+    let selected =
+        crate::git_commit_graph::selected_commit_row_index(&rows, target.strip_prefix("commit:"));
+    let bare = !e.ctrl_key() && !e.meta_key() && !e.alt_key();
+    match e.key().as_str() {
+        "ArrowDown" => {
+            let anchor = current.or(selected);
+            if anchor == Some(last) {
+                if m::yes(&dock["more"]) && !m::yes(&dock["loading"]) {
+                    spawn_local(async move {
+                        fetch_commit_dock(true).await;
+                        if m::array(&commit_dock()["rows"]).len() > last + 1 {
+                            mark_commit_dock(last + 1);
+                        }
+                    });
+                }
+                return true;
+            }
+            if let Some(next) = crate::git_commit_graph::next_commit_dock_index(
+                current,
+                selected,
+                rows.len(),
+                "ArrowDown",
+            ) {
+                mark_commit_dock(next);
+                return true;
+            }
+            false
+        }
+        "ArrowUp" => {
+            if let Some(next) = crate::git_commit_graph::next_commit_dock_index(
+                current,
+                selected,
+                rows.len(),
+                "ArrowUp",
+            ) {
+                mark_commit_dock(next);
+                return true;
+            }
+            false
+        }
+        "Home" | "End" if within_list => {
+            if let Some(next) = crate::git_commit_graph::next_commit_dock_index(
+                current,
+                selected,
+                rows.len(),
+                e.key().as_str(),
+            ) {
+                mark_commit_dock(next);
+                return true;
+            }
+            false
+        }
+        "Enter" if bare && !e.shift_key() && !on_button => {
+            let Some(active) = current.or(selected) else {
+                return false;
+            };
+            let row_target = rows[active]["target"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    rows[active]["commit"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|sha| format!("commit:{sha}"))
+                });
+            let Some(row_target) = row_target else {
+                return false;
+            };
+            spawn_local(async move {
+                event(
+                    "click",
+                    "",
+                    "graph-commit-select",
+                    &json!(row_target),
+                    "",
+                    false,
+                )
+                .await;
+            });
+            true
+        }
+        _ => false,
+    }
+}
+fn active_embedded_surface_for_key() -> Option<MapSurface> {
+    let view_mode = m::read(|s| s.view.clone());
+    let candidate = match view_mode.as_str() {
+        "systems" => SYSTEM_EMBEDDED_SURFACE,
+        "system-changes" => SYSTEM_CHANGE_SURFACE,
+        "omnigraph" => return None,
+        _ => SESSION_SURFACE,
+    };
+    let visible = dom::get(candidate.canvas)
+        .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none());
+    visible.then_some(candidate)
+}
+/// Keys of the map: those of the search of the project, Commit Dock arrows,
+/// the open picker (arrows/Enter/Escape), and zoom/Escape shortcuts across
+/// the modal, link dialog, and embedded graph surfaces.
 pub fn key(e: &web_sys::KeyboardEvent) -> bool {
     if dom::get("graph-shell-event").is_some_and(|dialog| dialog.has_attribute("open")) {
         return false;
@@ -12427,20 +12739,92 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
     if e.is_composing() {
         return false;
     }
-    if find_key(e) {
+    if find_key(e) || commit_dock_key(e) {
         return true;
     }
     let pick = picker();
     if !m::yes(&pick["open"]) {
-        // While the other end of a path is chosen, Escape gives that up
-        // and leaves the map open. The window of a link lies over the map
-        // and closes first.
-        let covered = dom::get("graph-link").is_some_and(|window| window.has_attribute("open"));
-        if e.key() == "Escape" && open() && !covered && state()["pick"].is_object() {
-            spawn_local(async {
-                event("click", "", "graph-map-path-cancel", &V::Null, "", false).await;
-            });
-            return true;
+        let target_el = e
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+        let in_input = is_editable_key_target(target_el.as_ref());
+        let bare = !e.ctrl_key() && !e.meta_key() && !e.alt_key();
+        let link_open = dom::get("graph-link").is_some_and(|window| window.has_attribute("open"));
+        if link_open {
+            if !in_input && bare {
+                match e.key().as_str() {
+                    "+" | "=" => return zoom_scroll_canvas("graph-link-canvas", ZOOM_STEP, None),
+                    "-" => return zoom_scroll_canvas("graph-link-canvas", 1.0 / ZOOM_STEP, None),
+                    "0" => {
+                        reset_scroll_canvas_zoom("graph-link-canvas");
+                        return dom::get("graph-link-canvas")
+                            .and_then(|c| c.query_selector(".graph-map-plane").ok().flatten())
+                            .is_some();
+                    }
+                    _ => {}
+                }
+            }
+            return false;
+        }
+        if open() {
+            // While the other end of a path is chosen, Escape gives that up
+            // and leaves the map open.
+            if e.key() == "Escape" && state()["pick"].is_object() {
+                spawn_local(async {
+                    event("click", "", "graph-map-path-cancel", &V::Null, "", false).await;
+                });
+                return true;
+            }
+            if !in_input && bare {
+                match e.key().as_str() {
+                    "+" | "=" => return zoom_scroll_canvas("graph-map-canvas", ZOOM_STEP, None),
+                    "-" => return zoom_scroll_canvas("graph-map-canvas", 1.0 / ZOOM_STEP, None),
+                    "0" => {
+                        reset_scroll_canvas_zoom("graph-map-canvas");
+                        return dom::get("graph-map-canvas")
+                            .and_then(|c| c.query_selector(".graph-map-plane").ok().flatten())
+                            .is_some();
+                    }
+                    _ => {}
+                }
+            }
+            return false;
+        }
+        if let Some(surface) = active_embedded_surface_for_key() {
+            let mut cam = load_surface_camera(surface);
+            if e.key() == "Escape" {
+                if surface_state(surface)["pick"].is_object() {
+                    return handle_surface_click(surface, "", "graph-map-path-cancel", &V::Null);
+                }
+                if cam.expanded {
+                    cam.expanded = false;
+                    cam.needs_measure = true;
+                    save_surface_camera(surface, &cam);
+                    apply_surface_camera(surface, &cam);
+                    dom::later(surface.refit_timer_key, 60, move || {
+                        refit_surface_if_visible(surface);
+                    });
+                    return true;
+                }
+                return false;
+            }
+            if !in_input && bare && cam.plane_w > 0.0 && cam.plane_h > 0.0 {
+                match e.key().as_str() {
+                    "+" | "=" => {
+                        zoom_surface_camera_at(surface, ZOOM_STEP, None);
+                        return true;
+                    }
+                    "-" => {
+                        zoom_surface_camera_at(surface, 1.0 / ZOOM_STEP, None);
+                        return true;
+                    }
+                    "0" => {
+                        fit_surface_camera(surface, &mut cam);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
         }
         return false;
     }
@@ -15744,7 +16128,7 @@ fn render(view: &V) {
         "graph-map-filter",
         follows(view) || paths(view) || cycles(view) || patterned(view),
     );
-    // Keep keyboard focus on the selected node through a repaint.
+    // Keep keyboard focus on the selected node or sidebar control through a repaint.
     const NODE_BUTTONS: &str = "#graph-map-canvas .graph-map-node";
     let active = dom::document().active_element();
     let module_focus = module_mode
@@ -15754,18 +16138,35 @@ fn render(view: &V) {
             )
             .unwrap_or(false)
         });
-    let keyboard_key = active
+    let keyboard_node = active
+        .as_ref()
         .filter(|node| {
-            (shares(view)
-                || cycles(view)
-                || patterned(view)
-                || view["chosen"]["kind"] == "pull"
-                || node.get_attribute("data-cycle").as_deref() == Some("true"))
-                && node
-                    .matches(&format!("{NODE_BUTTONS}:focus-visible"))
-                    .unwrap_or(false)
+            node.matches(&format!("{NODE_BUTTONS}:focus-visible"))
+                .unwrap_or(false)
         })
-        .and_then(|node| node.get_attribute("data-payload"));
+        .and_then(|node| {
+            let path = node.get_attribute("data-path");
+            let payload = node.get_attribute("data-payload");
+            (path.is_some() || payload.is_some()).then_some((path, payload))
+        });
+    struct SavedSideFocus {
+        id: Option<String>,
+        action: Option<String>,
+        path: Option<String>,
+        payload: Option<String>,
+    }
+    let side_focus = active
+        .as_ref()
+        .filter(|node| {
+            node.closest("#graph-map-side").ok().flatten().is_some()
+                && node.matches(":focus-visible").unwrap_or(false)
+        })
+        .map(|node| SavedSideFocus {
+            id: node.get_attribute("id"),
+            action: node.get_attribute("data-action"),
+            path: node.get_attribute("data-path"),
+            payload: node.get_attribute("data-payload"),
+        });
     let modal_impact = cached_impact_for_selection(MODAL_SURFACE, &modal_state, Some(view));
     let modal_key = key_now(&modal_state);
     let rendered = canvas_with_overlays(
@@ -15787,6 +16188,67 @@ fn render(view: &V) {
         "graph-map-arrow-legend",
         &key_html(view, &modal_key, "modal"),
     );
+    let restore_side_focus = |saved: Option<SavedSideFocus>| {
+        let Some(SavedSideFocus {
+            id,
+            action,
+            path,
+            payload,
+        }) = saved
+        else {
+            return;
+        };
+        let candidates = dom::all(
+            "#graph-map-side button, #graph-map-side a, #graph-map-side input, #graph-map-side select, #graph-map-side [tabindex]",
+        );
+        let found = id
+            .as_deref()
+            .and_then(|wanted| {
+                candidates
+                    .iter()
+                    .find(|el| el.get_attribute("id").as_deref() == Some(wanted))
+            })
+            .or_else(|| {
+                action.as_deref().zip(path.as_deref()).and_then(|(act, p)| {
+                    candidates.iter().find(|el| {
+                        el.get_attribute("data-action").as_deref() == Some(act)
+                            && el.get_attribute("data-path").as_deref() == Some(p)
+                    })
+                })
+            })
+            .or_else(|| {
+                action
+                    .as_deref()
+                    .zip(payload.as_deref())
+                    .and_then(|(act, pay)| {
+                        candidates.iter().find(|el| {
+                            el.get_attribute("data-action").as_deref() == Some(act)
+                                && el.get_attribute("data-payload").as_deref() == Some(pay)
+                        })
+                    })
+            })
+            .or_else(|| {
+                path.as_deref().and_then(|p| {
+                    candidates
+                        .iter()
+                        .find(|el| el.get_attribute("data-path").as_deref() == Some(p))
+                })
+            })
+            .or_else(|| {
+                action
+                    .as_deref()
+                    .filter(|_| path.is_none() && payload.is_none())
+                    .and_then(|act| {
+                        candidates
+                            .iter()
+                            .find(|el| el.get_attribute("data-action").as_deref() == Some(act))
+                    })
+            })
+            .and_then(|el| el.clone().dyn_into::<web_sys::HtmlElement>().ok());
+        if let Some(el) = found {
+            let _ = el.focus();
+        }
+    };
     let changes_tab = m::text(&modal_state, "side_tab") == "changes";
     if scenario_mode && !changes_tab {
         let focused = dom::document().active_element().is_some_and(|element| {
@@ -15810,6 +16272,8 @@ fn render(view: &V) {
         );
         if focused {
             dom::focus("graph-map-summary");
+        } else {
+            restore_side_focus(side_focus);
         }
         return;
     }
@@ -15836,17 +16300,32 @@ fn render(view: &V) {
                 .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
             {
                 let _ = node.focus();
+                return;
             }
         }
+        restore_side_focus(side_focus);
         return;
     }
-    if let Some(node) = keyboard_key.and_then(|key| {
-        dom::all(NODE_BUTTONS)
-            .into_iter()
-            .find(|node| node.get_attribute("data-payload").as_ref() == Some(&key))
-            .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
-    }) {
-        let _ = node.focus();
+    if let Some((path, payload)) = keyboard_node {
+        let nodes = dom::all(NODE_BUTTONS);
+        let matched = path
+            .as_deref()
+            .and_then(|wanted| {
+                nodes
+                    .iter()
+                    .find(|node| node.get_attribute("data-path").as_deref() == Some(wanted))
+            })
+            .or_else(|| {
+                payload.as_deref().and_then(|wanted| {
+                    nodes
+                        .iter()
+                        .find(|node| node.get_attribute("data-payload").as_deref() == Some(wanted))
+                })
+            })
+            .and_then(|node| node.clone().dyn_into::<web_sys::HtmlElement>().ok());
+        if let Some(node) = matched {
+            let _ = node.focus();
+        }
     }
     // While the other end of a path is chosen, a box is that end.
     let state = state();
@@ -15940,6 +16419,8 @@ fn render(view: &V) {
         }
     } else if show_cycle && active_action.as_deref() == Some("graph-map-cycle") {
         dom::focus("graph-map-show-cycle");
+    } else {
+        restore_side_focus(side_focus);
     }
     html("graph-map-legend", &legend(view, change));
 }
@@ -17032,6 +17513,7 @@ pub async fn event(
                 ),
             );
             show_commit_dock();
+            dom::focus("graph-commit-graph-list");
             if m::array(&m::data("graph-pick-branches")).is_empty() {
                 spawn_local(dock_histories());
             }
@@ -17048,6 +17530,7 @@ pub async fn event(
         ("input", "graph-commit-graph-search", _) => {
             let mut dock = commit_dock();
             dock["query"] = json!(value);
+            dock["active"] = V::Null;
             m::set("graph-commit-graph", dock);
             dom::later("graph-commit-graph-search", 220, || {
                 spawn_local(fetch_commit_dock(false));
@@ -17057,6 +17540,7 @@ pub async fn event(
         ("change", "graph-commit-graph-scope", _) => {
             let mut dock = commit_dock();
             dock["scope"] = json!(value);
+            dock["active"] = V::Null;
             m::set("graph-commit-graph", dock);
             fetch_commit_dock(false).await;
             return true;
@@ -17069,6 +17553,11 @@ pub async fn event(
             let Some(target) = commit_action_target(action, payload) else {
                 return true;
             };
+            let mut dock = commit_dock();
+            if dock.is_object() {
+                dock["active"] = V::Null;
+                m::set("graph-commit-graph", dock);
+            }
             shut();
             state = anew(&target);
             chosen = true;
@@ -17474,7 +17963,7 @@ fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
     }
     let _ = canvas.set_attribute("data-lod", lod(cam.scale));
     let style = format!(
-        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate({:.1}px,{:.1}px) scale({:.4});transform-origin:0 0",
+        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
         cam.plane_w, cam.plane_h, cam.scale, cam.pan_x, cam.pan_y, cam.pan_x, cam.pan_y, cam.scale
     );
     let _ = plane.set_attribute("style", &style);
@@ -17720,7 +18209,127 @@ fn render_surface_focus_strip(surface: MapSurface, focus: Option<&LiveFocus>) {
     );
     dom::hidden(&strip_id, false);
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SurfaceViewSignature {
+    nodes_len: usize,
+    frames_len: usize,
+    edges_len: usize,
+    first_node_path: String,
+    last_node_path: String,
+    mode: String,
+    pattern_declared: bool,
+    layered: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CachedSurfacePlan {
+    signature: SurfaceViewSignature,
+    nodes: Vec<Placed>,
+    frames: Vec<Framed>,
+    width: f64,
+    height: f64,
+}
+
+thread_local! {
+    static SURFACE_PLAN_CACHE: RefCell<HashMap<&'static str, CachedSurfacePlan>> =
+        RefCell::new(HashMap::new());
+}
+
+fn surface_view_signature(view: &V) -> SurfaceViewSignature {
+    let nodes = m::array(&view["nodes"]);
+    let frames = m::array(&view["frames"]);
+    let edges = m::array(&view["edges"]);
+    SurfaceViewSignature {
+        nodes_len: nodes.len(),
+        frames_len: frames.len(),
+        edges_len: edges.len(),
+        first_node_path: nodes
+            .first()
+            .map(|n| m::text(n, "path"))
+            .unwrap_or_default(),
+        last_node_path: nodes.last().map(|n| m::text(n, "path")).unwrap_or_default(),
+        mode: m::text(view, "mode"),
+        pattern_declared: m::yes(&view["pattern"]["declared"]),
+        layered: layered(view),
+    }
+}
+
+impl CachedSurfacePlan {
+    fn from_rendered(view: &V, rendered: &RenderedCanvas) -> Self {
+        Self {
+            signature: surface_view_signature(view),
+            nodes: rendered.plan_nodes.clone(),
+            frames: rendered.plan_frames.clone(),
+            width: rendered.width,
+            height: rendered.height,
+        }
+    }
+}
+
+fn invalidate_surface_plan_cache(canvas_id: &str) {
+    SURFACE_PLAN_CACHE.with(|cache| {
+        cache.borrow_mut().remove(canvas_id);
+    });
+}
+
+fn store_surface_plan_cache(canvas_id: &'static str, view: &V, rendered: &RenderedCanvas) {
+    let entry = CachedSurfacePlan::from_rendered(view, rendered);
+    SURFACE_PLAN_CACHE.with(|cache| {
+        cache.borrow_mut().insert(canvas_id, entry);
+    });
+}
+
+fn resolve_focus_bbox_with_cached_plan(
+    view: &V,
+    cached: Option<&CachedSurfacePlan>,
+    probe: &LiveFocus,
+) -> Option<(f64, f64, f64, f64)> {
+    let expected = surface_view_signature(view);
+    if let Some(entry) = cached.filter(|entry| entry.signature == expected) {
+        let plan = Plan {
+            nodes: entry.nodes.clone(),
+            wires: Vec::new(),
+            frames: entry.frames.clone(),
+            width: entry.width,
+            height: entry.height,
+            apart: None,
+        };
+        return resolve_focus(view, &plan, probe).bbox;
+    }
+    let nodes = m::array(&view["nodes"]);
+    let edges = m::array(&view["edges"]);
+    let frames = m::array(&view["frames"]);
+    let at = |p: &V| nodes.iter().position(|node| &node["path"] == p);
+    let weighted: Vec<(usize, usize, u64)> = edges
+        .iter()
+        .filter_map(|e| {
+            Some((
+                at(&e["from"])?,
+                at(&e["to"])?,
+                e["links"].as_u64().unwrap_or(1),
+            ))
+        })
+        .collect();
+    let framed = Frames {
+        of: nodes
+            .iter()
+            .map(|n| frames.iter().position(|f| f["path"] == n["holder"]))
+            .collect(),
+        holder: frames
+            .iter()
+            .map(|f| frames.iter().position(|h| h["path"] == f["holder"]))
+            .collect(),
+    };
+    let plan = if layered(view) && !m::yes(&view["pattern"]["declared"]) {
+        plan_row(nodes.len(), &weighted)
+    } else {
+        plan_beside(nodes.len(), &weighted, &framed, None)
+    };
+    resolve_focus(view, &plan, probe).bbox
+}
+
 fn blank_embedded_surface(surface: MapSurface, note_text: &str) {
+    invalidate_surface_plan_cache(surface.canvas);
     let prefix = surface.id_prefix;
     let state = surface_state(surface);
     let changes = surface_changes_doc(surface, &state);
@@ -17820,6 +18429,7 @@ fn render_embedded_surface(
             cone: surface_key.cone,
         },
     );
+    store_surface_plan_cache(surface.canvas, view, &rendered);
     html(surface.canvas, &rendered.html);
     html(&format!("{}-radar", surface.canvas), &rendered.radar);
     html(&legend_id, &key_html(view, &surface_key, surface.name));
@@ -18365,36 +18975,11 @@ fn jump_to_surface_entity_or_target(surface: MapSurface, payload: &V) -> bool {
             target_nodes: probe_targets,
             created_entities: Vec::new(),
         };
-        let nodes = m::array(&view["nodes"]);
-        let edges = m::array(&view["edges"]);
-        let frames = m::array(&view["frames"]);
-        let at = |p: &V| nodes.iter().position(|node| &node["path"] == p);
-        let weighted: Vec<(usize, usize, u64)> = edges
-            .iter()
-            .filter_map(|e| {
-                Some((
-                    at(&e["from"])?,
-                    at(&e["to"])?,
-                    e["links"].as_u64().unwrap_or(1),
-                ))
-            })
-            .collect();
-        let framed = Frames {
-            of: nodes
-                .iter()
-                .map(|n| frames.iter().position(|f| f["path"] == n["holder"]))
-                .collect(),
-            holder: frames
-                .iter()
-                .map(|f| frames.iter().position(|h| h["path"] == f["holder"]))
-                .collect(),
-        };
-        let plan = if layered(&view) && !m::yes(&view["pattern"]["declared"]) {
-            plan_row(nodes.len(), &weighted)
-        } else {
-            plan_beside(nodes.len(), &weighted, &framed, None)
-        };
-        if let Some(bbox) = resolve_focus(&view, &plan, &probe).bbox {
+        let cached_bbox = SURFACE_PLAN_CACHE.with(|cache| {
+            let borrowed = cache.borrow();
+            resolve_focus_bbox_with_cached_plan(&view, borrowed.get(surface.canvas), &probe)
+        });
+        if let Some(bbox) = cached_bbox {
             let mut cam = load_surface_camera(surface);
             zoom_surface_camera_to_bbox(surface, &mut cam, bbox);
             return true;
@@ -28599,5 +29184,111 @@ mod memory_bridge_tests {
         assert!(!plain.contains("graph-commit-memory"), "{plain}");
         m::take(MEMORY_LINKS);
         m::take(COMMIT_MEMORY_COUNTS);
+    }
+
+    #[test]
+    fn batched_memory_links_payload_and_response_populate_per_file_cache() {
+        let missing = vec![
+            (
+                "src/Auth/Guard.php".to_owned(),
+                "src/Auth/TokenGuard.php".to_owned(),
+            ),
+            (
+                "src/Http/Middleware.php".to_owned(),
+                "src/Http/LegacyMiddleware.php".to_owned(),
+            ),
+        ];
+        let payload = build_memory_links_batch_payload(&missing);
+        assert_eq!(
+            payload,
+            json!({
+                "files": [
+                    {"path": "src/Auth/Guard.php", "previous_path": "src/Auth/TokenGuard.php"},
+                    {"path": "src/Http/Middleware.php", "previous_path": "src/Http/LegacyMiddleware.php"}
+                ]
+            })
+        );
+
+        let mut cache = json!({});
+        let resp = json!({
+            "project_id": "proj-1",
+            "items": [
+                {
+                    "path": "src/Auth/Guard.php",
+                    "previous_path": "src/Auth/TokenGuard.php",
+                    "hygiene_warnings": [{"kind": "cited-file-renamed", "linked": ["MEM-1"]}]
+                },
+                {
+                    "path": "src/Http/Middleware.php",
+                    "previous_path": "src/Http/LegacyMiddleware.php",
+                    "hygiene_warnings": []
+                }
+            ]
+        });
+        apply_memory_links_batch_response(&mut cache, "proj-1", &missing, Ok(&resp), 1234.0);
+        let k0 = rename_memory_key("proj-1", "src/Auth/Guard.php", "src/Auth/TokenGuard.php");
+        let k1 = rename_memory_key(
+            "proj-1",
+            "src/Http/Middleware.php",
+            "src/Http/LegacyMiddleware.php",
+        );
+        assert_eq!(cache[&k0]["hygiene_warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(cache[&k0]["at"], 1234.0);
+        assert_eq!(cache[&k1]["hygiene_warnings"], json!([]));
+        assert_eq!(cache[&k1]["at"], 1234.0);
+
+        let mut err_cache = json!({});
+        apply_memory_links_batch_response(
+            &mut err_cache,
+            "proj-1",
+            &missing,
+            Err("network down"),
+            5678.0,
+        );
+        assert_eq!(err_cache[&k0]["error"], "network down");
+        assert_eq!(err_cache[&k1]["error"], "network down");
+    }
+
+    #[test]
+    fn cached_surface_plan_matches_uncached_focus_bbox() {
+        let view = json!({
+            "project_id": "proj-1",
+            "frames": [
+                {"path": "src/Auth", "name": "Auth", "holder": ""}
+            ],
+            "nodes": [
+                {"path": "src/Auth/Guard.php", "name": "Guard.php", "holder": "src/Auth"},
+                {"path": "src/Auth/Token.php", "name": "Token.php", "holder": "src/Auth"}
+            ],
+            "edges": [
+                {"from": "src/Auth/Guard.php", "to": "src/Auth/Token.php", "links": 2, "kind": "uses"}
+            ]
+        });
+        let rendered =
+            canvas_with_overlays(&view, "session-graph", CanvasOverlayContext::default());
+        assert_eq!(rendered.plan_nodes.len(), 2);
+        assert_eq!(rendered.plan_frames.len(), 1);
+
+        let cached = CachedSurfacePlan::from_rendered(&view, &rendered);
+        let probe = LiveFocus {
+            target_paths: vec!["src/Auth/Guard.php".to_owned()],
+            target_nodes: vec!["src/Auth/Guard.php".to_owned()],
+            ..LiveFocus::default()
+        };
+        let fast_bbox = resolve_focus_bbox_with_cached_plan(&view, Some(&cached), &probe);
+        let fallback_bbox = resolve_focus_bbox_with_cached_plan(&view, None, &probe);
+        assert!(fast_bbox.is_some());
+        assert_eq!(fast_bbox, fallback_bbox);
+
+        // Stale cache with mismatched node count falls back instead of using old coordinates.
+        let mut modified_view = view.clone();
+        modified_view["nodes"].as_array_mut().unwrap().push(json!({
+            "path": "src/Auth/Policy.php",
+            "name": "Policy.php",
+            "holder": "src/Auth"
+        }));
+        assert_ne!(surface_view_signature(&modified_view), cached.signature);
+        let recomputed = resolve_focus_bbox_with_cached_plan(&modified_view, Some(&cached), &probe);
+        assert!(recomputed.is_some());
     }
 }

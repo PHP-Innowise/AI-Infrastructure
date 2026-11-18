@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 const ROW_HEIGHT: usize = 36;
 const MID_Y: usize = ROW_HEIGHT / 2;
@@ -49,6 +49,38 @@ struct LaneSlot {
 /// Computes deterministic DAG lane assignments and per-row inline rail SVGs for a slice of commits ordered newest-first.
 pub fn compute_commit_rail_layouts(commits: &[Value]) -> Vec<CommitRowLayout> {
     build_layouts(commits, None)
+}
+
+/// Finds the index of `selected_commit` inside `commits`, if loaded.
+pub fn selected_commit_row_index(
+    commits: &[Value],
+    selected_commit: Option<&str>,
+) -> Option<usize> {
+    commits.iter().position(|commit| {
+        let sha = commit_sha(commit);
+        let short = commit_short(commit, &sha);
+        is_commit_selected(&sha, &short, selected_commit)
+    })
+}
+
+/// Computes the next keyboard-active Commit Dock row index for `ArrowDown`, `ArrowUp`, `Home`, and `End`.
+pub fn next_commit_dock_index(
+    current: Option<usize>,
+    selected: Option<usize>,
+    total: usize,
+    key: &str,
+) -> Option<usize> {
+    if total == 0 {
+        return None;
+    }
+    let anchor = current.or(selected).map(|idx| idx.min(total - 1));
+    match key {
+        "ArrowDown" => Some(anchor.map_or(0, |idx| (idx + 1).min(total - 1))),
+        "ArrowUp" => Some(anchor.map_or(0, |idx| idx.saturating_sub(1))),
+        "Home" => Some(0),
+        "End" => Some(total - 1),
+        _ => None,
+    }
 }
 
 /// Renders HTML `<li>` commit rows with inline DAG rail SVGs for either the modal picker or the docked commit graph panel.
@@ -148,8 +180,9 @@ pub fn render_commit_graph_rows(
                     }
                     None => String::new(),
                 };
+                let is_row_selected = active_index.map_or(is_selected, |idx| idx == index);
                 html.push_str(&format!(
-                    "<li class=\"git-graph-row\" id=\"graph-commit-row-{index}\" role=\"option\" aria-selected=\"{is_selected}\" data-current=\"{is_selected}\" data-action=\"graph-commit-select\" data-payload=\"{payload}\"><span class=\"git-graph-rail\">{}</span><div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">{}</span>{badges_html}</div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">{}</code>{who_html}{when_html}</div></div></li>",
+                    "<li class=\"git-graph-row\" id=\"graph-commit-row-{index}\" role=\"option\" aria-selected=\"{is_row_selected}\" data-current=\"{is_selected}\" data-action=\"graph-commit-select\" data-payload=\"{payload}\"><span class=\"git-graph-rail\">{}</span><div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">{}</span>{badges_html}</div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">{}</code>{who_html}{when_html}</div></div></li>",
                     layout.rail_svg,
                     escape_html(subject),
                     escape_html(&short),
@@ -384,19 +417,34 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
         .iter()
         .any(|c| c.get("parents").and_then(Value::as_array).is_some());
 
+    let row_shas: Vec<String> = commits.iter().map(commit_sha).collect();
+    let mut sha_last_row: HashMap<&str, usize> = HashMap::with_capacity(row_shas.len());
+    for (idx, sha) in row_shas.iter().enumerate() {
+        if !sha.is_empty() {
+            sha_last_row.insert(sha.as_str(), idx);
+        }
+    }
+
+    struct PendingRow {
+        lane: usize,
+        color: usize,
+        rail_width: usize,
+        body_svg: String,
+    }
+
     let mut lanes: Vec<Option<LaneSlot>> = Vec::new();
     let mut next_color: usize = 0;
-    let mut layouts = Vec::with_capacity(commits.len());
+    let mut pending = Vec::with_capacity(commits.len());
 
     for (row_idx, commit) in commits.iter().enumerate() {
-        let sha = commit_sha(commit);
-        let short = commit_short(commit, &sha);
-        let parents = extract_row_parents(commits, row_idx, &sha, any_has_parents);
+        let sha = &row_shas[row_idx];
+        let short = commit_short(commit, sha);
+        let parents = extract_row_parents(commits, row_idx, sha, any_has_parents);
         let is_merge = commit["merge"].as_bool().unwrap_or(false) || parents.len() > 1;
         let is_head = commit["refs"]
             .as_array()
             .is_some_and(|refs| refs.iter().any(|r| r["kind"].as_str() == Some("head")));
-        let is_selected = is_commit_selected(&sha, &short, selected_commit);
+        let is_selected = is_commit_selected(sha, &short, selected_commit);
 
         let lanes_in = lanes;
         let matching_cols: Vec<usize> = if sha.is_empty() {
@@ -405,7 +453,7 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
             lanes_in
                 .iter()
                 .enumerate()
-                .filter_map(|(col, slot)| slot.as_ref().filter(|s| s.sha == sha).map(|_| col))
+                .filter_map(|(col, slot)| slot.as_ref().filter(|s| s.sha == *sha).map(|_| col))
                 .collect()
         };
 
@@ -442,7 +490,7 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
             };
             let color = slot.color % LANE_COLORS;
             let x = lane_x(col);
-            if !sha.is_empty() && slot.sha == sha {
+            if !sha.is_empty() && slot.sha == *sha {
                 if col == c_lane {
                     incoming_svg.push_str(&straight_path(x, 0, MID_Y, color, "in"));
                 } else {
@@ -470,9 +518,9 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
             if !drawn_targets.insert(parent_sha.clone()) {
                 continue;
             }
-            let target_below = commits[row_idx + 1..]
-                .iter()
-                .any(|c| commit_sha(c) == *parent_sha);
+            let target_below = sha_last_row
+                .get(parent_sha.as_str())
+                .is_some_and(|&idx| idx > row_idx);
 
             if target_below {
                 if let Some(existing_col) = lanes_out
@@ -622,12 +670,10 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
         let rail_width = PAD_X * 2 + (max_visual_col - 1) * LANE_WIDTH;
         let cx = lane_x(c_lane);
 
-        let mut svg = format!(
-            "<svg class=\"git-graph-svg\" width=\"{rail_width}\" height=\"{ROW_HEIGHT}\" viewBox=\"0 0 {rail_width} {ROW_HEIGHT}\" preserveAspectRatio=\"none\" aria-hidden=\"true\">"
-        );
-        svg.push_str(&pass_through_svg);
-        svg.push_str(&incoming_svg);
-        svg.push_str(&outgoing_svg);
+        let mut body_svg = String::new();
+        body_svg.push_str(&pass_through_svg);
+        body_svg.push_str(&incoming_svg);
+        body_svg.push_str(&outgoing_svg);
 
         if is_selected || is_head {
             let ring_stroke = if is_selected {
@@ -635,30 +681,29 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
             } else {
                 format!("var(--git-lane-{c_color})")
             };
-            svg.push_str(&format!(
+            body_svg.push_str(&format!(
                 "<circle class=\"git-graph-ring\" cx=\"{cx}\" cy=\"{MID_Y}\" r=\"7.5\" fill=\"none\" stroke=\"{ring_stroke}\" stroke-width=\"1.5\" data-selected=\"{is_selected}\" data-head=\"{is_head}\"/>"
             ));
         }
 
         if is_merge {
-            svg.push_str(&format!(
+            body_svg.push_str(&format!(
                 "<circle class=\"git-graph-dot git-graph-dot-merge\" cx=\"{cx}\" cy=\"{MID_Y}\" r=\"5.5\" fill=\"var(--paper, #ffffff)\" stroke=\"var(--git-lane-{c_color})\" stroke-width=\"2.2\" data-merge=\"true\"/>"
             ));
-            svg.push_str(&format!(
+            body_svg.push_str(&format!(
                 "<circle class=\"git-graph-dot-inner\" cx=\"{cx}\" cy=\"{MID_Y}\" r=\"2.2\" fill=\"var(--git-lane-{c_color})\"/>"
             ));
         } else {
-            svg.push_str(&format!(
+            body_svg.push_str(&format!(
                 "<circle class=\"git-graph-dot\" cx=\"{cx}\" cy=\"{MID_Y}\" r=\"4.2\" fill=\"var(--git-lane-{c_color})\" stroke=\"var(--paper, #ffffff)\" stroke-width=\"1.5\"/>"
             ));
         }
-        svg.push_str("</svg>");
 
-        layouts.push(CommitRowLayout {
+        pending.push(PendingRow {
             lane: c_lane,
             color: c_color,
             rail_width,
-            rail_svg: svg,
+            body_svg,
         });
 
         while lanes_out.last().is_some_and(Option::is_none) {
@@ -667,7 +712,24 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
         lanes = lanes_out;
     }
 
-    layouts
+    let max_rail_width = pending
+        .iter()
+        .map(|row| row.rail_width)
+        .max()
+        .unwrap_or(PAD_X * 2);
+
+    pending
+        .into_iter()
+        .map(|row| CommitRowLayout {
+            lane: row.lane,
+            color: row.color,
+            rail_width: row.rail_width,
+            rail_svg: format!(
+                "<svg class=\"git-graph-svg\" width=\"{max_rail_width}\" height=\"{ROW_HEIGHT}\" viewBox=\"0 0 {max_rail_width} {ROW_HEIGHT}\" preserveAspectRatio=\"none\" aria-hidden=\"true\">{}</svg>",
+                row.body_svg
+            ),
+        })
+        .collect()
 }
 
 fn extract_row_parents(
@@ -1446,5 +1508,61 @@ mod tests {
             ""
         );
         assert_eq!(render_rename_memory_warnings(&[], &[], 4), "");
+    }
+
+    #[test]
+    fn rail_svgs_pad_uniformly_to_max_rail_width_and_dock_nav_steps_cleanly() {
+        let commits = vec![
+            json!({"commit": "c3", "short": "c3", "subject": "Merge", "parents": ["c2", "c1"], "merge": true}),
+            json!({"commit": "c2", "short": "c2", "subject": "Side", "parents": ["c0"], "merge": false}),
+            json!({"commit": "c1", "short": "c1", "subject": "Main", "parents": ["c0"], "merge": false}),
+            json!({"commit": "c0", "short": "c0", "subject": "Root", "parents": [], "merge": false}),
+        ];
+        let layouts = compute_commit_rail_layouts(&commits);
+        assert_eq!(layouts[0].rail_width, 38);
+        assert_eq!(layouts[3].rail_width, 24);
+        for (idx, layout) in layouts.iter().enumerate() {
+            assert!(
+                layout
+                    .rail_svg
+                    .contains("width=\"38\" height=\"36\" viewBox=\"0 0 38 36\""),
+                "row {idx} rail_svg was not padded uniformly: {}",
+                layout.rail_svg
+            );
+        }
+
+        let selected = selected_commit_row_index(&commits, Some("commit:c1"));
+        assert_eq!(selected, Some(2));
+        assert_eq!(
+            next_commit_dock_index(None, selected, 4, "ArrowDown"),
+            Some(3)
+        );
+        assert_eq!(
+            next_commit_dock_index(None, selected, 4, "ArrowUp"),
+            Some(1)
+        );
+        assert_eq!(
+            next_commit_dock_index(Some(3), selected, 4, "ArrowDown"),
+            Some(3)
+        );
+        assert_eq!(
+            next_commit_dock_index(Some(0), selected, 4, "ArrowUp"),
+            Some(0)
+        );
+        assert_eq!(next_commit_dock_index(None, None, 4, "ArrowDown"), Some(0));
+        assert_eq!(next_commit_dock_index(None, None, 0, "ArrowDown"), None);
+
+        let dock_html = render_commit_graph_rows(
+            &commits,
+            Some(1),
+            Some("commit:c2"),
+            false,
+            0,
+            CommitGraphSurface::Dock,
+        );
+        assert!(
+            dock_html.contains("id=\"graph-commit-row-0\" role=\"option\" aria-selected=\"false\"")
+        );
+        assert!(dock_html.contains("id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"true\" data-current=\"true\""));
     }
 }
