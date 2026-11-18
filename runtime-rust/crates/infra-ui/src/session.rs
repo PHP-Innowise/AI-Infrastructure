@@ -1019,6 +1019,9 @@ pub fn controls() {
                 && (dry || m::yes(&provider["available"]))
                 && session["workflow"] != "fleet-review"
         };
+    let project_id = dom::value("project");
+    dom::disabled("preflight-check", !ready || project_id.is_empty());
+    dom::disabled("preflight-risk-callers", !ready || project_id.is_empty());
     dom::disabled("send", !valid);
     dom::disabled(
         "cancel-session",
@@ -1951,6 +1954,7 @@ pub fn new_session(project: Option<&str>) {
     if m::read(|s| s.pending) {
         return;
     }
+    reset_preflight(true);
     reset_results();
     save_preferences();
     reset_merge_archive();
@@ -1993,6 +1997,7 @@ pub async fn select(id: &str) {
         return;
     }
     let before_project = dom::value("project");
+    reset_preflight(false);
     reset_results();
     save_preferences();
     stop_poll();
@@ -2806,6 +2811,7 @@ pub async fn send() {
     m::write(|s| s.pending = true);
     controls();
     dom::error("composer-error", "");
+    dom::cancel_timer("preflight-debounce");
     crate::graph_map::focus_from_prompt(&prompt);
     crate::graph::run_state(true);
     match api::post(&path, turn).await {
@@ -2830,6 +2836,7 @@ pub async fn send() {
                     inbox::clear_draft(&sid, &prompt);
                 }
                 dom::set_value("prompt", "");
+                reset_preflight(false);
                 clear_files();
                 reset_session_settings_state();
                 m::write(|s| s.pending = false);
@@ -3170,6 +3177,1073 @@ fn wait_for_restart(deadline: f64) {
         })
     });
 }
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+pub(crate) fn has_at_file_mention(prompt: &str) -> bool {
+    prompt.split_whitespace().any(|raw| {
+        let token = raw.trim_matches(|c: char| {
+            matches!(
+                c,
+                '(' | '[' | '{' | '"' | '\'' | ',' | ';' | ')' | ']' | '}'
+            )
+        });
+        let Some(rest) = token.strip_prefix('@') else {
+            return false;
+        };
+        rest.len() >= 2
+            && !rest.contains('@')
+            && (rest.contains('/') || rest.contains('.'))
+            && rest.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '#')
+            })
+    })
+}
+
+pub(crate) fn build_preflight_request(
+    prompt: &str,
+    sid: &str,
+    task_id: &str,
+    include_risk_callers: bool,
+) -> V {
+    let mut body = json!({
+        "prompt": prompt,
+        "risk_caller_hints": include_risk_callers,
+    });
+    if !sid.is_empty() {
+        body["session_id"] = json!(sid);
+    }
+    if !task_id.is_empty() {
+        body["task_id"] = json!(task_id);
+    }
+    body
+}
+
+fn preflight_task_id() -> String {
+    let sid = m::read(|s| s.sid.clone());
+    if !sid.is_empty() {
+        return m::read(|s| {
+            s.selected["brain"]["record_id"]
+                .as_str()
+                .or_else(|| s.selected["brain"]["task_id"].as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        });
+    }
+    match dom::value("brain-link-kind").as_str() {
+        "existing" => dom::value("brain-link-task").trim().to_owned(),
+        "create" => dom::value("brain-link-task-id").trim().to_owned(),
+        _ => String::new(),
+    }
+}
+
+fn reset_preflight(clear_opt_in: bool) {
+    dom::cancel_timer("preflight-debounce");
+    m::next("preflight");
+    m::take("preflight");
+    dom::text("preflight-status", "");
+    dom::error("preflight-error", "");
+    dom::clear("preflight-results");
+    dom::hidden("preflight-results", true);
+    if clear_opt_in {
+        dom::set_checked("preflight-risk-callers", false);
+    }
+}
+
+fn inspect_file_button_html(path: &str, label: &str) -> String {
+    let payload = json!({"path": path}).to_string();
+    format!(
+        "<button type=\"button\" class=\"button compact advisory-inspect\" data-action=\"inspect-file-graph\" data-path=\"{}\" data-payload=\"{}\">{}</button>",
+        escape_html(path),
+        escape_html(&payload),
+        escape_html(label)
+    )
+}
+
+fn inspect_knowledge_path_button_html(project_id: &str, path: &str, label: &str) -> String {
+    let payload = json!({"project_id": project_id, "path": path}).to_string();
+    format!(
+        "<button type=\"button\" class=\"button compact advisory-inspect\" data-action=\"preflight-open-knowledge\" data-payload=\"{}\">{}</button>",
+        escape_html(&payload),
+        escape_html(label)
+    )
+}
+
+fn open_memory_target_button_html(
+    scope: &str,
+    project_id: &str,
+    target_id: &str,
+    label: &str,
+) -> String {
+    let payload = json!({
+        "scope": scope,
+        "project_id": project_id,
+        "target_id": target_id
+    })
+    .to_string();
+    format!(
+        "<button type=\"button\" class=\"button compact advisory-inspect\" data-action=\"preflight-open-memory\" data-payload=\"{}\">{}</button>",
+        escape_html(&payload),
+        escape_html(label)
+    )
+}
+
+fn advisory_path(value: &V) -> String {
+    value
+        .as_str()
+        .or_else(|| value["path"].as_str())
+        .or_else(|| value["file"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned()
+}
+
+pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: bool) -> String {
+    let warnings_obj = if v["memory_warnings"].is_object() {
+        &v["memory_warnings"]
+    } else {
+        v
+    };
+    let contradictions = m::array(&warnings_obj["contradiction_warnings"]);
+    let hygiene = m::array(&warnings_obj["hygiene_warnings"]);
+    let risk_callers = m::array(&v["risk_callers"]);
+    let files = m::array(&v["files"]);
+    let blast = &v["blast_summary"];
+    let hints = m::array(&v["risk_caller_hints"]);
+
+    if !is_preflight && contradictions.is_empty() && hygiene.is_empty() && risk_callers.is_empty() {
+        return String::new();
+    }
+    if is_preflight
+        && contradictions.is_empty()
+        && hygiene.is_empty()
+        && risk_callers.is_empty()
+        && files.is_empty()
+        && !blast.is_object()
+    {
+        return "<p class=\"knowledge-note advisory-empty\">No referenced files, memory warnings, or graph risk callers flagged.</p>".to_owned();
+    }
+
+    let mut out = String::new();
+    if is_preflight && (blast.is_object() || !files.is_empty()) {
+        let blast_files = m::array(&blast["files"]);
+        let file_count = if !files.is_empty() {
+            files.len()
+        } else {
+            blast_files.len()
+        };
+        let direct = blast["direct_count"].as_u64().unwrap_or(0);
+        let downstream = blast["downstream_count"].as_u64().unwrap_or(0);
+        out.push_str("<div class=\"advisory-blast\">");
+        out.push_str(&format!(
+            "<span class=\"advisory-pill\" data-kind=\"info\">{file_count} file(s)</span>"
+        ));
+        if blast.is_object() {
+            out.push_str(&format!(
+                "<span class=\"advisory-pill\" data-kind=\"info\">{direct} direct</span><span class=\"advisory-pill\" data-kind=\"info\">{downstream} downstream</span>"
+            ));
+        }
+        if !hints.is_empty() {
+            out.push_str(&format!(
+                "<span class=\"advisory-pill\" data-kind=\"arch\">{} hint(s)</span>",
+                hints.len()
+            ));
+        }
+        out.push_str("</div>");
+
+        let mut listed_files = Vec::new();
+        for entry in files.iter().chain(blast_files.iter()) {
+            let p = advisory_path(entry);
+            if !p.is_empty() && !listed_files.contains(&p) {
+                listed_files.push(p);
+            }
+        }
+        if !listed_files.is_empty() {
+            out.push_str("<ul class=\"advisory-file-list\">");
+            for path in listed_files.iter().take(12) {
+                out.push_str("<li class=\"advisory-file-row\">");
+                out.push_str(&format!(
+                    "<code class=\"advisory-path\">{}</code><span class=\"advisory-actions\">",
+                    escape_html(path)
+                ));
+                out.push_str(&inspect_file_button_html(path, "Code graph"));
+                out.push_str(&inspect_knowledge_path_button_html(
+                    project_id,
+                    path,
+                    "Knowledge",
+                ));
+                out.push_str("</span></li>");
+            }
+            out.push_str("</ul>");
+        }
+    }
+
+    if !contradictions.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"contradiction\"><p class=\"advisory-group-title\">Memory contradictions</p><ul class=\"advisory-list\">");
+        for w in &contradictions {
+            let text = w["text"]
+                .as_str()
+                .unwrap_or("Conflicting memory atoms found.");
+            let path = advisory_path(w);
+            out.push_str("<li class=\"advisory-item\" data-kind=\"contradiction\">");
+            out.push_str("<span class=\"advisory-badge\" data-kind=\"error\">Contradiction</span>");
+            out.push_str(&format!(
+                "<span class=\"advisory-text\">{}</span>",
+                escape_html(text)
+            ));
+            out.push_str("<span class=\"advisory-actions\">");
+            if !path.is_empty() {
+                out.push_str(&inspect_file_button_html(&path, "Code graph"));
+            }
+            for open in m::array(&w["open"]) {
+                let scope = open["scope"].as_str().unwrap_or("");
+                let target_id = open["target_id"].as_str().unwrap_or("");
+                if matches!(scope, "brain" | "memory") && !target_id.is_empty() {
+                    let title = open["title"].as_str().unwrap_or(target_id);
+                    out.push_str(&open_memory_target_button_html(
+                        scope,
+                        project_id,
+                        target_id,
+                        &format!("Open {title}"),
+                    ));
+                }
+            }
+            out.push_str("</span></li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if !hygiene.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"hygiene\"><p class=\"advisory-group-title\">Memory hygiene warnings</p><ul class=\"advisory-list\">");
+        for w in &hygiene {
+            let kind = w["kind"].as_str().unwrap_or("hygiene");
+            let badge = match kind {
+                "cited-file-missing" => "Missing file",
+                "cited-file-renamed" => "Renamed file",
+                other => other,
+            };
+            let text = w["text"].as_str().unwrap_or("Review cited memory.");
+            let path = advisory_path(w);
+            out.push_str("<li class=\"advisory-item\" data-kind=\"hygiene\">");
+            out.push_str(&format!(
+                "<span class=\"advisory-badge\" data-kind=\"warning\">{}</span>",
+                escape_html(badge)
+            ));
+            out.push_str(&format!(
+                "<span class=\"advisory-text\">{}</span>",
+                escape_html(text)
+            ));
+            out.push_str("<span class=\"advisory-actions\">");
+            if !path.is_empty() {
+                out.push_str(&inspect_file_button_html(&path, "Code graph"));
+            }
+            let linked = m::array(&w["linked"]);
+            if linked.is_empty() {
+                if !path.is_empty() {
+                    out.push_str(&inspect_knowledge_path_button_html(
+                        project_id,
+                        &path,
+                        "Knowledge",
+                    ));
+                }
+            } else {
+                for target in linked.iter().take(4) {
+                    if let Some(id) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        let scope = if id.starts_with("MEM-") {
+                            "memory"
+                        } else {
+                            "brain"
+                        };
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            id,
+                            &format!("Open {id}"),
+                        ));
+                    }
+                }
+            }
+            out.push_str("</span></li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if !risk_callers.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"risk-callers\"><p class=\"advisory-group-title\">Graph risk callers</p><ul class=\"advisory-list\">");
+        for caller in &risk_callers {
+            let from = caller["from"]
+                .as_str()
+                .or_else(|| caller["caller"].as_str())
+                .or_else(|| caller["path"].as_str())
+                .or_else(|| caller["file"].as_str())
+                .or_else(|| caller.as_str())
+                .unwrap_or("")
+                .trim();
+            let to = caller["to"]
+                .as_str()
+                .or_else(|| caller["target"].as_str())
+                .unwrap_or("")
+                .trim();
+            let impact = caller["impact"]
+                .as_str()
+                .or_else(|| caller["kind"].as_str())
+                .unwrap_or("risk");
+            let reason = caller["reason"]
+                .as_str()
+                .or_else(|| caller["text"].as_str())
+                .unwrap_or("")
+                .trim();
+            if from.is_empty() && reason.is_empty() {
+                continue;
+            }
+            out.push_str("<li class=\"advisory-item\" data-kind=\"risk-caller\">");
+            out.push_str(&format!(
+                "<span class=\"advisory-badge\" data-kind=\"arch\">{}</span>",
+                escape_html(impact)
+            ));
+            let label = if !from.is_empty() && !to.is_empty() {
+                format!("{from} → {to}")
+            } else if !from.is_empty() {
+                from.to_owned()
+            } else {
+                reason.to_owned()
+            };
+            out.push_str(&format!(
+                "<code class=\"advisory-path\">{}</code>",
+                escape_html(&label)
+            ));
+            if !reason.is_empty() && !from.is_empty() {
+                out.push_str(&format!(
+                    "<span class=\"advisory-text\">{}</span>",
+                    escape_html(reason)
+                ));
+            }
+            if !from.is_empty() {
+                out.push_str("<span class=\"advisory-actions\">");
+                out.push_str(&inspect_file_button_html(from, "Code graph"));
+                out.push_str(&inspect_knowledge_path_button_html(
+                    project_id,
+                    from,
+                    "Knowledge",
+                ));
+                out.push_str("</span>");
+            }
+            out.push_str("</li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if is_preflight && contradictions.is_empty() && hygiene.is_empty() && risk_callers.is_empty() {
+        out.push_str("<p class=\"knowledge-note advisory-empty\">No contradictions, hygiene warnings, or graph risk callers flagged.</p>");
+    }
+    out
+}
+
+fn preflight_status_summary(v: &V) -> String {
+    let c = m::array(&v["contradiction_warnings"]).len();
+    let h = m::array(&v["hygiene_warnings"]).len();
+    let r = m::array(&v["risk_callers"]).len();
+    let f = m::array(&v["files"]).len();
+    if c + h + r == 0 {
+        if f == 0 {
+            "No risks flagged".to_owned()
+        } else {
+            format!("Checked {f} file(s) · no warnings")
+        }
+    } else {
+        let mut parts = Vec::new();
+        if c > 0 {
+            parts.push(format!("{c} contradiction(s)"));
+        }
+        if h > 0 {
+            parts.push(format!("{h} hygiene"));
+        }
+        if r > 0 {
+            parts.push(format!("{r} risk caller(s)"));
+        }
+        parts.join(" · ")
+    }
+}
+
+async fn run_preflight(manual: bool) {
+    let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed);
+    let project = dom::value("project");
+    if !ready || project.is_empty() {
+        return;
+    }
+    let prompt = dom::value("prompt");
+    if !manual && (prompt.trim().is_empty() || !has_at_file_mention(&prompt)) {
+        return;
+    }
+    let sid = m::read(|s| s.sid.clone());
+    let task_id = preflight_task_id();
+    let include_callers = dom::checked("preflight-risk-callers");
+    let body = build_preflight_request(&prompt, &sid, &task_id, include_callers);
+    let key = "preflight";
+    let epoch = m::next(key);
+    let Ok(controller) = web_sys::AbortController::new() else {
+        return;
+    };
+    m::write(|s| {
+        s.aborts.insert(key.into(), controller.clone());
+    });
+    dom::text("preflight-status", "Checking risks…");
+    if manual {
+        dom::error("preflight-error", "");
+    }
+    let url = format!("/api/projects/{}/preflight", dom::enc(&project));
+    let response = api::call("POST", &url, Some(body), Some(controller.signal())).await;
+    if m::current(key, epoch) {
+        m::write(|s| {
+            s.aborts.remove(key);
+        });
+    }
+    if !m::current(key, epoch) || dom::value("project") != project {
+        return;
+    }
+    match response {
+        Ok(v) => {
+            m::set("preflight", v.clone());
+            dom::error("preflight-error", "");
+            dom::text("preflight-status", &preflight_status_summary(&v));
+            let html = render_advisory_panel_html(&project, &v, true);
+            if let Some(el) = dom::get("preflight-results") {
+                el.set_inner_html(&html);
+                dom::hide(&el, html.is_empty());
+            }
+        }
+        Err(e) if e.aborted => {}
+        Err(e) => {
+            if manual {
+                dom::error("preflight-error", &e.message);
+                dom::text("preflight-status", "");
+            } else {
+                dom::text("preflight-status", "Risk check unavailable");
+            }
+        }
+    }
+}
+
+pub(crate) fn extract_used_memory_paths(session: &V) -> Vec<String> {
+    let mut paths = Vec::new();
+    let capsule = &session["brain"]["capsule"];
+    for layer in ["selected", "procedural", "semantic", "episodic"] {
+        for item in m::array(&capsule[layer]) {
+            if let Some(path) = item["path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                let owned = path.to_owned();
+                if !paths.contains(&owned) {
+                    paths.push(owned);
+                    if paths.len() >= 10 {
+                        return paths;
+                    }
+                }
+            }
+        }
+    }
+    if paths.is_empty() {
+        if let Some(hashes) = session["brain"]["source_hashes"].as_object() {
+            for key in hashes.keys() {
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    let owned = trimmed.to_owned();
+                    if !paths.contains(&owned) {
+                        paths.push(owned);
+                        if paths.len() >= 10 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn sanitize_memory_text(value: &str, max_chars: usize) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut trimmed = collapsed.trim();
+    for prefix in [
+        "user:",
+        "assistant:",
+        "system:",
+        "developer:",
+        "tool:",
+        "prompt:",
+        "response:",
+        "reasoning:",
+        "stdout:",
+        "stderr:",
+        "log:",
+    ] {
+        if trimmed.to_ascii_lowercase().starts_with(prefix) {
+            trimmed = trimmed[prefix.len()..].trim();
+        }
+    }
+    trimmed.chars().take(max_chars).collect()
+}
+
+pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V, preview: &V) -> V {
+    let snapshot_files = m::array(&results["snapshot"]["files"]);
+    let mut active_files = Vec::new();
+    let mut deleted_files = Vec::new();
+    for entry in &snapshot_files {
+        let path = m::text(entry, "path").trim().to_owned();
+        if path.is_empty() {
+            continue;
+        }
+        let status = m::text(entry, "status").to_ascii_lowercase();
+        if status == "d" || status == "deleted" {
+            if !deleted_files.contains(&path) {
+                deleted_files.push(path);
+            }
+        } else if !active_files.contains(&path) {
+            active_files.push(path);
+        }
+    }
+
+    let mut passed_checks = Vec::new();
+    let mut failed_checks = Vec::new();
+    for check in m::array(&results["checks"]) {
+        let cmd = m::text(&check, "command").trim().to_owned();
+        if cmd.is_empty() {
+            continue;
+        }
+        match check["status"].as_str().unwrap_or("") {
+            "passed" if !passed_checks.contains(&cmd) => passed_checks.push(cmd),
+            "failed" | "timed_out" | "output_limit" if !failed_checks.contains(&cmd) => {
+                failed_checks.push(cmd);
+            }
+            _ => {}
+        }
+    }
+    if preview["target_check"]["status"] == "passed" {
+        let cmd = m::text(&preview["target_check"], "command")
+            .trim()
+            .to_owned();
+        let label = if cmd.is_empty() {
+            "delivery target check".to_owned()
+        } else {
+            cmd
+        };
+        if !passed_checks.contains(&label) {
+            passed_checks.push(label);
+        }
+    }
+    for check in m::array(&preview["checks"]) {
+        if check["status"] == "passed" {
+            let cmd = m::text(&check, "command").trim().to_owned();
+            if !cmd.is_empty() && !passed_checks.contains(&cmd) {
+                passed_checks.push(cmd);
+            }
+        }
+    }
+
+    let clash_items = m::array(&session["clash_result"]["items"]);
+    let mut progress_parts = Vec::new();
+    let task_label = session["brain"]["task"]["external_id"]
+        .as_str()
+        .or_else(|| session["brain"]["task_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let total_changed = active_files.len() + deleted_files.len();
+    if total_changed > 0 {
+        let listed: Vec<String> = active_files
+            .iter()
+            .chain(deleted_files.iter())
+            .take(5)
+            .cloned()
+            .collect();
+        let suffix = if total_changed > 5 { ", …" } else { "" };
+        progress_parts.push(format!(
+            "Updated {total_changed} file(s): {}{suffix}.",
+            listed.join(", ")
+        ));
+    } else if let Some(task_prog) = session["brain"]["task"]["progress"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        progress_parts.push(task_prog.to_owned());
+    } else if let Some(id) = task_label {
+        progress_parts.push(format!("Reviewed session outcome for {id}."));
+    }
+    if !passed_checks.is_empty() {
+        progress_parts.push(format!(
+            "Passed checks: {}.",
+            passed_checks
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let clash_summary = m::text(&session["clash_result"], "summary");
+    if !clash_summary.trim().is_empty() {
+        progress_parts.push(clash_summary.trim().to_owned());
+    }
+    let progress = sanitize_memory_text(&progress_parts.join(" "), 1000);
+
+    let mut next_steps: Vec<String> = Vec::new();
+    for cmd in &failed_checks {
+        if next_steps.len() >= 3 {
+            break;
+        }
+        next_steps.push(sanitize_memory_text(
+            &format!("Fix failing check: {cmd}"),
+            300,
+        ));
+    }
+    for item in &clash_items {
+        if next_steps.len() >= 3 {
+            break;
+        }
+        let status = m::text(item, "status").to_ascii_lowercase();
+        if matches!(status.as_str(), "disputed" | "open" | "unresolved") {
+            let claim = m::text(item, "claim");
+            if !claim.trim().is_empty() {
+                next_steps.push(sanitize_memory_text(
+                    &format!("Resolve clash finding: {claim}"),
+                    300,
+                ));
+            }
+        }
+    }
+    if next_steps.len() < 3 && !m::array(&delivery["files"]).is_empty() {
+        next_steps.push("Review and commit remaining worktree changes.".to_owned());
+    }
+    if next_steps.is_empty() {
+        for step in m::array(&session["brain"]["task"]["next_steps"]) {
+            if next_steps.len() >= 3 {
+                break;
+            }
+            if let Some(text) = step.as_str() {
+                let cleaned = sanitize_memory_text(text, 300);
+                if !cleaned.is_empty() {
+                    next_steps.push(cleaned);
+                }
+            }
+        }
+    }
+
+    let mut learnings: Vec<V> = Vec::new();
+    for item in &clash_items {
+        if learnings.len() >= 3 {
+            break;
+        }
+        let file = m::text(item, "file").trim().to_owned();
+        if file.is_empty() || deleted_files.contains(&file) {
+            continue;
+        }
+        let claim = sanitize_memory_text(&m::text(item, "claim"), 200);
+        let detail = sanitize_memory_text(
+            item["verdict_note"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| item["evidence"].as_str().filter(|s| !s.trim().is_empty()))
+                .unwrap_or(&claim),
+            1000,
+        );
+        if claim.is_empty() || detail.is_empty() {
+            continue;
+        }
+        let kind_str = m::text(item, "kind").to_ascii_lowercase();
+        let status_str = m::text(item, "status").to_ascii_lowercase();
+        let learning_type = if kind_str.contains("decision") || status_str == "accepted" {
+            "decision"
+        } else {
+            "finding"
+        };
+        learnings.push(json!({
+            "type": learning_type,
+            "title": claim,
+            "consequence": detail,
+            "sources": [file],
+        }));
+    }
+    if learnings.is_empty()
+        && !active_files.is_empty()
+        && (!passed_checks.is_empty() || session["brain"].is_object())
+    {
+        let sources: Vec<String> = active_files.iter().take(3).cloned().collect();
+        let title =
+            sanitize_memory_text(&format!("Verified behavior in {}", sources.join(", ")), 200);
+        let consequence = if !passed_checks.is_empty() {
+            sanitize_memory_text(
+                &format!(
+                    "Changes in {} passed {}.",
+                    sources.join(", "),
+                    passed_checks
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("checks")
+                ),
+                1000,
+            )
+        } else {
+            sanitize_memory_text(
+                &format!(
+                    "Reviewed implementation in {} against workspace sources.",
+                    sources.join(", ")
+                ),
+                1000,
+            )
+        };
+        if !title.is_empty() && !consequence.is_empty() {
+            learnings.push(json!({
+                "type": "finding",
+                "title": title,
+                "consequence": consequence,
+                "sources": sources,
+            }));
+        }
+    }
+
+    let used_memory = extract_used_memory_paths(session);
+    json!({
+        "progress": progress,
+        "next_steps": next_steps,
+        "learnings": learnings,
+        "used_memory": used_memory,
+    })
+}
+
+pub(crate) fn render_memory_learning_row_html(idx: usize, learning: &V) -> String {
+    let ltype = if learning["type"].as_str() == Some("decision") {
+        "decision"
+    } else {
+        "finding"
+    };
+    let title = learning["title"].as_str().unwrap_or("");
+    let consequence = learning["consequence"].as_str().unwrap_or("");
+    let sources = m::array(&learning["sources"])
+        .into_iter()
+        .filter_map(|s| {
+            s.as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remove_payload = json!({"index": idx}).to_string();
+    format!(
+        "<article class=\"results-memory-learning-row\" data-learning-index=\"{idx}\">\
+        <div class=\"results-memory-learning-top\">\
+        <label class=\"field\">Type<select class=\"results-memory-learning-type\" data-action=\"results-memory-field\">\
+        <option value=\"finding\"{}>finding</option>\
+        <option value=\"decision\"{}>decision</option>\
+        </select></label>\
+        <label class=\"field wide\">Title<input type=\"text\" class=\"results-memory-learning-title\" data-action=\"results-memory-field\" maxlength=\"200\" value=\"{}\" placeholder=\"Concise reusable claim\"></label>\
+        <button type=\"button\" class=\"button compact\" data-action=\"results-memory-remove-learning\" data-payload=\"{}\">Remove</button>\
+        </div>\
+        <div class=\"knowledge-form-grid\">\
+        <label class=\"field wide\">Consequence<textarea class=\"results-memory-learning-consequence\" data-action=\"results-memory-field\" maxlength=\"1000\" rows=\"2\" placeholder=\"Reusable rule or consequence verified in project files\">{}</textarea></label>\
+        <label class=\"field wide\">Sources (comma-separated relative paths)<input type=\"text\" class=\"results-memory-learning-sources\" data-action=\"results-memory-field\" value=\"{}\" placeholder=\"src/example.rs\"></label>\
+        </div></article>",
+        if ltype == "finding" { " selected" } else { "" },
+        if ltype == "decision" { " selected" } else { "" },
+        escape_html(title),
+        escape_html(&remove_payload),
+        escape_html(consequence),
+        escape_html(&sources),
+    )
+}
+
+pub(crate) fn render_memory_learnings_html(learnings: &[V]) -> String {
+    learnings
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| render_memory_learning_row_html(idx, item))
+        .collect()
+}
+
+pub(crate) fn build_memory_save_payload(
+    progress: &str,
+    next_steps_text: &str,
+    learnings: &[V],
+    used_text: &str,
+    verified: bool,
+) -> Result<V, String> {
+    if !verified {
+        return Err(
+            "Check \"I verified these claims against project files\" before saving.".into(),
+        );
+    }
+    let progress = progress.trim();
+    if progress.chars().count() > 1000 {
+        return Err("Write progress in at most 1,000 characters.".into());
+    }
+    let next_steps: Vec<String> = next_steps_text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if next_steps.len() > 3 {
+        return Err("Keep at most 3 next steps.".into());
+    }
+    if next_steps.iter().any(|s| s.chars().count() > 300) {
+        return Err("Write each next step in at most 300 characters.".into());
+    }
+    let mut clean_learnings = Vec::new();
+    for item in learnings {
+        let ltype = item["type"].as_str().unwrap_or("finding").trim();
+        let title = item["title"].as_str().unwrap_or("").trim();
+        let consequence = item["consequence"].as_str().unwrap_or("").trim();
+        let sources: Vec<String> = item["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+        if title.is_empty() && consequence.is_empty() && sources.is_empty() {
+            continue;
+        }
+        if !matches!(ltype, "finding" | "decision") {
+            return Err("Each learning must use type \"finding\" or \"decision\".".into());
+        }
+        if title.is_empty() || title.chars().count() > 200 {
+            return Err("Each learning title must be 1 to 200 characters.".into());
+        }
+        if consequence.is_empty() || consequence.chars().count() > 1000 {
+            return Err("Each learning consequence must be 1 to 1,000 characters.".into());
+        }
+        if sources.is_empty() || sources.len() > 10 {
+            return Err("Each learning must cite 1 to 10 project-relative source paths.".into());
+        }
+        clean_learnings.push(json!({
+            "type": ltype,
+            "title": title,
+            "consequence": consequence,
+            "sources": sources,
+        }));
+    }
+    if clean_learnings.len() > 3 {
+        return Err("Keep at most 3 learnings.".into());
+    }
+    let mut used_memory = Vec::new();
+    for raw in used_text.split(['\n', ',']) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let owned = trimmed.to_owned();
+            if !used_memory.contains(&owned) {
+                used_memory.push(owned);
+            }
+        }
+    }
+    if used_memory.len() > 10 {
+        return Err("List at most 10 used memory paths.".into());
+    }
+    if progress.is_empty() && next_steps.is_empty() && clean_learnings.is_empty() {
+        return Err("Provide progress, next steps, or at least one learning to save.".into());
+    }
+    let mut body = json!({
+        "next_steps": next_steps,
+        "learnings": clean_learnings,
+        "verified": true,
+    });
+    if !progress.is_empty() {
+        body["progress"] = json!(progress);
+    }
+    if !used_memory.is_empty() {
+        body["used_memory"] = json!(used_memory);
+    }
+    Ok(body)
+}
+
+pub(crate) fn format_memory_save_feedback_html(resp: &V) -> String {
+    let ok = m::yes(&resp["ok"]);
+    let error = resp["error"].as_str().unwrap_or("").trim();
+    let skipped = m::array(&resp["skipped"]);
+    let records = m::array(&resp["saved"]["records"]);
+    let task = &resp["saved"]["task"];
+    let mut out = String::new();
+    if ok {
+        let task_ref = task["external_id"]
+            .as_str()
+            .or_else(|| task["id"].as_str())
+            .unwrap_or("");
+        let mut msg = format!("Saved verified memory ({} record(s))", records.len());
+        if !task_ref.is_empty() {
+            msg.push_str(&format!(" for {task_ref}"));
+        }
+        msg.push('.');
+        out.push_str(&format!(
+            "<p class=\"results-memory-status\" data-state=\"saved\">{}</p>",
+            escape_html(&msg)
+        ));
+    } else if !error.is_empty() {
+        out.push_str(&format!(
+            "<p class=\"results-memory-status\" data-state=\"error\">{}</p>",
+            escape_html(error)
+        ));
+    }
+    if !skipped.is_empty() {
+        out.push_str("<p class=\"knowledge-note\">Skipped items:</p><ul class=\"advisory-list\">");
+        for item in &skipped {
+            let title = item["title"]
+                .as_str()
+                .or_else(|| item.as_str())
+                .unwrap_or("item");
+            let reason = item["reason"].as_str().unwrap_or("skipped");
+            out.push_str(&format!(
+                "<li class=\"advisory-item\" data-kind=\"skipped\"><span class=\"advisory-badge\" data-kind=\"warning\">{}</span><span class=\"advisory-text\">{}</span></li>",
+                escape_html(reason),
+                escape_html(title)
+            ));
+        }
+        out.push_str("</ul>");
+    }
+    out
+}
+
+fn read_memory_learnings_from_dom() -> Vec<V> {
+    dom::all("#results-memory-learnings .results-memory-learning-row")
+        .into_iter()
+        .map(|row| {
+            let ltype = row
+                .query_selector(".results-memory-learning-type")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_else(|| "finding".to_owned());
+            let title = row
+                .query_selector(".results-memory-learning-title")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_default();
+            let consequence = row
+                .query_selector(".results-memory-learning-consequence")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_default();
+            let sources_raw = row
+                .query_selector(".results-memory-learning-sources")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_default();
+            let sources: Vec<String> = sources_raw
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+            json!({
+                "type": ltype,
+                "title": title,
+                "consequence": consequence,
+                "sources": sources,
+            })
+        })
+        .collect()
+}
+
+fn render_memory_learnings_dom(learnings: &[V]) {
+    if let Some(container) = dom::get("results-memory-learnings") {
+        container.set_inner_html(&render_memory_learnings_html(learnings));
+    }
+}
+
+fn prefill_results_memory() {
+    let session = m::read(|s| s.selected.clone());
+    let results = m::data("results");
+    let delivery = m::data("delivery");
+    let preview = m::data("delivery-preview");
+    let draft = build_memory_draft_prefill(&session, &results, &delivery, &preview);
+    dom::set_value("results-memory-progress", &m::text(&draft, "progress"));
+    let steps = m::array(&draft["next_steps"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    dom::set_value("results-memory-next-steps", &steps);
+    render_memory_learnings_dom(&m::array(&draft["learnings"]));
+    let used = m::array(&draft["used_memory"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    dom::set_value("results-memory-used", &used);
+}
+
+fn sync_results_memory_prefill(sid: &str) {
+    if m::data("results-memory-sid") != sid || !m::yes(&m::data("results-memory-dirty")) {
+        m::set("results-memory-sid", json!(sid));
+        prefill_results_memory();
+    }
+}
+
+async fn save_results_memory() {
+    let sid = m::read(|s| s.sid.clone());
+    if sid.is_empty() || m::read(|s| s.pending || m::active(&s.selected) || s.auth_failed) {
+        return;
+    }
+    dom::error("results-memory-error", "");
+    let learnings = read_memory_learnings_from_dom();
+    let payload = match build_memory_save_payload(
+        &dom::value("results-memory-progress"),
+        &dom::value("results-memory-next-steps"),
+        &learnings,
+        &dom::value("results-memory-used"),
+        dom::checked("results-memory-verified"),
+    ) {
+        Ok(body) => body,
+        Err(msg) => {
+            dom::error("results-memory-error", &msg);
+            return;
+        }
+    };
+    m::write(|s| s.pending = true);
+    controls();
+    let response = api::post(&format!("/api/sessions/{}/memory", dom::enc(&sid)), payload).await;
+    m::write(|s| s.pending = false);
+    match response {
+        Ok(v) => {
+            let html = format_memory_save_feedback_html(&v);
+            if let Some(el) = dom::get("results-memory-feedback") {
+                el.set_inner_html(&html);
+                dom::hide(&el, html.is_empty());
+            }
+            if m::yes(&v["ok"]) {
+                dom::set_checked("results-memory-verified", false);
+                m::take("results-memory-dirty");
+            } else if let Some(err) = v["error"].as_str().filter(|s| !s.trim().is_empty()) {
+                dom::error("results-memory-error", err);
+            }
+        }
+        Err(e) => {
+            dom::error("results-memory-error", &e.message);
+        }
+    }
+    controls();
+}
+
 fn result_view() -> bool {
     m::read(|s| ["changes", "checks", "usage"].contains(&s.view.as_str()))
 }
@@ -3178,6 +4252,8 @@ fn reset_results() {
     m::next("results");
     m::take("results");
     m::take("delivery");
+    m::take("results-memory-sid");
+    m::take("results-memory-dirty");
     invalidate_delivery();
     dom::hidden("delivery-options", true);
     dom::clear("delivery-files");
@@ -3185,6 +4261,14 @@ fn reset_results() {
     dom::clear("delivery-source");
     dom::clear("delivery-target");
     dom::text("delivery-status", "");
+    dom::set_value("results-memory-progress", "");
+    dom::set_value("results-memory-next-steps", "");
+    dom::clear("results-memory-learnings");
+    dom::set_value("results-memory-used", "");
+    dom::set_checked("results-memory-verified", false);
+    dom::error("results-memory-error", "");
+    dom::clear("results-memory-feedback");
+    dom::hidden("results-memory-feedback", true);
 }
 fn render_results_files(files: &[V]) {
     let Some(container) = dom::get("results-files") else {
@@ -3433,6 +4517,7 @@ pub async fn results() {
             if !m::current(key, e) || !m::read(|s| s.sid == sid) || !result_view() {
                 return;
             }
+            sync_results_memory_prefill(&sid);
             result_controls();
             let view = m::read(|s| s.view.clone());
             render_tabs(&view, "sessions");
@@ -3534,6 +4619,53 @@ fn result_controls() {
                     || check["workspace_changed"] == true
                     || check["candidate"] != preview["candidate"]),
     );
+    let brain_id = session["brain"]["record_id"]
+        .as_str()
+        .or_else(|| session["brain"]["task_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let has_brain_task = brain_id.is_some();
+    dom::text(
+        "results-memory-note",
+        &if let Some(id) = brain_id {
+            if m::active(&session) {
+                format!(
+                    "Linked Brain task {id}. Wait for this session to finish before saving memory."
+                )
+            } else {
+                format!("Linked Brain task {id}. Edit candidate notes and verify claims against project files before saving.")
+            }
+        } else {
+            "Link a Project Brain task to this session before saving verified memory.".to_owned()
+        },
+    );
+    let memory_locked = locked || !has_brain_task;
+    for el in dom::all(
+        "#results-memory-form input,#results-memory-form select,#results-memory-form textarea",
+    ) {
+        if memory_locked {
+            let _ = el.set_attribute("disabled", "");
+        } else {
+            let _ = el.remove_attribute("disabled");
+        }
+    }
+    let learnings_count = dom::all("#results-memory-learnings .results-memory-learning-row").len();
+    dom::disabled(
+        "results-memory-add-learning",
+        memory_locked || learnings_count >= 3,
+    );
+    dom::disabled("results-memory-prefill", memory_locked);
+    for btn in dom::all("#results-memory-learnings button") {
+        if memory_locked {
+            let _ = btn.set_attribute("disabled", "");
+        } else {
+            let _ = btn.remove_attribute("disabled");
+        }
+    }
+    dom::disabled(
+        "results-memory-save",
+        memory_locked || !dom::checked("results-memory-verified"),
+    );
     sync_working_indicator();
 }
 async fn delivery_load(sid: &str) {
@@ -3611,6 +4743,20 @@ fn render_delivery(v: &V) {
             .as_str()
             .unwrap_or("Review the files and diff before confirming."),
     );
+    let project_id = m::read(|s| {
+        let p = m::text(&s.selected, "project_id");
+        if p.is_empty() {
+            dom::value("project")
+        } else {
+            p
+        }
+    });
+    let risks_id = format!("{prefix}-risks");
+    let risks_html = render_advisory_panel_html(&project_id, v, false);
+    if let Some(el) = dom::get(&risks_id) {
+        el.set_inner_html(&risks_html);
+        dom::hide(&el, risks_html.is_empty());
+    }
     dom::disabled(
         "delivery-commit",
         !m::yes(&v["can_apply"]) || v["kind"] != "commit",
@@ -3630,6 +4776,10 @@ fn invalidate_delivery() {
     m::take("delivery-preview");
     dom::hidden("delivery-preview", true);
     dom::hidden("delivery-commit-preview", true);
+    for id in ["delivery-commit-risks", "delivery-preview-risks"] {
+        dom::clear(id);
+        dom::hidden(id, true);
+    }
     dom::disabled("delivery-commit", true);
     dom::disabled("delivery-apply", true);
 }
@@ -3788,7 +4938,31 @@ pub async fn event(
     if kind == "input" && id == "prompt" {
         save_preferences();
         controls();
+        let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed && !m::active(&s.selected));
+        if ready && !dom::value("project").is_empty() && has_at_file_mention(value) {
+            dom::later("preflight-debounce", 600, || {
+                spawn_local(async {
+                    run_preflight(false).await;
+                });
+            });
+        } else {
+            dom::cancel_timer("preflight-debounce");
+        }
         return false;
+    }
+    if (kind == "input" || kind == "change")
+        && (id.starts_with("results-memory-") || action == "results-memory-field")
+    {
+        m::set("results-memory-dirty", json!(true));
+        dom::error("results-memory-error", "");
+        result_controls();
+        return true;
+    }
+    if kind == "change" && id == "preflight-risk-callers" {
+        if m::data("preflight").is_object() {
+            run_preflight(true).await;
+        }
+        return true;
     }
     if (kind == "input" || kind == "change")
         && (id.starts_with("delivery-") || action == "delivery-file")
@@ -3956,6 +5130,10 @@ pub async fn event(
             }
             "delivery-preview-form" => {
                 delivery("preview_transfer",json!({"commit":dom::value("delivery-source"),"target_branch":dom::value("delivery-target"),"check":if dom::checked("delivery-check-required"){json!({"command":dom::value("delivery-check-command").trim(),"timeout":dom::num("delivery-check-timeout")})}else{V::Null}})).await;
+                return true;
+            }
+            "results-memory-form" => {
+                save_results_memory().await;
                 return true;
             }
             _ => {}
@@ -4360,6 +5538,65 @@ pub async fn event(
                 set_mobile_pane("graph");
                 crate::graph_map::focus_file_in_session(&path);
             }
+        }
+        "preflight-check" => {
+            dom::cancel_timer("preflight-debounce");
+            run_preflight(true).await;
+        }
+        "preflight-open-memory" => {
+            let scope = payload["scope"].as_str().unwrap_or("brain");
+            let project_id = payload["project_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| dom::value("project"));
+            let target_id = payload["target_id"].as_str().unwrap_or("");
+            if !target_id.is_empty() {
+                knowledge::open_from_omnigraph(scope, &project_id, target_id).await;
+            }
+        }
+        "preflight-open-knowledge" => {
+            let project_id = payload["project_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| dom::value("project"));
+            let path = payload["path"].as_str().unwrap_or("");
+            knowledge::open_from_omnigraph("brain", &project_id, path).await;
+        }
+        "results-memory-add-learning" => {
+            let mut learnings = read_memory_learnings_from_dom();
+            if learnings.len() < 3 {
+                learnings.push(json!({
+                    "type": "finding",
+                    "title": "",
+                    "consequence": "",
+                    "sources": []
+                }));
+                render_memory_learnings_dom(&learnings);
+                m::set("results-memory-dirty", json!(true));
+                result_controls();
+            }
+        }
+        "results-memory-remove-learning" => {
+            if let Some(idx) = payload["index"].as_u64().map(|n| n as usize) {
+                let mut learnings = read_memory_learnings_from_dom();
+                if idx < learnings.len() {
+                    learnings.remove(idx);
+                    render_memory_learnings_dom(&learnings);
+                    m::set("results-memory-dirty", json!(true));
+                    result_controls();
+                }
+            }
+        }
+        "results-memory-prefill" => {
+            m::take("results-memory-dirty");
+            dom::set_checked("results-memory-verified", false);
+            dom::error("results-memory-error", "");
+            dom::clear("results-memory-feedback");
+            dom::hidden("results-memory-feedback", true);
+            prefill_results_memory();
+            result_controls();
         }
         _ if action.starts_with("option-") => {
             let panel = action.trim_start_matches("option-");
@@ -5431,5 +6668,206 @@ mod update_tests {
         assert_eq!(normalize_mobile_pane("chat"), "chat");
         assert_eq!(normalize_mobile_pane(""), "chat");
         assert_eq!(normalize_mobile_pane("unknown"), "chat");
+    }
+
+    #[test]
+    fn preflight_request_detects_at_files_and_keeps_risk_caller_hints_opt_in() {
+        assert!(has_at_file_mention("Check @src/session.rs before running"));
+        assert!(has_at_file_mention("Review (@Cargo.toml)"));
+        assert!(!has_at_file_mention("Email me at user@example.com"));
+        assert!(!has_at_file_mention("Plain prompt without path"));
+
+        let default_req = build_preflight_request("Check @src/run.rs", "", "", false);
+        assert_eq!(default_req["prompt"], "Check @src/run.rs");
+        assert_eq!(default_req["risk_caller_hints"], false);
+        assert!(default_req.get("session_id").is_none());
+        assert!(default_req.get("task_id").is_none());
+
+        let opt_in_req = build_preflight_request("Follow up", "sess-1", "TASK-42", true);
+        assert_eq!(opt_in_req["session_id"], "sess-1");
+        assert_eq!(opt_in_req["task_id"], "TASK-42");
+        assert_eq!(opt_in_req["risk_caller_hints"], true);
+    }
+
+    #[test]
+    fn advisory_panel_renders_preflight_and_delivery_warnings_without_inline_hex() {
+        let preflight = json!({
+            "files": ["src/auth.rs"],
+            "blast_summary": {"direct_count": 2, "downstream_count": 5, "files": ["src/auth.rs", "src/api.rs"]},
+            "contradiction_warnings": [{
+                "kind": "atom-contradiction",
+                "text": "Token TTL <24h> contradicts 5m",
+                "path": "src/auth.rs",
+                "open": [{"scope": "brain", "target_id": "rec-1", "title": "Auth decision"}]
+            }],
+            "hygiene_warnings": [{
+                "kind": "cited-file-renamed",
+                "path": "src/auth.rs",
+                "linked": ["MEM-20261117-aabbccdd"],
+                "text": "Renamed from src/old_auth.rs"
+            }],
+            "risk_callers": [{
+                "from": "src/routes.rs",
+                "to": "src/auth.rs",
+                "impact": "broken_risk",
+                "reason": "Calls removed validate()"
+            }],
+            "risk_caller_hints": ["src/routes.rs"]
+        });
+        let html = render_advisory_panel_html("proj-1", &preflight, true);
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("2 direct"));
+        assert!(html.contains("5 downstream"));
+        assert!(html.contains("1 hint(s)"));
+        assert!(html.contains("data-action=\"inspect-file-graph\""));
+        assert!(html.contains("data-action=\"preflight-open-memory\""));
+        assert!(html.contains("data-action=\"preflight-open-knowledge\""));
+        assert!(html.contains("Token TTL &lt;24h&gt; contradicts 5m"));
+        assert!(html.contains("src/routes.rs → src/auth.rs"));
+
+        // Delivery preview returns empty when no memory_warnings or risk_callers exist.
+        assert_eq!(
+            render_advisory_panel_html("proj-1", &json!({"kind": "commit"}), false),
+            ""
+        );
+
+        let delivery_v = json!({
+            "kind": "transfer",
+            "memory_warnings": {
+                "contradiction_warnings": [],
+                "hygiene_warnings": [{
+                    "kind": "cited-file-missing",
+                    "path": "src/legacy.rs",
+                    "linked": ["rec-9"],
+                    "text": "File missing in workspace"
+                }]
+            },
+            "risk_callers": [{"from": "src/caller.rs", "to": "src/legacy.rs", "impact": "risk"}]
+        });
+        let delivery_html = render_advisory_panel_html("proj-1", &delivery_v, false);
+        crate::test_support::assert_no_inline_hex_colors(&delivery_html);
+        assert!(delivery_html.contains("Missing file"));
+        assert!(delivery_html.contains("src/caller.rs → src/legacy.rs"));
+    }
+
+    #[test]
+    fn memory_panel_prefills_from_results_delivery_clash_brain_and_requires_verified() {
+        let session = json!({
+            "brain": {
+                "task_id": "TASK-101",
+                "task": {
+                    "external_id": "TASK-101",
+                    "progress": "Initial plan",
+                    "next_steps": ["Fallback step"]
+                },
+                "capsule": {
+                    "selected": [{"path": "docs/ARCH.md"}, {"path": "docs/SECURITY.md"}],
+                    "procedural": [{"path": "docs/ARCH.md"}, {"path": "Laravel/AGENTS.md"}]
+                }
+            },
+            "clash_result": {
+                "summary": "Challenger confirmed token guard check.",
+                "items": [
+                    {
+                        "kind": "decision",
+                        "status": "accepted",
+                        "claim": "Require non-empty JWT audience",
+                        "evidence": "Verified in TokenGuard.php",
+                        "file": "src/TokenGuard.php"
+                    },
+                    {
+                        "kind": "objection",
+                        "status": "disputed",
+                        "claim": "Check refresh expiry edge case",
+                        "file": "src/Deleted.php"
+                    }
+                ]
+            }
+        });
+        let results_v = json!({
+            "snapshot": {
+                "files": [
+                    {"path": "src/TokenGuard.php", "status": "M"},
+                    {"path": "src/Deleted.php", "status": "D"}
+                ]
+            },
+            "checks": [
+                {"command": "cargo test -p infra-ui", "status": "passed"}
+            ]
+        });
+        let delivery_v = json!({
+            "files": [{"path": "src/TokenGuard.php", "status": "M"}]
+        });
+        let preview_v = json!({
+            "target_check": {"status": "passed", "command": "cargo clippy"}
+        });
+
+        let draft = build_memory_draft_prefill(&session, &results_v, &delivery_v, &preview_v);
+        assert!(draft["progress"]
+            .as_str()
+            .unwrap()
+            .contains("Updated 2 file(s)"));
+        assert!(draft["progress"]
+            .as_str()
+            .unwrap()
+            .contains("cargo test -p infra-ui"));
+        assert!(draft["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("Resolve clash finding")));
+        let learnings = draft["learnings"].as_array().unwrap();
+        assert_eq!(learnings.len(), 1);
+        assert_eq!(learnings[0]["type"], "decision");
+        assert_eq!(learnings[0]["sources"], json!(["src/TokenGuard.php"]));
+        assert_eq!(
+            draft["used_memory"],
+            json!(["docs/ARCH.md", "docs/SECURITY.md", "Laravel/AGENTS.md"])
+        );
+
+        let rows_html = render_memory_learnings_html(learnings);
+        crate::test_support::assert_no_inline_hex_colors(&rows_html);
+        assert!(rows_html.contains("Require non-empty JWT audience"));
+
+        assert!(build_memory_save_payload(
+            draft["progress"].as_str().unwrap(),
+            "Review remaining changes",
+            learnings,
+            "docs/ARCH.md",
+            false
+        )
+        .is_err());
+
+        let payload = build_memory_save_payload(
+            draft["progress"].as_str().unwrap(),
+            "Review remaining changes",
+            learnings,
+            "docs/ARCH.md\ndocs/SECURITY.md",
+            true,
+        )
+        .expect("verified payload");
+        assert_eq!(payload["verified"], true);
+        assert_eq!(payload["next_steps"], json!(["Review remaining changes"]));
+        assert_eq!(
+            payload["used_memory"],
+            json!(["docs/ARCH.md", "docs/SECURITY.md"])
+        );
+
+        let ok_html = format_memory_save_feedback_html(&json!({
+            "ok": true,
+            "saved": {"task": {"external_id": "TASK-101"}, "records": [{"id": "r1"}]},
+            "skipped": [{"title": "Repeated note", "reason": "repeated"}]
+        }));
+        crate::test_support::assert_no_inline_hex_colors(&ok_html);
+        assert!(ok_html.contains("Saved verified memory (1 record(s)) for TASK-101."));
+        assert!(ok_html.contains("Repeated note"));
+
+        let err_html = format_memory_save_feedback_html(&json!({
+            "ok": false,
+            "error": "Prepare the linked task before saving memory.",
+            "skipped": []
+        }));
+        crate::test_support::assert_no_inline_hex_colors(&err_html);
+        assert!(err_html.contains("Prepare the linked task before saving memory."));
     }
 }

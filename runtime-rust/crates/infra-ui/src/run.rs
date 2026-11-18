@@ -160,7 +160,6 @@ pub(crate) mod files_map {
         clean_bidi(path).replace('\\', "/")
     }
 
-    #[cfg(test)]
     pub(crate) fn escape_html(s: &str) -> String {
         let cleaned = clean_bidi(s);
         let mut out = String::with_capacity(cleaned.len());
@@ -1579,6 +1578,268 @@ fn permission_choices(session_option: bool) -> &'static [(&'static str, &'static
     }
 }
 
+pub(crate) fn is_question_permission(event: &V) -> bool {
+    event["ask_kind"].as_str() == Some("question")
+        && event["questions"]
+            .as_array()
+            .is_some_and(|questions| !questions.is_empty())
+}
+
+pub(crate) fn permission_rule_hint_text(event: &V) -> String {
+    let summary = clean(&m::text(event, "rule_summary"));
+    if summary.is_empty() {
+        return String::new();
+    }
+    if m::yes(&event["session_option"]) {
+        format!("Allow for this session: {summary}")
+    } else {
+        summary
+    }
+}
+
+fn diff_line_kind(line: &str) -> &'static str {
+    if line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("diff --git")
+        || line.starts_with("index ")
+    {
+        "meta"
+    } else if line.starts_with("@@") {
+        "hunk"
+    } else if line.starts_with('+') {
+        "add"
+    } else if line.starts_with('-') {
+        "del"
+    } else {
+        "ctx"
+    }
+}
+
+pub(crate) fn render_diff_preview_lines_html(diff: &str) -> String {
+    let normalized = clean(diff).replace("\r\n", "\n");
+    let mut out = String::new();
+    for line in normalized.lines() {
+        let kind = diff_line_kind(line);
+        let content = if line.is_empty() {
+            " ".to_owned()
+        } else {
+            files_map::escape_html(line)
+        };
+        out.push_str(&format!(
+            "<span class=\"permission-diff-line\" data-kind=\"{kind}\">{content}</span>"
+        ));
+    }
+    out
+}
+
+pub(crate) fn question_answer_key(question: &V, idx: usize) -> String {
+    question["id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            question["question"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            question["header"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("q{idx}"))
+}
+
+pub(crate) fn question_is_multi_select(question: &V) -> bool {
+    question["multi_select"]
+        .as_bool()
+        .or_else(|| question["multiSelect"].as_bool())
+        .unwrap_or(false)
+}
+
+pub(crate) fn question_allows_other(question: &V) -> bool {
+    question["is_other"]
+        .as_bool()
+        .or_else(|| question["isOther"].as_bool())
+        .unwrap_or(true)
+}
+
+pub(crate) fn question_radio_group_name(request_id: &str, idx: usize) -> String {
+    let safe_id: String = request_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("pq-{safe_id}-{idx}")
+}
+
+pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> String {
+    let mut out = String::new();
+    for (idx, q) in questions.iter().enumerate() {
+        let key = question_answer_key(q, idx);
+        let header = clean(&m::text(q, "header"));
+        let prompt = clean(&m::text(q, "question"));
+        let multi = question_is_multi_select(q);
+        let options = m::array(&q["options"]);
+        let allows_other = question_allows_other(q) || options.is_empty();
+        let group_name = question_radio_group_name(request_id, idx);
+        let input_type = if multi { "checkbox" } else { "radio" };
+        out.push_str(&format!(
+            "<fieldset class=\"permission-question\" data-question-index=\"{idx}\" data-question-key=\"{}\" data-multi-select=\"{multi}\">",
+            files_map::escape_html(&key)
+        ));
+        if !header.is_empty() {
+            out.push_str(&format!(
+                "<legend class=\"permission-question-header\">{}</legend>",
+                files_map::escape_html(&header)
+            ));
+        }
+        if !prompt.is_empty() {
+            out.push_str(&format!(
+                "<p class=\"permission-question-prompt\">{}</p>",
+                files_map::escape_html(&prompt)
+            ));
+        }
+        out.push_str("<div class=\"permission-question-options\">");
+        for opt in &options {
+            let label = clean(opt["label"].as_str().or_else(|| opt.as_str()).unwrap_or(""));
+            let desc = clean(&m::text(opt, "description"));
+            if label.is_empty() {
+                continue;
+            }
+            out.push_str("<label class=\"permission-question-option\">");
+            out.push_str(&format!(
+                "<input type=\"{input_type}\" class=\"permission-question-choice\" name=\"{}\" value=\"{}\" data-question-index=\"{idx}\">",
+                files_map::escape_html(&group_name),
+                files_map::escape_html(&label)
+            ));
+            out.push_str("<span class=\"permission-question-option-body\">");
+            out.push_str(&format!(
+                "<span class=\"permission-question-option-label\">{}</span>",
+                files_map::escape_html(&label)
+            ));
+            if !desc.is_empty() {
+                out.push_str(&format!(
+                    "<span class=\"permission-question-option-desc\">{}</span>",
+                    files_map::escape_html(&desc)
+                ));
+            }
+            out.push_str("</span></label>");
+        }
+        if allows_other {
+            if !multi && !options.is_empty() {
+                out.push_str(
+                    "<label class=\"permission-question-option permission-question-other-row\">",
+                );
+                out.push_str(&format!(
+                    "<input type=\"radio\" class=\"permission-question-choice permission-question-other-radio\" name=\"{}\" value=\"__other__\" data-question-index=\"{idx}\">",
+                    files_map::escape_html(&group_name)
+                ));
+                out.push_str("<span class=\"permission-question-option-body\"><span class=\"permission-question-option-label\">Other</span></span></label>");
+            }
+            let payload = json!({"request_id": request_id, "index": idx}).to_string();
+            let placeholder = if options.is_empty() {
+                "Type your answer…"
+            } else {
+                "Other (custom answer)…"
+            };
+            out.push_str(&format!(
+                "<input type=\"text\" class=\"permission-question-other-input\" data-question-index=\"{idx}\" data-action=\"permission-question-other\" data-payload=\"{}\" maxlength=\"2000\" placeholder=\"{placeholder}\" aria-label=\"Other answer\">",
+                files_map::escape_html(&payload)
+            ));
+        }
+        out.push_str("</div></fieldset>");
+    }
+    out
+}
+
+fn format_answer_value(val: &V) -> String {
+    match val {
+        V::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        V::String(s) => s.trim().to_owned(),
+        _ => clean(&m::string(val)),
+    }
+}
+
+pub(crate) fn render_answers_summary_html(questions: &[V], answers: &V) -> String {
+    let Some(map) = answers.as_object() else {
+        return String::new();
+    };
+    if map.is_empty() {
+        return String::new();
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut used_keys = std::collections::BTreeSet::new();
+    for (idx, q) in questions.iter().enumerate() {
+        let key = question_answer_key(q, idx);
+        let alt_question = clean(&m::text(q, "question"));
+        let found = map.get(&key).map(|v| (key.clone(), v)).or_else(|| {
+            if !alt_question.is_empty() {
+                map.get(&alt_question).map(|v| (alt_question.clone(), v))
+            } else {
+                None
+            }
+        });
+        if let Some((matched_key, val)) = found {
+            used_keys.insert(matched_key);
+            let label = clean(&m::text(q, "header"));
+            let title = if !label.is_empty() {
+                label
+            } else if !alt_question.is_empty() {
+                alt_question
+            } else {
+                key
+            };
+            let formatted = format_answer_value(val);
+            if !formatted.is_empty() {
+                rows.push((title, formatted));
+            }
+        }
+    }
+    for (k, v) in map {
+        if !used_keys.contains(k) {
+            let formatted = format_answer_value(v);
+            if !formatted.is_empty() {
+                rows.push((k.clone(), formatted));
+            }
+        }
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<p class=\"permission-answers-heading\">Submitted answers</p><dl class=\"permission-answers-list\">");
+    for (label, val) in rows {
+        out.push_str(&format!(
+            "<div class=\"permission-answer-row\"><dt>{}</dt><dd>{}</dd></div>",
+            files_map::escape_html(&label),
+            files_map::escape_html(&val)
+        ));
+    }
+    out.push_str("</dl>");
+    out
+}
+
+pub(crate) fn build_permission_decision_body(decision: &str, answers: Option<V>) -> V {
+    if decision == "allow" {
+        if let Some(ans) = answers {
+            return json!({"decision": "allow", "answers": ans});
+        }
+    }
+    json!({"decision": decision})
+}
+
 fn permission_notification_body(event: &V) -> String {
     let summary = clean(&m::text(event, "summary"));
     if !summary.is_empty() {
@@ -1600,11 +1861,31 @@ pub(crate) fn permission_heading(event: &V) -> String {
         Some("cursor") => "Cursor",
         _ => "The agent",
     };
+    let is_question =
+        is_question_permission(event) || event["ask_kind"].as_str() == Some("question");
     match event["state"].as_str().unwrap_or("") {
-        "pending" => format!("{host} asks permission · {tool}"),
-        "allowed" => format!("Allowed · {tool}"),
+        "pending" => {
+            if is_question {
+                format!("{host} asks a question · {tool}")
+            } else {
+                format!("{host} asks permission · {tool}")
+            }
+        }
+        "allowed" => {
+            if is_question {
+                format!("Answered · {tool}")
+            } else {
+                format!("Allowed · {tool}")
+            }
+        }
         "allowed_session" => format!("Allowed for this session · {tool}"),
-        "denied" => format!("Denied · {tool}"),
+        "denied" => {
+            if is_question {
+                format!("Declined · {tool}")
+            } else {
+                format!("Denied · {tool}")
+            }
+        }
         "declined" => format!("Declined automatically · {tool}"),
         "withdrawn" => format!("Withdrawn by {host} · {tool}"),
         "expired" => format!("No longer waiting · {tool}"),
@@ -1762,11 +2043,19 @@ fn permission(event: &V) {
     let existing_actions = permission_child(&block, "permission-actions", None);
     let existing_error = permission_child(&block, "permission-error", None);
     let existing_ended = permission_child(&block, "permission-detail", Some("ended"));
+    let existing_question = permission_child(&block, "permission-question-card", None);
+    let existing_answers = permission_child(&block, "permission-answers-summary", None);
+    let existing_diff = permission_child(&block, "permission-diff-wrap", None);
+    let existing_rule = permission_child(&block, "permission-rule-hint", None);
     let summary = clean(&m::text(event, "summary"));
     let detail = clean(&m::text(event, "detail"));
     let existing_detail = permission_child(&block, "permission-detail", Some("detail"));
     let before_summary = existing_detail
         .as_ref()
+        .or(existing_rule.as_ref())
+        .or(existing_diff.as_ref())
+        .or(existing_question.as_ref())
+        .or(existing_answers.as_ref())
         .or(existing_ended.as_ref())
         .or(existing_actions.as_ref())
         .or(existing_error.as_ref());
@@ -1778,8 +2067,12 @@ fn permission(event: &V) {
         &summary,
         before_summary,
     );
-    let before_detail = existing_ended
+    let before_detail = existing_rule
         .as_ref()
+        .or(existing_diff.as_ref())
+        .or(existing_question.as_ref())
+        .or(existing_answers.as_ref())
+        .or(existing_ended.as_ref())
         .or(existing_actions.as_ref())
         .or(existing_error.as_ref());
     sync_permission_text_slot(
@@ -1790,7 +2083,71 @@ fn permission(event: &V) {
         &detail,
         before_detail,
     );
+    let rule_hint = permission_rule_hint_text(event);
+    let raw_rule = clean(&m::text(event, "rule_summary"));
+    if raw_rule.is_empty() {
+        let _ = block.remove_attribute("data-rule-summary");
+    } else {
+        let _ = block.set_attribute("data-rule-summary", &raw_rule);
+    }
+    if let Some(ask_kind) = event["ask_kind"].as_str().filter(|s| !s.is_empty()) {
+        let _ = block.set_attribute("data-ask-kind", ask_kind);
+    }
+    let before_rule = existing_diff
+        .as_ref()
+        .or(existing_question.as_ref())
+        .or(existing_answers.as_ref())
+        .or(existing_ended.as_ref())
+        .or(existing_actions.as_ref())
+        .or(existing_error.as_ref());
+    sync_permission_text_slot(
+        &block,
+        "p",
+        "permission-rule-hint",
+        None,
+        &rule_hint,
+        before_rule,
+    );
+    let diff_preview = event["diff_preview"].as_str().unwrap_or("");
+    let before_diff = existing_question
+        .as_ref()
+        .or(existing_answers.as_ref())
+        .or(existing_ended.as_ref())
+        .or(existing_actions.as_ref())
+        .or(existing_error.as_ref());
+    if diff_preview.trim().is_empty() {
+        if let Some(el) = existing_diff {
+            el.remove();
+        }
+    } else {
+        let keep_diff = existing_diff
+            .as_ref()
+            .is_some_and(|el| el.get_attribute("data-diff-raw").as_deref() == Some(diff_preview));
+        if !keep_diff {
+            let wrap = dom::el("details", "permission-diff-wrap", "");
+            let _ = wrap.set_attribute("data-diff-raw", diff_preview);
+            if existing_diff
+                .as_ref()
+                .is_some_and(|old| old.has_attribute("open"))
+            {
+                let _ = wrap.set_attribute("open", "");
+            }
+            let sum = dom::el("summary", "", "View proposed changes");
+            let pre = dom::el("pre", "permission-diff", "");
+            pre.set_inner_html(&render_diff_preview_lines_html(diff_preview));
+            dom::add(&wrap, &sum);
+            dom::add(&wrap, &pre);
+            if let Some(old_diff) = existing_diff {
+                let _ = block.replace_child(&wrap, &old_diff);
+            } else {
+                let _ = block.insert_before(&wrap, before_diff.map(|e| e.as_ref()));
+            }
+        }
+    }
     if state != "pending" {
+        if let Some(el) = existing_question {
+            el.remove();
+        }
         if let Some(el) = existing_ended {
             el.remove();
         }
@@ -1800,9 +2157,49 @@ fn permission(event: &V) {
         if let Some(el) = existing_error {
             el.remove();
         }
+        let resolved_answers = if event["answers"].is_object() {
+            event["answers"].clone()
+        } else if event["resolved_answers"].is_object() {
+            event["resolved_answers"].clone()
+        } else {
+            m::data("permission-submitted-answers")[&request].clone()
+        };
+        let event_questions = m::array(&event["questions"]);
+        let questions = if !event_questions.is_empty() {
+            event_questions
+        } else {
+            m::array(&m::data("permission-questions-cache")[&request])
+        };
+        let summary_html = render_answers_summary_html(&questions, &resolved_answers);
+        if summary_html.is_empty() {
+            if let Some(el) = existing_answers {
+                el.remove();
+            }
+        } else {
+            let sig = json!([questions, resolved_answers]).to_string();
+            let keep_answers = existing_answers
+                .as_ref()
+                .is_some_and(|el| el.get_attribute("data-answers-sig").as_deref() == Some(&sig));
+            if !keep_answers {
+                let wrap = dom::el("div", "permission-answers-summary", "");
+                let _ = wrap.set_attribute("data-answers-sig", &sig);
+                wrap.set_inner_html(&summary_html);
+                if let Some(old_answers) = existing_answers {
+                    let _ = block.replace_child(&wrap, &old_answers);
+                } else {
+                    dom::add(&block, &wrap);
+                }
+            }
+        }
         return;
     }
+    if let Some(el) = existing_answers {
+        el.remove();
+    }
     if !m::active(&m::read(|s| s.selected.clone())) {
+        if let Some(el) = existing_question {
+            el.remove();
+        }
         sync_permission_text_slot(
             &block,
             "p",
@@ -1822,15 +2219,59 @@ fn permission(event: &V) {
     if let Some(el) = existing_ended {
         el.remove();
     }
+    let is_question = is_question_permission(event);
+    if is_question {
+        let questions = m::array(&event["questions"]);
+        let mut cache = m::data("permission-questions-cache")
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        if cache.len() >= 200 {
+            cache.clear();
+        }
+        cache.insert(request.clone(), V::Array(questions.clone()));
+        m::set("permission-questions-cache", V::Object(cache));
+        let questions_sig = serde_json::to_string(&questions).unwrap_or_default();
+        let keep_question = existing_question.as_ref().is_some_and(|el| {
+            el.get_attribute("data-questions-sig").as_deref() == Some(questions_sig.as_str())
+        });
+        if !keep_question {
+            let card = dom::el("div", "permission-question-card", "");
+            let _ = card.set_attribute("data-questions-sig", &questions_sig);
+            card.set_inner_html(&render_question_card_html(&request, &questions));
+            if let Some(old_card) = existing_question {
+                let _ = block.replace_child(&card, &old_card);
+            } else {
+                let _ = block.insert_before(
+                    &card,
+                    existing_actions
+                        .as_ref()
+                        .or(existing_error.as_ref())
+                        .map(|e| e.as_ref()),
+                );
+            }
+        }
+    } else if let Some(el) = existing_question {
+        el.remove();
+    }
     let session_option = m::yes(&event["session_option"]);
-    let actions_key = format!("{session_option}:{tool}");
+    let actions_key = if is_question {
+        format!("question:{request}")
+    } else {
+        format!("{session_option}:{tool}")
+    };
     let keep_actions = existing_actions
         .as_ref()
         .is_some_and(|el| el.get_attribute("data-actions-key").as_deref() == Some(&actions_key));
     if !keep_actions {
         let actions = dom::el("div", "permission-actions", "");
         let _ = actions.set_attribute("data-actions-key", &actions_key);
-        for (decision, label) in permission_choices(session_option) {
+        let choices: Vec<(&'static str, &'static str)> = if is_question {
+            vec![("allow", "Submit answers"), ("deny", "Decline")]
+        } else {
+            permission_choices(session_option).to_vec()
+        };
+        for (decision, label) in choices {
             let button = dom::button(
                 label,
                 "permission-decide",
@@ -1838,7 +2279,7 @@ fn permission(event: &V) {
             );
             let _ = button.set_attribute(
                 "class",
-                if *decision == "allow" {
+                if decision == "allow" {
                     "button primary compact"
                 } else {
                     "button compact"
@@ -1846,10 +2287,19 @@ fn permission(event: &V) {
             );
             let _ = button.set_attribute("data-decision", decision);
             let _ = button.set_attribute("data-label", label);
-            let _ = button.set_attribute(
-                "aria-label",
-                &permission_button_aria_label(decision, label, &tool),
-            );
+            if is_question && decision == "allow" {
+                let _ = button.set_attribute("data-question-submit", "true");
+            }
+            let aria = if is_question {
+                if decision == "allow" {
+                    format!("Submit answers for {tool}")
+                } else {
+                    format!("Decline {tool}")
+                }
+            } else {
+                permission_button_aria_label(decision, label, &tool)
+            };
+            let _ = button.set_attribute("aria-label", &aria);
             dom::add(&actions, &button);
         }
         if let Some(old_actions) = existing_actions {
@@ -1941,10 +2391,103 @@ pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
             .and_then(|block| permission_child(block, "permission-detail", Some("detail")))
             .and_then(|el| el.text_content())
             .unwrap_or_default();
-        permission(&expired_permission_event(
-            &id, &provider, &tool, &summary, &detail,
-        ));
+        let mut event = expired_permission_event(&id, &provider, &tool, &summary, &detail);
+        if let Some(ask_kind) = card
+            .as_ref()
+            .and_then(|block| block.get_attribute("data-ask-kind"))
+            .filter(|s| !s.is_empty())
+        {
+            event["ask_kind"] = json!(ask_kind);
+        }
+        if let Some(rule_summary) = card
+            .as_ref()
+            .and_then(|block| block.get_attribute("data-rule-summary"))
+            .filter(|s| !s.is_empty())
+        {
+            event["rule_summary"] = json!(rule_summary);
+        }
+        if let Some(diff_raw) = card
+            .as_ref()
+            .and_then(|block| permission_child(block, "permission-diff-wrap", None))
+            .and_then(|el| el.get_attribute("data-diff-raw"))
+            .filter(|s| !s.is_empty())
+        {
+            event["diff_preview"] = json!(diff_raw);
+        }
+        permission(&event);
     }
+}
+
+fn collect_question_answers(question_card: &web_sys::Element) -> Result<V, &'static str> {
+    let mut answers = serde_json::Map::new();
+    let Ok(fieldsets) = question_card.query_selector_all("fieldset.permission-question") else {
+        return Ok(V::Object(answers));
+    };
+    for i in 0..fieldsets.length() {
+        let Some(fieldset) = fieldsets
+            .item(i)
+            .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+        else {
+            continue;
+        };
+        let key = fieldset
+            .get_attribute("data-question-key")
+            .unwrap_or_else(|| format!("q{i}"));
+        let multi = fieldset.get_attribute("data-multi-select").as_deref() == Some("true");
+        let other_text = fieldset
+            .query_selector("input.permission-question-other-input")
+            .ok()
+            .flatten()
+            .map(|el| dom::value_of(&el).trim().to_owned())
+            .unwrap_or_default();
+        let choices = fieldset
+            .query_selector_all("input.permission-question-choice")
+            .ok()
+            .map(|list| {
+                (0..list.length())
+                    .filter_map(|j| list.item(j)?.dyn_into::<web_sys::Element>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if multi {
+            let mut selected = Vec::new();
+            for choice in &choices {
+                if dom::checked_of(choice) {
+                    let val = dom::value_of(choice);
+                    if !val.is_empty() && val != "__other__" {
+                        selected.push(val);
+                    }
+                }
+            }
+            if !other_text.is_empty() && !selected.contains(&other_text) {
+                selected.push(other_text);
+            }
+            if selected.is_empty() {
+                return Err(
+                    "Select at least one option or enter a custom answer, or choose Decline.",
+                );
+            }
+            answers.insert(key, V::Array(selected.into_iter().map(V::String).collect()));
+        } else {
+            let checked_choice = choices.iter().find(|c| dom::checked_of(c));
+            if let Some(choice) = checked_choice {
+                let val = dom::value_of(choice);
+                if val == "__other__" {
+                    if other_text.is_empty() {
+                        return Err("Enter a custom answer for Other.");
+                    }
+                    answers.insert(key, V::String(other_text));
+                } else {
+                    answers.insert(key, V::String(val));
+                }
+            } else if !other_text.is_empty() {
+                answers.insert(key, V::String(other_text));
+            } else {
+                return Err("Answer each question or choose Decline.");
+            }
+        }
+    }
+    Ok(V::Object(answers))
 }
 
 /// Sends the person's answer to a waiting request.
@@ -1972,15 +2515,6 @@ async fn decide_permission(payload: &V) {
     }) {
         return;
     }
-    let saved_labels: Vec<(web_sys::Element, String)> = buttons
-        .iter()
-        .map(|button| {
-            let original = button
-                .get_attribute("data-label")
-                .unwrap_or_else(|| button.text_content().unwrap_or_default());
-            (button.clone(), original)
-        })
-        .collect();
     let error_el = block
         .iter()
         .flat_map(dom::children)
@@ -1991,6 +2525,35 @@ async fn decide_permission(payload: &V) {
         }
         note.set_text_content(Some(""));
     }
+    let question_card = block
+        .as_ref()
+        .and_then(|b| permission_child(b, "permission-question-card", None));
+    let submitted_answers = if decision == "allow" {
+        if let Some(card) = &question_card {
+            match collect_question_answers(card) {
+                Ok(ans) => Some(ans),
+                Err(msg) => {
+                    if let Some(note) = &error_el {
+                        note.set_text_content(Some(msg));
+                    }
+                    return;
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let saved_labels: Vec<(web_sys::Element, String)> = buttons
+        .iter()
+        .map(|button| {
+            let original = button
+                .get_attribute("data-label")
+                .unwrap_or_else(|| button.text_content().unwrap_or_default());
+            (button.clone(), original)
+        })
+        .collect();
     for button in &buttons {
         let _ = button.set_attribute("disabled", "");
         if button.get_attribute("data-decision").as_deref() == Some(decision.as_str()) {
@@ -1998,23 +2561,54 @@ async fn decide_permission(payload: &V) {
             button.set_text_content(Some("Sending…"));
         }
     }
+    let question_inputs: Vec<web_sys::Element> = question_card
+        .as_ref()
+        .and_then(|card| card.query_selector_all("input,select,textarea").ok())
+        .map(|list| {
+            (0..list.length())
+                .filter_map(|i| list.item(i)?.dyn_into::<web_sys::Element>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    for input in &question_inputs {
+        let _ = input.set_attribute("disabled", "");
+    }
+    let body = build_permission_decision_body(&decision, submitted_answers.clone());
     let answered = crate::api::post(
         &format!(
             "/api/sessions/{}/permissions/{}",
             dom::enc(&sid),
             dom::enc(&request)
         ),
-        json!({"decision": decision}),
+        body,
     )
     .await;
-    if let Err(error) = answered {
-        for (button, label) in &saved_labels {
-            let _ = button.remove_attribute("disabled");
-            let _ = button.remove_attribute("aria-busy");
-            button.set_text_content(Some(label));
+    match answered {
+        Ok(_) => {
+            if let Some(ans) = submitted_answers {
+                let mut cache = m::data("permission-submitted-answers")
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                if cache.len() >= 200 {
+                    cache.clear();
+                }
+                cache.insert(request.clone(), ans);
+                m::set("permission-submitted-answers", V::Object(cache));
+            }
         }
-        if let Some(note) = &error_el {
-            note.set_text_content(Some(&error.message));
+        Err(error) => {
+            for (button, label) in &saved_labels {
+                let _ = button.remove_attribute("disabled");
+                let _ = button.remove_attribute("aria-busy");
+                button.set_text_content(Some(label));
+            }
+            for input in &question_inputs {
+                let _ = input.remove_attribute("disabled");
+            }
+            if let Some(note) = &error_el {
+                note.set_text_content(Some(&error.message));
+            }
         }
     }
     // The answer comes back as the request's next event.
@@ -3799,7 +4393,32 @@ pub fn outcomes(session: &V) {
     }
 }
 
-pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str) -> bool {
+pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str) -> bool {
+    if kind == "input" && action == "permission-question-other" {
+        let req = m::text(payload, "request_id");
+        let idx = payload["index"].as_u64();
+        if !req.is_empty() && !value.trim().is_empty() {
+            if let Some(idx) = idx {
+                if let Some(block) =
+                    dom::all("#events [data-permission-id]")
+                        .into_iter()
+                        .find(|el| {
+                            el.get_attribute("data-permission-id").as_deref() == Some(req.as_str())
+                        })
+                {
+                    let selector = format!(
+                        "fieldset.permission-question[data-question-index=\"{idx}\"] input.permission-question-other-radio"
+                    );
+                    if let Ok(Some(radio)) = block.query_selector(&selector) {
+                        if let Some(input) = radio.dyn_ref::<web_sys::HtmlInputElement>() {
+                            input.set_checked(true);
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
     if kind != "click" {
         return false;
     }
@@ -5306,5 +5925,120 @@ mod permission_tests {
             card_actions.last().map(|a| a.action.as_str()),
             Some("run-card-close")
         );
+    }
+
+    #[test]
+    fn rich_approval_renders_rule_hint_and_token_styled_diff_without_hex() {
+        let with_session = json!({
+            "session_option": true,
+            "rule_summary": "Session rule: Bash(cargo test *)"
+        });
+        assert_eq!(
+            permission_rule_hint_text(&with_session),
+            "Allow for this session: Session rule: Bash(cargo test *)"
+        );
+        let without_session = json!({
+            "session_option": false,
+            "rule_summary": "Ask every time"
+        });
+        assert_eq!(
+            permission_rule_hint_text(&without_session),
+            "Ask every time"
+        );
+        assert_eq!(permission_rule_hint_text(&json!({})), "");
+
+        let clean_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,4 @@\n fn a() {}\n-let old = 1;\n+let next = \"<tag>&\";\n";
+        let clean_html = render_diff_preview_lines_html(clean_diff);
+        crate::test_support::assert_no_inline_hex_colors(&clean_html);
+        assert!(clean_html.contains(
+            "<span class=\"permission-diff-line\" data-kind=\"meta\">--- a/src/lib.rs</span>"
+        ));
+        assert!(clean_html.contains(
+            "<span class=\"permission-diff-line\" data-kind=\"meta\">+++ b/src/lib.rs</span>"
+        ));
+        assert!(clean_html.contains(
+            "<span class=\"permission-diff-line\" data-kind=\"hunk\">@@ -1,3 +1,4 @@</span>"
+        ));
+        assert!(clean_html.contains("data-kind=\"ctx\"> fn a() {}</span>"));
+        assert!(clean_html.contains("data-kind=\"del\">-let old = 1;</span>"));
+        assert!(clean_html
+            .contains("data-kind=\"add\">+let next = &quot;&lt;tag&gt;&amp;&quot;;</span>"));
+    }
+
+    #[test]
+    fn question_cards_render_single_and_multi_select_without_hex_and_format_resolved_summary() {
+        let event = json!({
+            "request_id": "req:1/a",
+            "provider": "claude",
+            "tool": "AskUserQuestion",
+            "state": "pending",
+            "ask_kind": "question",
+            "questions": [
+                {
+                    "id": "auth_mode",
+                    "header": "Auth",
+                    "question": "Which mode should <API> use?",
+                    "multi_select": false,
+                    "options": [
+                        {"label": "JWT", "description": "Stateless bearer token"},
+                        {"label": "Session", "description": "Server-side cookie"}
+                    ]
+                },
+                {
+                    "id": "targets",
+                    "header": "Targets",
+                    "question": "Select targets",
+                    "multi_select": true,
+                    "options": [
+                        {"label": "API", "description": "REST routes"},
+                        {"label": "CLI", "description": "Command runner"}
+                    ]
+                }
+            ]
+        });
+        assert!(is_question_permission(&event));
+        assert_eq!(
+            permission_heading(&event),
+            "Claude Code asks a question · AskUserQuestion"
+        );
+        let resolved_heading = permission_heading(&json!({
+            "request_id": "req:1/a",
+            "provider": "claude",
+            "tool": "AskUserQuestion",
+            "state": "allowed",
+            "ask_kind": "question"
+        }));
+        assert_eq!(resolved_heading, "Answered · AskUserQuestion");
+
+        let questions = event["questions"].as_array().unwrap();
+        let html = render_question_card_html("req:1/a", questions);
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("name=\"pq-req_1_a-0\""));
+        assert!(html.contains("name=\"pq-req_1_a-1\""));
+        assert!(html.contains("type=\"radio\""));
+        assert!(html.contains("type=\"checkbox\""));
+        assert!(html.contains("&lt;API&gt;"));
+        assert!(html.contains("Stateless bearer token"));
+        assert!(html.contains("permission-question-other-radio"));
+        assert!(html.contains("permission-question-other-input"));
+
+        let allow_body = build_permission_decision_body(
+            "allow",
+            Some(json!({"auth_mode": "JWT", "targets": ["API", "CLI"]})),
+        );
+        assert_eq!(allow_body["decision"], "allow");
+        assert_eq!(allow_body["answers"]["auth_mode"], "JWT");
+        assert_eq!(allow_body["answers"]["targets"], json!(["API", "CLI"]));
+        let deny_body = build_permission_decision_body("deny", Some(json!({"ignored": "x"})));
+        assert_eq!(deny_body, json!({"decision": "deny"}));
+
+        let summary_html = render_answers_summary_html(
+            questions,
+            &json!({"auth_mode": "JWT", "targets": ["API", "CLI"]}),
+        );
+        crate::test_support::assert_no_inline_hex_colors(&summary_html);
+        assert!(summary_html.contains("Submitted answers"));
+        assert!(summary_html.contains("<dt>Auth</dt><dd>JWT</dd>"));
+        assert!(summary_html.contains("<dt>Targets</dt><dd>API, CLI</dd>"));
     }
 }
