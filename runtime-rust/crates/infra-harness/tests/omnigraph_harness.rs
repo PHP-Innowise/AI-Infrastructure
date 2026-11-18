@@ -851,6 +851,12 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
             .filter(|f| match_proj(f))
             .cloned()
             .collect(),
+        "list_symbols" => snap
+            .symbols
+            .values()
+            .filter(|s| match_proj(s))
+            .cloned()
+            .collect(),
         "list_published_edges" => snap.published_by.values().cloned().collect(),
         "list_consumed_edges" => snap.consumed_by.values().cloned().collect(),
         "list_file_edges" => snap.touches_file.values().cloned().collect(),
@@ -4579,4 +4585,168 @@ async fn http_memory_links_batch_returns_items_in_order_and_enforces_token_and_l
     assert_eq!(status, 400);
 
     fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn omnigraph_graph_http_paginates_past_100_and_exposes_symbol_refs() {
+    let (mock_url, mock_task) = spawn_mock_omnigraph("tok-graph-http").await;
+    let fx = HarnessFixture::new(None).await;
+    fx.omnigraph
+        .connect_external(
+            &mock_url,
+            Some("tok-graph-http"),
+            Some(schema::HARNESS_GRAPH_ID),
+        )
+        .await
+        .unwrap();
+
+    fs::create_dir_all(fx.project_path.join("src")).unwrap();
+    fs::write(
+        fx.project_path.join("src/token.rs"),
+        "pub fn verify_token() -> bool { true }\n",
+    )
+    .unwrap();
+
+    // Seed 260 atoms (> 100 cap and > 250 default page size) and a SymbolRef-linked atom.
+    let client = fx.omnigraph.client().await.unwrap();
+    let mut lines = Vec::with_capacity(260);
+    for i in 0..259usize {
+        lines.push(
+            json!({
+                "type": "ContextAtom",
+                "id": format!("atom-http-{i:04}"),
+                "data": {
+                    "atom_id": format!("atom-http-{i:04}"),
+                    "project_id": fx.project_id,
+                    "kind": "finding",
+                    "title": format!("HTTP atom {i:04}"),
+                    "summary": format!("Summary {i:04}"),
+                    "body": format!("Body {i:04}"),
+                    "source_branch": "main",
+                    "confidence": 0.9,
+                    "pin_priority": 5,
+                    "verified": false,
+                    "created_at": "2026-11-18T09:00:00.000Z",
+                    "updated_at": "2026-11-18T09:00:00.000Z",
+                }
+            })
+            .to_string(),
+        );
+    }
+    client
+        .load_ndjson("main", None, "merge", &lines.join("\n"), Some("harness"))
+        .await
+        .unwrap();
+
+    let (pub_status, pub_res) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": "main",
+                "atom_id": "atom-http-sym",
+                "kind": "decision",
+                "title": "verify_token must reject expired tokens",
+                "body": "Call verify_token() before granting access.",
+                "files": ["src/token.rs"],
+                "pin_priority": 100
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(pub_status, 200, "{pub_res}");
+
+    // Default GET /api/omnigraph/graph (backwards-compatible when limit/offset omitted) returns 250 atoms (>100).
+    let (status, g_default) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=main",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{g_default}");
+    assert_eq!(g_default["connected"], true);
+    assert_eq!(g_default["atoms"].as_array().unwrap().len(), 250);
+    assert_eq!(g_default["total_atoms"], 260);
+    assert_eq!(g_default["limit"], 250);
+    assert_eq!(g_default["offset"], 0);
+    assert_eq!(g_default["has_more"], true);
+    assert_eq!(g_default["truncated"], true);
+    assert_eq!(g_default["next_cursor"], "250");
+    assert_eq!(g_default["telemetry"]["atom_count"], 250);
+    assert_eq!(g_default["telemetry"]["total_atoms"], 260);
+    assert_eq!(g_default["telemetry"]["truncated"], true);
+
+    // Cursor / offset pagination returns the remaining 10 atoms.
+    let (status, g_tail) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=main&limit=50&cursor=offset:250",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{g_tail}");
+    assert_eq!(g_tail["atoms"].as_array().unwrap().len(), 10);
+    assert_eq!(g_tail["offset"], 250);
+    assert_eq!(g_tail["has_more"], false);
+    assert!(g_tail["next_cursor"].is_null());
+
+    // Filtering by symbol name exposes SymbolRef + MentionsSymbol over HTTP.
+    let (status, g_sym) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=main&q=verify_token&limit=10&offset=0",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{g_sym}");
+    assert_eq!(g_sym["total_atoms"], 1);
+    assert_eq!(g_sym["has_more"], false);
+    assert_eq!(g_sym["truncated"], false);
+    assert_eq!(g_sym["atoms"][0]["atom_id"], "atom-http-sym");
+    assert_eq!(
+        g_sym["atoms"][0]["symbols"],
+        json!(["src/token.rs::verify_token"])
+    );
+    assert_eq!(g_sym["symbols"][0]["fqn"], "src/token.rs::verify_token");
+    assert_eq!(g_sym["symbols"][0]["file_path"], "src/token.rs");
+    assert_eq!(g_sym["symbols"][0]["mention_count"], 1);
+    assert_eq!(g_sym["symbol_edges"][0]["kind"], "mentions_symbol");
+    assert_eq!(g_sym["symbol_edges"][0]["source"], "atom-http-sym");
+    assert_eq!(
+        g_sym["symbol_edges"][0]["target"],
+        "src/token.rs::verify_token"
+    );
+    assert_eq!(g_sym["telemetry"]["symbol_count"], 1);
+    assert_eq!(g_sym["telemetry"]["symbol_edge_count"], 1);
+
+    // Invalid pagination inputs return HTTP 400.
+    let (bad_status, _) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&cursor=bogus",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(bad_status, 400);
+
+    fx.shutdown().await;
+    mock_task.abort();
 }

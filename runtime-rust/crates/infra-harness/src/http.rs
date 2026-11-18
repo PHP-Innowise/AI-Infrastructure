@@ -1320,6 +1320,9 @@ pub const ROUTES: &[Route] = &[
             "kind",
             "q",
             "session_id",
+            "limit",
+            "offset",
+            "cursor",
         ],
     },
     Route {
@@ -1843,5 +1846,38 @@ mod tests {
             assert_eq!(matched.operation, op);
             assert!(params.is_empty());
         }
+    }
+
+    #[test]
+    fn omnigraph_graph_route_allows_pagination_query_params() {
+        let found = ROUTES
+            .iter()
+            .find(|r| r.method == "GET" && r.pattern == "/api/omnigraph/graph")
+            .expect("missing GET /api/omnigraph/graph route");
+        assert_eq!(found.operation, "omnigraph.graph");
+        assert_eq!(found.status, 200);
+        assert!(!found.token);
+        assert_eq!(
+            found.query,
+            &[
+                "project_id",
+                "branch",
+                "snapshot",
+                "kind",
+                "q",
+                "session_id",
+                "limit",
+                "offset",
+                "cursor",
+            ]
+        );
+        let parsed = query(
+            Some("project_id=p1&branch=main&limit=100&offset=50&cursor=offset:50"),
+            found.query,
+        )
+        .expect("pagination query params accepted");
+        assert_eq!(parsed["limit"], "100");
+        assert_eq!(parsed["offset"], "50");
+        assert_eq!(parsed["cursor"], "offset:50");
     }
 }

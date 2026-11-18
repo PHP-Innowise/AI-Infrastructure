@@ -19,6 +19,9 @@ pub const OMNIGRAPH_RELEASE_URL_LINUX_X86_64: &str = "https://github.com/ModernR
 /// Official Docker image for `omnigraph-server`.
 pub const OMNIGRAPH_DOCKER_IMAGE: &str = "ghcr.io/modernrelay/omnigraph-server:v0.15.0";
 
+/// Row limit baked into `QUERY_RECENT_ATOMS` (matches Studio max page size).
+pub(crate) const RECENT_ATOMS_LIMIT: usize = 1000;
+
 /// Validated `.pg` schema for Harness sessions, context atoms, files, symbols, and turn snapshots.
 pub const HARNESS_CONTEXT_PG: &str = r#"// Harness shared session context graph schema (Omnigraph v0.15.0)
 node Session {
@@ -239,7 +242,7 @@ pub const QUERY_RECENT_ATOMS: &str = r#"query recent_atoms($project_id: String) 
         $a.updated_at as updated_at
     }
     order { $a.pin_priority desc, $a.updated_at desc }
-    limit 100
+    limit 1000
 }"#;
 
 /// Stored query: `RelatesTo` edges marked as `contradicts` within a project.
@@ -372,7 +375,7 @@ pub const HARNESS_STORED_QUERIES_GQ: &str = concat!(
     "        $a.updated_at as updated_at\n",
     "    }\n",
     "    order { $a.pin_priority desc, $a.updated_at desc }\n",
-    "    limit 100\n",
+    "    limit 1000\n",
     "}\n\n",
     "query contradictions($project_id: String) {\n",
     "    match {\n",
@@ -447,7 +450,7 @@ pub(crate) const GQ_LIST_SESSIONS: &str = r#"query list_sessions($project_id: St
         $s.updated_at as updated_at
     }
     order { $s.updated_at desc }
-    limit 200
+    limit 500
 }"#;
 
 pub(crate) const GQ_LIST_FILES: &str = r#"query list_files($project_id: String) {
@@ -459,7 +462,20 @@ pub(crate) const GQ_LIST_FILES: &str = r#"query list_files($project_id: String) 
         $f.last_touched_at as last_touched_at
     }
     order { $f.last_touched_at desc }
-    limit 300
+    limit 1000
+}"#;
+
+pub(crate) const GQ_LIST_SYMBOLS: &str = r#"query list_symbols($project_id: String) {
+    match { $s: SymbolRef { project_id: $project_id } }
+    return {
+        $s.fqn as fqn,
+        $s.project_id as project_id,
+        $s.file_path as file_path,
+        $s.kind as kind,
+        $s.name as name
+    }
+    order { $s.file_path asc, $s.name asc }
+    limit 1000
 }"#;
 
 pub(crate) const GQ_LIST_PUBLISHED_EDGES: &str = r#"query list_published_edges($project_id: String) {
@@ -473,7 +489,7 @@ pub(crate) const GQ_LIST_PUBLISHED_EDGES: &str = r#"query list_published_edges($
         $e.role as role,
         $e.published_at as published_at
     }
-    limit 500
+    limit 2000
 }"#;
 
 pub(crate) const GQ_LIST_CONSUMED_EDGES: &str = r#"query list_consumed_edges($project_id: String) {
@@ -488,7 +504,7 @@ pub(crate) const GQ_LIST_CONSUMED_EDGES: &str = r#"query list_consumed_edges($pr
         $e.relevance as relevance,
         $e.consumed_at as consumed_at
     }
-    limit 500
+    limit 2000
 }"#;
 
 pub(crate) const GQ_LIST_FILE_EDGES: &str = r#"query list_file_edges($project_id: String) {
@@ -503,7 +519,7 @@ pub(crate) const GQ_LIST_FILE_EDGES: &str = r#"query list_file_edges($project_id
         $e.line_start as line_start,
         $e.line_end as line_end
     }
-    limit 500
+    limit 2000
 }"#;
 
 pub(crate) const GQ_LIST_ATOM_RELATIONS: &str = r#"query list_atom_relations($project_id: String) {
@@ -519,7 +535,7 @@ pub(crate) const GQ_LIST_ATOM_RELATIONS: &str = r#"query list_atom_relations($pr
         $e.confidence as confidence,
         $e.created_at as created_at
     }
-    limit 500
+    limit 2000
 }"#;
 
 pub(crate) const GQ_LIST_SESSION_FOLLOWS: &str = r#"query list_session_follows($project_id: String) {
@@ -533,7 +549,7 @@ pub(crate) const GQ_LIST_SESSION_FOLLOWS: &str = r#"query list_session_follows($
         $e.relation as relation,
         $e.created_at as created_at
     }
-    limit 500
+    limit 2000
 }"#;
 
 pub(crate) const GQ_UPSERT_SESSION: &str = r#"query upsert_session(
@@ -733,7 +749,7 @@ pub(crate) const GQ_LIST_SYMBOL_EDGES: &str = r#"query list_symbol_edges($projec
         $s.file_path as file_path,
         $e.role as role
     }
-    limit 500
+    limit 2000
 }"#;
 
 pub(crate) const GQ_LINK_RELATES_TO: &str = r#"query link_relates_to(
