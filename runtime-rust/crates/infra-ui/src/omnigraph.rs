@@ -3396,18 +3396,14 @@ pub fn merge_graph_page(mut existing: V, page: V) -> V {
         existing[key] = V::Array(combined);
     }
 
-    for meta_key in [
-        "total_atoms",
-        "has_more",
-        "truncated",
-        "next_cursor",
-        "limit",
-        "telemetry",
-    ] {
+    for meta_key in ["total_atoms", "has_more", "truncated", "limit", "telemetry"] {
         if !page[meta_key].is_null() {
             existing[meta_key] = page[meta_key].clone();
         }
     }
+    // Explicitly overwrite next_cursor (even when null on the final page) so a
+    // stale cursor from an earlier page does not linger on merged state.
+    existing["next_cursor"] = page["next_cursor"].clone();
     existing
 }
 
@@ -5560,6 +5556,7 @@ async fn open_file_in_code_map(path: &str) {
     if m::read(|s| s.view != "sessions") {
         crate::session::open_view("sessions", true).await;
     }
+    crate::session::set_mobile_pane("graph");
     crate::graph_map::focus_file_in_session(path);
 }
 
@@ -7902,6 +7899,9 @@ mod tests {
         assert_eq!(merged["symbols"].as_array().unwrap().len(), 1);
         assert_eq!(merged["edges"].as_array().unwrap().len(), 2);
         assert_eq!(merged["symbol_edges"].as_array().unwrap().len(), 1);
+        assert!(merged["next_cursor"].is_null());
+        assert_eq!(merged["has_more"], false);
+        assert!(graph_pagination_summary(&merged).next_cursor.is_empty());
 
         let (visible_after, _) = render_pagination_bar_html(&merged);
         assert!(!visible_after);
