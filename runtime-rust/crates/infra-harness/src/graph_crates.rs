@@ -571,6 +571,157 @@ impl Crates {
                     .is_some_and(|can| all(to, used).all(|used| !can.contains(&used)))
             })
     }
+
+    /// Returns `true` if Cargo crate boundaries permit `from_path` to depend on `to_path`.
+    #[allow(dead_code)]
+    pub(crate) fn allows_files(&self, files: &[String], from_path: &str, to_path: &str) -> bool {
+        let Some(from_id) = files.iter().position(|f| f == from_path) else {
+            return true;
+        };
+        let Some(to_id) = files.iter().position(|f| f == to_path) else {
+            return true;
+        };
+        !self.rules_out(from_id as u32, to_id as u32)
+    }
+}
+
+/// Workspace Cargo package metadata mapping crate identifiers to source roots and library entries.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CratePackageInfo {
+    #[allow(dead_code)]
+    pub name: String,
+    #[allow(dead_code)]
+    pub ident: String,
+    #[allow(dead_code)]
+    pub folder: String,
+    pub src_dir: String,
+    pub lib_path: Option<String>,
+}
+
+/// Index of Cargo packages in a workspace for cross-crate `use pkg::...` module resolution.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CratePackageMap {
+    by_ident: HashMap<String, Vec<CratePackageInfo>>,
+}
+
+impl CratePackageMap {
+    /// Builds a `CratePackageMap` from in-memory `(rel_path, content)` `Cargo.toml` manifests.
+    #[allow(dead_code)]
+    pub(crate) fn from_texts(manifests: &[(&str, &str)]) -> Self {
+        let mut out = Self::default();
+        for &(raw_path, text) in manifests {
+            let norm = raw_path.trim().replace('\\', "/");
+            let clean = norm.trim_start_matches("./");
+            let fname = clean.rsplit('/').next().unwrap_or(clean);
+            if fname != "Cargo.toml" {
+                continue;
+            }
+            let folder = clean
+                .rsplit_once('/')
+                .map_or_else(String::new, |(d, _)| d.to_owned());
+            out.ingest_manifest(&folder, text);
+        }
+        out
+    }
+
+    /// Builds a `CratePackageMap` from known workspace file paths and a file reader callback.
+    #[allow(dead_code)]
+    pub(crate) fn from_reader(files: &[String], reader: &dyn Fn(&str) -> Option<String>) -> Self {
+        let mut out = Self::default();
+        let mut seen_folders = HashSet::new();
+        for file in files {
+            let mut folder = file.rsplit_once('/').map_or("", |(d, _)| d);
+            loop {
+                if seen_folders.insert(folder.to_owned()) {
+                    let manifest_path = if folder.is_empty() {
+                        "Cargo.toml".to_owned()
+                    } else {
+                        format!("{folder}/Cargo.toml")
+                    };
+                    if let Some(text) = reader(&manifest_path) {
+                        out.ingest_manifest(folder, &text);
+                    }
+                }
+                if folder.is_empty() {
+                    break;
+                }
+                folder = folder.rsplit_once('/').map_or("", |(above, _)| above);
+            }
+        }
+        out
+    }
+
+    fn ingest_manifest(&mut self, folder: &str, text: &str) {
+        let parsed = manifest(text);
+        let Some(pkg_name) = parsed.name else {
+            return;
+        };
+        let lib_written = text
+            .parse::<toml::Table>()
+            .ok()
+            .and_then(|t| t.get("lib")?.get("path")?.as_str().map(str::to_owned));
+        let lib_path = lib_written
+            .as_deref()
+            .and_then(|p| led(folder, p))
+            .or_else(|| {
+                Some(if folder.is_empty() {
+                    "src/lib.rs".to_owned()
+                } else {
+                    format!("{folder}/src/lib.rs")
+                })
+            });
+        let src_dir = lib_path
+            .as_deref()
+            .and_then(|lp| lp.rsplit_once('/').map(|(d, _)| d.to_owned()))
+            .unwrap_or_else(|| {
+                if folder.is_empty() {
+                    "src".to_owned()
+                } else {
+                    format!("{folder}/src")
+                }
+            });
+        let ident = pkg_name.replace('-', "_");
+        self.by_ident
+            .entry(ident.clone())
+            .or_default()
+            .push(CratePackageInfo {
+                name: pkg_name,
+                ident,
+                folder: folder.to_owned(),
+                src_dir,
+                lib_path,
+            });
+    }
+
+    /// Resolves `crate_ident::segs_after_crate...` to `(target_file, consumed_segment_count)`.
+    pub(crate) fn resolve_crate_module(
+        &self,
+        crate_ident: &str,
+        segs_after_crate: &[&str],
+        known_files: &std::collections::BTreeSet<String>,
+    ) -> Option<(String, usize)> {
+        let norm_ident = crate_ident.replace('-', "_");
+        let entries = self.by_ident.get(&norm_ident)?;
+        for info in entries {
+            for k in (1..=segs_after_crate.len()).rev() {
+                let rel_mod = segs_after_crate[..k].join("/");
+                for cand in [
+                    format!("{}/{rel_mod}.rs", info.src_dir),
+                    format!("{}/{rel_mod}/mod.rs", info.src_dir),
+                ] {
+                    if let Some(found) = known_files.get(&cand) {
+                        return Some((found.clone(), 1 + k));
+                    }
+                }
+            }
+            if let Some(ref lp) = info.lib_path
+                && let Some(found) = known_files.get(lp)
+            {
+                return Some((found.clone(), 1));
+            }
+        }
+        None
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1048,5 +1199,49 @@ mod after_bytes;
         let bare = crates(&files, &manifests);
         assert!(!stands(&bare, "qa/src/check.rs", "core/src/fs/spelling.rs"));
         assert!(stands(&bare, "probe/src/lib.rs", "base/src/main.rs"));
+    }
+
+    #[test]
+    fn crate_package_map_resolves_custom_crate_names_and_lib_paths() {
+        let known: std::collections::BTreeSet<String> = [
+            "packages/auth-v2/custom_src/entry.rs",
+            "packages/auth-v2/custom_src/tokens.rs",
+            "apps/web/src/main.rs",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+        let map = CratePackageMap::from_texts(&[
+            (
+                "packages/auth-v2/Cargo.toml",
+                "[package]\nname = \"acme-auth\"\n[lib]\npath = \"custom_src/entry.rs\"\n",
+            ),
+            (
+                "apps/web/Cargo.toml",
+                "[package]\nname = \"web\"\n[dependencies]\nacme-auth = { path = \"../../packages/auth-v2\" }\n",
+            ),
+        ]);
+        assert_eq!(
+            map.resolve_crate_module("acme_auth", &["tokens", "verify"], &known),
+            Some(("packages/auth-v2/custom_src/tokens.rs".to_owned(), 2))
+        );
+        assert_eq!(
+            map.resolve_crate_module("acme_auth", &["AuthService"], &known),
+            Some(("packages/auth-v2/custom_src/entry.rs".to_owned(), 1))
+        );
+
+        let reader_files = vec!["packages/auth-v2/custom_src/tokens.rs".to_owned()];
+        let from_reader_map = CratePackageMap::from_reader(&reader_files, &|p| match p {
+            "packages/auth-v2/Cargo.toml" => Some(
+                "[package]\nname = \"acme-auth\"\n[lib]\npath = \"custom_src/entry.rs\"\n"
+                    .to_owned(),
+            ),
+            _ => None,
+        });
+        assert_eq!(
+            from_reader_map.resolve_crate_module("acme_auth", &["tokens"], &known),
+            Some(("packages/auth-v2/custom_src/tokens.rs".to_owned(), 2))
+        );
     }
 }
