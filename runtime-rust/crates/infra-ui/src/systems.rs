@@ -1092,6 +1092,102 @@ async fn read_scoped(id: &str, project: &str, generation: u64) {
         _ => {}
     }
 }
+fn editor_lock_state(scanning: bool, dirty: bool) -> (&'static str, &'static str, bool) {
+    if scanning {
+        (
+            "scanning",
+            "An AI scan is filling the system editor on Services. Planning and launching wait until it ends.",
+            false,
+        )
+    } else if dirty {
+        (
+            "dirty",
+            "The system editor on Services has unsaved changes. Save or discard them to plan or launch a change.",
+            true,
+        )
+    } else {
+        ("", "", false)
+    }
+}
+
+fn sync_editor_lock(state: &str, notice: &str, show_discard: bool, locked: bool) {
+    let Some(lock) = dom::get("system-editor-lock") else {
+        return;
+    };
+    let current = lock.get_attribute("data-lock-state").unwrap_or_default();
+    if current != state {
+        let _ = lock.set_attribute("data-lock-state", state);
+        lock.set_text_content(None);
+        if !notice.is_empty() {
+            dom::add(&lock, &dom::el("span", "", notice));
+            if show_discard {
+                dom::add(&lock, &dom::el("span", "", " "));
+                let btn = dom::button("Discard draft", "system-editor-lock-discard", V::Null);
+                btn.set_class_name("button compact");
+                let _ = btn.set_attribute("id", "system-editor-lock-discard");
+                if locked {
+                    let _ = btn.set_attribute("disabled", "");
+                }
+                dom::add(&lock, &btn);
+            }
+        }
+    } else if show_discard {
+        dom::disabled("system-editor-lock-discard", locked);
+    }
+    dom::hide(&lock, notice.is_empty());
+}
+
+fn discard_editor_draft(from_lock_banner: bool) {
+    if m::yes(&m::data("editor-pending")) {
+        return;
+    }
+    let lock_had_focus = from_lock_banner
+        && dom::document()
+            .active_element()
+            .zip(dom::get("system-editor-lock"))
+            .is_some_and(|(active, lock)| lock.contains(Some(&active)));
+    clear_editor_notices();
+    remember_discovery(None);
+    m::next("discovery");
+    dom::cancel_timer("discovery-poll");
+    crate::activity::reset("system-discovery-agent");
+    m::take("discovery-owner");
+    m::next("editor-scope");
+    m::take("editor");
+    m::take("editor-generation");
+    m::set("editor-dirty", json!(false));
+    dom::set_value("system-editor-name", "");
+    dom::text("system-editor-location", "");
+    dom::clear("system-editor-services");
+    dom::clear("system-editor-shared");
+    dom::hidden("system-editor", true);
+    controls();
+    if from_lock_banner {
+        dom::text(
+            "system-run-message",
+            "Discarded unsaved system editor draft.",
+        );
+        if lock_had_focus {
+            for candidate in [
+                "system-prepare",
+                "system-execute",
+                "system-new-change",
+                "system-runs",
+            ] {
+                let can_focus = dom::get(candidate).is_some_and(|el| {
+                    !el.has_attribute("hidden")
+                        && !dom::is_disabled(&el)
+                        && el.closest("[hidden]").ok().flatten().is_none()
+                });
+                if can_focus {
+                    dom::focus(candidate);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 fn controls() {
     let pending = m::yes(&m::data("system-pending"));
     let dirty = m::yes(&m::data("editor-dirty"));
@@ -1131,15 +1227,8 @@ fn controls() {
     // in the editor holds planning and launching until it is saved or discarded.
     let scanning = m::yes(&m::data("discovery-active"));
     let held = dirty || scanning;
-    let notice = if scanning {
-        "An AI scan is filling the system editor on Services. Planning and launching wait until it ends."
-    } else if dirty {
-        "The system editor on Services has unsaved changes. Save or discard them to plan or launch a change."
-    } else {
-        ""
-    };
-    dom::text("system-editor-lock", notice);
-    dom::hidden("system-editor-lock", notice.is_empty());
+    let (lock_state, notice, show_discard) = editor_lock_state(scanning, dirty);
+    sync_editor_lock(lock_state, notice, show_discard, locked);
     dom::disabled("system-prepare", pending || held);
     dom::disabled(
         "system-execute",
@@ -1815,6 +1904,186 @@ fn render_catalog(v: &V) {
     }
     controls();
 }
+fn build_receipt_render_items(receipts: &[V], steps: &[V], overlaps: &[OverlapRow]) -> Vec<V> {
+    let mut seen_keys = BTreeMap::<String, usize>::new();
+    let mut items = Vec::with_capacity(receipts.len() + usize::from(!overlaps.is_empty()));
+    for receipt in receipts {
+        let base = format!(
+            "receipt:{}:{}",
+            m::text(receipt, "phase"),
+            m::string(&receipt["attempt"])
+        );
+        let count = seen_keys.entry(base.clone()).or_insert(0);
+        let key = if *count == 0 {
+            base
+        } else {
+            format!("{base}#{}", *count)
+        };
+        *count += 1;
+        let accepted = steps.iter().any(|step| {
+            step["id"] == receipt["phase"]
+                && step["attempt"] == receipt["attempt"]
+                && step["accepted_unrun_checks"].is_array()
+        });
+        items.push(json!({
+            "kind": "receipt",
+            "key": key,
+            "receipt": receipt,
+            "accepted": accepted,
+        }));
+    }
+    if !overlaps.is_empty() {
+        let overlap_rows_json = overlaps
+            .iter()
+            .map(|(path, steps_text, open)| {
+                json!({
+                    "path": path,
+                    "steps": steps_text,
+                    "open": open.as_ref().map(|(service, file)| json!([service, file])),
+                })
+            })
+            .collect::<Vec<_>>();
+        items.push(json!({
+            "kind": "overlaps",
+            "key": "overlaps",
+            "overlaps": overlap_rows_json,
+        }));
+    }
+    items
+}
+
+fn build_receipt_card_element(item: &V) -> web_sys::Element {
+    if item["kind"] == "overlaps" {
+        let overlaps = m::array(&item["overlaps"]);
+        let card = dom::el(
+            "article",
+            "system-card system-receipt-card system-overlaps",
+            "",
+        );
+        dom::add(
+            &card,
+            &dom::el(
+                "h5",
+                "",
+                &format!("Edited by more than one step: {}", overlaps.len()),
+            ),
+        );
+        dom::add(
+            &card,
+            &dom::el(
+                "p",
+                "system-note",
+                "The steps of a run go one after another, so no two wrote a file at once; a later step may still have changed what an earlier one made.",
+            ),
+        );
+        let list = dom::el("div", "system-receipt-files", "");
+        for entry in &overlaps {
+            let path = m::text(entry, "path");
+            let steps_text = m::text(entry, "steps");
+            let row = dom::el("div", "system-receipt-file-row", "");
+            dom::add(&row, &dom::el("code", "system-receipt-file-path", &path));
+            dom::add(&row, &dom::el("span", "system-note", &steps_text));
+            if let Some(pair) = entry["open"].as_array() {
+                if let (Some(service), Some(file)) = (
+                    pair.first().and_then(V::as_str),
+                    pair.get(1).and_then(V::as_str),
+                ) {
+                    let map_btn = dom::button(
+                        "Map",
+                        "inspect-system-file-graph",
+                        json!({ "service": service, "path": file }),
+                    );
+                    map_btn.set_class_name("button compact");
+                    let _ = map_btn.set_attribute(
+                        "aria-label",
+                        &format!("Show {path} on {service} dependency map"),
+                    );
+                    dom::add(&row, &map_btn);
+                }
+            }
+            dom::add(&list, &row);
+        }
+        dom::add(&card, &list);
+        return card;
+    }
+
+    let receipt = &item["receipt"];
+    let accepted = m::yes(&item["accepted"]);
+    let outcome = if accepted {
+        format!("{}; a person accepted them", receipt_outcome(receipt))
+    } else {
+        receipt_outcome(receipt)
+    };
+    let (svc_id, changed_files) = receipt_changed_files(receipt);
+    let checks = m::array(&receipt["report"]["checks"]);
+    let passed = checks.iter().filter(|c| c["status"] == "passed").count();
+    let failed = checks.iter().filter(|c| c["status"] == "failed").count();
+    let not_run = checks.iter().filter(|c| c["status"] == "not_run").count();
+    let checks_summary = if checks.is_empty() {
+        "none".to_owned()
+    } else {
+        format!("{passed} passed · {failed} failed · {not_run} not run")
+    };
+    let card = dom::el("article", "system-card system-receipt-card", "");
+    dom::add(
+        &card,
+        &dom::el(
+            "h5",
+            "",
+            &format!(
+                "{} · attempt {} · {}",
+                m::text(receipt, "phase"),
+                m::string(&receipt["attempt"]),
+                outcome
+            ),
+        ),
+    );
+    let mut metrics = vec![
+        ("Service", svc_id.clone(), false),
+        ("Outcome", outcome.clone(), !m::yes(&receipt["ok"])),
+        ("Checks", checks_summary, checks.is_empty()),
+        (
+            "Changed files",
+            changed_files.len().to_string(),
+            changed_files.is_empty(),
+        ),
+    ];
+    if let Some((ev_summary, ev_zero)) = receipt_evidence_summary(&receipt["evidence"]) {
+        metrics.push(("Opened / Graph", ev_summary, ev_zero));
+    }
+    dom::add(&card, &metric_list(&metrics));
+
+    if !changed_files.is_empty() {
+        let file_list = dom::el("div", "system-receipt-files", "");
+        for path in &changed_files {
+            let row = dom::el("div", "system-receipt-file-row", "");
+            dom::add(&row, &dom::el("code", "system-receipt-file-path", path));
+            let map_btn = dom::button(
+                "Map",
+                "inspect-system-file-graph",
+                json!({ "service": svc_id, "path": path }),
+            );
+            map_btn.set_class_name("button compact");
+            let _ = map_btn.set_attribute(
+                "aria-label",
+                &format!("Show {path} on {svc_id} dependency map"),
+            );
+            dom::add(&row, &map_btn);
+            dom::add(&file_list, &row);
+        }
+        dom::add(&card, &file_list);
+    }
+
+    let raw = serde_json::to_string_pretty(receipt).unwrap_or_default();
+    let details = dom::details("Receipt JSON", &raw);
+    let _ = details.set_attribute("data-restore-key", "receipt-json");
+    if let Some(summary) = details.first_element_child() {
+        let _ = summary.set_attribute("data-focus-key", "receipt-json-summary");
+    }
+    dom::add(&card, &details);
+    card
+}
+
 fn render_run() {
     let v = m::data("system-run");
     if !v.is_object() {
@@ -1954,130 +2223,14 @@ fn render_run() {
     }
 
     let receipts = m::array(&v["receipts"]);
-    dom::clear("system-receipts");
-    for receipt in &receipts {
-        let accepted = steps.iter().any(|step| {
-            step["id"] == receipt["phase"]
-                && step["attempt"] == receipt["attempt"]
-                && step["accepted_unrun_checks"].is_array()
-        });
-        let outcome = if accepted {
-            format!("{}; a person accepted them", receipt_outcome(receipt))
-        } else {
-            receipt_outcome(receipt)
-        };
-        let (svc_id, changed_files) = receipt_changed_files(receipt);
-        let checks = m::array(&receipt["report"]["checks"]);
-        let passed = checks.iter().filter(|c| c["status"] == "passed").count();
-        let failed = checks.iter().filter(|c| c["status"] == "failed").count();
-        let not_run = checks.iter().filter(|c| c["status"] == "not_run").count();
-        let checks_summary = if checks.is_empty() {
-            "none".to_owned()
-        } else {
-            format!("{passed} passed · {failed} failed · {not_run} not run")
-        };
-        let card = dom::el("article", "system-card system-receipt-card", "");
-        dom::add(
-            &card,
-            &dom::el(
-                "h5",
-                "",
-                &format!(
-                    "{} · attempt {} · {}",
-                    m::text(receipt, "phase"),
-                    m::string(&receipt["attempt"]),
-                    outcome
-                ),
-            ),
-        );
-        let mut metrics = vec![
-            ("Service", svc_id.clone(), false),
-            ("Outcome", outcome.clone(), !m::yes(&receipt["ok"])),
-            ("Checks", checks_summary, checks.is_empty()),
-            (
-                "Changed files",
-                changed_files.len().to_string(),
-                changed_files.is_empty(),
-            ),
-        ];
-        if let Some((ev_summary, ev_zero)) = receipt_evidence_summary(&receipt["evidence"]) {
-            metrics.push(("Opened / Graph", ev_summary, ev_zero));
-        }
-        dom::add(&card, &metric_list(&metrics));
-
-        if !changed_files.is_empty() {
-            let file_list = dom::el("div", "system-receipt-files", "");
-            for path in &changed_files {
-                let row = dom::el("div", "system-receipt-file-row", "");
-                dom::add(&row, &dom::el("code", "system-receipt-file-path", path));
-                let map_btn = dom::button(
-                    "Map",
-                    "inspect-system-file-graph",
-                    json!({ "service": svc_id, "path": path }),
-                );
-                map_btn.set_class_name("button compact");
-                let _ = map_btn.set_attribute(
-                    "aria-label",
-                    &format!("Show {path} on {svc_id} dependency map"),
-                );
-                dom::add(&row, &map_btn);
-                dom::add(&file_list, &row);
-            }
-            dom::add(&card, &file_list);
-        }
-
-        let raw = serde_json::to_string_pretty(receipt).unwrap_or_default();
-        dom::add(&card, &dom::details("Receipt JSON", &raw));
-        dom::append("system-receipts", &card);
-    }
-
-    // The files more than one step of the run edited, after the receipts.
     let overlaps = overlap_rows(&v["evidence"]);
-    if !overlaps.is_empty() {
-        let card = dom::el(
-            "article",
-            "system-card system-receipt-card system-overlaps",
-            "",
-        );
-        dom::add(
-            &card,
-            &dom::el(
-                "h5",
-                "",
-                &format!("Edited by more than one step: {}", overlaps.len()),
-            ),
-        );
-        dom::add(
-            &card,
-            &dom::el(
-                "p",
-                "system-note",
-                "The steps of a run go one after another, so no two wrote a file at once; a later step may still have changed what an earlier one made.",
-            ),
-        );
-        let list = dom::el("div", "system-receipt-files", "");
-        for (path, steps, open) in &overlaps {
-            let row = dom::el("div", "system-receipt-file-row", "");
-            dom::add(&row, &dom::el("code", "system-receipt-file-path", path));
-            dom::add(&row, &dom::el("span", "system-note", steps));
-            if let Some((service, file)) = open {
-                let map_btn = dom::button(
-                    "Map",
-                    "inspect-system-file-graph",
-                    json!({ "service": service, "path": file }),
-                );
-                map_btn.set_class_name("button compact");
-                let _ = map_btn.set_attribute(
-                    "aria-label",
-                    &format!("Show {path} on {service} dependency map"),
-                );
-                dom::add(&row, &map_btn);
-            }
-            dom::add(&list, &row);
-        }
-        dom::add(&card, &list);
-        dom::append("system-receipts", &card);
-    }
+    let receipt_items = build_receipt_render_items(&receipts, &steps, &overlaps);
+    dom::keyed_render(
+        "system-receipts",
+        &receipt_items,
+        |item| m::text(item, "key"),
+        build_receipt_card_element,
+    );
 
     dom::pretty("system-native-tasks", &v["execution"]["tasks"]);
     dom::hidden(
@@ -2107,29 +2260,6 @@ fn render_run() {
         .join("\n");
     dom::text("system-events", &events_text);
     dom::hidden("system-events-log", events_text.trim().is_empty());
-    let launches = m::array(&v["launches"]);
-    let options = launches
-        .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            json!({
-                "id": l["session_id"],
-                "label": format!("Launch {} · {}", i + 1, m::text(l, "status"))
-            })
-        })
-        .collect::<Vec<_>>();
-    let chosen = m::data("system-agent-launch")
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| launches.last().map(|v| m::text(v, "session_id")));
-    dom::options(
-        "system-agents-launch",
-        &options,
-        m::summary,
-        chosen.as_deref(),
-    );
-    dom::hidden("system-agents-section", !run_has_agent_activity(&v));
-    dom::hidden("system-agents-live", !m::yes(&v["active"]));
     dom::hidden("system-open-session", !v["session_id"].is_string());
     sync_changes_map_workspace();
     controls();
@@ -2351,6 +2481,12 @@ fn field(
         "",
     );
     let _ = input.set_attribute("data-field", &format!("{path}|{kind}"));
+    let focus_key = if let Some((_, tail)) = path.split_once("/passport/") {
+        format!("field:passport/{tail}")
+    } else {
+        format!("field:{path}")
+    };
+    let _ = input.set_attribute("data-focus-key", &focus_key);
     if required {
         let _ = input.set_attribute("required", "");
     }
@@ -2411,16 +2547,22 @@ fn row_name(kind: &str) -> &'static str {
         _ => "Source",
     }
 }
-fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &str) {
+fn build_rows_details(
+    title: &str,
+    values: &V,
+    path: &str,
+    kind: &str,
+    restore_key: &str,
+) -> web_sys::Element {
     let d = dom::el("details", "system-editor-section", "");
-    dom::add(
-        &d,
-        &dom::el(
-            "summary",
-            "",
-            &format!("{title} ({})", m::array(values).len()),
-        ),
+    let _ = d.set_attribute("data-restore-key", restore_key);
+    let summary = dom::el(
+        "summary",
+        "",
+        &format!("{title} ({})", m::array(values).len()),
     );
+    let _ = summary.set_attribute("data-focus-key", &format!("summary:{restore_key}"));
+    dom::add(&d, &summary);
     let name = row_name(kind);
     for (index, value) in m::array(values).into_iter().enumerate() {
         let item = dom::el("div", "system-editor-row", "");
@@ -2437,6 +2579,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
             "aria-label",
             &format!("Remove {} {}", name.to_lowercase(), index + 1),
         );
+        let _ = remove.set_attribute("data-focus-key", &format!("remove:{kind}:{index}"));
         dom::add(&head, &remove);
         dom::add(&item, &head);
         // Field helpers below write into the row's two-column grid.
@@ -2568,107 +2711,166 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
         }
         dom::add(&d, &item);
     }
-    dom::add(
-        &d,
-        &dom::button(
-            &format!("Add {}", name.to_lowercase()),
-            "editor-row-add",
-            json!({"path":path,"kind":kind}),
-        ),
+    let add_btn = dom::button(
+        &format!("Add {}", name.to_lowercase()),
+        "editor-row-add",
+        json!({"path":path,"kind":kind}),
     );
-    dom::add(parent, &d);
+    let _ = add_btn.set_attribute("data-focus-key", &format!("add:{kind}"));
+    dom::add(&d, &add_btn);
+    d
 }
+
+fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &str) {
+    dom::add(parent, &build_rows_details(title, values, path, kind, kind));
+}
+
+fn build_editor_service_items(services: &[V]) -> Vec<V> {
+    let mut seen_paths = BTreeMap::<String, usize>::new();
+    services
+        .iter()
+        .enumerate()
+        .map(|(index, service)| {
+            let path = m::text(service, "path");
+            let base = if path.is_empty() {
+                format!("idx:{index}")
+            } else {
+                format!("path:{path}")
+            };
+            let count = seen_paths.entry(base.clone()).or_insert(0);
+            let key = if *count == 0 {
+                base
+            } else {
+                format!("{base}#{}", *count)
+            };
+            *count += 1;
+            json!({
+                "key": key,
+                "index": index,
+                "service": service,
+            })
+        })
+        .collect()
+}
+
+fn build_editor_service_card(item: &V) -> web_sys::Element {
+    let index = item["index"].as_u64().unwrap_or(0) as usize;
+    let service = &item["service"];
+    let base = format!("/services/{index}/passport");
+    let p = &service["passport"];
+    let path = m::text(service, "path");
+    let card = dom::el("section", "system-editor-service", "");
+    let head = dom::el("div", "system-editor-service-head", "");
+    let title = dom::el("div", "", "");
+    dom::add(&title, &dom::el("h5", "", &service_title(p, &path)));
+    dom::add(&title, &dom::el("p", "system-note", &path));
+    dom::add(&head, &title);
+    let actions = dom::el("div", "system-editor-service-actions", "");
+    for (label, action, payload, focus_key) in [
+        (
+            "Choose another folder",
+            "editor-service-folder",
+            json!(index),
+            "service-folder",
+        ),
+        (
+            "Remove service",
+            "editor-row-remove",
+            json!({"path":"/services","index":index}),
+            "service-remove",
+        ),
+    ] {
+        let button = dom::button(label, action, payload);
+        let _ = button.set_attribute("class", "button quiet");
+        let _ = button.set_attribute("data-focus-key", focus_key);
+        dom::add(&actions, &button);
+    }
+    dom::add(&head, &actions);
+    dom::add(&card, &head);
+    let grid = dom::el("div", "system-editor-grid", "");
+    for (key, label, kind, required, limit) in [
+        ("id", "Service ID", "text", true, 80),
+        ("owner", "Owning team", "text", true, 200),
+        ("description", "Service description", "textarea", true, 2000),
+    ] {
+        field(
+            &grid,
+            label,
+            &p[key],
+            &format!("{base}/{key}"),
+            kind,
+            &[],
+            (required, limit),
+        );
+    }
+    dom::add(&card, &grid);
+    field(
+        &card,
+        "I have described all known dependencies",
+        &p["relationships_complete"],
+        &format!("{base}/relationships_complete"),
+        "checkbox",
+        &[],
+        (false, 200),
+    );
+    for (key, title) in [
+        ("capabilities", "Capabilities"),
+        ("provides", "Provided contracts"),
+        ("consumes", "Consumed contracts"),
+        ("sources", "Sources of context"),
+    ] {
+        rows(&card, title, &p[key], &format!("{base}/{key}"), key);
+    }
+    card
+}
+
 fn render_editor() {
     let data = m::data("editor");
     if !data.is_object() {
         return;
     }
     dom::hidden("system-editor", false);
-    dom::set_value("system-editor-name", &m::text(&data, "name"));
-    dom::text(
-        "system-editor-location",
-        &format!(
-            "{} / {}",
-            m::text(&m::project(&m::text(&data, "project_id")), "path"),
-            m::text(&data, "config_path")
-        ),
+    let name = m::text(&data, "name");
+    if dom::value("system-editor-name") != name {
+        dom::set_value("system-editor-name", &name);
+    }
+    let location = format!(
+        "{} / {}",
+        m::text(&m::project(&m::text(&data, "project_id")), "path"),
+        m::text(&data, "config_path")
     );
-    dom::clear("system-editor-services");
-    dom::clear("system-editor-shared");
-    for (index, service) in m::array(&data["services"]).into_iter().enumerate() {
-        let base = format!("/services/{index}/passport");
-        let p = &service["passport"];
-        let path = m::text(&service, "path");
-        let card = dom::el("section", "system-editor-service", "");
-        let head = dom::el("div", "system-editor-service-head", "");
-        let title = dom::el("div", "", "");
-        dom::add(&title, &dom::el("h5", "", &service_title(p, &path)));
-        dom::add(&title, &dom::el("p", "system-note", &path));
-        dom::add(&head, &title);
-        let actions = dom::el("div", "system-editor-service-actions", "");
-        for (label, action, payload) in [
-            (
-                "Choose another folder",
-                "editor-service-folder",
-                json!(index),
-            ),
-            (
-                "Remove service",
-                "editor-row-remove",
-                json!({"path":"/services","index":index}),
-            ),
-        ] {
-            let button = dom::button(label, action, payload);
-            let _ = button.set_attribute("class", "button quiet");
-            dom::add(&actions, &button);
-        }
-        dom::add(&head, &actions);
-        dom::add(&card, &head);
-        let grid = dom::el("div", "system-editor-grid", "");
-        for (key, label, kind, required, limit) in [
-            ("id", "Service ID", "text", true, 80),
-            ("owner", "Owning team", "text", true, 200),
-            ("description", "Service description", "textarea", true, 2000),
-        ] {
-            field(
-                &grid,
-                label,
-                &p[key],
-                &format!("{base}/{key}"),
-                kind,
-                &[],
-                (required, limit),
-            );
-        }
-        dom::add(&card, &grid);
-        field(
-            &card,
-            "I have described all known dependencies",
-            &p["relationships_complete"],
-            &format!("{base}/relationships_complete"),
-            "checkbox",
-            &[],
-            (false, 200),
-        );
-        for (key, title) in [
-            ("capabilities", "Capabilities"),
-            ("provides", "Provided contracts"),
-            ("consumes", "Consumed contracts"),
-            ("sources", "Sources of context"),
-        ] {
-            rows(&card, title, &p[key], &format!("{base}/{key}"), key);
-        }
-        dom::append("system-editor-services", &card);
+    if dom::get("system-editor-location")
+        .and_then(|e| e.text_content())
+        .as_deref()
+        != Some(location.as_str())
+    {
+        dom::text("system-editor-location", &location);
     }
-    if let Some(e) = dom::get("system-editor-shared") {
-        rows(
-            &e,
-            "Shared sources",
-            &data["shared_sources"],
-            "/shared_sources",
-            "sources",
-        );
-    }
+    let service_items = build_editor_service_items(&m::array(&data["services"]));
+    dom::keyed_render(
+        "system-editor-services",
+        &service_items,
+        |item| m::text(item, "key"),
+        build_editor_service_card,
+    );
+    let shared_items = [json!({
+        "key": "shared_sources",
+        "values": data["shared_sources"],
+    })];
+    dom::keyed_render(
+        "system-editor-shared",
+        &shared_items,
+        |item| m::text(item, "key"),
+        |item| {
+            build_rows_details(
+                "Shared sources",
+                &item["values"],
+                "/shared_sources",
+                "sources",
+                "shared_sources",
+            )
+        },
+    );
     controls();
 }
 fn pointer_token(token: &str) -> Option<String> {
@@ -2906,7 +3108,10 @@ async fn save_editor() {
                     "System saved. The map shows the saved services.",
                 );
             } else {
-                dom::text("system-editor-status", "Save did not complete. The form is retained; reload metadata before retrying if files changed.");
+                dom::text(
+                    "system-editor-status",
+                    "Save did not complete. The form is retained; reload metadata before retrying if files changed.",
+                );
             }
         }
         controls();
@@ -3007,7 +3212,14 @@ fn proposal(v: &V, draft: &V) {
     }
     dom::clear("system-discovery-report");
     dom::hidden("system-discovery-report", false);
-    dom::append("system-discovery-report",&dom::el("p","system-note","AI filled the forms. Verify sources, ownership and dependencies before saving. Complete dependency coverage remains unconfirmed."));
+    dom::append(
+        "system-discovery-report",
+        &dom::el(
+            "p",
+            "system-note",
+            "AI filled the forms. Verify sources, ownership and dependencies before saving. Complete dependency coverage remains unconfirmed.",
+        ),
+    );
     for warning in m::array(&v["warnings"]) {
         dom::append(
             "system-discovery-report",
@@ -3079,7 +3291,10 @@ async fn discovery_poll(epoch: u64) {
             } else {
                 if job["proposal"].is_object() {
                     proposal(&job["proposal"], &job["draft"]);
-                    dom::text("system-editor-status","AI filled service details. Review sources and uncertainties, then Save system.");
+                    dom::text(
+                        "system-editor-status",
+                        "AI filled service details. Review sources and uncertainties, then Save system.",
+                    );
                 } else {
                     dom::text(
                         "system-discovery-status",
@@ -3180,6 +3395,75 @@ async fn restore_discovery() {
         _ => {}
     }
 }
+fn resolve_agent_launch_selection(
+    launches: &[V],
+    prev_count: u64,
+    preferred: &str,
+) -> (String, bool) {
+    let latest = launches
+        .last()
+        .map(|l| m::text(l, "session_id"))
+        .unwrap_or_default();
+    let sid = if prev_count != launches.len() as u64
+        || !launches.iter().any(|l| l["session_id"] == preferred)
+    {
+        latest.clone()
+    } else {
+        preferred.to_owned()
+    };
+    let is_current = sid == latest;
+    (sid, is_current)
+}
+
+fn build_agent_launch_options(launches: &[V]) -> Vec<V> {
+    launches
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            json!({
+                "id": l["session_id"],
+                "label": format!(
+                    "Launch {} · {}",
+                    i + 1,
+                    m::label(l["status"].as_str().unwrap_or(""))
+                )
+            })
+        })
+        .collect()
+}
+
+fn sync_agent_launch_options(options: &[V], selected: Option<&str>) {
+    let Some(select) = dom::get("system-agents-launch") else {
+        return;
+    };
+    let current = dom::children(&select)
+        .into_iter()
+        .map(|opt| {
+            (
+                opt.get_attribute("value").unwrap_or_default(),
+                opt.text_content().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = if options.is_empty() {
+        vec![(String::new(), "None available".to_owned())]
+    } else {
+        options
+            .iter()
+            .map(|o| (m::text(o, "id"), m::summary(o)))
+            .collect::<Vec<_>>()
+    };
+    if current == expected {
+        if let Some(sid) = selected {
+            if dom::value_of(&select) != sid {
+                dom::set_element_value(&select, sid);
+            }
+        }
+        return;
+    }
+    dom::options("system-agents-launch", options, m::summary, selected);
+}
+
 async fn agents(v: &V) {
     let launches = m::array(&v["launches"]);
     let show_agents = run_has_agent_activity(v);
@@ -3192,48 +3476,21 @@ async fn agents(v: &V) {
     let (sid, current) = if launches.is_empty() {
         m::set("agent-launch-count", json!(0));
         m::set("system-agent-launch", json!(""));
+        sync_agent_launch_options(&[], None);
         dom::hidden("system-agents-launch-field", true);
         (String::new(), true)
     } else {
-        let latest = launches
-            .last()
-            .map(|l| m::text(l, "session_id"))
-            .unwrap_or_default();
         let count = m::data("agent-launch-count").as_u64().unwrap_or(0);
         let preferred = m::data("system-agent-launch")
             .as_str()
             .map(str::to_owned)
             .unwrap_or_default();
-        let sid = if count != launches.len() as u64
-            || !launches.iter().any(|l| l["session_id"] == preferred)
-        {
-            latest.clone()
-        } else {
-            preferred
-        };
+        let (sid, is_current) = resolve_agent_launch_selection(&launches, count, &preferred);
         m::set("agent-launch-count", json!(launches.len()));
         m::set("system-agent-launch", json!(sid.clone()));
-        dom::options(
-            "system-agents-launch",
-            &launches
-                .iter()
-                .enumerate()
-                .map(|(i, l)| {
-                    json!({
-                        "id": l["session_id"],
-                        "label": format!(
-                            "Launch {} · {}",
-                            i + 1,
-                            m::label(l["status"].as_str().unwrap_or(""))
-                        )
-                    })
-                })
-                .collect::<Vec<_>>(),
-            m::summary,
-            Some(&sid),
-        );
+        let options = build_agent_launch_options(&launches);
+        sync_agent_launch_options(&options, Some(&sid));
         dom::hidden("system-agents-launch-field", launches.len() < 2);
-        let is_current = sid == latest;
         (sid, is_current)
     };
     let mut steps = m::array(&v["execution"]["steps"]);
@@ -3560,21 +3817,8 @@ pub async fn event(
             dom::hidden("system-editor", true);
             layout();
         }
-        "system-editor-discard" => {
-            if !m::yes(&m::data("editor-pending")) {
-                clear_editor_notices();
-                remember_discovery(None);
-                m::next("discovery");
-                dom::cancel_timer("discovery-poll");
-                crate::activity::reset("system-discovery-agent");
-                m::take("discovery-owner");
-                m::next("editor-scope");
-                m::take("editor");
-                m::set("editor-dirty", json!(false));
-                dom::hidden("system-editor", true);
-                controls();
-            }
-        }
+        "system-editor-discard" => discard_editor_draft(false),
+        "system-editor-lock-discard" => discard_editor_draft(true),
         "system-plan-change" | "system-new-change" => {
             if m::data("system-catalog").is_null() {
                 catalog_load().await;
@@ -4215,11 +4459,15 @@ mod display_tests {
     fn a_handoff_says_what_memory_the_outcome_became() {
         let title = "System change refunds: check receipts";
         assert_eq!(
-            handoff_memory(&json!({"memory":{"status":"applied","review_mode":"automatic","memory_id":"MEM-1","title":title}})),
+            handoff_memory(
+                &json!({"memory":{"status":"applied","review_mode":"automatic","memory_id":"MEM-1","title":title}})
+            ),
             "\nShared as system memory: System change refunds: check receipts (MEM-1). Later changes give it to every agent."
         );
         assert_eq!(
-            handoff_memory(&json!({"memory":{"status":"proposed","review_mode":"human","proposal_id":"p1","title":title}})),
+            handoff_memory(
+                &json!({"memory":{"status":"proposed","review_mode":"human","proposal_id":"p1","title":title}})
+            ),
             "\nProposed as system memory: System change refunds: check receipts (proposal p1). The system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply."
         );
         assert_eq!(
@@ -4502,5 +4750,98 @@ mod display_tests {
             ]
         );
         assert!(overlap_rows(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn receipt_render_items_key_by_phase_attempt_and_preserve_accepted_and_overlaps() {
+        let receipts = vec![
+            json!({ "phase": "contracts", "attempt": 1, "ok": true }),
+            json!({ "phase": "verify", "attempt": 1, "ok": false }),
+            json!({ "phase": "verify", "attempt": 1, "ok": true }),
+        ];
+        let steps = vec![json!({
+            "id": "verify",
+            "attempt": 1,
+            "accepted_unrun_checks": ["phpstan"]
+        })];
+        let overlaps = vec![(
+            "orders/src/Order.php".to_owned(),
+            "service-orders → verify".to_owned(),
+            Some(("orders".to_owned(), "src/Order.php".to_owned())),
+        )];
+        let items = build_receipt_render_items(&receipts, &steps, &overlaps);
+        let keys: Vec<String> = items.iter().map(|i| m::text(i, "key")).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "receipt:contracts:1",
+                "receipt:verify:1",
+                "receipt:verify:1#1",
+                "overlaps",
+            ]
+        );
+        assert_eq!(items[0]["accepted"], false);
+        assert_eq!(items[1]["accepted"], true);
+        assert_eq!(items[3]["kind"], "overlaps");
+    }
+
+    #[test]
+    fn editor_service_items_key_by_path_with_index_updates_and_collision_fallback() {
+        let services = vec![
+            json!({ "path": "services/orders", "passport": { "id": "orders" } }),
+            json!({ "path": "", "passport": { "id": "draft" } }),
+            json!({ "path": "services/orders", "passport": { "id": "orders-dup" } }),
+        ];
+        let items = build_editor_service_items(&services);
+        assert_eq!(items[0]["key"], "path:services/orders");
+        assert_eq!(items[0]["index"], 0);
+        assert_eq!(items[1]["key"], "idx:1");
+        assert_eq!(items[1]["index"], 1);
+        assert_eq!(items[2]["key"], "path:services/orders#1");
+        assert_eq!(items[2]["index"], 2);
+    }
+
+    #[test]
+    fn editor_lock_state_offers_discard_only_when_dirty_and_not_scanning() {
+        assert_eq!(editor_lock_state(false, false), ("", "", false));
+        let (state, msg, show_discard) = editor_lock_state(false, true);
+        assert_eq!(state, "dirty");
+        assert!(msg.contains("unsaved changes"));
+        assert!(show_discard);
+        let (scan_state, scan_msg, scan_discard) = editor_lock_state(true, true);
+        assert_eq!(scan_state, "scanning");
+        assert!(scan_msg.contains("AI scan"));
+        assert!(!scan_discard);
+    }
+
+    #[test]
+    fn agent_launch_options_and_selection_humanize_labels_and_track_latest() {
+        let launches = vec![
+            json!({ "session_id": "s1", "status": "completed" }),
+            json!({ "session_id": "s2", "status": "needs_review" }),
+        ];
+        let options = build_agent_launch_options(&launches);
+        assert_eq!(
+            options,
+            vec![
+                json!({ "id": "s1", "label": "Launch 1 · completed" }),
+                json!({ "id": "s2", "label": "Launch 2 · needs review" }),
+            ]
+        );
+        // Preserves user's chosen earlier launch when launch count didn't change
+        assert_eq!(
+            resolve_agent_launch_selection(&launches, 2, "s1"),
+            ("s1".to_owned(), false)
+        );
+        // Advances to newest launch when a new launch was added
+        assert_eq!(
+            resolve_agent_launch_selection(&launches, 1, "s1"),
+            ("s2".to_owned(), true)
+        );
+        // Falls back to latest when preferred no longer exists
+        assert_eq!(
+            resolve_agent_launch_selection(&launches, 2, "missing"),
+            ("s2".to_owned(), true)
+        );
     }
 }
