@@ -1869,6 +1869,23 @@ fn permission(event: &V) {
     }
 }
 
+fn expired_permission_event(
+    request_id: &str,
+    provider: &str,
+    tool: &str,
+    summary: &str,
+    detail: &str,
+) -> V {
+    json!({
+        "request_id": request_id,
+        "state": "expired",
+        "provider": provider,
+        "tool": tool,
+        "summary": summary,
+        "detail": detail,
+    })
+}
+
 /// Reconciles live waiting permission requests returned by `sessions.get`.
 pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
     let mut live_ids = std::collections::BTreeSet::new();
@@ -1908,12 +1925,19 @@ pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
             .as_ref()
             .and_then(|block| block.get_attribute("data-tool"))
             .unwrap_or_default();
-        permission(&json!({
-            "request_id": id,
-            "state": "expired",
-            "provider": provider,
-            "tool": tool,
-        }));
+        let summary = card
+            .as_ref()
+            .and_then(|block| permission_child(block, "permission-summary", None))
+            .and_then(|el| el.text_content())
+            .unwrap_or_default();
+        let detail = card
+            .as_ref()
+            .and_then(|block| permission_child(block, "permission-detail", Some("detail")))
+            .and_then(|el| el.text_content())
+            .unwrap_or_default();
+        permission(&expired_permission_event(
+            &id, &provider, &tool, &summary, &detail,
+        ));
     }
 }
 
@@ -4709,5 +4733,16 @@ mod permission_tests {
             permission_notification_body(&json!({})),
             "Waiting for your answer in Harness."
         );
+        let expired = expired_permission_event(
+            "cursor-1",
+            "cursor",
+            "Shell",
+            "touch out.txt",
+            "Not in allowlist",
+        );
+        assert_eq!(expired["state"], "expired");
+        assert_eq!(expired["summary"], "touch out.txt");
+        assert_eq!(expired["detail"], "Not in allowlist");
+        assert_eq!(permission_heading(&expired), "No longer waiting · Shell");
     }
 }

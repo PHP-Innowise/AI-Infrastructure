@@ -1109,6 +1109,7 @@ pub fn controls() {
     merge_controls();
     inbox::render();
     run::render();
+    refresh_provider_hint();
     sync_working_indicator();
 }
 
@@ -2715,6 +2716,29 @@ pub async fn load_git() {
     knowledge::load_brain_link().await;
     management::load_attachment().await;
 }
+fn provider_sign_in_note(sign_in: &V, provider_id: &str, provider_name: &str) -> String {
+    let state = &sign_in["states"][provider_id];
+    if state["state"] == "signed_out" {
+        let name = if provider_name.is_empty() {
+            provider_id
+        } else {
+            provider_name
+        };
+        format!(
+            "{name} is not signed in. Sign in from a terminal with {}, then send again.",
+            state["login"].as_str().unwrap_or("the provider CLI")
+        )
+    } else {
+        String::new()
+    }
+}
+fn refresh_provider_hint() {
+    let chosen = dom::value("provider");
+    let sign_in = m::data("sign-in");
+    let note = provider_sign_in_note(&sign_in, &chosen, &m::summary(&m::provider(&chosen)));
+    dom::text("provider-hint", &note);
+    dom::hidden("provider-hint", note.is_empty());
+}
 pub async fn sign_in(refresh: bool) {
     if m::read(|s| s.boot.is_null() || s.auth_failed) || m::yes(&m::data("sign-in-pending")) {
         return;
@@ -2740,20 +2764,9 @@ pub async fn sign_in(refresh: bool) {
             }
         }
         v["states"] = states;
-        let chosen = dom::value("provider");
-        let state = &v["states"][&chosen];
-        let note = if state["state"] == "signed_out" {
-            format!(
-                "{} is not signed in. Sign in from a terminal with {}, then send again.",
-                m::summary(&m::provider(&chosen)),
-                state["login"].as_str().unwrap_or("the provider CLI")
-            )
-        } else {
-            String::new()
-        };
-        dom::text("provider-hint", &note);
         m::set("sign-in", v);
         m::set("sign-in-at", json!(js_sys::Date::now()));
+        refresh_provider_hint();
     }
     m::set("sign-in-pending", json!(false));
     sync_working_indicator();
@@ -3648,6 +3661,7 @@ pub async fn event(
                 for prefix in ["routing-plan-", "routing-edit-"] {
                     models(prefix, Some(String::new()));
                 }
+                refresh_provider_hint();
             }
             mark_dirty_for_id(id);
             controls();
@@ -4558,6 +4572,21 @@ mod session_contract_tests {
         assert_eq!(output_resize_percent(40., 480.), 100);
         assert_eq!(output_resize_percent(600., 480.), 0);
         assert_eq!(output_resize_percent(80., 80.), 100);
+    }
+    #[test]
+    fn provider_sign_in_note_formats_signed_out_and_clears_when_signed_in() {
+        let sign_in = json!({
+            "states": {
+                "claude": {"state": "signed_out", "login": "claude login"},
+                "codex": {"state": "signed_in", "login": "codex login"},
+            }
+        });
+        assert_eq!(
+            provider_sign_in_note(&sign_in, "claude", "Claude Code"),
+            "Claude Code is not signed in. Sign in from a terminal with claude login, then send again."
+        );
+        assert_eq!(provider_sign_in_note(&sign_in, "codex", "Codex"), "");
+        assert_eq!(provider_sign_in_note(&V::Null, "claude", "Claude Code"), "");
     }
     #[test]
     fn poll_apply_settings_skips_dirty_and_unchanged_groups() {
