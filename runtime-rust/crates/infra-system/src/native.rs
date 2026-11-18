@@ -156,6 +156,24 @@ pub fn use_scratch(
     }
     Ok(prepared)
 }
+#[inline(never)]
+fn discover_providers_boxed() -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = infra_host::Result<Vec<infra_host::provider::Provider>>>
+            + Send,
+    >,
+> {
+    Box::pin(async move { infra_host::provider::discover(&BTreeMap::new()).await })
+}
+
+#[inline(never)]
+fn executable_boxed<'a>(
+    provider: &'a str,
+    explicit: Option<&'a str>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf>> + Send + 'a>> {
+    Box::pin(executable(provider, explicit))
+}
+
 pub async fn executable(provider: &str, explicit: Option<&str>) -> Result<PathBuf> {
     if !["codex", "claude", "cursor", "command"].contains(&provider) {
         return Err(fail("Invalid worker provider"));
@@ -168,7 +186,7 @@ pub async fn executable(provider: &str, explicit: Option<&str>) -> Result<PathBu
                 "Command provider requires explicit trusted executable",
             ));
         }
-        infra_host::provider::discover(&BTreeMap::new())
+        discover_providers_boxed()
             .await
             .map_err(host)?
             .into_iter()
@@ -764,7 +782,7 @@ pub(crate) async fn create_run_context_with_options(
     tell_agents_graph: Option<bool>,
     adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
 ) -> Result<Value> {
-    create_run_context_with_permissions(
+    create_run_context_with_permissions_boxed(
         system,
         plan,
         directory,
@@ -778,6 +796,39 @@ pub(crate) async fn create_run_context_with_options(
         adapter,
     )
     .await
+}
+
+#[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Boxing helper isolates create_run_context_with_permissions onto the heap for 2 MiB debug stacks."
+)]
+fn create_run_context_with_permissions_boxed<'a>(
+    system: &'a mut System,
+    plan: &'a Value,
+    directory: &'a Path,
+    provider: &'a str,
+    explicit: Option<&'a str>,
+    mode: &'a str,
+    timeout: u64,
+    access: &'a str,
+    tell_agents_graph: Option<bool>,
+    permissions: Option<&'a str>,
+    adapter: Option<&'a dyn infra_host::provider::LaunchAdapter>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    Box::pin(create_run_context_with_permissions(
+        system,
+        plan,
+        directory,
+        provider,
+        explicit,
+        mode,
+        timeout,
+        access,
+        tell_agents_graph,
+        permissions,
+        adapter,
+    ))
 }
 
 #[expect(
@@ -817,7 +868,7 @@ pub(crate) async fn create_run_context_with_permissions(
     if access == "all" && !["codex", "claude", "command"].contains(&provider) {
         return Err(fail("Provider CLI cannot access other service folders"));
     }
-    let executable = executable(provider, explicit).await?;
+    let executable = executable_boxed(provider, explicit).await?;
     let directory = absolute(directory)?;
     let run = id32();
     let mut roots = object!({"__system__":system.root});
@@ -1313,7 +1364,7 @@ pub async fn create_run_with_permissions(
     tell_agents_graph: Option<bool>,
     permissions: Option<&str>,
 ) -> Result<Value> {
-    create_run_context_with_permissions(
+    create_run_context_with_permissions_boxed(
         system,
         plan,
         directory,
