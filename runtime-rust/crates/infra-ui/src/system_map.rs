@@ -33,6 +33,13 @@ const CAMERA_MIN: f64 = 0.25;
 const CAMERA_MAX: f64 = 2.4;
 const ZOOM_STEP: f64 = 1.25;
 const DRAG_THRESHOLD_PX: f64 = 4.0;
+const LOD_FAR: f64 = 0.55;
+const LOD_NEAR: f64 = 1.25;
+const RADAR_WIDTH: f64 = 176.0;
+const RADAR_HEIGHT: f64 = 112.0;
+const RADAR_DRAG_KEY: &str = "system-map-radar-drag";
+const SYS_PORT_GAP: f64 = 6.0;
+const SYS_PORT_SPREAD: f64 = 18.0;
 
 #[derive(Clone, Copy)]
 pub struct SysMapSurface {
@@ -293,24 +300,144 @@ fn contract_arrow_defs_svg(id_prefix: &str) -> String {
     defs
 }
 
-/// Accessible legend of all 7 cross-service contract & code arrow kinds plus drift/risk halos.
-pub fn contract_arrow_legend_html() -> String {
+fn contract_spec_index(kind: &str) -> usize {
+    let norm = normalize_contract_arrow_kind(kind);
+    CONTRACT_ARROW_SPECS
+        .iter()
+        .position(|s| s.kind == norm)
+        .unwrap_or(0)
+}
+
+/// Returns which of the 7 contract arrow kinds are hidden in `state["kinds_off"]`.
+pub fn hidden_contract_kinds(state: &V) -> [bool; 7] {
+    let mut hidden = [false; 7];
+    for entry in m::array(&state["kinds_off"]) {
+        if let Some(kind) = entry.as_str() {
+            let idx = CONTRACT_ARROW_SPECS
+                .iter()
+                .position(|s| s.kind == kind.trim().to_ascii_lowercase());
+            if let Some(i) = idx {
+                hidden[i] = true;
+            }
+        }
+    }
+    hidden
+}
+
+/// Counts edges matching each of the 7 canonical contract arrow kinds in `doc`.
+pub fn contract_kind_counts(doc: &V) -> [u64; 7] {
+    let mut counts = [0u64; 7];
+    for edge in m::array(&doc["edges"]) {
+        if m::yes(&edge["child_link"]) {
+            continue;
+        }
+        let kind = primary_edge_kind(&edge);
+        counts[contract_spec_index(kind)] += 1;
+    }
+    counts
+}
+
+fn write_hidden_contract_kinds(mut state: V, hidden: [bool; 7]) -> V {
+    let list: Vec<&'static str> = CONTRACT_ARROW_SPECS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| hidden[i].then_some(s.kind))
+        .collect();
+    state["kinds_off"] = json!(list);
+    state
+}
+
+/// Toggles or isolates (`solo == true`, e.g. Alt+click) one contract kind in `state["kinds_off"]`.
+/// Never allows hiding all 7 kinds at once; if hiding the last visible kind, keeps at least one shown.
+pub fn switched_contract_kind(state: V, kind: &str, solo: bool) -> V {
+    let idx = contract_spec_index(kind);
+    let current = hidden_contract_kinds(&state);
+    let mut next = current;
+    if solo {
+        let already_solo = (0..7).all(|i| current[i] == (i != idx));
+        if already_solo {
+            next = [false; 7];
+        } else {
+            for (i, slot) in next.iter_mut().enumerate() {
+                *slot = i != idx;
+            }
+        }
+    } else {
+        next[idx] = !current[idx];
+        if next.iter().all(|h| *h) {
+            next = [false; 7];
+        }
+    }
+    write_hidden_contract_kinds(state, next)
+}
+
+/// Resets or applies a preset (`"all"`) on contract kind visibility in `state["kinds_off"]`.
+pub fn preset_contract_kinds(state: V, preset: &str) -> V {
+    match preset {
+        "all" => write_hidden_contract_kinds(state, [false; 7]),
+        _ => state,
+    }
+}
+
+/// Interactive filter switchboard + accessible legend of all 7 cross-service contract & code arrow kinds.
+pub fn contract_arrow_legend_html_for(surface: SysMapSurface, doc: &V, state: &V) -> String {
+    let hidden = hidden_contract_kinds(state);
+    let counts = contract_kind_counts(doc);
+    let has_counts = counts.iter().any(|c| *c > 0);
+    let any_hidden = hidden.iter().any(|h| *h);
     let mut html = String::from(
         "<div class=\"graph-arrow-legend system-arrow-legend\" role=\"list\" aria-label=\"Cross-service contract and dependency arrow types\"><span class=\"graph-arrow-legend-title\">Links:</span>",
     );
-    for spec in CONTRACT_ARROW_SPECS {
+    for (idx, spec) in CONTRACT_ARROW_SPECS.iter().enumerate() {
+        let shown = !hidden[idx];
+        let count = counts[idx];
         let dash = spec
             .dash_array
             .map(|d| format!(" stroke-dasharray=\"{d}\""))
             .unwrap_or_default();
+        let payload = payload_attr(&json!({
+            "surface": surface.id,
+            "kind": spec.kind,
+        }));
+        let title = if has_counts {
+            format!(
+                "{} · {} links (click to {}, Alt+click to isolate)",
+                spec.description,
+                count,
+                if shown { "hide" } else { "show" }
+            )
+        } else {
+            format!(
+                "{} (click to {}, Alt+click to isolate)",
+                spec.description,
+                if shown { "hide" } else { "show" }
+            )
+        };
+        let count_html = if count > 0 {
+            format!("<span class=\"graph-arrow-legend-count\">{count}</span>")
+        } else {
+            String::new()
+        };
         html.push_str(&format!(
-            "<span class=\"graph-arrow-legend-item\" role=\"listitem\" title=\"{}\"><svg class=\"graph-arrow-swatch system-arrow-swatch\" data-sys-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"system-map-arrow system-map-arrow-{}\">{}</g></svg><span>{}</span></span>",
-            escape(spec.description),
+            "<button type=\"button\" class=\"graph-arrow-legend-item\" role=\"listitem\" data-action=\"system-map-kind-toggle\" data-surface=\"{}\" data-payload=\"{payload}\" data-sys-edge-kind=\"{}\" aria-pressed=\"{shown}\" title=\"{}\"><svg class=\"graph-arrow-swatch system-arrow-swatch\" data-sys-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"system-map-arrow system-map-arrow-{}\">{}</g></svg><span>{}</span>{count_html}</button>",
+            surface.id,
+            spec.kind,
+            escape(&title),
             spec.kind,
             spec.swatch_line_end,
             spec.kind,
             spec.marker_body,
             spec.label,
+        ));
+    }
+    if any_hidden {
+        let all_payload = payload_attr(&json!({
+            "surface": surface.id,
+            "preset": "all",
+        }));
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-kind-preset\" data-surface=\"{}\" data-payload=\"{all_payload}\" title=\"Show all contract and code link types\">Show all</button>",
+            surface.id,
         ));
     }
     html.push_str(
@@ -324,6 +451,12 @@ pub fn contract_arrow_legend_html() -> String {
     );
     html.push_str("</div>");
     html
+}
+
+/// Accessible legend of all 7 cross-service contract & code arrow kinds plus drift/risk halos.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn contract_arrow_legend_html() -> String {
+    contract_arrow_legend_html_for(SERVICES_SURFACE, &V::Null, &default_surface_state())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -426,18 +559,112 @@ fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
     }
 }
 
+/// Returns the zoom LOD bucket (`"far"`, `"mid"`, or `"near"`) for CSS decluttering.
+pub fn lod(scale: f64) -> &'static str {
+    if !scale.is_finite() || scale < LOD_FAR {
+        "far"
+    } else if scale >= LOD_NEAR {
+        "near"
+    } else {
+        "mid"
+    }
+}
+
+fn radar_size(picture: (f64, f64)) -> (f64, f64) {
+    let (pw, ph) = picture;
+    if !(pw > 0.0 && ph > 0.0) {
+        return (0.0, 0.0);
+    }
+    let scale = (RADAR_WIDTH / pw).min(RADAR_HEIGHT / ph);
+    (
+        (pw * scale).round().max(24.0),
+        (ph * scale).round().max(18.0),
+    )
+}
+
+/// Computes the visible rectangle in plane coordinates for the minimap viewport frame.
+/// Returns `None` if the entire map already fits inside the viewport.
+pub fn radar_window_rect(
+    corner: (f64, f64),
+    scale: f64,
+    room: (f64, f64),
+    picture: (f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    if !(scale.is_finite() && scale > 0.0 && picture.0 > 0.0 && picture.1 > 0.0) {
+        return None;
+    }
+    let side = |c: f64, r: f64, p: f64| {
+        let from = -c / scale;
+        let to = from + r / scale;
+        let all = from <= 0.5 / scale && to >= p - 0.5 / scale;
+        let (from, to) = (from.clamp(0.0, p), to.clamp(0.0, p));
+        (from, (to - from).max(0.0), all)
+    };
+    let (x, w, wide) = side(corner.0, room.0, picture.0);
+    let (y, h, tall) = side(corner.1, room.1, picture.1);
+    (!(wide && tall)).then_some((x, y, w, h))
+}
+
+/// Returns camera pan `(pan_x, pan_y)` that centers world `point` in `room` at `scale`.
+pub fn centred(point: (f64, f64), scale: f64, room: (f64, f64)) -> (f64, f64) {
+    (
+        (room.0 / 2.0 - point.0 * scale).round(),
+        (room.1 / 2.0 - point.1 * scale).round(),
+    )
+}
+
+fn sync_system_radar(surface: SysMapSurface, cam: &Camera) {
+    let radar_id = format!("{}-radar", surface.canvas_id);
+    let Some(radar) = dom::get(&radar_id) else {
+        return;
+    };
+    let (vw, vh, measured) = viewport_size(surface.canvas_id);
+    let seen = (measured && cam.plane_w > 0.0 && cam.plane_h > 0.0)
+        .then(|| {
+            radar_window_rect(
+                (cam.pan_x, cam.pan_y),
+                cam.scale,
+                (vw, vh),
+                (cam.plane_w, cam.plane_h),
+            )
+        })
+        .flatten();
+    let frame = radar.query_selector(".graph-radar-view").ok().flatten();
+    let (Some(seen), Some(frame)) = (seen, frame) else {
+        dom::hide(&radar, true);
+        return;
+    };
+    for (k, v) in [
+        ("x", seen.0),
+        ("y", seen.1),
+        ("width", seen.2),
+        ("height", seen.3),
+    ] {
+        let _ = frame.set_attribute(k, &format!("{v:.1}"));
+    }
+    dom::hide(&radar, false);
+}
+
 fn apply_camera(surface: SysMapSurface, cam: &Camera) {
     let pct = format!("{}%", (cam.scale * 100.0).round() as i64);
     dom::text(&format!("{}-zoom-level", surface.id_prefix), &pct);
     let Some(canvas) = dom::get(surface.canvas_id) else {
         return;
     };
+    let lod_val = lod(cam.scale);
+    let scale_text = format!("{:.4}", cam.scale);
+    let _ = canvas.set_attribute("data-lod", lod_val);
+    let _ = canvas.set_attribute("data-scale", &scale_text);
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
+        sync_system_radar(surface, cam);
         return;
     };
     let Some(plane_el) = plane.dyn_into::<web_sys::HtmlElement>().ok() else {
+        sync_system_radar(surface, cam);
         return;
     };
+    let _ = plane_el.set_attribute("data-lod", lod_val);
+    let _ = plane_el.set_attribute("data-scale", &scale_text);
     let style = format!(
         "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
         cam.plane_w.max(320.0),
@@ -450,6 +677,7 @@ fn apply_camera(surface: SysMapSurface, cam: &Camera) {
         cam.scale,
     );
     let _ = plane_el.set_attribute("style", &style);
+    sync_system_radar(surface, cam);
 }
 
 fn fit_surface_camera(surface: SysMapSurface) {
@@ -539,6 +767,7 @@ fn default_surface_state() -> V {
         "shared_side": "both_use",
         "shared_page": 0,
         "cycle_index": null,
+        "kinds_off": [],
         "overlay": {},
     })
 }
@@ -1810,7 +2039,7 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
     }
 
     // Compact empty columns when not in fixed 4-tier layers mode.
-    let active_cols: Vec<(usize, Vec<usize>)> = if layers_mode {
+    let mut active_cols: Vec<(usize, Vec<usize>)> = if layers_mode {
         (0..=3)
             .map(|tier| {
                 let members = cols.get(tier).cloned().unwrap_or_default();
@@ -1824,6 +2053,83 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
             .filter(|(_, m)| !m.is_empty())
             .collect()
     };
+
+    // Multi-pass barycenter ordering across columns (inspired by graph_map::plan_roomy)
+    // minimizes edge crossings while keeping `__system__` pinned last in its column.
+    if active_cols.len() > 1 {
+        let mut col_idx_by_node = vec![0usize; count];
+        let mut row_by_node = vec![0usize; count];
+        for (ci, (_, members)) in active_cols.iter().enumerate() {
+            for (ri, &u) in members.iter().enumerate() {
+                col_idx_by_node[u] = ci;
+                row_by_node[u] = ri;
+            }
+        }
+        let mut neighbors = vec![Vec::<usize>::new(); count];
+        for e in &all_edges {
+            if m::yes(&e["child_link"]) {
+                continue;
+            }
+            if let (Some(&u), Some(&v)) = (
+                top_idx_by_id.get(&m::text(e, "from")),
+                top_idx_by_id.get(&m::text(e, "to")),
+            ) {
+                if u != v && col_idx_by_node[u] != col_idx_by_node[v] {
+                    neighbors[u].push(v);
+                    neighbors[v].push(u);
+                }
+            }
+        }
+        for pass in 0..8usize {
+            let col_order: Vec<usize> = if pass % 2 == 0 {
+                (1..active_cols.len()).collect()
+            } else {
+                (0..active_cols.len().saturating_sub(1)).rev().collect()
+            };
+            for ci in col_order {
+                let prefer_left = pass % 2 == 0;
+                let mut scored: Vec<(bool, f64, usize)> = active_cols[ci]
+                    .1
+                    .iter()
+                    .map(|&u| {
+                        let is_sys = node_id(&top_nodes[u]) == "__system__";
+                        let preferred: Vec<usize> = neighbors[u]
+                            .iter()
+                            .copied()
+                            .filter(|&v| {
+                                if prefer_left {
+                                    col_idx_by_node[v] < ci
+                                } else {
+                                    col_idx_by_node[v] > ci
+                                }
+                            })
+                            .collect();
+                        let pool = if preferred.is_empty() {
+                            &neighbors[u]
+                        } else {
+                            &preferred
+                        };
+                        let score = if pool.is_empty() {
+                            row_by_node[u] as f64
+                        } else {
+                            let sum: usize = pool.iter().map(|&v| row_by_node[v]).sum();
+                            sum as f64 / pool.len() as f64
+                        };
+                        (is_sys, score, u)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    a.0.cmp(&b.0)
+                        .then_with(|| a.1.total_cmp(&b.1))
+                        .then_with(|| a.2.cmp(&b.2))
+                });
+                active_cols[ci].1 = scored.iter().map(|x| x.2).collect();
+                for (ri, &u) in active_cols[ci].1.iter().enumerate() {
+                    row_by_node[u] = ri;
+                }
+            }
+        }
+    }
 
     let mut placed_nodes = Vec::new();
     let mut frames = Vec::new();
@@ -1941,7 +2247,35 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
     let total_w = (cur_x - COL_GAP + MARGIN).max(420.0);
     let total_h = (max_y - ROW_GAP + MARGIN).max(240.0);
 
-    let mut wires = Vec::new();
+    struct CandidateWire {
+        edge_index: usize,
+        from: String,
+        to: String,
+        fx: f64,
+        fy: f64,
+        fw: f64,
+        fh: f64,
+        fcol: usize,
+        tx: f64,
+        ty: f64,
+        tw: f64,
+        th: f64,
+        tcol: usize,
+        back: bool,
+        src_side: u8,
+        dst_side: u8,
+    }
+
+    struct PortSlot {
+        other_y: f64,
+        back: bool,
+        cw_idx: usize,
+        is_src: bool,
+    }
+
+    let mut candidates = Vec::new();
+    let mut port_slots: BTreeMap<(String, u8), Vec<PortSlot>> = BTreeMap::new();
+
     for (edge_index, edge) in all_edges.iter().enumerate() {
         let from = m::text(edge, "from");
         let to = m::text(edge, "to");
@@ -1955,17 +2289,97 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
             continue;
         }
         let back = fcol > tcol || (fcol == tcol && fy > ty);
-        let (sx, sy, ex, ey) = if fcol < tcol {
-            (fx + fw, fy + fh / 2.0, tx, ty + th / 2.0)
+        let (src_side, dst_side) = if fcol < tcol {
+            (1u8, 0u8)
         } else if fcol > tcol {
-            (fx, fy + fh * 0.35, tx + tw, ty + th * 0.35)
+            (0u8, 1u8)
         } else {
-            (fx + fw, fy + fh / 2.0, tx + tw, ty + th / 2.0)
+            (1u8, 1u8)
         };
+        let cw_idx = candidates.len();
+        port_slots
+            .entry((from.clone(), src_side))
+            .or_default()
+            .push(PortSlot {
+                other_y: ty + th / 2.0,
+                back,
+                cw_idx,
+                is_src: true,
+            });
+        port_slots
+            .entry((to.clone(), dst_side))
+            .or_default()
+            .push(PortSlot {
+                other_y: fy + fh / 2.0,
+                back,
+                cw_idx,
+                is_src: false,
+            });
+        candidates.push(CandidateWire {
+            edge_index,
+            from,
+            to,
+            fx,
+            fy,
+            fw,
+            fh,
+            fcol,
+            tx,
+            ty,
+            tw,
+            th,
+            tcol,
+            back,
+            src_side,
+            dst_side,
+        });
+    }
+
+    let mut port_ranks: BTreeMap<(usize, bool), (usize, usize)> = BTreeMap::new();
+    for entries in port_slots.values_mut() {
+        entries.sort_by(|a, b| {
+            a.other_y
+                .total_cmp(&b.other_y)
+                .then_with(|| a.back.cmp(&b.back))
+                .then_with(|| a.cw_idx.cmp(&b.cw_idx))
+        });
+        let total = entries.len();
+        for (rank, slot) in entries.iter().enumerate() {
+            port_ranks.insert((slot.cw_idx, slot.is_src), (rank, total));
+        }
+    }
+
+    let spread_y = |top: f64, height: f64, base_frac: f64, rank: usize, total: usize| -> f64 {
+        if total <= 1 {
+            return top + height * base_frac;
+        }
+        let step = SYS_PORT_GAP.min((height * 0.55) / total as f64);
+        let offset = ((rank as f64 - (total as f64 - 1.0) / 2.0) * step)
+            .clamp(-SYS_PORT_SPREAD, SYS_PORT_SPREAD);
+        (top + height * base_frac + offset).clamp(top + 6.0, top + height - 6.0)
+    };
+
+    let mut wires = Vec::with_capacity(candidates.len());
+    for (cw_idx, cw) in candidates.into_iter().enumerate() {
+        let base_frac = if cw.fcol > cw.tcol { 0.35 } else { 0.5 };
+        let (s_rank, s_total) = port_ranks.get(&(cw_idx, true)).copied().unwrap_or((0, 1));
+        let (d_rank, d_total) = port_ranks.get(&(cw_idx, false)).copied().unwrap_or((0, 1));
+        let sx = if cw.src_side == 1 {
+            cw.fx + cw.fw
+        } else {
+            cw.fx
+        };
+        let ex = if cw.dst_side == 1 {
+            cw.tx + cw.tw
+        } else {
+            cw.tx
+        };
+        let sy = spread_y(cw.fy, cw.fh, base_frac, s_rank, s_total);
+        let ey = spread_y(cw.ty, cw.th, base_frac, d_rank, d_total);
         let dx = (ex - sx).abs().max(48.0) * 0.45;
-        let (c1x, c2x) = if fcol == tcol {
+        let (c1x, c2x) = if cw.fcol == cw.tcol {
             (sx + 44.0, ex + 44.0)
-        } else if fcol < tcol {
+        } else if cw.fcol < cw.tcol {
             (sx + dx, ex - dx)
         } else {
             (sx - dx, ex + dx)
@@ -1973,12 +2387,13 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
         let path_d = format!("M{sx:.1},{sy:.1} C{c1x:.1},{sy:.1} {c2x:.1},{ey:.1} {ex:.1},{ey:.1}");
         let mid_x = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
         let mid_y = 0.5 * (sy + ey);
+        let _ = (cw.from, cw.to);
         wires.push(PlacedSysWire {
-            edge_index,
+            edge_index: cw.edge_index,
             path_d,
             mid_x,
             mid_y,
-            back,
+            back: cw.back,
         });
     }
 
@@ -2273,16 +2688,118 @@ fn filtered_doc(doc: &V, state: &V) -> V {
     out
 }
 
+fn place_sys_edge_label(placed: &mut Vec<(f64, f64)>, candidate: (f64, f64)) -> (f64, f64) {
+    let clashes = |x: f64, y: f64, p: &(f64, f64)| (x - p.0).abs() < 56.0 && (y - p.1).abs() < 18.0;
+    for step in 0..8i32 {
+        let offsets: &[f64] = if step == 0 {
+            &[0.0]
+        } else {
+            &[18.0 * step as f64, -18.0 * step as f64]
+        };
+        for &dy in offsets {
+            let y = candidate.1 + dy;
+            if y >= 10.0 && !placed.iter().any(|p| clashes(candidate.0, y, p)) {
+                placed.push((candidate.0, y));
+                return (candidate.0, y);
+            }
+        }
+    }
+    placed.push(candidate);
+    candidate
+}
+
+/// Renders the SVG minimap radar for a laid-out system graph.
+pub fn system_radar_html(doc: &V, state: &V, layout: &SysLayout) -> String {
+    let (rw, rh) = radar_size((layout.width, layout.height));
+    if rw <= 0.0 || layout.nodes.is_empty() {
+        return String::new();
+    }
+    let focus_id = m::text(state, "focus");
+    let overlay = &state["overlay"];
+    let seeds: BTreeSet<String> = m::array(&overlay["seed_services"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let blast_doc = filtered_doc(doc, state);
+    let seed_vec: Vec<String> = seeds.iter().cloned().collect();
+    let changed_contracts: Vec<String> = m::array(&overlay["changed_contracts"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let depth = overlay["depth"].as_u64().unwrap_or(32) as usize;
+    let blast = compute_blast_radius(&blast_doc, &seed_vec, &changed_contracts, depth);
+
+    let mut svg = format!(
+        "<svg class=\"graph-radar-picture\" width=\"{rw:.0}\" height=\"{rh:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\" focusable=\"false\">",
+        layout.width, layout.height, layout.width, layout.height
+    );
+    for frame in &layout.frames {
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-frame\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"/>",
+            frame.x, frame.y, frame.w, frame.h
+        ));
+    }
+    for placed in &layout.nodes {
+        let state_attr = if placed.id == focus_id {
+            " data-state=\"selected\""
+        } else if seeds.contains(&placed.id)
+            || blast.direct_consumers.contains(&placed.id)
+            || blast.downstream_consumers.contains(&placed.id)
+        {
+            " data-state=\"changed\""
+        } else if placed.cycle {
+            " data-state=\"cycle\""
+        } else {
+            ""
+        };
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-box\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"{state_attr}/>",
+            placed.x, placed.y, placed.w, placed.h
+        ));
+    }
+    svg.push_str(
+        "<rect class=\"graph-radar-view\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"/></svg>",
+    );
+    svg
+}
+
+/// Renders the interactive SVG + HTML plane AND its minimap radar for `render_surface`.
+pub fn render_canvas_with_radar(
+    surface: SysMapSurface,
+    doc: &V,
+    state: &V,
+) -> (String, String, f64, f64) {
+    let view_doc = filtered_doc(doc, state);
+    let layers_mode = m::yes(&state["layers"]);
+    let layout = layout_system_nodes(&view_doc, layers_mode);
+    let plane_html = render_canvas_html_with_layout(surface, &view_doc, state, &layout);
+    let radar_svg = system_radar_html(doc, state, &layout);
+    (plane_html, radar_svg, layout.width, layout.height)
+}
+
 /// Renders the interactive SVG + HTML plane for `#system-map-canvas` or `#system-change-topology-canvas`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String, f64, f64) {
     let view_doc = filtered_doc(doc, state);
     let layers_mode = m::yes(&state["layers"]);
     let layout = layout_system_nodes(&view_doc, layers_mode);
+    let html = render_canvas_html_with_layout(surface, &view_doc, state, &layout);
+    (html, layout.width, layout.height)
+}
+
+fn render_canvas_html_with_layout(
+    surface: SysMapSurface,
+    view_doc: &V,
+    state: &V,
+    layout: &SysLayout,
+) -> String {
+    let layers_mode = m::yes(&state["layers"]);
+    let view_doc = view_doc.clone();
     let nodes = m::array(&view_doc["nodes"]);
     let edges = m::array(&view_doc["edges"]);
 
     if nodes.is_empty() {
-        return (String::new(), 0.0, 0.0);
+        return String::new();
     }
 
     let mut node_by_id = BTreeMap::new();
@@ -2456,6 +2973,9 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         ));
     }
 
+    let hidden_kinds = hidden_contract_kinds(state);
+    let mut placed_labels: Vec<(f64, f64)> = Vec::new();
+
     // Edges (halos + visible strokes + wide click/contextmenu hit targets)
     for wire in &layout.wires {
         let Some(edge) = edges.get(wire.edge_index) else {
@@ -2464,18 +2984,25 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         let from = m::text(edge, "from");
         let to = m::text(edge, "to");
         let kind = primary_edge_kind(edge);
+        let kind_idx = contract_spec_index(kind);
         let spec = spec_for_kind(kind);
         let prov = m::text(edge, "provenance");
         let broken = m::yes(&edge["broken_risk"]);
         let against = m::yes(&edge["against"])
             || wire.back
             || (layers_mode && violation_set.contains(&(from.clone(), to.clone())));
+        let kind_hidden = hidden_kinds[kind_idx] && !against && !broken;
+        let hidden_attr = if kind_hidden {
+            " data-kind-hidden=\"true\""
+        } else {
+            ""
+        };
         let is_selected = sel_edge_pair.0 == from && sel_edge_pair.1 == to && !from.is_empty();
         let is_highlighted = highlight_edges.contains(&(from.clone(), to.clone()));
 
         if against {
             html.push_str(&format!(
-                "<path class=\"graph-map-violation-halo system-map-violation-halo\" d=\"{}\" data-from=\"{}\" data-to=\"{}\"{}/>",
+                "<path class=\"graph-map-violation-halo system-map-violation-halo\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{}/>",
                 wire.path_d,
                 escape(&from),
                 escape(&to),
@@ -2484,7 +3011,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         }
         if broken {
             html.push_str(&format!(
-                "<path class=\"system-map-broken-halo\" d=\"{}\" data-from=\"{}\" data-to=\"{}\"/>",
+                "<path class=\"system-map-broken-halo\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{hidden_attr}/>",
                 wire.path_d,
                 escape(&from),
                 escape(&to),
@@ -2522,7 +3049,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         }
 
         html.push_str(&format!(
-            "<path class=\"{edge_classes}\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-provenance=\"{}\" data-broken-risk=\"{}\" data-from=\"{}\" data-to=\"{}\"{dash_attr}{} marker-end=\"url(#{marker_id})\"/>",
+            "<path class=\"{edge_classes}\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-provenance=\"{}\" data-broken-risk=\"{}\" data-from=\"{}\" data-to=\"{}\"{dash_attr}{hidden_attr}{} marker-end=\"url(#{marker_id})\"/>",
             wire.path_d,
             escape(&prov),
             if broken { "true" } else { "false" },
@@ -2543,15 +3070,16 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         };
 
         if !m::yes(&edge["child_link"]) {
+            let (lx, ly) = place_sys_edge_label(&mut placed_labels, (wire.mid_x, wire.mid_y));
             html.push_str(&format!(
-                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-from=\"{}\" data-to=\"{}\"{}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
+                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{}{hidden_attr}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
                 escape(&from),
                 escape(&to),
                 if is_selected || is_highlighted { " data-edge-state=\"on\"" } else { "" },
-                wire.mid_x - 27.0,
-                wire.mid_y - 8.0,
-                wire.mid_x,
-                wire.mid_y + 3.5,
+                lx - 27.0,
+                ly - 8.0,
+                lx,
+                ly + 3.5,
                 escape(&pill_text),
             ));
         }
@@ -2568,7 +3096,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         }));
         let aria = format!("{from} to {to} ({} link)", spec.label);
         html.push_str(&format!(
-            "<path class=\"graph-map-hit system-map-hit\" d=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"{}\" data-action=\"system-map-edge\" data-payload=\"{hit_payload}\" data-explain-services=\"{}\" data-from=\"{}\" data-to=\"{}\"><title>{}</title></path>",
+            "<path class=\"graph-map-hit system-map-hit\" d=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"{}\" data-action=\"system-map-edge\" data-sys-edge-kind=\"{kind}\" data-payload=\"{hit_payload}\" data-explain-services=\"{}\" data-from=\"{}\" data-to=\"{}\"{hidden_attr}><title>{}</title></path>",
             wire.path_d,
             escape(&aria),
             escape(&explain_svcs),
@@ -2741,7 +3269,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
     }
 
     html.push_str("</div>");
-    (html, layout.width, layout.height)
+    html
 }
 
 /// Renders the rich `#system-map-side` or `#system-change-topology-side` inspector HTML.
@@ -3772,6 +4300,8 @@ fn sync_toolbar_buttons(surface: SysMapSurface, state: &V) {
 fn render_surface(surface: SysMapSurface, refit: bool) {
     attach_wheel_listeners();
     ensure_hover_watch(surface);
+    ensure_legend_hover_watch(surface);
+    ensure_resize_watch();
     let state = surface_state(surface);
     let doc = m::data(surface.map_key);
     sync_toolbar_buttons(surface, &state);
@@ -3796,15 +4326,26 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
     };
     crate::graph_explanation::surface_map_context(surface.canvas_id, &doc, &doc, &explain_scope);
 
-    let (canvas_html, pw, ph) = render_canvas_html(surface, &doc, &state);
+    let (canvas_html, radar_svg, pw, ph) = render_canvas_with_radar(surface, &doc, &state);
     invalidate_hover_cache(surface.canvas_id);
-    set_html(surface.canvas_id, &canvas_html);
+    let combined_html = if canvas_html.is_empty() {
+        String::new()
+    } else if radar_svg.is_empty() {
+        canvas_html.clone()
+    } else {
+        format!(
+            "{canvas_html}<div class=\"graph-map-radar system-map-radar\" id=\"{}-radar\" data-surface=\"{}\" aria-hidden=\"true\" hidden>{radar_svg}</div>",
+            surface.canvas_id,
+            surface.id,
+        )
+    };
+    set_html(surface.canvas_id, &combined_html);
     set_html(
         surface.legend_id,
         &format!(
             "{}{}",
             wave_scrubber_html(surface, &blast_of(&doc, &state), &state),
-            contract_arrow_legend_html()
+            contract_arrow_legend_html_for(surface, &filtered_doc(&doc, &state), &state)
         ),
     );
     dom::hidden(surface.legend_id, canvas_html.is_empty());
@@ -4438,6 +4979,195 @@ fn apply_hover_lighting(
     });
 }
 
+fn radar_world_point(radar: &web_sys::Element, client: (f64, f64)) -> Option<(f64, f64)> {
+    let picture = radar
+        .query_selector(".graph-radar-picture")
+        .ok()
+        .flatten()?;
+    let attr = |k: &str| {
+        picture
+            .get_attribute(k)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+    };
+    let (pw, ph) = (attr("data-w")?, attr("data-h")?);
+    let drawn = picture.get_bounding_client_rect();
+    if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
+        return None;
+    }
+    Some((
+        ((client.0 - drawn.left()) / drawn.width()).clamp(0.0, 1.0) * pw,
+        ((client.1 - drawn.top()) / drawn.height()).clamp(0.0, 1.0) * ph,
+    ))
+}
+
+fn look_at_system_point(surface: SysMapSurface, point: (f64, f64)) {
+    let (vw, vh, measured) = viewport_size(surface.canvas_id);
+    if !measured {
+        return;
+    }
+    let mut cam = load_camera(surface);
+    let (px, py) = centred(point, cam.scale, (vw, vh));
+    cam.pan_x = px;
+    cam.pan_y = py;
+    cam.fit_mode = false;
+    cam.needs_measure = false;
+    save_camera(surface, &cam);
+    apply_camera(surface, &cam);
+}
+
+fn radar_pointer_event(
+    kind: &str,
+    event: &web_sys::Event,
+    target_el: Option<&web_sys::Element>,
+) -> bool {
+    let held = m::data(RADAR_DRAG_KEY);
+    let pointer = event.dyn_ref::<web_sys::PointerEvent>();
+    match kind {
+        "pointerdown" => {
+            let Some(radar) =
+                target_el.and_then(|el| el.closest(".system-map-radar").ok().flatten())
+            else {
+                return false;
+            };
+            let Some(pe) = pointer.filter(|p| p.button() == 0) else {
+                return true;
+            };
+            let surf_id = radar.get_attribute("data-surface").unwrap_or_default();
+            let surface = surface_by_id(&surf_id);
+            event.prevent_default();
+            let _ = radar.set_pointer_capture(pe.pointer_id());
+            m::set(
+                RADAR_DRAG_KEY,
+                json!({
+                    "active": true,
+                    "surface": surface.id,
+                    "radar_id": radar.id(),
+                    "pointer_id": pe.pointer_id(),
+                }),
+            );
+            if let Some(pt) =
+                radar_world_point(&radar, (pe.client_x() as f64, pe.client_y() as f64))
+            {
+                look_at_system_point(surface, pt);
+            }
+            true
+        }
+        "pointermove" => {
+            if !m::yes(&held["active"]) {
+                return false;
+            }
+            let Some(pe) = pointer else {
+                return true;
+            };
+            if pe.pointer_id() as i64 != held["pointer_id"].as_i64().unwrap_or(-1) {
+                return true;
+            }
+            let surface = surface_by_id(&m::text(&held, "surface"));
+            if let Some(radar) = dom::get(&m::text(&held, "radar_id")) {
+                if let Some(pt) =
+                    radar_world_point(&radar, (pe.client_x() as f64, pe.client_y() as f64))
+                {
+                    look_at_system_point(surface, pt);
+                }
+            }
+            true
+        }
+        "pointerup" | "pointercancel" => {
+            if !m::yes(&held["active"]) {
+                return false;
+            }
+            if let Some(pe) = pointer {
+                if let Some(radar) = dom::get(&m::text(&held, "radar_id")) {
+                    let _ = radar.release_pointer_capture(pe.pointer_id());
+                }
+            }
+            m::set(RADAR_DRAG_KEY, json!({"active": false}));
+            true
+        }
+        _ => false,
+    }
+}
+
+fn ensure_resize_watch() {
+    if m::yes(&m::data("system-map-resize-watched")) {
+        return;
+    }
+    m::set("system-map-resize-watched", json!(true));
+    let resized = Closure::<dyn FnMut()>::new(|| {
+        dom::later("system-map-resize", 60, || {
+            for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
+                let visible = dom::get(surface.canvas_id)
+                    .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none());
+                let has_plane = dom::get(surface.canvas_id)
+                    .and_then(|el| el.query_selector(".graph-map-plane").ok().flatten())
+                    .is_some();
+                if !(visible && has_plane) {
+                    continue;
+                }
+                let cam = load_camera(surface);
+                if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+                    continue;
+                }
+                if cam.fit_mode || cam.needs_measure {
+                    fit_surface_camera(surface);
+                } else {
+                    apply_camera(surface, &cam);
+                }
+            }
+        });
+    });
+    if let Some(win) = web_sys::window() {
+        let _ = win.add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
+    }
+    resized.forget();
+}
+
+fn ensure_legend_hover_watch(surface: SysMapSurface) {
+    let Some(legend) = dom::get(surface.legend_id) else {
+        return;
+    };
+    if legend.get_attribute("data-hover-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = legend.set_attribute("data-hover-bound", "true");
+    let cid = surface.canvas_id;
+    for (event_kind, rests) in [
+        ("mouseover", true),
+        ("focusin", true),
+        ("mouseleave", false),
+        ("focusout", false),
+    ] {
+        let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let held = rests
+                .then(|| {
+                    event
+                        .target()
+                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                })
+                .flatten()
+                .and_then(|target| {
+                    target
+                        .closest(
+                            ".graph-arrow-legend-item[aria-pressed='true'][data-sys-edge-kind]",
+                        )
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|item| item.get_attribute("data-sys-edge-kind"));
+            let Some(canvas) = dom::get(cid) else {
+                return;
+            };
+            let _ = match held {
+                Some(kind) => canvas.set_attribute("data-sys-kind-hover", &kind),
+                None => canvas.remove_attribute("data-sys-kind-hover"),
+            };
+        });
+        let _ = legend.add_event_listener_with_callback(event_kind, moved.as_ref().unchecked_ref());
+        moved.forget();
+    }
+}
+
 fn ensure_hover_watch(surface: SysMapSurface) {
     let Some(canvas) = dom::get(surface.canvas_id) else {
         return;
@@ -4455,6 +5185,10 @@ fn ensure_hover_watch(surface: SysMapSurface) {
         else {
             return;
         };
+        if target.closest(".system-map-radar").ok().flatten().is_some() {
+            apply_hover_lighting(cid, None, None);
+            return;
+        }
         if let Some(node_el) = target.closest("[data-n]").ok().flatten() {
             let nid = node_el.get_attribute("data-n").unwrap_or_default();
             apply_hover_lighting(cid, Some(&nid), None);
@@ -4482,6 +5216,10 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         .target()
         .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
 
+    if radar_pointer_event(kind, event, target_el.as_ref()) {
+        return true;
+    }
+
     for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
         if kind == "pointerdown"
             && dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden"))
@@ -4504,11 +5242,15 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                     .flatten()
             })
             .is_some();
+        let in_radar = target_el
+            .as_ref()
+            .and_then(|el| el.closest(".system-map-radar").ok().flatten())
+            .is_some();
         let drag = m::data(surface.drag_key);
         let drag_active = m::yes(&drag["active"]);
 
         match kind {
-            "pointerdown" if in_canvas => {
+            "pointerdown" if in_canvas && !in_radar => {
                 let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
                     return false;
                 };
@@ -4595,7 +5337,7 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 }
                 return true;
             }
-            "dblclick" if in_canvas => {
+            "dblclick" if in_canvas && !in_radar => {
                 if let Some(node_el) = target_el
                     .as_ref()
                     .and_then(|el| el.closest("[data-n]").ok().flatten())
@@ -5039,6 +5781,30 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             spawn_local(async move {
                 fetch_surface_changes(surface).await;
             });
+            true
+        }
+        "system-map-kind-toggle" | "system-map-kind-preset" => {
+            let state = surface_state(surface);
+            let next = if action == "system-map-kind-preset" {
+                preset_contract_kinds(state, &m::text(payload, "preset"))
+            } else {
+                switched_contract_kind(
+                    state,
+                    &m::text(payload, "kind"),
+                    m::yes(&m::data("pointer-mods")["alt"]),
+                )
+            };
+            save_surface_state(surface, &next);
+            render_surface(surface, false);
+            let wanted = payload.to_string();
+            if let Some(button) =
+                dom::all(&format!("#{} [data-action='{action}']", surface.legend_id))
+                    .into_iter()
+                    .find(|el| el.get_attribute("data-payload").as_deref() == Some(wanted.as_str()))
+                    .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = button.focus();
+            }
             true
         }
         "system-map-find-pick" => {
@@ -5641,5 +6407,165 @@ mod tests {
             BTreeSet::from(["orders".to_owned()])
         );
         assert!(!adj.contains_key("ignored"));
+    }
+
+    #[test]
+    fn barycenter_ordering_and_port_spreading_untangle_crossed_services() {
+        // Inputs in columns are inverted relative to edges:
+        // Column 0: a, b  |  Column 1: y (connected to a), x (connected to b)
+        // WAIT: to force a crossing before barycenter:
+        // col 0: top=a, bottom=b; edges: a -> x, b -> y; if x was added after y, raw order puts y above x causing a crossing!
+        let doc = json!({
+            "nodes": [
+                {"id": "a", "name": "Service A", "kind": "service"},
+                {"id": "b", "name": "Service B", "kind": "service"},
+                {"id": "y", "name": "Service Y", "kind": "service"},
+                {"id": "x", "name": "Service X", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "a", "to": "x", "kind": "http"},
+                {"from": "b", "to": "y", "kind": "rpc"},
+                {"from": "a", "to": "y", "kind": "event"}
+            ]
+        });
+        let layout = layout_system_nodes(&doc, false);
+        let pos = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| (n.x, n.y))
+                .expect(id)
+        };
+        // `a` connects to both `x` and `y`, while `b` connects only to `y`.
+        // Note `a` has TWO outgoing right-side wires (`a -> x`, `a -> y`), so their start Y ports must spread apart!
+        assert_eq!(pos("a").0, MARGIN);
+        let wire_starts: Vec<f64> = layout
+            .wires
+            .iter()
+            .filter(|w| doc["edges"][w.edge_index]["from"] == "a")
+            .filter_map(|w| {
+                let after_m = w.path_d.strip_prefix('M')?;
+                let first_pair = after_m.split_whitespace().next()?;
+                let (_, y_str) = first_pair.split_once(',')?;
+                y_str.parse::<f64>().ok()
+            })
+            .collect();
+        assert_eq!(wire_starts.len(), 2);
+        assert!(
+            (wire_starts[0] - wire_starts[1]).abs() >= 2.0,
+            "expected spread ports on multi-edge source, got {:?}",
+            wire_starts
+        );
+
+        // Now verify crossing removal when two disjoint edges cross in input order:
+        let crossed = json!({
+            "nodes": [
+                {"id": "g1", "name": "G1", "kind": "service"},
+                {"id": "g2", "name": "G2", "kind": "service"},
+                {"id": "s_for_g2", "name": "S2", "kind": "service"},
+                {"id": "s_for_g1", "name": "S1", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "g1", "to": "s_for_g1", "kind": "http"},
+                {"from": "g2", "to": "s_for_g2", "kind": "http"}
+            ]
+        });
+        let cl = layout_system_nodes(&crossed, false);
+        let y_of = |id: &str| cl.nodes.iter().find(|n| n.id == id).unwrap().y;
+        assert!(
+            y_of("s_for_g1") < y_of("s_for_g2"),
+            "barycenter sweep should align s_for_g1 above s_for_g2 matching g1 above g2"
+        );
+    }
+
+    #[test]
+    fn contract_legend_switchboard_toggles_solos_and_hides_matching_edges() {
+        let doc = synthesize_map_from_catalog(&sample_catalog(), &json!({}));
+        let mut state = default_surface_state();
+
+        let legend = contract_arrow_legend_html_for(SERVICES_SURFACE, &doc, &state);
+        crate::test_support::assert_no_inline_hex_colors(&legend);
+        assert!(legend.contains("data-action=\"system-map-kind-toggle\""));
+        assert!(legend.contains("<button type=\"button\" class=\"graph-arrow-legend-item\""));
+        assert!(!legend.contains("Show all"));
+
+        // Toggle rpc off -> Show all appears and rpc edge gets data-kind-hidden="true"
+        state = switched_contract_kind(state, "rpc", false);
+        assert_eq!(
+            hidden_contract_kinds(&state),
+            [false, false, true, false, false, false, false]
+        );
+        let legend_off = contract_arrow_legend_html_for(SERVICES_SURFACE, &doc, &state);
+        assert!(legend_off.contains("Show all"));
+        assert!(legend_off.contains("data-sys-edge-kind=\"rpc\" aria-pressed=\"false\""));
+
+        let (canvas, _, _) = render_canvas_html(SERVICES_SURFACE, &doc, &state);
+        crate::test_support::assert_no_inline_hex_colors(&canvas);
+        assert!(canvas.contains("data-sys-edge-kind=\"rpc\""));
+        assert!(canvas.contains("data-kind-hidden=\"true\""));
+
+        // Alt+click solo on http isolates http only; second solo resets to all visible.
+        let solo = switched_contract_kind(default_surface_state(), "http", true);
+        assert_eq!(
+            hidden_contract_kinds(&solo),
+            [false, true, true, true, true, true, true]
+        );
+        let reset = switched_contract_kind(solo, "http", true);
+        assert_eq!(hidden_contract_kinds(&reset), [false; 7]);
+        let preset_all = preset_contract_kinds(state, "all");
+        assert_eq!(hidden_contract_kinds(&preset_all), [false; 7]);
+    }
+
+    #[test]
+    fn system_radar_lod_and_edge_label_deoverlap_work_cleanly() {
+        assert_eq!(lod(0.4), "far");
+        assert_eq!(lod(0.9), "mid");
+        assert_eq!(lod(1.4), "near");
+        assert_eq!(lod(f64::NAN), "far");
+
+        let doc = json!({
+            "nodes": [
+                {"id": "gw", "name": "Gateway", "kind": "service"},
+                {"id": "ord", "name": "Orders", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "gw", "to": "ord", "kind": "http", "contracts": [{"id": "c1"}]},
+                {"from": "gw", "to": "ord", "kind": "rpc", "contracts": [{"id": "c2"}]}
+            ]
+        });
+        let mut state = default_surface_state();
+        state["focus"] = json!("gw");
+        let (plane_html, radar_svg, w, h) = render_canvas_with_radar(CHANGES_SURFACE, &doc, &state);
+        crate::test_support::assert_no_inline_hex_colors(&plane_html);
+        crate::test_support::assert_no_inline_hex_colors(&radar_svg);
+        assert!(radar_svg.contains("class=\"graph-radar-picture\""));
+        assert!(radar_svg.contains("data-state=\"selected\""));
+        assert!(radar_svg.contains("class=\"graph-radar-view\""));
+
+        // Parallel edge labels between gw -> ord must be de-overlapped to distinct Y coordinates.
+        let label_ys: Vec<f64> = plane_html
+            .split("<g class=\"graph-map-edge-tie system-map-edge-label\"")
+            .skip(1)
+            .filter_map(|chunk| {
+                let text_at = chunk.find("<text ")?;
+                let y_at = chunk[text_at..].find(" y=\"")?;
+                let start = text_at + y_at + 4;
+                let end = start + chunk[start..].find('"')?;
+                chunk[start..end].parse::<f64>().ok()
+            })
+            .collect();
+        assert_eq!(label_ys.len(), 2);
+        assert!(
+            (label_ys[0] - label_ys[1]).abs() >= 16.0,
+            "overlapping edge labels should step apart: {:?}",
+            label_ys
+        );
+
+        assert!(radar_window_rect((0.0, 0.0), 1.0, (w + 100.0, h + 100.0), (w, h)).is_none());
+        let partial = radar_window_rect((-40.0, -20.0), 1.5, (300.0, 200.0), (w, h)).unwrap();
+        assert!(partial.2 > 0.0 && partial.3 > 0.0);
+        let centered = centred((200.0, 120.0), 1.5, (600.0, 400.0));
+        assert_eq!(centered, (0.0, 20.0));
     }
 }
