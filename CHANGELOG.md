@@ -36,6 +36,9 @@ edition's own files remain in that edition's changelog.
   (`POST /api/sessions/{session_id}/permissions/{request_id}`). Bypass
   Permissions turns approvals and the sandbox off. Planning stays read-only,
   and a session created without the field keeps its earlier behaviour.
+- A provider's model catalog no longer reads as not loaded while another
+  request reads it: two sessions created at once could get `503` "The native
+  model catalog has not been loaded."
 - Fleet progress reads and writes its task under the Project Brain mutation
   lock instead of retrying a stale revision: on Windows a lens reading the task
   while another replaced its file could see it as missing. A System

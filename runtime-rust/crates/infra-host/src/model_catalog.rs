@@ -8,10 +8,14 @@ use serde_json::{Value as V, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, atomic::AtomicBool},
+    sync::{Arc, OnceLock, RwLock, atomic::AtomicBool},
 };
 const LIMIT: usize = 4 * 1024 * 1024;
-static CACHE: OnceLock<tokio::sync::Mutex<BTreeMap<String, V>>> = OnceLock::new();
+/// Catalogs already loaded, by provider. A read never waits for a load, and
+/// two readers never turn each other away.
+static LOADED: RwLock<BTreeMap<String, V>> = RwLock::new(BTreeMap::new());
+/// One load at a time: loading may run a provider's CLI.
+static LOADING: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 pub fn codex_home() -> PathBuf {
     let value = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -109,10 +113,12 @@ pub async fn model_options(
     runner_lock: Option<Arc<std::fs::File>>,
 ) -> Result<V> {
     let _ = efforts(provider)?;
-    let cache = CACHE.get_or_init(|| tokio::sync::Mutex::new(BTreeMap::new()));
-    let mut cache = cache.lock().await;
-    if let Some(v) = cache.get(provider) {
-        return Ok(v.clone());
+    let _loading = LOADING
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    if let Some(v) = cached_options(provider) {
+        return Ok(v);
     }
     let mut all = efforts(provider)?;
     let result = match provider {
@@ -210,7 +216,10 @@ pub async fn model_options(
             json!({"models":models,"efforts":all,"detail":format!("{origin}. Availability is checked by the native CLI; custom models may support different effort levels.")})
         }
     };
-    cache.insert(provider.into(), result.clone());
+    LOADED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(provider.into(), result.clone());
     Ok(result)
 }
 pub fn validate_model_effort(
@@ -335,7 +344,11 @@ pub fn routed_model_settings(
 }
 
 pub fn cached_options(provider: &str) -> Option<V> {
-    CACHE.get()?.try_lock().ok()?.get(provider).cloned()
+    LOADED
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(provider)
+        .cloned()
 }
 
 #[cfg(test)]
@@ -457,5 +470,21 @@ mod contract_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn loaded_catalogs_reach_every_reader_at_once() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(model_options("cursor", None, None))
+            .unwrap();
+        // Readers that meet used to turn each other away, and a session saw
+        // "The native model catalog has not been loaded."
+        let readers: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| (0..20_000).all(|_| cached_options("cursor").is_some())))
+            .collect();
+        assert!(readers.into_iter().all(|reader| reader.join().unwrap()));
     }
 }
