@@ -18,6 +18,11 @@ pub(super) const PARAMETER: u16 = 2;
 pub(super) const RESULT: u16 = 3;
 pub(super) const GENERIC: u16 = 4;
 pub(super) const MADE: u16 = 5;
+pub(super) const ROUTE: u16 = 6;
+pub(super) const DI_BINDING: u16 = 7;
+pub(super) const EVENT_HINT: u16 = 8;
+pub(super) const TABLE_READ: u16 = 9;
+pub(super) const TABLE_WRITE: u16 = 10;
 /// Findings of one pattern a list names at once, the largest first.
 pub const LISTED: usize = 30;
 /// Boxes a picture of one finding holds.
@@ -47,6 +52,11 @@ pub(super) fn how(context: &str) -> Option<u16> {
         "return_type" => Some(RESULT),
         "generic_arg" => Some(GENERIC),
         "constructor" => Some(MADE),
+        "route" | "exposes_route" => Some(ROUTE),
+        "di_binding" | "di_binds" => Some(DI_BINDING),
+        "event" | "publishes_event" | "handles_event" => Some(EVENT_HINT),
+        "table_read" | "reads_table" => Some(TABLE_READ),
+        "table_write" | "writes_table" => Some(TABLE_WRITE),
         _ => None,
     }
 }
@@ -72,6 +82,13 @@ const HANDLER: Role = ("handler", "handlers");
 const SENDER: Role = ("type that sends it", "types that send it");
 const REPOSITORY: Role = ("repository", "repositories");
 const STORED: Role = ("stored type", "stored types");
+const ROUTE_HANDLER: Role = ("route handler", "route handlers");
+const ROUTE_ENDPOINT: Role = ("route", "routes");
+const TABLE: Role = ("table", "tables");
+const TABLE_READER: Role = ("reader", "readers");
+const TABLE_WRITER: Role = ("writer", "writers");
+const DI_PROVIDER: Role = ("container binding", "container bindings");
+const DI_SERVICE: Role = ("bound service", "bound services");
 /// One pattern that is looked for.
 struct Sort {
     id: &'static str,
@@ -91,6 +108,9 @@ const TEMPLATES: usize = 6;
 const BUILDERS: usize = 7;
 const SINGLETONS: usize = 8;
 const ADAPTERS: usize = 9;
+const ROUTES: usize = 10;
+const DATA_ACCESS: usize = 11;
+const DI_BINDINGS: usize = 12;
 const SORTS: &[Sort] = &[
     Sort {
         id: "repository",
@@ -152,7 +172,60 @@ const SORTS: &[Sort] = &[
         architecture: false,
         tells: "A type implements an abstraction and delegates a method to a different type it holds. This is a candidate based on the links shown.",
     },
+    Sort {
+        id: "routes",
+        name: "HTTP & RPC routes",
+        architecture: true,
+        tells: "Controllers, handlers, or modules that expose HTTP or RPC routes.",
+    },
+    Sort {
+        id: "data_access",
+        name: "Database table access",
+        architecture: true,
+        tells: "Database tables paired with the types or functions that read from or write to them.",
+    },
+    Sort {
+        id: "di_bindings",
+        name: "DI container bindings",
+        architecture: true,
+        tells: "Service providers or containers that bind interfaces and concrete services via dependency injection.",
+    },
 ];
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SemanticSummary {
+    routes: Vec<String>,
+    di_bindings: Vec<String>,
+    events_published: Vec<String>,
+    events_handled: Vec<String>,
+    tables_read: Vec<String>,
+    tables_written: Vec<String>,
+    insights: Vec<String>,
+}
+impl SemanticSummary {
+    fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+            && self.di_bindings.is_empty()
+            && self.events_published.is_empty()
+            && self.events_handled.is_empty()
+            && self.tables_read.is_empty()
+            && self.tables_written.is_empty()
+            && self.insights.is_empty()
+    }
+    fn to_json(&self) -> Option<Value> {
+        if self.is_empty() {
+            return None;
+        }
+        Some(json!({
+            "routes": self.routes,
+            "di_bindings": self.di_bindings,
+            "events_published": self.events_published,
+            "events_handled": self.events_handled,
+            "tables_read": self.tables_read,
+            "tables_written": self.tables_written,
+            "insights": self.insights,
+        }))
+    }
+}
 /// One pattern found in the graph.
 #[derive(Debug)]
 struct Found {
@@ -170,6 +243,8 @@ struct Found {
     named: bool,
     /// The files its parts lie in, in order, each once.
     files: Vec<u32>,
+    /// Optional semantic framework and database summary when semantic edges touch this finding.
+    semantic_summary: SemanticSummary,
 }
 /// The patterns of a graph.
 #[derive(Debug, Default)]
@@ -204,6 +279,62 @@ struct Read<'a> {
     /// Whether a type stands above others as an abstraction or a base, once
     /// it was asked.
     bases: RefCell<HashMap<u32, bool>>,
+    /// Semantic framework & DB edges collected from relation kinds and `ties`.
+    routes: BTreeMap<u32, Vec<(u32, bool)>>,
+    di_binds: Vec<(u32, u32, bool)>,
+    event_publishers: BTreeMap<u32, Vec<(u32, bool)>>,
+    event_listeners: BTreeMap<u32, Vec<(u32, bool)>>,
+    table_readers: BTreeMap<u32, Vec<(u32, bool)>>,
+    table_writers: BTreeMap<u32, Vec<(u32, bool)>>,
+    sym_routes: HashMap<u32, Vec<String>>,
+    sym_di: HashMap<u32, Vec<String>>,
+    sym_events_pub: HashMap<u32, Vec<String>>,
+    sym_events_handle: HashMap<u32, Vec<String>>,
+    sym_tables_read: HashMap<u32, Vec<String>>,
+    sym_tables_write: HashMap<u32, Vec<String>>,
+}
+fn clean_semantic_label(raw: &str, prefix: &str) -> String {
+    let trimmed = raw.trim();
+    if !prefix.is_empty()
+        && let Some(rest) = trimmed.strip_prefix(prefix)
+    {
+        return rest.trim().to_owned();
+    }
+    trimmed.to_owned()
+}
+fn push_unique_edge(list: &mut Vec<(u32, bool)>, target: u32, guessed: bool) {
+    match list.iter_mut().find(|(existing, _)| *existing == target) {
+        Some((_, existing_guessed)) => *existing_guessed &= guessed,
+        None => list.push((target, guessed)),
+    }
+}
+fn push_unique_text(map: &mut HashMap<u32, Vec<String>>, sym: u32, label: String) {
+    if label.is_empty() {
+        return;
+    }
+    let entry = map.entry(sym).or_default();
+    if !entry.contains(&label) {
+        entry.push(label);
+    }
+}
+fn is_listener_symbol(label: &str, path: &str) -> bool {
+    let name = plain(label);
+    ["Listener", "Subscriber", "Observer"]
+        .iter()
+        .any(|end| name.ends_with(end))
+        || foldered(
+            path,
+            &[
+                "listener",
+                "listeners",
+                "subscriber",
+                "subscribers",
+                "eventsubscriber",
+                "eventlistener",
+                "observer",
+                "observers",
+            ],
+        )
 }
 /// What the source says a type is declared as.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -307,6 +438,18 @@ impl<'a> Read<'a> {
             text,
             sources: RefCell::new(HashMap::new()),
             bases: RefCell::new(HashMap::new()),
+            routes: BTreeMap::new(),
+            di_binds: Vec::new(),
+            event_publishers: BTreeMap::new(),
+            event_listeners: BTreeMap::new(),
+            table_readers: BTreeMap::new(),
+            table_writers: BTreeMap::new(),
+            sym_routes: HashMap::new(),
+            sym_di: HashMap::new(),
+            sym_events_pub: HashMap::new(),
+            sym_events_handle: HashMap::new(),
+            sym_tables_read: HashMap::new(),
+            sym_tables_write: HashMap::new(),
         };
         for (at, symbol) in symbols.iter().enumerate() {
             if matches!(symbol.kind, Kind::Method | Kind::Function)
@@ -319,6 +462,18 @@ impl<'a> Read<'a> {
                     .push(at as u32);
             }
         }
+        let semantic_tag = |relation: &str| -> Option<u16> {
+            match relation {
+                "exposes_route" | "route" => Some(ROUTE),
+                "di_binds" | "di_binding" => Some(DI_BINDING),
+                "publishes_event" => Some(u16::MAX - 1),
+                "handles_event" => Some(u16::MAX),
+                "event" => Some(EVENT_HINT),
+                "reads_table" | "table_read" => Some(TABLE_READ),
+                "writes_table" | "table_write" => Some(TABLE_WRITE),
+                _ => None,
+            }
+        };
         for (from, to, kind, guessed) in &index.uses {
             if certain && *guessed {
                 continue;
@@ -354,13 +509,25 @@ impl<'a> Read<'a> {
                 {
                     read.make(from, made, *guessed);
                 }
+            } else if let Some(tag) = semantic_tag(index.kinds[*kind as usize].as_str()) {
+                read.record_semantic(tag, from, to, *guessed);
             }
         }
         for (from, to, how, guessed) in &index.ties {
-            if (certain && *guessed) || !read.typed[*to as usize] {
+            if certain && *guessed {
                 continue;
             }
             let (from, to) = (*from, *to);
+            if matches!(
+                *how,
+                ROUTE | DI_BINDING | EVENT_HINT | TABLE_READ | TABLE_WRITE
+            ) {
+                read.record_semantic(*how, from, to, *guessed);
+                continue;
+            }
+            if !read.typed[to as usize] {
+                continue;
+            }
             if *how == MADE {
                 read.make(from, to, *guessed);
                 continue;
@@ -387,6 +554,77 @@ impl<'a> Read<'a> {
                 .push((holder, way, *guessed));
         }
         read
+    }
+    fn actor(&self, sym: u32) -> u32 {
+        match self.owner[sym as usize] {
+            NONE => sym,
+            owner => owner,
+        }
+    }
+    fn record_semantic(&mut self, tag: u16, from: u32, to: u32, guessed: bool) {
+        let src = self.actor(from);
+        let dst = self.actor(to);
+        let resolved_tag = if tag == EVENT_HINT {
+            if handles(bare(self.label(from)))
+                || is_listener_symbol(self.label(src), self.path(src))
+            {
+                u16::MAX
+            } else {
+                u16::MAX - 1
+            }
+        } else {
+            tag
+        };
+        match resolved_tag {
+            ROUTE => {
+                push_unique_edge(self.routes.entry(src).or_default(), to, guessed);
+                let label = clean_semantic_label(self.label(to), "route:");
+                push_unique_text(&mut self.sym_routes, src, label.clone());
+                push_unique_text(&mut self.sym_routes, to, label);
+            }
+            DI_BINDING => {
+                match self
+                    .di_binds
+                    .iter_mut()
+                    .find(|(s, d, _)| *s == src && *d == dst)
+                {
+                    Some((_, _, g)) => *g &= guessed,
+                    None => self.di_binds.push((src, dst, guessed)),
+                }
+                let text = format!(
+                    "{} -> {}",
+                    self.index.shown(src),
+                    clean_semantic_label(self.label(dst), "service:")
+                );
+                push_unique_text(&mut self.sym_di, src, text.clone());
+                push_unique_text(&mut self.sym_di, dst, text);
+            }
+            t if t == u16::MAX - 1 => {
+                push_unique_edge(self.event_publishers.entry(to).or_default(), src, guessed);
+                let label = clean_semantic_label(self.label(to), "event:");
+                push_unique_text(&mut self.sym_events_pub, src, label.clone());
+                push_unique_text(&mut self.sym_events_pub, to, label);
+            }
+            t if t == u16::MAX => {
+                push_unique_edge(self.event_listeners.entry(to).or_default(), src, guessed);
+                let label = clean_semantic_label(self.label(to), "event:");
+                push_unique_text(&mut self.sym_events_handle, src, label.clone());
+                push_unique_text(&mut self.sym_events_handle, to, label);
+            }
+            TABLE_READ => {
+                push_unique_edge(self.table_readers.entry(to).or_default(), src, guessed);
+                let label = clean_semantic_label(self.label(to), "table:");
+                push_unique_text(&mut self.sym_tables_read, src, label.clone());
+                push_unique_text(&mut self.sym_tables_read, to, label);
+            }
+            TABLE_WRITE => {
+                push_unique_edge(self.table_writers.entry(to).or_default(), src, guessed);
+                let label = clean_semantic_label(self.label(to), "table:");
+                push_unique_text(&mut self.sym_tables_write, src, label.clone());
+                push_unique_text(&mut self.sym_tables_write, to, label);
+            }
+            _ => {}
+        }
     }
     /// The types that have methods, in the order of the graph.
     fn types(&self) -> Vec<u32> {
@@ -508,8 +746,14 @@ impl<'a> Read<'a> {
         }
         found
     }
-    /// Whether a type keeps the abstraction it stands under: in a field, or
-    /// taken where it is built.
+    fn di_binds_pair(&self, from: u32, to: u32) -> Option<bool> {
+        self.di_binds
+            .iter()
+            .find(|(src, dst, _)| *src == from && *dst == to)
+            .map(|(_, _, guessed)| *guessed)
+    }
+    /// Whether a type keeps the abstraction it stands under: in a field,
+    /// taken where it is built, or bound via DI.
     fn wraps(&self, at: u32, abstraction: u32) -> Option<bool> {
         let kept = self
             .named(at, &[FIELD, GENERIC])
@@ -532,6 +776,7 @@ impl<'a> Read<'a> {
                 })
         })
         .map(|(_, guessed)| guessed)
+        .or_else(|| self.di_binds_pair(at, abstraction))
     }
     /// `handled` are the messages that have a handler of their own.
     fn strategies(&self, found: &mut Vec<Found>, handled: &BTreeSet<u32>) {
@@ -556,13 +801,22 @@ impl<'a> Read<'a> {
             if data * 2 > made.len() {
                 continue;
             }
-            let users = self
+            let mut users = self
                 .holders(*abstraction)
                 .into_iter()
                 .filter(|(user, ..)| {
                     user != abstraction && !under.iter().any(|(sub, ..)| sub == user)
                 })
                 .collect::<Vec<_>>();
+            for &(binder, target, guessed) in &self.di_binds {
+                if binder != *abstraction
+                    && !under.iter().any(|(sub, ..)| *sub == binder)
+                    && (target == *abstraction || under.iter().any(|(sub, ..)| *sub == target))
+                    && !users.iter().any(|(known, ..)| *known == binder)
+                {
+                    users.push((binder, "binds", guessed));
+                }
+            }
             if users.is_empty() {
                 continue;
             }
@@ -888,27 +1142,13 @@ impl<'a> Read<'a> {
     /// and gives the messages that have a handler of their own.
     fn messages(&self, found: &mut Vec<Found>) -> BTreeSet<u32> {
         let mut events: BTreeMap<u32, Vec<(u32, bool)>> = BTreeMap::new();
+        let mut param_events: BTreeSet<u32> = BTreeSet::new();
         let mut commands: BTreeMap<u32, (u32, bool)> = BTreeMap::new();
         for at in self.types() {
             let methods = &self.members[&at];
             let at = &at;
             let name = plain(self.label(*at));
-            let listens = ["Listener", "Subscriber", "Observer"]
-                .iter()
-                .any(|end| name.ends_with(end))
-                || foldered(
-                    self.path(*at),
-                    &[
-                        "listener",
-                        "listeners",
-                        "subscriber",
-                        "subscribers",
-                        "eventsubscriber",
-                        "eventlistener",
-                        "observer",
-                        "observers",
-                    ],
-                );
+            let listens = is_listener_symbol(self.label(*at), self.path(*at));
             for method in methods {
                 if !handles(bare(self.label(*method))) {
                     continue;
@@ -924,6 +1164,7 @@ impl<'a> Read<'a> {
                         || message.ends_with("Event")
                         || foldered(self.path(taken), &["event", "events"])
                     {
+                        param_events.insert(taken);
                         let listeners = events.entry(taken).or_default();
                         if !listeners.iter().any(|(known, _)| known == at) {
                             listeners.push((*at, guessed));
@@ -931,6 +1172,15 @@ impl<'a> Read<'a> {
                     }
                 }
             }
+        }
+        for (&event, sem_listeners) in &self.event_listeners {
+            let listeners = events.entry(event).or_default();
+            for &(listener, guessed) in sem_listeners {
+                push_unique_edge(listeners, listener, guessed);
+            }
+        }
+        for &event in self.event_publishers.keys() {
+            events.entry(event).or_default();
         }
         for (event, listeners) in events {
             let mut finding = Finding::new(self, EVENTS, event, EVENT);
@@ -944,17 +1194,60 @@ impl<'a> Read<'a> {
                     finding.link(raiser, event, "raises", guessed);
                 }
             }
-            finding.told(format!(
-                "{} {} {} in a handling method.",
-                listed(self.index, listeners.iter().map(|(listener, _)| *listener)),
-                if listeners.len() == 1 {
-                    "takes"
-                } else {
-                    "take"
-                },
-                self.index.shown(event),
-            ));
-            found.push(finding.done(true));
+            let sem_publishers = self.event_publishers.get(&event);
+            if let Some(publishers) = sem_publishers {
+                for &(publisher, guessed) in publishers {
+                    if !finding.has(publisher) {
+                        finding.part(publisher, RAISER);
+                    }
+                    finding.link(publisher, event, "publishes", guessed);
+                }
+            }
+            if finding.parts.len() <= 1 {
+                continue;
+            }
+            let has_sem = self.event_listeners.contains_key(&event) || sem_publishers.is_some();
+            if !has_sem {
+                finding.told(format!(
+                    "{} {} {} in a handling method.",
+                    listed(self.index, listeners.iter().map(|(listener, _)| *listener)),
+                    if listeners.len() == 1 {
+                        "takes"
+                    } else {
+                        "take"
+                    },
+                    self.index.shown(event),
+                ));
+            } else {
+                if !listeners.is_empty() {
+                    finding.told(format!(
+                        "{} {} {}.",
+                        listed(self.index, listeners.iter().map(|(listener, _)| *listener)),
+                        if listeners.len() == 1 {
+                            "handles"
+                        } else {
+                            "handle"
+                        },
+                        self.index.shown(event),
+                    ));
+                }
+                if let Some(publishers) = sem_publishers
+                    && !publishers.is_empty()
+                {
+                    finding.told(format!(
+                        "{} {} {}.",
+                        listed(self.index, publishers.iter().map(|(p, _)| *p)),
+                        if publishers.len() == 1 {
+                            "publishes"
+                        } else {
+                            "publish"
+                        },
+                        self.index.shown(event),
+                    ));
+                }
+            }
+            let named_only = param_events.contains(&event) && !has_sem;
+            found.push(finding.done(named_only));
         }
         let handled = commands.keys().copied().collect();
         for (message, (handler, guessed)) in commands {
@@ -975,6 +1268,148 @@ impl<'a> Read<'a> {
             found.push(finding.done(true));
         }
         handled
+    }
+    fn semantic_patterns(&self, found: &mut Vec<Found>) {
+        for (&handler, routes) in &self.routes {
+            let mut finding = Finding::new(self, ROUTES, handler, ROUTE_HANDLER);
+            for &(route, guessed) in routes {
+                finding.part(route, ROUTE_ENDPOINT);
+                finding.link(handler, route, "exposes", guessed);
+            }
+            if finding.parts.len() > 1 {
+                finding.told(format!(
+                    "{} exposes {}.",
+                    self.index.shown(handler),
+                    listed(self.index, routes.iter().map(|(route, _)| *route)),
+                ));
+                found.push(finding.done(false));
+            }
+        }
+        let mut tables: BTreeSet<u32> = BTreeSet::new();
+        tables.extend(self.table_readers.keys().copied());
+        tables.extend(self.table_writers.keys().copied());
+        for table in tables {
+            let mut finding = Finding::new(self, DATA_ACCESS, table, TABLE);
+            let writers = self.table_writers.get(&table);
+            let readers = self.table_readers.get(&table);
+            for &(writer, guessed) in writers.into_iter().flatten() {
+                finding.part(writer, TABLE_WRITER);
+                finding.link(writer, table, "writes", guessed);
+            }
+            for &(reader, guessed) in readers.into_iter().flatten() {
+                finding.part(reader, TABLE_READER);
+                finding.link(reader, table, "reads", guessed);
+            }
+            if finding.parts.len() > 1 {
+                if let Some(writers) = writers
+                    && !writers.is_empty()
+                {
+                    finding.told(format!(
+                        "{} {} {}.",
+                        listed(self.index, writers.iter().map(|(w, _)| *w)),
+                        if writers.len() == 1 {
+                            "writes"
+                        } else {
+                            "write"
+                        },
+                        self.index.shown(table),
+                    ));
+                }
+                if let Some(readers) = readers
+                    && !readers.is_empty()
+                {
+                    finding.told(format!(
+                        "{} {} {}.",
+                        listed(self.index, readers.iter().map(|(r, _)| *r)),
+                        if readers.len() == 1 { "reads" } else { "read" },
+                        self.index.shown(table),
+                    ));
+                }
+                found.push(finding.done(false));
+            }
+        }
+        let mut di_by_binder: BTreeMap<u32, Vec<(u32, bool)>> = BTreeMap::new();
+        for &(binder, service, guessed) in &self.di_binds {
+            if binder != service {
+                push_unique_edge(di_by_binder.entry(binder).or_default(), service, guessed);
+            }
+        }
+        for (binder, services) in di_by_binder {
+            let mut finding = Finding::new(self, DI_BINDINGS, binder, DI_PROVIDER);
+            for &(service, guessed) in &services {
+                finding.part(service, DI_SERVICE);
+                finding.link(binder, service, "binds", guessed);
+            }
+            if finding.parts.len() > 1 {
+                finding.told(format!(
+                    "{} binds {}.",
+                    self.index.shown(binder),
+                    listed(self.index, services.iter().map(|(s, _)| *s)),
+                ));
+                found.push(finding.done(false));
+            }
+        }
+    }
+    fn attach_semantic_summaries(&self, found: &mut [Found]) {
+        let extend_unique = |dest: &mut Vec<String>, map: &HashMap<u32, Vec<String>>, sym: u32| {
+            if let Some(items) = map.get(&sym) {
+                for item in items {
+                    if !dest.contains(item) {
+                        dest.push(item.clone());
+                    }
+                }
+            }
+        };
+        for item in found {
+            let mut summary = SemanticSummary::default();
+            for &(part, _) in &item.parts {
+                extend_unique(&mut summary.routes, &self.sym_routes, part);
+                extend_unique(&mut summary.di_bindings, &self.sym_di, part);
+                extend_unique(&mut summary.events_published, &self.sym_events_pub, part);
+                extend_unique(&mut summary.events_handled, &self.sym_events_handle, part);
+                extend_unique(&mut summary.tables_read, &self.sym_tables_read, part);
+                extend_unique(&mut summary.tables_written, &self.sym_tables_write, part);
+            }
+            summary.routes.sort();
+            summary.di_bindings.sort();
+            summary.events_published.sort();
+            summary.events_handled.sort();
+            summary.tables_read.sort();
+            summary.tables_written.sort();
+            if !summary.routes.is_empty() {
+                summary.insights.push(format!(
+                    "Exposes {} route{}",
+                    summary.routes.len(),
+                    if summary.routes.len() == 1 { "" } else { "s" }
+                ));
+            }
+            if !summary.di_bindings.is_empty() {
+                summary.insights.push(format!(
+                    "Participates in {} DI binding{}",
+                    summary.di_bindings.len(),
+                    if summary.di_bindings.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            if !summary.events_published.is_empty() || !summary.events_handled.is_empty() {
+                summary.insights.push(format!(
+                    "Events: {} published, {} handled",
+                    summary.events_published.len(),
+                    summary.events_handled.len()
+                ));
+            }
+            if !summary.tables_read.is_empty() || !summary.tables_written.is_empty() {
+                summary.insights.push(format!(
+                    "Tables: {} read, {} written",
+                    summary.tables_read.len(),
+                    summary.tables_written.len()
+                ));
+            }
+            item.semantic_summary = summary;
+        }
     }
     fn repositories(&self, found: &mut Vec<Found>) {
         for (at, &typed) in self.typed.iter().enumerate() {
@@ -1118,6 +1553,7 @@ impl<'a> Finding<'a> {
             told: self.told,
             named: named || self.named,
             files,
+            semantic_summary: SemanticSummary::default(),
         }
     }
 }
@@ -1136,6 +1572,8 @@ impl Patterns {
         read.templates(&mut found);
         read.builders(&mut found);
         read.singletons(&mut found);
+        read.semantic_patterns(&mut found);
+        read.attach_semantic_summaries(&mut found);
         // The order of a list: pattern by pattern, the largest finding
         // first, and of two as large the one that lies first.
         found.sort_by(|a, b| {
@@ -1198,7 +1636,7 @@ impl Index {
     }
     fn pattern_row(&self, names: &Names, found: &Found) -> Value {
         let anchor = &self.symbols[found.anchor as usize];
-        json!({
+        let mut row = json!({
             "id": self.pattern_id(names, found),
             "sort": SORTS[found.sort].id,
             "name": SORTS[found.sort].name,
@@ -1208,7 +1646,11 @@ impl Index {
             "named": found.named,
             "guessed": found.guessed(),
             "parts": found.counted(),
-        })
+        });
+        if let Some(summary) = found.semantic_summary.to_json() {
+            row["semantic_summary"] = summary;
+        }
+        row
     }
     /// Marks a picture with the patterns found where it is open: on each box
     /// how many findings it takes part in or holds, beside the picture the
@@ -1463,6 +1905,9 @@ impl Index {
                 .collect::<Vec<_>>(),
             "focus": null,
         });
+        if let Some(summary) = found.semantic_summary.to_json() {
+            view["pattern"]["semantic_summary"] = summary;
+        }
         if let Some(at) = focus.and_then(|selected| keys.iter().position(|key| key == selected)) {
             let row = |other: usize, ways: &[&str], guessed: bool| {
                 let flow = Flow {
@@ -1493,3 +1938,195 @@ impl Index {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod semantic_tests {
+    use super::*;
+
+    #[test]
+    fn how_recognizes_semantic_framework_and_database_hints() {
+        assert_eq!(how("route"), Some(ROUTE));
+        assert_eq!(how("exposes_route"), Some(ROUTE));
+        assert_eq!(how("di_binding"), Some(DI_BINDING));
+        assert_eq!(how("di_binds"), Some(DI_BINDING));
+        assert_eq!(how("event"), Some(EVENT_HINT));
+        assert_eq!(how("publishes_event"), Some(EVENT_HINT));
+        assert_eq!(how("handles_event"), Some(EVENT_HINT));
+        assert_eq!(how("table_read"), Some(TABLE_READ));
+        assert_eq!(how("reads_table"), Some(TABLE_READ));
+        assert_eq!(how("table_write"), Some(TABLE_WRITE));
+        assert_eq!(how("writes_table"), Some(TABLE_WRITE));
+    }
+
+    #[test]
+    fn semantic_events_di_routes_and_tables_participate_in_patterns() {
+        let mut sources: HashMap<String, String> = HashMap::new();
+        sources.insert(
+            "app/Contracts/Notifier.php".into(),
+            "<?php\n\ninterface Notifier\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Adapters/LegacyMailer.php".into(),
+            "<?php\n\nclass LegacyMailer\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Adapters/MailerAdapter.php".into(),
+            "<?php\n\nclass MailerAdapter implements Notifier\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Adapters/NullNotifier.php".into(),
+            "<?php\n\nclass NullNotifier implements Notifier\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Providers/AppServiceProvider.php".into(),
+            "<?php\n\nclass AppServiceProvider\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Repositories/OrderRepository.php".into(),
+            "<?php\n\nclass OrderRepository\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Http/OrderController.php".into(),
+            "<?php\n\nclass OrderController\n{\n}\n".into(),
+        );
+        sources.insert(
+            "app/Services/AuditListener.php".into(),
+            "<?php\n\nclass AuditListener\n{\n}\n".into(),
+        );
+
+        let graph = json!({
+            "nodes": [
+                {"id": "Notifier", "label": "Notifier", "source_file": "app/Contracts/Notifier.php", "source_location": "L3", "_callable_class": true},
+                {"id": "Notifier.send", "label": ".send()", "source_file": "app/Contracts/Notifier.php", "source_location": "L4"},
+                {"id": "LegacyMailer", "label": "LegacyMailer", "source_file": "app/Adapters/LegacyMailer.php", "source_location": "L3", "_callable_class": true},
+                {"id": "LegacyMailer.deliver", "label": ".deliver()", "source_file": "app/Adapters/LegacyMailer.php", "source_location": "L4"},
+                {"id": "MailerAdapter", "label": "MailerAdapter", "source_file": "app/Adapters/MailerAdapter.php", "source_location": "L3", "_callable_class": true},
+                {"id": "MailerAdapter.send", "label": ".send()", "source_file": "app/Adapters/MailerAdapter.php", "source_location": "L4"},
+                {"id": "NullNotifier", "label": "NullNotifier", "source_file": "app/Adapters/NullNotifier.php", "source_location": "L3", "_callable_class": true},
+                {"id": "NullNotifier.send", "label": ".send()", "source_file": "app/Adapters/NullNotifier.php", "source_location": "L4"},
+                {"id": "AppServiceProvider", "label": "AppServiceProvider", "source_file": "app/Providers/AppServiceProvider.php", "source_location": "L3", "_callable_class": true},
+                {"id": "AppServiceProvider.register", "label": ".register()", "source_file": "app/Providers/AppServiceProvider.php", "source_location": "L4"},
+                {"id": "OrderRepository", "label": "OrderRepository", "source_file": "app/Repositories/OrderRepository.php", "source_location": "L3", "_callable_class": true},
+                {"id": "OrderRepository.save", "label": ".save()", "source_file": "app/Repositories/OrderRepository.php", "source_location": "L4"},
+                {"id": "OrderController", "label": "OrderController", "source_file": "app/Http/OrderController.php", "source_location": "L3", "_callable_class": true},
+                {"id": "OrderController.store", "label": ".store()", "source_file": "app/Http/OrderController.php", "source_location": "L4"},
+                {"id": "AuditListener", "label": "AuditListener", "source_file": "app/Services/AuditListener.php", "source_location": "L3", "_callable_class": true},
+                {"id": "AuditListener.record", "label": ".record()", "source_file": "app/Services/AuditListener.php", "source_location": "L4"},
+                {"id": "route_orders", "label": "route:POST /orders", "source_file": "routes/api.php", "source_location": "L2"},
+                {"id": "evt_created", "label": "event:order.created", "source_file": "app/Http/OrderController.php", "source_location": "L5"},
+                {"id": "tbl_orders", "label": "table:orders", "source_file": "database/migrations/orders.php", "source_location": "L1"},
+            ],
+            "links": [
+                {"source": "Notifier", "target": "Notifier.send", "relation": "method"},
+                {"source": "LegacyMailer", "target": "LegacyMailer.deliver", "relation": "method"},
+                {"source": "MailerAdapter", "target": "MailerAdapter.send", "relation": "method"},
+                {"source": "NullNotifier", "target": "NullNotifier.send", "relation": "method"},
+                {"source": "AppServiceProvider", "target": "AppServiceProvider.register", "relation": "method"},
+                {"source": "OrderRepository", "target": "OrderRepository.save", "relation": "method"},
+                {"source": "OrderController", "target": "OrderController.store", "relation": "method"},
+                {"source": "AuditListener", "target": "AuditListener.record", "relation": "method"},
+                // Strategy + Adapter via DI bindings (no static field tie needed!)
+                {"source": "MailerAdapter", "target": "Notifier", "relation": "implements", "confidence": "EXTRACTED"},
+                {"source": "NullNotifier", "target": "Notifier", "relation": "implements", "confidence": "EXTRACTED"},
+                {"source": "MailerAdapter.send", "target": "LegacyMailer.deliver", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "MailerAdapter", "target": "LegacyMailer", "relation": "di_binds", "confidence": "EXTRACTED"},
+                {"source": "AppServiceProvider.register", "target": "Notifier", "relation": "di_binds", "confidence": "EXTRACTED"},
+                // Semantic routes, events (no *Event/*Listener naming), and tables
+                {"source": "OrderController.store", "target": "route_orders", "relation": "exposes_route", "confidence": "EXTRACTED"},
+                {"source": "OrderController.store", "target": "evt_created", "relation": "publishes_event", "confidence": "EXTRACTED"},
+                {"source": "AuditListener.record", "target": "evt_created", "relation": "handles_event", "confidence": "EXTRACTED"},
+                {"source": "OrderRepository.save", "target": "tbl_orders", "relation": "writes_table", "confidence": "EXTRACTED"},
+                {"source": "OrderController.store", "target": "tbl_orders", "relation": "reads_table", "confidence": "INFERRED"},
+            ]
+        });
+
+        let index = Index::read_with(
+            graph.to_string().as_bytes(),
+            Path::new("/work/shop"),
+            &|path| sources.get(path).cloned(),
+        )
+        .unwrap();
+
+        let all = Patterns::find(&index, false, &|path| sources.get(path).cloned());
+        let sorts: Vec<&str> = all.found.iter().map(|f| SORTS[f.sort].id).collect();
+        assert!(sorts.contains(&"repository"), "{sorts:?}");
+        assert!(sorts.contains(&"events"), "{sorts:?}");
+        assert!(sorts.contains(&"strategy"), "{sorts:?}");
+        assert!(sorts.contains(&"adapter"), "{sorts:?}");
+        assert!(sorts.contains(&"routes"), "{sorts:?}");
+        assert!(sorts.contains(&"data_access"), "{sorts:?}");
+        assert!(sorts.contains(&"di_bindings"), "{sorts:?}");
+
+        // Events detector consumed publishes_event + handles_event even with arbitrary method/event names.
+        let ev = all
+            .found
+            .iter()
+            .find(|f| SORTS[f.sort].id == "events")
+            .unwrap();
+        assert!(!ev.named);
+        assert_eq!(ev.semantic_summary.events_published, vec!["order.created"]);
+        assert_eq!(ev.semantic_summary.events_handled, vec!["order.created"]);
+
+        // Strategy detector got AppServiceProvider via di_binds.
+        let strat = all
+            .found
+            .iter()
+            .find(|f| SORTS[f.sort].id == "strategy")
+            .unwrap();
+        assert!(
+            strat
+                .parts
+                .iter()
+                .any(|(at, role)| index.shown(*at) == "AppServiceProvider" && *role == USER),
+            "{:?}",
+            strat.parts
+        );
+        assert!(!strat.semantic_summary.di_bindings.is_empty());
+
+        // Adapter detector worked using MailerAdapter -> LegacyMailer di_binds without field tie.
+        let adapter = all
+            .found
+            .iter()
+            .find(|f| SORTS[f.sort].id == "adapter")
+            .unwrap();
+        assert_eq!(index.shown(adapter.anchor), "MailerAdapter");
+
+        // Repository carries semantic_summary with table write info.
+        let repo = all
+            .found
+            .iter()
+            .find(|f| SORTS[f.sort].id == "repository")
+            .unwrap();
+        assert_eq!(repo.semantic_summary.tables_written, vec!["orders"]);
+
+        // mark_patterns exposes semantic_summary on rows and omits INFERRED reads_table when certain=true.
+        let mut view = index.view("demo", "", None, false, "");
+        index.mark_patterns(&mut view, false);
+        let kinds = view["patterns"]["kinds"].as_array().unwrap();
+        let data_kind = kinds.iter().find(|k| k["id"] == "data_access").unwrap();
+        assert_eq!(
+            data_kind["instances"][0]["semantic_summary"]["tables_read"],
+            json!(["orders"])
+        );
+        assert_eq!(
+            data_kind["instances"][0]["semantic_summary"]["tables_written"],
+            json!(["orders"])
+        );
+
+        let mut certain_view = index.view("demo", "", None, true, "");
+        index.mark_patterns(&mut certain_view, true);
+        let certain_kinds = certain_view["patterns"]["kinds"].as_array().unwrap();
+        let certain_data = certain_kinds
+            .iter()
+            .find(|k| k["id"] == "data_access")
+            .unwrap();
+        assert_eq!(
+            certain_data["instances"][0]["semantic_summary"]["tables_read"],
+            json!([])
+        );
+        assert_eq!(
+            certain_data["instances"][0]["semantic_summary"]["tables_written"],
+            json!(["orders"])
+        );
+    }
+}
