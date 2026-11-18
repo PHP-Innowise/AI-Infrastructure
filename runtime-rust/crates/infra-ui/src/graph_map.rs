@@ -14824,10 +14824,14 @@ fn side_tabs_html(side_tab: &str, changes_count: u64, surface: &str) -> String {
     let changes_selected = side_tab == "changes";
     let details_payload = payload(&json!({"tab": "details", "surface": surface}));
     let changes_payload = payload(&json!({"tab": "changes", "surface": surface}));
+    let (details_selected, details_tabindex, changes_selected_attr, changes_tabindex) =
+        if changes_selected {
+            ("false", "-1", "true", "0")
+        } else {
+            ("true", "0", "false", "-1")
+        };
     format!(
-        "<div class=\"graph-side-tabs\" role=\"tablist\" aria-label=\"Graph inspector tabs\"><button type=\"button\" class=\"graph-side-tab\" role=\"tab\" aria-selected=\"{}\" data-action=\"graph-side-tab\" data-tab=\"details\" data-payload=\"{details_payload}\">Details</button><button type=\"button\" class=\"graph-side-tab\" role=\"tab\" aria-selected=\"{}\" data-action=\"graph-side-tab\" data-tab=\"changes\" data-payload=\"{changes_payload}\">Changes <span class=\"graph-map-total\">({changes_count})</span></button></div>",
-        if !changes_selected { "true" } else { "false" },
-        if changes_selected { "true" } else { "false" },
+        "<div class=\"graph-side-tabs\" role=\"tablist\" aria-label=\"Graph inspector tabs\"><button type=\"button\" class=\"graph-side-tab\" role=\"tab\" aria-selected=\"{details_selected}\" tabindex=\"{details_tabindex}\" data-action=\"graph-side-tab\" data-tab=\"details\" data-payload=\"{details_payload}\">Details</button><button type=\"button\" class=\"graph-side-tab\" role=\"tab\" aria-selected=\"{changes_selected_attr}\" tabindex=\"{changes_tabindex}\" data-action=\"graph-side-tab\" data-tab=\"changes\" data-payload=\"{changes_payload}\">Changes <span class=\"graph-map-total\">({changes_count})</span></button></div>",
     )
 }
 fn side_top_html(side_tab: &str, changes_count: u64, surface: &str, show_close: bool) -> String {
@@ -30411,5 +30415,12 @@ mod memory_bridge_tests {
         }
         let end = drag.end(Some(7), false).expect("drag end");
         assert!(end.suppress_click);
+
+        let details_tabs = side_tabs_html("details", 3, "session");
+        assert!(details_tabs.contains("aria-selected=\"true\" tabindex=\"0\""));
+        assert!(details_tabs.contains("aria-selected=\"false\" tabindex=\"-1\""));
+        let changes_tabs = side_tabs_html("changes", 3, "modal");
+        assert!(changes_tabs.contains("aria-selected=\"true\" tabindex=\"0\" data-action=\"graph-side-tab\" data-tab=\"changes\""));
+        assert!(changes_tabs.contains("aria-selected=\"false\" tabindex=\"-1\" data-action=\"graph-side-tab\" data-tab=\"details\""));
     }
 }

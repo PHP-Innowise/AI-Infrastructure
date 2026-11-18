@@ -3252,13 +3252,10 @@ fn render_canvas_html_with_layout(
 
 /// Renders the rich `#system-map-side` or `#system-change-topology-side` inspector HTML.
 pub fn render_side_html(surface: SysMapSurface, doc: &V, state: &V) -> String {
-    let side_tab = {
-        let t = m::text(state, "side_tab");
-        if t.is_empty() {
-            "details".to_owned()
-        } else {
-            t
-        }
+    let side_tab = match m::text(state, "side_tab").as_str() {
+        "analyze" => "analyze".to_owned(),
+        "changes" => "changes".to_owned(),
+        _ => "details".to_owned(),
     };
     let nodes = m::array(&doc["nodes"]);
     let edges = m::array(&doc["edges"]);
@@ -3277,10 +3274,12 @@ pub fn render_side_html(surface: SysMapSurface, doc: &V, state: &V) -> String {
         ("analyze", "Analyze"),
         ("changes", "Changes & Impact"),
     ] {
+        let selected = side_tab == id;
         let p = payload_attr(&json!({ "surface": surface.id, "tab": id }));
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-pick-tab system-side-tab\" role=\"tab\" aria-selected=\"{}\" data-action=\"system-map-side-tab\" data-payload=\"{p}\">{}</button>",
-            if side_tab == id { "true" } else { "false" },
+            "<button type=\"button\" class=\"graph-pick-tab system-side-tab\" role=\"tab\" aria-selected=\"{}\" tabindex=\"{}\" data-action=\"system-map-side-tab\" data-payload=\"{p}\">{}</button>",
+            if selected { "true" } else { "false" },
+            if selected { "0" } else { "-1" },
             escape(label),
         ));
     }
@@ -6512,5 +6511,21 @@ mod tests {
             ),
             graph_viewport::ResizeAction::SyncRadar(fit_cam)
         );
+
+        let mut st = default_surface_state();
+        let doc = json!({"nodes": [], "edges": []});
+        let details_html = render_side_html(SERVICES_SURFACE, &doc, &st);
+        assert!(details_html.contains("aria-selected=\"true\" tabindex=\"0\""));
+        assert_eq!(details_html.matches("tabindex=\"-1\"").count(), 2);
+
+        st["side_tab"] = json!("analyze");
+        let analyze_html = render_side_html(SERVICES_SURFACE, &doc, &st);
+        assert_eq!(
+            analyze_html
+                .matches("aria-selected=\"true\" tabindex=\"0\"")
+                .count(),
+            1
+        );
+        assert_eq!(analyze_html.matches("tabindex=\"-1\"").count(), 2);
     }
 }
