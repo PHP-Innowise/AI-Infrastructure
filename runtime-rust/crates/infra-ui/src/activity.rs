@@ -3424,6 +3424,7 @@ pub(crate) fn render(root: &str) {
                 btn.set_class_name("run-tab");
                 let _ = btn.set_attribute("role", "tab");
                 let _ = btn.set_attribute("aria-selected", truth(active_tab));
+                let _ = btn.set_attribute("tabindex", roving_tabindex(active_tab));
                 let _ = btn.set_attribute("data-focus-key", &format!("tab:{tab_id}"));
                 if let Some(n) = badge_count {
                     let _ = btn.set_attribute("aria-label", &format!("{title} ({n})"));
@@ -3434,6 +3435,7 @@ pub(crate) fn render(root: &str) {
                 }
                 dom::add(&tabs_bar, &btn);
             }
+            dom::sync_roving_widget(&tabs_bar);
         }
     }
 
@@ -3853,6 +3855,14 @@ pub fn event(kind: &str, action: &str, payload: &V, checked: bool) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+fn roving_tabindex(active: bool) -> &'static str {
+    if active {
+        "0"
+    } else {
+        "-1"
     }
 }
 
@@ -4568,5 +4578,7 @@ mod tests {
         let folder_items = build_folder_render_items(&folders, true);
         assert_eq!(folder_items.len(), 1);
         assert_eq!(folder_items[0]["key"], "folder:orders · src/");
+        assert_eq!(super::roving_tabindex(true), "0");
+        assert_eq!(super::roving_tabindex(false), "-1");
     }
 }
