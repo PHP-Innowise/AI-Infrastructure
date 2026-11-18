@@ -1,5 +1,7 @@
 use crate::{
     HarnessError, Result,
+    conversation::{self, Step},
+    permission::{Approvals, Decision, PermissionMode},
     process::{self, Limits},
 };
 use serde::{Deserialize, Serialize};
@@ -7,7 +9,10 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
@@ -31,6 +36,37 @@ pub struct Launch {
     pub effort: Option<String>,
     pub usd: Option<f64>,
     pub hook_events: bool,
+    /// What an editing launch may do without asking. None keeps the fixed
+    /// behaviour of launches without a person: workspace edits only.
+    pub permissions: Option<PermissionMode>,
+    /// Where a Manual launch puts the requests a person answers.
+    pub approvals: Option<Arc<dyn Approvals>>,
+}
+/// How a launch talks to its host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// The prompt is written, the input closes, the host prints its events.
+    Text,
+    /// Claude Code's stream-json input with its control channel on stdio.
+    ClaudeControl,
+    /// Codex's app server.
+    CodexServer,
+    /// Cursor's ACP server.
+    CursorAcp,
+}
+/// The transport a launch needs: a person answering requests needs a host
+/// that keeps listening, and Claude Code is told to accept edits where its
+/// auto mode is unavailable.
+pub fn transport(input: &Launch) -> Transport {
+    match (
+        input.provider.as_str(),
+        input.permissions.filter(|_| input.mode == "edit"),
+    ) {
+        ("claude", Some(PermissionMode::Auto | PermissionMode::Manual)) => Transport::ClaudeControl,
+        ("codex", Some(PermissionMode::Manual)) => Transport::CodexServer,
+        ("cursor", Some(PermissionMode::Manual)) => Transport::CursorAcp,
+        _ => Transport::Text,
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerResult {
@@ -69,6 +105,9 @@ pub struct PreparedCommand {
     pub input: Vec<u8>,
     pub readable: Vec<PathBuf>,
     pub remove: Vec<String>,
+    /// Text placed before the prompt of a host that is prompted over its
+    /// protocol rather than on its command line.
+    pub prompt_prefix: String,
 }
 pub trait LaunchAdapter: Send + Sync {
     fn adapt(&self, input: &Launch, command: PreparedCommand) -> Result<PreparedCommand>;
@@ -92,6 +131,7 @@ pub fn command_with_adapter(
             input: bytes,
             readable: vec![],
             remove: vec![],
+            prompt_prefix: String::new(),
         },
     )
 }
@@ -126,6 +166,9 @@ pub fn command(input: &Launch) -> Result<CommandParts> {
         .ok_or_else(|| HarnessError::invalid("Native executable path is not UTF-8."))?;
     let mut args = command_argv(&[exe.into()], Some(&input.provider))?;
     let mut env = environment(&input.provider, input.agents, input.count);
+    // A planning launch stays read-only whatever the permissions say.
+    let permission = input.permissions.filter(|_| input.mode == "edit");
+    let transport = transport(input);
     match input.provider.as_str() {
         "claude" => {
             args.extend(
@@ -135,14 +178,30 @@ pub fn command(input: &Launch) -> Result<CommandParts> {
                     "stream-json",
                     "--verbose",
                     "--permission-mode",
-                    if input.mode == "plan" {
-                        "plan"
-                    } else {
-                        "acceptEdits"
+                    match (input.mode.as_str(), permission) {
+                        ("plan", _) => "plan",
+                        (_, None) => "acceptEdits",
+                        (_, Some(PermissionMode::Auto)) => "auto",
+                        (_, Some(PermissionMode::Manual)) => "default",
+                        (_, Some(PermissionMode::Bypass)) => "bypassPermissions",
                     },
                 ]
                 .map(String::from),
             );
+            if permission == Some(PermissionMode::Bypass) {
+                args.push("--allow-dangerously-skip-permissions".into());
+            }
+            if transport == Transport::ClaudeControl {
+                args.extend(
+                    [
+                        "--input-format",
+                        "stream-json",
+                        "--permission-prompt-tool",
+                        "stdio",
+                    ]
+                    .map(String::from),
+                );
+            }
             if input.effort.as_deref() == Some("ultracode") {
                 if !input.agents {
                     return Err(HarnessError::invalid(
@@ -185,18 +244,29 @@ pub fn command(input: &Launch) -> Result<CommandParts> {
             }
         }
         "codex" => {
-            args.extend([
-                "--ask-for-approval".into(),
-                "never".into(),
-                "--sandbox".into(),
-                if input.mode == "plan" {
-                    "read-only".into()
-                } else {
-                    "workspace-write".into()
-                },
-                "--cd".into(),
-                input.project.to_string_lossy().into(),
-            ]);
+            match (transport, permission) {
+                // The app server takes approvals and sandbox per thread.
+                (Transport::CodexServer, _) => {}
+                // Codex's automatic reviewer answers what needs approval,
+                // inside the workspace-write sandbox.
+                (_, Some(PermissionMode::Auto)) => args.push("--approve-for-me".into()),
+                (_, Some(PermissionMode::Bypass)) => {
+                    args.push("--dangerously-bypass-approvals-and-sandbox".into())
+                }
+                _ => args.extend([
+                    "--ask-for-approval".into(),
+                    "never".into(),
+                    "--sandbox".into(),
+                    if input.mode == "plan" {
+                        "read-only".into()
+                    } else {
+                        "workspace-write".into()
+                    },
+                ]),
+            }
+            if transport != Transport::CodexServer {
+                args.extend(["--cd".into(), input.project.to_string_lossy().into()]);
+            }
             let settings = if input.agents {
                 vec![
                     "agents.enabled=true".into(),
@@ -238,30 +308,34 @@ pub fn command(input: &Launch) -> Result<CommandParts> {
                     ),
                 ]);
             }
-            args.push("exec".into());
-            if input.session.is_some() {
-                args.push("resume".into());
+            if transport == Transport::CodexServer {
+                args.push("app-server".into());
+            } else {
+                args.push("exec".into());
+                if input.session.is_some() {
+                    args.push("resume".into());
+                }
+                args.push("--json".into());
             }
-            args.push("--json".into());
         }
         "cursor" => {
-            args.extend(
-                [
-                    "--disable-auto-update",
-                    "--print",
-                    "--output-format",
-                    "stream-json",
-                    "--workspace",
-                ]
-                .map(String::from),
-            );
-            args.push(input.project.to_string_lossy().into());
-            args.extend(["--sandbox", "enabled"].map(String::from));
-            if input.mode == "plan" {
-                args.extend(["--mode", "plan"].map(String::from));
-            }
-            if let Some(session) = &input.session {
-                args.extend(["--resume".into(), session.clone()]);
+            args.push("--disable-auto-update".into());
+            if transport != Transport::CursorAcp {
+                args.extend(
+                    ["--print", "--output-format", "stream-json", "--workspace"].map(String::from),
+                );
+                args.push(input.project.to_string_lossy().into());
+                if permission == Some(PermissionMode::Bypass) {
+                    args.extend(["--force", "--sandbox", "disabled"].map(String::from));
+                } else {
+                    args.extend(["--sandbox", "enabled"].map(String::from));
+                }
+                if input.mode == "plan" {
+                    args.extend(["--mode", "plan"].map(String::from));
+                }
+                if let Some(session) = &input.session {
+                    args.extend(["--resume".into(), session.clone()]);
+                }
             }
         }
         _ => return Err(HarnessError::invalid("Unknown provider.")),
@@ -269,20 +343,25 @@ pub fn command(input: &Launch) -> Result<CommandParts> {
     if let Some(usd) = input.usd {
         args.extend(["--max-budget-usd".into(), usd.to_string()]);
     }
-    if let Some(model) = &input.model {
+    // Codex's app server takes the model with the thread.
+    if let Some(model) = &input.model
+        && transport != Transport::CodexServer
+    {
         args.extend(["--model".into(), model.clone()]);
     }
-    match input.provider.as_str() {
-        "codex" => {
+    match (input.provider.as_str(), transport) {
+        ("codex", Transport::Text) => {
             if let Some(session) = &input.session {
                 args.push(session.clone());
             }
             args.push("-".into());
         }
-        "cursor" => args.extend(["--".into(), input.prompt.clone()]),
+        ("cursor", Transport::Text) => args.extend(["--".into(), input.prompt.clone()]),
+        ("cursor", Transport::CursorAcp) => args.push("acp".into()),
         _ => {}
     }
-    let stdin = if input.provider == "cursor" {
+    // A host that talks over its input is prompted by its driver.
+    let stdin = if input.provider == "cursor" || transport != Transport::Text {
         vec![]
     } else {
         input.prompt.as_bytes().to_vec()
@@ -376,6 +455,7 @@ pub async fn run_monitored_until(
             input: bytes,
             readable: vec![],
             remove: vec![],
+            prompt_prefix: String::new(),
         }
     };
     let mut remove = plan.remove.clone();
@@ -401,38 +481,115 @@ pub async fn run_monitored_until(
             events: events.clone(),
         }) as Arc<dyn process::RunObserver>
     });
-    let mut accounting = RunCost::new(&input.provider, input.session.clone(), previous);
-    let mut text = String::new();
-    let mut terminal = false;
-    let mut failed = false;
-    let mut session = None;
-    let mut cost = None;
-    let mut limit = None;
-    let observe = |line: &[u8]| -> Result<()> {
-        let Ok(event) = crate::strict_json::parse(line, 2 * 1024 * 1024) else {
-            return Ok(());
+    let mut reading = Reading::new(input, previous);
+    let transport = transport(input);
+    let output = if transport == Transport::Text {
+        let observe = |line: &[u8]| -> Result<()> {
+            let Ok(event) = crate::strict_json::parse(line, 2 * 1024 * 1024) else {
+                return Ok(());
+            };
+            reading.read(input, &event, &events, &mut emit)
         };
-        if let Some(events) = &events {
-            events.observe(Some(&event), None)?;
+        if let Some(deadline) = deadline {
+            process::run_monitored_until(
+                &plan.argv,
+                &input.project,
+                &plan.environment,
+                &remove,
+                &plan.input,
+                limits,
+                cancel,
+                runner_lock,
+                observer,
+                deadline,
+                observe,
+            )
+            .await?
+        } else {
+            process::run_monitored(
+                &plan.argv,
+                &input.project,
+                &plan.environment,
+                &remove,
+                &plan.input,
+                limits,
+                cancel,
+                runner_lock,
+                observer,
+                observe,
+            )
+            .await?
         }
-        accounting.observe(&event);
+    } else {
+        converse_with_host(
+            input,
+            transport,
+            &plan,
+            &remove,
+            limits,
+            cancel,
+            runner_lock,
+            observer,
+            deadline,
+            &mut reading,
+            &events,
+            &mut emit,
+        )
+        .await?
+    };
+    Ok(reading.finish(input, output))
+}
+/// What a run learns from its host's events.
+struct Reading {
+    accounting: RunCost,
+    text: String,
+    terminal: bool,
+    failed: bool,
+    session: Option<String>,
+    cost: Option<f64>,
+    limit: Option<String>,
+}
+impl Reading {
+    fn new(input: &Launch, previous: Option<f64>) -> Self {
+        Self {
+            accounting: RunCost::new(&input.provider, input.session.clone(), previous),
+            text: String::new(),
+            terminal: false,
+            failed: false,
+            session: None,
+            cost: None,
+            limit: None,
+        }
+    }
+    /// One event in the host's own format.
+    fn read(
+        &mut self,
+        input: &Launch,
+        event: &Value,
+        events: &Option<Arc<dyn RunEvents>>,
+        emit: &mut (impl FnMut(Value) -> Result<()> + Send),
+    ) -> Result<()> {
+        if let Some(events) = events {
+            events.observe(Some(event), None)?;
+        }
+        self.accounting.observe(event);
         if input.provider == "claude" && event["subtype"] == "error_max_budget_usd" {
-            limit = Some("USD".to_string());
+            self.limit = Some("USD".to_string());
         }
-        for mut event in normalize(&input.provider, &event) {
+        for mut event in normalize(&input.provider, event) {
             if event["kind"] == "usage"
                 && let Some(reported) = event["cost_usd"].as_f64()
             {
                 event["cost_usd_reported"] = reported.into();
-                event["cost_session_total"] = json!(accounting.total(reported));
-                event["cost_usd"] = json!(accounting.own(reported));
+                event["cost_session_total"] = json!(self.accounting.total(reported));
+                event["cost_usd"] = json!(self.accounting.own(reported));
             }
             match event["kind"].as_str() {
                 Some("session") => {
-                    session = event["native_session_id"].as_str().map(String::from);
+                    self.session = event["native_session_id"].as_str().map(String::from);
                 }
                 Some("text") => {
-                    text = event["text"]
+                    self.text = event["text"]
                         .as_str()
                         .unwrap_or("")
                         .chars()
@@ -444,15 +601,15 @@ pub async fn run_monitored_until(
                         .as_f64()
                         .filter(|v| v.is_finite() && *v >= 0.)
                     {
-                        cost = Some(value);
+                        self.cost = Some(value);
                     }
                 }
-                Some("error") => failed = true,
+                Some("error") => self.failed = true,
                 Some("result") => {
-                    terminal = true;
-                    failed |= event["ok"] != true;
-                    if text.is_empty() && event["ok"] == true {
-                        text = event["text"]
+                    self.terminal = true;
+                    self.failed |= event["ok"] != true;
+                    if self.text.is_empty() && event["ok"] == true {
+                        self.text = event["text"]
                             .as_str()
                             .unwrap_or("")
                             .chars()
@@ -462,72 +619,235 @@ pub async fn run_monitored_until(
                 }
                 _ => {}
             }
-            if let Some(events) = &events {
+            if let Some(events) = events {
                 events.observe(None, Some(&event))?;
                 event = events.enrich(&event)?;
             }
             emit(event)?;
         }
         Ok(())
-    };
-    let output = if let Some(deadline) = deadline {
-        process::run_monitored_until(
-            &plan.argv,
-            &input.project,
-            &plan.environment,
-            &remove,
-            &plan.input,
-            limits,
-            cancel,
-            runner_lock,
-            observer,
-            deadline,
-            observe,
-        )
-        .await?
-    } else {
-        process::run_monitored(
-            &plan.argv,
-            &input.project,
-            &plan.environment,
-            &remove,
-            &plan.input,
-            limits,
-            cancel,
-            runner_lock,
-            observer,
-            observe,
-        )
-        .await?
-    };
-    let over = input
-        .usd
-        .zip(cost)
-        .is_some_and(|(limit, cost)| cost > limit);
-    if over {
-        limit = Some("USD".into());
     }
-    let ok = output.code == 0 && terminal && !failed && !over;
-    Ok(WorkerResult {
-        text,
-        ok,
-        cost_usd: cost,
-        session_id: session,
-        duration_seconds: output.seconds,
-        error: if ok {
-            None
-        } else {
-            Some(
-                if limit.is_some() {
-                    "Native reviewer reached its USD budget; review incomplete."
-                } else {
-                    "Native reviewer did not return a completed result."
+    fn finish(mut self, input: &Launch, output: process::Output) -> WorkerResult {
+        let over = input
+            .usd
+            .zip(self.cost)
+            .is_some_and(|(limit, cost)| cost > limit);
+        if over {
+            self.limit = Some("USD".into());
+        }
+        let ok = output.code == 0 && self.terminal && !self.failed && !over;
+        WorkerResult {
+            text: self.text,
+            ok,
+            cost_usd: self.cost,
+            session_id: self.session,
+            duration_seconds: output.seconds,
+            error: if ok {
+                None
+            } else {
+                Some(
+                    if self.limit.is_some() {
+                        "Native reviewer reached its USD budget; review incomplete."
+                    } else {
+                        "Native reviewer did not return a completed result."
+                    }
+                    .into(),
+                )
+            },
+            limit_reached: self.limit,
+        }
+    }
+}
+/// Counts a request as waiting for a person until it is answered or dropped.
+struct Waiting(Arc<AtomicUsize>);
+impl Waiting {
+    fn start(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self(count.clone())
+    }
+}
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+fn line(value: &Value) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+/// Runs a host that keeps its input open: replies to its protocol, routes its
+/// permission requests and reads its events as a one-shot launch would.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The conversation shares the one-shot launch's custody, observations and reading."
+)]
+async fn converse_with_host(
+    input: &Launch,
+    transport: Transport,
+    plan: &PreparedCommand,
+    remove: &[String],
+    limits: Limits,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<std::fs::File>>,
+    observer: Option<Arc<dyn process::RunObserver>>,
+    deadline: Option<std::time::Instant>,
+    reading: &mut Reading,
+    events: &Option<Arc<dyn RunEvents>>,
+    emit: &mut (impl FnMut(Value) -> Result<()> + Send),
+) -> Result<process::Output> {
+    let mode = input
+        .permissions
+        .ok_or_else(|| HarnessError::invalid("A conversation needs a permission mode."))?;
+    if mode == PermissionMode::Manual && input.approvals.is_none() {
+        return Err(HarnessError::invalid(
+            "Manual permissions need someone to answer the requests.",
+        ));
+    }
+    let setup = conversation::Setup {
+        mode,
+        prompt: format!("{}{}", plan.prompt_prefix, input.prompt),
+        cwd: input.project.to_string_lossy().into_owned(),
+        model: input.model.clone(),
+        resume: input.session.clone(),
+    };
+    let mut driver = match transport {
+        Transport::ClaudeControl => conversation::claude(setup),
+        Transport::CodexServer => conversation::codex(setup),
+        Transport::CursorAcp => conversation::cursor(setup),
+        Transport::Text => {
+            return Err(HarnessError::invalid(
+                "A one-shot launch has no conversation.",
+            ));
+        }
+    };
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let finished = Arc::new(AtomicBool::new(false));
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let decisions: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+    // Answers the driver has not heard yet, by ask id: allowed or not.
+    let answers: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
+    // The host hears the opening before it says anything: Codex and Cursor
+    // answer only what they are asked.
+    for reply in driver.opening().replies {
+        let _ = sender.send(line(&reply)?);
+    }
+    let mut writer = Some(sender);
+    let mut take = |step: Step,
+                    writer: &mut Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+                    reading: &mut Reading|
+     -> Result<()> {
+        // What the host said comes before what it asks, as it happened.
+        for event in &step.events {
+            reading.read(input, event, events, emit)?;
+        }
+        for reply in &step.replies {
+            if let Some(writer) = writer.as_ref() {
+                let _ = writer.send(line(reply)?);
+            }
+        }
+        for notice in step.notices {
+            emit(notice)?;
+        }
+        for id in &step.withdrawn {
+            if let Some(approvals) = &input.approvals {
+                approvals.withdraw(id)?;
+            }
+        }
+        for ask in step.asks {
+            let Some(approvals) = input.approvals.clone() else {
+                continue;
+            };
+            let Some(sender) = writer.clone() else {
+                continue;
+            };
+            let decided = match approvals.ask(&ask.public) {
+                Ok(decided) => decided,
+                Err(error) => {
+                    // Nobody can see the request: the host hears no.
+                    if let Ok(mut answers) = answers.lock() {
+                        answers.push((ask.public.id.clone(), false));
+                    }
+                    let _ = sender.send(line(&ask.deny)?);
+                    emit(
+                        json!({"kind":"error","text":format!("A permission request could not be shown: {}", error.message)}),
+                    )?;
+                    continue;
                 }
-                .into(),
-            )
+            };
+            let pending = Waiting::start(&waiting);
+            let answers = answers.clone();
+            let task = tokio::spawn(async move {
+                let _pending = pending;
+                let (reply, allowed) = match decided.await {
+                    Ok(Decision::Allow) => (ask.allow, true),
+                    Ok(Decision::AllowSession) => (ask.allow_session.unwrap_or(ask.allow), true),
+                    Ok(Decision::Deny) | Err(_) => (ask.deny, false),
+                };
+                // Recorded before the host hears it, so the driver knows the
+                // answer before anything the host says about it.
+                if let Ok(mut answers) = answers.lock() {
+                    answers.push((ask.public.id.clone(), allowed));
+                }
+                if let Ok(bytes) = line(&reply) {
+                    let _ = sender.send(bytes);
+                }
+            });
+            if let Ok(mut tasks) = decisions.lock() {
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(task);
+            }
+        }
+        if step.close_input {
+            writer.take();
+        }
+        if step.finished {
+            finished.store(true, Ordering::Release);
+        }
+        Ok(())
+    };
+    let observe = |bytes: &[u8]| -> Result<()> {
+        let Ok(message) = crate::strict_json::parse(bytes, 2 * 1024 * 1024) else {
+            return Ok(());
+        };
+        if !message.is_object() {
+            return Ok(());
+        }
+        let heard = answers
+            .lock()
+            .map(|mut answers| std::mem::take(&mut *answers))
+            .unwrap_or_default();
+        for (ask, allowed) in heard {
+            driver.answered(&ask, allowed);
+        }
+        let step = driver.receive(message);
+        take(step, &mut writer, reading)
+    };
+    let output = process::run_interactive(
+        &plan.argv,
+        &input.project,
+        &plan.environment,
+        remove,
+        &[],
+        limits,
+        cancel,
+        runner_lock,
+        observer,
+        deadline,
+        process::Interactive {
+            input: receiver,
+            finished: finished.clone(),
+            waiting: waiting.clone(),
         },
-        limit_reached: limit,
-    })
+        observe,
+    )
+    .await;
+    if let Ok(mut tasks) = decisions.lock() {
+        for task in tasks.drain(..) {
+            task.abort();
+        }
+    }
+    output
 }
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     let path = Path::new(name);

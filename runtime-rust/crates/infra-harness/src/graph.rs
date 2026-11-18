@@ -4510,6 +4510,7 @@ mod tests {
             input: vec![],
             readable: vec![],
             remove: vec![],
+            prompt_prefix: String::new(),
         };
         let before =
             r#"{"env":{"A":"1"},"permissions":{"allow":["Bash(php:*)"],"deny":["Read(.env)"]}}"#;

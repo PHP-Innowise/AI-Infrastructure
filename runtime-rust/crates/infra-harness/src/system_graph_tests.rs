@@ -1496,6 +1496,8 @@ fn run_multi_root_system_explain_test() {
         agents: false,
         count: 0,
         hook_events: false,
+        permissions: None,
+        approvals: None,
     };
     let codex_cmd = adapt_system_explain_launch(
         &fx.store,
@@ -1507,6 +1509,7 @@ fn run_multi_root_system_explain_test() {
             input: Vec::new(),
             readable: Vec::new(),
             remove: Vec::new(),
+            prompt_prefix: String::new(),
         },
     )
     .unwrap();
@@ -1534,6 +1537,7 @@ fn run_multi_root_system_explain_test() {
             input: Vec::new(),
             readable: Vec::new(),
             remove: Vec::new(),
+            prompt_prefix: String::new(),
         },
     )
     .unwrap();

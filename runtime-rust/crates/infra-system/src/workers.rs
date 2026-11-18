@@ -636,6 +636,7 @@ async fn run_discovery_context(
         input,
         readable,
         remove,
+        ..
     } = native::prepare_launch(
         &provider,
         &executable,

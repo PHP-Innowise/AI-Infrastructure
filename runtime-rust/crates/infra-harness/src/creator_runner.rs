@@ -340,6 +340,8 @@ impl CreatorRunner {
             effort: request["thinking_effort"].as_str().map(str::to_owned),
             usd: request["budgets"]["usd"].as_f64(),
             hook_events: false,
+            permissions: None,
+            approvals: None,
         };
         let (mut command, environment, stdin) = provider::command(&input)?;
         if input.provider == "codex" {

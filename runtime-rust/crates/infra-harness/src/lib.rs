@@ -30,6 +30,7 @@ pub mod legacy;
 pub mod legacy_msgpack;
 pub mod native_diagnostics;
 pub mod omnigraph;
+pub mod permissions;
 pub mod process;
 pub mod projects;
 pub mod provider;

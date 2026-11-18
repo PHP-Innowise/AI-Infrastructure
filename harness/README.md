@@ -331,6 +331,59 @@ controls again. The default remains one model, and new sessions start with the
 option disabled. Switching stays within one native provider and preserves the
 session/workspace; it does not transfer conversations between providers.
 
+### Permissions: Auto, Manual, Bypass Permissions
+
+In Sessions, **Permissions** next to **Mode** says what an editing turn may do
+without asking. Planning (Plan mode and the Plan, Review and Fleet workflows)
+stays read-only whatever the setting, so nothing in it asks. The setting is kept
+with the session and can change between turns in **Next-turn settings**.
+
+| Setting | Claude Code | Codex | Cursor |
+| --- | --- | --- | --- |
+| **Auto** (default) | `--permission-mode auto`: Claude Code's classifier reviews each action. Where a model has no auto mode (Haiku, for one), Claude Code starts in its default mode; the Harness switches it to `acceptEdits` and says so in the chat | `--approve-for-me`: the workspace-write sandbox, with Codex's automatic reviewer answering what needs approval | Print mode with `--sandbox enabled`: workspace edits and sandboxed commands run |
+| **Manual** | `--permission-mode default` with `--permission-prompt-tool stdio`: Claude Code asks before edits and commands | `codex app-server`, a read-only thread with `approvalPolicy: on-request` and the person as reviewer: Codex asks before each edit and each command that writes | `cursor-agent acp`: Cursor asks before actions outside its allowlist (`permissions.allow` in `~/.cursor/cli-config.json`) |
+| **Bypass Permissions** | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--force --sandbox disabled` |
+
+In Auto nothing waits for a person: a request the host's own review would put to
+a person is declined, and the chat shows it as *declined automatically*. In
+Manual each request appears in the chat with the command, path or host it
+concerns and **Allow**, **Allow for this session** and **Deny**; the run waits for
+the answer, and the waiting does not count against the session's time budget.
+Allow for this session keeps the approval in the host's running session (Claude
+Code's suggested rules are scoped to the session, never written to the
+project's settings; Codex's `acceptForSession`). Cursor's always-allow outlives
+the session, so a Cursor request offers Allow and Deny only. A request the host
+withdraws, or one still open when the run ends or is cancelled, is answered no
+and marked as no longer waiting. Bypass Permissions runs every action without
+asking and without the sandbox: use it only in a disposable checkout or
+container.
+
+Manual keeps the host's input open instead of closing it after the prompt:
+Claude Code reads stream-json, and Codex and Cursor run their protocol servers,
+which the Harness stops after the turn when they keep serving. Their events are
+read exactly as in a one-shot launch. Cursor's ACP mode has known gaps of its
+own (plugins may not load), so an attached project's Cursor policy arrives as
+the prompt preamble. The Harness runs `cursor-agent` rather than `agent`, a name
+other tools install too; the ACP server needs a CLI signed in with
+`cursor-agent login`. Cursor reports a command the person denied as completed;
+the Harness records it as not run, not as a success. Cursor CLI 2026.11 also
+keeps a model a launch names with `--model` as its default for later launches,
+in the Harness or not. A session created through the API without `permissions`
+keeps the behaviour from before the setting: workspace edits only, everything
+else declined.
+
+| Request | Response |
+| --- | --- |
+| `POST /api/sessions` or `POST /api/sessions/{session_id}/messages` with `"permissions": "auto"`, `"manual"` or `"bypass"` | The session with its `permissions`; any other value is refused with `400` |
+| `POST /api/sessions/{session_id}/permissions/{request_id}` with exactly `{"decision":"allow"}`, `"allow_session"` or `"deny"` | `200`, `{permission, session}`; `409` when the request no longer waits; `400` for `allow_session` on a request that cannot be remembered |
+
+A request is the session event `{"kind":"permission","state":"pending","request_id",…}`
+with `provider`, `tool`, `summary`, `detail` and `session_option`; later events of
+the same `request_id` carry `allowed`, `allowed_session`, `denied`, `declined`,
+`withdrawn` or `expired`. Codex and Cursor number their requests afresh in every
+process, so `request_id` is the host's id followed by a tag of the run
+(`cursor-0-1c029d06`): each turn's requests stay apart.
+
 ### Starting the server
 
 Supports Linux, macOS and native Windows 10/11 through the platform's native engine and at least one authenticated provider CLI. The server and Fleet runtime are Rust; browser business logic is Rust/Wasm. Install a verified engine and its generated UI assets. A Python virtualenv is not part of the runtime.
@@ -1034,12 +1087,10 @@ confirm a later one. Reads are bounded to the journal's last 4 MiB, and missing,
 malformed or mismatched records remain unconfirmed. Model messages, prompts and
 reasoning from the journal are never forwarded to the UI.
 
-Plan/Review always use plan permissions. Codex uses its read-only sandbox
-for Plan and workspace-write for Edit; Claude uses plan/acceptEdits;
-Cursor uses plan/default agent mode with its sandbox enabled. These native
-permission systems are not identical. The web UI does not implement an
-interactive permission-approval relay or bypass native checks: a command
-requiring unavailable approval can fail and must be handled in the CLI.
+Plan/Review always use plan permissions: Codex's read-only sandbox, Claude
+Code's plan mode and Cursor's plan mode. What an Edit turn may do follows the
+session's Permissions setting (see *Permissions: Auto, Manual, Bypass
+Permissions*); these native permission systems are not identical.
 
 By default one run is active at a time, with a bounded queue of 16. The
 experimental concurrency option above permits independent native sessions.

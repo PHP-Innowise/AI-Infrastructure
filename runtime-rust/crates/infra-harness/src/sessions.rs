@@ -82,6 +82,8 @@ pub struct Sessions {
     graphs: Mutex<Option<Arc<crate::graph::Graphs>>>,
     omnigraph: Mutex<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
     lifecycle: Arc<crate::lifecycle::RunnerLifecycle>,
+    /// Permission requests running sessions wait on.
+    permissions: Arc<crate::permissions::PermissionDesk>,
     pub default_seconds: u64,
 }
 fn lock<T>(value: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
@@ -216,6 +218,9 @@ fn followup_settings(session: &Value, options: &Value, catalog: &Value) -> Resul
     let mut fields = options.clone();
     fields["sdd"] = sdd.clone().unwrap_or(Value::Null);
     fields["mode"] = json!(mode);
+    if let Some(permissions) = options.get("permissions") {
+        fields["permissions"] = crate::permissions::validate(permissions)?;
+    }
     let provider = session["provider"].as_str().unwrap_or("");
     let (model, effort, routing) = infra_host::model_catalog::routed_model_settings(
         catalog,
@@ -378,6 +383,7 @@ impl Sessions {
             graphs: Mutex::new(None),
             omnigraph: Mutex::new(None),
             lifecycle,
+            permissions: Arc::default(),
             default_seconds: limits.seconds,
         });
         let runner = Arc::downgrade(&result);
@@ -540,6 +546,7 @@ impl Sessions {
             "clash",
             "system_explain",
             "omnigraph",
+            "permissions",
         ];
         if !data.is_object()
             || data
@@ -591,6 +598,7 @@ impl Sessions {
         value["workflow"] = workflow.into();
         value["agents_enabled"] = enabled.into();
         value["agent_count"] = count.into();
+        value["permissions"] = crate::permissions::validate(&data["permissions"])?;
         let fleet = if workflow == "fleet-review" {
             fleet_options(
                 data.get("fleet").unwrap_or(&json!({})),
@@ -1276,6 +1284,32 @@ impl Sessions {
         crate::chat_merge::ChatMerge::new(self.store.clone()).restore(sid)?;
         self.enqueue(sid, "", &json!({}))
     }
+    /// Where a Manual session's launch puts the requests its person answers.
+    fn approvals(
+        &self,
+        sid: &str,
+        session: &Value,
+        emit: &Event,
+    ) -> Option<Arc<dyn infra_host::permission::Approvals>> {
+        (crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Manual))
+            .then(|| self.permissions.approvals(sid, emit.clone()))
+    }
+    /// A person's answer to a request a running session waits on.
+    pub fn decide_permission(&self, sid: &str, request: &str, body: &Value) -> Result<Value> {
+        if !store::exact(body, &["decision"], &[]) {
+            return Err(HarnessError::invalid("Send only the decision."));
+        }
+        let decision = body["decision"]
+            .as_str()
+            .and_then(infra_host::permission::Decision::parse)
+            .ok_or_else(|| HarnessError::invalid("Choose allow, allow_session or deny."))?;
+        self.store.get(sid)?;
+        self.permissions.decide(sid, request, decision)
+    }
+    /// The requests a session's run waits on now.
+    pub fn waiting_permissions(&self, sid: &str) -> Vec<Value> {
+        self.permissions.waiting(sid)
+    }
     fn configure_launch(&self, session: &Value, prompt: &str) -> Result<Launch> {
         let provider = session["provider"]
             .as_str()
@@ -1310,6 +1344,8 @@ impl Sessions {
             effort: session["thinking_effort"].as_str().map(String::from),
             usd: session["budgets"]["usd"].as_f64(),
             hook_events: true,
+            permissions: crate::permissions::mode(session),
+            approvals: None,
         })
     }
     #[cfg(test)]
@@ -1764,7 +1800,8 @@ impl Sessions {
                     executables.insert(id.into(), path);
                 }
             }
-            let launch = self.configure_launch(&session, &job.prompt)?;
+            let mut launch = self.configure_launch(&session, &job.prompt)?;
+            launch.approvals = self.approvals(&job.sid, &session, &emit);
             let stage = if session["mode"] == "edit" {
                 "implement"
             } else {
@@ -1799,6 +1836,7 @@ impl Sessions {
                     emit,
                 )
                 .await;
+            self.permissions.expire(&job.sid);
             if let Some(binding) = &graph_binding {
                 let _ = self.lifecycle.abort(
                     binding,
@@ -1888,13 +1926,14 @@ impl Sessions {
             self.lifecycle.before_dispatch(&binding, &launch)?;
             Ok(launch)
         })();
-        let launch = match configured {
+        let mut launch = match configured {
             Ok(launch) => launch,
             Err(error) => {
                 let _ = self.lifecycle.abort(&binding, "failed");
                 return Err(error);
             }
         };
+        launch.approvals = self.approvals(&job.sid, &session, &emit);
         let adapter = self.launch_adapter(&session)?;
         let previous = launch
             .session
@@ -1977,6 +2016,8 @@ impl Sessions {
         ))
         .await;
         drop(forwarding);
+        // Whatever the run left waiting is answered no.
+        self.permissions.expire(&job.sid);
         let observed = observed.map_err(|error| {
             if error.code == "native-cancelled"
                 && budget_stop.load(Ordering::Acquire)
@@ -2087,6 +2128,7 @@ impl Sessions {
             "clash",
             "omnigraph",
             "brain",
+            "permissions",
         ];
         if !options.is_object()
             || options
@@ -2224,6 +2266,13 @@ impl Domain for Sessions {
                         .ok_or_else(|| HarnessError::invalid("Invalid message options."))?;
                     options.remove("prompt");
                     self.send(sid, prompt, &options.into())?
+                }
+                "sessions.permission" => {
+                    let request = request["params"]["request_id"].as_str().unwrap_or("");
+                    let answer = self.decide_permission(sid, request, body)?;
+                    return Ok(Payload::Json(
+                        json!({"permission": answer, "session": self.store.get(sid)?}),
+                    ));
                 }
                 "sessions.cancel" => {
                     if !store::exact(body, &[], &[]) {
@@ -3729,6 +3778,7 @@ pub(crate) mod generation_completion_tests {
                 lifecycle: Arc::new(crate::lifecycle::RunnerLifecycle::new(
                     store, knowledge, source,
                 )),
+                permissions: Arc::default(),
                 default_seconds: 900,
             });
             Self {

@@ -1,6 +1,8 @@
 //! Shared concrete native host, CLI and isolation implementations.
 pub mod capture;
+mod conversation;
 pub mod error;
+pub mod permission;
 pub mod process;
 pub mod provider;
 pub mod sandbox;

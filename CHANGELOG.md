@@ -24,6 +24,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Sessions have a **Permissions** setting — Auto, Manual or Bypass
+  Permissions — that says what an editing turn of Claude Code, Codex or Cursor
+  may do without asking. Auto uses each host's own automatic review (Claude
+  Code's auto mode, falling back to accepting edits where a model has none;
+  Codex `--approve-for-me`; Cursor's sandbox) and declines what would need a
+  person. Manual keeps the host talking — Claude Code's stream-json control
+  channel, `codex app-server`, Cursor's ACP server — and shows each request in
+  the chat with Allow, Allow for this session and Deny; the run waits for the
+  answer without spending its time budget
+  (`POST /api/sessions/{session_id}/permissions/{request_id}`). Bypass
+  Permissions turns approvals and the sandbox off. Planning stays read-only,
+  and a session created without the field keeps its earlier behaviour.
+  Checked live against Cursor CLI 2026.11.17: a request id carries a tag of
+  its run, because Codex and Cursor number requests from 0 in every process
+  and the next turn's request redrew the last turn's card; Cursor's request
+  shows the command from the call's start and why Cursor asks; a command the
+  person denied, which Cursor reports completed, shows as not run.
+- A provider's model catalog no longer reads as not loaded while another
+  request reads it: two sessions created at once could get `503` "The native
+  model catalog has not been loaded."
 - Fleet progress reads and writes its task under the Project Brain mutation
   lock instead of retrying a stale revision: on Windows a lens reading the task
   while another replaced its file could see it as missing. A System

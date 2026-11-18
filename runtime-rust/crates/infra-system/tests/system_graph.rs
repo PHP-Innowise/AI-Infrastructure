@@ -777,6 +777,7 @@ fn worker_offers_sandbox_mounts_claude_rules_codex_dirs_and_prompt_injection() {
         remove: vec!["GRAPHIFY_NO_AUTO_REFRESH".into()],
         input: vec![],
         readable: vec![],
+        prompt_prefix: String::new(),
     };
     let codex_prepared = prepare_worker("codex", "edit", codex_cmd, &own_filtered).unwrap();
     assert_eq!(
@@ -821,6 +822,7 @@ fn worker_offers_sandbox_mounts_claude_rules_codex_dirs_and_prompt_injection() {
             remove: vec![],
             input: vec![],
             readable: vec![],
+            prompt_prefix: String::new(),
         },
         &with_program,
     )
@@ -853,6 +855,7 @@ fn worker_offers_sandbox_mounts_claude_rules_codex_dirs_and_prompt_injection() {
         remove: vec![],
         input: vec![],
         readable: vec![],
+        prompt_prefix: String::new(),
     };
     let claude_prepared = prepare_worker("claude", "edit", claude_cmd, &own_filtered).unwrap();
     let settings_idx = claude_prepared

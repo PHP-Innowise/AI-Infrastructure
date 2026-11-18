@@ -944,7 +944,10 @@ pub fn codex_config_arguments(command: &[String]) -> Result<Vec<String>> {
         return Ok(command.to_vec());
     }
     let mut first = first.unwrap_or(remaining.len());
-    if let Some(exec) = remaining.iter().position(|value| value == "exec") {
+    if let Some(exec) = remaining
+        .iter()
+        .position(|value| value == "exec" || value == "app-server")
+    {
         first = first.min(exec);
     }
     remaining.splice(first..first, configs);
@@ -974,12 +977,19 @@ pub fn apply_overlay(
             command.splice(index + 2..index + 2, overlay.arguments.clone());
         }
         "codex" => {
+            // A launch a person answers runs Codex's app server instead of exec.
             let index = command
                 .iter()
-                .position(|value| value == "exec")
+                .position(|value| value == "exec" || value == "app-server")
                 .ok_or_else(|| RuntimeError::invalid("Codex command lacks exec"))?;
             command.splice(index..index, overlay.arguments.clone());
             command = codex_config_arguments(&command)?;
+        }
+        "cursor" if command.last().is_some_and(|value| value == "acp") => {
+            // Cursor's ACP server is prompted over its protocol; the launch
+            // puts the prompt prefix there.
+            let index = command.len() - 1;
+            command.splice(index..index, overlay.arguments.clone());
         }
         "cursor" => {
             let index = command
