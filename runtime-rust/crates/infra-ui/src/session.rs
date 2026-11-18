@@ -278,7 +278,195 @@ const PREF_FIELDS: &[&str] = &[
     "omnigraph-auto-publish",
     "omnigraph-auto-merge",
 ];
+fn template_content_node(id: &str) -> Option<web_sys::Node> {
+    let template = dom::get(id)?;
+    js_sys::Reflect::get(&template, &"content".into())
+        .ok()
+        .and_then(|v| v.dyn_into::<web_sys::Node>().ok())
+}
+
+fn hydrate_rabbit_svgs() {
+    let Some(content) = template_content_node("rabbit-svg-template") else {
+        return;
+    };
+    for slot in dom::all(".composer-rabbit") {
+        if slot.first_element_child().is_some() {
+            continue;
+        }
+        if let Ok(cloned) = content.clone_node_with_deep(true) {
+            let _ = slot.append_child(&cloned);
+        }
+    }
+}
+
+fn hydrate_embedded_graph_panels() {
+    let Some(content) = template_content_node("embedded-graph-panel-template") else {
+        return;
+    };
+    for host in dom::all("[data-graph-prefix]") {
+        if host.first_element_child().is_some() {
+            continue;
+        }
+        let Some(prefix) = host
+            .get_attribute("data-graph-prefix")
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let heading_tag = host
+            .get_attribute("data-graph-heading")
+            .filter(|s| matches!(s.as_str(), "h2" | "h3" | "h4"))
+            .unwrap_or_else(|| "h4".into());
+        let title = host
+            .get_attribute("data-graph-title")
+            .unwrap_or_else(|| "Code graph".into());
+        let scope = host
+            .get_attribute("data-graph-scope")
+            .unwrap_or_else(|| "Code graph".into());
+        let Ok(cloned) = content.clone_node_with_deep(true) else {
+            continue;
+        };
+        if host.append_child(&cloned).is_err() {
+            continue;
+        }
+        if let Ok(nodes) = host.query_selector_all("[data-graph-id]") {
+            for i in 0..nodes.length() {
+                if let Some(el) = nodes
+                    .item(i)
+                    .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                {
+                    if let Some(suffix) = el.get_attribute("data-graph-id") {
+                        let _ = el.set_attribute("id", &format!("{prefix}-{suffix}"));
+                        let _ = el.remove_attribute("data-graph-id");
+                    }
+                }
+            }
+        }
+        for (source_attr, target_attr) in [
+            ("data-graph-controls", "aria-controls"),
+            ("data-graph-labelledby", "aria-labelledby"),
+        ] {
+            let selector = format!("[{source_attr}]");
+            if let Ok(nodes) = host.query_selector_all(&selector) {
+                for i in 0..nodes.length() {
+                    if let Some(el) = nodes
+                        .item(i)
+                        .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                    {
+                        if let Some(suffix) = el.get_attribute(source_attr) {
+                            let _ = el.set_attribute(target_attr, &format!("{prefix}-{suffix}"));
+                            let _ = el.remove_attribute(source_attr);
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(nodes) = host.query_selector_all("[data-graph-role]") {
+            for i in 0..nodes.length() {
+                let Some(el) = nodes
+                    .item(i)
+                    .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                else {
+                    continue;
+                };
+                let role = el.get_attribute("data-graph-role").unwrap_or_default();
+                let _ = el.remove_attribute("data-graph-role");
+                match role.as_str() {
+                    "title" => {
+                        if heading_tag != "h4" {
+                            let heading = dom::el(&heading_tag, "session-graph-title", &title);
+                            let _ = heading.set_attribute("id", &format!("{prefix}-title"));
+                            let _ = el.replace_with_with_node_1(&heading);
+                        } else {
+                            el.set_text_content(Some(&title));
+                        }
+                    }
+                    "toolbar" => {
+                        let _ = el.set_attribute("aria-label", &format!("{scope} controls"));
+                    }
+                    "filter-label" => {
+                        el.set_text_content(Some(if prefix == "session-graph" {
+                            "Filter graph names"
+                        } else {
+                            "Filter service graph names"
+                        }));
+                    }
+                    "crumbs" => {
+                        let label = match prefix.as_str() {
+                            "session-graph" => "Graph breadcrumbs",
+                            "system-member-graph" => "Service graph breadcrumbs",
+                            _ => "Change service graph breadcrumbs",
+                        };
+                        let _ = el.set_attribute("aria-label", label);
+                    }
+                    "canvas" => {
+                        let label = match prefix.as_str() {
+                            "session-graph" => "Interactive code graph canvas",
+                            "system-member-graph" => "Interactive service code graph canvas",
+                            _ => "Interactive change service code graph canvas",
+                        };
+                        let _ = el.set_attribute("aria-label", label);
+                    }
+                    "side" => {
+                        let label = match prefix.as_str() {
+                            "session-graph" => "Selected code unit details",
+                            "system-member-graph" => "Selected service code unit details",
+                            _ => "Selected change service code unit details",
+                        };
+                        let _ = el.set_attribute("aria-label", label);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn hydrate_templates() {
+    hydrate_rabbit_svgs();
+    hydrate_embedded_graph_panels();
+}
+
+pub fn normalize_mobile_pane(pane: &str) -> &'static str {
+    if pane == "graph" {
+        "graph"
+    } else {
+        "chat"
+    }
+}
+
+pub fn set_mobile_pane(pane: &str) {
+    let pane = normalize_mobile_pane(pane);
+    dom::attr("sessions-view", "data-mobile-pane", pane);
+    dom::attr("sessions-workspace", "data-mobile-pane", pane);
+    let is_graph = pane == "graph";
+    dom::attr(
+        "session-mobile-tab-chat",
+        "aria-selected",
+        if is_graph { "false" } else { "true" },
+    );
+    dom::attr(
+        "session-mobile-tab-chat",
+        "tabindex",
+        if is_graph { "-1" } else { "0" },
+    );
+    dom::attr(
+        "session-mobile-tab-graph",
+        "aria-selected",
+        if is_graph { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-mobile-tab-graph",
+        "tabindex",
+        if is_graph { "0" } else { "-1" },
+    );
+    if is_graph {
+        crate::graph_map::sync_embedded(false);
+    }
+}
+
 pub fn initialize() {
+    hydrate_templates();
     for prefix in ["session-budgets", "creator-budgets", "creator-run-budgets"] {
         budget_editor(prefix);
     }
@@ -319,6 +507,16 @@ pub fn initialize() {
         let _ = media.add_event_listener_with_callback("change", c.as_ref().unchecked_ref());
         c.forget();
     }
+    if let Ok(Some(mobile_media)) = dom::window().match_media("(max-width:920px)") {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+            if m::read(|s| s.view == "sessions") {
+                crate::graph_map::sync_embedded(false);
+            }
+        });
+        let _ =
+            mobile_media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
     let capture_click = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
         if let Some(target) = event
             .target()
@@ -335,6 +533,7 @@ pub fn initialize() {
         true,
     );
     capture_click.forget();
+    dom::wire_a11y_widgets();
 }
 fn apply_theme(preference: &str) {
     let dark = dom::window()
@@ -375,6 +574,7 @@ pub async fn bootstrap() {
                 s.boot = boot;
                 s.auth_failed = false;
             });
+            reset_session_settings_state();
             dom::hidden("connection-banner", true);
             render_update();
             spawn_local(async {
@@ -392,6 +592,7 @@ pub async fn bootstrap() {
             spawn_local(async {
                 sign_in(false).await;
             });
+            m::set("bootstrapping", json!(true));
             let wanted = dom::json_storage(PREFS);
             let sid = m::text(&wanted, "session_id");
             if !sid.is_empty() && m::read(|s| s.sessions.iter().any(|x| m::text(x, "id") == sid)) {
@@ -399,6 +600,7 @@ pub async fn bootstrap() {
             }
             let view = dom::hash_view();
             open_view(if view.is_empty() { "sessions" } else { &view }, false).await;
+            m::take("bootstrapping");
             if m::read(|s| s.view != "sessions") && !dom::value("project").is_empty() {
                 crate::graph_map::sync_embedded(false);
                 spawn_local(async {
@@ -570,8 +772,13 @@ pub fn models(prefix: &str, requested: Option<String>) {
         m::summary,
         None,
     );
+    let custom_field = if prefix.is_empty() {
+        "custom-model-field".to_owned()
+    } else {
+        format!("{prefix}custom-field")
+    };
     dom::hidden(
-        &format!("{prefix}custom-field"),
+        &custom_field,
         !custom && dom::value(&format!("{prefix}model-choice")) != "--custom--",
     );
     dom::disabled(
@@ -609,6 +816,12 @@ pub fn selected_model(prefix: &str) -> V {
         V::Null
     } else {
         json!(v)
+    }
+}
+pub(crate) fn model_selection_valid(custom_selected: bool, selected: &V) -> bool {
+    match selected.as_str() {
+        Some(x) => x.len() <= 120 && !x.starts_with('-') && !x.chars().any(char::is_control),
+        None => !custom_selected,
     }
 }
 pub fn routing() -> V {
@@ -794,10 +1007,8 @@ pub fn controls() {
     let max = m::read(|s| s.boot["runtime"]["max_agents"].as_u64().unwrap_or(40));
     let helper_valid = !dom::checked("agents-enabled") || (1..=max).contains(&count);
     let model = selected_model("");
-    let model_valid = model
-        .as_str()
-        .map(|x| x.len() <= 120 && !x.starts_with('-') && !x.chars().any(char::is_control))
-        .unwrap_or(true);
+    let custom_model = dom::value("model-choice") == "--custom--";
+    let model_valid = model_selection_valid(custom_model, &model);
     let inbox_active = inbox::eligible(&session);
     let valid = ready
         && !m::read(|s| s.pending)
@@ -817,7 +1028,11 @@ pub fn controls() {
                 && (dry || m::yes(&provider["available"]))
                 && session["workflow"] != "fleet-review"
         };
+    let project_id = dom::value("project");
+    dom::disabled("preflight-check", !ready || project_id.is_empty());
+    dom::disabled("preflight-risk-callers", !ready || project_id.is_empty());
     dom::disabled("send", !valid);
+    dom::hidden("cancel-session", sid.is_empty() || !m::active(&session));
     dom::disabled(
         "cancel-session",
         !m::active(&session) || m::read(|s| s.pending),
@@ -853,17 +1068,39 @@ pub fn controls() {
     ] {
         dom::disabled(id, !ready || locked || !sid.is_empty());
     }
+    let git = m::data("project-git");
+    let worktree_ok = m::yes(&git["worktree_available"]);
+    let worktrees = m::array(&m::data("project-worktrees")["worktrees"]);
+    dom::disabled(
+        "refresh-project-git",
+        !ready || locked || project_id.is_empty(),
+    );
+    dom::disabled("workspace-worktree-option", !worktree_ok);
+    dom::disabled(
+        "workspace-existing-option",
+        !worktree_ok || worktrees.is_empty(),
+    );
+    if git.is_object() {
+        dom::text("project-git-status", &format_project_git_status(&git));
+        dom::text(
+            "workspace-hint",
+            &format_workspace_hint(&dom::value("workspace"), &git),
+        );
+    }
     for id in [
         "model-choice",
         "thinking-effort",
         "agents-enabled",
-        "agent-count",
         "mode",
         "prompt",
         "attach-files",
     ] {
         dom::disabled(id, !ready || locked);
     }
+    dom::disabled(
+        "agent-count",
+        !ready || locked || !dom::checked("agents-enabled"),
+    );
     dom::disabled(
         "prompt",
         !ready || m::read(|s| s.pending) || inbox_retry || (m::active(&session) && !inbox_active),
@@ -881,6 +1118,9 @@ pub fn controls() {
         commands::close();
     }
     dom::hidden("fleet-settings", !fleet);
+    for id in ["fleet-dry-run", "fleet-budget", "fleet-worker-timeout"] {
+        dom::disabled(id, !ready || locked || !fleet);
+    }
     let sdd_locked = !ready || locked || session["status"] == "awaiting_context";
     dom::hidden("sdd-settings", !sdd);
     dom::disabled("sdd-feature", !sdd || sdd_locked || !sid.is_empty());
@@ -912,7 +1152,11 @@ pub fn controls() {
         "permissions-hint",
         permissions_hint(&dom::value("provider"), &editing, &permission),
     );
-    dom::attr("permissions-hint", "data-mode", &permission);
+    dom::attr(
+        "permissions-hint",
+        "data-mode",
+        permissions_hint_mode(read_only, &editing, &permission),
+    );
     let description = phases
         .iter()
         .find(|entry| entry["id"] == phase)
@@ -945,7 +1189,34 @@ pub fn controls() {
             || sdd_locked
             || m::yes(&m::data("sdd-documents-pending")),
     );
-    dom::hidden("clash-settings", !dom::checked("clash-enabled"));
+    let merging = m::data("merge-draft").is_object();
+    let clash_supported = ["native", "review"].contains(&workflow.as_str());
+    dom::disabled(
+        "clash-enabled",
+        !ready || locked || merging || !clash_supported,
+    );
+    let clash_active = dom::checked("clash-enabled");
+    dom::hidden("clash-settings", !clash_active);
+    for id in [
+        "clash-challenger",
+        "clash-rounds",
+        "clash-model-choice",
+        "clash-thinking-effort",
+    ] {
+        dom::disabled(id, !ready || locked || !clash_active || !clash_supported);
+    }
+    dom::disabled(
+        "clash-model",
+        !ready
+            || locked
+            || !clash_active
+            || !clash_supported
+            || dom::value("clash-model-choice") != "--custom--",
+    );
+    dom::hidden(
+        "clash-custom-field",
+        dom::value("clash-model-choice") != "--custom--",
+    );
     dom::hidden(
         "worktree-branch-field",
         dom::value("workspace") != "worktree",
@@ -960,7 +1231,7 @@ pub fn controls() {
     );
     dom::disabled(
         "model",
-        locked || dom::value("model-choice") != "--custom--",
+        !ready || locked || dom::value("model-choice") != "--custom--",
     );
     let route_enabled = !routing().is_null();
     dom::hidden(
@@ -1035,14 +1306,65 @@ pub fn controls() {
             "Off"
         },
     );
+    let settings_invalid = !helper_valid
+        || !model_valid
+        || !sdd_valid
+        || !budget_fields_valid("session-budgets")
+        || !valid_budgets(&budgets("session-budgets"));
+    if sid.is_empty() {
+        m::take("session-settings-owner");
+        dom::hidden("session-summary", true);
+        dom::hidden("session-settings", false);
+        dom::attr("session-settings-toggle", "aria-expanded", "false");
+        dom::attr("session-settings-toggle", "data-invalid", "false");
+    } else {
+        let provider_name = {
+            let name = m::summary(&provider);
+            if name.is_empty() {
+                dom::value("provider")
+            } else {
+                name
+            }
+        };
+        let model_label = selected_model("")
+            .as_str()
+            .map(|id| {
+                m::array(&provider["model_options"]["models"])
+                    .into_iter()
+                    .find(|entry| entry["id"] == id)
+                    .and_then(|entry| entry["label"].as_str().map(str::to_owned))
+                    .filter(|label| !label.is_empty())
+                    .unwrap_or_else(|| id.to_owned())
+            })
+            .unwrap_or_default();
+        let summary = format_session_summary(
+            &provider_name,
+            &dom::value("mode"),
+            &permission,
+            &model_label,
+            !routing().is_null(),
+        );
+        dom::text("session-summary-text", &summary);
+        dom::hidden("session-summary", false);
+        dom::attr(
+            "session-settings-toggle",
+            "data-invalid",
+            if settings_invalid { "true" } else { "false" },
+        );
+        let owner = json!([m::read(|s| s.epoch), sid]);
+        if m::data("session-settings-owner") != owner {
+            m::set("session-settings-owner", owner);
+            dom::hidden("session-settings", true);
+            dom::attr("session-settings-toggle", "aria-expanded", "false");
+        }
+    }
     dom::hidden("waiting", !m::active(&session));
     dom::text(
         "waiting-text",
-        if session["status"] == "queued" {
-            "Queued — waiting for an available runner."
-        } else {
-            "Agent is running."
-        },
+        waiting_banner_text(
+            session["status"].as_str().unwrap_or(""),
+            run::permission_waiting(),
+        ),
     );
     knowledge::linked_controls();
     omnigraph::session_controls();
@@ -1051,7 +1373,71 @@ pub fn controls() {
     merge_controls();
     inbox::render();
     run::render();
+    refresh_provider_hint();
     sync_working_indicator();
+}
+
+pub(crate) fn permissions_hint_mode<'a>(
+    read_only: bool,
+    editing: &str,
+    permission: &'a str,
+) -> &'a str {
+    if read_only || editing != "edit" {
+        "plan"
+    } else {
+        permission
+    }
+}
+
+pub(crate) fn waiting_banner_text(status: &str, permission_waiting: bool) -> &'static str {
+    if status == "queued" {
+        "Queued — waiting for an available runner."
+    } else if permission_waiting {
+        "Waiting for your answer to a permission request…"
+    } else {
+        "Agent is running."
+    }
+}
+
+fn permission_display_label(permission: &str) -> &'static str {
+    match permission {
+        "manual" => "Manual",
+        "bypass" => "Bypass Permissions",
+        _ => "Auto",
+    }
+}
+
+fn mode_display_label(mode: &str) -> &'static str {
+    match mode {
+        "edit" => "Edit",
+        _ => "Plan",
+    }
+}
+
+pub(crate) fn format_session_summary(
+    provider: &str,
+    mode: &str,
+    permissions: &str,
+    model: &str,
+    routing_enabled: bool,
+) -> String {
+    let provider = if provider.trim().is_empty() {
+        "Provider"
+    } else {
+        provider.trim()
+    };
+    let model_text = if routing_enabled {
+        "Routing (Plan + Edit)"
+    } else if model.trim().is_empty() {
+        "Provider default"
+    } else {
+        model.trim()
+    };
+    format!(
+        "{provider} · {} · {} · {model_text}",
+        mode_display_label(mode),
+        permission_display_label(permissions),
+    )
 }
 
 pub(crate) struct WorkingSignals<'a> {
@@ -1132,6 +1518,13 @@ pub(crate) fn working_message(signals: &WorkingSignals<'_>) -> Option<&'static s
     if signals.booting {
         return Some("Loading workspace…");
     }
+    if signals
+        .sessions
+        .iter()
+        .any(|s| s["waiting_permissions"].as_u64().unwrap_or(0) > 0)
+    {
+        return Some("Another session is waiting for approval…");
+    }
     if signals.sessions.iter().any(m::active) {
         return Some("Another session is running…");
     }
@@ -1202,6 +1595,10 @@ pub fn sync_working_indicator() {
     dom::attr("session-form", "data-working", active);
 }
 pub async fn open_view(view: &str, record: bool) {
+    open_view_inner(view, record, record).await;
+}
+
+async fn open_view_inner(view: &str, record: bool, focus_heading: bool) {
     let previous_view = m::read(|state| state.view.clone());
     if ["systems", "system-changes"].contains(&previous_view.as_str())
         && !["systems", "system-changes"].contains(&view)
@@ -1312,7 +1709,11 @@ pub async fn open_view(view: &str, record: bool) {
     dom::text("page-title", title);
     dom::text("page-subtitle", subtitle);
     dom::class("sidebar", "open", false);
-    dom::focus("view-heading");
+    dom::class("scrim", "open", false);
+    dom::attr("menu-toggle", "aria-expanded", "false");
+    if focus_heading {
+        dom::focus("view-heading");
+    }
     match view {
         "changes" | "checks" | "usage" => results().await,
         "context" => knowledge::load_context().await,
@@ -1340,7 +1741,27 @@ fn history_projection(sessions: &[V], sid: &str) -> V {
             .iter()
             .map(|session| {
                 let id = m::text(session, "id");
-                json!({"id":id,"label":format!("{} · {}",m::summary(session),m::label(session["status"].as_str().unwrap_or(""))),"selected":id==sid})
+                let title = m::summary(session);
+                let status = session["status"].as_str().unwrap_or("").to_owned();
+                let waiting_permissions = session["waiting_permissions"].as_u64().unwrap_or(0);
+                let status_text = if waiting_permissions > 0 {
+                    if waiting_permissions == 1 {
+                        "Waiting for approval".to_owned()
+                    } else {
+                        format!("{waiting_permissions} approvals waiting")
+                    }
+                } else {
+                    m::label(&status)
+                };
+                json!({
+                    "id": id,
+                    "title": title,
+                    "status": status,
+                    "status_text": status_text,
+                    "waiting_permissions": waiting_permissions,
+                    "label": format!("{title} · {status_text}"),
+                    "selected": id == sid,
+                })
             })
             .collect(),
     )
@@ -1356,11 +1777,37 @@ pub fn history() {
     dom::clear("history");
     for v in projection.as_array().into_iter().flatten() {
         let id = m::text(v, "id");
-        let b = dom::button(&m::text(v, "label"), "session-open", json!(id));
+        let title = m::text(v, "title");
+        let status = m::text(v, "status");
+        let status_text = m::text(v, "status_text");
+        let waiting = v["waiting_permissions"].as_u64().unwrap_or(0);
+        let b = dom::button("", "session-open", json!(id));
         b.set_class_name("history-item");
+        if waiting > 0 {
+            let _ = b.set_attribute("data-waiting-approval", "true");
+        }
         if m::yes(&v["selected"]) {
             let _ = b.set_attribute("aria-current", "true");
         }
+        dom::add(&b, &dom::el("span", "history-title", &title));
+        let meta = dom::el("span", "history-meta", "");
+        let dot_class = if waiting > 0 {
+            "status-dot awaiting_approval"
+        } else {
+            match status.as_str() {
+                "running" => "status-dot running",
+                "queued" => "status-dot queued",
+                "failed" => "status-dot failed",
+                "awaiting_approval" => "status-dot awaiting_approval",
+                "rejected" => "status-dot rejected",
+                _ => "status-dot",
+            }
+        };
+        let dot = dom::el("span", dot_class, "");
+        let _ = dot.set_attribute("aria-hidden", "true");
+        dom::add(&meta, &dot);
+        dom::add(&meta, &dom::el("span", "", &status_text));
+        dom::add(&b, &meta);
         dom::append("history", &b);
     }
     m::set("history-projection", projection);
@@ -1479,7 +1926,7 @@ fn restore_preferences() {
 }
 /// A remembered field as a new draft starts with it. Bypass Permissions is
 /// chosen for each session on purpose, so a draft starts with Auto instead.
-fn restored_value<'a>(id: &str, value: &'a str) -> &'a str {
+pub(crate) fn restored_value<'a>(id: &str, value: &'a str) -> &'a str {
     if id == "permissions" && value == "bypass" {
         "auto"
     } else {
@@ -1569,6 +2016,7 @@ pub fn new_session(project: Option<&str>) {
     if m::read(|s| s.pending) {
         return;
     }
+    reset_preflight(true);
     reset_results();
     save_preferences();
     reset_merge_archive();
@@ -1582,6 +2030,8 @@ pub fn new_session(project: Option<&str>) {
         s.seen.clear();
         s.cursor = 0;
     });
+    reset_session_settings_state();
+    m::take("session-settings-owner");
     m::take("merge-draft");
     crate::graph_map::apply_focus(&V::Null);
     crate::graph::run_state(false);
@@ -1609,6 +2059,7 @@ pub async fn select(id: &str) {
         return;
     }
     let before_project = dom::value("project");
+    reset_preflight(false);
     reset_results();
     save_preferences();
     stop_poll();
@@ -1620,14 +2071,20 @@ pub async fn select(id: &str) {
         s.seen.clear();
         s.cursor = 0;
     });
+    reset_session_settings_state();
+    m::take("session-settings-owner");
+    dom::hidden("session-settings", true);
+    dom::attr("session-settings-toggle", "aria-expanded", "false");
     clear_files();
     dom::clear("events");
     dom::set_value("prompt", "");
     inbox::restore(id);
     run::reset();
-    spawn_local(async {
-        open_view("sessions", true).await;
-    });
+    if !m::yes(&m::data("bootstrapping")) {
+        spawn_local(async {
+            open_view("sessions", true).await;
+        });
+    }
     let epoch = m::read(|s| s.epoch);
     poll(epoch).await;
     if !m::read(|s| m::selection_matches(&s.sid, s.epoch, id, epoch)) {
@@ -1733,8 +2190,15 @@ pub async fn poll(epoch: u64) {
                 );
                 return;
             }
-            m::upsert(data["session"].clone());
-            apply_settings(&data["session"]);
+            let waiting_list = data["waiting_permissions"].as_array().cloned();
+            let mut session = data["session"].clone();
+            if let Some(waiting) = &waiting_list {
+                if session.is_object() {
+                    session["waiting_permissions"] = json!(waiting.len());
+                }
+            }
+            m::upsert(session.clone());
+            apply_settings(&session);
             let events = m::array(&data["events"]);
             let length = events.len();
             let mut fresh_events = Vec::new();
@@ -1758,6 +2222,9 @@ pub async fn poll(epoch: u64) {
                     fresh_events.push(event.clone());
                     run::observe(event);
                 }
+            }
+            if let Some(waiting) = &waiting_list {
+                run::reconcile_waiting_permissions(waiting);
             }
             let current_focus = m::data("session-graph-focus");
             let focus_update =
@@ -1854,25 +2321,181 @@ pub(crate) fn permissions_hint(provider: &str, mode: &str, permission: &str) -> 
         _ => "The agent works on its own and the host declines what needs approval; nothing waits for you.",
     }
 }
-pub fn apply_settings(v: &V) {
-    for (id, key) in [
-        ("provider", "provider"),
-        ("workflow", "workflow"),
-        ("mode", "mode"),
-        ("workspace", "workspace"),
-        ("agent-count", "agent_count"),
-    ] {
-        if !v[key].is_null() {
-            dom::set_value(id, &m::string(&v[key]));
-        }
+pub(crate) fn mark_dirty(group: &str) {
+    if m::read(|s| s.restoring || s.sid.is_empty()) {
+        return;
     }
-    dom::set_checked("agents-enabled", m::yes(&v["agents_enabled"]));
-    dom::set_value("permissions", v["permissions"].as_str().unwrap_or("auto"));
-    models("", Some(m::text(v, "model")));
-    dom::set_value("thinking-effort", &m::text(v, "thinking_effort"));
-    restore_model_routing(&v["model_routing"]);
-    dom::set_value("sdd-feature", &m::text(&v["sdd"], "feature"));
-    dom::set_value("sdd-phase", v["sdd"]["phase"].as_str().unwrap_or("specify"));
+    let mut dirty = m::data("session-dirty-fields")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    dirty.insert(group.to_owned(), json!(true));
+    m::set("session-dirty-fields", V::Object(dirty));
+}
+
+fn mark_dirty_for_id(id: &str) {
+    match id {
+        "permissions" => mark_dirty("permissions"),
+        "mode" => mark_dirty("mode"),
+        "agents-enabled" | "agent-count" => mark_dirty("agents"),
+        "model-choice" | "model" | "thinking-effort" => mark_dirty("model"),
+        "model-routing-enabled"
+        | "routing-plan-model-choice"
+        | "routing-plan-model"
+        | "routing-plan-thinking-effort"
+        | "routing-edit-model-choice"
+        | "routing-edit-model"
+        | "routing-edit-thinking-effort" => mark_dirty("model_routing"),
+        "sdd-phase" | "sdd-feature" => mark_dirty("sdd"),
+        "clash-enabled"
+        | "clash-challenger"
+        | "clash-rounds"
+        | "clash-model-choice"
+        | "clash-model"
+        | "clash-thinking-effort" => mark_dirty("clash"),
+        _ => {}
+    }
+}
+
+fn reset_session_settings_state() {
+    m::take("session-dirty-fields");
+    m::take("applied-session-snapshot");
+}
+
+fn session_settings_snapshot_fields(v: &V) -> V {
+    let clash = if v["clash"].is_object() {
+        json!({
+            "enabled": true,
+            "challenger": m::text(&v["clash"], "challenger"),
+            "rounds": m::string(&v["clash"]["rounds"]),
+            "model": m::text(&v["clash"], "challenger_model"),
+            "effort": m::text(&v["clash"], "challenger_thinking_effort"),
+        })
+    } else {
+        json!({"enabled": false})
+    };
+    json!({
+        "base": {
+            "provider": v["provider"],
+            "workflow": v["workflow"],
+            "workspace": v["workspace"],
+        },
+        "mode": v["mode"],
+        "permissions": v["permissions"].as_str().unwrap_or("auto"),
+        "agents": {
+            "enabled": m::yes(&v["agents_enabled"]),
+            "count": v["agent_count"],
+        },
+        "model": {
+            "model": m::text(v, "model"),
+            "effort": m::text(v, "thinking_effort"),
+        },
+        "model_routing": v["model_routing"],
+        "sdd": {
+            "feature": m::text(&v["sdd"], "feature"),
+            "phase": v["sdd"]["phase"].as_str().unwrap_or("specify"),
+        },
+        "clash": clash,
+    })
+}
+
+fn should_apply_setting_group(
+    snapshot: &V,
+    dirty: &V,
+    epoch: u64,
+    sid: &str,
+    group: &str,
+    incoming: &V,
+) -> bool {
+    let same_selection =
+        snapshot["epoch"].as_u64() == Some(epoch) && snapshot["sid"].as_str() == Some(sid);
+    if !same_selection {
+        return true;
+    }
+    if dirty[group] == true {
+        return false;
+    }
+    snapshot["fields"][group] != *incoming
+}
+
+pub fn apply_settings(v: &V) {
+    let epoch = m::read(|s| s.epoch);
+    let sid = m::text(v, "id");
+    let snapshot = m::data("applied-session-snapshot");
+    let dirty = m::data("session-dirty-fields");
+    let incoming = session_settings_snapshot_fields(v);
+    let mut next_fields = if snapshot["epoch"].as_u64() == Some(epoch)
+        && snapshot["sid"].as_str() == Some(sid.as_str())
+        && snapshot["fields"].is_object()
+    {
+        snapshot["fields"].clone()
+    } else {
+        json!({})
+    };
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "base", &incoming["base"]) {
+        for (id, key) in [
+            ("provider", "provider"),
+            ("workflow", "workflow"),
+            ("workspace", "workspace"),
+        ] {
+            if !v[key].is_null() {
+                dom::set_value(id, &m::string(&v[key]));
+            }
+        }
+        next_fields["base"] = incoming["base"].clone();
+    }
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "mode", &incoming["mode"]) {
+        if !v["mode"].is_null() {
+            dom::set_value("mode", &m::string(&v["mode"]));
+        }
+        next_fields["mode"] = incoming["mode"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "permissions",
+        &incoming["permissions"],
+    ) {
+        dom::set_value("permissions", v["permissions"].as_str().unwrap_or("auto"));
+        next_fields["permissions"] = incoming["permissions"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "agents",
+        &incoming["agents"],
+    ) {
+        if !v["agent_count"].is_null() {
+            dom::set_value("agent-count", &m::string(&v["agent_count"]));
+        }
+        dom::set_checked("agents-enabled", m::yes(&v["agents_enabled"]));
+        next_fields["agents"] = incoming["agents"].clone();
+    }
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "model", &incoming["model"]) {
+        models("", Some(m::text(v, "model")));
+        dom::set_value("thinking-effort", &m::text(v, "thinking_effort"));
+        next_fields["model"] = incoming["model"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "model_routing",
+        &incoming["model_routing"],
+    ) {
+        restore_model_routing(&v["model_routing"]);
+        next_fields["model_routing"] = incoming["model_routing"].clone();
+    }
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "sdd", &incoming["sdd"]) {
+        dom::set_value("sdd-feature", &m::text(&v["sdd"], "feature"));
+        dom::set_value("sdd-phase", v["sdd"]["phase"].as_str().unwrap_or("specify"));
+        next_fields["sdd"] = incoming["sdd"].clone();
+    }
     let revision = format!("{}:{}", m::text(v, "id"), m::string(&v["budget_revision"]));
     if m::data("budget-revision") != revision {
         restore_budgets("session-budgets", &v["budgets"]);
@@ -1896,16 +2519,23 @@ pub fn apply_settings(v: &V) {
         }
         m::set("budget-revision", json!(revision));
     }
-    dom::set_checked("clash-enabled", v["clash"].is_object());
-    if v["clash"].is_object() {
-        dom::set_value("clash-challenger", &m::text(&v["clash"], "challenger"));
-        dom::set_value("clash-rounds", &m::string(&v["clash"]["rounds"]));
-        models("clash-", Some(m::text(&v["clash"], "challenger_model")));
-        dom::set_value(
-            "clash-thinking-effort",
-            &m::text(&v["clash"], "challenger_thinking_effort"),
-        );
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "clash", &incoming["clash"]) {
+        dom::set_checked("clash-enabled", v["clash"].is_object());
+        if v["clash"].is_object() {
+            dom::set_value("clash-challenger", &m::text(&v["clash"], "challenger"));
+            dom::set_value("clash-rounds", &m::string(&v["clash"]["rounds"]));
+            models("clash-", Some(m::text(&v["clash"], "challenger_model")));
+            dom::set_value(
+                "clash-thinking-effort",
+                &m::text(&v["clash"], "challenger_thinking_effort"),
+            );
+        }
+        next_fields["clash"] = incoming["clash"].clone();
     }
+    m::set(
+        "applied-session-snapshot",
+        json!({"epoch": epoch, "sid": sid, "fields": next_fields}),
+    );
     dom::text("workspace-session-branch", &m::text(v, "branch"));
     dom::text("workspace-session-path", &m::text(v, "project_path"));
     knowledge::render_linked(v);
@@ -2140,7 +2770,16 @@ pub async fn send() {
         return;
     }
     let dry = workflow == "fleet-review" && dom::checked("fleet-dry-run");
-    let mut turn = json!({"prompt":prompt,"agents_enabled":dom::checked("agents-enabled"),"agent_count":dom::num("agent-count"),"model_routing":routing(),"model":if dry{V::Null}else{selected_model("")},"thinking_effort":if dry{V::Null}else{nullable(dom::value("thinking-effort"))},"permissions":dom::value("permissions")});
+    let agent_count = if dom::checked("agents-enabled") {
+        dom::num("agent-count")
+    } else {
+        json!(m::read(|s| {
+            s.boot["runtime"]["default_agent_count"]
+                .as_u64()
+                .unwrap_or(3)
+        }))
+    };
+    let mut turn = json!({"prompt":prompt,"agents_enabled":dom::checked("agents-enabled"),"agent_count":agent_count,"model_routing":routing(),"model":if dry{V::Null}else{selected_model("")},"thinking_effort":if dry{V::Null}else{nullable(dom::value("thinking-effort"))},"permissions":dom::value("permissions")});
     if follow && workflow == "native" && !routing().is_null() {
         turn["mode"] = json!(dom::value("mode"));
     }
@@ -2243,6 +2882,7 @@ pub async fn send() {
     m::write(|s| s.pending = true);
     controls();
     dom::error("composer-error", "");
+    dom::cancel_timer("preflight-debounce");
     crate::graph_map::focus_from_prompt(&prompt);
     crate::graph::run_state(true);
     match api::post(&path, turn).await {
@@ -2267,7 +2907,9 @@ pub async fn send() {
                     inbox::clear_draft(&sid, &prompt);
                 }
                 dom::set_value("prompt", "");
+                reset_preflight(false);
                 clear_files();
+                reset_session_settings_state();
                 m::write(|s| s.pending = false);
                 if follow {
                     let e = m::read(|s| s.epoch);
@@ -2314,6 +2956,46 @@ pub async fn session_action(action: &str, body: V, error: &str) {
     poll(e).await;
     controls();
 }
+pub(crate) fn format_project_git_status(v: &V) -> String {
+    let explicit = m::summary(v);
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    if !m::yes(&v["is_git"]) {
+        return v["reason"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Select a Git working directory to use a worktree.")
+            .to_owned();
+    }
+    let branch = v["branch"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("HEAD (detached)");
+    if m::yes(&v["worktree_available"]) {
+        format!("Git branch: {branch} · Worktrees ready")
+    } else if let Some(reason) = v["reason"].as_str().filter(|s| !s.trim().is_empty()) {
+        format!("Git branch: {branch} · {reason}")
+    } else {
+        format!("Git branch: {branch} · Worktrees unavailable")
+    }
+}
+
+pub(crate) fn format_workspace_hint(workspace: &str, git: &V) -> String {
+    match workspace {
+        "worktree" => {
+            "Creates an isolated Git worktree from committed HEAD for this session.".into()
+        }
+        "existing-worktree" => "Reuses an existing Git worktree listed for this repository.".into(),
+        _ if git.is_object() && !m::yes(&git["worktree_available"]) => git["reason"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("The agent runs in the selected project folder.")
+            .to_owned(),
+        _ => "The agent runs in the selected project folder.".into(),
+    }
+}
+
 pub async fn load_git() {
     let p = dom::value("project");
     if p.is_empty() {
@@ -2332,7 +3014,7 @@ pub async fn load_git() {
             }
             m::set(&format!("project-{kind}"), v.clone());
             if kind == "git" {
-                dom::text("project-git-status", &m::summary(&v));
+                dom::text("project-git-status", &format_project_git_status(&v));
                 crate::graph_map::sync_embedded_changes();
                 synced_changes = true;
             } else {
@@ -2348,8 +3030,32 @@ pub async fn load_git() {
     if !synced_changes && dom::value("project") == p {
         crate::graph_map::sync_embedded_changes();
     }
+    controls();
     knowledge::load_brain_link().await;
     management::load_attachment().await;
+}
+fn provider_sign_in_note(sign_in: &V, provider_id: &str, provider_name: &str) -> String {
+    let state = &sign_in["states"][provider_id];
+    if state["state"] == "signed_out" {
+        let name = if provider_name.is_empty() {
+            provider_id
+        } else {
+            provider_name
+        };
+        format!(
+            "{name} is not signed in. Sign in from a terminal with {}, then send again.",
+            state["login"].as_str().unwrap_or("the provider CLI")
+        )
+    } else {
+        String::new()
+    }
+}
+fn refresh_provider_hint() {
+    let chosen = dom::value("provider");
+    let sign_in = m::data("sign-in");
+    let note = provider_sign_in_note(&sign_in, &chosen, &m::summary(&m::provider(&chosen)));
+    dom::text("provider-hint", &note);
+    dom::hidden("provider-hint", note.is_empty());
 }
 pub async fn sign_in(refresh: bool) {
     if m::read(|s| s.boot.is_null() || s.auth_failed) || m::yes(&m::data("sign-in-pending")) {
@@ -2376,20 +3082,9 @@ pub async fn sign_in(refresh: bool) {
             }
         }
         v["states"] = states;
-        let chosen = dom::value("provider");
-        let state = &v["states"][&chosen];
-        let note = if state["state"] == "signed_out" {
-            format!(
-                "{} is not signed in. Sign in from a terminal with {}, then send again.",
-                m::summary(&m::provider(&chosen)),
-                state["login"].as_str().unwrap_or("the provider CLI")
-            )
-        } else {
-            String::new()
-        };
-        dom::text("provider-hint", &note);
         m::set("sign-in", v);
         m::set("sign-in-at", json!(js_sys::Date::now()));
+        refresh_provider_hint();
     }
     m::set("sign-in-pending", json!(false));
     sync_working_indicator();
@@ -2594,6 +3289,1328 @@ fn wait_for_restart(deadline: f64) {
         })
     });
 }
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+pub(crate) fn has_at_file_mention(prompt: &str) -> bool {
+    prompt.split_whitespace().any(|raw| {
+        let token = raw.trim_matches(|c: char| {
+            matches!(
+                c,
+                '(' | '[' | '{' | '"' | '\'' | ',' | ';' | ')' | ']' | '}'
+            )
+        });
+        let Some(rest) = token.strip_prefix('@') else {
+            return false;
+        };
+        rest.len() >= 2
+            && !rest.contains('@')
+            && (rest.contains('/') || rest.contains('.'))
+            && rest.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '#')
+            })
+    })
+}
+
+pub(crate) fn build_preflight_request(
+    prompt: &str,
+    sid: &str,
+    task_id: &str,
+    include_risk_callers: bool,
+) -> V {
+    let mut body = json!({
+        "prompt": prompt,
+        "risk_caller_hints": include_risk_callers,
+    });
+    if !sid.is_empty() {
+        body["session_id"] = json!(sid);
+    }
+    if !task_id.is_empty() {
+        body["task_id"] = json!(task_id);
+    }
+    body
+}
+
+fn preflight_task_id() -> String {
+    let sid = m::read(|s| s.sid.clone());
+    if !sid.is_empty() {
+        return m::read(|s| {
+            s.selected["brain"]["record_id"]
+                .as_str()
+                .or_else(|| s.selected["brain"]["task_id"].as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        });
+    }
+    match dom::value("brain-link-kind").as_str() {
+        "existing" => dom::value("brain-link-task").trim().to_owned(),
+        "create" => dom::value("brain-link-task-id").trim().to_owned(),
+        _ => String::new(),
+    }
+}
+
+fn reset_preflight(clear_opt_in: bool) {
+    dom::cancel_timer("preflight-debounce");
+    m::next("preflight");
+    m::take("preflight");
+    dom::text("preflight-status", "");
+    dom::error("preflight-error", "");
+    dom::clear("preflight-results");
+    dom::hidden("preflight-results", true);
+    if clear_opt_in {
+        dom::set_checked("preflight-risk-callers", false);
+    }
+}
+
+fn inspect_file_button_html(path: &str, label: &str) -> String {
+    let payload = json!({"path": path}).to_string();
+    format!(
+        "<button type=\"button\" class=\"button compact advisory-inspect\" data-action=\"inspect-file-graph\" data-path=\"{}\" data-payload=\"{}\">{}</button>",
+        escape_html(path),
+        escape_html(&payload),
+        escape_html(label)
+    )
+}
+
+fn open_memory_target_button_html(
+    scope: &str,
+    project_id: &str,
+    target_id: &str,
+    label: &str,
+) -> String {
+    let payload = json!({
+        "scope": scope,
+        "project_id": project_id,
+        "target_id": target_id
+    })
+    .to_string();
+    format!(
+        "<button type=\"button\" class=\"button compact advisory-inspect\" data-action=\"preflight-open-memory\" data-payload=\"{}\">{}</button>",
+        escape_html(&payload),
+        escape_html(label)
+    )
+}
+
+fn render_linked_record_buttons_html(
+    project_id: &str,
+    brain_records: &[V],
+    memory_chunks: &[V],
+) -> String {
+    let mut out = String::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for rec in brain_records.iter().take(4) {
+        let target_id = rec["id"]
+            .as_str()
+            .or_else(|| rec["external_id"].as_str())
+            .or_else(|| rec.as_str())
+            .unwrap_or("")
+            .trim();
+        if target_id.is_empty() || !seen.insert(("brain", target_id.to_owned())) {
+            continue;
+        }
+        let title = rec["title"]
+            .as_str()
+            .or_else(|| rec["external_id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(target_id);
+        out.push_str(&open_memory_target_button_html(
+            "brain",
+            project_id,
+            target_id,
+            &format!("Open {title}"),
+        ));
+    }
+    for chunk in memory_chunks.iter().take(4) {
+        let target_id = chunk["id"]
+            .as_str()
+            .or_else(|| chunk.as_str())
+            .unwrap_or("")
+            .trim();
+        if target_id.is_empty() || !seen.insert(("memory", target_id.to_owned())) {
+            continue;
+        }
+        let title = chunk["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(target_id);
+        out.push_str(&open_memory_target_button_html(
+            "memory",
+            project_id,
+            target_id,
+            &format!("Open {title}"),
+        ));
+    }
+    out
+}
+
+fn advisory_path(value: &V) -> String {
+    value
+        .as_str()
+        .or_else(|| value["path"].as_str())
+        .or_else(|| value["file"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned()
+}
+
+pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: bool) -> String {
+    let warnings_obj = if v["memory_warnings"].is_object() {
+        &v["memory_warnings"]
+    } else {
+        v
+    };
+    let contradictions = m::array(&warnings_obj["contradiction_warnings"]);
+    let hygiene = m::array(&warnings_obj["hygiene_warnings"]);
+    let risk_callers = m::array(&v["risk_callers"]);
+    let files = m::array(&v["files"]);
+    let blast = &v["blast_summary"];
+    let hints = m::array(&v["risk_caller_hints"]);
+
+    if !is_preflight && contradictions.is_empty() && hygiene.is_empty() && risk_callers.is_empty() {
+        return String::new();
+    }
+    if is_preflight
+        && contradictions.is_empty()
+        && hygiene.is_empty()
+        && risk_callers.is_empty()
+        && files.is_empty()
+        && hints.is_empty()
+        && !blast.is_object()
+    {
+        return "<p class=\"knowledge-note advisory-empty\">No referenced files, memory warnings, or graph risk callers flagged.</p>".to_owned();
+    }
+
+    let mut links_by_path: std::collections::BTreeMap<String, (Vec<V>, Vec<V>)> =
+        std::collections::BTreeMap::new();
+    for entry in files.iter().chain(hints.iter()) {
+        let p = advisory_path(entry);
+        if p.is_empty() {
+            continue;
+        }
+        let entry_links = links_by_path.entry(p).or_default();
+        entry_links.0.extend(m::array(&entry["brain_records"]));
+        entry_links.1.extend(m::array(&entry["memory_chunks"]));
+    }
+
+    let mut out = String::new();
+    if is_preflight && (blast.is_object() || !files.is_empty() || !hints.is_empty()) {
+        let blast_files = m::array(&blast["files"]);
+        let file_count = if !files.is_empty() {
+            files.len()
+        } else {
+            blast_files.len()
+        };
+        let direct = blast["direct_count"].as_u64().unwrap_or(0);
+        let downstream = blast["downstream_count"].as_u64().unwrap_or(0);
+        out.push_str("<div class=\"advisory-blast\">");
+        out.push_str(&format!(
+            "<span class=\"advisory-pill\" data-kind=\"info\">{file_count} file(s)</span>"
+        ));
+        if blast.is_object() {
+            out.push_str(&format!(
+                "<span class=\"advisory-pill\" data-kind=\"info\">{direct} direct</span><span class=\"advisory-pill\" data-kind=\"info\">{downstream} downstream</span>"
+            ));
+        }
+        if !hints.is_empty() {
+            out.push_str(&format!(
+                "<span class=\"advisory-pill\" data-kind=\"arch\">{} hint(s)</span>",
+                hints.len()
+            ));
+        }
+        out.push_str("</div>");
+
+        let mut listed_files = Vec::new();
+        for entry in files.iter().chain(blast_files.iter()) {
+            let p = advisory_path(entry);
+            if !p.is_empty() && !listed_files.contains(&p) {
+                listed_files.push(p);
+            }
+        }
+        if !listed_files.is_empty() {
+            out.push_str("<ul class=\"advisory-file-list\">");
+            for path in listed_files.iter().take(12) {
+                out.push_str("<li class=\"advisory-file-row\">");
+                out.push_str(&format!(
+                    "<code class=\"advisory-path\">{}</code><span class=\"advisory-actions\">",
+                    escape_html(path)
+                ));
+                out.push_str(&inspect_file_button_html(path, "Code graph"));
+                if let Some((brain_records, memory_chunks)) = links_by_path.get(path) {
+                    out.push_str(&render_linked_record_buttons_html(
+                        project_id,
+                        brain_records,
+                        memory_chunks,
+                    ));
+                }
+                out.push_str("</span></li>");
+            }
+            out.push_str("</ul>");
+        }
+    }
+
+    if !contradictions.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"contradiction\"><p class=\"advisory-group-title\">Memory contradictions</p><ul class=\"advisory-list\">");
+        for w in &contradictions {
+            let text = w["text"]
+                .as_str()
+                .unwrap_or("Conflicting memory atoms found.");
+            let path = advisory_path(w);
+            out.push_str("<li class=\"advisory-item\" data-kind=\"contradiction\">");
+            out.push_str("<span class=\"advisory-badge\" data-kind=\"error\">Contradiction</span>");
+            out.push_str(&format!(
+                "<span class=\"advisory-text\">{}</span>",
+                escape_html(text)
+            ));
+            out.push_str("<span class=\"advisory-actions\">");
+            if !path.is_empty() {
+                out.push_str(&inspect_file_button_html(&path, "Code graph"));
+            }
+            let opens = m::array(&w["open"]);
+            if opens.is_empty() {
+                for target in m::array(&w["linked"]).iter().take(4) {
+                    if let Some(id) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        let scope = if id.starts_with("MEM-") {
+                            "memory"
+                        } else {
+                            "brain"
+                        };
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            id,
+                            &format!("Open {id}"),
+                        ));
+                    }
+                }
+            } else {
+                for open in opens {
+                    let scope = open["scope"].as_str().unwrap_or("");
+                    let target_id = open["target_id"].as_str().unwrap_or("");
+                    if matches!(scope, "brain" | "memory") && !target_id.is_empty() {
+                        let title = open["title"].as_str().unwrap_or(target_id);
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            target_id,
+                            &format!("Open {title}"),
+                        ));
+                    }
+                }
+            }
+            out.push_str("</span></li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if !hygiene.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"hygiene\"><p class=\"advisory-group-title\">Memory hygiene warnings</p><ul class=\"advisory-list\">");
+        for w in &hygiene {
+            let kind = w["kind"].as_str().unwrap_or("hygiene");
+            let badge = match kind {
+                "cited-file-missing" => "Missing file",
+                "cited-file-renamed" => "Renamed file",
+                other => other,
+            };
+            let text = w["text"].as_str().unwrap_or("Review cited memory.");
+            let path = advisory_path(w);
+            out.push_str("<li class=\"advisory-item\" data-kind=\"hygiene\">");
+            out.push_str(&format!(
+                "<span class=\"advisory-badge\" data-kind=\"warning\">{}</span>",
+                escape_html(badge)
+            ));
+            out.push_str(&format!(
+                "<span class=\"advisory-text\">{}</span>",
+                escape_html(text)
+            ));
+            out.push_str("<span class=\"advisory-actions\">");
+            if !path.is_empty() {
+                out.push_str(&inspect_file_button_html(&path, "Code graph"));
+            }
+            for target in m::array(&w["linked"]).iter().take(4) {
+                if let Some(id) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    let scope = if id.starts_with("MEM-") {
+                        "memory"
+                    } else {
+                        "brain"
+                    };
+                    out.push_str(&open_memory_target_button_html(
+                        scope,
+                        project_id,
+                        id,
+                        &format!("Open {id}"),
+                    ));
+                }
+            }
+            out.push_str("</span></li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if !risk_callers.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"risk-callers\"><p class=\"advisory-group-title\">Graph risk callers</p><ul class=\"advisory-list\">");
+        for caller in &risk_callers {
+            let from = caller["from"]
+                .as_str()
+                .or_else(|| caller["caller"].as_str())
+                .or_else(|| caller["path"].as_str())
+                .or_else(|| caller["file"].as_str())
+                .or_else(|| caller.as_str())
+                .unwrap_or("")
+                .trim();
+            let to = caller["to"]
+                .as_str()
+                .or_else(|| caller["target"].as_str())
+                .unwrap_or("")
+                .trim();
+            let impact = caller["impact"]
+                .as_str()
+                .or_else(|| caller["kind"].as_str())
+                .unwrap_or("risk");
+            let reason = caller["reason"]
+                .as_str()
+                .or_else(|| caller["text"].as_str())
+                .unwrap_or("")
+                .trim();
+            if from.is_empty() && reason.is_empty() {
+                continue;
+            }
+            out.push_str("<li class=\"advisory-item\" data-kind=\"risk-caller\">");
+            out.push_str(&format!(
+                "<span class=\"advisory-badge\" data-kind=\"arch\">{}</span>",
+                escape_html(impact)
+            ));
+            let label = if !from.is_empty() && !to.is_empty() {
+                format!("{from} → {to}")
+            } else if !from.is_empty() {
+                from.to_owned()
+            } else {
+                reason.to_owned()
+            };
+            out.push_str(&format!(
+                "<code class=\"advisory-path\">{}</code>",
+                escape_html(&label)
+            ));
+            if !reason.is_empty() && !from.is_empty() {
+                out.push_str(&format!(
+                    "<span class=\"advisory-text\">{}</span>",
+                    escape_html(reason)
+                ));
+            }
+            if !from.is_empty() {
+                out.push_str("<span class=\"advisory-actions\">");
+                out.push_str(&inspect_file_button_html(from, "Code graph"));
+                if let Some((brain_records, memory_chunks)) = links_by_path.get(from) {
+                    out.push_str(&render_linked_record_buttons_html(
+                        project_id,
+                        brain_records,
+                        memory_chunks,
+                    ));
+                }
+                out.push_str("</span>");
+            }
+            out.push_str("</li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if is_preflight && !hints.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"risk-caller-hints\"><p class=\"advisory-group-title\">Advisory risk-caller hints</p><ul class=\"advisory-list\">");
+        for hint in &hints {
+            let path = advisory_path(hint);
+            let target = hint["target"]
+                .as_str()
+                .or_else(|| hint["to"].as_str())
+                .unwrap_or("")
+                .trim();
+            let impact = hint["impact"].as_str().unwrap_or("hint");
+            let brain_records = m::array(&hint["brain_records"]);
+            let memory_chunks = m::array(&hint["memory_chunks"]);
+            let hint_hygiene = m::array(&hint["hygiene_warnings"]);
+            let source_hints = m::array(&hint["source_hints"]);
+            if path.is_empty()
+                && brain_records.is_empty()
+                && memory_chunks.is_empty()
+                && hint_hygiene.is_empty()
+                && source_hints.is_empty()
+            {
+                continue;
+            }
+            let label = if !path.is_empty() && !target.is_empty() {
+                format!("{path} → {target}")
+            } else {
+                path.clone()
+            };
+            let mut details = Vec::new();
+            for hw in &hint_hygiene {
+                if let Some(txt) = hw["text"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    details.push(txt.to_owned());
+                }
+            }
+            let source_paths: Vec<String> = source_hints
+                .iter()
+                .filter_map(|item| {
+                    item["path"]
+                        .as_str()
+                        .or_else(|| item.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .take(4)
+                .collect();
+            if !source_paths.is_empty() {
+                details.push(format!("Sources: {}", source_paths.join(", ")));
+            }
+            out.push_str("<li class=\"advisory-item\" data-kind=\"risk-caller-hint\">");
+            out.push_str(&format!(
+                "<span class=\"advisory-badge\" data-kind=\"arch\">{}</span>",
+                escape_html(impact)
+            ));
+            if !label.is_empty() {
+                out.push_str(&format!(
+                    "<code class=\"advisory-path\">{}</code>",
+                    escape_html(&label)
+                ));
+            }
+            if !details.is_empty() {
+                out.push_str(&format!(
+                    "<span class=\"advisory-text\">{}</span>",
+                    escape_html(&details.join(" · "))
+                ));
+            }
+            out.push_str("<span class=\"advisory-actions\">");
+            if !path.is_empty() {
+                out.push_str(&inspect_file_button_html(&path, "Code graph"));
+            }
+            out.push_str(&render_linked_record_buttons_html(
+                project_id,
+                &brain_records,
+                &memory_chunks,
+            ));
+            for hw in &hint_hygiene {
+                for target_id in m::array(&hw["linked"]).iter().take(4) {
+                    if let Some(id) = target_id.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        let scope = if id.starts_with("MEM-") {
+                            "memory"
+                        } else {
+                            "brain"
+                        };
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            id,
+                            &format!("Open {id}"),
+                        ));
+                    }
+                }
+            }
+            out.push_str("</span></li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if is_preflight
+        && contradictions.is_empty()
+        && hygiene.is_empty()
+        && risk_callers.is_empty()
+        && hints.is_empty()
+    {
+        out.push_str("<p class=\"knowledge-note advisory-empty\">No contradictions, hygiene warnings, or graph risk callers flagged.</p>");
+    }
+    out
+}
+
+fn preflight_status_summary(v: &V) -> String {
+    let c = m::array(&v["contradiction_warnings"]).len();
+    let h = m::array(&v["hygiene_warnings"]).len();
+    let r = m::array(&v["risk_callers"]).len();
+    let hints = m::array(&v["risk_caller_hints"]).len();
+    let f = m::array(&v["files"]).len();
+    if c + h + r + hints == 0 {
+        if f == 0 {
+            "No risks flagged".to_owned()
+        } else {
+            format!("Checked {f} file(s) · no warnings")
+        }
+    } else {
+        let mut parts = Vec::new();
+        if c > 0 {
+            parts.push(format!("{c} contradiction(s)"));
+        }
+        if h > 0 {
+            parts.push(format!("{h} hygiene"));
+        }
+        if r > 0 {
+            parts.push(format!("{r} risk caller(s)"));
+        }
+        if hints > 0 {
+            parts.push(format!("{hints} hint(s)"));
+        }
+        parts.join(" · ")
+    }
+}
+
+async fn run_preflight(manual: bool) {
+    let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed);
+    let project = dom::value("project");
+    if !ready || project.is_empty() {
+        return;
+    }
+    let prompt = dom::value("prompt");
+    if !manual && (prompt.trim().is_empty() || !has_at_file_mention(&prompt)) {
+        return;
+    }
+    let sid = m::read(|s| s.sid.clone());
+    let task_id = preflight_task_id();
+    let include_callers = dom::checked("preflight-risk-callers");
+    let body = build_preflight_request(&prompt, &sid, &task_id, include_callers);
+    let key = "preflight";
+    let epoch = m::next(key);
+    let Ok(controller) = web_sys::AbortController::new() else {
+        return;
+    };
+    m::write(|s| {
+        s.aborts.insert(key.into(), controller.clone());
+    });
+    dom::text("preflight-status", "Checking risks…");
+    if manual {
+        dom::error("preflight-error", "");
+    }
+    let url = format!("/api/projects/{}/preflight", dom::enc(&project));
+    let response = api::call("POST", &url, Some(body), Some(controller.signal())).await;
+    if m::current(key, epoch) {
+        m::write(|s| {
+            s.aborts.remove(key);
+        });
+    }
+    if !m::current(key, epoch) || dom::value("project") != project {
+        return;
+    }
+    match response {
+        Ok(v) => {
+            m::set("preflight", v.clone());
+            dom::error("preflight-error", "");
+            dom::text("preflight-status", &preflight_status_summary(&v));
+            let html = render_advisory_panel_html(&project, &v, true);
+            if let Some(el) = dom::get("preflight-results") {
+                el.set_inner_html(&html);
+                dom::hide(&el, html.is_empty());
+            }
+        }
+        Err(e) if e.aborted => {}
+        Err(e) => {
+            if manual {
+                dom::error("preflight-error", &e.message);
+                dom::text("preflight-status", "");
+            } else {
+                dom::text("preflight-status", "Risk check unavailable");
+            }
+        }
+    }
+}
+
+pub(crate) fn extract_used_memory_paths(session: &V) -> Vec<String> {
+    let mut paths = Vec::new();
+    let capsule = &session["brain"]["capsule"];
+    for layer in ["selected", "procedural", "semantic", "episodic"] {
+        for item in m::array(&capsule[layer]) {
+            if let Some(path) = item["path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                let owned = path.to_owned();
+                if !paths.contains(&owned) {
+                    paths.push(owned);
+                    if paths.len() >= 10 {
+                        return paths;
+                    }
+                }
+            }
+        }
+    }
+    if paths.is_empty() {
+        if let Some(hashes) = session["brain"]["source_hashes"].as_object() {
+            for key in hashes.keys() {
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    let owned = trimmed.to_owned();
+                    if !paths.contains(&owned) {
+                        paths.push(owned);
+                        if paths.len() >= 10 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn sanitize_memory_text(value: &str, max_chars: usize) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut trimmed = collapsed.trim();
+    for prefix in [
+        "user:",
+        "assistant:",
+        "system:",
+        "developer:",
+        "tool:",
+        "prompt:",
+        "response:",
+        "reasoning:",
+        "stdout:",
+        "stderr:",
+        "log:",
+    ] {
+        if trimmed.to_ascii_lowercase().starts_with(prefix) {
+            trimmed = trimmed[prefix.len()..].trim();
+        }
+    }
+    trimmed.chars().take(max_chars).collect()
+}
+
+fn is_canonical_learning_source(value: &str) -> bool {
+    let head = value.split('#').next().unwrap_or(value).trim();
+    if head.is_empty() || head.starts_with('/') || head.contains('\\') || head.contains(':') {
+        return false;
+    }
+    let parts: Vec<&str> = head.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        return false;
+    }
+    if ["memory-bank/", "project-brain/"]
+        .iter()
+        .any(|prefix| head.starts_with(prefix))
+        || parts.windows(2).any(|pair| {
+            matches!(
+                (pair[0], pair[1]),
+                ("memory-bank", "local" | "chunks" | "indexes")
+                    | (
+                        "project-brain",
+                        "local" | "dynamic" | "archive" | "control" | "indexes"
+                    )
+            )
+        })
+    {
+        return false;
+    }
+    let name = parts.last().copied().unwrap_or("").to_ascii_lowercase();
+    let suffix = name.rsplit_once('.').map(|(_, s)| s).unwrap_or("");
+    if name == ".env"
+        || (name.starts_with(".env.") && name.len() > 5)
+        || matches!(name.as_str(), "secret" | "secrets" | "credentials.json")
+        || (name.starts_with("id_")
+            && name.len() > 3
+            && name[3..].chars().all(|c| c.is_ascii_alphanumeric()))
+        || matches!(
+            suffix,
+            "pem" | "key" | "p12" | "pfx" | "jks" | "keystore" | "sqlite" | "db"
+        )
+    {
+        return false;
+    }
+    !parts.iter().any(|part| {
+        let folded = part.to_ascii_lowercase();
+        matches!(
+            folded.as_str(),
+            ".git"
+                | ".ssh"
+                | ".aws"
+                | ".kube"
+                | "node_modules"
+                | "vendor"
+                | ".venv"
+                | "__pycache__"
+                | "secrets"
+                | ".secrets"
+                | "credentials"
+        ) || folded.starts_with(".env")
+    })
+}
+
+pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V, preview: &V) -> V {
+    let snapshot_files = m::array(&results["snapshot"]["files"]);
+    let mut active_files = Vec::new();
+    let mut deleted_files = Vec::new();
+    for entry in &snapshot_files {
+        let path = m::text(entry, "path").trim().to_owned();
+        if path.is_empty() {
+            continue;
+        }
+        let status = m::text(entry, "status").to_ascii_lowercase();
+        if status == "d" || status == "deleted" {
+            if !deleted_files.contains(&path) {
+                deleted_files.push(path);
+            }
+        } else if !active_files.contains(&path) {
+            active_files.push(path);
+        }
+    }
+    let canonical_active: Vec<String> = active_files
+        .iter()
+        .filter(|path| is_canonical_learning_source(path))
+        .cloned()
+        .collect();
+    let canonical_deleted: Vec<String> = deleted_files
+        .iter()
+        .filter(|path| is_canonical_learning_source(path))
+        .cloned()
+        .collect();
+
+    let mut passed_checks = Vec::new();
+    let mut failed_checks = Vec::new();
+    for check in m::array(&results["checks"]) {
+        let cmd = m::text(&check, "command").trim().to_owned();
+        if cmd.is_empty() {
+            continue;
+        }
+        match check["status"].as_str().unwrap_or("") {
+            "passed" if !passed_checks.contains(&cmd) => passed_checks.push(cmd),
+            "failed" | "timed_out" | "output_limit" if !failed_checks.contains(&cmd) => {
+                failed_checks.push(cmd);
+            }
+            _ => {}
+        }
+    }
+    if preview["target_check"]["status"] == "passed" {
+        let cmd = m::text(&preview["target_check"], "command")
+            .trim()
+            .to_owned();
+        let label = if cmd.is_empty() {
+            "delivery target check".to_owned()
+        } else {
+            cmd
+        };
+        if !passed_checks.contains(&label) {
+            passed_checks.push(label);
+        }
+    }
+    for check in m::array(&preview["checks"]) {
+        if check["status"] == "passed" {
+            let cmd = m::text(&check, "command").trim().to_owned();
+            if !cmd.is_empty() && !passed_checks.contains(&cmd) {
+                passed_checks.push(cmd);
+            }
+        }
+    }
+
+    let clash_items = m::array(&session["clash_result"]["items"]);
+    let mut progress_parts = Vec::new();
+    let task_label = session["brain"]["task"]["external_id"]
+        .as_str()
+        .or_else(|| session["brain"]["task_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let progress_active = if canonical_active.is_empty() && canonical_deleted.is_empty() {
+        &active_files
+    } else {
+        &canonical_active
+    };
+    let progress_deleted = if canonical_active.is_empty() && canonical_deleted.is_empty() {
+        &deleted_files
+    } else {
+        &canonical_deleted
+    };
+    let total_changed = progress_active.len() + progress_deleted.len();
+    if total_changed > 0 {
+        let listed: Vec<String> = progress_active
+            .iter()
+            .chain(progress_deleted.iter())
+            .take(5)
+            .cloned()
+            .collect();
+        let suffix = if total_changed > 5 { ", …" } else { "" };
+        progress_parts.push(format!(
+            "Updated {total_changed} file(s): {}{suffix}.",
+            listed.join(", ")
+        ));
+    } else if let Some(task_prog) = session["brain"]["task"]["progress"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        progress_parts.push(task_prog.to_owned());
+    } else if let Some(id) = task_label {
+        progress_parts.push(format!("Reviewed session outcome for {id}."));
+    }
+    if !passed_checks.is_empty() {
+        progress_parts.push(format!(
+            "Passed checks: {}.",
+            passed_checks
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let clash_summary = m::text(&session["clash_result"], "summary");
+    if !clash_summary.trim().is_empty() {
+        progress_parts.push(clash_summary.trim().to_owned());
+    }
+    let progress = sanitize_memory_text(&progress_parts.join(" "), 1000);
+
+    let mut next_steps: Vec<String> = Vec::new();
+    for cmd in &failed_checks {
+        if next_steps.len() >= 3 {
+            break;
+        }
+        next_steps.push(sanitize_memory_text(
+            &format!("Fix failing check: {cmd}"),
+            300,
+        ));
+    }
+    for item in &clash_items {
+        if next_steps.len() >= 3 {
+            break;
+        }
+        let status = m::text(item, "status").to_ascii_lowercase();
+        if matches!(status.as_str(), "disputed" | "open" | "unresolved") {
+            let claim = m::text(item, "claim");
+            if !claim.trim().is_empty() {
+                next_steps.push(sanitize_memory_text(
+                    &format!("Resolve clash finding: {claim}"),
+                    300,
+                ));
+            }
+        }
+    }
+    if next_steps.len() < 3 && !m::array(&delivery["files"]).is_empty() {
+        next_steps.push("Review and commit remaining worktree changes.".to_owned());
+    }
+    if next_steps.is_empty() {
+        for step in m::array(&session["brain"]["task"]["next_steps"]) {
+            if next_steps.len() >= 3 {
+                break;
+            }
+            if let Some(text) = step.as_str() {
+                let cleaned = sanitize_memory_text(text, 300);
+                if !cleaned.is_empty() {
+                    next_steps.push(cleaned);
+                }
+            }
+        }
+    }
+
+    let mut learnings: Vec<V> = Vec::new();
+    for item in &clash_items {
+        if learnings.len() >= 3 {
+            break;
+        }
+        let file = m::text(item, "file").trim().to_owned();
+        if file.is_empty() || deleted_files.contains(&file) || !is_canonical_learning_source(&file)
+        {
+            continue;
+        }
+        let claim = sanitize_memory_text(&m::text(item, "claim"), 200);
+        let detail = sanitize_memory_text(
+            item["verdict_note"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| item["evidence"].as_str().filter(|s| !s.trim().is_empty()))
+                .unwrap_or(&claim),
+            1000,
+        );
+        if claim.is_empty() || detail.is_empty() {
+            continue;
+        }
+        let kind_str = m::text(item, "kind").to_ascii_lowercase();
+        let status_str = m::text(item, "status").to_ascii_lowercase();
+        let learning_type = if kind_str.contains("decision") || status_str == "accepted" {
+            "decision"
+        } else {
+            "finding"
+        };
+        learnings.push(json!({
+            "type": learning_type,
+            "title": claim,
+            "consequence": detail,
+            "sources": [file],
+        }));
+    }
+    if learnings.is_empty()
+        && !canonical_active.is_empty()
+        && (!passed_checks.is_empty() || session["brain"].is_object())
+    {
+        let sources: Vec<String> = canonical_active.iter().take(3).cloned().collect();
+        let title =
+            sanitize_memory_text(&format!("Verified behavior in {}", sources.join(", ")), 200);
+        let consequence = if !passed_checks.is_empty() {
+            sanitize_memory_text(
+                &format!(
+                    "Changes in {} passed {}.",
+                    sources.join(", "),
+                    passed_checks
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("checks")
+                ),
+                1000,
+            )
+        } else {
+            sanitize_memory_text(
+                &format!(
+                    "Reviewed implementation in {} against workspace sources.",
+                    sources.join(", ")
+                ),
+                1000,
+            )
+        };
+        if !title.is_empty() && !consequence.is_empty() {
+            learnings.push(json!({
+                "type": "finding",
+                "title": title,
+                "consequence": consequence,
+                "sources": sources,
+            }));
+        }
+    }
+
+    let used_memory = extract_used_memory_paths(session);
+    json!({
+        "progress": progress,
+        "next_steps": next_steps,
+        "learnings": learnings,
+        "used_memory": used_memory,
+    })
+}
+
+pub(crate) fn render_memory_learning_row_html(idx: usize, learning: &V) -> String {
+    let ltype = if learning["type"].as_str() == Some("decision") {
+        "decision"
+    } else {
+        "finding"
+    };
+    let title = learning["title"].as_str().unwrap_or("");
+    let consequence = learning["consequence"].as_str().unwrap_or("");
+    let sources = m::array(&learning["sources"])
+        .into_iter()
+        .filter_map(|s| {
+            s.as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remove_payload = json!({"index": idx}).to_string();
+    format!(
+        "<article class=\"results-memory-learning-row\" data-learning-index=\"{idx}\">\
+        <div class=\"results-memory-learning-top\">\
+        <label class=\"field\">Type<select class=\"results-memory-learning-type\" data-action=\"results-memory-field\">\
+        <option value=\"finding\"{}>finding</option>\
+        <option value=\"decision\"{}>decision</option>\
+        </select></label>\
+        <label class=\"field wide\">Title<input type=\"text\" class=\"results-memory-learning-title\" data-action=\"results-memory-field\" maxlength=\"200\" value=\"{}\" placeholder=\"Concise reusable claim\"></label>\
+        <button type=\"button\" class=\"button compact\" data-action=\"results-memory-remove-learning\" data-payload=\"{}\">Remove</button>\
+        </div>\
+        <div class=\"knowledge-form-grid\">\
+        <label class=\"field wide\">Consequence<textarea class=\"results-memory-learning-consequence\" data-action=\"results-memory-field\" maxlength=\"1000\" rows=\"2\" placeholder=\"Reusable rule or consequence verified in project files\">{}</textarea></label>\
+        <label class=\"field wide\">Sources (comma-separated relative paths)<input type=\"text\" class=\"results-memory-learning-sources\" data-action=\"results-memory-field\" value=\"{}\" placeholder=\"src/example.rs\"></label>\
+        </div></article>",
+        if ltype == "finding" { " selected" } else { "" },
+        if ltype == "decision" { " selected" } else { "" },
+        escape_html(title),
+        escape_html(&remove_payload),
+        escape_html(consequence),
+        escape_html(&sources),
+    )
+}
+
+pub(crate) fn render_memory_learnings_html(learnings: &[V]) -> String {
+    learnings
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| render_memory_learning_row_html(idx, item))
+        .collect()
+}
+
+pub(crate) fn build_memory_save_payload(
+    progress: &str,
+    next_steps_text: &str,
+    learnings: &[V],
+    used_text: &str,
+    verified: bool,
+) -> Result<V, String> {
+    if !verified {
+        return Err(
+            "Check \"I verified these claims against project files\" before saving.".into(),
+        );
+    }
+    let progress = progress.trim();
+    if progress.chars().count() > 1000 {
+        return Err("Write progress in at most 1,000 characters.".into());
+    }
+    let next_steps: Vec<String> = next_steps_text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if next_steps.len() > 3 {
+        return Err("Keep at most 3 next steps.".into());
+    }
+    if next_steps.iter().any(|s| s.chars().count() > 300) {
+        return Err("Write each next step in at most 300 characters.".into());
+    }
+    let mut clean_learnings = Vec::new();
+    for item in learnings {
+        let ltype = item["type"].as_str().unwrap_or("finding").trim();
+        let title = item["title"].as_str().unwrap_or("").trim();
+        let consequence = item["consequence"].as_str().unwrap_or("").trim();
+        let sources: Vec<String> = item["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+        if title.is_empty() && consequence.is_empty() && sources.is_empty() {
+            continue;
+        }
+        if !matches!(ltype, "finding" | "decision") {
+            return Err("Each learning must use type \"finding\" or \"decision\".".into());
+        }
+        if title.is_empty() || title.chars().count() > 200 {
+            return Err("Each learning title must be 1 to 200 characters.".into());
+        }
+        if consequence.is_empty() || consequence.chars().count() > 1000 {
+            return Err("Each learning consequence must be 1 to 1,000 characters.".into());
+        }
+        if sources.is_empty() || sources.len() > 10 {
+            return Err("Each learning must cite 1 to 10 project-relative source paths.".into());
+        }
+        clean_learnings.push(json!({
+            "type": ltype,
+            "title": title,
+            "consequence": consequence,
+            "sources": sources,
+        }));
+    }
+    if clean_learnings.len() > 3 {
+        return Err("Keep at most 3 learnings.".into());
+    }
+    let mut used_memory = Vec::new();
+    for raw in used_text.split(['\n', ',']) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let owned = trimmed.to_owned();
+            if !used_memory.contains(&owned) {
+                used_memory.push(owned);
+            }
+        }
+    }
+    if used_memory.len() > 10 {
+        return Err("List at most 10 used memory paths.".into());
+    }
+    if progress.is_empty() && next_steps.is_empty() && clean_learnings.is_empty() {
+        return Err("Provide progress, next steps, or at least one learning to save.".into());
+    }
+    let mut body = json!({
+        "next_steps": next_steps,
+        "learnings": clean_learnings,
+        "verified": true,
+    });
+    if !progress.is_empty() {
+        body["progress"] = json!(progress);
+    }
+    if !used_memory.is_empty() {
+        body["used_memory"] = json!(used_memory);
+    }
+    Ok(body)
+}
+
+pub(crate) fn format_memory_save_feedback_html(resp: &V) -> String {
+    let ok = m::yes(&resp["ok"]);
+    let error = resp["error"].as_str().unwrap_or("").trim();
+    let skipped = m::array(&resp["skipped"]);
+    let records = m::array(&resp["saved"]["records"]);
+    let task = &resp["saved"]["task"];
+    let mut out = String::new();
+    if ok {
+        let task_ref = task["external_id"]
+            .as_str()
+            .or_else(|| task["id"].as_str())
+            .unwrap_or("");
+        let mut msg = format!("Saved verified memory ({} record(s))", records.len());
+        if !task_ref.is_empty() {
+            msg.push_str(&format!(" for {task_ref}"));
+        }
+        msg.push('.');
+        out.push_str(&format!(
+            "<p class=\"results-memory-status\" data-state=\"saved\">{}</p>",
+            escape_html(&msg)
+        ));
+    } else if !error.is_empty() {
+        out.push_str(&format!(
+            "<p class=\"results-memory-status\" data-state=\"error\">{}</p>",
+            escape_html(error)
+        ));
+    }
+    if !skipped.is_empty() {
+        out.push_str("<p class=\"knowledge-note\">Skipped items:</p><ul class=\"advisory-list\">");
+        for item in &skipped {
+            let title = item["title"]
+                .as_str()
+                .or_else(|| item.as_str())
+                .unwrap_or("item");
+            let reason = item["reason"].as_str().unwrap_or("skipped");
+            out.push_str(&format!(
+                "<li class=\"advisory-item\" data-kind=\"skipped\"><span class=\"advisory-badge\" data-kind=\"warning\">{}</span><span class=\"advisory-text\">{}</span></li>",
+                escape_html(reason),
+                escape_html(title)
+            ));
+        }
+        out.push_str("</ul>");
+    }
+    out
+}
+
+fn read_memory_learnings_from_dom() -> Vec<V> {
+    dom::all("#results-memory-learnings .results-memory-learning-row")
+        .into_iter()
+        .map(|row| {
+            let ltype = row
+                .query_selector(".results-memory-learning-type")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_else(|| "finding".to_owned());
+            let title = row
+                .query_selector(".results-memory-learning-title")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_default();
+            let consequence = row
+                .query_selector(".results-memory-learning-consequence")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_default();
+            let sources_raw = row
+                .query_selector(".results-memory-learning-sources")
+                .ok()
+                .flatten()
+                .map(|el| dom::value_of(&el))
+                .unwrap_or_default();
+            let sources: Vec<String> = sources_raw
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+            json!({
+                "type": ltype,
+                "title": title,
+                "consequence": consequence,
+                "sources": sources,
+            })
+        })
+        .collect()
+}
+
+fn render_memory_learnings_dom(learnings: &[V]) {
+    if let Some(container) = dom::get("results-memory-learnings") {
+        container.set_inner_html(&render_memory_learnings_html(learnings));
+    }
+}
+
+fn prefill_results_memory() {
+    let session = m::read(|s| s.selected.clone());
+    let results = m::data("results");
+    let delivery = m::data("delivery");
+    let preview = m::data("delivery-preview");
+    let draft = build_memory_draft_prefill(&session, &results, &delivery, &preview);
+    dom::set_value("results-memory-progress", &m::text(&draft, "progress"));
+    let steps = m::array(&draft["next_steps"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    dom::set_value("results-memory-next-steps", &steps);
+    render_memory_learnings_dom(&m::array(&draft["learnings"]));
+    let used = m::array(&draft["used_memory"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n");
+    dom::set_value("results-memory-used", &used);
+}
+
+fn sync_results_memory_prefill(sid: &str) {
+    if m::data("results-memory-sid") != sid || !m::yes(&m::data("results-memory-dirty")) {
+        m::set("results-memory-sid", json!(sid));
+        prefill_results_memory();
+    }
+}
+
+async fn save_results_memory() {
+    let sid = m::read(|s| s.sid.clone());
+    if sid.is_empty() || m::read(|s| s.pending || m::active(&s.selected) || s.auth_failed) {
+        return;
+    }
+    dom::error("results-memory-error", "");
+    let learnings = read_memory_learnings_from_dom();
+    let payload = match build_memory_save_payload(
+        &dom::value("results-memory-progress"),
+        &dom::value("results-memory-next-steps"),
+        &learnings,
+        &dom::value("results-memory-used"),
+        dom::checked("results-memory-verified"),
+    ) {
+        Ok(body) => body,
+        Err(msg) => {
+            dom::error("results-memory-error", &msg);
+            return;
+        }
+    };
+    m::write(|s| s.pending = true);
+    controls();
+    let response = api::post(&format!("/api/sessions/{}/memory", dom::enc(&sid)), payload).await;
+    m::write(|s| s.pending = false);
+    match response {
+        Ok(v) => {
+            let html = format_memory_save_feedback_html(&v);
+            if let Some(el) = dom::get("results-memory-feedback") {
+                el.set_inner_html(&html);
+                dom::hide(&el, html.is_empty());
+            }
+            if m::yes(&v["ok"]) {
+                dom::set_checked("results-memory-verified", false);
+                m::take("results-memory-dirty");
+            } else if let Some(err) = v["error"].as_str().filter(|s| !s.trim().is_empty()) {
+                dom::error("results-memory-error", err);
+            }
+        }
+        Err(e) => {
+            dom::error("results-memory-error", &e.message);
+        }
+    }
+    controls();
+}
+
 fn result_view() -> bool {
     m::read(|s| ["changes", "checks", "usage"].contains(&s.view.as_str()))
 }
@@ -2602,6 +4619,8 @@ fn reset_results() {
     m::next("results");
     m::take("results");
     m::take("delivery");
+    m::take("results-memory-sid");
+    m::take("results-memory-dirty");
     invalidate_delivery();
     dom::hidden("delivery-options", true);
     dom::clear("delivery-files");
@@ -2609,6 +4628,14 @@ fn reset_results() {
     dom::clear("delivery-source");
     dom::clear("delivery-target");
     dom::text("delivery-status", "");
+    dom::set_value("results-memory-progress", "");
+    dom::set_value("results-memory-next-steps", "");
+    dom::clear("results-memory-learnings");
+    dom::set_value("results-memory-used", "");
+    dom::set_checked("results-memory-verified", false);
+    dom::error("results-memory-error", "");
+    dom::clear("results-memory-feedback");
+    dom::hidden("results-memory-feedback", true);
 }
 fn render_results_files(files: &[V]) {
     let Some(container) = dom::get("results-files") else {
@@ -2857,6 +4884,7 @@ pub async fn results() {
             if !m::current(key, e) || !m::read(|s| s.sid == sid) || !result_view() {
                 return;
             }
+            sync_results_memory_prefill(&sid);
             result_controls();
             let view = m::read(|s| s.view.clone());
             render_tabs(&view, "sessions");
@@ -2958,6 +4986,53 @@ fn result_controls() {
                     || check["workspace_changed"] == true
                     || check["candidate"] != preview["candidate"]),
     );
+    let brain_id = session["brain"]["record_id"]
+        .as_str()
+        .or_else(|| session["brain"]["task_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let has_brain_task = brain_id.is_some();
+    dom::text(
+        "results-memory-note",
+        &if let Some(id) = brain_id {
+            if m::active(&session) {
+                format!(
+                    "Linked Brain task {id}. Wait for this session to finish before saving memory."
+                )
+            } else {
+                format!("Linked Brain task {id}. Edit candidate notes and verify claims against project files before saving.")
+            }
+        } else {
+            "Link a Project Brain task to this session before saving verified memory.".to_owned()
+        },
+    );
+    let memory_locked = locked || !has_brain_task;
+    for el in dom::all(
+        "#results-memory-form input,#results-memory-form select,#results-memory-form textarea",
+    ) {
+        if memory_locked {
+            let _ = el.set_attribute("disabled", "");
+        } else {
+            let _ = el.remove_attribute("disabled");
+        }
+    }
+    let learnings_count = dom::all("#results-memory-learnings .results-memory-learning-row").len();
+    dom::disabled(
+        "results-memory-add-learning",
+        memory_locked || learnings_count >= 3,
+    );
+    dom::disabled("results-memory-prefill", memory_locked);
+    for btn in dom::all("#results-memory-learnings button") {
+        if memory_locked {
+            let _ = btn.set_attribute("disabled", "");
+        } else {
+            let _ = btn.remove_attribute("disabled");
+        }
+    }
+    dom::disabled(
+        "results-memory-save",
+        memory_locked || !dom::checked("results-memory-verified"),
+    );
     sync_working_indicator();
 }
 async fn delivery_load(sid: &str) {
@@ -3035,6 +5110,20 @@ fn render_delivery(v: &V) {
             .as_str()
             .unwrap_or("Review the files and diff before confirming."),
     );
+    let project_id = m::read(|s| {
+        let p = m::text(&s.selected, "project_id");
+        if p.is_empty() {
+            dom::value("project")
+        } else {
+            p
+        }
+    });
+    let risks_id = format!("{prefix}-risks");
+    let risks_html = render_advisory_panel_html(&project_id, v, false);
+    if let Some(el) = dom::get(&risks_id) {
+        el.set_inner_html(&risks_html);
+        dom::hide(&el, risks_html.is_empty());
+    }
     dom::disabled(
         "delivery-commit",
         !m::yes(&v["can_apply"]) || v["kind"] != "commit",
@@ -3054,6 +5143,10 @@ fn invalidate_delivery() {
     m::take("delivery-preview");
     dom::hidden("delivery-preview", true);
     dom::hidden("delivery-commit-preview", true);
+    for id in ["delivery-commit-risks", "delivery-preview-risks"] {
+        dom::clear(id);
+        dom::hidden(id, true);
+    }
     dom::disabled("delivery-commit", true);
     dom::disabled("delivery-apply", true);
 }
@@ -3106,6 +5199,16 @@ fn resize_column_height() -> f64 {
         .or_else(|| dom::get("sessions-view").map(|e| e.client_height()))
         .unwrap_or(500) as f64
 }
+fn output_resize_percent(height: f64, max_height: f64) -> u64 {
+    let min_h = 80.;
+    let max_h = max_height.max(min_h);
+    if max_h <= min_h {
+        return 100;
+    }
+    let clamped = height.clamp(min_h, max_h);
+    let ratio = (max_h - clamped) / (max_h - min_h);
+    (ratio * 100.).round().clamp(0., 100.) as u64
+}
 fn resize(height: f64) {
     let available = resize_column_height()
         - dom::get("composer-area")
@@ -3113,7 +5216,8 @@ fn resize(height: f64) {
             .unwrap_or(0) as f64
         - dom::get("run-view").map(|e| e.client_height()).unwrap_or(0) as f64
         - 100.;
-    let h = height.max(80.).min(available.max(80.));
+    let max_h = available.max(80.);
+    let h = height.max(80.).min(max_h);
     if let Some(e) =
         dom::get("sessions-view").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
     {
@@ -3122,7 +5226,12 @@ fn resize(height: f64) {
             .set_property("--configuration-height", &format!("{h}px"));
         let _ = e.class_list().add_1("output-resized");
     }
-    m::set("output-height", json!(height));
+    m::set("output-height", json!(h));
+    dom::attr(
+        "output-resizer",
+        "aria-valuenow",
+        &output_resize_percent(h, max_h).to_string(),
+    );
 }
 pub fn resize_key(event: &web_sys::KeyboardEvent) {
     if event
@@ -3157,6 +5266,8 @@ pub fn resize_event(kind: &str, event: &web_sys::Event) {
     }
     if kind == "dblclick" {
         dom::class("sessions-view", "output-resized", false);
+        m::take("output-height");
+        dom::attr("output-resizer", "aria-valuenow", "50");
         return;
     }
     let Some(p) = event.dyn_ref::<web_sys::PointerEvent>() else {
@@ -3194,7 +5305,31 @@ pub async fn event(
     if kind == "input" && id == "prompt" {
         save_preferences();
         controls();
+        let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed && !m::active(&s.selected));
+        if ready && !dom::value("project").is_empty() && has_at_file_mention(value) {
+            dom::later("preflight-debounce", 600, || {
+                spawn_local(async {
+                    run_preflight(false).await;
+                });
+            });
+        } else {
+            dom::cancel_timer("preflight-debounce");
+        }
         return false;
+    }
+    if (kind == "input" || kind == "change")
+        && (id.starts_with("results-memory-") || action == "results-memory-field")
+    {
+        m::set("results-memory-dirty", json!(true));
+        dom::error("results-memory-error", "");
+        result_controls();
+        return true;
+    }
+    if kind == "change" && id == "preflight-risk-callers" {
+        if m::data("preflight").is_object() {
+            run_preflight(true).await;
+        }
+        return true;
     }
     if (kind == "input" || kind == "change")
         && (id.starts_with("delivery-") || action == "delivery-file")
@@ -3266,7 +5401,9 @@ pub async fn event(
                 for prefix in ["routing-plan-", "routing-edit-"] {
                     models(prefix, Some(String::new()));
                 }
+                refresh_provider_hint();
             }
+            mark_dirty_for_id(id);
             controls();
             save_preferences();
             return true;
@@ -3292,14 +5429,18 @@ pub async fn event(
         if [
             "workflow",
             "mode",
+            "permissions",
             "sdd-phase",
             "agents-enabled",
             "agent-count",
             "workspace",
             "clash-enabled",
             "clash-rounds",
+            "clash-thinking-effort",
             "thinking-effort",
             "model-routing-enabled",
+            "routing-plan-thinking-effort",
+            "routing-edit-thinking-effort",
             "brain-link-kind",
             "brain-link-review",
             "fleet-dry-run",
@@ -3312,6 +5453,7 @@ pub async fn event(
         ]
         .contains(&id)
         {
+            mark_dirty_for_id(id);
             controls();
             save_preferences();
             return true;
@@ -3322,6 +5464,10 @@ pub async fn event(
             || id == "model"
             || id == "agent-count"
             || id == "sdd-feature"
+            || id == "clash-model"
+            || id == "clash-rounds"
+            || id == "routing-plan-model"
+            || id == "routing-edit-model"
             || id == "omnigraph-pull-branches"
             || id == "omnigraph-session-query"
             || id == "omnigraph-shared-space")
@@ -3329,6 +5475,7 @@ pub async fn event(
         if id.starts_with("omnigraph-") {
             save_preferences();
         }
+        mark_dirty_for_id(id);
         controls();
         return true;
     }
@@ -3350,6 +5497,10 @@ pub async fn event(
             }
             "delivery-preview-form" => {
                 delivery("preview_transfer",json!({"commit":dom::value("delivery-source"),"target_branch":dom::value("delivery-target"),"check":if dom::checked("delivery-check-required"){json!({"command":dom::value("delivery-check-command").trim(),"timeout":dom::num("delivery-check-timeout")})}else{V::Null}})).await;
+                return true;
+            }
+            "results-memory-form" => {
+                save_results_memory().await;
                 return true;
             }
             _ => {}
@@ -3420,6 +5571,7 @@ pub async fn event(
                 crate::graph::load(true).await;
             });
         }
+        set_mobile_pane("graph");
         dom::attr("session-graph-workspace", "tabindex", "-1");
         if let Some(el) = dom::get("session-graph-workspace") {
             el.scroll_into_view();
@@ -3444,7 +5596,7 @@ pub async fn event(
         "reconnect" => bootstrap().await,
         "new-session" => {
             new_session(None);
-            open_view("sessions", true).await;
+            open_view_inner("sessions", true, false).await;
         }
         "refresh-sessions" => {
             refresh().await;
@@ -3499,12 +5651,29 @@ pub async fn event(
                 render_files();
             }
         }
+        "session-mobile-pane" => {
+            let pane = payload
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if id == "session-mobile-tab-graph" {
+                        "graph"
+                    } else {
+                        "chat"
+                    }
+                });
+            set_mobile_pane(pane);
+        }
         "session-settings-toggle" => {
             let open = dom::get("session-settings")
                 .map(|e| e.has_attribute("hidden"))
                 .unwrap_or(true);
             dom::hidden("session-settings", !open);
-            dom::attr(id, "aria-expanded", if open { "true" } else { "false" });
+            dom::attr(
+                "session-settings-toggle",
+                "aria-expanded",
+                if open { "true" } else { "false" },
+            );
         }
         "menu-toggle" => {
             let open = dom::get("sidebar")
@@ -3733,8 +5902,59 @@ pub async fn event(
                 if m::read(|s| s.view != "sessions") {
                     open_view("sessions", true).await;
                 }
+                set_mobile_pane("graph");
                 crate::graph_map::focus_file_in_session(&path);
             }
+        }
+        "preflight-check" => {
+            dom::cancel_timer("preflight-debounce");
+            run_preflight(true).await;
+        }
+        "preflight-open-memory" => {
+            let scope = payload["scope"].as_str().unwrap_or("brain");
+            let project_id = payload["project_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| dom::value("project"));
+            let target_id = payload["target_id"].as_str().unwrap_or("");
+            if !target_id.is_empty() {
+                knowledge::open_from_omnigraph(scope, &project_id, target_id).await;
+            }
+        }
+        "results-memory-add-learning" => {
+            let mut learnings = read_memory_learnings_from_dom();
+            if learnings.len() < 3 {
+                learnings.push(json!({
+                    "type": "finding",
+                    "title": "",
+                    "consequence": "",
+                    "sources": []
+                }));
+                render_memory_learnings_dom(&learnings);
+                m::set("results-memory-dirty", json!(true));
+                result_controls();
+            }
+        }
+        "results-memory-remove-learning" => {
+            if let Some(idx) = payload["index"].as_u64().map(|n| n as usize) {
+                let mut learnings = read_memory_learnings_from_dom();
+                if idx < learnings.len() {
+                    learnings.remove(idx);
+                    render_memory_learnings_dom(&learnings);
+                    m::set("results-memory-dirty", json!(true));
+                    result_controls();
+                }
+            }
+        }
+        "results-memory-prefill" => {
+            m::take("results-memory-dirty");
+            dom::set_checked("results-memory-verified", false);
+            dom::error("results-memory-error", "");
+            dom::clear("results-memory-feedback");
+            dom::hidden("results-memory-feedback", true);
+            prefill_results_memory();
+            result_controls();
         }
         _ if action.starts_with("option-") => {
             let panel = action.trim_start_matches("option-");
@@ -4034,12 +6254,38 @@ mod history_projection_tests {
         let sessions = vec![
             json!({"id":"a","name":"Named chat","title":"Unused title","status":"running"}),
             json!({"id":"b","title":"Second chat","status":"awaiting_approval"}),
+            json!({"id":"c","title":"Background ask","status":"running","waiting_permissions":2}),
         ];
         assert_eq!(
             history_projection(&sessions, "b"),
             json!([
-                {"id":"a","label":"Named chat · running","selected":false},
-                {"id":"b","label":"Second chat · awaiting approval","selected":true}
+                {
+                    "id":"a",
+                    "title":"Named chat",
+                    "status":"running",
+                    "status_text":"running",
+                    "waiting_permissions":0,
+                    "label":"Named chat · running",
+                    "selected":false
+                },
+                {
+                    "id":"b",
+                    "title":"Second chat",
+                    "status":"awaiting_approval",
+                    "status_text":"awaiting approval",
+                    "waiting_permissions":0,
+                    "label":"Second chat · awaiting approval",
+                    "selected":true
+                },
+                {
+                    "id":"c",
+                    "title":"Background ask",
+                    "status":"running",
+                    "status_text":"2 approvals waiting",
+                    "waiting_permissions":2,
+                    "label":"Background ask · 2 approvals waiting",
+                    "selected":false
+                }
             ])
         );
         let original = history_projection(&sessions, "b");
@@ -4059,18 +6305,27 @@ mod history_projection_tests {
         report_changed["fleet_result"] = json!({"report":"new report"});
         assert_eq!(original, history_projection(&[report_changed], "a"));
         for (field, value) in [
-            ("id", "b"),
-            ("title", "Renamed chat"),
-            ("name", "Preferred name"),
-            ("status", "completed"),
+            ("id", json!("b")),
+            ("title", json!("Renamed chat")),
+            ("name", json!("Preferred name")),
+            ("status", json!("completed")),
+            ("waiting_permissions", json!(1)),
         ] {
             let mut changed = session.clone();
-            changed[field] = json!(value);
+            changed[field] = value;
             assert_ne!(original, history_projection(&[changed], "a"), "{field}");
         }
         assert_eq!(
             history_projection(&[json!({"id":"fallback"})], ""),
-            json!([{"id":"fallback","label":"fallback · ","selected":false}])
+            json!([{
+                "id":"fallback",
+                "title":"fallback",
+                "status":"",
+                "status_text":"",
+                "waiting_permissions":0,
+                "label":"fallback · ",
+                "selected":false
+            }])
         );
     }
 }
@@ -4083,6 +6338,123 @@ mod session_contract_tests {
         assert_eq!(restored_value("permissions", "bypass"), "auto");
         assert_eq!(restored_value("permissions", "manual"), "manual");
         assert_eq!(restored_value("mode", "bypass"), "bypass");
+    }
+    #[test]
+    fn read_only_planning_hint_never_shows_bypass_warning_style() {
+        assert_eq!(permissions_hint_mode(true, "plan", "bypass"), "plan");
+        assert_eq!(permissions_hint_mode(false, "plan", "bypass"), "plan");
+        assert_eq!(permissions_hint_mode(false, "edit", "bypass"), "bypass");
+        assert_eq!(permissions_hint_mode(false, "edit", "manual"), "manual");
+    }
+    #[test]
+    fn waiting_banner_matches_permission_wait_state() {
+        assert_eq!(
+            waiting_banner_text("queued", true),
+            "Queued — waiting for an available runner."
+        );
+        assert_eq!(
+            waiting_banner_text("running", true),
+            "Waiting for your answer to a permission request…"
+        );
+        assert_eq!(waiting_banner_text("running", false), "Agent is running.");
+    }
+    #[test]
+    fn session_summary_formats_provider_mode_permissions_and_model() {
+        assert_eq!(
+            format_session_summary("Claude Code", "edit", "manual", "claude-sonnet-4-6", false),
+            "Claude Code · Edit · Manual · claude-sonnet-4-6"
+        );
+        assert_eq!(
+            format_session_summary("Codex", "plan", "bypass", "", false),
+            "Codex · Plan · Bypass Permissions · Provider default"
+        );
+        assert_eq!(
+            format_session_summary("Cursor", "edit", "auto", "gpt-5", true),
+            "Cursor · Edit · Auto · Routing (Plan + Edit)"
+        );
+    }
+    #[test]
+    fn resize_percent_maps_configuration_height_inversely_to_output_height() {
+        assert_eq!(output_resize_percent(80., 480.), 100);
+        assert_eq!(output_resize_percent(480., 480.), 0);
+        assert_eq!(output_resize_percent(280., 480.), 50);
+        assert_eq!(output_resize_percent(40., 480.), 100);
+        assert_eq!(output_resize_percent(600., 480.), 0);
+        assert_eq!(output_resize_percent(80., 80.), 100);
+    }
+    #[test]
+    fn provider_sign_in_note_formats_signed_out_and_clears_when_signed_in() {
+        let sign_in = json!({
+            "states": {
+                "claude": {"state": "signed_out", "login": "claude login"},
+                "codex": {"state": "signed_in", "login": "codex login"},
+            }
+        });
+        assert_eq!(
+            provider_sign_in_note(&sign_in, "claude", "Claude Code"),
+            "Claude Code is not signed in. Sign in from a terminal with claude login, then send again."
+        );
+        assert_eq!(provider_sign_in_note(&sign_in, "codex", "Codex"), "");
+        assert_eq!(provider_sign_in_note(&V::Null, "claude", "Claude Code"), "");
+    }
+    #[test]
+    fn poll_apply_settings_skips_dirty_and_unchanged_groups() {
+        let session = json!({"id":"s1","provider":"claude","workflow":"native","workspace":"project","mode":"edit","permissions":"auto","agents_enabled":false,"agent_count":3,"model":"sonnet","thinking_effort":"medium","sdd":{"feature":"","phase":"specify"},"clash":null});
+        let fields = session_settings_snapshot_fields(&session);
+        let empty = V::Null;
+        assert!(should_apply_setting_group(
+            &empty,
+            &empty,
+            1,
+            "s1",
+            "permissions",
+            &fields["permissions"]
+        ));
+        let snapshot = json!({"epoch": 1, "sid": "s1", "fields": fields});
+        assert!(!should_apply_setting_group(
+            &snapshot,
+            &empty,
+            1,
+            "s1",
+            "permissions",
+            &fields["permissions"]
+        ));
+        // Server change applies when clean, and is suppressed when locally dirty.
+        let manual = json!("manual");
+        assert!(should_apply_setting_group(
+            &snapshot,
+            &empty,
+            1,
+            "s1",
+            "permissions",
+            &manual
+        ));
+        let dirty = json!({"permissions": true});
+        assert!(!should_apply_setting_group(
+            &snapshot,
+            &dirty,
+            1,
+            "s1",
+            "permissions",
+            &manual
+        ));
+        // Session/epoch switch resets and applies again.
+        assert!(should_apply_setting_group(
+            &snapshot,
+            &dirty,
+            2,
+            "s1",
+            "permissions",
+            &manual
+        ));
+        assert!(should_apply_setting_group(
+            &snapshot,
+            &dirty,
+            1,
+            "s2",
+            "permissions",
+            &manual
+        ));
     }
     #[test]
     fn the_permissions_hint_says_what_each_mode_does_for_the_host() {
@@ -4646,5 +7018,300 @@ mod update_tests {
         );
         assert_eq!(extract_inspect_file_path(&json!({"path": "   "})), None);
         assert_eq!(extract_inspect_file_path(&V::Null), None);
+    }
+
+    #[test]
+    fn normalize_mobile_pane_defaults_to_chat_and_accepts_graph() {
+        assert_eq!(normalize_mobile_pane("graph"), "graph");
+        assert_eq!(normalize_mobile_pane("chat"), "chat");
+        assert_eq!(normalize_mobile_pane(""), "chat");
+        assert_eq!(normalize_mobile_pane("unknown"), "chat");
+    }
+
+    #[test]
+    fn preflight_request_detects_at_files_and_keeps_risk_caller_hints_opt_in() {
+        assert!(has_at_file_mention("Check @src/session.rs before running"));
+        assert!(has_at_file_mention("Review (@Cargo.toml)"));
+        assert!(!has_at_file_mention("Email me at user@example.com"));
+        assert!(!has_at_file_mention("Plain prompt without path"));
+
+        let default_req = build_preflight_request("Check @src/run.rs", "", "", false);
+        assert_eq!(default_req["prompt"], "Check @src/run.rs");
+        assert_eq!(default_req["risk_caller_hints"], false);
+        assert!(default_req.get("session_id").is_none());
+        assert!(default_req.get("task_id").is_none());
+
+        let opt_in_req = build_preflight_request("Follow up", "sess-1", "TASK-42", true);
+        assert_eq!(opt_in_req["session_id"], "sess-1");
+        assert_eq!(opt_in_req["task_id"], "TASK-42");
+        assert_eq!(opt_in_req["risk_caller_hints"], true);
+    }
+
+    #[test]
+    fn advisory_panel_renders_preflight_and_delivery_warnings_without_inline_hex() {
+        let preflight = json!({
+            "files": [{
+                "path": "src/auth.rs",
+                "brain_records": [{"id": "rec-auth-1", "external_id": "finding-auth", "title": "Auth contract"}],
+                "memory_chunks": [{"id": "MEM-20261117-aabbccdd", "title": "Token guard note"}]
+            }],
+            "blast_summary": {"direct_count": 2, "downstream_count": 5, "files": ["src/auth.rs", "src/api.rs"]},
+            "contradiction_warnings": [{
+                "kind": "atom-contradiction",
+                "text": "Token TTL <24h> contradicts 5m",
+                "path": "src/auth.rs",
+                "open": [{"scope": "brain", "target_id": "rec-1", "title": "Auth decision"}]
+            }],
+            "hygiene_warnings": [{
+                "kind": "cited-file-renamed",
+                "path": "src/auth.rs",
+                "linked": ["MEM-20261117-aabbccdd"],
+                "text": "Renamed from src/old_auth.rs"
+            }],
+            "risk_callers": [{
+                "from": "src/routes.rs",
+                "to": "src/auth.rs",
+                "impact": "broken_risk",
+                "reason": "Calls removed validate()"
+            }],
+            "risk_caller_hints": [{
+                "path": "src/routes.rs",
+                "target": "src/auth.rs",
+                "impact": "impacted",
+                "brain_records": [{"id": "rec-routes-1", "title": "Routes handler note"}],
+                "memory_chunks": [{"id": "MEM-20261118-cccc4444", "title": "Route caller contract"}],
+                "hygiene_warnings": [],
+                "source_hints": [{"path": "memory-bank/chunks/MEM-20261118-cccc4444-caller-contract.md", "source_sha256": "deadbeef"}]
+            }]
+        });
+        let html = render_advisory_panel_html("proj-1", &preflight, true);
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("2 direct"));
+        assert!(html.contains("5 downstream"));
+        assert!(html.contains("1 hint(s)"));
+        assert!(html.contains("data-action=\"inspect-file-graph\""));
+        assert!(html.contains("data-action=\"preflight-open-memory\""));
+        assert!(!html.contains("preflight-open-knowledge"));
+        assert!(html.contains("Open Auth contract"));
+        assert!(html.contains("Open Token guard note"));
+        assert!(html.contains("Advisory risk-caller hints"));
+        assert!(html.contains("Open Routes handler note"));
+        assert!(html.contains("Open Route caller contract"));
+        assert!(
+            html.contains("Sources: memory-bank/chunks/MEM-20261118-cccc4444-caller-contract.md")
+        );
+        assert!(html.contains("Token TTL &lt;24h&gt; contradicts 5m"));
+        assert!(html.contains("src/routes.rs → src/auth.rs"));
+
+        // Delivery preview returns empty when no memory_warnings or risk_callers exist.
+        assert_eq!(
+            render_advisory_panel_html("proj-1", &json!({"kind": "commit"}), false),
+            ""
+        );
+
+        let delivery_v = json!({
+            "kind": "transfer",
+            "memory_warnings": {
+                "contradiction_warnings": [],
+                "hygiene_warnings": [{
+                    "kind": "cited-file-missing",
+                    "path": "src/legacy.rs",
+                    "linked": ["rec-9"],
+                    "text": "File missing in workspace"
+                }]
+            },
+            "risk_callers": [{"from": "src/caller.rs", "to": "src/legacy.rs", "impact": "risk"}]
+        });
+        let delivery_html = render_advisory_panel_html("proj-1", &delivery_v, false);
+        crate::test_support::assert_no_inline_hex_colors(&delivery_html);
+        assert!(delivery_html.contains("Missing file"));
+        assert!(delivery_html.contains("src/caller.rs → src/legacy.rs"));
+    }
+
+    #[test]
+    fn memory_panel_prefills_from_results_delivery_clash_brain_and_requires_verified() {
+        let session = json!({
+            "brain": {
+                "task_id": "TASK-101",
+                "task": {
+                    "external_id": "TASK-101",
+                    "progress": "Initial plan",
+                    "next_steps": ["Fallback step"]
+                },
+                "capsule": {
+                    "selected": [{"path": "docs/ARCH.md"}, {"path": "docs/SECURITY.md"}],
+                    "procedural": [{"path": "docs/ARCH.md"}, {"path": "Laravel/AGENTS.md"}]
+                }
+            },
+            "clash_result": {
+                "summary": "Challenger confirmed token guard check.",
+                "items": [
+                    {
+                        "kind": "decision",
+                        "status": "accepted",
+                        "claim": "Require non-empty JWT audience",
+                        "evidence": "Verified in TokenGuard.php",
+                        "file": "src/TokenGuard.php"
+                    },
+                    {
+                        "kind": "objection",
+                        "status": "disputed",
+                        "claim": "Check refresh expiry edge case",
+                        "file": "src/Deleted.php"
+                    }
+                ]
+            }
+        });
+        let results_v = json!({
+            "snapshot": {
+                "files": [
+                    {"path": "src/TokenGuard.php", "status": "M"},
+                    {"path": "src/Deleted.php", "status": "D"}
+                ]
+            },
+            "checks": [
+                {"command": "cargo test -p infra-ui", "status": "passed"}
+            ]
+        });
+        let delivery_v = json!({
+            "files": [{"path": "src/TokenGuard.php", "status": "M"}]
+        });
+        let preview_v = json!({
+            "target_check": {"status": "passed", "command": "cargo clippy"}
+        });
+
+        let draft = build_memory_draft_prefill(&session, &results_v, &delivery_v, &preview_v);
+        assert!(draft["progress"]
+            .as_str()
+            .unwrap()
+            .contains("Updated 2 file(s)"));
+        assert!(draft["progress"]
+            .as_str()
+            .unwrap()
+            .contains("cargo test -p infra-ui"));
+        assert!(draft["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("Resolve clash finding")));
+        let learnings = draft["learnings"].as_array().unwrap();
+        assert_eq!(learnings.len(), 1);
+        assert_eq!(learnings[0]["type"], "decision");
+        assert_eq!(learnings[0]["sources"], json!(["src/TokenGuard.php"]));
+        assert_eq!(
+            draft["used_memory"],
+            json!(["docs/ARCH.md", "docs/SECURITY.md", "Laravel/AGENTS.md"])
+        );
+
+        let rows_html = render_memory_learnings_html(learnings);
+        crate::test_support::assert_no_inline_hex_colors(&rows_html);
+        assert!(rows_html.contains("Require non-empty JWT audience"));
+
+        assert!(build_memory_save_payload(
+            draft["progress"].as_str().unwrap(),
+            "Review remaining changes",
+            learnings,
+            "docs/ARCH.md",
+            false
+        )
+        .is_err());
+
+        let payload = build_memory_save_payload(
+            draft["progress"].as_str().unwrap(),
+            "Review remaining changes",
+            learnings,
+            "docs/ARCH.md\ndocs/SECURITY.md",
+            true,
+        )
+        .expect("verified payload");
+        assert_eq!(payload["verified"], true);
+        assert_eq!(payload["next_steps"], json!(["Review remaining changes"]));
+        assert_eq!(
+            payload["used_memory"],
+            json!(["docs/ARCH.md", "docs/SECURITY.md"])
+        );
+
+        let ok_html = format_memory_save_feedback_html(&json!({
+            "ok": true,
+            "saved": {"task": {"external_id": "TASK-101"}, "records": [{"id": "r1"}]},
+            "skipped": [{"title": "Repeated note", "reason": "repeated"}]
+        }));
+        crate::test_support::assert_no_inline_hex_colors(&ok_html);
+        assert!(ok_html.contains("Saved verified memory (1 record(s)) for TASK-101."));
+        assert!(ok_html.contains("Repeated note"));
+
+        let err_html = format_memory_save_feedback_html(&json!({
+            "ok": false,
+            "error": "Prepare the linked task before saving memory.",
+            "skipped": []
+        }));
+        crate::test_support::assert_no_inline_hex_colors(&err_html);
+        assert!(err_html.contains("Prepare the linked task before saving memory."));
+    }
+
+    #[test]
+    fn memory_draft_prefill_excludes_non_canonical_brain_and_memory_paths() {
+        let session = json!({
+            "brain": {"bank": "memory-bank", "task_id": "TASK-202"},
+            "clash_result": {
+                "items": [{
+                    "kind": "finding",
+                    "status": "disputed",
+                    "file": "project-brain/control/handoffs/h1.md",
+                    "claim": "Internal handoff note"
+                }]
+            }
+        });
+        let results_v = json!({
+            "snapshot": {
+                "files": [
+                    {"path": "project-brain/indexes/active.json", "status": "M"},
+                    {"path": "project-brain/control/handoffs/8966be82.md", "status": "A"},
+                    {"path": "services/billing/project-brain/control/handoffs/eae40ef8.md", "status": "A"},
+                    {"path": "services/billing/project-brain/indexes/active.json", "status": "M"},
+                    {"path": "memory-bank/chunks/MEM-20261118-deadbeef-tax.md", "status": "M"},
+                    {"path": ".env.local", "status": "M"},
+                    {"path": "services/orders/src/OrderService.php", "status": "M"}
+                ]
+            },
+            "checks": []
+        });
+        let draft = build_memory_draft_prefill(&session, &results_v, &json!({}), &json!({}));
+        assert!(draft["progress"]
+            .as_str()
+            .unwrap()
+            .contains("Updated 1 file(s): services/orders/src/OrderService.php"));
+        let learnings = draft["learnings"].as_array().unwrap();
+        assert_eq!(learnings.len(), 1);
+        assert_eq!(
+            learnings[0]["sources"],
+            json!(["services/orders/src/OrderService.php"])
+        );
+    }
+
+    #[test]
+    fn custom_model_selection_rejects_empty_and_flag_like_values() {
+        assert!(model_selection_valid(false, &V::Null));
+        assert!(!model_selection_valid(true, &V::Null));
+        assert!(!model_selection_valid(true, &json!("-bad")));
+        assert!(model_selection_valid(true, &json!("claude-sonnet-4-test")));
+    }
+
+    #[test]
+    fn project_git_status_and_workspace_hint_format_worktree_readiness() {
+        assert_eq!(
+            format_project_git_status(
+                &json!({"is_git": true, "branch": "master", "worktree_available": true})
+            ),
+            "Git branch: master · Worktrees ready"
+        );
+        assert_eq!(
+            format_project_git_status(&json!({"is_git": false, "reason": "Not a git repo"})),
+            "Not a git repo"
+        );
+        assert!(
+            format_workspace_hint("worktree", &json!({"worktree_available": true}))
+                .contains("worktree")
+        );
     }
 }

@@ -9,8 +9,9 @@
 //! cycles, paths, shared dependencies, and architectural tiers work smoothly
 //! both before and after member code graphs finish indexing.
 
-use crate::{api, dom, model as m, systems};
+use crate::{api, dom, graph_viewport, model as m, systems};
 use serde_json::{json, Value as V};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
@@ -28,10 +29,22 @@ const MARGIN: f64 = 24.0;
 const FRAME_HEAD: f64 = 28.0;
 const FRAME_PAD: f64 = 12.0;
 
-const CAMERA_MIN: f64 = 0.25;
+const CAMERA_MIN: f64 = graph_viewport::DEFAULT_MIN_SCALE;
 const CAMERA_MAX: f64 = 2.4;
 const ZOOM_STEP: f64 = 1.25;
-const DRAG_THRESHOLD_PX: f64 = 4.0;
+const LOD_FAR: f64 = 0.55;
+const LOD_NEAR: f64 = 1.25;
+const SYSTEM_MAP_LOD: graph_viewport::LodThresholds = graph_viewport::LodThresholds {
+    far_below: LOD_FAR,
+    near_at: LOD_NEAR,
+    near_inclusive: true,
+    invalid_fallback: "far",
+};
+const RADAR_WIDTH: f64 = 176.0;
+const RADAR_HEIGHT: f64 = 112.0;
+const RADAR_DRAG_KEY: &str = "system-map-radar-drag";
+const SYS_PORT_GAP: f64 = 6.0;
+const SYS_PORT_SPREAD: f64 = 18.0;
 
 #[derive(Clone, Copy)]
 pub struct SysMapSurface {
@@ -292,24 +305,144 @@ fn contract_arrow_defs_svg(id_prefix: &str) -> String {
     defs
 }
 
-/// Accessible legend of all 7 cross-service contract & code arrow kinds plus drift/risk halos.
-pub fn contract_arrow_legend_html() -> String {
+fn contract_spec_index(kind: &str) -> usize {
+    let norm = normalize_contract_arrow_kind(kind);
+    CONTRACT_ARROW_SPECS
+        .iter()
+        .position(|s| s.kind == norm)
+        .unwrap_or(0)
+}
+
+/// Returns which of the 7 contract arrow kinds are hidden in `state["kinds_off"]`.
+pub fn hidden_contract_kinds(state: &V) -> [bool; 7] {
+    let mut hidden = [false; 7];
+    for entry in m::array(&state["kinds_off"]) {
+        if let Some(kind) = entry.as_str() {
+            let idx = CONTRACT_ARROW_SPECS
+                .iter()
+                .position(|s| s.kind == kind.trim().to_ascii_lowercase());
+            if let Some(i) = idx {
+                hidden[i] = true;
+            }
+        }
+    }
+    hidden
+}
+
+/// Counts edges matching each of the 7 canonical contract arrow kinds in `doc`.
+pub fn contract_kind_counts(doc: &V) -> [u64; 7] {
+    let mut counts = [0u64; 7];
+    for edge in m::array(&doc["edges"]) {
+        if m::yes(&edge["child_link"]) {
+            continue;
+        }
+        let kind = primary_edge_kind(&edge);
+        counts[contract_spec_index(kind)] += 1;
+    }
+    counts
+}
+
+fn write_hidden_contract_kinds(mut state: V, hidden: [bool; 7]) -> V {
+    let list: Vec<&'static str> = CONTRACT_ARROW_SPECS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| hidden[i].then_some(s.kind))
+        .collect();
+    state["kinds_off"] = json!(list);
+    state
+}
+
+/// Toggles or isolates (`solo == true`, e.g. Alt+click) one contract kind in `state["kinds_off"]`.
+/// Never allows hiding all 7 kinds at once; if hiding the last visible kind, keeps at least one shown.
+pub fn switched_contract_kind(state: V, kind: &str, solo: bool) -> V {
+    let idx = contract_spec_index(kind);
+    let current = hidden_contract_kinds(&state);
+    let mut next = current;
+    if solo {
+        let already_solo = (0..7).all(|i| current[i] == (i != idx));
+        if already_solo {
+            next = [false; 7];
+        } else {
+            for (i, slot) in next.iter_mut().enumerate() {
+                *slot = i != idx;
+            }
+        }
+    } else {
+        next[idx] = !current[idx];
+        if next.iter().all(|h| *h) {
+            next = [false; 7];
+        }
+    }
+    write_hidden_contract_kinds(state, next)
+}
+
+/// Resets or applies a preset (`"all"`) on contract kind visibility in `state["kinds_off"]`.
+pub fn preset_contract_kinds(state: V, preset: &str) -> V {
+    match preset {
+        "all" => write_hidden_contract_kinds(state, [false; 7]),
+        _ => state,
+    }
+}
+
+/// Interactive filter switchboard + accessible legend of all 7 cross-service contract & code arrow kinds.
+pub fn contract_arrow_legend_html_for(surface: SysMapSurface, doc: &V, state: &V) -> String {
+    let hidden = hidden_contract_kinds(state);
+    let counts = contract_kind_counts(doc);
+    let has_counts = counts.iter().any(|c| *c > 0);
+    let any_hidden = hidden.iter().any(|h| *h);
     let mut html = String::from(
         "<div class=\"graph-arrow-legend system-arrow-legend\" role=\"list\" aria-label=\"Cross-service contract and dependency arrow types\"><span class=\"graph-arrow-legend-title\">Links:</span>",
     );
-    for spec in CONTRACT_ARROW_SPECS {
+    for (idx, spec) in CONTRACT_ARROW_SPECS.iter().enumerate() {
+        let shown = !hidden[idx];
+        let count = counts[idx];
         let dash = spec
             .dash_array
             .map(|d| format!(" stroke-dasharray=\"{d}\""))
             .unwrap_or_default();
+        let payload = payload_attr(&json!({
+            "surface": surface.id,
+            "kind": spec.kind,
+        }));
+        let title = if has_counts {
+            format!(
+                "{} · {} links (click to {}, Alt+click to isolate)",
+                spec.description,
+                count,
+                if shown { "hide" } else { "show" }
+            )
+        } else {
+            format!(
+                "{} (click to {}, Alt+click to isolate)",
+                spec.description,
+                if shown { "hide" } else { "show" }
+            )
+        };
+        let count_html = if count > 0 {
+            format!("<span class=\"graph-arrow-legend-count\">{count}</span>")
+        } else {
+            String::new()
+        };
         html.push_str(&format!(
-            "<span class=\"graph-arrow-legend-item\" role=\"listitem\" title=\"{}\"><svg class=\"graph-arrow-swatch system-arrow-swatch\" data-sys-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"system-map-arrow system-map-arrow-{}\">{}</g></svg><span>{}</span></span>",
-            escape(spec.description),
+            "<button type=\"button\" class=\"graph-arrow-legend-item\" role=\"listitem\" data-action=\"system-map-kind-toggle\" data-surface=\"{}\" data-payload=\"{payload}\" data-sys-edge-kind=\"{}\" aria-pressed=\"{shown}\" title=\"{}\"><svg class=\"graph-arrow-swatch system-arrow-swatch\" data-sys-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"system-map-arrow system-map-arrow-{}\">{}</g></svg><span>{}</span>{count_html}</button>",
+            surface.id,
+            spec.kind,
+            escape(&title),
             spec.kind,
             spec.swatch_line_end,
             spec.kind,
             spec.marker_body,
             spec.label,
+        ));
+    }
+    if any_hidden {
+        let all_payload = payload_attr(&json!({
+            "surface": surface.id,
+            "preset": "all",
+        }));
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-kind-preset\" data-surface=\"{}\" data-payload=\"{all_payload}\" title=\"Show all contract and code link types\">Show all</button>",
+            surface.id,
         ));
     }
     html.push_str(
@@ -323,6 +456,12 @@ pub fn contract_arrow_legend_html() -> String {
     );
     html.push_str("</div>");
     html
+}
+
+/// Accessible legend of all 7 cross-service contract & code arrow kinds plus drift/risk halos.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn contract_arrow_legend_html() -> String {
+    contract_arrow_legend_html_for(SERVICES_SURFACE, &V::Null, &default_surface_state())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -350,6 +489,19 @@ impl Default for Camera {
     }
 }
 
+impl Camera {
+    fn viewport_cam(&self) -> graph_viewport::Camera {
+        graph_viewport::Camera::new(self.pan_x, self.pan_y, self.scale)
+    }
+
+    fn apply_viewport_cam(&mut self, cam: graph_viewport::Camera) {
+        self.scale = cam.scale;
+        self.pan_x = cam.tx;
+        self.pan_y = cam.ty;
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn zoom_at(
     scale: f64,
     pan_x: f64,
@@ -357,24 +509,24 @@ pub fn zoom_at(
     anchor: (f64, f64),
     target_scale: f64,
 ) -> (f64, f64, f64) {
-    let cur = scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let next = target_scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let world_x = (anchor.0 - pan_x) / cur;
-    let world_y = (anchor.1 - pan_y) / cur;
-    let next_pan_x = (anchor.0 - world_x * next).round();
-    let next_pan_y = (anchor.1 - world_y * next).round();
-    (next, next_pan_x, next_pan_y)
+    let next = graph_viewport::zoom_at(
+        graph_viewport::Camera::new(pan_x, pan_y, scale),
+        anchor,
+        target_scale,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    (next.scale, next.tx, next.ty)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn camera_for_fit(plane: (f64, f64), viewport: (f64, f64)) -> (f64, f64, f64) {
-    let pw = plane.0.max(1.0);
-    let ph = plane.1.max(1.0);
-    let vw = (viewport.0 - 24.0).max(120.0);
-    let vh = (viewport.1 - 24.0).max(120.0);
-    let scale = (vw / pw).min(vh / ph).clamp(CAMERA_MIN, 1.15);
-    let pan_x = ((viewport.0 - pw * scale) / 2.0).max(12.0).round();
-    let pan_y = ((viewport.1 - ph * scale) / 2.0).max(12.0).round();
-    (scale, pan_x, pan_y)
+    let cam = graph_viewport::fit(
+        plane,
+        viewport,
+        graph_viewport::FitOptions::for_system_map(),
+    );
+    (cam.scale, cam.tx, cam.ty)
 }
 
 fn load_camera(surface: SysMapSurface) -> Camera {
@@ -412,43 +564,99 @@ fn save_camera(surface: SysMapSurface, cam: &Camera) {
 }
 
 fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
-    let Some(el) = dom::get(canvas_id).and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return (760.0, 380.0, false);
-    };
-    let w = el.client_width() as f64;
-    let h = el.client_height() as f64;
-    if w > 40.0 && h > 40.0 {
-        (w, h, true)
-    } else {
-        (760.0, 380.0, false)
+    graph_viewport::viewport_size(canvas_id, 40.0, (760.0, 380.0))
+}
+
+/// Returns the zoom LOD bucket (`"far"`, `"mid"`, or `"near"`) for CSS decluttering.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn lod(scale: f64) -> &'static str {
+    graph_viewport::lod_with(scale, SYSTEM_MAP_LOD)
+}
+
+fn radar_size(picture: (f64, f64)) -> (f64, f64) {
+    let (pw, ph) = picture;
+    if !(pw > 0.0 && ph > 0.0) {
+        return (0.0, 0.0);
     }
+    let scale = (RADAR_WIDTH / pw).min(RADAR_HEIGHT / ph);
+    (
+        (pw * scale).round().max(24.0),
+        (ph * scale).round().max(18.0),
+    )
+}
+
+/// Computes the visible rectangle in plane coordinates for the minimap viewport frame.
+/// Returns `None` if the entire map already fits inside the viewport.
+pub fn radar_window_rect(
+    corner: (f64, f64),
+    scale: f64,
+    room: (f64, f64),
+    picture: (f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    graph_viewport::radar_window_rect(
+        graph_viewport::Camera::new(corner.0, corner.1, scale),
+        room,
+        picture,
+    )
+}
+
+/// Returns camera pan `(pan_x, pan_y)` that centers world `point` in `room` at `scale`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn centred(point: (f64, f64), scale: f64, room: (f64, f64)) -> (f64, f64) {
+    let cam = graph_viewport::center_camera_on(point, room, scale);
+    (cam.tx, cam.ty)
+}
+
+fn sync_system_radar(surface: SysMapSurface, cam: &Camera) {
+    let radar_id = format!("{}-radar", surface.canvas_id);
+    let Some(radar) = dom::get(&radar_id) else {
+        return;
+    };
+    let (vw, vh, measured) = viewport_size(surface.canvas_id);
+    let seen = (measured && cam.plane_w > 0.0 && cam.plane_h > 0.0)
+        .then(|| {
+            radar_window_rect(
+                (cam.pan_x, cam.pan_y),
+                cam.scale,
+                (vw, vh),
+                (cam.plane_w, cam.plane_h),
+            )
+        })
+        .flatten();
+    let frame = radar.query_selector(".graph-radar-view").ok().flatten();
+    let (Some(seen), Some(frame)) = (seen, frame) else {
+        dom::hide(&radar, true);
+        return;
+    };
+    for (k, v) in [
+        ("x", seen.0),
+        ("y", seen.1),
+        ("width", seen.2),
+        ("height", seen.3),
+    ] {
+        let _ = frame.set_attribute(k, &format!("{v:.1}"));
+    }
+    dom::hide(&radar, false);
 }
 
 fn apply_camera(surface: SysMapSurface, cam: &Camera) {
-    let pct = format!("{}%", (cam.scale * 100.0).round() as i64);
-    dom::text(&format!("{}-zoom-level", surface.id_prefix), &pct);
-    let Some(canvas) = dom::get(surface.canvas_id) else {
-        return;
-    };
-    let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
-        return;
-    };
-    let Some(plane_el) = plane.dyn_into::<web_sys::HtmlElement>().ok() else {
-        return;
-    };
-    let style = format!(
-        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
-        cam.plane_w.max(320.0),
-        cam.plane_h.max(220.0),
-        cam.scale,
-        cam.pan_x,
-        cam.pan_y,
-        cam.pan_x,
-        cam.pan_y,
-        cam.scale,
+    let zoom_id = format!("{}-zoom-level", surface.id_prefix);
+    let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(220.0));
+    let _ = graph_viewport::apply_transform_3d_by_id(
+        surface.canvas_id,
+        Some(&zoom_id),
+        cam.viewport_cam(),
+        plane_size,
+        SYSTEM_MAP_LOD,
     );
-    let _ = plane_el.set_attribute("style", &style);
+    if let Some(canvas) = dom::get(surface.canvas_id) {
+        let scale_text = format!("{:.4}", cam.scale);
+        let _ = canvas.set_attribute("data-scale", &scale_text);
+        if let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") {
+            let _ = plane.set_attribute("data-scale", &scale_text);
+        }
+    }
+    sync_system_radar(surface, cam);
 }
 
 fn fit_surface_camera(surface: SysMapSurface) {
@@ -457,10 +665,11 @@ fn fit_surface_camera(surface: SysMapSurface) {
     cam.needs_measure = !measured;
     cam.fit_mode = true;
     if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
-        let (s, px, py) = camera_for_fit((cam.plane_w, cam.plane_h), (vw, vh));
-        cam.scale = s;
-        cam.pan_x = px;
-        cam.pan_y = py;
+        cam.apply_viewport_cam(graph_viewport::fit(
+            (cam.plane_w, cam.plane_h),
+            (vw, vh),
+            graph_viewport::FitOptions::for_system_map(),
+        ));
     }
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
@@ -470,17 +679,11 @@ fn reset_surface_camera_100(surface: SysMapSurface) {
     let mut cam = load_camera(surface);
     let (vw, vh, measured) = viewport_size(surface.canvas_id);
     cam.needs_measure = !measured;
-    cam.scale = 1.0;
-    cam.pan_x = if cam.plane_w > 0.0 && cam.plane_w < vw {
-        ((vw - cam.plane_w) / 2.0).round()
-    } else {
-        16.0
-    };
-    cam.pan_y = if cam.plane_h > 0.0 && cam.plane_h < vh {
-        ((vh - cam.plane_h) / 2.0).round()
-    } else {
-        16.0
-    };
+    cam.apply_viewport_cam(graph_viewport::reset_100(
+        (cam.plane_w, cam.plane_h),
+        (vw, vh),
+        16.0,
+    ));
     cam.fit_mode = false;
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
@@ -503,10 +706,14 @@ fn zoom_surface_at(surface: SysMapSurface, factor: f64, client_anchor: Option<(f
     } else {
         (vw / 2.0, vh / 2.0)
     };
-    let (s, px, py) = zoom_at(cam.scale, cam.pan_x, cam.pan_y, anchor, cam.scale * factor);
-    cam.scale = s;
-    cam.pan_x = px;
-    cam.pan_y = py;
+    let next = graph_viewport::zoom_at(
+        cam.viewport_cam(),
+        anchor,
+        cam.scale * factor,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    cam.apply_viewport_cam(next);
     cam.fit_mode = false;
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
@@ -538,6 +745,7 @@ fn default_surface_state() -> V {
         "shared_side": "both_use",
         "shared_page": 0,
         "cycle_index": null,
+        "kinds_off": [],
         "overlay": {},
     })
 }
@@ -1809,7 +2017,7 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
     }
 
     // Compact empty columns when not in fixed 4-tier layers mode.
-    let active_cols: Vec<(usize, Vec<usize>)> = if layers_mode {
+    let mut active_cols: Vec<(usize, Vec<usize>)> = if layers_mode {
         (0..=3)
             .map(|tier| {
                 let members = cols.get(tier).cloned().unwrap_or_default();
@@ -1823,6 +2031,83 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
             .filter(|(_, m)| !m.is_empty())
             .collect()
     };
+
+    // Multi-pass barycenter ordering across columns (inspired by graph_map::plan_roomy)
+    // minimizes edge crossings while keeping `__system__` pinned last in its column.
+    if active_cols.len() > 1 {
+        let mut col_idx_by_node = vec![0usize; count];
+        let mut row_by_node = vec![0usize; count];
+        for (ci, (_, members)) in active_cols.iter().enumerate() {
+            for (ri, &u) in members.iter().enumerate() {
+                col_idx_by_node[u] = ci;
+                row_by_node[u] = ri;
+            }
+        }
+        let mut neighbors = vec![Vec::<usize>::new(); count];
+        for e in &all_edges {
+            if m::yes(&e["child_link"]) {
+                continue;
+            }
+            if let (Some(&u), Some(&v)) = (
+                top_idx_by_id.get(&m::text(e, "from")),
+                top_idx_by_id.get(&m::text(e, "to")),
+            ) {
+                if u != v && col_idx_by_node[u] != col_idx_by_node[v] {
+                    neighbors[u].push(v);
+                    neighbors[v].push(u);
+                }
+            }
+        }
+        for pass in 0..8usize {
+            let col_order: Vec<usize> = if pass % 2 == 0 {
+                (1..active_cols.len()).collect()
+            } else {
+                (0..active_cols.len().saturating_sub(1)).rev().collect()
+            };
+            for ci in col_order {
+                let prefer_left = pass % 2 == 0;
+                let mut scored: Vec<(bool, f64, usize)> = active_cols[ci]
+                    .1
+                    .iter()
+                    .map(|&u| {
+                        let is_sys = node_id(&top_nodes[u]) == "__system__";
+                        let preferred: Vec<usize> = neighbors[u]
+                            .iter()
+                            .copied()
+                            .filter(|&v| {
+                                if prefer_left {
+                                    col_idx_by_node[v] < ci
+                                } else {
+                                    col_idx_by_node[v] > ci
+                                }
+                            })
+                            .collect();
+                        let pool = if preferred.is_empty() {
+                            &neighbors[u]
+                        } else {
+                            &preferred
+                        };
+                        let score = if pool.is_empty() {
+                            row_by_node[u] as f64
+                        } else {
+                            let sum: usize = pool.iter().map(|&v| row_by_node[v]).sum();
+                            sum as f64 / pool.len() as f64
+                        };
+                        (is_sys, score, u)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    a.0.cmp(&b.0)
+                        .then_with(|| a.1.total_cmp(&b.1))
+                        .then_with(|| a.2.cmp(&b.2))
+                });
+                active_cols[ci].1 = scored.iter().map(|x| x.2).collect();
+                for (ri, &u) in active_cols[ci].1.iter().enumerate() {
+                    row_by_node[u] = ri;
+                }
+            }
+        }
+    }
 
     let mut placed_nodes = Vec::new();
     let mut frames = Vec::new();
@@ -1940,7 +2225,35 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
     let total_w = (cur_x - COL_GAP + MARGIN).max(420.0);
     let total_h = (max_y - ROW_GAP + MARGIN).max(240.0);
 
-    let mut wires = Vec::new();
+    struct CandidateWire {
+        edge_index: usize,
+        from: String,
+        to: String,
+        fx: f64,
+        fy: f64,
+        fw: f64,
+        fh: f64,
+        fcol: usize,
+        tx: f64,
+        ty: f64,
+        tw: f64,
+        th: f64,
+        tcol: usize,
+        back: bool,
+        src_side: u8,
+        dst_side: u8,
+    }
+
+    struct PortSlot {
+        other_y: f64,
+        back: bool,
+        cw_idx: usize,
+        is_src: bool,
+    }
+
+    let mut candidates = Vec::new();
+    let mut port_slots: BTreeMap<(String, u8), Vec<PortSlot>> = BTreeMap::new();
+
     for (edge_index, edge) in all_edges.iter().enumerate() {
         let from = m::text(edge, "from");
         let to = m::text(edge, "to");
@@ -1954,17 +2267,97 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
             continue;
         }
         let back = fcol > tcol || (fcol == tcol && fy > ty);
-        let (sx, sy, ex, ey) = if fcol < tcol {
-            (fx + fw, fy + fh / 2.0, tx, ty + th / 2.0)
+        let (src_side, dst_side) = if fcol < tcol {
+            (1u8, 0u8)
         } else if fcol > tcol {
-            (fx, fy + fh * 0.35, tx + tw, ty + th * 0.35)
+            (0u8, 1u8)
         } else {
-            (fx + fw, fy + fh / 2.0, tx + tw, ty + th / 2.0)
+            (1u8, 1u8)
         };
+        let cw_idx = candidates.len();
+        port_slots
+            .entry((from.clone(), src_side))
+            .or_default()
+            .push(PortSlot {
+                other_y: ty + th / 2.0,
+                back,
+                cw_idx,
+                is_src: true,
+            });
+        port_slots
+            .entry((to.clone(), dst_side))
+            .or_default()
+            .push(PortSlot {
+                other_y: fy + fh / 2.0,
+                back,
+                cw_idx,
+                is_src: false,
+            });
+        candidates.push(CandidateWire {
+            edge_index,
+            from,
+            to,
+            fx,
+            fy,
+            fw,
+            fh,
+            fcol,
+            tx,
+            ty,
+            tw,
+            th,
+            tcol,
+            back,
+            src_side,
+            dst_side,
+        });
+    }
+
+    let mut port_ranks: BTreeMap<(usize, bool), (usize, usize)> = BTreeMap::new();
+    for entries in port_slots.values_mut() {
+        entries.sort_by(|a, b| {
+            a.other_y
+                .total_cmp(&b.other_y)
+                .then_with(|| a.back.cmp(&b.back))
+                .then_with(|| a.cw_idx.cmp(&b.cw_idx))
+        });
+        let total = entries.len();
+        for (rank, slot) in entries.iter().enumerate() {
+            port_ranks.insert((slot.cw_idx, slot.is_src), (rank, total));
+        }
+    }
+
+    let spread_y = |top: f64, height: f64, base_frac: f64, rank: usize, total: usize| -> f64 {
+        if total <= 1 {
+            return top + height * base_frac;
+        }
+        let step = SYS_PORT_GAP.min((height * 0.55) / total as f64);
+        let offset = ((rank as f64 - (total as f64 - 1.0) / 2.0) * step)
+            .clamp(-SYS_PORT_SPREAD, SYS_PORT_SPREAD);
+        (top + height * base_frac + offset).clamp(top + 6.0, top + height - 6.0)
+    };
+
+    let mut wires = Vec::with_capacity(candidates.len());
+    for (cw_idx, cw) in candidates.into_iter().enumerate() {
+        let base_frac = if cw.fcol > cw.tcol { 0.35 } else { 0.5 };
+        let (s_rank, s_total) = port_ranks.get(&(cw_idx, true)).copied().unwrap_or((0, 1));
+        let (d_rank, d_total) = port_ranks.get(&(cw_idx, false)).copied().unwrap_or((0, 1));
+        let sx = if cw.src_side == 1 {
+            cw.fx + cw.fw
+        } else {
+            cw.fx
+        };
+        let ex = if cw.dst_side == 1 {
+            cw.tx + cw.tw
+        } else {
+            cw.tx
+        };
+        let sy = spread_y(cw.fy, cw.fh, base_frac, s_rank, s_total);
+        let ey = spread_y(cw.ty, cw.th, base_frac, d_rank, d_total);
         let dx = (ex - sx).abs().max(48.0) * 0.45;
-        let (c1x, c2x) = if fcol == tcol {
+        let (c1x, c2x) = if cw.fcol == cw.tcol {
             (sx + 44.0, ex + 44.0)
-        } else if fcol < tcol {
+        } else if cw.fcol < cw.tcol {
             (sx + dx, ex - dx)
         } else {
             (sx - dx, ex + dx)
@@ -1972,12 +2365,13 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
         let path_d = format!("M{sx:.1},{sy:.1} C{c1x:.1},{sy:.1} {c2x:.1},{ey:.1} {ex:.1},{ey:.1}");
         let mid_x = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
         let mid_y = 0.5 * (sy + ey);
+        let _ = (cw.from, cw.to);
         wires.push(PlacedSysWire {
-            edge_index,
+            edge_index: cw.edge_index,
             path_d,
             mid_x,
             mid_y,
-            back,
+            back: cw.back,
         });
     }
 
@@ -2272,16 +2666,118 @@ fn filtered_doc(doc: &V, state: &V) -> V {
     out
 }
 
+fn place_sys_edge_label(placed: &mut Vec<(f64, f64)>, candidate: (f64, f64)) -> (f64, f64) {
+    let clashes = |x: f64, y: f64, p: &(f64, f64)| (x - p.0).abs() < 56.0 && (y - p.1).abs() < 18.0;
+    for step in 0..8i32 {
+        let offsets: &[f64] = if step == 0 {
+            &[0.0]
+        } else {
+            &[18.0 * step as f64, -18.0 * step as f64]
+        };
+        for &dy in offsets {
+            let y = candidate.1 + dy;
+            if y >= 10.0 && !placed.iter().any(|p| clashes(candidate.0, y, p)) {
+                placed.push((candidate.0, y));
+                return (candidate.0, y);
+            }
+        }
+    }
+    placed.push(candidate);
+    candidate
+}
+
+/// Renders the SVG minimap radar for a laid-out system graph.
+pub fn system_radar_html(doc: &V, state: &V, layout: &SysLayout) -> String {
+    let (rw, rh) = radar_size((layout.width, layout.height));
+    if rw <= 0.0 || layout.nodes.is_empty() {
+        return String::new();
+    }
+    let focus_id = m::text(state, "focus");
+    let overlay = &state["overlay"];
+    let seeds: BTreeSet<String> = m::array(&overlay["seed_services"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let blast_doc = filtered_doc(doc, state);
+    let seed_vec: Vec<String> = seeds.iter().cloned().collect();
+    let changed_contracts: Vec<String> = m::array(&overlay["changed_contracts"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let depth = overlay["depth"].as_u64().unwrap_or(32) as usize;
+    let blast = compute_blast_radius(&blast_doc, &seed_vec, &changed_contracts, depth);
+
+    let mut svg = format!(
+        "<svg class=\"graph-radar-picture\" width=\"{rw:.0}\" height=\"{rh:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\" focusable=\"false\">",
+        layout.width, layout.height, layout.width, layout.height
+    );
+    for frame in &layout.frames {
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-frame\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"/>",
+            frame.x, frame.y, frame.w, frame.h
+        ));
+    }
+    for placed in &layout.nodes {
+        let state_attr = if placed.id == focus_id {
+            " data-state=\"selected\""
+        } else if seeds.contains(&placed.id)
+            || blast.direct_consumers.contains(&placed.id)
+            || blast.downstream_consumers.contains(&placed.id)
+        {
+            " data-state=\"changed\""
+        } else if placed.cycle {
+            " data-state=\"cycle\""
+        } else {
+            ""
+        };
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-box\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"{state_attr}/>",
+            placed.x, placed.y, placed.w, placed.h
+        ));
+    }
+    svg.push_str(
+        "<rect class=\"graph-radar-view\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"/></svg>",
+    );
+    svg
+}
+
+/// Renders the interactive SVG + HTML plane AND its minimap radar for `render_surface`.
+pub fn render_canvas_with_radar(
+    surface: SysMapSurface,
+    doc: &V,
+    state: &V,
+) -> (String, String, f64, f64) {
+    let view_doc = filtered_doc(doc, state);
+    let layers_mode = m::yes(&state["layers"]);
+    let layout = layout_system_nodes(&view_doc, layers_mode);
+    let plane_html = render_canvas_html_with_layout(surface, &view_doc, state, &layout);
+    let radar_svg = system_radar_html(doc, state, &layout);
+    (plane_html, radar_svg, layout.width, layout.height)
+}
+
 /// Renders the interactive SVG + HTML plane for `#system-map-canvas` or `#system-change-topology-canvas`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String, f64, f64) {
     let view_doc = filtered_doc(doc, state);
     let layers_mode = m::yes(&state["layers"]);
     let layout = layout_system_nodes(&view_doc, layers_mode);
+    let html = render_canvas_html_with_layout(surface, &view_doc, state, &layout);
+    (html, layout.width, layout.height)
+}
+
+fn render_canvas_html_with_layout(
+    surface: SysMapSurface,
+    view_doc: &V,
+    state: &V,
+    layout: &SysLayout,
+) -> String {
+    let layers_mode = m::yes(&state["layers"]);
+    let view_doc = view_doc.clone();
     let nodes = m::array(&view_doc["nodes"]);
     let edges = m::array(&view_doc["edges"]);
 
     if nodes.is_empty() {
-        return (String::new(), 0.0, 0.0);
+        return String::new();
     }
 
     let mut node_by_id = BTreeMap::new();
@@ -2455,6 +2951,9 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         ));
     }
 
+    let hidden_kinds = hidden_contract_kinds(state);
+    let mut placed_labels: Vec<(f64, f64)> = Vec::new();
+
     // Edges (halos + visible strokes + wide click/contextmenu hit targets)
     for wire in &layout.wires {
         let Some(edge) = edges.get(wire.edge_index) else {
@@ -2463,18 +2962,25 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         let from = m::text(edge, "from");
         let to = m::text(edge, "to");
         let kind = primary_edge_kind(edge);
+        let kind_idx = contract_spec_index(kind);
         let spec = spec_for_kind(kind);
         let prov = m::text(edge, "provenance");
         let broken = m::yes(&edge["broken_risk"]);
         let against = m::yes(&edge["against"])
             || wire.back
             || (layers_mode && violation_set.contains(&(from.clone(), to.clone())));
+        let kind_hidden = hidden_kinds[kind_idx] && !against && !broken;
+        let hidden_attr = if kind_hidden {
+            " data-kind-hidden=\"true\""
+        } else {
+            ""
+        };
         let is_selected = sel_edge_pair.0 == from && sel_edge_pair.1 == to && !from.is_empty();
         let is_highlighted = highlight_edges.contains(&(from.clone(), to.clone()));
 
         if against {
             html.push_str(&format!(
-                "<path class=\"graph-map-violation-halo system-map-violation-halo\" d=\"{}\" data-from=\"{}\" data-to=\"{}\"{}/>",
+                "<path class=\"graph-map-violation-halo system-map-violation-halo\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{}/>",
                 wire.path_d,
                 escape(&from),
                 escape(&to),
@@ -2483,7 +2989,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         }
         if broken {
             html.push_str(&format!(
-                "<path class=\"system-map-broken-halo\" d=\"{}\" data-from=\"{}\" data-to=\"{}\"/>",
+                "<path class=\"system-map-broken-halo\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{hidden_attr}/>",
                 wire.path_d,
                 escape(&from),
                 escape(&to),
@@ -2521,7 +3027,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         }
 
         html.push_str(&format!(
-            "<path class=\"{edge_classes}\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-provenance=\"{}\" data-broken-risk=\"{}\" data-from=\"{}\" data-to=\"{}\"{dash_attr}{} marker-end=\"url(#{marker_id})\"/>",
+            "<path class=\"{edge_classes}\" d=\"{}\" data-sys-edge-kind=\"{kind}\" data-provenance=\"{}\" data-broken-risk=\"{}\" data-from=\"{}\" data-to=\"{}\"{dash_attr}{hidden_attr}{} marker-end=\"url(#{marker_id})\"/>",
             wire.path_d,
             escape(&prov),
             if broken { "true" } else { "false" },
@@ -2542,15 +3048,16 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         };
 
         if !m::yes(&edge["child_link"]) {
+            let (lx, ly) = place_sys_edge_label(&mut placed_labels, (wire.mid_x, wire.mid_y));
             html.push_str(&format!(
-                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-from=\"{}\" data-to=\"{}\"{}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
+                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{}{hidden_attr}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
                 escape(&from),
                 escape(&to),
                 if is_selected || is_highlighted { " data-edge-state=\"on\"" } else { "" },
-                wire.mid_x - 27.0,
-                wire.mid_y - 8.0,
-                wire.mid_x,
-                wire.mid_y + 3.5,
+                lx - 27.0,
+                ly - 8.0,
+                lx,
+                ly + 3.5,
                 escape(&pill_text),
             ));
         }
@@ -2567,7 +3074,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         }));
         let aria = format!("{from} to {to} ({} link)", spec.label);
         html.push_str(&format!(
-            "<path class=\"graph-map-hit system-map-hit\" d=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"{}\" data-action=\"system-map-edge\" data-payload=\"{hit_payload}\" data-explain-services=\"{}\" data-from=\"{}\" data-to=\"{}\"><title>{}</title></path>",
+            "<path class=\"graph-map-hit system-map-hit\" d=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"{}\" data-action=\"system-map-edge\" data-sys-edge-kind=\"{kind}\" data-payload=\"{hit_payload}\" data-explain-services=\"{}\" data-from=\"{}\" data-to=\"{}\"{hidden_attr}><title>{}</title></path>",
             wire.path_d,
             escape(&aria),
             escape(&explain_svcs),
@@ -2740,18 +3247,15 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
     }
 
     html.push_str("</div>");
-    (html, layout.width, layout.height)
+    html
 }
 
 /// Renders the rich `#system-map-side` or `#system-change-topology-side` inspector HTML.
 pub fn render_side_html(surface: SysMapSurface, doc: &V, state: &V) -> String {
-    let side_tab = {
-        let t = m::text(state, "side_tab");
-        if t.is_empty() {
-            "details".to_owned()
-        } else {
-            t
-        }
+    let side_tab = match m::text(state, "side_tab").as_str() {
+        "analyze" => "analyze".to_owned(),
+        "changes" => "changes".to_owned(),
+        _ => "details".to_owned(),
     };
     let nodes = m::array(&doc["nodes"]);
     let edges = m::array(&doc["edges"]);
@@ -2770,10 +3274,12 @@ pub fn render_side_html(surface: SysMapSurface, doc: &V, state: &V) -> String {
         ("analyze", "Analyze"),
         ("changes", "Changes & Impact"),
     ] {
+        let selected = side_tab == id;
         let p = payload_attr(&json!({ "surface": surface.id, "tab": id }));
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-pick-tab system-side-tab\" role=\"tab\" aria-selected=\"{}\" data-action=\"system-map-side-tab\" data-payload=\"{p}\">{}</button>",
-            if side_tab == id { "true" } else { "false" },
+            "<button type=\"button\" class=\"graph-pick-tab system-side-tab\" role=\"tab\" aria-selected=\"{}\" tabindex=\"{}\" data-action=\"system-map-side-tab\" data-payload=\"{p}\">{}</button>",
+            if selected { "true" } else { "false" },
+            if selected { "0" } else { "-1" },
             escape(label),
         ));
     }
@@ -3150,7 +3656,224 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
             );
         }
     }
+    html.push_str(&semantic_bridges_html(
+        from,
+        to,
+        &bridge["semantic_bridges"],
+    ));
     html
+}
+
+fn join_text_array(value: &V) -> String {
+    m::array(value)
+        .iter()
+        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn semantic_bridge_file_buttons(service: &str, files: &V) -> String {
+    let mut out = String::new();
+    for item in m::array(files).into_iter().take(6) {
+        let Some(path) = item.as_str().map(str::trim).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let open = payload_attr(&json!({"path": path, "service": service}));
+        out.push_str(&format!(
+            "<button type=\"button\" class=\"system-semantic-file\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" title=\"Show {} on the code map of {}\"><code>{}</code></button>",
+            escape(path),
+            escape(service),
+            escape(path),
+        ));
+    }
+    out
+}
+
+fn wrap_semantic_files(buttons: String) -> String {
+    if buttons.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"system-semantic-files\">{buttons}</div>")
+    }
+}
+
+fn semantic_bridges_html(from: &str, to: &str, sem: &V) -> String {
+    if !sem.is_object() {
+        return String::new();
+    }
+    let routes = m::array(&sem["routes"]);
+    let events = m::array(&sem["events"]);
+    let di_bindings = m::array(&sem["di_bindings"]);
+    let tables = m::array(&sem["tables"]);
+    let total = routes.len() + events.len() + di_bindings.len() + tables.len();
+    if total == 0 {
+        return "<details class=\"system-semantic-bridges\"><summary class=\"system-semantic-bridges-summary\"><span>Semantic framework &amp; DB bridges</span><span class=\"system-chip\">0</span></summary><p class=\"system-note\">No shared routes, events, DI bindings, or tables detected.</p></details>".to_owned();
+    }
+    let mut body = String::new();
+    if !routes.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">Routes <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            routes.len()
+        ));
+        for r in &routes {
+            let route = m::text(r, "route");
+            let methods = {
+                let joined = join_text_array(&r["methods"]);
+                if !joined.is_empty() {
+                    joined
+                } else {
+                    let single = m::text(r, "method");
+                    if single.is_empty() {
+                        "ANY".to_owned()
+                    } else {
+                        single
+                    }
+                }
+            };
+            let caller = {
+                let c = m::text(r, "caller");
+                if c.is_empty() {
+                    from.to_owned()
+                } else {
+                    c
+                }
+            };
+            let provider = {
+                let p = m::text(r, "provider");
+                if p.is_empty() {
+                    to.to_owned()
+                } else {
+                    p
+                }
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(&caller, &r["caller_files"]),
+                semantic_bridge_file_buttons(&provider, &r["provider_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"route\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"route\">{}</span><code>{}</code></div><div class=\"system-note\">{} → {}</div>{}</li>",
+                escape(&methods),
+                escape(&route),
+                escape(&caller),
+                escape(&provider),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    if !events.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">Events <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            events.len()
+        ));
+        for ev in &events {
+            let event_name = m::text(ev, "event");
+            let producer = {
+                let p = m::text(ev, "producer");
+                if p.is_empty() {
+                    from.to_owned()
+                } else {
+                    p
+                }
+            };
+            let consumer = {
+                let c = m::text(ev, "consumer");
+                if c.is_empty() {
+                    to.to_owned()
+                } else {
+                    c
+                }
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(&producer, &ev["producer_files"]),
+                semantic_bridge_file_buttons(&consumer, &ev["consumer_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"event\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"event\">event</span><code>{}</code></div><div class=\"system-note\">{} → {}</div>{}</li>",
+                escape(&event_name),
+                escape(&producer),
+                escape(&consumer),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    if !di_bindings.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">DI bindings <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            di_bindings.len()
+        ));
+        for di in &di_bindings {
+            let service = m::text(di, "service");
+            let from_kinds = join_text_array(&di["from_kinds"]);
+            let to_kinds = join_text_array(&di["to_kinds"]);
+            let left_note = if from_kinds.is_empty() {
+                escape(from)
+            } else {
+                format!("{}: {}", escape(from), escape(&from_kinds))
+            };
+            let right_note = if to_kinds.is_empty() {
+                escape(to)
+            } else {
+                format!("{}: {}", escape(to), escape(&to_kinds))
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(from, &di["from_files"]),
+                semantic_bridge_file_buttons(to, &di["to_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"di\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"di\">DI</span><code>{}</code></div><div class=\"system-note\">{left_note} ↔ {right_note}</div>{}</li>",
+                escape(&service),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    if !tables.is_empty() {
+        body.push_str(&format!(
+            "<h6 class=\"system-semantic-group-title\">Shared DB tables <span class=\"system-chip\">{}</span></h6><ul class=\"system-semantic-list\">",
+            tables.len()
+        ));
+        for tbl in &tables {
+            let table_name = m::text(tbl, "table");
+            let coupling_raw = m::text(tbl, "coupling");
+            let (coupling_attr, coupling_label) = match coupling_raw.as_str() {
+                "shared_write" => ("shared_write", "shared write"),
+                "cross_read_write" => ("cross_read_write", "read / write"),
+                "shared_read" => ("shared_read", "shared read"),
+                _ => ("shared_read", "shared"),
+            };
+            let from_access = join_text_array(&tbl["from_access"]);
+            let to_access = join_text_array(&tbl["to_access"]);
+            let left_note = if from_access.is_empty() {
+                escape(from)
+            } else {
+                format!("{} ({})", escape(from), escape(&from_access))
+            };
+            let right_note = if to_access.is_empty() {
+                escape(to)
+            } else {
+                format!("{} ({})", escape(to), escape(&to_access))
+            };
+            let files = format!(
+                "{}{}",
+                semantic_bridge_file_buttons(from, &tbl["from_files"]),
+                semantic_bridge_file_buttons(to, &tbl["to_files"]),
+            );
+            body.push_str(&format!(
+                "<li class=\"system-semantic-item\" data-kind=\"table\"><div class=\"system-semantic-item-head\"><span class=\"system-semantic-badge\" data-kind=\"table\" data-coupling=\"{coupling_attr}\">{coupling_label}</span><code>{}</code></div><div class=\"system-note\">{left_note} · {right_note}</div>{}</li>",
+                escape(&table_name),
+                wrap_semantic_files(files),
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    format!(
+        "<details class=\"system-semantic-bridges\" open><summary class=\"system-semantic-bridges-summary\"><span>Semantic framework &amp; DB bridges</span><span class=\"system-chip\">{total}</span></summary><div class=\"system-semantic-bridges-body\">{body}</div></details>"
+    )
 }
 /// Asks for the code on both sides of a link and draws it beside the map.
 async fn fetch_bridge(surface: SysMapSurface, from: String, to: String) {
@@ -3771,6 +4494,8 @@ fn sync_toolbar_buttons(surface: SysMapSurface, state: &V) {
 fn render_surface(surface: SysMapSurface, refit: bool) {
     attach_wheel_listeners();
     ensure_hover_watch(surface);
+    ensure_legend_hover_watch(surface);
+    ensure_resize_watch();
     let state = surface_state(surface);
     let doc = m::data(surface.map_key);
     sync_toolbar_buttons(surface, &state);
@@ -3795,14 +4520,26 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
     };
     crate::graph_explanation::surface_map_context(surface.canvas_id, &doc, &doc, &explain_scope);
 
-    let (canvas_html, pw, ph) = render_canvas_html(surface, &doc, &state);
-    set_html(surface.canvas_id, &canvas_html);
+    let (canvas_html, radar_svg, pw, ph) = render_canvas_with_radar(surface, &doc, &state);
+    invalidate_hover_cache(surface.canvas_id);
+    let combined_html = if canvas_html.is_empty() {
+        String::new()
+    } else if radar_svg.is_empty() {
+        canvas_html.clone()
+    } else {
+        format!(
+            "{canvas_html}<div class=\"graph-map-radar system-map-radar\" id=\"{}-radar\" data-surface=\"{}\" aria-hidden=\"true\" hidden>{radar_svg}</div>",
+            surface.canvas_id,
+            surface.id,
+        )
+    };
+    set_html(surface.canvas_id, &combined_html);
     set_html(
         surface.legend_id,
         &format!(
             "{}{}",
             wave_scrubber_html(surface, &blast_of(&doc, &state), &state),
-            contract_arrow_legend_html()
+            contract_arrow_legend_html_for(surface, &filtered_doc(&doc, &state), &state)
         ),
     );
     dom::hidden(surface.legend_id, canvas_html.is_empty());
@@ -3838,10 +4575,11 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
         let (vw, vh, measured) = viewport_size(surface.canvas_id);
         cam.needs_measure = !measured;
         if pw > 0.0 && ph > 0.0 {
-            let (s, px, py) = camera_for_fit((pw, ph), (vw, vh));
-            cam.scale = s;
-            cam.pan_x = px;
-            cam.pan_y = py;
+            cam.apply_viewport_cam(graph_viewport::fit(
+                (pw, ph),
+                (vw, vh),
+                graph_viewport::FitOptions::for_system_map(),
+            ));
         }
     }
     save_camera(surface, &cam);
@@ -4221,55 +4959,93 @@ pub fn current_context_brief() -> String {
 }
 
 fn attach_canvas_wheel(canvas_id: &'static str) {
-    let Some(canvas) = dom::get(canvas_id) else {
-        return;
-    };
-    if canvas.get_attribute("data-wheel-bound").as_deref() == Some("true") {
-        return;
-    }
-    let _ = canvas.set_attribute("data-wheel-bound", "true");
-    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
-        let Ok(wheel) = event.dyn_into::<web_sys::WheelEvent>() else {
-            return;
-        };
-        let Some(surface) = surface_for_canvas(canvas_id) else {
-            return;
-        };
-        wheel.prevent_default();
-        wheel.stop_propagation();
-        let dy = wheel.delta_y();
-        if dy.abs() < f64::EPSILON {
-            return;
+    let timer_key = format!("{canvas_id}-wheel-end");
+    graph_viewport::attach_wheel_zoom(canvas_id, &timer_key, move |factor, anchor| {
+        if let Some(surface) = surface_for_canvas(canvas_id) {
+            zoom_surface_at(surface, factor, Some(anchor));
         }
-        let factor = if dy < 0.0 { 1.14 } else { 1.0 / 1.14 };
-        dom::attr(canvas_id, "data-wheeling", "true");
-        zoom_surface_at(
-            surface,
-            factor,
-            Some((wheel.client_x() as f64, wheel.client_y() as f64)),
-        );
-        let clear_key = format!("{canvas_id}-wheel-end");
-        dom::later(&clear_key, 140, move || {
-            dom::attr(canvas_id, "data-wheeling", "false");
-        });
     });
-    let options = web_sys::AddEventListenerOptions::new();
-    options.set_passive(false);
-    if canvas
-        .add_event_listener_with_callback_and_add_event_listener_options(
-            "wheel",
-            callback.as_ref().unchecked_ref(),
-            &options,
-        )
-        .is_ok()
-    {
-        callback.forget();
-    }
 }
 
 pub fn attach_wheel_listeners() {
     attach_canvas_wheel(SERVICES_SURFACE.canvas_id);
     attach_canvas_wheel(CHANGES_SURFACE.canvas_id);
+}
+
+#[derive(Default)]
+struct HoverIndex {
+    node_els: BTreeMap<String, Vec<web_sys::Element>>,
+    edge_els: Vec<web_sys::Element>,
+    edges_by_node: BTreeMap<String, Vec<usize>>,
+    edges_by_pair: BTreeMap<(String, String), Vec<usize>>,
+    adjacency: BTreeMap<String, BTreeSet<String>>,
+    lit: Vec<web_sys::Element>,
+}
+
+thread_local! {
+    static HOVER_CACHE: RefCell<BTreeMap<String, HoverIndex>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn invalidate_hover_cache(canvas_id: &str) {
+    HOVER_CACHE.with(|cache| {
+        cache.borrow_mut().remove(canvas_id);
+    });
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn hover_pointed_key(hovered_node: Option<&str>, hovered_edge: Option<(&str, &str)>) -> String {
+    match (hovered_node, hovered_edge) {
+        (Some(nid), _) => format!("n:{nid}"),
+        (None, Some((ef, et))) => format!("e:{ef}\u{1f}{et}"),
+        (None, None) => String::new(),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_edge_adjacency(edges: &[(String, String)]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (from, to) in edges {
+        if !from.is_empty() && !to.is_empty() {
+            adj.entry(from.clone()).or_default().insert(to.clone());
+            adj.entry(to.clone()).or_default().insert(from.clone());
+        }
+    }
+    adj
+}
+
+fn build_hover_index(canvas_id: &str) -> HoverIndex {
+    let mut index = HoverIndex::default();
+    let mut pairs = Vec::new();
+    for el in dom::all(&format!(
+        "#{canvas_id} .system-map-edge, #{canvas_id} .system-map-violation-halo, #{canvas_id} .system-map-edge-label"
+    )) {
+        let f = el.get_attribute("data-from").unwrap_or_default();
+        let t = el.get_attribute("data-to").unwrap_or_default();
+        let idx = index.edge_els.len();
+        index.edge_els.push(el);
+        if !f.is_empty() {
+            index.edges_by_node.entry(f.clone()).or_default().push(idx);
+        }
+        if !t.is_empty() && t != f {
+            index.edges_by_node.entry(t.clone()).or_default().push(idx);
+        }
+        if !f.is_empty() || !t.is_empty() {
+            index
+                .edges_by_pair
+                .entry((f.clone(), t.clone()))
+                .or_default()
+                .push(idx);
+            pairs.push((f, t));
+        }
+    }
+    index.adjacency = build_edge_adjacency(&pairs);
+    for el in dom::all(&format!("#{canvas_id} [data-n]")) {
+        let nid = el.get_attribute("data-n").unwrap_or_default();
+        if !nid.is_empty() {
+            index.node_els.entry(nid).or_default().push(el);
+        }
+    }
+    index
 }
 
 fn apply_hover_lighting(
@@ -4283,44 +5059,276 @@ fn apply_hover_lighting(
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
         return;
     };
-    if hovered_node.is_none() && hovered_edge.is_none() {
-        let _ = plane.remove_attribute("data-hover");
-        for el in dom::all(&format!("#{canvas_id} [data-lit]")) {
-            let _ = el.remove_attribute("data-lit");
-        }
+    let pointed_key = hover_pointed_key(hovered_node, hovered_edge);
+    if plane.get_attribute("data-pointed").unwrap_or_default() == pointed_key {
         return;
     }
+    let _ = plane.set_attribute("data-pointed", &pointed_key);
 
-    let _ = plane.set_attribute("data-hover", "true");
-    let mut lit_nodes = BTreeSet::new();
-    for el in dom::all(&format!("#{canvas_id} .system-map-edge, #{canvas_id} .system-map-violation-halo, #{canvas_id} .system-map-edge-label")) {
-        let f = el.get_attribute("data-from").unwrap_or_default();
-        let t = el.get_attribute("data-to").unwrap_or_default();
-        let matches = if let Some(nid) = hovered_node {
-            f == nid || t == nid
-        } else if let Some((ef, et)) = hovered_edge {
-            f == ef && t == et
+    HOVER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let cleared_existing = if let Some(entry) = cache.get_mut(canvas_id) {
+            for el in entry.lit.drain(..) {
+                let _ = el.remove_attribute("data-lit");
+            }
+            true
         } else {
             false
         };
-        if matches {
-            let _ = el.set_attribute("data-lit", "true");
-            lit_nodes.insert(f);
-            lit_nodes.insert(t);
-        } else {
-            let _ = el.remove_attribute("data-lit");
+        if !cleared_existing {
+            for el in dom::all(&format!("#{canvas_id} [data-lit]")) {
+                let _ = el.remove_attribute("data-lit");
+            }
         }
-    }
-    if let Some(nid) = hovered_node {
-        lit_nodes.insert(nid.to_owned());
-    }
-    for el in dom::all(&format!("#{canvas_id} [data-n]")) {
-        let nid = el.get_attribute("data-n").unwrap_or_default();
-        if lit_nodes.contains(&nid) {
-            let _ = el.set_attribute("data-lit", "true");
-        } else {
-            let _ = el.remove_attribute("data-lit");
+
+        if hovered_node.is_none() && hovered_edge.is_none() {
+            let _ = plane.remove_attribute("data-hover");
+            return;
         }
+
+        let entry = cache
+            .entry(canvas_id.to_owned())
+            .or_insert_with(|| build_hover_index(canvas_id));
+
+        let _ = plane.set_attribute("data-hover", "true");
+        let mut lit_nodes = BTreeSet::new();
+
+        if let Some(nid) = hovered_node {
+            if let Some(edge_indices) = entry.edges_by_node.get(nid) {
+                for &idx in edge_indices {
+                    if let Some(el) = entry.edge_els.get(idx) {
+                        let _ = el.set_attribute("data-lit", "true");
+                        entry.lit.push(el.clone());
+                    }
+                }
+            }
+            lit_nodes.insert(nid.to_owned());
+            if let Some(neighbors) = entry.adjacency.get(nid) {
+                for neighbor in neighbors {
+                    lit_nodes.insert(neighbor.clone());
+                }
+            }
+        } else if let Some((ef, et)) = hovered_edge {
+            if let Some(edge_indices) = entry.edges_by_pair.get(&(ef.to_owned(), et.to_owned())) {
+                for &idx in edge_indices {
+                    if let Some(el) = entry.edge_els.get(idx) {
+                        let _ = el.set_attribute("data-lit", "true");
+                        entry.lit.push(el.clone());
+                    }
+                }
+            }
+            if !ef.is_empty() {
+                lit_nodes.insert(ef.to_owned());
+            }
+            if !et.is_empty() {
+                lit_nodes.insert(et.to_owned());
+            }
+        }
+
+        for nid in &lit_nodes {
+            if let Some(els) = entry.node_els.get(nid) {
+                for el in els {
+                    let _ = el.set_attribute("data-lit", "true");
+                    entry.lit.push(el.clone());
+                }
+            }
+        }
+    });
+}
+
+fn look_at_system_point(surface: SysMapSurface, point: (f64, f64)) {
+    let (vw, vh, measured) = viewport_size(surface.canvas_id);
+    if !measured {
+        return;
+    }
+    let mut cam = load_camera(surface);
+    let next = graph_viewport::center_camera_on(point, (vw, vh), cam.scale);
+    cam.apply_viewport_cam(next);
+    cam.fit_mode = false;
+    cam.needs_measure = false;
+    save_camera(surface, &cam);
+    apply_camera(surface, &cam);
+}
+
+fn radar_target_element(radar: &web_sys::Element) -> web_sys::Element {
+    radar
+        .query_selector(".graph-radar-picture")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| radar.clone())
+}
+
+fn save_radar_drag(surface_id: &str, radar_id: &str, drag: graph_viewport::RadarDrag) {
+    let mut raw = drag.to_json();
+    raw["surface"] = json!(surface_id);
+    raw["radar_id"] = json!(radar_id);
+    m::set(RADAR_DRAG_KEY, raw);
+}
+
+fn radar_pointer_event(
+    kind: &str,
+    event: &web_sys::Event,
+    target_el: Option<&web_sys::Element>,
+) -> bool {
+    let held = m::data(RADAR_DRAG_KEY);
+    let mut drag = graph_viewport::RadarDrag::from_json(&held);
+    match kind {
+        "pointerdown" => {
+            let Some(radar) =
+                target_el.and_then(|el| el.closest(".system-map-radar").ok().flatten())
+            else {
+                return false;
+            };
+            let surf_id = radar.get_attribute("data-surface").unwrap_or_default();
+            let surface = surface_by_id(&surf_id);
+            let cam = load_camera(surface);
+            let target = radar_target_element(&radar);
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &target,
+                Some(surface.canvas_id),
+                (cam.plane_w, cam.plane_h),
+                &mut drag,
+            ) {
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    save_radar_drag(surface.id, &radar.id(), drag);
+                    look_at_system_point(surface, world_point);
+                }
+                graph_viewport::RadarAction::Ignored => {
+                    if drag.active {
+                        save_radar_drag(surface.id, &radar.id(), drag);
+                    }
+                }
+                graph_viewport::RadarAction::Released => {
+                    m::set(RADAR_DRAG_KEY, json!({"active": false}));
+                }
+            }
+            true
+        }
+        "pointermove" | "pointerup" | "pointercancel" => {
+            if !drag.active {
+                return false;
+            }
+            let surf_id = m::text(&held, "surface");
+            let surface = surface_by_id(&surf_id);
+            let radar_id = m::text(&held, "radar_id");
+            let Some(radar) = dom::get(&radar_id) else {
+                dom::attr(surface.canvas_id, "data-panning", "false");
+                m::set(RADAR_DRAG_KEY, json!({"active": false}));
+                return true;
+            };
+            let cam = load_camera(surface);
+            let target = radar_target_element(&radar);
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &target,
+                Some(surface.canvas_id),
+                (cam.plane_w, cam.plane_h),
+                &mut drag,
+            ) {
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    save_radar_drag(surface.id, &radar_id, drag);
+                    look_at_system_point(surface, world_point);
+                }
+                graph_viewport::RadarAction::Released => {
+                    m::set(RADAR_DRAG_KEY, json!({"active": false}));
+                }
+                graph_viewport::RadarAction::Ignored => {
+                    save_radar_drag(surface.id, &radar_id, drag);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn ensure_resize_watch() {
+    graph_viewport::ensure_resize_observer(
+        "system-map-resize-watched",
+        Some("system-map-resize"),
+        60,
+        || {
+            for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
+                let visible = dom::get(surface.canvas_id)
+                    .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none());
+                let has_plane = dom::get(surface.canvas_id)
+                    .and_then(|el| el.query_selector(".graph-map-plane").ok().flatten())
+                    .is_some();
+                if !(visible && has_plane) {
+                    continue;
+                }
+                let mut cam = load_camera(surface);
+                let (vw, vh, measured) = viewport_size(surface.canvas_id);
+                match graph_viewport::resize_refit_decision(
+                    cam.viewport_cam(),
+                    cam.fit_mode || cam.needs_measure,
+                    (cam.plane_w, cam.plane_h),
+                    (vw, vh),
+                    measured,
+                    graph_viewport::FitOptions::for_system_map(),
+                ) {
+                    graph_viewport::ResizeAction::Skip => {}
+                    graph_viewport::ResizeAction::Refit(next) => {
+                        cam.apply_viewport_cam(next);
+                        cam.fit_mode = true;
+                        cam.needs_measure = false;
+                        save_camera(surface, &cam);
+                        apply_camera(surface, &cam);
+                    }
+                    graph_viewport::ResizeAction::SyncRadar(_) => {
+                        apply_camera(surface, &cam);
+                    }
+                }
+            }
+        },
+    );
+}
+
+fn ensure_legend_hover_watch(surface: SysMapSurface) {
+    let Some(legend) = dom::get(surface.legend_id) else {
+        return;
+    };
+    if legend.get_attribute("data-hover-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = legend.set_attribute("data-hover-bound", "true");
+    let cid = surface.canvas_id;
+    for (event_kind, rests) in [
+        ("mouseover", true),
+        ("focusin", true),
+        ("mouseleave", false),
+        ("focusout", false),
+    ] {
+        let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let held = rests
+                .then(|| {
+                    event
+                        .target()
+                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                })
+                .flatten()
+                .and_then(|target| {
+                    target
+                        .closest(
+                            ".graph-arrow-legend-item[aria-pressed='true'][data-sys-edge-kind]",
+                        )
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|item| item.get_attribute("data-sys-edge-kind"));
+            let Some(canvas) = dom::get(cid) else {
+                return;
+            };
+            let _ = match held {
+                Some(kind) => canvas.set_attribute("data-sys-kind-hover", &kind),
+                None => canvas.remove_attribute("data-sys-kind-hover"),
+            };
+        });
+        let _ = legend.add_event_listener_with_callback(event_kind, moved.as_ref().unchecked_ref());
+        moved.forget();
     }
 }
 
@@ -4341,6 +5349,10 @@ fn ensure_hover_watch(surface: SysMapSurface) {
         else {
             return;
         };
+        if target.closest(".system-map-radar").ok().flatten().is_some() {
+            apply_hover_lighting(cid, None, None);
+            return;
+        }
         if let Some(node_el) = target.closest("[data-n]").ok().flatten() {
             let nid = node_el.get_attribute("data-n").unwrap_or_default();
             apply_hover_lighting(cid, Some(&nid), None);
@@ -4368,6 +5380,10 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         .target()
         .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
 
+    if radar_pointer_event(kind, event, target_el.as_ref()) {
+        return true;
+    }
+
     for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
         if kind == "pointerdown"
             && dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden"))
@@ -4390,127 +5406,96 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                     .flatten()
             })
             .is_some();
-        let drag = m::data(surface.drag_key);
-        let drag_active = m::yes(&drag["active"]);
+        let in_radar = target_el
+            .as_ref()
+            .and_then(|el| el.closest(".system-map-radar").ok().flatten())
+            .is_some();
+        let mut drag = graph_viewport::DragPan::from_json(&m::data(surface.drag_key));
+        let drag_active = drag.active;
 
-        match kind {
-            "pointerdown" if in_canvas => {
-                let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                    return false;
-                };
-                if pe.button() != 0 {
-                    return false;
-                }
-                let cam = load_camera(surface);
-                m::set(
-                    surface.drag_key,
-                    json!({
-                        "active": true,
-                        "pointer_id": pe.pointer_id(),
-                        "start_x": pe.client_x() as f64,
-                        "start_y": pe.client_y() as f64,
-                        "orig_pan_x": cam.pan_x,
-                        "orig_pan_y": cam.pan_y,
-                        "moved": false,
-                        "suppress_click": false,
-                    }),
-                );
-                return true;
-            }
-            "pointermove" if drag_active => {
-                let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                    return true;
-                };
-                if pe.pointer_id() as i64 != drag["pointer_id"].as_i64().unwrap_or(-1) {
+        if kind == "dblclick" && in_canvas && !in_radar {
+            if let Some(node_el) = target_el
+                .as_ref()
+                .and_then(|el| el.closest("[data-n]").ok().flatten())
+            {
+                let svc = node_el
+                    .get_attribute("data-explain-services")
+                    .unwrap_or_default();
+                let sid = svc.split(',').next().unwrap_or("").trim().to_owned();
+                if !sid.is_empty() {
+                    systems::drill_down_service_map(surface.id, &sid, None);
                     return true;
                 }
-                let dx = pe.client_x() as f64 - drag["start_x"].as_f64().unwrap_or(0.0);
-                let dy = pe.client_y() as f64 - drag["start_y"].as_f64().unwrap_or(0.0);
-                let mut moved = m::yes(&drag["moved"]);
-                if !moved {
-                    if (dx * dx + dy * dy).sqrt() <= DRAG_THRESHOLD_PX {
-                        return true;
-                    }
-                    moved = true;
-                    dom::attr(surface.canvas_id, "data-panning", "true");
-                    if let Some(c) = dom::get(surface.canvas_id) {
-                        let _ = c.set_pointer_capture(pe.pointer_id());
-                    }
-                }
-                let orig_x = drag["orig_pan_x"].as_f64().unwrap_or(0.0);
-                let orig_y = drag["orig_pan_y"].as_f64().unwrap_or(0.0);
-                let mut next_drag = drag;
-                next_drag["moved"] = json!(moved);
-                m::set(surface.drag_key, next_drag);
-                let mut cam = load_camera(surface);
-                cam.pan_x = (orig_x + dx).round();
-                cam.pan_y = (orig_y + dy).round();
-                cam.fit_mode = false;
-                save_camera(surface, &cam);
-                apply_camera(surface, &cam);
-                return true;
             }
-            "pointerup" | "pointercancel" if drag_active => {
-                dom::attr(surface.canvas_id, "data-panning", "false");
-                if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
-                    if m::yes(&drag["moved"]) {
-                        if let Some(c) = dom::get(surface.canvas_id) {
-                            let _ = c.release_pointer_capture(pe.pointer_id());
-                        }
-                    }
-                }
-                let suppress = kind == "pointerup" && m::yes(&drag["moved"]);
-                m::set(
-                    surface.drag_key,
-                    json!({
-                        "active": false,
-                        "moved": false,
-                        "suppress_click": suppress,
-                    }),
+            if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
+                zoom_surface_at(
+                    surface,
+                    ZOOM_STEP,
+                    Some((me.client_x() as f64, me.client_y() as f64)),
                 );
-                if suppress {
-                    let dk = surface.drag_key;
-                    let tk = format!("{dk}-clear");
-                    dom::later(&tk, 70, move || {
-                        let mut d = m::data(dk);
-                        if d.is_object() {
-                            d["suppress_click"] = json!(false);
-                            m::set(dk, d);
-                        }
-                    });
-                }
-                return true;
             }
-            "dblclick" if in_canvas => {
-                if let Some(node_el) = target_el
-                    .as_ref()
-                    .and_then(|el| el.closest("[data-n]").ok().flatten())
-                {
-                    let svc = node_el
-                        .get_attribute("data-explain-services")
-                        .unwrap_or_default();
-                    let sid = svc.split(',').next().unwrap_or("").trim().to_owned();
-                    if !sid.is_empty() {
-                        systems::drill_down_service_map(surface.id, &sid, None);
+            return true;
+        }
+
+        if (kind == "pointerdown" && in_canvas && !in_radar)
+            || (drag_active && matches!(kind, "pointermove" | "pointerup" | "pointercancel"))
+        {
+            let mut cam = load_camera(surface);
+            match graph_viewport::handle_canvas_drag(
+                kind,
+                event,
+                surface.canvas_id,
+                cam.viewport_cam(),
+                graph_viewport::DEFAULT_DRAG_THRESHOLD_PX,
+                &mut drag,
+            ) {
+                graph_viewport::CanvasDragOutcome::Down => {
+                    m::set(surface.drag_key, drag.to_json());
+                    return true;
+                }
+                graph_viewport::CanvasDragOutcome::Panned { tx, ty } => {
+                    m::set(surface.drag_key, drag.to_json());
+                    cam.pan_x = tx;
+                    cam.pan_y = ty;
+                    cam.fit_mode = false;
+                    save_camera(surface, &cam);
+                    apply_camera(surface, &cam);
+                    return true;
+                }
+                graph_viewport::CanvasDragOutcome::Ended { suppress_click } => {
+                    m::set(surface.drag_key, drag.to_json());
+                    if suppress_click {
+                        let dk = surface.drag_key;
+                        let tk = format!("{dk}-clear");
+                        dom::later(&tk, 70, move || {
+                            let mut d = graph_viewport::DragPan::from_json(&m::data(dk));
+                            d.clear_suppress();
+                            m::set(dk, d.to_json());
+                        });
+                    }
+                    return true;
+                }
+                graph_viewport::CanvasDragOutcome::Ignored => {
+                    if drag.active {
+                        m::set(surface.drag_key, drag.to_json());
                         return true;
                     }
                 }
-                if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
-                    zoom_surface_at(
-                        surface,
-                        ZOOM_STEP,
-                        Some((me.client_x() as f64, me.client_y() as f64)),
-                    );
-                }
-                return true;
             }
-            _ => {}
         }
     }
     false
 }
 
 pub fn key(event: &web_sys::KeyboardEvent) -> bool {
+    if event.is_composing() {
+        return false;
+    }
+    if dom::get("graph-map").is_some_and(|d| d.has_attribute("open"))
+        || dom::get("graph-link").is_some_and(|d| d.has_attribute("open"))
+    {
+        return false;
+    }
     let view = m::read(|s| s.view.clone());
     if view != "systems" && view != "system-changes" {
         return false;
@@ -4520,26 +5505,57 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     } else {
         SERVICES_SURFACE
     };
-    if event.key() == "Escape"
-        && dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden"))
-    {
-        close_finder(surface);
-        return true;
+    let canvas_visible = dom::get(surface.canvas_id)
+        .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none());
+    if !canvas_visible {
+        return false;
     }
-    if event.key() == "/"
-        && !event.ctrl_key()
-        && !event.meta_key()
-        && !event.alt_key()
-        && event
-            .target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            .is_none_or(|el| !matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"))
-        && dom::get(surface.find_input_id)
-            .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
-    {
-        event.prevent_default();
-        dom::focus(surface.find_input_id);
-        return true;
+    if event.key() == "Escape" {
+        if dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden")) {
+            close_finder(surface);
+            return true;
+        }
+        let mut state = surface_state(surface);
+        if m::yes(&state["expanded"]) {
+            state["expanded"] = json!(false);
+            save_surface_state(surface, &state);
+            sync_toolbar_buttons(surface, &state);
+            fit_surface_camera(surface);
+            return true;
+        }
+        return false;
+    }
+    let target = event
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    let in_input = target
+        .as_ref()
+        .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
+    if !in_input && !event.ctrl_key() && !event.meta_key() && !event.alt_key() {
+        match event.key().as_str() {
+            "/" => {
+                if dom::get(surface.find_input_id)
+                    .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
+                {
+                    event.prevent_default();
+                    dom::focus(surface.find_input_id);
+                    return true;
+                }
+            }
+            "+" | "=" => {
+                zoom_surface_at(surface, ZOOM_STEP, None);
+                return true;
+            }
+            "-" => {
+                zoom_surface_at(surface, 1.0 / ZOOM_STEP, None);
+                return true;
+            }
+            "0" => {
+                fit_surface_camera(surface);
+                return true;
+            }
+            _ => {}
+        }
     }
     false
 }
@@ -4886,6 +5902,30 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             spawn_local(async move {
                 fetch_surface_changes(surface).await;
             });
+            true
+        }
+        "system-map-kind-toggle" | "system-map-kind-preset" => {
+            let state = surface_state(surface);
+            let next = if action == "system-map-kind-preset" {
+                preset_contract_kinds(state, &m::text(payload, "preset"))
+            } else {
+                switched_contract_kind(
+                    state,
+                    &m::text(payload, "kind"),
+                    m::yes(&m::data("pointer-mods")["alt"]),
+                )
+            };
+            save_surface_state(surface, &next);
+            render_surface(surface, false);
+            let wanted = payload.to_string();
+            if let Some(button) =
+                dom::all(&format!("#{} [data-action='{action}']", surface.legend_id))
+                    .into_iter()
+                    .find(|el| el.get_attribute("data-payload").as_deref() == Some(wanted.as_str()))
+                    .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = button.focus();
+            }
             true
         }
         "system-map-find-pick" => {
@@ -5459,5 +6499,329 @@ mod tests {
             wave_scrubber_html(CHANGES_SURFACE, &blast_of(&doc, &state), &state),
             ""
         );
+    }
+
+    #[test]
+    fn hover_pointed_key_and_edge_adjacency_dedup_cleanly() {
+        assert_eq!(hover_pointed_key(None, None), "");
+        assert_eq!(hover_pointed_key(Some("orders"), None), "n:orders");
+        assert_ne!(
+            hover_pointed_key(Some("orders"), None),
+            hover_pointed_key(None, Some(("orders", "payments")))
+        );
+        assert_eq!(
+            hover_pointed_key(None, Some(("orders", "payments"))),
+            "e:orders\u{1f}payments"
+        );
+
+        let adj = build_edge_adjacency(&[
+            ("gateway".to_owned(), "orders".to_owned()),
+            ("orders".to_owned(), "payments".to_owned()),
+            ("".to_owned(), "ignored".to_owned()),
+        ]);
+        assert_eq!(
+            adj.get("orders").cloned().unwrap_or_default(),
+            BTreeSet::from(["gateway".to_owned(), "payments".to_owned()])
+        );
+        assert_eq!(
+            adj.get("gateway").cloned().unwrap_or_default(),
+            BTreeSet::from(["orders".to_owned()])
+        );
+        assert!(!adj.contains_key("ignored"));
+    }
+
+    #[test]
+    fn barycenter_ordering_and_port_spreading_untangle_crossed_services() {
+        // Inputs in columns are inverted relative to edges:
+        // Column 0: a, b  |  Column 1: y (connected to a), x (connected to b)
+        // WAIT: to force a crossing before barycenter:
+        // col 0: top=a, bottom=b; edges: a -> x, b -> y; if x was added after y, raw order puts y above x causing a crossing!
+        let doc = json!({
+            "nodes": [
+                {"id": "a", "name": "Service A", "kind": "service"},
+                {"id": "b", "name": "Service B", "kind": "service"},
+                {"id": "y", "name": "Service Y", "kind": "service"},
+                {"id": "x", "name": "Service X", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "a", "to": "x", "kind": "http"},
+                {"from": "b", "to": "y", "kind": "rpc"},
+                {"from": "a", "to": "y", "kind": "event"}
+            ]
+        });
+        let layout = layout_system_nodes(&doc, false);
+        let pos = |id: &str| {
+            layout
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| (n.x, n.y))
+                .expect(id)
+        };
+        // `a` connects to both `x` and `y`, while `b` connects only to `y`.
+        // Note `a` has TWO outgoing right-side wires (`a -> x`, `a -> y`), so their start Y ports must spread apart!
+        assert_eq!(pos("a").0, MARGIN);
+        let wire_starts: Vec<f64> = layout
+            .wires
+            .iter()
+            .filter(|w| doc["edges"][w.edge_index]["from"] == "a")
+            .filter_map(|w| {
+                let after_m = w.path_d.strip_prefix('M')?;
+                let first_pair = after_m.split_whitespace().next()?;
+                let (_, y_str) = first_pair.split_once(',')?;
+                y_str.parse::<f64>().ok()
+            })
+            .collect();
+        assert_eq!(wire_starts.len(), 2);
+        assert!(
+            (wire_starts[0] - wire_starts[1]).abs() >= 2.0,
+            "expected spread ports on multi-edge source, got {:?}",
+            wire_starts
+        );
+
+        // Now verify crossing removal when two disjoint edges cross in input order:
+        let crossed = json!({
+            "nodes": [
+                {"id": "g1", "name": "G1", "kind": "service"},
+                {"id": "g2", "name": "G2", "kind": "service"},
+                {"id": "s_for_g2", "name": "S2", "kind": "service"},
+                {"id": "s_for_g1", "name": "S1", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "g1", "to": "s_for_g1", "kind": "http"},
+                {"from": "g2", "to": "s_for_g2", "kind": "http"}
+            ]
+        });
+        let cl = layout_system_nodes(&crossed, false);
+        let y_of = |id: &str| cl.nodes.iter().find(|n| n.id == id).unwrap().y;
+        assert!(
+            y_of("s_for_g1") < y_of("s_for_g2"),
+            "barycenter sweep should align s_for_g1 above s_for_g2 matching g1 above g2"
+        );
+    }
+
+    #[test]
+    fn contract_legend_switchboard_toggles_solos_and_hides_matching_edges() {
+        let doc = synthesize_map_from_catalog(&sample_catalog(), &json!({}));
+        let mut state = default_surface_state();
+
+        let legend = contract_arrow_legend_html_for(SERVICES_SURFACE, &doc, &state);
+        crate::test_support::assert_no_inline_hex_colors(&legend);
+        assert!(legend.contains("data-action=\"system-map-kind-toggle\""));
+        assert!(legend.contains("<button type=\"button\" class=\"graph-arrow-legend-item\""));
+        assert!(!legend.contains("Show all"));
+
+        // Toggle rpc off -> Show all appears and rpc edge gets data-kind-hidden="true"
+        state = switched_contract_kind(state, "rpc", false);
+        assert_eq!(
+            hidden_contract_kinds(&state),
+            [false, false, true, false, false, false, false]
+        );
+        let legend_off = contract_arrow_legend_html_for(SERVICES_SURFACE, &doc, &state);
+        assert!(legend_off.contains("Show all"));
+        assert!(legend_off.contains("data-sys-edge-kind=\"rpc\" aria-pressed=\"false\""));
+
+        let (canvas, _, _) = render_canvas_html(SERVICES_SURFACE, &doc, &state);
+        crate::test_support::assert_no_inline_hex_colors(&canvas);
+        assert!(canvas.contains("data-sys-edge-kind=\"rpc\""));
+        assert!(canvas.contains("data-kind-hidden=\"true\""));
+
+        // Alt+click solo on http isolates http only; second solo resets to all visible.
+        let solo = switched_contract_kind(default_surface_state(), "http", true);
+        assert_eq!(
+            hidden_contract_kinds(&solo),
+            [false, true, true, true, true, true, true]
+        );
+        let reset = switched_contract_kind(solo, "http", true);
+        assert_eq!(hidden_contract_kinds(&reset), [false; 7]);
+        let preset_all = preset_contract_kinds(state, "all");
+        assert_eq!(hidden_contract_kinds(&preset_all), [false; 7]);
+    }
+
+    #[test]
+    fn system_radar_lod_and_edge_label_deoverlap_work_cleanly() {
+        assert_eq!(lod(0.4), "far");
+        assert_eq!(lod(0.9), "mid");
+        assert_eq!(lod(1.4), "near");
+        assert_eq!(lod(f64::NAN), "far");
+
+        let doc = json!({
+            "nodes": [
+                {"id": "gw", "name": "Gateway", "kind": "service"},
+                {"id": "ord", "name": "Orders", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "gw", "to": "ord", "kind": "http", "contracts": [{"id": "c1"}]},
+                {"from": "gw", "to": "ord", "kind": "rpc", "contracts": [{"id": "c2"}]}
+            ]
+        });
+        let mut state = default_surface_state();
+        state["focus"] = json!("gw");
+        let (plane_html, radar_svg, w, h) = render_canvas_with_radar(CHANGES_SURFACE, &doc, &state);
+        crate::test_support::assert_no_inline_hex_colors(&plane_html);
+        crate::test_support::assert_no_inline_hex_colors(&radar_svg);
+        assert!(radar_svg.contains("class=\"graph-radar-picture\""));
+        assert!(radar_svg.contains("data-state=\"selected\""));
+        assert!(radar_svg.contains("class=\"graph-radar-view\""));
+
+        // Parallel edge labels between gw -> ord must be de-overlapped to distinct Y coordinates.
+        let label_ys: Vec<f64> = plane_html
+            .split("<g class=\"graph-map-edge-tie system-map-edge-label\"")
+            .skip(1)
+            .filter_map(|chunk| {
+                let text_at = chunk.find("<text ")?;
+                let y_at = chunk[text_at..].find(" y=\"")?;
+                let start = text_at + y_at + 4;
+                let end = start + chunk[start..].find('"')?;
+                chunk[start..end].parse::<f64>().ok()
+            })
+            .collect();
+        assert_eq!(label_ys.len(), 2);
+        assert!(
+            (label_ys[0] - label_ys[1]).abs() >= 16.0,
+            "overlapping edge labels should step apart: {:?}",
+            label_ys
+        );
+
+        assert!(radar_window_rect((0.0, 0.0), 1.0, (w + 100.0, h + 100.0), (w, h)).is_none());
+        let partial = radar_window_rect((-40.0, -20.0), 1.5, (300.0, 200.0), (w, h)).unwrap();
+        assert!(partial.2 > 0.0 && partial.3 > 0.0);
+        let centered = centred((200.0, 120.0), 1.5, (600.0, 400.0));
+        assert_eq!(centered, (0.0, 20.0));
+    }
+
+    #[test]
+    fn system_map_delegates_camera_resize_and_radar_to_graph_viewport() {
+        let fit_cam = graph_viewport::fit(
+            (1200.0, 600.0),
+            (800.0, 400.0),
+            graph_viewport::FitOptions::for_system_map(),
+        );
+        assert_eq!(
+            camera_for_fit((1200.0, 600.0), (800.0, 400.0)),
+            (fit_cam.scale, fit_cam.tx, fit_cam.ty)
+        );
+
+        let mut cam = Camera::default();
+        cam.apply_viewport_cam(fit_cam);
+        assert_eq!(cam.viewport_cam(), fit_cam);
+
+        assert!(matches!(
+            graph_viewport::resize_refit_decision(
+                cam.viewport_cam(),
+                true,
+                (1200.0, 600.0),
+                (900.0, 500.0),
+                true,
+                graph_viewport::FitOptions::for_system_map(),
+            ),
+            graph_viewport::ResizeAction::Refit(_)
+        ));
+        assert_eq!(
+            graph_viewport::resize_refit_decision(
+                cam.viewport_cam(),
+                false,
+                (1200.0, 600.0),
+                (900.0, 500.0),
+                true,
+                graph_viewport::FitOptions::for_system_map(),
+            ),
+            graph_viewport::ResizeAction::SyncRadar(fit_cam)
+        );
+
+        let mut st = default_surface_state();
+        let doc = json!({"nodes": [], "edges": []});
+        let details_html = render_side_html(SERVICES_SURFACE, &doc, &st);
+        assert!(details_html.contains("aria-selected=\"true\" tabindex=\"0\""));
+        assert_eq!(details_html.matches("tabindex=\"-1\"").count(), 2);
+
+        st["side_tab"] = json!("analyze");
+        let analyze_html = render_side_html(SERVICES_SURFACE, &doc, &st);
+        assert_eq!(
+            analyze_html
+                .matches("aria-selected=\"true\" tabindex=\"0\"")
+                .count(),
+            1
+        );
+        assert_eq!(analyze_html.matches("tabindex=\"-1\"").count(), 2);
+    }
+
+    #[test]
+    fn bridge_html_renders_semantic_framework_and_db_bridges_without_inline_hex_colors() {
+        let bridge = json!({
+            "kind": "system_bridge",
+            "from": "web",
+            "to": "orders",
+            "contracts": ["orders-http-v1"],
+            "consumer": {"service": "web", "graph": true, "more": 0, "sites": []},
+            "provider": {"service": "orders", "graph": true, "more": 0, "sites": []},
+            "semantic_bridges": {
+                "routes": [{
+                    "route": "/api/orders/{id}",
+                    "method": "POST",
+                    "methods": ["POST"],
+                    "direction": "from->to",
+                    "caller": "web",
+                    "provider": "orders",
+                    "caller_files": ["src/OrdersClient.ts"],
+                    "provider_files": ["src/OrderController.php"]
+                }],
+                "events": [{
+                    "event": "OrderCreated",
+                    "direction": "to->from",
+                    "producer": "orders",
+                    "consumer": "web",
+                    "producer_files": ["src/OrderService.php"],
+                    "consumer_files": ["src/OrderSyncListener.ts"]
+                }],
+                "di_bindings": [{
+                    "service": "PaymentGateway",
+                    "from_kinds": ["binds"],
+                    "to_kinds": ["implements"],
+                    "from_files": ["src/Providers/AppProvider.ts"],
+                    "to_files": ["src/StripeGateway.php"]
+                }],
+                "tables": [{
+                    "table": "orders",
+                    "coupling": "cross_read_write",
+                    "from_access": ["read"],
+                    "to_access": ["read", "write"],
+                    "from_files": ["src/OrderQuery.ts"],
+                    "to_files": ["src/OrderRepository.php"]
+                }],
+                "summary": {"routes": 1, "events": 1, "di_bindings": 1, "tables": 1, "total": 4}
+            }
+        });
+        let html = bridge_html(SERVICES_SURFACE, "web", "orders", &bridge);
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(
+            html.contains("Semantic framework &amp; DB bridges"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"system-chip\">4</span>"),
+            "{html}"
+        );
+        assert!(html.contains("/api/orders/{id}"), "{html}");
+        assert!(html.contains("POST"), "{html}");
+        assert!(html.contains("OrderCreated"), "{html}");
+        assert!(html.contains("PaymentGateway"), "{html}");
+        assert!(
+            html.contains("data-coupling=\"cross_read_write\""),
+            "{html}"
+        );
+        assert!(html.contains("read / write"), "{html}");
+        assert!(html.contains("<code>orders</code>"), "{html}");
+        let payloads = crate::test_support::payloads(&html, "inspect-system-file-graph");
+        assert!(payloads.contains(&json!({"path": "src/OrderController.php", "service": "orders"})));
+        assert!(payloads.contains(&json!({"path": "src/OrderSyncListener.ts", "service": "web"})));
+
+        let mut empty_sem = bridge.clone();
+        empty_sem["semantic_bridges"] = json!({
+            "routes": [], "events": [], "di_bindings": [], "tables": []
+        });
+        let empty_html = bridge_html(SERVICES_SURFACE, "web", "orders", &empty_sem);
+        crate::test_support::assert_no_inline_hex_colors(&empty_html);
+        assert!(empty_html.contains("No shared routes, events, DI bindings, or tables detected."));
     }
 }

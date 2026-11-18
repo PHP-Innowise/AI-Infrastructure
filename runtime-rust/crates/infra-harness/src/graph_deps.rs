@@ -1,16 +1,29 @@
-//! Pure static source dependency extraction, declaration diffing, and reference matching.
-use crate::graph_live::{
-    CreatedEntity, ExtractedDecl, Language, clean_rel_key, detect_language,
-    extract_declaration_spans, folder_of, is_ident_char, is_ident_start, sanitize_c_like_line,
-    strip_comments_keep_strings, strip_leading_words, take_ident,
+//! Pure static AST-backed source dependency extraction, declaration diffing, re-export propagation, and reference matching.
+use crate::{
+    graph_ast::{AstFileExtraction, AstRef, parse_file_ir},
+    graph_crates::CratePackageMap,
+    graph_live::{
+        CreatedEntity, ExtractedDecl, Language, clean_rel_key, detect_language,
+        extract_declaration_spans, folder_of, is_ident_char,
+    },
+    graph_manifests::{ManifestIndex, join_rel},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const PHP_EXTS: &[&str] = &["php", "phtml", "inc"];
 const RUST_EXTS: &[&str] = &["rs"];
 const TS_JS_EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
 const PYTHON_EXTS: &[&str] = &["py", "pyi"];
+const GO_EXTS: &[&str] = &["go"];
+const JAVA_EXTS: &[&str] = &["java"];
+const KOTLIN_EXTS: &[&str] = &["kt", "kts"];
+const CSHARP_EXTS: &[&str] = &["cs"];
+const RUBY_EXTS: &[&str] = &["rb"];
+const SWIFT_EXTS: &[&str] = &["swift"];
+const SCALA_EXTS: &[&str] = &["scala", "sc"];
+const MAX_REEXPORT_HOPS: usize = 8;
+const MAX_REEXPORT_VISITS: usize = 64;
 
 fn is_false(v: &bool) -> bool {
     !*v
@@ -192,37 +205,13 @@ pub(crate) struct DepDiff {
     pub unchanged: Vec<DepRef>,
 }
 
-/// Extracts all declarations from a source file into `DeclaredMember` summaries.
+/// Extracts all declarations from a source file into `DeclaredMember` summaries via tree-sitter AST.
 pub(crate) fn extract_declared_members(rel_path: &str, source: &str) -> Vec<DeclaredMember> {
     let rel = clean_rel_key(rel_path);
     if rel.is_empty() || source.trim().is_empty() {
         return Vec::new();
     }
-    extract_declaration_spans(&rel, source)
-        .into_iter()
-        .map(|decl| {
-            let parent = decl.entity.parent.filter(|p| !p.is_empty() && *p != rel);
-            let signature = if decl.signature.is_empty() {
-                None
-            } else {
-                Some(decl.signature)
-            };
-            DeclaredMember {
-                name: decl.entity.name,
-                kind: decl.entity.kind,
-                parent,
-                line: decl.entity.line,
-                signature,
-                visibility: decl.visibility,
-                previous_visibility: None,
-                modifiers: decl.modifiers,
-                change: "unchanged".to_owned(),
-                signature_changed: false,
-                visibility_narrowed: false,
-                used_by_caller: false,
-            }
-        })
-        .collect()
+    crate::graph_ast::extract_declared_members_ast(&rel, source)
 }
 
 /// Computes created, modified, and deleted declarations between `before` and `after`.
@@ -415,11 +404,233 @@ fn make_entity_change(
     }
 }
 
+/// Single re-export statement (`pub use ...;` in Rust or `export { ... } from '...'` in TS/JS).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReexportEntry {
+    pub source_module_path: String,
+    pub exported_symbol: String,
+    pub original_symbol: String,
+    pub is_wildcard: bool,
+}
+
+/// Workspace re-export graph supporting cycle-safe multi-hop symbol propagation.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ReexportIndex {
+    pub by_file: BTreeMap<String, Vec<ReexportEntry>>,
+    pub declared_by_file: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ReexportIndex {
+    /// Builds a `ReexportIndex` by parsing `(rel_path, source)` pairs via AST.
+    #[allow(dead_code)]
+    pub(crate) fn from_sources(sources: &[(&str, &str)]) -> Self {
+        let extractions: Vec<AstFileExtraction> = sources
+            .iter()
+            .filter_map(|(path, src)| parse_file_ir(path, src))
+            .collect();
+        Self::from_extractions(&extractions)
+    }
+
+    /// Builds a `ReexportIndex` from pre-parsed `AstFileExtraction` records.
+    #[allow(dead_code)]
+    pub(crate) fn from_extractions(extractions: &[AstFileExtraction]) -> Self {
+        let mut index = Self::default();
+        for ir in extractions {
+            let rel = clean_rel_key(&ir.rel_path);
+            if rel.is_empty() {
+                continue;
+            }
+            let decls = index.declared_by_file.entry(rel.clone()).or_default();
+            for d in &ir.declarations {
+                if d.entity.parent.as_deref() == Some(rel.as_str())
+                    || !matches!(d.entity.kind.as_str(), "method" | "field" | "property")
+                {
+                    decls.insert(d.entity.name.clone());
+                }
+            }
+            for imp in &ir.imports {
+                if !imp.is_reexport {
+                    continue;
+                }
+                if imp.is_wildcard {
+                    index
+                        .by_file
+                        .entry(rel.clone())
+                        .or_default()
+                        .push(ReexportEntry {
+                            source_module_path: imp.path.clone(),
+                            exported_symbol: "*".to_owned(),
+                            original_symbol: "*".to_owned(),
+                            is_wildcard: true,
+                        });
+                } else {
+                    for orig in &imp.symbols {
+                        let exported = imp.alias.clone().unwrap_or_else(|| orig.clone());
+                        index
+                            .by_file
+                            .entry(rel.clone())
+                            .or_default()
+                            .push(ReexportEntry {
+                                source_module_path: imp.path.clone(),
+                                exported_symbol: exported,
+                                original_symbol: orig.clone(),
+                                is_wildcard: false,
+                            });
+                    }
+                    if imp.symbols.is_empty()
+                        && let Some(ref alias) = imp.alias
+                    {
+                        index
+                            .by_file
+                            .entry(rel.clone())
+                            .or_default()
+                            .push(ReexportEntry {
+                                source_module_path: imp.path.clone(),
+                                exported_symbol: alias.clone(),
+                                original_symbol: alias.clone(),
+                                is_wildcard: false,
+                            });
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    /// Resolves `(facade_file, symbol)` across bounded cycle-safe re-export hops to `(defining_file, original_symbol)`.
+    pub(crate) fn resolve_reexport_target(
+        &self,
+        facade_file: &str,
+        symbol: &str,
+        known_files: &BTreeSet<String>,
+        crate_map_opt: Option<&CratePackageMap>,
+    ) -> Option<(String, String)> {
+        let start_file = clean_rel_key(facade_file);
+        if start_file.is_empty() || symbol.is_empty() || symbol == "*" {
+            return None;
+        }
+        // If the facade file itself defines the symbol, do not redirect away from it.
+        if self
+            .declared_by_file
+            .get(&start_file)
+            .is_some_and(|decls| decls.contains(symbol))
+        {
+            return None;
+        }
+        let lookup = KnownLookup::new(known_files);
+        let mut queue = VecDeque::new();
+        queue.push_back((start_file.clone(), symbol.to_owned(), 0usize, false));
+        let mut visited: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut named_fallback: Option<(String, String)> = None;
+        let mut wildcard_candidates: Vec<(String, String)> = Vec::new();
+        let mut visits = 0usize;
+
+        while let Some((cur_file, cur_sym, hops, via_wildcard)) = queue.pop_front() {
+            if visits >= MAX_REEXPORT_VISITS {
+                break;
+            }
+            visits += 1;
+            if !visited.insert((cur_file.clone(), cur_sym.clone())) {
+                continue;
+            }
+            if hops > 0
+                && self
+                    .declared_by_file
+                    .get(&cur_file)
+                    .is_some_and(|decls| decls.contains(&cur_sym))
+            {
+                return Some((cur_file, cur_sym));
+            }
+            if hops >= MAX_REEXPORT_HOPS {
+                if hops > 0 && cur_file != start_file && !via_wildcard && named_fallback.is_none() {
+                    named_fallback = Some((cur_file, cur_sym));
+                }
+                continue;
+            }
+            let Some(entries) = self.by_file.get(&cur_file) else {
+                if hops > 0 && cur_file != start_file {
+                    if !via_wildcard && named_fallback.is_none() {
+                        named_fallback = Some((cur_file, cur_sym));
+                    } else if via_wildcard {
+                        wildcard_candidates.push((cur_file, cur_sym));
+                    }
+                }
+                continue;
+            };
+
+            let mut matched_named = false;
+            for entry in entries
+                .iter()
+                .filter(|e| !e.is_wildcard && e.exported_symbol == cur_sym)
+            {
+                if let Some((next_file, next_sym)) =
+                    resolve_reexport_step(&cur_file, entry, &cur_sym, &lookup, crate_map_opt)
+                {
+                    matched_named = true;
+                    if named_fallback.is_none() && next_file != start_file {
+                        named_fallback = Some((next_file.clone(), next_sym.clone()));
+                    }
+                    queue.push_back((next_file, next_sym, hops + 1, false));
+                }
+            }
+
+            if !matched_named {
+                for entry in entries.iter().filter(|e| e.is_wildcard) {
+                    if let Some((next_file, next_sym)) =
+                        resolve_reexport_step(&cur_file, entry, &cur_sym, &lookup, crate_map_opt)
+                    {
+                        queue.push_back((next_file, next_sym, hops + 1, true));
+                    }
+                }
+            }
+        }
+
+        named_fallback.or_else(|| {
+            if self.declared_by_file.is_empty() && wildcard_candidates.len() == 1 {
+                wildcard_candidates.into_iter().next()
+            } else {
+                None
+            }
+        })
+    }
+}
+
 /// Extracts imports, inheritance, includes, and symbol references from `source`, resolving against `known_files`.
 pub(crate) fn extract_file_deps(
     rel_path: &str,
     source: &str,
     known_files: &BTreeSet<String>,
+) -> Vec<DepRef> {
+    extract_file_deps_with_manifests(rel_path, source, known_files, None, None)
+}
+
+/// Extracts dependencies using tree-sitter AST, optional workspace manifests (`composer.json`,
+/// `tsconfig.json`, `package.json`, `pyproject.toml`, `go.mod`), and optional re-export propagation.
+pub(crate) fn extract_file_deps_with_manifests(
+    rel_path: &str,
+    source: &str,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+) -> Vec<DepRef> {
+    extract_file_deps_with_context(
+        rel_path,
+        source,
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        None,
+    )
+}
+
+/// Full dependency extractor also accepting an optional Cargo `CratePackageMap`.
+pub(crate) fn extract_file_deps_with_context(
+    rel_path: &str,
+    source: &str,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
 ) -> Vec<DepRef> {
     let rel = clean_rel_key(rel_path);
     if rel.is_empty() || source.trim().is_empty() {
@@ -428,14 +639,28 @@ pub(crate) fn extract_file_deps(
     let Some(lang) = detect_language(&rel) else {
         return Vec::new();
     };
+    let Some(ir) = parse_file_ir(&rel, source) else {
+        return Vec::new();
+    };
     let lookup = KnownLookup::new(known_files);
     let mut acc = DepAccumulator::new(&rel, known_files);
 
     match lang {
-        Language::Php => extract_php_deps(&rel, source, &lookup, &mut acc),
-        Language::Rust => extract_rust_deps(&rel, source, &lookup, &mut acc),
-        Language::TsJs => extract_ts_js_deps(&rel, source, &lookup, &mut acc),
-        Language::Python => extract_python_deps(&rel, source, &lookup, &mut acc),
+        Language::Php => resolve_php_ir(&rel, &ir, &lookup, manifests_opt, &mut acc),
+        Language::Rust => {
+            resolve_rust_ir(&rel, &ir, &lookup, reexports_opt, crate_map_opt, &mut acc)
+        }
+        Language::TsJs => {
+            resolve_ts_js_ir(&rel, &ir, &lookup, manifests_opt, reexports_opt, &mut acc)
+        }
+        Language::Python => resolve_python_ir(&rel, &ir, &lookup, manifests_opt, &mut acc),
+        Language::Go => resolve_go_ir(&rel, &ir, &lookup, manifests_opt, &mut acc),
+        Language::Java | Language::Kotlin | Language::Scala => {
+            resolve_jvm_ir(&rel, &ir, lang, &lookup, &mut acc)
+        }
+        Language::CSharp => resolve_csharp_ir(&rel, &ir, &lookup, &mut acc),
+        Language::Ruby => resolve_ruby_ir(&rel, &ir, &lookup, &mut acc),
+        Language::Swift => resolve_swift_ir(&rel, &ir, &lookup, &mut acc),
     }
 
     acc.into_sorted_vec()
@@ -524,8 +749,7 @@ pub(crate) fn find_matching_references(
     }
 
     let target_stem = file_stem(&target);
-    let sanitized_caller = sanitize_whole_source(&caller, caller_source);
-    let caller_idents = collect_identifiers(&sanitized_caller);
+    let caller_idents = crate::graph_ast::extract_code_identifiers(&caller, caller_source);
 
     let same_folder = folder_of(&caller) == folder_of(&target);
     let stem_referenced =
@@ -694,8 +918,7 @@ pub(crate) fn find_matching_member_references(
     }
 
     let target_stem = file_stem(&target);
-    let sanitized_caller = sanitize_whole_source(&caller, caller_source);
-    let caller_idents = collect_identifiers(&sanitized_caller);
+    let caller_idents = crate::graph_ast::extract_code_identifiers(&caller, caller_source);
     let same_folder = folder_of(&caller) == folder_of(&target);
     let stem_referenced =
         !target_stem.is_empty() && target_stem.len() >= 2 && caller_idents.contains(target_stem);
@@ -770,13 +993,16 @@ pub(crate) fn find_matching_member_references(
     }
 
     if has_target_link {
-        let caller_lines: Vec<&str> = sanitized_caller.lines().collect();
+        let stripped_caller = strip_comments_for_lines(&caller, caller_source);
+        let caller_lines: Vec<&str> = stripped_caller.lines().collect();
         for (idx, tm) in target_members.iter().enumerate() {
             if matched_tm_indices.contains(&idx) {
                 continue;
             }
             let bare = norm_member_name(&tm.name);
-            if bare.len() < 2 {
+            if bare.len() < 2
+                || (!caller_idents.contains(bare) && !caller_idents.contains(&tm.name))
+            {
                 continue;
             }
             let owner_ok = match tm.parent.as_deref() {
@@ -1066,7 +1292,8 @@ fn clip_evidence(raw: &str) -> String {
     compact[..end].to_owned()
 }
 
-struct KnownLookup {
+struct KnownLookup<'a> {
+    known_files: &'a BTreeSet<String>,
     by_cleaned: BTreeMap<String, String>,
     by_lower: BTreeMap<String, Vec<String>>,
     by_stem_lower: BTreeMap<String, Vec<String>>,
@@ -1074,8 +1301,8 @@ struct KnownLookup {
     all_entries: Vec<(String, String, String)>,
 }
 
-impl KnownLookup {
-    fn new(known_files: &BTreeSet<String>) -> Self {
+impl<'a> KnownLookup<'a> {
+    fn new(known_files: &'a BTreeSet<String>) -> Self {
         let mut by_cleaned = BTreeMap::new();
         let mut by_lower: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut by_stem_lower: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1112,6 +1339,7 @@ impl KnownLookup {
         }
 
         Self {
+            known_files,
             by_cleaned,
             by_lower,
             by_stem_lower,
@@ -1357,30 +1585,6 @@ fn resolve_relative_segments(base_dir: &str, spec: &str) -> Option<String> {
 // Shared Member Classification Helpers
 // =========================================================================
 
-fn is_upper_snake(name: &str) -> bool {
-    let bare = norm_member_name(name);
-    bare.len() >= 2
-        && bare.chars().any(|c| c.is_ascii_uppercase())
-        && bare
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-}
-
-fn is_write_operator(rest: &str) -> bool {
-    let r = rest.trim_start();
-    if r.starts_with("=>") || r.starts_with("==") || r.starts_with("===") {
-        return false;
-    }
-    if r.starts_with('=') {
-        return true;
-    }
-    [
-        "+=", "-=", "*=", "/=", "%=", ".=", "&=", "|=", "^=", "??=", "<<=", ">>=",
-    ]
-    .iter()
-    .any(|op| r.starts_with(op))
-}
-
 /// The kind of dependency a member access is drawn as: writing state,
 /// reading it, or calling. Anything else stays a plain use.
 pub(crate) fn access_kind(access: &str) -> Option<&'static str> {
@@ -1392,97 +1596,203 @@ pub(crate) fn access_kind(access: &str) -> Option<&'static str> {
     }
 }
 
-/// What one member access is: the kind of the dependency it makes (`calls`,
-/// `writes`, `reads`), what the member is, and how it is reached. An
-/// assignment writes; every other access of a field, a static property or a
-/// constant reads.
-fn classify_member_access(
-    member: &str,
-    after_member: &str,
-    is_static: bool,
-    is_call: bool,
-    field_kind: &'static str,
-    module_level: bool,
-) -> (&'static str, &'static str, &'static str) {
-    if is_call {
-        let mk = if module_level { "function" } else { "method" };
-        return ("calls", mk, "call");
-    }
-    let (member_kind, access) = if is_static {
-        if is_upper_snake(member) && !member.starts_with('$') {
-            ("const", "const")
-        } else if is_write_operator(after_member) {
-            (field_kind, "write")
-        } else if member.starts_with('$') || field_kind == "field" || field_kind == "property" {
-            (field_kind, "static_read")
-        } else {
-            ("const", "const")
-        }
-    } else if is_upper_snake(member) && module_level {
-        ("const", "const")
-    } else if is_write_operator(after_member) {
-        (field_kind, "write")
+// =========================================================================
+// Shared Re-export & Line Comment Stripping Helpers
+// =========================================================================
+
+fn resolve_reexport_step(
+    cur_file: &str,
+    entry: &ReexportEntry,
+    cur_sym: &str,
+    lookup: &KnownLookup,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Option<(String, String)> {
+    let next_sym = if entry.is_wildcard {
+        cur_sym.to_owned()
     } else {
-        (field_kind, "read")
+        entry.original_symbol.clone()
     };
-    (access_kind(access).unwrap_or("uses"), member_kind, access)
-}
-
-fn take_ts_js_member_ident(s: &str) -> Option<(&str, &str)> {
-    if let Some(after_hash) = s.strip_prefix('#') {
-        let (ident, rest) = take_ident(after_hash)?;
-        let total = 1 + ident.len();
-        return Some((&s[..total], rest));
-    }
-    take_ident(s)
-}
-
-fn contains_word_ascii(haystack: &str, word: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let len = bytes.len();
-    for i in 0..len {
-        if starts_word_at(haystack, i, word) {
-            let end = i + word.len();
-            if end == len || !is_ident_char(bytes[end] as char) {
-                return true;
-            }
+    if cur_file.ends_with(".rs") {
+        let crate_src_root = rust_crate_src_root(cur_file);
+        let segs: Vec<&str> = entry
+            .source_module_path
+            .split("::")
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "*")
+            .collect();
+        if let Some((target, _)) = resolve_rust_path_segments_with_crates(
+            cur_file,
+            &crate_src_root,
+            &segs,
+            lookup,
+            crate_map_opt,
+        ) {
+            return Some((target, next_sym));
         }
+        // Fallback for `pub use submodule::Thing;` relative to current file.
+        if let Some(first) = segs.first()
+            && !matches!(*first, "crate" | "super" | "self")
+            && let Some(target) = resolve_rust_child_mod(cur_file, first, lookup)
+        {
+            return Some((target, next_sym));
+        }
+        return None;
     }
-    false
+    // TS/JS re-export `export { Foo } from './bar'`
+    let dir = folder_of(cur_file);
+    let target = resolve_ts_js_spec(&dir, &entry.source_module_path, lookup)?;
+    Some((target, next_sym))
 }
 
-fn split_simple_assign(line: &str) -> Option<(&str, &str)> {
-    let bytes = line.as_bytes();
-    let mut paren = 0usize;
-    let mut bracket = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' => paren += 1,
-            b')' => paren = paren.saturating_sub(1),
-            b'[' => bracket += 1,
-            b']' => bracket = bracket.saturating_sub(1),
-            b'=' if paren == 0 && bracket == 0 => {
-                let prev = i.checked_sub(1).and_then(|k| bytes.get(k)).copied();
-                let next = bytes.get(i + 1).copied();
-                if matches!(prev, Some(b'=' | b'!' | b'<' | b'>'))
-                    || matches!(next, Some(b'=' | b'>'))
-                {
-                    continue;
+fn strip_comments_for_lines(rel_path: &str, source: &str) -> String {
+    let Some(lang) = detect_language(rel_path) else {
+        return source.to_owned();
+    };
+    match lang {
+        Language::Python | Language::Ruby => source
+            .lines()
+            .map(|line| {
+                if let Some(idx) = line.find('#') {
+                    &line[..idx]
+                } else {
+                    line
                 }
-                return Some((line[..i].trim(), line[i + 1..].trim()));
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => {
+            let mut out = String::with_capacity(source.len());
+            let mut in_block = false;
+            for line in source.lines() {
+                let bytes = line.as_bytes();
+                let mut i = 0usize;
+                while i < bytes.len() {
+                    if in_block {
+                        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                            in_block = false;
+                            out.push_str("  ");
+                            i += 2;
+                        } else {
+                            out.push(' ');
+                            i += 1;
+                        }
+                    } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        in_block = true;
+                        out.push_str("  ");
+                        i += 2;
+                    } else if (i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/')
+                        || (lang == Language::Php
+                            && bytes[i] == b'#'
+                            && bytes.get(i + 1) != Some(&b'['))
+                    {
+                        break;
+                    } else if bytes[i].is_ascii() {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    } else if let Some(ch) = line[i..].chars().next() {
+                        out.push(ch);
+                        i += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                out.push('\n');
             }
-            _ => {}
+            out
         }
     }
-    None
+}
+
+fn ref_dep_kind_and_member(
+    r: &AstRef,
+    canon: &str,
+    default_field_kind: &str,
+    parent_override: Option<String>,
+    php_dollar_prop: bool,
+) -> (&'static str, Vec<DepMemberRef>) {
+    match r.context.as_str() {
+        "constructor" => {
+            if r.access == "type" {
+                ("uses", Vec::new())
+            } else {
+                ("calls", Vec::new())
+            }
+        }
+        "parameter_type" | "return_type" | "generic_arg" => ("uses", Vec::new()),
+        "call" => {
+            let Some(ref mem) = r.member else {
+                // Direct function or constructor call.
+                let is_type = canon.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+                let members = if !is_type && r.member_kind.as_deref() == Some("function") {
+                    vec![DepMemberRef::basic(canon, "function", None, "call", r.line)]
+                } else {
+                    Vec::new()
+                };
+                return ("calls", members);
+            };
+            let mk = r.member_kind.as_deref().unwrap_or("method");
+            let parent = if mk == "function" {
+                None
+            } else {
+                parent_override
+            };
+            (
+                "calls",
+                vec![DepMemberRef::basic(mem, mk, parent, "call", r.line)],
+            )
+        }
+        "field" => {
+            if r.access == "type" {
+                return ("uses", Vec::new());
+            }
+            let Some(ref mem) = r.member else {
+                return ("uses", Vec::new());
+            };
+            if r.access == "write_init" {
+                return (
+                    "uses",
+                    vec![DepMemberRef::basic(
+                        mem,
+                        default_field_kind,
+                        parent_override,
+                        "write",
+                        r.line,
+                    )],
+                );
+            }
+            let dep_kind = access_kind(&r.access).unwrap_or("reads");
+            let mk = r.member_kind.as_deref().unwrap_or(default_field_kind);
+            let mem_name = if php_dollar_prop && mk == "property" && !mem.starts_with('$') {
+                format!("${mem}")
+            } else {
+                mem.clone()
+            };
+            let parent = if mk == "const" && parent_override.is_none() {
+                None
+            } else {
+                parent_override
+            };
+            (
+                dep_kind,
+                vec![DepMemberRef::basic(mem_name, mk, parent, &r.access, r.line)],
+            )
+        }
+        _ => ("uses", Vec::new()),
+    }
 }
 
 // =========================================================================
-// PHP Dependency Extraction & Resolution
+// 1. PHP AST Resolution
 // =========================================================================
 
-fn extract_php_deps(rel_path: &str, source: &str, lookup: &KnownLookup, acc: &mut DepAccumulator) {
-    const PHP_TYPE_BUILTINS: &[&str] = &[
+fn resolve_php_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
+    acc: &mut DepAccumulator,
+) {
+    const PHP_BUILTINS: &[&str] = &[
         "int",
         "integer",
         "float",
@@ -1522,734 +1832,91 @@ fn extract_php_deps(rel_path: &str, source: &str, lookup: &KnownLookup, acc: &mu
         "datetimeimmutable",
         "datetimeinterface",
     ];
-
-    let mut current_ns: Option<String> = None;
-    let mut aliases: BTreeMap<String, String> = BTreeMap::new();
-    let mut this_props: BTreeMap<String, String> = BTreeMap::new();
-    let mut var_types: BTreeMap<String, String> = BTreeMap::new();
-    let mut in_block_comment = false;
-    let mut depth = 0usize;
-    let mut class_stack: Vec<(bool, usize)> = Vec::new(); // (is_class_like, open_depth)
-    let mut pending_class_like = false;
-    let mut pending_fn = false;
-    let mut in_ctor_sig = false;
-
-    let mut use_buf = String::new();
-    let mut use_start_line = 0u32;
-    let mut class_hdr_buf = String::new();
-    let mut class_hdr_line = 0u32;
-
     let dir = folder_of(rel_path);
+    let current_ns = ir.namespace.as_deref();
+    let mut aliases: BTreeMap<String, String> = BTreeMap::new();
 
-    for (idx, raw_line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as u32;
-        let comments_stripped = strip_comments_keep_strings(raw_line, Language::Php);
-        let sanitized = sanitize_c_like_line(raw_line, &mut in_block_comment, Language::Php);
-        let trimmed = sanitized.trim();
-        let clean_stmt = trimmed
-            .trim_start_matches("<?php")
-            .trim_start_matches("<?")
-            .trim();
-
-        // 1. Handle PHP require / include statements using raw comment-stripped text (strings kept).
-        extract_php_includes(&dir, &comments_stripped, line_no, lookup, acc);
-
-        let inside_class = class_stack
-            .last()
-            .is_some_and(|(is_class, open_d)| *is_class && *open_d == depth);
-        let inside_fn = class_stack.iter().any(|(is_class, _)| !is_class);
-
-        // 2. Continue accumulated `use ...;` statement (both namespace imports and trait uses).
-        if !use_buf.is_empty() {
-            use_buf.push(' ');
-            use_buf.push_str(clean_stmt);
-            if clean_stmt.contains(';') || clean_stmt.contains('{') {
-                let stmt = std::mem::take(&mut use_buf);
-                process_php_use_stmt(
-                    &stmt,
-                    inside_class,
-                    current_ns.as_deref(),
-                    &dir,
-                    &mut aliases,
-                    use_start_line,
-                    lookup,
-                    acc,
-                );
-            }
-        } else if !class_hdr_buf.is_empty() {
-            class_hdr_buf.push(' ');
-            class_hdr_buf.push_str(clean_stmt);
-            if clean_stmt.contains('{') || clean_stmt.contains(';') {
-                let hdr = std::mem::take(&mut class_hdr_buf);
-                extract_php_inheritance(
-                    &hdr,
-                    current_ns.as_deref(),
-                    &dir,
-                    &aliases,
-                    class_hdr_line,
-                    lookup,
-                    acc,
-                );
-            }
-        } else if !inside_fn && let Some((kw, after_kw)) = take_ident(clean_stmt) {
-            match kw {
-                "namespace" => {
-                    let ns_part = after_kw.split([';', '{']).next().unwrap_or("").trim();
-                    if !ns_part.is_empty() && !ns_part.starts_with('\\') {
-                        current_ns = Some(ns_part.trim_matches('\\').to_owned());
-                    }
-                }
-                "use" if !after_kw.trim_start().starts_with('(') => {
-                    if clean_stmt.contains(';') || (inside_class && clean_stmt.contains('{')) {
-                        process_php_use_stmt(
-                            clean_stmt,
-                            inside_class,
-                            current_ns.as_deref(),
-                            &dir,
-                            &mut aliases,
-                            line_no,
-                            lookup,
-                            acc,
-                        );
+    for imp in &ir.imports {
+        match imp.kind.as_str() {
+            "include" => {
+                let norm = imp.path.trim().trim_start_matches('/');
+                let sym = file_stem(norm);
+                let resolved =
+                    if imp.evidence.contains("__DIR__") || imp.evidence.contains("dirname(") {
+                        lookup.resolve_relative(&dir, norm)
                     } else {
-                        use_buf = clean_stmt.to_owned();
-                        use_start_line = line_no;
-                    }
-                }
-                _ => {
-                    let stripped = strip_leading_words(
-                        clean_stmt,
-                        &[
-                            "abstract",
-                            "final",
-                            "readonly",
-                            "public",
-                            "protected",
-                            "private",
-                            "static",
-                        ],
-                    );
-                    if let Some((decl_kw, after_decl)) = take_ident(stripped) {
-                        match decl_kw {
-                            "class" | "interface" | "trait" | "enum"
-                                if !trimmed.starts_with("new ") =>
-                            {
-                                pending_class_like = true;
-                                if clean_stmt.contains('{') || clean_stmt.contains(';') {
-                                    extract_php_inheritance(
-                                        clean_stmt,
-                                        current_ns.as_deref(),
-                                        &dir,
-                                        &aliases,
-                                        line_no,
-                                        lookup,
-                                        acc,
-                                    );
-                                } else {
-                                    class_hdr_buf = after_decl.to_owned();
-                                    class_hdr_line = line_no;
-                                }
-                            }
-                            "function" => {
-                                pending_fn = true;
-                                if after_decl.trim_start().starts_with("__construct") {
-                                    in_ctor_sig = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Extract calls, instantiations, static references, instanceof, catch, typehints, member accesses.
-        if !trimmed.is_empty()
-            && !clean_stmt.starts_with("use ")
-            && !clean_stmt.starts_with("namespace ")
-        {
-            extract_php_line_refs(
-                clean_stmt,
-                inside_class,
-                inside_fn || pending_fn,
-                in_ctor_sig,
-                current_ns.as_deref(),
-                &dir,
-                &aliases,
-                PHP_TYPE_BUILTINS,
-                line_no,
-                lookup,
-                &mut this_props,
-                &mut var_types,
-                acc,
-            );
-        }
-
-        // 4. Update PHP brace scope.
-        for ch in sanitized.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    if pending_class_like {
-                        pending_class_like = false;
-                        class_stack.push((true, depth));
-                    } else if pending_fn {
-                        pending_fn = false;
-                        in_ctor_sig = false;
-                        class_stack.push((false, depth));
-                    }
-                }
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    while class_stack.last().is_some_and(|(_, d)| depth < *d) {
-                        if let Some((is_class, _)) = class_stack.pop() {
-                            if is_class {
-                                if !class_stack.iter().any(|(c, _)| *c) {
-                                    this_props.clear();
-                                }
-                            } else {
-                                var_types.clear();
-                            }
-                        }
-                    }
-                }
-                ';' => {
-                    pending_class_like = false;
-                    if pending_fn {
-                        pending_fn = false;
-                        in_ctor_sig = false;
-                        var_types.clear();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn extract_php_includes(
-    base_dir: &str,
-    comments_stripped: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    acc: &mut DepAccumulator,
-) {
-    for kw in ["require_once", "include_once", "require", "include"] {
-        let Some(pos) = find_keyword(comments_stripped, kw) else {
-            continue;
-        };
-        let rest = &comments_stripped[pos + kw.len()..];
-        let trimmed = rest.trim_start();
-        if !trimmed.starts_with(['\'', '"', '(', '_', 'd']) {
-            continue;
-        }
-        if let Some(quoted) = extract_first_quoted_string(trimmed) {
-            let candidate = quoted.trim();
-            if candidate.is_empty() {
-                continue;
-            }
-            let normalized = candidate.trim_start_matches('/');
-            let resolved = if trimmed.contains("__DIR__") || trimmed.contains("dirname(") {
-                lookup.resolve_relative(base_dir, normalized)
-            } else {
-                lookup
-                    .resolve_relative(base_dir, candidate)
-                    .or_else(|| lookup.resolve_exact_or_ci(normalized))
-                    .or_else(|| lookup.resolve_suffix(normalized, Some(PHP_EXTS)))
-            };
-            let sym = file_stem(normalized);
-            match resolved {
-                Some(target) => {
-                    acc.add_resolved(target, "imports", &[sym], line_no, comments_stripped)
-                }
-                None => {
-                    acc.add_unresolved(candidate, "imports", &[sym], line_no, comments_stripped)
-                }
-            }
-        }
-        break;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_php_use_stmt(
-    stmt: &str,
-    inside_class: bool,
-    current_ns: Option<&str>,
-    dir: &str,
-    aliases: &mut BTreeMap<String, String>,
-    line_no: u32,
-    lookup: &KnownLookup,
-    acc: &mut DepAccumulator,
-) {
-    let body = stmt
-        .trim_start()
-        .strip_prefix("use")
-        .unwrap_or(stmt)
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim();
-    if body.is_empty() || body.starts_with('(') {
-        return;
-    }
-    let body = if inside_class {
-        body.split('{').next().unwrap_or(body).trim()
-    } else {
-        body
-    };
-    let kind = if inside_class { "uses" } else { "imports" };
-
-    for item in split_php_use_clauses(body) {
-        let mut item = item.trim();
-        let mut is_fn_or_const = false;
-        if let Some(rest) = item.strip_prefix("function ") {
-            item = rest.trim();
-            is_fn_or_const = true;
-        } else if let Some(rest) = item.strip_prefix("const ") {
-            item = rest.trim();
-            is_fn_or_const = true;
-        }
-        if item.is_empty() {
-            continue;
-        }
-        let (fqn_raw, alias) = if let Some((lhs, rhs)) = split_as_alias(item) {
-            (lhs.trim(), Some(rhs.trim()))
-        } else {
-            (item, None)
-        };
-        let fqn = fqn_raw.trim_start_matches('\\').trim();
-        if fqn.is_empty() {
-            continue;
-        }
-        let short_name = fqn.rsplit('\\').next().unwrap_or(fqn);
-        let local_name = alias.unwrap_or(short_name);
-        aliases.insert(local_name.to_owned(), fqn.to_owned());
-
-        let resolved = resolve_php_fqn(fqn, current_ns, dir, lookup).or_else(|| {
-            if is_fn_or_const && let Some((parent_ns, _)) = fqn.rsplit_once('\\') {
-                resolve_php_fqn(parent_ns, current_ns, dir, lookup)
-            } else {
-                None
-            }
-        });
-        match resolved {
-            Some(target) => acc.add_resolved(target, kind, &[short_name], line_no, stmt),
-            None => acc.add_unresolved(fqn, kind, &[short_name], line_no, stmt),
-        }
-    }
-}
-
-fn split_php_use_clauses(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    // Handle grouped `Prefix\{A, B as C}` as well as comma-separated `A, B`.
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut top_items = Vec::new();
-    for (idx, ch) in body.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                top_items.push(body[start..idx].trim());
-                start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-    top_items.push(body[start..].trim());
-
-    for item in top_items {
-        if let Some((prefix_raw, brace_rest)) = item.split_once('{') {
-            let inner = brace_rest.rsplit_once('}').map_or(brace_rest, |(i, _)| i);
-            let prefix = prefix_raw.trim().trim_end_matches('\\');
-            for sub in inner.split(',') {
-                let mut sub = sub.trim();
-                let mut qualifier = "";
-                if let Some(rest) = sub.strip_prefix("function ") {
-                    qualifier = "function ";
-                    sub = rest.trim();
-                } else if let Some(rest) = sub.strip_prefix("const ") {
-                    qualifier = "const ";
-                    sub = rest.trim();
-                }
-                if !sub.is_empty() {
-                    out.push(format!("{qualifier}{prefix}\\{sub}"));
-                }
-            }
-        } else if !item.is_empty() {
-            out.push(item.to_owned());
-        }
-    }
-    out
-}
-
-fn split_as_alias(clause: &str) -> Option<(&str, &str)> {
-    let lower = clause.to_ascii_lowercase();
-    let idx = lower.rfind(" as ")?;
-    Some((&clause[..idx], &clause[idx + 4..]))
-}
-
-fn extract_php_inheritance(
-    hdr: &str,
-    current_ns: Option<&str>,
-    dir: &str,
-    aliases: &BTreeMap<String, String>,
-    line_no: u32,
-    lookup: &KnownLookup,
-    acc: &mut DepAccumulator,
-) {
-    let before_brace = hdr.split(['{', ';']).next().unwrap_or(hdr);
-    for (kw, kind) in [("extends", "extends"), ("implements", "implements")] {
-        let Some(pos) = find_keyword(before_brace, kw) else {
-            continue;
-        };
-        let after = &before_brace[pos + kw.len()..];
-        let stop = if kw == "extends" {
-            find_keyword(after, "implements").unwrap_or(after.len())
-        } else {
-            after.len()
-        };
-        for item in after[..stop].split(',') {
-            let raw_name = item.trim();
-            if raw_name.is_empty() {
-                continue;
-            }
-            let short = raw_name.rsplit('\\').next().unwrap_or(raw_name);
-            let fqn = resolve_php_alias(raw_name, aliases, current_ns);
-            match resolve_php_fqn(&fqn, current_ns, dir, lookup) {
-                Some(target) => acc.add_resolved(target, kind, &[short], line_no, hdr),
-                None => acc.add_unresolved(&fqn, kind, &[short], line_no, hdr),
-            }
-        }
-    }
-}
-
-fn take_php_arrow_ident(s: &str) -> Option<(&str, &str)> {
-    let trimmed = s.trim_start();
-    let after_op = trimmed
-        .strip_prefix("?->")
-        .or_else(|| trimmed.strip_prefix("->"))?;
-    take_ident(after_op.trim_start())
-}
-
-fn is_php_type_candidate(ty: &str, aliases: &BTreeMap<String, String>, builtins: &[&str]) -> bool {
-    let short = ty.rsplit('\\').next().unwrap_or(ty);
-    if builtins.contains(&short.to_ascii_lowercase().as_str()) {
-        return false;
-    }
-    aliases.contains_key(short)
-        || ty.contains('\\')
-        || short.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-}
-
-fn extract_php_typehint_before(
-    prefix: &str,
-    aliases: &BTreeMap<String, String>,
-    builtins: &[&str],
-) -> Option<String> {
-    let ty = take_trailing_php_name(prefix)?;
-    if is_php_type_candidate(ty, aliases, builtins) {
-        return Some(ty.to_owned());
-    }
-    if ty.eq_ignore_ascii_case("null")
-        && let Some(pos) = prefix.trim_end().rfind(ty)
-        && let Some(before_pipe) = prefix[..pos].trim_end().strip_suffix('|')
-        && let Some(alt) = take_trailing_php_name(before_pipe)
-        && is_php_type_candidate(alt, aliases, builtins)
-    {
-        return Some(alt.to_owned());
-    }
-    None
-}
-
-fn extract_php_rhs_type(
-    rhs: &str,
-    this_props: &BTreeMap<String, String>,
-    var_types: &BTreeMap<String, String>,
-) -> Option<String> {
-    let cleaned = rhs.trim().trim_end_matches(';').trim();
-    if let Some(after_new) = cleaned.strip_prefix("new")
-        && after_new.starts_with(char::is_whitespace)
-        && let Some((cls, _)) = take_php_qualified_name(after_new.trim_start())
-    {
-        return Some(cls.to_owned());
-    }
-    if let Some(after_dollar) = cleaned.strip_prefix('$')
-        && let Some((ident, rest)) = take_ident(after_dollar)
-    {
-        if ident == "this"
-            && let Some((prop, after_prop)) = take_php_arrow_ident(rest)
-            && after_prop.trim().is_empty()
-        {
-            return this_props.get(prop).cloned();
-        }
-        if rest.trim().is_empty() {
-            return var_types.get(ident).cloned();
-        }
-    }
-    None
-}
-
-#[allow(clippy::too_many_arguments)]
-fn extract_php_line_refs(
-    line: &str,
-    inside_class: bool,
-    in_fn_or_sig: bool,
-    in_ctor_sig: bool,
-    current_ns: Option<&str>,
-    dir: &str,
-    aliases: &BTreeMap<String, String>,
-    builtins: &[&str],
-    line_no: u32,
-    lookup: &KnownLookup,
-    this_props: &mut BTreeMap<String, String>,
-    var_types: &mut BTreeMap<String, String>,
-    acc: &mut DepAccumulator,
-) {
-    if let Some((lhs, rhs)) = split_simple_assign(line)
-        && let Some(ty) = extract_php_rhs_type(rhs, this_props, var_types)
-    {
-        let clean_lhs = lhs.trim();
-        if let Some(after_dollar) = clean_lhs.strip_prefix('$')
-            && let Some((ident, rest)) = take_ident(after_dollar)
-        {
-            if ident == "this"
-                && let Some((prop, after_prop)) = take_php_arrow_ident(rest)
-                && after_prop.trim().is_empty()
-            {
-                this_props.insert(prop.to_owned(), ty);
-            } else if rest.trim().is_empty() {
-                var_types.insert(ident.to_owned(), ty);
-            }
-        }
-    }
-
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-
-    while i < len {
-        // 1. `new ClassName`
-        if starts_word_at(line, i, "new")
-            && line[i + 3..].starts_with(char::is_whitespace)
-            && let Some((cls, _)) = take_php_qualified_name(line[i + 3..].trim_start())
-        {
-            emit_php_ref(
-                cls, "calls", None, None, current_ns, dir, aliases, builtins, line_no, line,
-                lookup, acc,
-            );
-        }
-        // 2. `instanceof ClassName`
-        if starts_word_at(line, i, "instanceof")
-            && line[i + 10..].starts_with(char::is_whitespace)
-            && let Some((cls, _)) = take_php_qualified_name(line[i + 10..].trim_start())
-        {
-            emit_php_ref(
-                cls, "uses", None, None, current_ns, dir, aliases, builtins, line_no, line, lookup,
-                acc,
-            );
-        }
-        // 3. `ClassName::member` (static method, class constant, or `ClassName::$prop`)
-        if i + 1 < len
-            && bytes[i] == b':'
-            && bytes[i + 1] == b':'
-            && let Some(cls) = take_trailing_php_name(line[..i].trim_end())
-        {
-            let after_colons = line[i + 2..].trim_start();
-            if let Some(after_dollar) = after_colons.strip_prefix('$') {
-                if let Some((ident, rest)) = take_ident(after_dollar) {
-                    let prop_name = format!("${ident}");
-                    let access = if is_write_operator(rest) {
-                        "write"
-                    } else {
-                        "static_read"
+                        lookup
+                            .resolve_relative(&dir, &imp.path)
+                            .or_else(|| lookup.resolve_exact_or_ci(norm))
+                            .or_else(|| lookup.resolve_suffix(norm, Some(PHP_EXTS)))
                     };
-                    emit_php_ref(
-                        cls,
-                        access_kind(access).unwrap_or("uses"),
-                        Some(&prop_name),
-                        Some(("property", access)),
-                        current_ns,
-                        dir,
-                        aliases,
-                        builtins,
-                        line_no,
-                        line,
-                        lookup,
-                        acc,
-                    );
-                }
-            } else if let Some((m, rest)) = take_ident(after_colons) {
-                if m == "class" {
-                    emit_php_ref(
-                        cls, "uses", None, None, current_ns, dir, aliases, builtins, line_no, line,
-                        lookup, acc,
-                    );
-                } else {
-                    let is_call = rest.trim_start().starts_with('(');
-                    let (dep_kind, mem_kind, access) =
-                        classify_member_access(m, rest, true, is_call, "property", false);
-                    emit_php_ref(
-                        cls,
-                        dep_kind,
-                        Some(m),
-                        Some((mem_kind, access)),
-                        current_ns,
-                        dir,
-                        aliases,
-                        builtins,
-                        line_no,
-                        line,
-                        lookup,
-                        acc,
-                    );
+                match resolved {
+                    Some(t) => acc.add_resolved(t, "imports", &[sym], imp.line, &imp.evidence),
+                    None => {
+                        acc.add_unresolved(&imp.path, "imports", &[sym], imp.line, &imp.evidence)
+                    }
                 }
             }
-        }
-        // 4. Typed vars/properties (`Signer $s`) and instance member accesses (`$this->p->m()`, `$svc->ttl`).
-        if bytes[i] == b'$' {
-            let preceded_by_colons = line[..i].trim_end().ends_with("::");
-            if !preceded_by_colons && let Some((var_name, after_var)) = take_ident(&line[i + 1..]) {
-                if var_name != "this"
-                    && i > 0
-                    && let Some(ty) = extract_php_typehint_before(&line[..i], aliases, builtins)
+            "trait_use" => {
+                let short = imp.symbols.first().map(String::as_str).unwrap_or(&imp.path);
+                let fqn = resolve_php_alias(&imp.path, &aliases, current_ns);
+                match resolve_php_fqn_with_manifests(&fqn, current_ns, &dir, lookup, manifests_opt)
                 {
-                    emit_php_ref(
-                        &ty, "uses", None, None, current_ns, dir, aliases, builtins, line_no, line,
-                        lookup, acc,
-                    );
-                    let decl_chunk = line[..i]
-                        .rsplit(['(', ',', '{', ';'])
-                        .next()
-                        .unwrap_or(&line[..i]);
-                    let promoted = in_ctor_sig
-                        && (contains_word_ascii(decl_chunk, "public")
-                            || contains_word_ascii(decl_chunk, "protected")
-                            || contains_word_ascii(decl_chunk, "private")
-                            || contains_word_ascii(decl_chunk, "readonly"));
-                    if (inside_class && !in_fn_or_sig) || promoted {
-                        this_props.insert(var_name.to_owned(), ty.clone());
-                    }
-                    if in_fn_or_sig || in_ctor_sig || line[..i].contains('(') {
-                        var_types.insert(var_name.to_owned(), ty);
-                    }
-                } else if !preceded_by_colons
-                    && let Some((mem, after_mem)) = take_php_arrow_ident(after_var)
-                {
-                    if var_name == "this" {
-                        if let Some((mem2, after_mem2)) = take_php_arrow_ident(after_mem)
-                            && let Some(owner_ty) = this_props.get(mem).cloned()
-                        {
-                            let is_call = after_mem2.trim_start().starts_with('(');
-                            let (dep_kind, mem_kind, access) = classify_member_access(
-                                mem2, after_mem2, false, is_call, "property", false,
-                            );
-                            let mem_name = if mem_kind == "property" {
-                                format!("${mem2}")
-                            } else {
-                                mem2.to_owned()
-                            };
-                            emit_php_ref(
-                                &owner_ty,
-                                dep_kind,
-                                Some(&mem_name),
-                                Some((mem_kind, access)),
-                                current_ns,
-                                dir,
-                                aliases,
-                                builtins,
-                                line_no,
-                                line,
-                                lookup,
-                                acc,
-                            );
-                        }
-                    } else if let Some(owner_ty) = var_types.get(var_name).cloned() {
-                        let is_call = after_mem.trim_start().starts_with('(');
-                        let (dep_kind, mem_kind, access) = classify_member_access(
-                            mem, after_mem, false, is_call, "property", false,
-                        );
-                        let mem_name = if mem_kind == "property" {
-                            format!("${mem}")
-                        } else {
-                            mem.to_owned()
-                        };
-                        emit_php_ref(
-                            &owner_ty,
-                            dep_kind,
-                            Some(&mem_name),
-                            Some((mem_kind, access)),
-                            current_ns,
-                            dir,
-                            aliases,
-                            builtins,
-                            line_no,
-                            line,
-                            lookup,
-                            acc,
-                        );
-                    }
+                    Some(t) => acc.add_resolved(t, "uses", &[short], imp.line, &imp.evidence),
+                    None => acc.add_unresolved(&fqn, "uses", &[short], imp.line, &imp.evidence),
+                }
+            }
+            _ => {
+                let fqn = imp.path.trim_start_matches('\\');
+                let short = imp
+                    .symbols
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| fqn.rsplit('\\').next().unwrap_or(fqn).to_owned());
+                let local = imp.alias.clone().unwrap_or_else(|| short.clone());
+                aliases.insert(local, fqn.to_owned());
+                match resolve_php_fqn_with_manifests(fqn, current_ns, &dir, lookup, manifests_opt) {
+                    Some(t) => acc.add_resolved(t, "imports", &[&short], imp.line, &imp.evidence),
+                    None => acc.add_unresolved(fqn, "imports", &[&short], imp.line, &imp.evidence),
                 }
             }
         }
-        i += 1;
     }
-}
 
-fn resolve_php_target(
-    raw_name: &str,
-    current_ns: Option<&str>,
-    dir: &str,
-    aliases: &BTreeMap<String, String>,
-    builtins: &[&str],
-    lookup: &KnownLookup,
-) -> Option<(String, String)> {
-    let short = raw_name.rsplit('\\').next().unwrap_or(raw_name);
-    if builtins.contains(&short.to_ascii_lowercase().as_str()) {
-        return None;
-    }
-    let fqn = resolve_php_alias(raw_name, aliases, current_ns);
-    let canon = fqn.rsplit('\\').next().unwrap_or(short).to_owned();
-    let target = resolve_php_fqn(&fqn, current_ns, dir, lookup)?;
-    Some((target, canon))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_php_ref(
-    raw_name: &str,
-    kind: &str,
-    member: Option<&str>,
-    member_meta: Option<(&str, &str)>,
-    current_ns: Option<&str>,
-    dir: &str,
-    aliases: &BTreeMap<String, String>,
-    builtins: &[&str],
-    line_no: u32,
-    line: &str,
-    lookup: &KnownLookup,
-    acc: &mut DepAccumulator,
-) {
-    if let Some((target, canon)) =
-        resolve_php_target(raw_name, current_ns, dir, aliases, builtins, lookup)
-    {
-        match member {
-            Some(m) => {
-                let members = member_meta
-                    .map(|(mk, acc_mode)| {
-                        vec![DepMemberRef::basic(
-                            m,
-                            mk,
-                            Some(canon.clone()),
-                            acc_mode,
-                            line_no,
-                        )]
-                    })
-                    .unwrap_or_default();
-                acc.add_resolved_members(target, kind, &[&canon, m], &members, line_no, line);
-            }
-            None => acc.add_resolved(target, kind, &[&canon], line_no, line),
+    for inh in &ir.inheritance {
+        if inh.kind == "uses" {
+            continue;
         }
+        let short = inh.parent.rsplit('\\').next().unwrap_or(&inh.parent);
+        let fqn = resolve_php_alias(&inh.parent, &aliases, current_ns);
+        match resolve_php_fqn_with_manifests(&fqn, current_ns, &dir, lookup, manifests_opt) {
+            Some(t) => acc.add_resolved(t, &inh.kind, &[short], inh.line, &inh.evidence),
+            None => acc.add_unresolved(&fqn, &inh.kind, &[short], inh.line, &inh.evidence),
+        }
+    }
+
+    for r in &ir.calls_and_refs {
+        let short = r.target_name.rsplit('\\').next().unwrap_or(&r.target_name);
+        if PHP_BUILTINS.contains(&short.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        let fqn = resolve_php_alias(&r.target_name, &aliases, current_ns);
+        let canon = fqn.rsplit('\\').next().unwrap_or(short).to_owned();
+        let Some(target) =
+            resolve_php_fqn_with_manifests(&fqn, current_ns, &dir, lookup, manifests_opt)
+        else {
+            continue;
+        };
+        let parent_opt = r.owner_type.clone().or_else(|| Some(canon.clone()));
+        let (dep_kind, members) = ref_dep_kind_and_member(r, &canon, "property", parent_opt, true);
+        let mut syms = vec![canon.as_str()];
+        for m in &members {
+            let clean = norm_member_name(&m.name);
+            if !clean.is_empty() {
+                syms.push(clean);
+            }
+        }
+        acc.add_resolved_members(target, dep_kind, &syms, &members, r.line, &r.evidence);
     }
 }
 
@@ -2276,6 +1943,21 @@ fn resolve_php_alias(
     }
 }
 
+fn resolve_php_fqn_with_manifests(
+    fqn: &str,
+    current_ns: Option<&str>,
+    dir: &str,
+    lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
+) -> Option<String> {
+    if let Some(manifests) = manifests_opt
+        && let Some(found) = manifests.resolve_php_fqn(fqn, lookup.known_files)
+    {
+        return Some(found);
+    }
+    resolve_php_fqn(fqn, current_ns, dir, lookup)
+}
+
 fn resolve_php_fqn(
     fqn: &str,
     current_ns: Option<&str>,
@@ -2288,13 +1970,10 @@ fn resolve_php_fqn(
     }
     let slash_path = cleaned.replace('\\', "/");
     let segs: Vec<&str> = slash_path.split('/').filter(|s| !s.is_empty()).collect();
-
     for ext in PHP_EXTS {
-        let full = format!("{slash_path}.{ext}");
-        if let Some(found) = lookup.resolve_exact_or_ci(&full) {
+        if let Some(found) = lookup.resolve_exact_or_ci(&format!("{slash_path}.{ext}")) {
             return Some(found);
         }
-        // Try PSR-4 suffixes (e.g. `App\Security\Signer` -> `src/Security/Signer.php`).
         for start in 1..segs.len() {
             let suffix = format!("{}.{ext}", segs[start..].join("/"));
             if let Some(found) = lookup.resolve_suffix(&suffix, Some(PHP_EXTS)) {
@@ -2302,9 +1981,7 @@ fn resolve_php_fqn(
             }
         }
     }
-
     let short = segs.last().copied().unwrap_or(cleaned);
-    // Same-directory match (especially for same-namespace PHP classes without `use`).
     if !dir.is_empty()
         && let Some(found) = lookup.resolve_stem_in_dir(dir, short, PHP_EXTS)
     {
@@ -2319,207 +1996,18 @@ fn resolve_php_fqn(
     None
 }
 
-fn take_php_qualified_name(s: &str) -> Option<(&str, &str)> {
-    let mut end = 0usize;
-    for (idx, ch) in s.char_indices() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '\\' {
-            end = idx + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    let candidate = &s[..end];
-    if candidate.is_empty() || candidate == "\\" {
-        None
-    } else {
-        Some((candidate, &s[end..]))
-    }
-}
-
-fn take_trailing_php_name(s: &str) -> Option<&str> {
-    let trimmed = s.trim_end();
-    let bytes = trimmed.as_bytes();
-    let mut start = bytes.len();
-    while start > 0 {
-        let b = bytes[start - 1];
-        if b.is_ascii_alphanumeric() || b == b'_' || b == b'\\' {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    let cand = &trimmed[start..];
-    if cand.is_empty() || cand.starts_with(|c: char| c.is_ascii_digit()) {
-        None
-    } else {
-        Some(cand)
-    }
-}
-
 // =========================================================================
-// Rust Dependency Extraction & Resolution
+// 2. Rust AST Resolution (with CratePackageMap & `pub use` propagation)
 // =========================================================================
 
-enum RustBlockScope {
-    Struct(String),
-    Impl(String),
-    Fn,
-    Other,
-}
-
-fn unwrap_rust_wrapper_type(raw: &str) -> String {
-    let mut ty = raw.trim().trim_end_matches([',', ';', ')']).trim();
-    loop {
-        let before = ty;
-        while let Some(rest) = ty.strip_prefix('&') {
-            ty = rest.trim_start();
-            if ty.starts_with('\'')
-                && let Some((_, after)) = ty.split_once(char::is_whitespace)
-            {
-                ty = after.trim_start();
-            }
-            if let Some(after) = ty.strip_prefix("mut")
-                && after.starts_with(char::is_whitespace)
-            {
-                ty = after.trim_start();
-            }
-        }
-        for wrapper in [
-            "Arc",
-            "Rc",
-            "Box",
-            "Option",
-            "Mutex",
-            "RwLock",
-            "RefCell",
-            "Cell",
-            "Pin",
-            "std::sync::Arc",
-            "alloc::rc::Rc",
-            "std::boxed::Box",
-            "core::option::Option",
-        ] {
-            if let Some(after_w) = ty.strip_prefix(wrapper)
-                && let Some(inner_start) = after_w.trim_start().strip_prefix('<')
-                && let Some(last_gt) = inner_start.rfind('>')
-            {
-                ty = inner_start[..last_gt].trim();
-                break;
-            }
-        }
-        if ty == before {
-            break;
-        }
-    }
-    ty.split('<').next().unwrap_or(ty).trim().to_owned()
-}
-
-fn parse_rust_impl_target(after_impl: &str) -> Option<String> {
-    let hdr = after_impl.split('{').next().unwrap_or(after_impl);
-    let no_where = hdr.split(" where ").next().unwrap_or(hdr).trim();
-    let ty_part = if let Some((_, rhs)) = no_where.split_once(" for ") {
-        rhs.trim()
-    } else {
-        no_where
-    };
-    let clean = strip_generics_and_refs(ty_part);
-    let short = clean.rsplit("::").next().unwrap_or(clean).trim();
-    if short.is_empty() {
-        None
-    } else {
-        Some(short.to_owned())
-    }
-}
-
-fn collect_rust_param_bindings(line: &str, var_types: &mut BTreeMap<String, String>) {
-    // Extract typed parameters `(a: TypeA, b: &mut Option<TypeB>)` or field-like `var: Type`
-    let slice = if let Some((_, after_paren)) = line.split_once('(') {
-        after_paren
-    } else {
-        line
-    };
-    for part in slice.split(',') {
-        let p = part.trim();
-        let Some((lhs, rhs)) = p.split_once(':') else {
-            continue;
-        };
-        if rhs.starts_with(':') {
-            continue;
-        }
-        let param_name = lhs.trim().trim_start_matches("mut ").trim();
-        if !param_name.is_empty()
-            && param_name != "self"
-            && let Some((ident, rest)) = take_ident(param_name)
-            && rest.trim().is_empty()
-        {
-            let ty = unwrap_rust_wrapper_type(rhs.split(['=', '{']).next().unwrap_or(rhs));
-            if !ty.is_empty() {
-                var_types.insert(ident.to_owned(), ty);
-            }
-        }
-    }
-}
-
-fn collect_rust_let_binding(
-    trimmed: &str,
-    struct_fields_for_self: Option<&BTreeMap<String, String>>,
-    var_types: &mut BTreeMap<String, String>,
+fn resolve_rust_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    lookup: &KnownLookup,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+    acc: &mut DepAccumulator,
 ) {
-    let Some(after_let) = trimmed.strip_prefix("let ") else {
-        return;
-    };
-    let after_mut = after_let
-        .trim_start()
-        .strip_prefix("mut ")
-        .unwrap_or(after_let)
-        .trim_start();
-    let Some((var_name, after_var)) = take_ident(after_mut) else {
-        return;
-    };
-    let rest = after_var.trim_start();
-    if let Some(after_colon) = rest.strip_prefix(':') {
-        let ty_raw = after_colon.split(['=', ';']).next().unwrap_or("");
-        let ty = unwrap_rust_wrapper_type(ty_raw);
-        if !ty.is_empty() {
-            var_types.insert(var_name.to_owned(), ty);
-            return;
-        }
-    }
-    if let Some(after_eq) = rest.split_once('=').map(|(_, r)| r.trim()) {
-        let rhs = after_eq.trim_end_matches(';').trim();
-        if let Some(after_self) = rhs.strip_prefix("self.")
-            && let Some((field, after_f)) = take_ident(after_self)
-            && after_f.trim().is_empty()
-            && let Some(ty) = struct_fields_for_self.and_then(|m| m.get(field))
-        {
-            var_types.insert(var_name.to_owned(), ty.clone());
-            return;
-        }
-        // `Foo::new(...)`, `Foo::default()`, `Foo { ... }`
-        let mut prefix_end = 0usize;
-        let bytes = rhs.as_bytes();
-        while prefix_end < bytes.len()
-            && (is_ident_char(bytes[prefix_end] as char) || bytes[prefix_end] == b':')
-        {
-            prefix_end += 1;
-        }
-        let head = rhs[..prefix_end].trim();
-        let after_head = rhs[prefix_end..].trim_start();
-        if after_head.starts_with('{') && !head.is_empty() {
-            var_types.insert(var_name.to_owned(), head.to_owned());
-        } else if let Some((type_part, ctor)) = head.rsplit_once("::")
-            && matches!(
-                ctor,
-                "new" | "default" | "create" | "open" | "connect" | "build" | "from"
-            )
-            && !type_part.is_empty()
-        {
-            var_types.insert(var_name.to_owned(), type_part.to_owned());
-        }
-    }
-}
-
-fn extract_rust_deps(rel_path: &str, source: &str, lookup: &KnownLookup, acc: &mut DepAccumulator) {
     const RUST_BUILTINS: &[&str] = &[
         "std", "core", "alloc", "self", "super", "crate", "Vec", "String", "Option", "Result",
         "Box", "Arc", "Rc", "Mutex", "RwLock", "RefCell", "Cell", "Path", "PathBuf", "BTreeMap",
@@ -2529,314 +2017,231 @@ fn extract_rust_deps(rel_path: &str, source: &str, lookup: &KnownLookup, acc: &m
         "cmp", "str", "slice", "u8", "u16", "u32", "u64", "usize", "i32", "i64", "f64", "bool",
         "char",
     ];
-
     let crate_src_root = rust_crate_src_root(rel_path);
+    let dir = folder_of(rel_path);
     let mut aliases: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-    let mut struct_fields: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let mut var_types: BTreeMap<String, String> = BTreeMap::new();
-    let mut in_block_comment = false;
-    let mut pending_mod_path: Option<String> = None;
-    let mut use_buf = String::new();
-    let mut use_line = 0u32;
-    let mut depth = 0usize;
-    let mut scope_stack: Vec<(RustBlockScope, usize)> = Vec::new();
-    let mut pending_scope: Option<RustBlockScope> = None;
-    let mut struct_lit_stack: Vec<(String, String, usize)> = Vec::new(); // (target, struct_name, open_depth)
+    let mut wildcard_facades: Vec<String> = Vec::new();
 
-    for (idx, raw_line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as u32;
-        let comments_stripped = strip_comments_keep_strings(raw_line, Language::Rust);
-        let sanitized = sanitize_c_like_line(raw_line, &mut in_block_comment, Language::Rust);
-        let trimmed = sanitized.trim();
-
-        // Capture `#[path = "..."]` attribute before `mod x;`
-        if trimmed.starts_with('#') {
-            if comments_stripped.contains("path")
-                && comments_stripped.contains('=')
-                && let Some(path_val) = extract_first_quoted_string(&comments_stripped)
-            {
-                pending_mod_path = Some(path_val.to_owned());
-            }
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // 1. Multi-line `use ...;`
-        if !use_buf.is_empty() {
-            use_buf.push(' ');
-            use_buf.push_str(trimmed);
-            if trimmed.contains(';') {
-                let full_stmt = std::mem::take(&mut use_buf);
-                process_rust_use_stmt(
-                    rel_path,
-                    &crate_src_root,
-                    &full_stmt,
-                    use_line,
-                    lookup,
-                    &mut aliases,
-                    acc,
-                );
-            }
-            continue;
-        }
-
-        let inside_struct_name = scope_stack.last().and_then(|(sc, d)| match sc {
-            RustBlockScope::Struct(name) if *d == depth => Some(name.clone()),
-            _ => None,
-        });
-        let current_impl_name = scope_stack.iter().rev().find_map(|(sc, _)| match sc {
-            RustBlockScope::Impl(name) => Some(name.as_str()),
-            _ => None,
-        });
-        let inside_fn = scope_stack
-            .iter()
-            .any(|(sc, _)| matches!(sc, RustBlockScope::Fn));
-
-        let after_vis = strip_rust_visibility(trimmed);
-        let mut is_decl_header = false;
-        if let Some((kw, after_kw)) = take_ident(after_vis) {
-            if kw == "use" {
-                if trimmed.contains(';') {
-                    process_rust_use_stmt(
-                        rel_path,
-                        &crate_src_root,
-                        trimmed,
-                        line_no,
-                        lookup,
-                        &mut aliases,
-                        acc,
-                    );
-                } else {
-                    use_buf = trimmed.to_owned();
-                    use_line = line_no;
-                }
-                pending_mod_path = None;
-                continue;
-            }
-            if kw == "mod" && trimmed.ends_with(';') {
-                if let Some((mod_name, _)) = take_ident(after_kw) {
-                    let resolved = if let Some(attr_path) = pending_mod_path.take() {
-                        lookup.resolve_relative(&folder_of(rel_path), &attr_path)
-                    } else {
-                        resolve_rust_child_mod(rel_path, mod_name, lookup)
-                    };
-                    match resolved {
-                        Some(target) => {
-                            aliases.insert(
-                                mod_name.to_owned(),
-                                (Some(target.clone()), mod_name.to_owned()),
-                            );
-                            acc.add_resolved(target, "imports", &[mod_name], line_no, trimmed);
-                        }
-                        None => {
-                            acc.add_unresolved(mod_name, "imports", &[mod_name], line_no, trimmed)
-                        }
-                    }
-                }
-                continue;
-            }
-            if !inside_fn && matches!(kw, "struct" | "enum" | "trait") {
-                is_decl_header = true;
-                if kw == "struct"
-                    && let Some((sname, _)) = take_ident(after_kw)
-                {
-                    pending_scope = Some(RustBlockScope::Struct(sname.to_owned()));
-                } else {
-                    pending_scope = Some(RustBlockScope::Other);
-                }
-            }
-        }
-        pending_mod_path = None;
-
-        // Track struct field types inside `struct Name { ... }`
-        if let Some(ref sname) = inside_struct_name
-            && !is_decl_header
-            && !trimmed.starts_with('}')
-        {
-            let f_after_vis = strip_rust_visibility(trimmed);
-            if let Some((field, after_f)) = take_ident(f_after_vis)
-                && let Some(after_colon) = after_f.trim_start().strip_prefix(':')
-                && !after_colon.starts_with(':')
-            {
-                let ty = unwrap_rust_wrapper_type(after_colon);
-                if !ty.is_empty() {
-                    struct_fields
-                        .entry(sname.clone())
-                        .or_default()
-                        .insert(field.to_owned(), ty);
-                }
-            }
-        }
-
-        // 2. `impl Trait for Type` / `impl Type`
-        if !inside_fn
-            && let Some(after_impl) = after_vis.strip_prefix("impl")
-            && after_impl.starts_with([' ', '<'])
-        {
-            is_decl_header = true;
-            if let Some(target_ty) = parse_rust_impl_target(after_impl) {
-                pending_scope = Some(RustBlockScope::Impl(target_ty));
+    for imp in &ir.imports {
+        if imp.kind == "mod_decl" {
+            let mod_name = imp.symbols.first().map(String::as_str).unwrap_or(&imp.path);
+            let resolved = if imp.path.contains('/') || imp.path.ends_with(".rs") {
+                lookup.resolve_relative(&dir, &imp.path)
             } else {
-                pending_scope = Some(RustBlockScope::Other);
+                resolve_rust_child_mod(rel_path, mod_name, lookup)
+            };
+            match resolved {
+                Some(t) => {
+                    aliases.insert(mod_name.to_owned(), (Some(t.clone()), mod_name.to_owned()));
+                    acc.add_resolved(t, "imports", &[mod_name], imp.line, &imp.evidence);
+                }
+                None => {
+                    acc.add_unresolved(mod_name, "imports", &[mod_name], imp.line, &imp.evidence)
+                }
             }
-            extract_rust_impl_deps(
-                rel_path,
-                &crate_src_root,
-                after_impl,
-                line_no,
-                trimmed,
-                lookup,
-                &aliases,
-                RUST_BUILTINS,
-                acc,
-            );
+            continue;
         }
 
-        // Detect `fn` signatures (including `async`/`unsafe`/`const`/`extern`)
-        let fn_stripped = strip_leading_words(after_vis, &["async", "unsafe", "const", "default"]);
-        let is_fn_header = fn_stripped
-            .strip_prefix("fn")
-            .is_some_and(|r| r.starts_with(char::is_whitespace) || r.starts_with('<'));
-        if is_fn_header && !inside_fn {
-            pending_scope = Some(RustBlockScope::Fn);
+        let segs: Vec<&str> = imp
+            .path
+            .split("::")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segs.is_empty() {
+            continue;
         }
-        if is_fn_header || matches!(pending_scope, Some(RustBlockScope::Fn)) {
-            collect_rust_param_bindings(trimmed, &mut var_types);
-        }
-
-        // Collect local `let [mut] x [: Type] = ...` bindings
-        let self_fields = current_impl_name.and_then(|n| struct_fields.get(n));
-        if inside_fn {
-            collect_rust_let_binding(trimmed, self_fields, &mut var_types);
-        }
-
-        // Track multi-line struct literal field writes
-        if let Some((ref target, ref sname, open_d)) = struct_lit_stack.last().cloned()
-            && depth == open_d
-            && !trimmed.starts_with('}')
-            && !trimmed.starts_with("..")
-            && let Some((field, after_f)) = take_ident(trimmed)
-            && after_f.trim_start().starts_with(':')
-            && !after_f.trim_start().starts_with("::")
-        {
-            acc.add_resolved_members(
-                target.clone(),
-                "uses",
-                &[sname.as_str(), field],
-                &[DepMemberRef::basic(
-                    field,
-                    "field",
-                    Some(sname.clone()),
-                    "write",
-                    line_no,
-                )],
-                line_no,
-                trimmed,
-            );
-        }
-
-        // 3. Qualified paths, dot member accesses, struct literals, direct calls & consts
-        extract_rust_line_refs(
-            rel_path,
-            &crate_src_root,
-            trimmed,
-            line_no,
-            lookup,
-            &aliases,
-            RUST_BUILTINS,
-            self_fields,
-            &var_types,
-            acc,
-        );
-
-        // Update brace scope + multi-line struct literal tracking
-        let open_lit_target = if !is_decl_header
-            && !is_fn_header
-            && trimmed.ends_with('{')
-            && !trimmed.ends_with("{{")
-        {
-            let before_brace = trimmed.trim_end_matches('{').trim_end();
-            let mut start = before_brace.len();
-            let bytes = before_brace.as_bytes();
-            while start > 0 && (is_ident_char(bytes[start - 1] as char) || bytes[start - 1] == b':')
-            {
-                start -= 1;
-            }
-            let cand = before_brace[start..].trim();
-            if cand
-                .rsplit("::")
-                .next()
-                .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
-                && !RUST_BUILTINS.contains(&cand)
-            {
-                resolve_rust_symbol_ref(
-                    rel_path,
-                    &crate_src_root,
-                    cand,
-                    lookup,
-                    &aliases,
-                    RUST_BUILTINS,
-                )
-            } else {
-                None
-            }
+        let last = segs.last().copied().unwrap_or("");
+        let effective: Vec<&str> = if (last == "self" || last == "*") && segs.len() > 1 {
+            segs[..segs.len() - 1].to_vec()
         } else {
-            None
+            segs.clone()
         };
 
-        for ch in sanitized.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    if let Some(sc) = pending_scope.take() {
-                        scope_stack.push((sc, depth));
-                    } else if let Some((ref t, ref s)) = open_lit_target {
-                        struct_lit_stack.push((t.clone(), s.clone(), depth));
-                    }
+        if let Some((mut target, split_at)) = resolve_rust_path_segments_with_crates(
+            rel_path,
+            &crate_src_root,
+            &effective,
+            lookup,
+            crate_map_opt,
+        ) {
+            let mut orig_sym = if imp.is_wildcard {
+                "*".to_owned()
+            } else if last == "self" {
+                effective.last().copied().unwrap_or("").to_owned()
+            } else {
+                last.to_owned()
+            };
+            if imp.is_wildcard {
+                if !wildcard_facades.contains(&target) {
+                    wildcard_facades.push(target.clone());
                 }
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    while struct_lit_stack.last().is_some_and(|(_, _, d)| depth < *d) {
-                        struct_lit_stack.pop();
-                    }
-                    while scope_stack.last().is_some_and(|(_, d)| depth < *d) {
-                        if let Some((sc, _)) = scope_stack.pop()
-                            && matches!(sc, RustBlockScope::Fn)
-                        {
-                            var_types.clear();
-                        }
-                    }
+            } else if let Some(reexports) = reexports_opt
+                && !orig_sym.is_empty()
+                && let Some((real_target, real_sym)) = reexports.resolve_reexport_target(
+                    &target,
+                    &orig_sym,
+                    lookup.known_files,
+                    crate_map_opt,
+                )
+            {
+                target = real_target;
+                orig_sym = real_sym;
+            }
+
+            let mut syms: Vec<&str> = Vec::new();
+            for s in &effective[split_at..] {
+                if *s != "self" && *s != "*" {
+                    syms.push(*s);
                 }
-                ';' => {
-                    if let Some(sc) = pending_scope.take()
-                        && matches!(sc, RustBlockScope::Fn)
-                    {
-                        var_types.clear();
-                    }
+            }
+            if syms.is_empty() && !orig_sym.is_empty() && orig_sym != "*" {
+                syms.push(&orig_sym);
+            }
+            let local_name = imp.alias.as_deref().unwrap_or_else(|| {
+                if last == "self" {
+                    effective.last().copied().unwrap_or("")
+                } else {
+                    last
                 }
-                _ => {}
+            });
+            if !local_name.is_empty() && local_name != "*" && local_name != "self" {
+                aliases.insert(
+                    local_name.to_owned(),
+                    (Some(target.clone()), orig_sym.clone()),
+                );
+            }
+            acc.add_resolved(target, "imports", &syms, imp.line, &imp.evidence);
+        } else {
+            let unres_target = if effective.len() >= 2 {
+                format!("{}::{}", effective[0], effective[1])
+            } else {
+                effective.join("::")
+            };
+            let syms: Vec<&str> = if !imp.is_wildcard && last != "self" {
+                vec![last]
+            } else {
+                Vec::new()
+            };
+            acc.add_unresolved(&unres_target, "imports", &syms, imp.line, &imp.evidence);
+        }
+    }
+
+    let resolve_rs_sym = |raw: &str| -> Option<(String, String)> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.contains("::") {
+            let segs: Vec<&str> = trimmed
+                .split("::")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if matches!(segs.first().copied(), Some("crate" | "super" | "self"))
+                && let Some((mut target, _)) = resolve_rust_path_segments_with_crates(
+                    rel_path,
+                    &crate_src_root,
+                    &segs,
+                    lookup,
+                    crate_map_opt,
+                )
+            {
+                let mut sym = segs.last().copied().unwrap_or("").to_owned();
+                if let Some(reexports) = reexports_opt
+                    && let Some((rt, rs)) = reexports.resolve_reexport_target(
+                        &target,
+                        &sym,
+                        lookup.known_files,
+                        crate_map_opt,
+                    )
+                {
+                    target = rt;
+                    sym = rs;
+                }
+                return Some((target, sym));
+            }
+            if let Some(head) = segs.first()
+                && let Some((Some(target), _)) = aliases.get(*head)
+            {
+                return Some((
+                    target.clone(),
+                    segs.last().copied().unwrap_or("").to_owned(),
+                ));
+            }
+            return None;
+        }
+        if let Some((Some(target), orig)) = aliases.get(trimmed) {
+            return Some((target.clone(), orig.clone()));
+        }
+        if RUST_BUILTINS.contains(&trimmed) {
+            return None;
+        }
+        if let Some(reexports) = reexports_opt {
+            for facade in &wildcard_facades {
+                if let Some((rt, rs)) = reexports.resolve_reexport_target(
+                    facade,
+                    trimmed,
+                    lookup.known_files,
+                    crate_map_opt,
+                ) {
+                    return Some((rt, rs));
+                }
             }
         }
-    }
-}
+        let target = lookup
+            .resolve_stem_in_dir(&dir, trimmed, RUST_EXTS)
+            .or_else(|| {
+                lookup.resolve_unambiguous_stem(
+                    trimmed,
+                    RUST_EXTS,
+                    (!crate_src_root.is_empty()).then_some(crate_src_root.as_str()),
+                )
+            })?;
+        Some((target, trimmed.to_owned()))
+    };
 
-fn strip_rust_visibility(mut s: &str) -> &str {
-    s = s.trim_start();
-    if let Some(rest) = s.strip_prefix("pub") {
-        let trimmed = rest.trim_start();
-        if let Some(paren_rest) = trimmed.strip_prefix('(')
-            && let Some((_, after_paren)) = paren_rest.split_once(')')
-        {
-            return after_paren.trim_start();
-        }
-        if rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace) {
-            return trimmed;
+    for inh in &ir.inheritance {
+        if let Some((target, sym)) = resolve_rs_sym(&inh.parent) {
+            acc.add_resolved(target, &inh.kind, &[&sym], inh.line, &inh.evidence);
         }
     }
-    s
+
+    for r in &ir.calls_and_refs {
+        if r.context == "call"
+            && let Some(ref mem) = r.member
+            && is_rust_std_trait_method(mem)
+        {
+            continue;
+        }
+        // For qualified paths like `crate::security::signer::Signer::new`, resolve owner part first.
+        let lookup_expr = if r.is_static && r.member.is_some() && r.target_name.contains("::") {
+            r.target_name
+                .rsplit_once("::")
+                .map(|(scope, _)| scope)
+                .unwrap_or(&r.target_name)
+        } else {
+            r.target_name.as_str()
+        };
+        let Some((target, canon)) = resolve_rs_sym(lookup_expr) else {
+            continue;
+        };
+        let parent_opt = r.owner_type.clone().or_else(|| {
+            canon
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+                .then(|| canon.clone())
+        });
+        let (dep_kind, members) = ref_dep_kind_and_member(r, &canon, "field", parent_opt, false);
+        let mut syms = vec![canon.as_str()];
+        for m in &members {
+            if !m.name.is_empty() {
+                syms.push(&m.name);
+            }
+        }
+        acc.add_resolved_members(target, dep_kind, &syms, &members, r.line, &r.evidence);
+    }
 }
 
 fn rust_crate_src_root(rel_path: &str) -> String {
@@ -2865,7 +2270,6 @@ fn resolve_rust_child_mod(rel_path: &str, mod_name: &str, lookup: &KnownLookup) 
     } else {
         format!("{dir}/{stem}")
     };
-
     for base in [&sub_dir, &dir] {
         for cand in [
             join_rel(base, &format!("{mod_name}.rs")),
@@ -2879,167 +2283,12 @@ fn resolve_rust_child_mod(rel_path: &str, mod_name: &str, lookup: &KnownLookup) 
     None
 }
 
-fn process_rust_use_stmt(
-    rel_path: &str,
-    crate_src_root: &str,
-    stmt: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    aliases: &mut BTreeMap<String, (Option<String>, String)>,
-    acc: &mut DepAccumulator,
-) {
-    let after_vis = strip_rust_visibility(stmt);
-    let Some(body) = after_vis.strip_prefix("use") else {
-        return;
-    };
-    let body = body.split(';').next().unwrap_or("").trim();
-    if body.is_empty() {
-        return;
-    }
-
-    let mut expanded = Vec::new();
-    expand_rust_use_tree(body, &[], &mut expanded);
-
-    for (segs, alias_opt) in expanded {
-        if segs.is_empty() {
-            continue;
-        }
-        let last = segs.last().map(String::as_str).unwrap_or("");
-        let effective_segs: Vec<&str> = if (last == "self" || last == "*") && segs.len() > 1 {
-            segs[..segs.len() - 1].iter().map(String::as_str).collect()
-        } else {
-            segs.iter().map(String::as_str).collect()
-        };
-
-        if let Some((target, split_at)) =
-            resolve_rust_path_segments(rel_path, crate_src_root, &effective_segs, lookup)
-        {
-            let mut syms: Vec<&str> = Vec::new();
-            for s in &effective_segs[split_at..] {
-                if *s != "self" && *s != "*" {
-                    syms.push(*s);
-                }
-            }
-            if syms.is_empty() && last != "*" && last != "self" {
-                syms.push(last);
-            }
-            let local_name = alias_opt.as_deref().unwrap_or(last);
-            if !local_name.is_empty() && local_name != "*" && local_name != "self" {
-                let orig_sym = if last == "self" {
-                    effective_segs.last().copied().unwrap_or(local_name)
-                } else {
-                    last
-                };
-                aliases.insert(
-                    local_name.to_owned(),
-                    (Some(target.clone()), orig_sym.to_owned()),
-                );
-            }
-            acc.add_resolved(target, "imports", &syms, line_no, stmt);
-        } else {
-            let unres_target = if effective_segs.len() >= 2 {
-                format!("{}::{}", effective_segs[0], effective_segs[1])
-            } else {
-                effective_segs.join("::")
-            };
-            let syms: Vec<&str> = if last != "*" && last != "self" {
-                vec![last]
-            } else {
-                Vec::new()
-            };
-            acc.add_unresolved(&unres_target, "imports", &syms, line_no, stmt);
-        }
-    }
-}
-
-fn expand_rust_use_tree(
-    tree: &str,
-    prefix: &[String],
-    out: &mut Vec<(Vec<String>, Option<String>)>,
-) {
-    let trimmed = tree.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    if let Some((before_brace, after_brace)) = split_top_level_brace(trimmed) {
-        let head = before_brace.trim().trim_end_matches(':');
-        let mut next_prefix = prefix.to_vec();
-        if !head.is_empty() {
-            for seg in head.split("::").map(str::trim).filter(|s| !s.is_empty()) {
-                next_prefix.push(seg.to_owned());
-            }
-        }
-        let inner = after_brace
-            .rsplit_once('}')
-            .map_or(after_brace, |(inside, _)| inside);
-        for item in split_top_level_commas(inner) {
-            expand_rust_use_tree(&item, &next_prefix, out);
-        }
-        return;
-    }
-
-    let (path_part, alias_part) = if let Some((lhs, rhs)) = split_as_alias(trimmed) {
-        (lhs.trim(), Some(rhs.trim().to_owned()))
-    } else {
-        (trimmed, None)
-    };
-
-    let mut full = prefix.to_vec();
-    for seg in path_part
-        .split("::")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        full.push(seg.to_owned());
-    }
-    if !full.is_empty() {
-        out.push((full, alias_part));
-    }
-}
-
-fn split_top_level_brace(s: &str) -> Option<(&str, &str)> {
-    let mut depth = 0usize;
-    for (idx, ch) in s.char_indices() {
-        match ch {
-            '{' if depth == 0 => return Some((&s[..idx], &s[idx + 1..])),
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn split_top_level_commas(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (idx, ch) in s.char_indices() {
-        match ch {
-            '{' | '(' | '<' => depth += 1,
-            '}' | ')' | '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let item = s[start..idx].trim();
-                if !item.is_empty() {
-                    out.push(item.to_owned());
-                }
-                start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-    let tail = s[start..].trim();
-    if !tail.is_empty() {
-        out.push(tail.to_owned());
-    }
-    out
-}
-
-fn resolve_rust_path_segments(
+fn resolve_rust_path_segments_with_crates(
     rel_path: &str,
     crate_src_root: &str,
     segs: &[&str],
     lookup: &KnownLookup,
+    crate_map_opt: Option<&CratePackageMap>,
 ) -> Option<(String, usize)> {
     if segs.is_empty() {
         return None;
@@ -3062,7 +2311,7 @@ fn resolve_rust_path_segments(
             let mut idx = 0usize;
             while segs.get(idx) == Some(&"super") {
                 if idx == 0 && !matches!(stem, "lib" | "main" | "mod") {
-                    // In `src/a/b.rs`, first `super` is `src/a` (folder_of).
+                    // In `src/a/b.rs`, first `super` is `src/a`.
                 } else {
                     cur = folder_of(&cur);
                 }
@@ -3071,9 +2320,13 @@ fn resolve_rust_path_segments(
             (cur, idx)
         }
         pkg => {
-            // Check workspace crate `<pkg_with_hyphens>/src/...`
-            let pkg_hyphen = pkg.replace('_', "-");
             let rest = &segs[1..];
+            if let Some(crate_map) = crate_map_opt
+                && let Some(found) = crate_map.resolve_crate_module(pkg, rest, lookup.known_files)
+            {
+                return Some(found);
+            }
+            let pkg_hyphen = pkg.replace('_', "-");
             for k in (1..=rest.len()).rev() {
                 let rel_mod = rest[..k].join("/");
                 for pkg_name in [&pkg_hyphen, &pkg.to_owned()] {
@@ -3101,7 +2354,6 @@ fn resolve_rust_path_segments(
             return None;
         }
     };
-
     let rest = &segs[start_idx..];
     for k in (1..=rest.len()).rev() {
         let mod_rel = rest[..k].join("/");
@@ -3114,8 +2366,6 @@ fn resolve_rust_path_segments(
             }
         }
     }
-
-    // `use super::*;` or `use crate;` -> lib.rs / mod.rs of `base_dir`
     for fallback in [
         join_rel(&base_dir, "mod.rs"),
         join_rel(&base_dir, "lib.rs"),
@@ -3126,75 +2376,6 @@ fn resolve_rust_path_segments(
         }
     }
     None
-}
-
-#[allow(clippy::too_many_arguments)]
-fn extract_rust_impl_deps(
-    rel_path: &str,
-    crate_src_root: &str,
-    after_impl: &str,
-    line_no: u32,
-    raw_line: &str,
-    lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-    builtins: &[&str],
-    acc: &mut DepAccumulator,
-) {
-    let head = after_impl
-        .split(['{', ';'])
-        .next()
-        .unwrap_or("")
-        .split(" where ")
-        .next()
-        .unwrap_or("");
-    let Some((trait_part, type_part)) = head.split_once(" for ") else {
-        return;
-    };
-    let trait_clean = strip_generics_and_refs(trait_part);
-    if let Some((target, sym)) = resolve_rust_symbol_ref(
-        rel_path,
-        crate_src_root,
-        trait_clean,
-        lookup,
-        aliases,
-        builtins,
-    ) {
-        acc.add_resolved(target, "implements", &[&sym], line_no, raw_line);
-    }
-    let type_clean = strip_generics_and_refs(type_part);
-    if let Some((target, sym)) = resolve_rust_symbol_ref(
-        rel_path,
-        crate_src_root,
-        type_clean,
-        lookup,
-        aliases,
-        builtins,
-    ) {
-        acc.add_resolved(target, "uses", &[&sym], line_no, raw_line);
-    }
-}
-
-fn is_rust_call_after(s: &str) -> bool {
-    let t = s.trim_start();
-    if t.starts_with('(') {
-        return true;
-    }
-    if let Some(after) = t.strip_prefix("::<") {
-        let mut depth = 1usize;
-        for (idx, ch) in after.char_indices() {
-            match ch {
-                '<' => depth += 1,
-                '>' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return after[idx + 1..].trim_start().starts_with('(');
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    false
 }
 
 fn is_rust_std_trait_method(name: &str) -> bool {
@@ -3222,1056 +2403,106 @@ fn is_rust_std_trait_method(name: &str) -> bool {
     )
 }
 
-/// A path that names a constant reads it; any other path keeps its kind.
-fn path_ref_kind(kind: &'static str, members: &[DepMemberRef]) -> &'static str {
-    match members.first().map(|member| member.access.as_str()) {
-        Some("const") if kind == "uses" => "reads",
-        _ => kind,
-    }
-}
-
-fn build_rust_path_member_ref(syms: &[&str], is_call: bool, line_no: u32) -> Option<DepMemberRef> {
-    match syms.len() {
-        0 => None,
-        1 => {
-            let mem = syms[0];
-            if is_call {
-                let mk = if mem.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                    "method"
-                } else {
-                    "function"
-                };
-                Some(DepMemberRef::basic(mem, mk, None, "call", line_no))
-            } else if is_upper_snake(mem) {
-                Some(DepMemberRef::basic(mem, "const", None, "const", line_no))
-            } else {
-                None
-            }
-        }
-        _ => {
-            let parent = syms[syms.len() - 2];
-            let mem = syms[syms.len() - 1];
-            let parent_is_type = parent
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase());
-            let parent_opt = parent_is_type.then(|| parent.to_owned());
-            if is_call {
-                let mk = if parent_is_type { "method" } else { "function" };
-                Some(DepMemberRef::basic(mem, mk, parent_opt, "call", line_no))
-            } else if is_upper_snake(mem) {
-                Some(DepMemberRef::basic(
-                    mem, "const", parent_opt, "const", line_no,
-                ))
-            } else {
-                None
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn extract_rust_line_refs(
-    rel_path: &str,
-    crate_src_root: &str,
-    line: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-    builtins: &[&str],
-    struct_fields_for_self: Option<&BTreeMap<String, String>>,
-    var_types: &BTreeMap<String, String>,
-    acc: &mut DepAccumulator,
-) {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    while i < len {
-        let ch = bytes[i] as char;
-        if is_ident_start(ch) && (i == 0 || !is_ident_char(bytes[i - 1] as char)) {
-            let mut end = i + 1;
-            while end < len && is_ident_char(bytes[end] as char) {
-                end += 1;
-            }
-            let first = &line[i..end];
-            let preceded_by_dot = line[..i].trim_end().ends_with('.');
-            let preceded_by_colons = line[..i].trim_end().ends_with("::");
-
-            if line[end..].starts_with("::") {
-                let mut segs = vec![first];
-                let mut cursor = end;
-                while line[cursor..].starts_with("::") {
-                    let after = &line[cursor + 2..];
-                    if let Some((seg, rest)) = take_ident(after)
-                        && after.starts_with(seg)
-                    {
-                        segs.push(seg);
-                        cursor = line.len() - rest.len();
-                    } else {
-                        break;
-                    }
-                }
-                let after_path = &line[cursor..];
-                let is_call = is_rust_call_after(after_path);
-                let kind = if is_call { "calls" } else { "uses" };
-                if matches!(segs[0], "crate" | "super" | "self")
-                    && let Some((target, split_at)) =
-                        resolve_rust_path_segments(rel_path, crate_src_root, &segs, lookup)
-                {
-                    let syms: Vec<&str> = if split_at < segs.len() {
-                        segs[split_at..].to_vec()
-                    } else {
-                        vec![segs.last().copied().unwrap_or("")]
-                    };
-                    let mref = build_rust_path_member_ref(&syms, is_call, line_no);
-                    let members: Vec<DepMemberRef> = mref.into_iter().collect();
-                    let kind = path_ref_kind(kind, &members);
-                    acc.add_resolved_members(target, kind, &syms, &members, line_no, line);
-                } else if let Some((Some(target), orig_sym)) = aliases.get(segs[0]) {
-                    let mut syms = vec![orig_sym.as_str()];
-                    if let Some(member) = segs.get(1) {
-                        syms.push(*member);
-                    }
-                    let mref = build_rust_path_member_ref(&syms, is_call, line_no);
-                    let members: Vec<DepMemberRef> = mref.into_iter().collect();
-                    let kind = path_ref_kind(kind, &members);
-                    acc.add_resolved_members(target.clone(), kind, &syms, &members, line_no, line);
-                } else if !builtins.contains(&segs[0]) {
-                    let dir = folder_of(rel_path);
-                    let target_opt = lookup
-                        .resolve_stem_in_dir(&dir, segs[0], RUST_EXTS)
-                        .or_else(|| {
-                            lookup.resolve_unambiguous_stem(
-                                segs[0],
-                                RUST_EXTS,
-                                (!crate_src_root.is_empty()).then_some(crate_src_root),
-                            )
-                        });
-                    if let Some(target) = target_opt {
-                        let mut syms = vec![segs[0]];
-                        if let Some(member) = segs.get(1) {
-                            syms.push(*member);
-                        }
-                        let mref = build_rust_path_member_ref(&syms, is_call, line_no);
-                        let members: Vec<DepMemberRef> = mref.into_iter().collect();
-                        let kind = path_ref_kind(kind, &members);
-                        acc.add_resolved_members(target, kind, &syms, &members, line_no, line);
-                    }
-                }
-                i = cursor;
-                continue;
-            }
-
-            let after_first = &line[end..];
-            let trimmed_after = after_first.trim_start();
-
-            // Inline single-line struct literal `TypeName { field: val, ... }`
-            if !preceded_by_dot
-                && !preceded_by_colons
-                && first.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                && !builtins.contains(&first)
-                && let Some(inside_brace) = trimmed_after.strip_prefix('{')
-                && let Some(close_rel) = inside_brace.find('}')
-                && !line[..i].trim_end().ends_with("struct")
-                && !line[..i].trim_end().ends_with("impl")
-                && let Some((target, canon)) = resolve_rust_symbol_ref(
-                    rel_path,
-                    crate_src_root,
-                    first,
-                    lookup,
-                    aliases,
-                    builtins,
-                )
-            {
-                let body = &inside_brace[..close_rel];
-                let mut members = Vec::new();
-                for part in body.split(',') {
-                    let pt = part.trim();
-                    if pt.starts_with("..") {
-                        continue;
-                    }
-                    if let Some((field, after_f)) = take_ident(pt)
-                        && after_f.trim_start().starts_with(':')
-                        && !after_f.trim_start().starts_with("::")
-                    {
-                        members.push(DepMemberRef::basic(
-                            field,
-                            "field",
-                            Some(canon.clone()),
-                            "write",
-                            line_no,
-                        ));
-                    }
-                }
-                acc.add_resolved_members(
-                    target,
-                    "uses",
-                    &[canon.as_str()],
-                    &members,
-                    line_no,
-                    line,
-                );
-            }
-
-            // `self.field.member` -> resolve `self.field`'s struct type
-            if !preceded_by_dot
-                && !preceded_by_colons
-                && first == "self"
-                && let Some(after_dot1) = trimmed_after.strip_prefix('.')
-                && let Some((field, after_field)) = take_ident(after_dot1.trim_start())
-                && let Some(after_dot2) = after_field.trim_start().strip_prefix('.')
-                && let Some((mem2, after_mem2)) = take_ident(after_dot2.trim_start())
-                && let Some(owner_ty) = struct_fields_for_self.and_then(|m| m.get(field))
-                && let Some((target, canon)) = resolve_rust_symbol_ref(
-                    rel_path,
-                    crate_src_root,
-                    owner_ty,
-                    lookup,
-                    aliases,
-                    builtins,
-                )
-            {
-                let is_call = is_rust_call_after(after_mem2);
-                if !(is_call && is_rust_std_trait_method(mem2)) {
-                    let (dep_kind, mem_kind, access) =
-                        classify_member_access(mem2, after_mem2, false, is_call, "field", false);
-                    acc.add_resolved_members(
-                        target,
-                        dep_kind,
-                        &[canon.as_str(), mem2],
-                        &[DepMemberRef::basic(
-                            mem2,
-                            mem_kind,
-                            Some(canon.clone()),
-                            access,
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            } else if !preceded_by_dot
-                && !preceded_by_colons
-                && let Some(owner_ty) = var_types.get(first)
-                && let Some(after_dot) = trimmed_after.strip_prefix('.')
-                && let Some((mem, after_mem)) = take_ident(after_dot.trim_start())
-                && let Some((target, canon)) = resolve_rust_symbol_ref(
-                    rel_path,
-                    crate_src_root,
-                    owner_ty,
-                    lookup,
-                    aliases,
-                    builtins,
-                )
-            {
-                let is_call = is_rust_call_after(after_mem);
-                if !(is_call && is_rust_std_trait_method(mem)) {
-                    let (dep_kind, mem_kind, access) =
-                        classify_member_access(mem, after_mem, false, is_call, "field", false);
-                    acc.add_resolved_members(
-                        target,
-                        dep_kind,
-                        &[canon.as_str(), mem],
-                        &[DepMemberRef::basic(
-                            mem,
-                            mem_kind,
-                            Some(canon.clone()),
-                            access,
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            } else if !preceded_by_dot
-                && !preceded_by_colons
-                && let Some((Some(target), orig_sym)) = aliases.get(first)
-            {
-                // Direct call or imported constant (`verify_token(...)` or `DEFAULT_TTL`)
-                if is_rust_call_after(trimmed_after) {
-                    let mk = if orig_sym
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-                    {
-                        "method"
-                    } else {
-                        "function"
-                    };
-                    acc.add_resolved_members(
-                        target.clone(),
-                        "calls",
-                        &[orig_sym],
-                        &[DepMemberRef::basic(
-                            orig_sym.as_str(),
-                            mk,
-                            None,
-                            "call",
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                } else if !trimmed_after.starts_with('.') && is_upper_snake(orig_sym) {
-                    acc.add_resolved_members(
-                        target.clone(),
-                        "uses",
-                        &[orig_sym],
-                        &[DepMemberRef::basic(
-                            orig_sym.as_str(),
-                            "const",
-                            None,
-                            "const",
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            }
-            i = end;
-            continue;
-        }
-        i += 1;
-    }
-}
-
-fn resolve_rust_symbol_ref(
-    rel_path: &str,
-    crate_src_root: &str,
-    expr: &str,
-    lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-    builtins: &[&str],
-) -> Option<(String, String)> {
-    let trimmed = expr.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.contains("::") {
-        let segs: Vec<&str> = trimmed
-            .split("::")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if matches!(segs.first().copied(), Some("crate" | "super" | "self"))
-            && let Some((target, _)) =
-                resolve_rust_path_segments(rel_path, crate_src_root, &segs, lookup)
-        {
-            return Some((target, segs.last().copied().unwrap_or("").to_owned()));
-        }
-        if let Some(head) = segs.first()
-            && let Some((Some(target), _)) = aliases.get(*head)
-        {
-            return Some((
-                target.clone(),
-                segs.last().copied().unwrap_or("").to_owned(),
-            ));
-        }
-        return None;
-    }
-    if let Some((Some(target), orig_sym)) = aliases.get(trimmed) {
-        return Some((target.clone(), orig_sym.clone()));
-    }
-    if builtins.contains(&trimmed) {
-        return None;
-    }
-    let dir = folder_of(rel_path);
-    let target = lookup
-        .resolve_stem_in_dir(&dir, trimmed, RUST_EXTS)
-        .or_else(|| {
-            lookup.resolve_unambiguous_stem(
-                trimmed,
-                RUST_EXTS,
-                (!crate_src_root.is_empty()).then_some(crate_src_root),
-            )
-        })?;
-    Some((target, trimmed.to_owned()))
-}
-
-fn strip_generics_and_refs(s: &str) -> &str {
-    let mut trimmed = s.trim();
-    while let Some(rest) = trimmed.strip_prefix('&') {
-        trimmed = rest.trim_start();
-        if trimmed.starts_with('\'')
-            && let Some((_, after)) = trimmed.split_once(char::is_whitespace)
-        {
-            trimmed = after.trim_start();
-        }
-        if let Some(after) = trimmed.strip_prefix("mut ") {
-            trimmed = after.trim_start();
-        }
-    }
-    trimmed.split('<').next().unwrap_or(trimmed).trim()
-}
-
 // =========================================================================
-// TS/JS Dependency Extraction & Resolution
+// 3. TS / JS AST Resolution
 // =========================================================================
 
-fn resolve_ts_owner_type(
-    ty_name: &str,
-    dir: &str,
-    lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-) -> Option<(String, String)> {
-    let clean = ty_name.split('<').next().unwrap_or(ty_name).trim();
-    if clean.is_empty() {
-        return None;
-    }
-    if let Some((Some(target), orig)) = aliases.get(clean) {
-        let canon = if orig == "*" { clean } else { orig.as_str() };
-        return Some((target.clone(), canon.to_owned()));
-    }
-    lookup
-        .resolve_stem_in_dir(dir, clean, TS_JS_EXTS)
-        .map(|target| (target, clean.to_owned()))
-}
-
-fn collect_ts_param_bindings(
-    line: &str,
-    in_ctor_sig: bool,
-    this_props: &mut BTreeMap<String, String>,
-    var_types: &mut BTreeMap<String, String>,
-) {
-    let slice = line.split_once('(').map(|(_, after)| after).unwrap_or(line);
-    let params_part = slice.split(')').next().unwrap_or(slice);
-    for raw_param in params_part.split(',') {
-        let trimmed = raw_param.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some((lhs, rhs)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let has_ctor_vis = in_ctor_sig
-            && (contains_word_ascii(lhs, "public")
-                || contains_word_ascii(lhs, "protected")
-                || contains_word_ascii(lhs, "private")
-                || contains_word_ascii(lhs, "readonly"));
-        let param_stripped = strip_leading_words(
-            lhs,
-            &["public", "protected", "private", "readonly", "override"],
-        );
-        if let Some((param_name, rest)) = take_ts_js_member_ident(param_stripped)
-            && (rest.trim().is_empty() || rest.trim() == "?")
-        {
-            let ty = rhs.split(['=', '|', '<', '&']).next().unwrap_or("").trim();
-            if let Some((ty_ident, _)) = take_ident(ty)
-                && ty_ident
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-            {
-                if has_ctor_vis {
-                    this_props.insert(param_name.to_owned(), ty_ident.to_owned());
-                }
-                var_types.insert(param_name.to_owned(), ty_ident.to_owned());
-            }
-        }
-    }
-}
-
-fn update_ts_var_bindings(
-    san_trimmed: &str,
-    inside_class: bool,
-    in_fn: bool,
-    in_ctor_sig: bool,
-    this_props: &mut BTreeMap<String, String>,
-    var_types: &mut BTreeMap<String, String>,
-) {
-    // Constructor / function typed parameters
-    if san_trimmed.contains(':') && (in_fn || san_trimmed.contains('(')) {
-        collect_ts_param_bindings(san_trimmed, in_ctor_sig, this_props, var_types);
-    }
-
-    // Class field declaration (`private signer: Signer;`, `#signer: Signer;`, `signer = new Signer();`)
-    if inside_class && !in_fn && !in_ctor_sig {
-        let stripped = strip_leading_words(
-            san_trimmed,
-            &[
-                "public",
-                "protected",
-                "private",
-                "readonly",
-                "static",
-                "override",
-                "declare",
-            ],
-        );
-        if let Some((prop, after_prop)) = take_ts_js_member_ident(stripped) {
-            let after_opt = after_prop
-                .trim_start()
-                .trim_start_matches(['?', '!'])
-                .trim_start();
-            if let Some(after_colon) = after_opt.strip_prefix(':') {
-                let ty_raw = after_colon
-                    .split(['=', ';', '<', '|'])
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if let Some((ty_ident, _)) = take_ident(ty_raw)
-                    && ty_ident
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-                {
-                    this_props.insert(prop.to_owned(), ty_ident.to_owned());
-                }
-            }
-        }
-    }
-
-    // `const|let|var x [: Type] = ...`
-    let after_decl = san_trimmed
-        .strip_prefix("export ")
-        .unwrap_or(san_trimmed)
-        .trim_start();
-    for kw in ["const ", "let ", "var "] {
-        if let Some(rest) = after_decl.strip_prefix(kw)
-            && let Some((var_name, after_var)) = take_ident(rest.trim_start())
-        {
-            let r = after_var.trim_start();
-            if let Some(after_colon) = r.strip_prefix(':') {
-                let ty_raw = after_colon
-                    .split(['=', ';', '<', '|'])
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if let Some((ty_ident, _)) = take_ident(ty_raw)
-                    && ty_ident
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-                {
-                    var_types.insert(var_name.to_owned(), ty_ident.to_owned());
-                    return;
-                }
-            }
-            if let Some((_, rhs)) = split_simple_assign(san_trimmed) {
-                let rhs_c = rhs.trim_end_matches(';').trim();
-                if let Some(after_new) = rhs_c.strip_prefix("new")
-                    && after_new.starts_with(char::is_whitespace)
-                    && let Some((cls, _)) = take_ident(after_new.trim_start())
-                {
-                    var_types.insert(var_name.to_owned(), cls.to_owned());
-                } else if let Some(after_this) = rhs_c.strip_prefix("this.")
-                    && let Some((prop, after_p)) = take_ts_js_member_ident(after_this)
-                    && after_p.trim().is_empty()
-                    && let Some(ty) = this_props.get(prop)
-                {
-                    var_types.insert(var_name.to_owned(), ty.clone());
-                }
-            }
-            return;
-        }
-    }
-
-    // `this.prop = new Foo(...)` or `this.prop = param` or `x = new Foo(...)`
-    if let Some((lhs, rhs)) = split_simple_assign(san_trimmed) {
-        let rhs_c = rhs.trim_end_matches(';').trim();
-        let rhs_ty = if let Some(after_new) = rhs_c.strip_prefix("new")
-            && after_new.starts_with(char::is_whitespace)
-        {
-            take_ident(after_new.trim_start()).map(|(c, _)| c.to_owned())
-        } else if let Some((var_rhs, rest_rhs)) = take_ident(rhs_c)
-            && rest_rhs.trim().is_empty()
-        {
-            var_types.get(var_rhs).cloned()
-        } else {
-            None
-        };
-        if let Some(ty) = rhs_ty {
-            if let Some(after_this) = lhs.trim().strip_prefix("this.")
-                && let Some((prop, rest_p)) = take_ts_js_member_ident(after_this)
-                && rest_p.trim().is_empty()
-            {
-                this_props.insert(prop.to_owned(), ty);
-            } else if let Some((var_lhs, rest_l)) = take_ident(lhs.trim())
-                && rest_l.trim().is_empty()
-            {
-                var_types.insert(var_lhs.to_owned(), ty);
-            }
-        }
-    }
-}
-
-fn extract_ts_js_deps(
+fn resolve_ts_js_ir(
     rel_path: &str,
-    source: &str,
+    ir: &AstFileExtraction,
     lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
     acc: &mut DepAccumulator,
 ) {
     let dir = folder_of(rel_path);
     let mut aliases: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-    let mut this_props: BTreeMap<String, String> = BTreeMap::new();
-    let mut var_types: BTreeMap<String, String> = BTreeMap::new();
-    let mut in_block_comment = false;
-    let mut import_buf = String::new();
-    let mut import_line = 0u32;
-    let mut depth = 0usize;
-    let mut scope_stack: Vec<(bool, usize)> = Vec::new(); // (is_class, open_depth)
-    let mut pending_scope: Option<bool> = None;
-    let mut in_ctor_sig = false;
 
-    for (idx, raw_line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as u32;
-        let comments_stripped = strip_comments_keep_strings(raw_line, Language::TsJs);
-        let sanitized = sanitize_c_like_line(raw_line, &mut in_block_comment, Language::TsJs);
-        let raw_trimmed = comments_stripped.trim();
-        let san_trimmed = sanitized.trim();
+    for imp in &ir.imports {
+        let mut resolved = resolve_ts_js_spec(&dir, &imp.path, lookup)
+            .or_else(|| {
+                manifests_opt
+                    .and_then(|m| m.resolve_ts_import(rel_path, &imp.path, lookup.known_files))
+            })
+            .or_else(|| resolve_ts_js_alias_fallback(&imp.path, lookup));
 
-        if raw_trimmed.is_empty() && import_buf.is_empty() {
-            continue;
-        }
-
-        // 1. Multi-line `import ...` or `export ... from '...'`
-        if !import_buf.is_empty() {
-            import_buf.push(' ');
-            import_buf.push_str(raw_trimmed);
-            if ts_import_complete(&import_buf) {
-                let stmt = std::mem::take(&mut import_buf);
-                process_ts_import_stmt(&dir, &stmt, import_line, lookup, &mut aliases, acc);
+        if imp.is_wildcard {
+            if let Some(ns_alias) = imp.alias.as_deref() {
+                aliases.insert(ns_alias.to_owned(), (resolved.clone(), "*".to_owned()));
             }
-            continue;
-        }
-
-        let starts_import = starts_word_at(raw_trimmed, 0, "import")
-            && !raw_trimmed[6..].trim_start().starts_with('(');
-        let starts_reexport = starts_word_at(raw_trimmed, 0, "export")
-            && (raw_trimmed.contains('{') || raw_trimmed.contains('*'))
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "class")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "function")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "const")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "let")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "var")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "interface")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "type")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "enum")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "default")
-            && !starts_word_at(raw_trimmed[6..].trim_start(), 0, "async");
-
-        if starts_import || (starts_reexport && raw_trimmed.contains("from")) {
-            if ts_import_complete(raw_trimmed) {
-                process_ts_import_stmt(&dir, raw_trimmed, line_no, lookup, &mut aliases, acc);
-            } else {
-                import_buf = raw_trimmed.to_owned();
-                import_line = line_no;
-            }
-            continue;
-        }
-        if starts_reexport && !raw_trimmed.contains([';', '=']) {
-            import_buf = raw_trimmed.to_owned();
-            import_line = line_no;
-            continue;
-        }
-
-        // 2. Dynamic `import('...')` and `require('...')`
-        extract_ts_call_imports(&dir, raw_trimmed, line_no, lookup, acc);
-
-        let inside_class = scope_stack
-            .last()
-            .is_some_and(|(is_c, open_d)| *is_c && *open_d == depth);
-        let inside_fn = scope_stack.iter().any(|(is_c, _)| !*is_c);
-
-        if !inside_fn && !san_trimmed.is_empty() {
-            let hdr = strip_leading_words(
-                san_trimmed,
-                &[
-                    "export",
-                    "default",
-                    "declare",
-                    "abstract",
-                    "async",
-                    "public",
-                    "protected",
-                    "private",
-                    "static",
-                    "override",
-                ],
-            );
-            if starts_word_at(hdr, 0, "class") {
-                pending_scope = Some(true);
-            } else if starts_word_at(hdr, 0, "function") {
-                pending_scope = Some(false);
-            } else if inside_class
-                && let Some((mname, after_m)) = take_ts_js_member_ident(hdr)
-                && after_m.trim_start().starts_with('(')
-                && !matches!(mname, "if" | "for" | "while" | "switch" | "catch")
-            {
-                pending_scope = Some(false);
-                if mname == "constructor" {
-                    in_ctor_sig = true;
+        } else {
+            for sym in &imp.symbols {
+                let mut target_opt = resolved.clone();
+                let mut orig_sym = sym.clone();
+                if let Some(ref facade) = target_opt
+                    && let Some(reexports) = reexports_opt
+                    && let Some((rt, rs)) =
+                        reexports.resolve_reexport_target(facade, sym, lookup.known_files, None)
+                {
+                    target_opt = Some(rt.clone());
+                    orig_sym = rs;
+                    resolved = Some(rt);
                 }
+                let local = imp.alias.as_deref().unwrap_or(sym);
+                aliases.insert(local.to_owned(), (target_opt, orig_sym));
             }
         }
-
-        // 3. Variable/property type bindings + inheritance/member references
-        if !san_trimmed.is_empty() {
-            update_ts_var_bindings(
-                san_trimmed,
-                inside_class,
-                inside_fn || matches!(pending_scope, Some(false)),
-                in_ctor_sig,
-                &mut this_props,
-                &mut var_types,
-            );
-            extract_ts_line_refs(
-                san_trimmed,
-                &dir,
-                line_no,
-                lookup,
-                &aliases,
-                &this_props,
-                &var_types,
-                acc,
-            );
-        }
-
-        for ch in sanitized.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    if let Some(is_c) = pending_scope.take() {
-                        in_ctor_sig = false;
-                        scope_stack.push((is_c, depth));
-                    }
-                }
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    while scope_stack.last().is_some_and(|(_, d)| depth < *d) {
-                        if let Some((is_c, _)) = scope_stack.pop() {
-                            if is_c {
-                                if !scope_stack.iter().any(|(c, _)| *c) {
-                                    this_props.clear();
-                                }
-                            } else {
-                                var_types.clear();
-                            }
-                        }
-                    }
-                }
-                ';' if matches!(pending_scope, Some(false)) => {
-                    pending_scope = None;
-                    in_ctor_sig = false;
-                    var_types.clear();
-                }
-                _ => {}
-            }
+        let sym_refs: Vec<&str> = imp.symbols.iter().map(String::as_str).collect();
+        match resolved {
+            Some(t) => acc.add_resolved(t, "imports", &sym_refs, imp.line, &imp.evidence),
+            None => acc.add_unresolved(&imp.path, "imports", &sym_refs, imp.line, &imp.evidence),
         }
     }
-}
 
-fn ts_import_complete(stmt: &str) -> bool {
-    if stmt.contains("from") && extract_last_quoted_string(stmt).is_some() {
-        return true;
-    }
-    let after_import = stmt
-        .trim_start()
-        .strip_prefix("import")
-        .unwrap_or("")
-        .trim_start();
-    if after_import.starts_with(['\'', '"']) && extract_first_quoted_string(after_import).is_some()
-    {
-        return true;
-    }
-    stmt.contains(';') && !stmt.contains('{')
-}
-
-fn process_ts_import_stmt(
-    dir: &str,
-    stmt: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    aliases: &mut BTreeMap<String, (Option<String>, String)>,
-    acc: &mut DepAccumulator,
-) {
-    let Some(spec) = extract_last_quoted_string(stmt) else {
-        return;
+    let resolve_owner = |name: &str| -> Option<(String, String, bool)> {
+        let clean = name.split('<').next().unwrap_or(name).trim();
+        if clean.is_empty() {
+            return None;
+        }
+        if let Some((Some(t), orig)) = aliases.get(clean) {
+            let is_ns = orig == "*";
+            let canon = if is_ns { clean } else { orig.as_str() };
+            return Some((t.clone(), canon.to_owned(), is_ns));
+        }
+        lookup
+            .resolve_stem_in_dir(&dir, clean, TS_JS_EXTS)
+            .map(|t| (t, clean.to_owned(), false))
     };
-    let resolved = resolve_ts_js_spec(dir, spec, lookup);
-    let mut syms: Vec<String> = Vec::new();
 
-    if let Some((head, _)) = stmt.rsplit_once("from") {
-        let mut clause = head
-            .trim()
-            .trim_start_matches("import")
-            .trim_start_matches("export")
-            .trim();
-        if let Some(rest) = clause.strip_prefix("type ") {
-            clause = rest.trim();
-        }
-        // Extract default import before `{` or `,`
-        if let Some((before_brace, brace_part)) = clause.split_once('{') {
-            let default_part = before_brace.trim().trim_end_matches(',').trim();
-            if !default_part.is_empty() && !default_part.starts_with('*') {
-                if let Some((name, _)) = take_ident(default_part) {
-                    syms.push(name.to_owned());
-                    aliases.insert(name.to_owned(), (resolved.clone(), name.to_owned()));
-                }
-            } else if let Some(after_star) = default_part.strip_prefix('*')
-                && let Some((_, ns)) = split_as_alias(&format!("* {after_star}"))
-                && let Some((ns_ident, _)) = take_ident(ns)
-            {
-                aliases.insert(ns_ident.to_owned(), (resolved.clone(), "*".to_owned()));
-            }
-            let inner = brace_part.rsplit_once('}').map_or(brace_part, |(i, _)| i);
-            for item in inner.split(',') {
-                let mut item = item.trim();
-                if let Some(rest) = item.strip_prefix("type ") {
-                    item = rest.trim();
-                }
-                if item.is_empty() {
-                    continue;
-                }
-                if let Some((orig, alias)) = split_as_alias(item) {
-                    if let Some((orig_id, _)) = take_ident(orig) {
-                        syms.push(orig_id.to_owned());
-                        if let Some((alias_id, _)) = take_ident(alias) {
-                            aliases.insert(
-                                alias_id.to_owned(),
-                                (resolved.clone(), orig_id.to_owned()),
-                            );
-                        }
-                    }
-                } else if let Some((id, _)) = take_ident(item) {
-                    syms.push(id.to_owned());
-                    aliases.insert(id.to_owned(), (resolved.clone(), id.to_owned()));
-                }
-            }
-        } else if let Some((_, ns)) = split_as_alias(clause) {
-            if let Some((ns_ident, _)) = take_ident(ns) {
-                aliases.insert(ns_ident.to_owned(), (resolved.clone(), "*".to_owned()));
-            }
-        } else if let Some((default_id, _)) = take_ident(clause) {
-            syms.push(default_id.to_owned());
-            aliases.insert(
-                default_id.to_owned(),
-                (resolved.clone(), default_id.to_owned()),
-            );
+    for inh in &ir.inheritance {
+        if let Some((target, sym, _)) = resolve_owner(&inh.parent) {
+            acc.add_resolved(target, &inh.kind, &[&sym], inh.line, &inh.evidence);
         }
     }
 
-    let sym_refs: Vec<&str> = syms.iter().map(String::as_str).collect();
-    match resolved {
-        Some(target) => acc.add_resolved(target, "imports", &sym_refs, line_no, stmt),
-        None => acc.add_unresolved(spec, "imports", &sym_refs, line_no, stmt),
-    }
-}
-
-fn extract_ts_call_imports(
-    dir: &str,
-    line: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    acc: &mut DepAccumulator,
-) {
-    for kw in ["require", "import"] {
-        let mut search_from = 0usize;
-        while let Some(rel_pos) = find_keyword(&line[search_from..], kw) {
-            let pos = search_from + rel_pos;
-            let after_kw = line[pos + kw.len()..].trim_start();
-            if let Some(after_paren) = after_kw.strip_prefix('(')
-                && let Some(spec) = extract_first_quoted_string(after_paren)
-            {
-                let sym = file_stem(spec);
-                match resolve_ts_js_spec(dir, spec, lookup) {
-                    Some(target) => acc.add_resolved(target, "imports", &[sym], line_no, line),
-                    None => acc.add_unresolved(spec, "imports", &[sym], line_no, line),
-                }
-            }
-            search_from = pos + kw.len();
-        }
-    }
-}
-
-fn strip_ts_dot_op(s: &str) -> Option<&str> {
-    let trimmed = s.trim_start();
-    trimmed
-        .strip_prefix("?.")
-        .or_else(|| trimmed.strip_prefix('.'))
-        .map(str::trim_start)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn extract_ts_line_refs(
-    line: &str,
-    dir: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-    this_props: &BTreeMap<String, String>,
-    var_types: &BTreeMap<String, String>,
-    acc: &mut DepAccumulator,
-) {
-    // 1. `extends Base` / `implements I1, I2`
-    let before_brace = line.split('{').next().unwrap_or(line);
-    for (kw, kind) in [("extends", "extends"), ("implements", "implements")] {
-        if let Some(pos) = find_keyword(before_brace, kw) {
-            let after = &before_brace[pos + kw.len()..];
-            let stop = if kw == "extends" {
-                find_keyword(after, "implements").unwrap_or(after.len())
-            } else {
-                after.len()
-            };
-            for item in after[..stop].split(',') {
-                let name_raw = item.split('<').next().unwrap_or(item).trim();
-                if let Some((ident, _)) = take_ident(name_raw) {
-                    if let Some((Some(target), orig)) = aliases.get(ident) {
-                        acc.add_resolved(target.clone(), kind, &[orig], line_no, line);
-                    } else if let Some(target) = lookup.resolve_stem_in_dir(dir, ident, TS_JS_EXTS)
-                    {
-                        acc.add_resolved(target, kind, &[ident], line_no, line);
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Calls, instantiations, static/namespace member reads & writes, `this.prop.m()`, `var.prop`
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    while i < len {
-        let ch = bytes[i] as char;
-        if is_ident_start(ch) && (i == 0 || !is_ident_char(bytes[i - 1] as char)) {
-            let mut end = i + 1;
-            while end < len && is_ident_char(bytes[end] as char) {
-                end += 1;
-            }
-            let ident = &line[i..end];
-            let rest = line[end..].trim_start();
-            let preceded_by_dot = line[..i].trim_end().ends_with('.');
-
-            if !preceded_by_dot && ident == "this" {
-                if let Some(after_dot1) = strip_ts_dot_op(rest)
-                    && let Some((prop, after_prop)) = take_ts_js_member_ident(after_dot1)
-                    && let Some(after_dot2) = strip_ts_dot_op(after_prop)
-                    && let Some((mem2, after_mem2)) = take_ts_js_member_ident(after_dot2)
-                    && let Some(owner_ty) = this_props.get(prop)
-                    && let Some((target, canon)) =
-                        resolve_ts_owner_type(owner_ty, dir, lookup, aliases)
-                {
-                    let trimmed_after = after_mem2.trim_start();
-                    let is_call = trimmed_after.starts_with('(')
-                        || (trimmed_after.starts_with('<') && trimmed_after.contains('('));
-                    let (dep_kind, mem_kind, access) =
-                        classify_member_access(mem2, after_mem2, false, is_call, "property", false);
-                    acc.add_resolved_members(
-                        target,
-                        dep_kind,
-                        &[canon.as_str(), mem2],
-                        &[DepMemberRef::basic(
-                            mem2,
-                            mem_kind,
-                            Some(canon.clone()),
-                            access,
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            } else if !preceded_by_dot && let Some((Some(target), orig)) = aliases.get(ident) {
-                if let Some(after_dot) = strip_ts_dot_op(rest) {
-                    if let Some((member, after_m)) = take_ts_js_member_ident(after_dot) {
-                        let trimmed_after = after_m.trim_start();
-                        let is_call = trimmed_after.starts_with('(')
-                            || (trimmed_after.starts_with('<') && trimmed_after.contains('('));
-                        let is_ns = orig == "*";
-                        let orig_is_class =
-                            !is_ns && orig.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-                        let (dep_kind, mem_kind, access) = classify_member_access(
-                            member,
-                            after_m,
-                            orig_is_class,
-                            is_call,
-                            "property",
-                            is_ns || !orig_is_class,
-                        );
-                        let sym = if is_ns { member } else { orig.as_str() };
-                        let mut syms = vec![sym];
-                        if member != sym {
-                            syms.push(member);
-                        }
-                        let parent = orig_is_class.then(|| orig.clone());
-                        acc.add_resolved_members(
-                            target.clone(),
-                            dep_kind,
-                            &syms,
-                            &[DepMemberRef::basic(
-                                member, mem_kind, parent, access, line_no,
-                            )],
-                            line_no,
-                            line,
-                        );
-                    }
-                } else if rest.starts_with('(')
-                    || rest.starts_with('<')
-                    || (i >= 4 && line[..i].trim_end().ends_with("new"))
-                {
-                    let sym = if orig == "*" { ident } else { orig.as_str() };
-                    let is_ctor_or_type = line[..i].trim_end().ends_with("new")
-                        || sym.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-                    let members = if !is_ctor_or_type && rest.starts_with('(') {
-                        vec![DepMemberRef::basic(sym, "function", None, "call", line_no)]
-                    } else {
-                        Vec::new()
-                    };
-                    acc.add_resolved_members(
-                        target.clone(),
-                        "calls",
-                        &[sym],
-                        &members,
-                        line_no,
-                        line,
-                    );
-                } else if orig != "*" && is_upper_snake(orig) {
-                    acc.add_resolved_members(
-                        target.clone(),
-                        "uses",
-                        &[orig.as_str()],
-                        &[DepMemberRef::basic(
-                            orig.as_str(),
-                            "const",
-                            None,
-                            "const",
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            } else if !preceded_by_dot
-                && let Some(owner_ty) = var_types.get(ident)
-                && let Some(after_dot) = strip_ts_dot_op(rest)
-                && let Some((member, after_m)) = take_ts_js_member_ident(after_dot)
-                && let Some((target, canon)) = resolve_ts_owner_type(owner_ty, dir, lookup, aliases)
-            {
-                let trimmed_after = after_m.trim_start();
-                let is_call = trimmed_after.starts_with('(')
-                    || (trimmed_after.starts_with('<') && trimmed_after.contains('('));
-                let (dep_kind, mem_kind, access) =
-                    classify_member_access(member, after_m, false, is_call, "property", false);
-                acc.add_resolved_members(
-                    target,
-                    dep_kind,
-                    &[canon.as_str(), member],
-                    &[DepMemberRef::basic(
-                        member,
-                        mem_kind,
-                        Some(canon.clone()),
-                        access,
-                        line_no,
-                    )],
-                    line_no,
-                    line,
-                );
-            }
-            i = end;
+    for r in &ir.calls_and_refs {
+        let Some((target, canon, is_ns)) = resolve_owner(&r.target_name) else {
             continue;
+        };
+        let is_class = !is_ns && canon.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        let parent_opt = if is_class {
+            r.owner_type.clone().or_else(|| Some(canon.clone()))
+        } else {
+            None
+        };
+        let mut adjusted = r.clone();
+        if r.member.is_some() && !is_class && r.context == "call" {
+            adjusted.member_kind = Some("function".to_owned());
         }
-        i += 1;
+        let (dep_kind, members) =
+            ref_dep_kind_and_member(&adjusted, &canon, "property", parent_opt, false);
+        let mut syms = Vec::new();
+        if is_ns && let Some(ref mem) = r.member {
+            syms.push(mem.as_str());
+        } else {
+            syms.push(canon.as_str());
+            if let Some(ref mem) = r.member
+                && mem != &canon
+            {
+                syms.push(mem.as_str());
+            }
+        }
+        acc.add_resolved_members(target, dep_kind, &syms, &members, r.line, &r.evidence);
     }
 }
 
@@ -4284,6 +2515,11 @@ fn resolve_ts_js_spec(dir: &str, spec: &str, lookup: &KnownLookup) -> Option<Str
         let base = resolve_relative_segments(dir, trimmed)?;
         return resolve_ts_js_candidates(&base, lookup);
     }
+    None
+}
+
+fn resolve_ts_js_alias_fallback(spec: &str, lookup: &KnownLookup) -> Option<String> {
+    let trimmed = spec.trim();
     if let Some(alias_rest) = trimmed
         .strip_prefix("@/")
         .or_else(|| trimmed.strip_prefix("~/"))
@@ -4303,7 +2539,6 @@ fn resolve_ts_js_candidates(base: &str, lookup: &KnownLookup) -> Option<String> 
     if let Some(found) = lookup.resolve_exact_or_ci(base) {
         return Some(found);
     }
-    // TS ESM convention: `./foo.js` -> `./foo.ts` / `./foo.tsx`
     if let Some((stem_path, ext)) = base.rsplit_once('.') {
         let lower_ext = ext.to_ascii_lowercase();
         let mapped: &[&str] = match lower_ext.as_str() {
@@ -4314,21 +2549,18 @@ fn resolve_ts_js_candidates(base: &str, lookup: &KnownLookup) -> Option<String> 
             _ => &[],
         };
         for alt_ext in mapped {
-            let cand = format!("{stem_path}.{alt_ext}");
-            if let Some(found) = lookup.resolve_exact_or_ci(&cand) {
+            if let Some(found) = lookup.resolve_exact_or_ci(&format!("{stem_path}.{alt_ext}")) {
                 return Some(found);
             }
         }
     }
     for ext in TS_JS_EXTS {
-        let cand = format!("{base}.{ext}");
-        if let Some(found) = lookup.resolve_exact_or_ci(&cand) {
+        if let Some(found) = lookup.resolve_exact_or_ci(&format!("{base}.{ext}")) {
             return Some(found);
         }
     }
     for ext in TS_JS_EXTS {
-        let cand = format!("{base}/index.{ext}");
-        if let Some(found) = lookup.resolve_exact_or_ci(&cand) {
+        if let Some(found) = lookup.resolve_exact_or_ci(&format!("{base}/index.{ext}")) {
             return Some(found);
         }
     }
@@ -4352,527 +2584,139 @@ fn resolve_ts_js_suffix(rest: &str, lookup: &KnownLookup) -> Option<String> {
 }
 
 // =========================================================================
-// Python Dependency Extraction & Resolution
+// 4. Python AST Resolution
 // =========================================================================
 
-fn clean_py_type(raw: &str) -> Option<String> {
-    let mut s = raw.split(['=', ',']).next().unwrap_or(raw).trim();
-    for wrapper in ["Optional[", "Union[", "Annotated["] {
-        if let Some(inner) = s.strip_prefix(wrapper) {
-            s = inner.trim_end_matches(']').trim();
-            if wrapper == "Annotated[" {
-                s = s.split(',').next().unwrap_or(s).trim();
-            }
-        }
-    }
-    let chosen = s
-        .split('|')
-        .map(str::trim)
-        .find(|part| !part.is_empty() && *part != "None")?;
-    let base = chosen.split('[').next().unwrap_or(chosen).trim();
-    if base.is_empty()
-        || matches!(
-            base,
-            "str"
-                | "int"
-                | "float"
-                | "bool"
-                | "bytes"
-                | "list"
-                | "dict"
-                | "set"
-                | "tuple"
-                | "Any"
-                | "None"
-                | "Self"
-                | "object"
-                | "Callable"
-        )
-    {
-        return None;
-    }
-    if base.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
-        Some(base.to_owned())
-    } else {
-        None
-    }
-}
-
-fn resolve_py_owner_type(
-    ty_name: &str,
-    dir: &str,
-    lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-) -> Option<(String, String)> {
-    if let Some((head, tail)) = ty_name.rsplit_once('.') {
-        let root = head.split('.').next().unwrap_or(head);
-        if let Some((Some(target), _)) = aliases.get(root) {
-            return Some((target.clone(), tail.to_owned()));
-        }
-    }
-    if let Some((Some(target), orig)) = aliases.get(ty_name) {
-        let canon = if orig == file_stem(target) {
-            ty_name.to_owned()
-        } else {
-            orig.clone()
-        };
-        return Some((target.clone(), canon));
-    }
-    lookup
-        .resolve_stem_in_dir(dir, ty_name, PYTHON_EXTS)
-        .map(|target| (target, ty_name.to_owned()))
-}
-
-fn collect_py_param_bindings(line: &str, var_types: &mut BTreeMap<String, String>) {
-    let slice = line.split_once('(').map(|(_, after)| after).unwrap_or(line);
-    let params = slice.split(')').next().unwrap_or(slice);
-    for raw_p in params.split(',') {
-        let p = raw_p.trim();
-        let Some((lhs, rhs)) = p.split_once(':') else {
-            continue;
-        };
-        let param_name = lhs.trim().trim_start_matches('*');
-        if param_name.is_empty() || matches!(param_name, "self" | "cls") {
-            continue;
-        }
-        if let Some((ident, rest)) = take_ident(param_name)
-            && rest.trim().is_empty()
-            && let Some(ty) = clean_py_type(rhs)
-        {
-            var_types.insert(ident.to_owned(), ty);
-        }
-    }
-}
-
-fn extract_py_call_ctor_type(
-    rhs: &str,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-) -> Option<String> {
-    let r = rhs.trim();
-    if let Some((head, after_h)) = take_ident(r) {
-        let rest = after_h.trim_start();
-        if let Some(after_dot) = rest.strip_prefix('.')
-            && let Some((cls, after_c)) = take_ident(after_dot.trim_start())
-            && after_c.trim_start().starts_with('(')
-            && (cls.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                || aliases.contains_key(head))
-        {
-            return Some(format!("{head}.{cls}"));
-        }
-        if rest.starts_with('(')
-            && (head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                || aliases.contains_key(head))
-        {
-            return Some(head.to_owned());
-        }
-    }
-    None
-}
-
-fn update_py_var_bindings(
-    clean_code: &str,
-    in_class_body: bool,
-    in_fn: bool,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-    this_attrs: &mut BTreeMap<String, String>,
-    var_types: &mut BTreeMap<String, String>,
-) {
-    // 1. Assignment `lhs = rhs` or annotated `lhs: Type [= rhs]`
-    if let Some((lhs, rhs)) = split_simple_assign(clean_code) {
-        let lhs_t = lhs.trim();
-        let (target_expr, ann_ty) = if let Some((var_part, ty_part)) = lhs_t.split_once(':') {
-            (var_part.trim(), clean_py_type(ty_part))
-        } else {
-            (lhs_t, None)
-        };
-        let resolved_ty = ann_ty.or_else(|| {
-            let rhs_t = rhs.trim();
-            if let Some(after_self) = rhs_t.strip_prefix("self.")
-                && let Some((attr, rest)) = take_ident(after_self)
-                && rest.trim().is_empty()
-            {
-                return this_attrs.get(attr).cloned();
-            }
-            if let Some((rhs_var, rest)) = take_ident(rhs_t)
-                && rest.trim().is_empty()
-            {
-                return var_types.get(rhs_var).cloned();
-            }
-            extract_py_call_ctor_type(rhs_t, aliases)
-        });
-        if let Some(ty) = resolved_ty {
-            if let Some(after_self) = target_expr.strip_prefix("self.")
-                && let Some((attr, rest)) = take_ident(after_self)
-                && rest.trim().is_empty()
-            {
-                this_attrs.insert(attr.to_owned(), ty);
-            } else if let Some((var_name, rest)) = take_ident(target_expr)
-                && rest.trim().is_empty()
-            {
-                if in_class_body && !in_fn {
-                    this_attrs.insert(var_name.to_owned(), ty);
-                } else {
-                    var_types.insert(var_name.to_owned(), ty);
-                }
-            }
-        }
-        return;
-    }
-
-    // 2. Annotation-only statement (`self.client: Client` or class field `client: Client`)
-    if let Some((lhs_part, rhs_part)) = clean_code.split_once(':')
-        && !clean_code.starts_with("if ")
-        && !clean_code.starts_with("elif ")
-        && !clean_code.starts_with("def ")
-        && !clean_code.starts_with("class ")
-        && let Some(ty) = clean_py_type(rhs_part)
-    {
-        let target_expr = lhs_part.trim();
-        if let Some(after_self) = target_expr.strip_prefix("self.")
-            && let Some((attr, rest)) = take_ident(after_self)
-            && rest.trim().is_empty()
-        {
-            this_attrs.insert(attr.to_owned(), ty);
-        } else if let Some((var_name, rest)) = take_ident(target_expr)
-            && rest.trim().is_empty()
-        {
-            if in_class_body && !in_fn {
-                this_attrs.insert(var_name.to_owned(), ty);
-            } else {
-                var_types.insert(var_name.to_owned(), ty);
-            }
-        }
-    }
-}
-
-fn extract_python_deps(
+fn resolve_python_ir(
     rel_path: &str,
-    source: &str,
+    ir: &AstFileExtraction,
     lookup: &KnownLookup,
+    manifests_opt: Option<&ManifestIndex>,
     acc: &mut DepAccumulator,
 ) {
     let dir = folder_of(rel_path);
     let mut aliases: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-    let mut this_attrs: BTreeMap<String, String> = BTreeMap::new();
-    let mut var_types: BTreeMap<String, String> = BTreeMap::new();
-    let mut triple_quote: Option<&'static str> = None;
-    let mut import_buf = String::new();
-    let mut import_line = 0u32;
-    let mut paren_depth = 0usize;
-    let mut class_indent: Option<usize> = None;
-    let mut fn_stack: Vec<usize> = Vec::new();
-    let mut in_fn_sig = false;
-    let mut sig_parens = 0usize;
 
-    for (idx, raw_line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as u32;
-        if let Some(marker) = triple_quote {
-            if raw_line.contains(marker) {
-                triple_quote = None;
-            }
-            continue;
-        }
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('@') {
-            continue;
-        }
-        for marker in ["\"\"\"", "'''"] {
-            if let Some(after) = trimmed.strip_prefix(marker) {
-                if !after.contains(marker) {
-                    triple_quote = Some(marker);
-                }
-                break;
-            }
-        }
-        if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
-            continue;
-        }
+    for imp in &ir.imports {
+        let dots = imp.path.bytes().take_while(|b| *b == b'.').count();
+        let dotted = &imp.path[dots..];
 
-        let code = strip_py_line_comment(trimmed);
-        if code.is_empty() {
-            continue;
-        }
-
-        let indent = raw_line
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .count();
-        if !in_fn_sig {
-            let mut popped_fn = false;
-            while fn_stack.last().is_some_and(|fi| indent <= *fi) {
-                fn_stack.pop();
-                popped_fn = true;
-            }
-            if popped_fn {
-                var_types.clear();
-            }
-            if class_indent.is_some_and(|ci| indent <= ci) {
-                class_indent = None;
-                this_attrs.clear();
-            }
-        }
-
-        if !import_buf.is_empty() {
-            let clean_part = code.trim_end_matches('\\').trim();
-            import_buf.push(' ');
-            import_buf.push_str(clean_part);
-            paren_depth = update_paren_depth(paren_depth, clean_part);
-            if paren_depth == 0 && !code.trim_end().ends_with('\\') {
-                let stmt = std::mem::take(&mut import_buf);
-                process_python_import_stmt(&dir, &stmt, import_line, lookup, &mut aliases, acc);
-            }
-            continue;
-        }
-
-        if starts_word_at(code, 0, "import") || starts_word_at(code, 0, "from") {
-            let clean_part = code.trim_end_matches('\\').trim();
-            paren_depth = update_paren_depth(0, clean_part);
-            if paren_depth == 0 && !code.trim_end().ends_with('\\') {
-                process_python_import_stmt(&dir, clean_part, line_no, lookup, &mut aliases, acc);
-            } else {
-                import_buf = clean_part.to_owned();
-                import_line = line_no;
-            }
-            continue;
-        }
-
-        let clean_code = strip_py_strings(code);
-
-        // `class Child(Base1, Base2):`
-        if let Some(after_class) = clean_code.strip_prefix("class ") {
-            if class_indent.is_none_or(|ci| indent <= ci) {
-                this_attrs.clear();
-            }
-            class_indent = Some(indent);
-            if let Some((_, after_name)) = take_ident(after_class)
-                && let Some(after_open) = after_name.trim_start().strip_prefix('(')
-                && let Some((bases_str, _)) = after_open.split_once(')')
-            {
-                for base in bases_str.split(',') {
-                    let base_t = base.trim();
-                    let head = base_t.split('.').next().unwrap_or(base_t);
-                    if let Some((Some(target), orig)) = aliases.get(head) {
-                        let sym = base_t.rsplit('.').next().unwrap_or(orig);
-                        acc.add_resolved(target.clone(), "extends", &[sym], line_no, code);
-                    } else if let Some(target) = lookup.resolve_stem_in_dir(&dir, head, PYTHON_EXTS)
-                    {
-                        acc.add_resolved(target, "extends", &[base_t], line_no, code);
-                    }
-                }
-            }
-        }
-
-        let after_async = clean_code
-            .strip_prefix("async ")
-            .unwrap_or(&clean_code)
-            .trim_start();
-        if let Some(after_def) = after_async.strip_prefix("def ") {
-            fn_stack.push(indent);
-            var_types.clear();
-            in_fn_sig = true;
-            sig_parens = update_paren_depth(0, after_def);
-            collect_py_param_bindings(after_def, &mut var_types);
-            if sig_parens == 0 && after_def.contains(':') {
-                in_fn_sig = false;
-            }
-        } else if in_fn_sig {
-            collect_py_param_bindings(&clean_code, &mut var_types);
-            sig_parens = update_paren_depth(sig_parens, &clean_code);
-            if sig_parens == 0 && clean_code.contains(':') {
-                in_fn_sig = false;
-            }
-        } else {
-            update_py_var_bindings(
-                &clean_code,
-                class_indent.is_some(),
-                !fn_stack.is_empty(),
-                &aliases,
-                &mut this_attrs,
-                &mut var_types,
-            );
-        }
-
-        // Calls, non-call member accesses, and imported constant references
-        extract_py_line_calls(
-            &clean_code,
-            &dir,
-            line_no,
-            lookup,
-            &aliases,
-            &this_attrs,
-            &var_types,
-            acc,
-        );
-    }
-}
-
-fn update_paren_depth(mut depth: usize, s: &str) -> usize {
-    for ch in s.chars() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    depth
-}
-
-fn strip_py_line_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    while i < len {
-        let ch = bytes[i];
-        if ch == b'#' {
-            return line[..i].trim();
-        }
-        if ch == b'"' || ch == b'\'' {
-            i += 1;
-            while i < len {
-                if bytes[i] == b'\\' && i + 1 < len {
-                    i += 2;
-                } else if bytes[i] == ch {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    line.trim()
-}
-
-fn process_python_import_stmt(
-    dir: &str,
-    stmt: &str,
-    line_no: u32,
-    lookup: &KnownLookup,
-    aliases: &mut BTreeMap<String, (Option<String>, String)>,
-    acc: &mut DepAccumulator,
-) {
-    if let Some(after_import) = stmt.strip_prefix("import")
-        && stmt[6..].starts_with(char::is_whitespace)
-    {
-        for clause in after_import.split(',') {
-            let clause = clause.trim();
-            if clause.is_empty() {
-                continue;
-            }
-            let (mod_path, alias) = if let Some((lhs, rhs)) = split_as_alias(clause) {
-                (lhs.trim(), Some(rhs.trim()))
-            } else {
-                (clause, None)
-            };
-            let resolved = resolve_python_module(dir, 0, mod_path, lookup);
-            let last_seg = mod_path.rsplit('.').next().unwrap_or(mod_path);
-            let local_name =
-                alias.unwrap_or_else(|| mod_path.split('.').next().unwrap_or(mod_path));
-            aliases.insert(
-                local_name.to_owned(),
-                (resolved.clone(), last_seg.to_owned()),
-            );
-            match resolved {
-                Some(target) => acc.add_resolved(target, "imports", &[last_seg], line_no, stmt),
-                None => acc.add_unresolved(mod_path, "imports", &[last_seg], line_no, stmt),
-            }
-        }
-        return;
-    }
-
-    if let Some(after_from) = stmt.strip_prefix("from")
-        && let Some((mod_part, import_part)) = split_python_from_import(after_from)
-    {
-        let mod_trim = mod_part.trim();
-        let dots = mod_trim.bytes().take_while(|b| *b == b'.').count();
-        let dotted = &mod_trim[dots..];
-        let items_raw = import_part
-            .trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')');
-
-        let mut parsed_items: Vec<(&str, Option<&str>)> = Vec::new();
-        for clause in items_raw.split(',') {
-            let clause = clause.trim();
-            if clause.is_empty() {
-                continue;
-            }
-            if let Some((lhs, rhs)) = split_as_alias(clause) {
-                parsed_items.push((lhs.trim(), Some(rhs.trim())));
-            } else {
-                parsed_items.push((clause, None));
-            }
-        }
-
-        // Handle `from . import submodule` where each imported name may itself be a sibling `.py` file.
-        if dots > 0 && dotted.is_empty() {
-            for (sym, alias) in parsed_items {
-                if let Some(sub_target) = resolve_python_module(dir, dots, sym, lookup) {
-                    let local = alias.unwrap_or(sym);
-                    aliases.insert(local.to_owned(), (Some(sub_target.clone()), sym.to_owned()));
-                    acc.add_resolved(sub_target, "imports", &[sym], line_no, stmt);
-                } else if let Some(pkg_init) = resolve_python_module(dir, dots, "", lookup) {
-                    let local = alias.unwrap_or(sym);
-                    aliases.insert(local.to_owned(), (Some(pkg_init.clone()), sym.to_owned()));
-                    acc.add_resolved(pkg_init, "imports", &[sym], line_no, stmt);
+        if dots > 0 && dotted.is_empty() && !imp.symbols.is_empty() {
+            for sym in &imp.symbols {
+                if let Some(sub) = resolve_python_module(&dir, dots, sym, lookup) {
+                    let local = imp.alias.as_deref().unwrap_or(sym);
+                    aliases.insert(local.to_owned(), (Some(sub.clone()), sym.clone()));
+                    acc.add_resolved(sub, "imports", &[sym], imp.line, &imp.evidence);
+                } else if let Some(init) = resolve_python_module(&dir, dots, "", lookup) {
+                    let local = imp.alias.as_deref().unwrap_or(sym);
+                    aliases.insert(local.to_owned(), (Some(init.clone()), sym.clone()));
+                    acc.add_resolved(init, "imports", &[sym], imp.line, &imp.evidence);
                 } else {
                     acc.add_unresolved(
-                        &format!("{mod_trim}{sym}"),
+                        &format!("{}{sym}", imp.path),
                         "imports",
                         &[sym],
-                        line_no,
-                        stmt,
+                        imp.line,
+                        &imp.evidence,
                     );
                 }
             }
-            return;
+            continue;
         }
 
-        let resolved = resolve_python_module(dir, dots, dotted, lookup);
-        if let Some(target) = resolved {
-            let syms: Vec<&str> = parsed_items
-                .iter()
-                .filter_map(|(s, _)| (*s != "*").then_some(*s))
-                .collect();
-            for (sym, alias) in &parsed_items {
-                if *sym != "*" {
-                    let local = alias.unwrap_or(sym);
-                    aliases.insert(local.to_owned(), (Some(target.clone()), (*sym).to_owned()));
+        let resolved = if dots > 0 {
+            resolve_python_module(&dir, dots, dotted, lookup)
+        } else {
+            manifests_opt
+                .and_then(|m| m.resolve_py_import(rel_path, dotted, lookup.known_files))
+                .or_else(|| resolve_python_module(&dir, 0, dotted, lookup))
+        };
+
+        if let Some(t) = resolved {
+            let sym_refs: Vec<&str> = imp.symbols.iter().map(String::as_str).collect();
+            if imp.symbols.is_empty() {
+                let last_seg = dotted.rsplit('.').next().unwrap_or(dotted);
+                let local = imp
+                    .alias
+                    .as_deref()
+                    .unwrap_or_else(|| dotted.split('.').next().unwrap_or(dotted));
+                aliases.insert(local.to_owned(), (Some(t.clone()), last_seg.to_owned()));
+            } else {
+                for sym in &imp.symbols {
+                    let local = imp.alias.as_deref().unwrap_or(sym);
+                    aliases.insert(local.to_owned(), (Some(t.clone()), sym.clone()));
                 }
             }
-            acc.add_resolved(target, "imports", &syms, line_no, stmt);
-            return;
-        }
-
-        // Fallback for namespace packages (or `from pkg import submod` without `__init__.py`).
-        let mut unresolved_syms = Vec::new();
-        for (sym, alias) in &parsed_items {
-            if *sym != "*"
-                && !dotted.is_empty()
-                && let Some(sub_target) =
-                    resolve_python_module(dir, dots, &format!("{dotted}.{sym}"), lookup)
-            {
-                let local = alias.unwrap_or(sym);
-                aliases.insert(
-                    local.to_owned(),
-                    (Some(sub_target.clone()), (*sym).to_owned()),
-                );
-                acc.add_resolved(sub_target, "imports", &[sym], line_no, stmt);
-            } else if *sym != "*" {
-                unresolved_syms.push(*sym);
+            acc.add_resolved(t, "imports", &sym_refs, imp.line, &imp.evidence);
+        } else {
+            let mut unresolved = Vec::new();
+            for sym in &imp.symbols {
+                if !dotted.is_empty()
+                    && let Some(sub) =
+                        resolve_python_module(&dir, dots, &format!("{dotted}.{sym}"), lookup)
+                {
+                    let local = imp.alias.as_deref().unwrap_or(sym);
+                    aliases.insert(local.to_owned(), (Some(sub.clone()), sym.clone()));
+                    acc.add_resolved(sub, "imports", &[sym], imp.line, &imp.evidence);
+                } else {
+                    unresolved.push(sym.as_str());
+                }
+            }
+            if !unresolved.is_empty() || imp.is_wildcard || imp.symbols.is_empty() {
+                acc.add_unresolved(&imp.path, "imports", &unresolved, imp.line, &imp.evidence);
             }
         }
-        if !unresolved_syms.is_empty() || parsed_items.iter().any(|(s, _)| *s == "*") {
-            acc.add_unresolved(mod_trim, "imports", &unresolved_syms, line_no, stmt);
+    }
+
+    let resolve_py_owner = |raw: &str| -> Option<(String, String, bool)> {
+        if let Some((head, tail)) = raw.rsplit_once('.') {
+            let root = head.split('.').next().unwrap_or(head);
+            if let Some((Some(t), _)) = aliases.get(root) {
+                return Some((t.clone(), tail.to_owned(), false));
+            }
+        }
+        if let Some((Some(t), orig)) = aliases.get(raw) {
+            let is_mod = orig == file_stem(t);
+            let canon = if is_mod { raw.to_owned() } else { orig.clone() };
+            return Some((t.clone(), canon, is_mod));
+        }
+        lookup
+            .resolve_stem_in_dir(&dir, raw, PYTHON_EXTS)
+            .map(|t| (t, raw.to_owned(), false))
+    };
+
+    for inh in &ir.inheritance {
+        let head = inh.parent.split('.').next().unwrap_or(&inh.parent);
+        if let Some((t, sym, _)) = resolve_py_owner(head) {
+            let short = inh.parent.rsplit('.').next().unwrap_or(&sym);
+            acc.add_resolved(t, &inh.kind, &[short], inh.line, &inh.evidence);
         }
     }
-}
 
-fn split_python_from_import(after_from: &str) -> Option<(&str, &str)> {
-    let pos = find_keyword(after_from, "import")?;
-    Some((&after_from[..pos], &after_from[pos + 6..]))
+    for r in &ir.calls_and_refs {
+        let Some((target, canon, is_mod)) = resolve_py_owner(&r.target_name) else {
+            continue;
+        };
+        let is_class = !is_mod && canon.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        let parent_opt = if is_class {
+            r.owner_type.clone().or_else(|| Some(canon.clone()))
+        } else {
+            None
+        };
+        let mut adjusted = r.clone();
+        if r.member.is_some() && !is_class && r.context == "call" {
+            adjusted.member_kind = Some("function".to_owned());
+        }
+        let (dep_kind, members) =
+            ref_dep_kind_and_member(&adjusted, &canon, "property", parent_opt, false);
+        let mut syms = vec![canon.as_str()];
+        if let Some(ref mem) = r.member
+            && mem != &canon
+        {
+            syms.push(mem.as_str());
+        }
+        acc.add_resolved_members(target, dep_kind, &syms, &members, r.line, &r.evidence);
+    }
 }
 
 fn resolve_python_module(
@@ -4894,7 +2738,6 @@ fn resolve_python_module(
         };
         return resolve_python_candidates(&base, lookup);
     }
-
     if rel_mod.is_empty() {
         return None;
     }
@@ -4916,362 +2759,331 @@ fn resolve_python_module(
 
 fn resolve_python_candidates(base: &str, lookup: &KnownLookup) -> Option<String> {
     for ext in PYTHON_EXTS {
-        let file_cand = format!("{base}.{ext}");
-        if let Some(found) = lookup.resolve_exact_or_ci(&file_cand) {
+        if let Some(found) = lookup.resolve_exact_or_ci(&format!("{base}.{ext}")) {
             return Some(found);
         }
     }
     for ext in PYTHON_EXTS {
-        let init_cand = join_rel(base, &format!("__init__.{ext}"));
-        if let Some(found) = lookup.resolve_exact_or_ci(&init_cand) {
+        if let Some(found) = lookup.resolve_exact_or_ci(&join_rel(base, &format!("__init__.{ext}")))
+        {
             return Some(found);
         }
     }
     None
 }
 
-fn strip_py_strings(code: &str) -> String {
-    let mut out = String::with_capacity(code.len());
-    let mut i = 0usize;
-    let bytes = code.as_bytes();
-    while i < bytes.len() {
-        let ch = bytes[i];
-        if ch == b'"' || ch == b'\'' {
-            out.push(' ');
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
-                } else if bytes[i] == ch {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-            out.push(' ');
-        } else if ch.is_ascii() {
-            out.push(ch as char);
-            i += 1;
-        } else if let Some(c) = code[i..].chars().next() {
-            out.push(c);
-            i += c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    out
-}
+// =========================================================================
+// 5. Go, Java/Kotlin/Scala, C#, Ruby, Swift AST Resolution
+// =========================================================================
 
-#[allow(clippy::too_many_arguments)]
-fn extract_py_line_calls(
-    line: &str,
-    dir: &str,
-    line_no: u32,
+fn resolve_go_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
     lookup: &KnownLookup,
-    aliases: &BTreeMap<String, (Option<String>, String)>,
-    this_attrs: &BTreeMap<String, String>,
-    var_types: &BTreeMap<String, String>,
+    manifests_opt: Option<&ManifestIndex>,
     acc: &mut DepAccumulator,
 ) {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    while i < len {
-        let ch = bytes[i] as char;
-        if is_ident_start(ch) && (i == 0 || !is_ident_char(bytes[i - 1] as char)) {
-            let mut end = i + 1;
-            while end < len && is_ident_char(bytes[end] as char) {
-                end += 1;
+    let dir = folder_of(rel_path);
+    let mut pkg_aliases: BTreeMap<String, String> = BTreeMap::new();
+    for imp in &ir.imports {
+        let resolved = manifests_opt
+            .and_then(|m| m.resolve_go_import(&imp.path, lookup.known_files))
+            .or_else(|| resolve_go_package_suffix(&imp.path, lookup));
+        let pkg_name = imp
+            .alias
+            .clone()
+            .or_else(|| imp.symbols.first().cloned())
+            .unwrap_or_else(|| imp.path.rsplit('/').next().unwrap_or(&imp.path).to_owned());
+        match resolved {
+            Some(t) => {
+                pkg_aliases.insert(pkg_name.clone(), t.clone());
+                acc.add_resolved(t, "imports", &[&pkg_name], imp.line, &imp.evidence);
             }
-            let ident = &line[i..end];
-            let preceded_by_dot = line[..i].trim_end().ends_with('.');
-            let rest = line[end..].trim_start();
-
-            if !preceded_by_dot && ident == "self" {
-                if let Some(after_dot1) = rest.strip_prefix('.')
-                    && let Some((attr, after_attr)) = take_ident(after_dot1.trim_start())
-                    && let Some(after_dot2) = after_attr.trim_start().strip_prefix('.')
-                    && let Some((mem2, after_mem2)) = take_ident(after_dot2.trim_start())
-                    && let Some(owner_ty) = this_attrs.get(attr)
-                    && let Some((target, canon)) =
-                        resolve_py_owner_type(owner_ty, dir, lookup, aliases)
-                {
-                    let is_call = after_mem2.trim_start().starts_with('(');
-                    let (dep_kind, mem_kind, access) =
-                        classify_member_access(mem2, after_mem2, false, is_call, "property", false);
-                    acc.add_resolved_members(
-                        target,
-                        dep_kind,
-                        &[canon.as_str(), mem2],
-                        &[DepMemberRef::basic(
-                            mem2,
-                            mem_kind,
-                            Some(canon.clone()),
-                            access,
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            } else if !preceded_by_dot && let Some((Some(target), orig)) = aliases.get(ident) {
-                if let Some(after_dot) = rest.strip_prefix('.') {
-                    if let Some((member, after_m)) = take_ident(after_dot.trim_start()) {
-                        let is_call = after_m.trim_start().starts_with('(');
-                        let is_mod = orig == file_stem(target);
-                        let orig_is_class =
-                            !is_mod && orig.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-                        let (dep_kind, mem_kind, access) = classify_member_access(
-                            member,
-                            after_m,
-                            orig_is_class,
-                            is_call,
-                            "property",
-                            is_mod || !orig_is_class,
-                        );
-                        let mut syms = vec![orig.as_str()];
-                        if member != orig {
-                            syms.push(member);
-                        }
-                        let parent = orig_is_class.then(|| orig.clone());
-                        acc.add_resolved_members(
-                            target.clone(),
-                            dep_kind,
-                            &syms,
-                            &[DepMemberRef::basic(
-                                member, mem_kind, parent, access, line_no,
-                            )],
-                            line_no,
-                            line,
-                        );
-                    }
-                } else if rest.starts_with('(') {
-                    let members = if orig.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                        Vec::new()
-                    } else {
-                        vec![DepMemberRef::basic(
-                            orig.as_str(),
-                            "function",
-                            None,
-                            "call",
-                            line_no,
-                        )]
-                    };
-                    acc.add_resolved_members(
-                        target.clone(),
-                        "calls",
-                        &[orig],
-                        &members,
-                        line_no,
-                        line,
-                    );
-                } else if is_upper_snake(orig) {
-                    acc.add_resolved_members(
-                        target.clone(),
-                        "uses",
-                        &[orig],
-                        &[DepMemberRef::basic(
-                            orig.as_str(),
-                            "const",
-                            None,
-                            "const",
-                            line_no,
-                        )],
-                        line_no,
-                        line,
-                    );
-                }
-            } else if !preceded_by_dot
-                && let Some(owner_ty) = var_types.get(ident)
-                && let Some(after_dot) = rest.strip_prefix('.')
-                && let Some((member, after_m)) = take_ident(after_dot.trim_start())
-                && let Some((target, canon)) = resolve_py_owner_type(owner_ty, dir, lookup, aliases)
-            {
-                let is_call = after_m.trim_start().starts_with('(');
-                let (dep_kind, mem_kind, access) =
-                    classify_member_access(member, after_m, false, is_call, "property", false);
-                acc.add_resolved_members(
-                    target,
-                    dep_kind,
-                    &[canon.as_str(), member],
-                    &[DepMemberRef::basic(
-                        member,
-                        mem_kind,
-                        Some(canon.clone()),
-                        access,
-                        line_no,
-                    )],
-                    line_no,
-                    line,
-                );
-            }
-            i = end;
-            continue;
+            None => acc.add_unresolved(&imp.path, "imports", &[&pkg_name], imp.line, &imp.evidence),
         }
-        i += 1;
+    }
+    for r in &ir.calls_and_refs {
+        let target = pkg_aliases
+            .get(&r.target_name)
+            .cloned()
+            .or_else(|| lookup.resolve_stem_in_dir(&dir, &r.target_name, GO_EXTS));
+        if let Some(t) = target {
+            let (dep_kind, members) =
+                ref_dep_kind_and_member(r, &r.target_name, "field", None, false);
+            let mut syms = vec![r.target_name.as_str()];
+            if let Some(ref mem) = r.member {
+                syms.push(mem.as_str());
+            }
+            acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+        }
     }
 }
 
-// =========================================================================
-// Shared Text & Identifier Helpers
-// =========================================================================
-
-fn join_rel(prefix: &str, tail: &str) -> String {
-    if prefix.is_empty() {
-        tail.trim_start_matches('/').to_owned()
-    } else if tail.is_empty() {
-        prefix.trim_end_matches('/').to_owned()
-    } else {
-        format!(
-            "{}/{}",
-            prefix.trim_end_matches('/'),
-            tail.trim_start_matches('/')
-        )
+fn resolve_go_package_suffix(import_path: &str, lookup: &KnownLookup) -> Option<String> {
+    let cleaned = clean_rel_key(import_path);
+    if cleaned.is_empty() {
+        return None;
     }
-}
-
-fn find_keyword(haystack: &str, kw: &str) -> Option<usize> {
-    let bytes = haystack.as_bytes();
-    let kw_len = kw.len();
-    let mut offset = 0usize;
-    while let Some(pos) = haystack[offset..].find(kw) {
-        let abs = offset + pos;
-        let left_ok = abs == 0 || !is_ident_char(bytes[abs - 1] as char);
-        let right_ok = abs + kw_len >= bytes.len() || !is_ident_char(bytes[abs + kw_len] as char);
-        if left_ok && right_ok {
-            return Some(abs);
+    let segs: Vec<&str> = cleaned.split('/').filter(|s| !s.is_empty()).collect();
+    for start in 0..segs.len() {
+        let sub_dir = segs[start..].join("/");
+        let matches: Vec<String> = lookup
+            .all_entries
+            .iter()
+            .filter(|(_, c, _)| {
+                has_any_ext(c, GO_EXTS)
+                    && (folder_of(c) == sub_dir || folder_of(c).ends_with(&format!("/{sub_dir}")))
+            })
+            .map(|(orig, _, _)| orig.clone())
+            .collect();
+        if let Some(best) = pick_best_candidate(&matches) {
+            return Some(best);
         }
-        offset = abs + kw_len;
     }
     None
 }
 
-fn starts_word_at(s: &str, idx: usize, word: &str) -> bool {
-    let Some(sub) = s.get(idx..) else {
-        return false;
+fn resolve_jvm_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    lang: Language,
+    lookup: &KnownLookup,
+    acc: &mut DepAccumulator,
+) {
+    let exts = match lang {
+        Language::Java => JAVA_EXTS,
+        Language::Kotlin => KOTLIN_EXTS,
+        Language::Scala => SCALA_EXTS,
+        _ => JAVA_EXTS,
     };
-    if !sub.starts_with(word) {
-        return false;
-    }
-    let left_ok = idx == 0 || !is_ident_char(s.as_bytes()[idx - 1] as char);
-    let right_ok = sub
-        .as_bytes()
-        .get(word.len())
-        .is_none_or(|b| !is_ident_char(*b as char));
-    left_ok && right_ok
-}
+    let dir = folder_of(rel_path);
+    let mut symbol_targets: BTreeMap<String, String> = BTreeMap::new();
+    let mut wildcard_pkgs: Vec<String> = Vec::new();
 
-fn extract_first_quoted_string(s: &str) -> Option<&str> {
-    let bytes = s.as_bytes();
-    for (idx, &b) in bytes.iter().enumerate() {
-        if b == b'\'' || b == b'"' {
-            let mut j = idx + 1;
-            while j < bytes.len() {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    j += 2;
-                } else if bytes[j] == b {
-                    return Some(&s[idx + 1..j]);
-                } else {
-                    j += 1;
-                }
-            }
-            return None;
-        }
-    }
-    None
-}
-
-fn extract_last_quoted_string(s: &str) -> Option<&str> {
-    let mut last = None;
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\'' || b == b'"' {
-            let start = i + 1;
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
-                } else if bytes[i] == b {
-                    last = Some(&s[start..i]);
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
+    for imp in &ir.imports {
+        let slash = imp.path.replace('.', "/");
+        if imp.is_wildcard {
+            wildcard_pkgs.push(slash);
+            acc.add_unresolved(&imp.path, "imports", &[], imp.line, &imp.evidence);
             continue;
         }
-        i += 1;
+        let mut resolved = None;
+        for ext in exts {
+            if let Some(found) = lookup.resolve_suffix(&format!("{slash}.{ext}"), Some(exts)) {
+                resolved = Some(found);
+                break;
+            }
+        }
+        let sym = imp
+            .symbols
+            .first()
+            .cloned()
+            .unwrap_or_else(|| imp.path.rsplit('.').next().unwrap_or(&imp.path).to_owned());
+        match resolved {
+            Some(t) => {
+                let local = imp.alias.clone().unwrap_or_else(|| sym.clone());
+                symbol_targets.insert(local, t.clone());
+                acc.add_resolved(t, "imports", &[&sym], imp.line, &imp.evidence);
+            }
+            None => acc.add_unresolved(&imp.path, "imports", &[&sym], imp.line, &imp.evidence),
+        }
     }
-    last
+
+    let resolve_jvm_sym = |name: &str| -> Option<String> {
+        let short = name.split('<').next().unwrap_or(name).trim();
+        if let Some(t) = symbol_targets.get(short) {
+            return Some(t.clone());
+        }
+        for pkg in &wildcard_pkgs {
+            for ext in exts {
+                if let Some(found) =
+                    lookup.resolve_suffix(&format!("{pkg}/{short}.{ext}"), Some(exts))
+                {
+                    return Some(found);
+                }
+            }
+        }
+        lookup.resolve_stem_in_dir(&dir, short, exts)
+    };
+
+    for inh in &ir.inheritance {
+        if let Some(t) = resolve_jvm_sym(&inh.parent) {
+            acc.add_resolved(t, &inh.kind, &[&inh.parent], inh.line, &inh.evidence);
+        }
+    }
+    for r in &ir.calls_and_refs {
+        if let Some(t) = resolve_jvm_sym(&r.target_name) {
+            let (dep_kind, members) = ref_dep_kind_and_member(
+                r,
+                &r.target_name,
+                "field",
+                Some(r.target_name.clone()),
+                false,
+            );
+            let mut syms = vec![r.target_name.as_str()];
+            if let Some(ref mem) = r.member {
+                syms.push(mem.as_str());
+            }
+            acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+        }
+    }
 }
 
-fn sanitize_whole_source(rel_path: &str, source: &str) -> String {
-    match detect_language(rel_path) {
-        Some(lang @ (Language::Php | Language::Rust | Language::TsJs)) => {
-            let mut in_block = false;
-            let mut out = String::with_capacity(source.len());
-            for line in source.lines() {
-                out.push_str(&sanitize_c_like_line(line, &mut in_block, lang));
-                out.push('\n');
-            }
-            out
-        }
-        Some(Language::Python) => {
-            let mut triple: Option<&'static str> = None;
-            let mut out = String::with_capacity(source.len());
-            for line in source.lines() {
-                if let Some(marker) = triple {
-                    if line.contains(marker) {
-                        triple = None;
-                    }
-                    out.push('\n');
-                    continue;
-                }
-                let trimmed = line.trim();
-                for marker in ["\"\"\"", "'''"] {
-                    if let Some(after) = trimmed.strip_prefix(marker)
-                        && !after.contains(marker)
-                    {
-                        triple = Some(marker);
-                    }
-                }
-                if triple.is_some() {
-                    out.push('\n');
-                    continue;
-                }
-                let code = strip_py_line_comment(line);
-                out.push_str(&strip_py_strings(code));
-                out.push('\n');
-            }
-            out
-        }
-        None => source.to_owned(),
-    }
-}
+fn resolve_csharp_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    lookup: &KnownLookup,
+    acc: &mut DepAccumulator,
+) {
+    let dir = folder_of(rel_path);
+    let mut symbol_targets: BTreeMap<String, String> = BTreeMap::new();
+    let mut using_ns: Vec<String> = Vec::new();
 
-fn collect_identifiers(sanitized: &str) -> BTreeSet<String> {
-    let mut set = BTreeSet::new();
-    let bytes = sanitized.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    while i < len {
-        let ch = bytes[i] as char;
-        if is_ident_start(ch) {
-            let mut end = i + 1;
-            while end < len && is_ident_char(bytes[end] as char) {
-                end += 1;
+    for imp in &ir.imports {
+        let slash = imp.path.replace('.', "/");
+        if let Some(ref alias) = imp.alias {
+            if let Some(t) = lookup.resolve_suffix(&format!("{slash}.cs"), Some(CSHARP_EXTS)) {
+                symbol_targets.insert(alias.clone(), t.clone());
+                acc.add_resolved(t, "imports", &[alias], imp.line, &imp.evidence);
+            } else {
+                acc.add_unresolved(&imp.path, "imports", &[alias], imp.line, &imp.evidence);
             }
-            set.insert(sanitized[i..end].to_owned());
-            i = end;
         } else {
-            i += 1;
+            using_ns.push(slash);
+            acc.add_unresolved(&imp.path, "imports", &[], imp.line, &imp.evidence);
         }
     }
-    set
+
+    let resolve_cs_sym = |name: &str| -> Option<String> {
+        let short = name.split('<').next().unwrap_or(name).trim();
+        if let Some(t) = symbol_targets.get(short) {
+            return Some(t.clone());
+        }
+        for ns in &using_ns {
+            if let Some(t) = lookup.resolve_suffix(&format!("{ns}/{short}.cs"), Some(CSHARP_EXTS)) {
+                return Some(t);
+            }
+        }
+        lookup.resolve_stem_in_dir(&dir, short, CSHARP_EXTS)
+    };
+
+    for inh in &ir.inheritance {
+        if let Some(t) = resolve_cs_sym(&inh.parent) {
+            acc.add_resolved(t, &inh.kind, &[&inh.parent], inh.line, &inh.evidence);
+        }
+    }
+    for r in &ir.calls_and_refs {
+        if let Some(t) = resolve_cs_sym(&r.target_name) {
+            let (dep_kind, members) = ref_dep_kind_and_member(
+                r,
+                &r.target_name,
+                "property",
+                Some(r.target_name.clone()),
+                false,
+            );
+            let mut syms = vec![r.target_name.as_str()];
+            if let Some(ref mem) = r.member {
+                syms.push(mem.as_str());
+            }
+            acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+        }
+    }
+}
+
+fn resolve_ruby_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    lookup: &KnownLookup,
+    acc: &mut DepAccumulator,
+) {
+    let dir = folder_of(rel_path);
+    for imp in &ir.imports {
+        let with_ext = if imp.path.ends_with(".rb") {
+            imp.path.clone()
+        } else {
+            format!("{}.rb", imp.path)
+        };
+        let resolved = if imp.kind == "include" {
+            lookup.resolve_relative(&dir, &with_ext)
+        } else {
+            lookup.resolve_suffix(&with_ext, Some(RUBY_EXTS))
+        };
+        let sym = file_stem(&with_ext);
+        match resolved {
+            Some(t) => acc.add_resolved(t, "imports", &[sym], imp.line, &imp.evidence),
+            None => acc.add_unresolved(&imp.path, "imports", &[sym], imp.line, &imp.evidence),
+        }
+    }
+    for inh in &ir.inheritance {
+        let short = inh.parent.rsplit("::").next().unwrap_or(&inh.parent);
+        if let Some(t) = lookup
+            .resolve_stem_in_dir(&dir, short, RUBY_EXTS)
+            .or_else(|| lookup.resolve_unambiguous_stem(short, RUBY_EXTS, None))
+        {
+            acc.add_resolved(t, &inh.kind, &[short], inh.line, &inh.evidence);
+        }
+    }
+    for r in &ir.calls_and_refs {
+        let short = r.target_name.rsplit("::").next().unwrap_or(&r.target_name);
+        if let Some(t) = lookup
+            .resolve_stem_in_dir(&dir, short, RUBY_EXTS)
+            .or_else(|| lookup.resolve_unambiguous_stem(short, RUBY_EXTS, None))
+        {
+            let (dep_kind, members) =
+                ref_dep_kind_and_member(r, short, "property", Some(short.to_owned()), false);
+            let mut syms = vec![short];
+            if let Some(ref mem) = r.member {
+                syms.push(mem.as_str());
+            }
+            acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+        }
+    }
+}
+
+fn resolve_swift_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    lookup: &KnownLookup,
+    acc: &mut DepAccumulator,
+) {
+    let dir = folder_of(rel_path);
+    for imp in &ir.imports {
+        let mut resolved = None;
+        for entry in &lookup.all_entries {
+            if has_any_ext(&entry.1, SWIFT_EXTS) && entry.1.contains(&format!("{}/", imp.path)) {
+                resolved = Some(entry.0.clone());
+                break;
+            }
+        }
+        match resolved {
+            Some(t) => acc.add_resolved(t, "imports", &[&imp.path], imp.line, &imp.evidence),
+            None => acc.add_unresolved(&imp.path, "imports", &[&imp.path], imp.line, &imp.evidence),
+        }
+    }
+    for inh in &ir.inheritance {
+        let short = inh.parent.split('<').next().unwrap_or(&inh.parent).trim();
+        if let Some(t) = lookup
+            .resolve_stem_in_dir(&dir, short, SWIFT_EXTS)
+            .or_else(|| lookup.resolve_unambiguous_stem(short, SWIFT_EXTS, None))
+        {
+            acc.add_resolved(t, &inh.kind, &[short], inh.line, &inh.evidence);
+        }
+    }
+    for r in &ir.calls_and_refs {
+        let short = r.target_name.split('.').next().unwrap_or(&r.target_name);
+        if let Some(t) = lookup
+            .resolve_stem_in_dir(&dir, short, SWIFT_EXTS)
+            .or_else(|| lookup.resolve_unambiguous_stem(short, SWIFT_EXTS, None))
+        {
+            let (dep_kind, members) =
+                ref_dep_kind_and_member(r, short, "property", Some(short.to_owned()), false);
+            let mut syms = vec![short];
+            if let Some(ref mem) = r.member {
+                syms.push(mem.as_str());
+            }
+            acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6077,5 +3889,241 @@ class Caller {
             .find(|r| r.name == "secret" && r.access == "call")
             .expect("secret call ref");
         assert_eq!(secret_ref.access_risk.as_deref(), Some("private"));
+    }
+
+    #[test]
+    fn extract_file_deps_with_manifests_resolves_composer_tsconfig_package_and_pyproject() {
+        let files = known(&[
+            "modules/Billing/src/Invoice.php",
+            "src/App/Controller.php",
+            "packages/core/src/crypto/hash.ts",
+            "packages/shared/src/index.ts",
+            "apps/web/src/main.ts",
+            "services/api/src/billing_pkg/ledger.py",
+            "services/api/tests/app.py",
+        ]);
+        let manifests = ManifestIndex::from_texts(&[
+            (
+                "composer.json",
+                r#"{"autoload":{"psr-4":{"Acme\\Billing\\":"modules/Billing/src/"}}}"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions":{"baseUrl":".","paths":{"@core/*":["packages/core/src/*"]}}}"#,
+            ),
+            (
+                "packages/shared/package.json",
+                r#"{"name":"@acme/shared","exports":{".":"./src/index.ts"}}"#,
+            ),
+            (
+                "services/api/pyproject.toml",
+                "[project]\nname = \"api\"\n[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
+            ),
+        ]);
+
+        let php_deps = extract_file_deps_with_manifests(
+            "src/App/Controller.php",
+            "<?php\nuse Acme\\Billing\\Invoice;\nclass Controller { public function run(): Invoice { return new Invoice(); } }\n",
+            &files,
+            Some(&manifests),
+            None,
+        );
+        assert!(
+            php_deps
+                .iter()
+                .any(|d| d.target == "modules/Billing/src/Invoice.php"
+                    && d.resolved
+                    && d.kind == "imports"),
+            "{php_deps:?}"
+        );
+
+        let ts_deps = extract_file_deps_with_manifests(
+            "apps/web/src/main.ts",
+            "import { sha } from '@core/crypto/hash';\nimport { boot } from '@acme/shared';\nexport const run = () => sha() + boot();\n",
+            &files,
+            Some(&manifests),
+            None,
+        );
+        assert!(
+            ts_deps
+                .iter()
+                .any(|d| d.target == "packages/core/src/crypto/hash.ts" && d.resolved),
+            "{ts_deps:?}"
+        );
+        assert!(
+            ts_deps
+                .iter()
+                .any(|d| d.target == "packages/shared/src/index.ts" && d.resolved),
+            "{ts_deps:?}"
+        );
+
+        let py_deps = extract_file_deps_with_manifests(
+            "services/api/tests/app.py",
+            "from billing_pkg.ledger import record\nrecord()\n",
+            &files,
+            Some(&manifests),
+            None,
+        );
+        assert!(
+            py_deps
+                .iter()
+                .any(|d| d.target == "services/api/src/billing_pkg/ledger.py" && d.resolved),
+            "{py_deps:?}"
+        );
+    }
+
+    #[test]
+    fn propagates_rust_pub_use_reexports_across_named_wildcard_alias_and_cyclic_chains() {
+        let files = known(&[
+            "crates/app/src/inner.rs",
+            "crates/app/src/submodule.rs",
+            "crates/app/src/facade.rs",
+            "crates/app/src/cycle_a.rs",
+            "crates/app/src/cycle_b.rs",
+            "crates/app/src/caller.rs",
+        ]);
+        let inner = "pub struct Thing { pub id: u32 }\nimpl Thing { pub fn create() -> Self { Self { id: 1 } } }\n";
+        let submodule = "pub struct SubItem;\n";
+        let facade = "pub use crate::inner::Thing;\npub use crate::inner::Thing as PublicThing;\npub use crate::submodule::*;\n";
+        let cycle_a = "pub use crate::cycle_b::*;\n";
+        let cycle_b = "pub use crate::cycle_a::*;\n";
+        let caller = "use crate::facade::{Thing, PublicThing, SubItem};\nuse crate::cycle_a::Ghost;\npub fn go() { Thing::create(); PublicThing::create(); }\n";
+
+        let reexports = ReexportIndex::from_sources(&[
+            ("crates/app/src/inner.rs", inner),
+            ("crates/app/src/submodule.rs", submodule),
+            ("crates/app/src/facade.rs", facade),
+            ("crates/app/src/cycle_a.rs", cycle_a),
+            ("crates/app/src/cycle_b.rs", cycle_b),
+        ]);
+
+        let deps = extract_file_deps_with_manifests(
+            "crates/app/src/caller.rs",
+            caller,
+            &files,
+            None,
+            Some(&reexports),
+        );
+        assert!(
+            deps.iter().any(|d| d.target == "crates/app/src/inner.rs"
+                && d.kind == "imports"
+                && d.resolved),
+            "expected Thing/PublicThing to resolve to inner.rs: {deps:?}"
+        );
+        assert!(
+            deps.iter()
+                .any(|d| d.target == "crates/app/src/inner.rs" && d.kind == "calls" && d.resolved),
+            "expected Thing::create() call to resolve to inner.rs: {deps:?}"
+        );
+        assert!(
+            deps.iter()
+                .any(|d| d.target == "crates/app/src/submodule.rs"
+                    && d.kind == "imports"
+                    && d.resolved),
+            "expected wildcard SubItem re-export to resolve to submodule.rs: {deps:?}"
+        );
+        // Cyclic pub use terminates cleanly without looping.
+        assert!(
+            deps.iter()
+                .any(|d| d.target == "crates/app/src/cycle_a.rs" && d.kind == "imports"),
+            "{deps:?}"
+        );
+    }
+
+    #[test]
+    fn extracts_deps_for_go_java_kotlin_csharp_ruby_swift_and_scala() {
+        let files = known(&[
+            "internal/auth/guard.go",
+            "cmd/main.go",
+            "src/main/java/acme/security/Signer.java",
+            "src/main/java/acme/app/Controller.java",
+            "src/main/kotlin/acme/security/Signer.kt",
+            "src/main/kotlin/acme/app/Service.kt",
+            "src/Security/Signer.cs",
+            "src/App/Handler.cs",
+            "lib/auth/signer.rb",
+            "lib/app/controller.rb",
+            "Sources/AuthKit/Signer.swift",
+            "Sources/App/Runner.swift",
+            "src/main/scala/acme/security/Signer.scala",
+            "src/main/scala/acme/app/App.scala",
+        ]);
+
+        let go_deps = extract_file_deps(
+            "cmd/main.go",
+            "package main\nimport \"github.com/acme/repo/internal/auth\"\nfunc main() { auth.Verify() }\n",
+            &files,
+        );
+        assert!(
+            go_deps
+                .iter()
+                .any(|d| d.target == "internal/auth/guard.go" && d.resolved)
+        );
+
+        let java_deps = extract_file_deps(
+            "src/main/java/acme/app/Controller.java",
+            "package acme.app;\nimport acme.security.Signer;\npublic class Controller extends Signer { void go() { new Signer(); } }\n",
+            &files,
+        );
+        assert!(
+            java_deps
+                .iter()
+                .any(|d| d.target == "src/main/java/acme/security/Signer.java" && d.resolved)
+        );
+
+        let kt_deps = extract_file_deps(
+            "src/main/kotlin/acme/app/Service.kt",
+            "package acme.app\nimport acme.security.Signer\nclass Service : Signer() {}\n",
+            &files,
+        );
+        assert!(
+            kt_deps
+                .iter()
+                .any(|d| d.target == "src/main/kotlin/acme/security/Signer.kt" && d.resolved)
+        );
+
+        let cs_deps = extract_file_deps(
+            "src/App/Handler.cs",
+            "namespace App;\nusing Security;\npublic class Handler { void Run() { new Signer(); } }\n",
+            &files,
+        );
+        assert!(
+            cs_deps
+                .iter()
+                .any(|d| d.target == "src/Security/Signer.cs" && d.resolved)
+        );
+
+        let rb_deps = extract_file_deps(
+            "lib/app/controller.rb",
+            "require_relative '../auth/signer'\nclass Controller < Signer\nend\n",
+            &files,
+        );
+        assert!(
+            rb_deps
+                .iter()
+                .any(|d| d.target == "lib/auth/signer.rb" && d.resolved)
+        );
+
+        let swift_deps = extract_file_deps(
+            "Sources/App/Runner.swift",
+            "import AuthKit\nclass Runner { func go() { Signer.check() } }\n",
+            &files,
+        );
+        assert!(
+            swift_deps
+                .iter()
+                .any(|d| d.target == "Sources/AuthKit/Signer.swift" && d.resolved)
+        );
+
+        let scala_deps = extract_file_deps(
+            "src/main/scala/acme/app/App.scala",
+            "package acme.app\nimport acme.security.Signer\nclass App extends Signer {}\n",
+            &files,
+        );
+        assert!(
+            scala_deps
+                .iter()
+                .any(|d| d.target == "src/main/scala/acme/security/Signer.scala" && d.resolved)
+        );
     }
 }

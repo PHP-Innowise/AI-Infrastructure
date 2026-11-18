@@ -13,10 +13,10 @@ use super::{
         GQ_LINK_MENTIONS_SYMBOL, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO, GQ_LINK_SESSION_FOLLOWS,
         GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS, GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES,
         GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSION_FOLLOWS,
-        GQ_LIST_SESSION_TURN_SNAPSHOTS, GQ_LIST_SESSIONS, GQ_LIST_SYMBOL_EDGES, GQ_UPSERT_ATOM,
-        GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_SYMBOL, GQ_UPSERT_TURN_SNAPSHOT,
-        HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE, OMNIGRAPH_RELEASE_URL_LINUX_X86_64,
-        OMNIGRAPH_VERSION,
+        GQ_LIST_SESSION_TURN_SNAPSHOTS, GQ_LIST_SESSIONS, GQ_LIST_SYMBOL_EDGES, GQ_LIST_SYMBOLS,
+        GQ_UPSERT_ATOM, GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_SYMBOL,
+        GQ_UPSERT_TURN_SNAPSHOT, HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE,
+        OMNIGRAPH_RELEASE_URL_LINUX_X86_64, OMNIGRAPH_VERSION, RECENT_ATOMS_LIMIT,
     },
     session_branch_name,
     transfer::{
@@ -62,6 +62,10 @@ const VALID_RELATIONS: &[&str] = &[
 /// this many of the files it touches.
 const MAX_ATOM_SYMBOLS: usize = 12;
 const MAX_SYMBOL_FILES: usize = 8;
+const DEFAULT_GRAPH_ATOM_LIMIT: usize = 250;
+const MAX_GRAPH_ATOM_LIMIT: usize = 1000;
+const COMMIT_DIGEST_PREFETCH_COUNT: usize = 16;
+const COMMIT_DIGEST_CONCURRENCY: usize = 8;
 
 /// Operating mode for Harness Omnigraph integration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,7 +182,7 @@ pub struct OmnigraphManager {
     store: Option<SessionStore>,
     runtime: Mutex<RuntimeState>,
     process: Arc<StdMutex<ProcessHandle>>,
-    commit_cache: StdMutex<BTreeMap<String, CommitDigest>>,
+    commit_cache: Arc<StdMutex<BTreeMap<String, CommitDigest>>>,
 }
 
 impl OmnigraphManager {
@@ -193,7 +197,7 @@ impl OmnigraphManager {
                 last_error: None,
             }),
             process: Arc::new(StdMutex::new(ProcessHandle::default())),
-            commit_cache: StdMutex::new(BTreeMap::new()),
+            commit_cache: Arc::new(StdMutex::new(BTreeMap::new())),
         })
     }
 
@@ -923,7 +927,8 @@ impl OmnigraphManager {
         }
     }
 
-    /// Build full constellation graph + branch/commit DAG payload for `/api/omnigraph/graph`.
+    /// Build full constellation graph + branch/commit DAG payload for `/api/omnigraph/graph`
+    /// using default pagination (`limit = 250`, `offset = 0`).
     pub async fn graph_view_json(
         &self,
         project_id: &str,
@@ -933,105 +938,51 @@ impl OmnigraphManager {
         q: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<Value> {
+        self.graph_view_json_paginated(
+            project_id, branch, snapshot, kind, q, session_id, None, None, None,
+        )
+        .await
+    }
+
+    /// Build constellation graph + branch/commit DAG payload for `/api/omnigraph/graph`
+    /// with optional `limit` (`1..=1000`, default `250`) and `offset` / `cursor` pagination,
+    /// `SymbolRef` / `MentionsSymbol` exposure, and latency/truncation telemetry.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Mirrors the /api/omnigraph/graph query parameter contract."
+    )]
+    pub async fn graph_view_json_paginated(
+        &self,
+        project_id: &str,
+        branch: Option<&str>,
+        snapshot: Option<&str>,
+        kind: Option<&str>,
+        q: Option<&str>,
+        session_id: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<Value> {
+        let started = Instant::now();
         let cfg = self.config().await;
         let active_branch = clean_opt(branch).unwrap_or("main").to_string();
         let snapshot_commit = clean_opt(snapshot).map(str::to_string);
+        let effective_limit = limit
+            .unwrap_or(DEFAULT_GRAPH_ATOM_LIMIT)
+            .clamp(1, MAX_GRAPH_ATOM_LIMIT);
+        let parsed_cursor = parse_graph_cursor(cursor)?;
+        let effective_offset = offset.or(parsed_cursor).unwrap_or(0);
 
         let Ok(client) = self.client().await else {
             return Ok(empty_graph_view(
                 &cfg.graph_id,
                 &active_branch,
                 snapshot_commit,
+                effective_limit,
+                effective_offset,
+                started.elapsed().as_millis() as u64,
             ));
         };
-
-        let branch_list = match client.list_branches(true).await {
-            Ok(list) => list,
-            Err(_) => {
-                return Ok(empty_graph_view(
-                    &cfg.graph_id,
-                    &active_branch,
-                    snapshot_commit,
-                ));
-            }
-        };
-
-        let main_head = branch_list
-            .details
-            .as_ref()
-            .and_then(|details| details.iter().find(|d| d.name == "main"))
-            .map(|d| d.head.graph_commit_id.clone());
-
-        let branches_json: Vec<Value> = if let Some(details) = &branch_list.details {
-            details
-                .iter()
-                .map(|d| {
-                    let unmerged = d.name != "main"
-                        && main_head
-                            .as_deref()
-                            .is_some_and(|mh| mh != d.head.graph_commit_id);
-                    json!({
-                        "name": d.name,
-                        "head_commit": d.head.graph_commit_id,
-                        "head_commit_id": d.head.graph_commit_id,
-                        "from": d.from,
-                        "from_commit_id": d.from_commit_id,
-                        "created_at": d.created_at,
-                        "updated_at": d.updated_at,
-                        "is_main": d.name == "main",
-                        "unmerged": unmerged,
-                    })
-                })
-                .collect()
-        } else {
-            branch_list
-                .branches
-                .iter()
-                .map(|name| {
-                    json!({
-                        "name": name,
-                        "is_main": name == "main",
-                        "unmerged": name != "main",
-                    })
-                })
-                .collect()
-        };
-
-        let commits_resp = client
-            .list_commits(&CommitListQuery {
-                branch: Some(active_branch.clone()),
-                limit: Some(50),
-                page_token: None,
-            })
-            .await
-            .unwrap_or_default();
-
-        let mut commits_json = Vec::with_capacity(commits_resp.commits.len());
-        for (idx, c) in commits_resp.commits.iter().enumerate() {
-            let digest = if idx < 16 {
-                summarize_commit_cached(&client, &self.commit_cache, c).await
-            } else {
-                fallback_commit_digest(c)
-            };
-            commits_json.push(json!({
-                "graph_commit_id": c.graph_commit_id,
-                "commit_id": c.graph_commit_id,
-                "branch": c.graph_branch.as_deref().unwrap_or(&active_branch),
-                "graph_branch": c.graph_branch,
-                "parent_commit_id": c.parent_commit_id,
-                "merged_parent_commit_id": c.merged_parent_commit_id,
-                "actor_id": c.actor_id,
-                "authored_at": c.created_at,
-                "created_at": format_omnigraph_ts(c.created_at)
-                    .unwrap_or_else(|| c.created_at.to_string()),
-                "published": c.published,
-                "added_count": digest.added_count,
-                "updated_count": digest.updated_count,
-                "deleted_count": digest.deleted_count,
-                "atom_delta": digest.atom_delta,
-                "summary": digest.summary,
-            }));
-        }
 
         let target_branch = if snapshot_commit.is_some() {
             None
@@ -1039,16 +990,137 @@ impl OmnigraphManager {
             Some(active_branch.clone())
         };
         let params = json!({ "project_id": project_id });
+        let branch_ref = target_branch.as_deref();
+        let snap_ref = snapshot_commit.as_deref();
 
-        let atoms_res = run_stored_or_inline(
+        let commits_fut = fetch_commits_with_digests(&client, &self.commit_cache, &active_branch);
+        let atoms_fut = run_recent_atoms_query(
             &client,
-            "recent_atoms",
-            schema::QUERY_RECENT_ATOMS,
-            params.clone(),
+            project_id,
             target_branch.clone(),
             snapshot_commit.clone(),
-        )
-        .await?;
+        );
+        let sessions_fut = query_edges_safe(
+            &client,
+            GQ_LIST_SESSIONS,
+            "list_sessions",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let files_fut = query_edges_safe(
+            &client,
+            GQ_LIST_FILES,
+            "list_files",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let symbols_fut = query_edges_safe(
+            &client,
+            GQ_LIST_SYMBOLS,
+            "list_symbols",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let pub_fut = query_edges_safe(
+            &client,
+            GQ_LIST_PUBLISHED_EDGES,
+            "list_published_edges",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let con_fut = query_edges_safe(
+            &client,
+            GQ_LIST_CONSUMED_EDGES,
+            "list_consumed_edges",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let file_edges_fut = query_edges_safe(
+            &client,
+            GQ_LIST_FILE_EDGES,
+            "list_file_edges",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let rel_fut = query_edges_safe(
+            &client,
+            GQ_LIST_ATOM_RELATIONS,
+            "list_atom_relations",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let follow_fut = query_edges_safe(
+            &client,
+            GQ_LIST_SESSION_FOLLOWS,
+            "list_session_follows",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+        let symbol_edges_fut = query_edges_safe(
+            &client,
+            GQ_LIST_SYMBOL_EDGES,
+            "list_symbol_edges",
+            &params,
+            branch_ref,
+            snap_ref,
+        );
+
+        let (
+            branch_res,
+            (commits_resp, commit_digests),
+            atoms_res,
+            session_rows,
+            file_rows,
+            symbol_rows,
+            pub_edges,
+            con_edges,
+            file_edges,
+            rel_edges,
+            follow_edges,
+            symbol_edge_rows,
+        ) = tokio::join!(
+            client.list_branches(true),
+            commits_fut,
+            atoms_fut,
+            sessions_fut,
+            files_fut,
+            symbols_fut,
+            pub_fut,
+            con_fut,
+            file_edges_fut,
+            rel_fut,
+            follow_fut,
+            symbol_edges_fut,
+        );
+
+        let Ok(branch_list) = branch_res else {
+            return Ok(empty_graph_view(
+                &cfg.graph_id,
+                &active_branch,
+                snapshot_commit,
+                effective_limit,
+                effective_offset,
+                started.elapsed().as_millis() as u64,
+            ));
+        };
+        let atoms_res = atoms_res?;
+
+        let branches_json = build_branches_json(&branch_list);
+        let commits_json: Vec<Value> = commits_resp
+            .commits
+            .iter()
+            .zip(commit_digests.iter())
+            .map(|(c, digest)| commit_to_graph_json(c, &active_branch, digest))
+            .collect();
+
         let head_commit = atoms_res.graph_commit_id.clone().or_else(|| {
             branch_list
                 .details
@@ -1057,82 +1129,39 @@ impl OmnigraphManager {
                 .map(|d| d.head.graph_commit_id.clone())
         });
 
-        let sessions_res = client
-            .query(&QueryRequest {
-                query: GQ_LIST_SESSIONS.into(),
-                name: Some("list_sessions".into()),
-                params: Some(params.clone()),
-                branch: target_branch.clone(),
-                snapshot: snapshot_commit.clone(),
-                settings: None,
-            })
+        let (raw_atom_rows, backend_capped) = if atoms_res.rows.len() >= RECENT_ATOMS_LIMIT {
+            expand_capped_graph_atoms(
+                &client,
+                project_id,
+                &active_branch,
+                snapshot_commit.as_deref(),
+                atoms_res.rows,
+            )
             .await
-            .unwrap_or_default();
-
-        let files_res = client
-            .query(&QueryRequest {
-                query: GQ_LIST_FILES.into(),
-                name: Some("list_files".into()),
-                params: Some(params.clone()),
-                branch: target_branch.clone(),
-                snapshot: snapshot_commit.clone(),
-                settings: None,
-            })
-            .await
-            .unwrap_or_default();
-
-        let pub_edges = query_edges_safe(
-            &client,
-            GQ_LIST_PUBLISHED_EDGES,
-            "list_published_edges",
-            &params,
-            target_branch.as_deref(),
-            snapshot_commit.as_deref(),
-        )
-        .await;
-        let con_edges = query_edges_safe(
-            &client,
-            GQ_LIST_CONSUMED_EDGES,
-            "list_consumed_edges",
-            &params,
-            target_branch.as_deref(),
-            snapshot_commit.as_deref(),
-        )
-        .await;
-        let file_edges = query_edges_safe(
-            &client,
-            GQ_LIST_FILE_EDGES,
-            "list_file_edges",
-            &params,
-            target_branch.as_deref(),
-            snapshot_commit.as_deref(),
-        )
-        .await;
-        let rel_edges = query_edges_safe(
-            &client,
-            GQ_LIST_ATOM_RELATIONS,
-            "list_atom_relations",
-            &params,
-            target_branch.as_deref(),
-            snapshot_commit.as_deref(),
-        )
-        .await;
-        let follow_edges = query_edges_safe(
-            &client,
-            GQ_LIST_SESSION_FOLLOWS,
-            "list_session_follows",
-            &params,
-            target_branch.as_deref(),
-            snapshot_commit.as_deref(),
-        )
-        .await;
+        } else {
+            (atoms_res.rows, false)
+        };
 
         let mut files_by_atom: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for edge in &file_edges {
             if let (Some(src), Some(dst)) =
                 (str_field(edge, "source_id"), str_field(edge, "target_id"))
             {
-                files_by_atom.entry(src).or_default().push(dst);
+                let entry = files_by_atom.entry(src).or_default();
+                if !entry.contains(&dst) {
+                    entry.push(dst);
+                }
+            }
+        }
+        let mut symbols_by_atom_all: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for edge in &symbol_edge_rows {
+            if let (Some(src), Some(dst)) =
+                (str_field(edge, "source_id"), str_field(edge, "target_id"))
+            {
+                let entry = symbols_by_atom_all.entry(src).or_default();
+                if !entry.contains(&dst) {
+                    entry.push(dst);
+                }
             }
         }
 
@@ -1151,16 +1180,18 @@ impl OmnigraphManager {
             }
         }
 
-        let mut atoms = Vec::new();
-        let mut kept_atom_ids = BTreeSet::new();
-        for row in &atoms_res.rows {
+        let mut filtered_atoms = Vec::new();
+        for row in &raw_atom_rows {
             let mut atom = normalize_atom_row(row);
             let aid = str_field(&atom, "atom_id").unwrap_or_default();
-            if let Some(files) = files_by_atom.get(&aid) {
-                atom["files"] = json!(files);
-            } else {
-                atom["files"] = json!([]);
-            }
+            atom["files"] = files_by_atom
+                .get(&aid)
+                .map(|files| json!(files))
+                .unwrap_or_else(|| json!([]));
+            atom["symbols"] = symbols_by_atom_all
+                .get(&aid)
+                .map(|syms| json!(syms))
+                .unwrap_or_else(|| json!([]));
             if let Some(ref kf) = kind_filter
                 && atom["kind"]
                     .as_str()
@@ -1181,14 +1212,22 @@ impl OmnigraphManager {
             {
                 continue;
             }
-            if !aid.is_empty() {
-                kept_atom_ids.insert(aid);
-            }
-            atoms.push(atom);
+            filtered_atoms.push(atom);
         }
 
-        let sessions: Vec<Value> = sessions_res
-            .rows
+        let total_atoms = filtered_atoms.len();
+        let page_start = effective_offset.min(total_atoms);
+        let page_end = page_start.saturating_add(effective_limit).min(total_atoms);
+        let atoms = filtered_atoms[page_start..page_end].to_vec();
+        let kept_atom_ids: BTreeSet<String> = atoms
+            .iter()
+            .filter_map(|atom| str_field(atom, "atom_id"))
+            .collect();
+        let has_more = page_end < total_atoms || backend_capped;
+        let truncated = has_more || atoms.len() < total_atoms || backend_capped;
+        let next_cursor = has_more.then(|| page_end.to_string());
+
+        let sessions: Vec<Value> = session_rows
             .iter()
             .map(|row| {
                 let mut obj = normalize_session_row(row);
@@ -1209,103 +1248,49 @@ impl OmnigraphManager {
                 obj
             })
             .collect();
-        let files: Vec<Value> = files_res.rows.iter().map(normalize_file_row).collect();
+        let files: Vec<Value> = file_rows.iter().map(normalize_file_row).collect();
 
-        let mut edges = Vec::new();
-        for e in &pub_edges {
-            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
-                && (kept_atom_ids.is_empty() || kept_atom_ids.contains(&src))
-            {
-                edges.push(json!({
-                    "id": format!("pub:{src}->{dst}"),
-                    "kind": "published_by",
-                    "relation": "published_by",
-                    "source": src,
-                    "target": dst,
-                    "from": src,
-                    "to": dst,
-                    "label": e["role"].as_str().unwrap_or("published_by"),
-                    "published_at": e.get("published_at").cloned().unwrap_or(Value::Null),
-                }));
-            }
-        }
-        for e in &con_edges {
-            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
-                && (kept_atom_ids.is_empty() || kept_atom_ids.contains(&src))
-            {
-                edges.push(json!({
-                    "id": format!("con:{src}->{dst}"),
-                    "kind": "consumed_by",
-                    "relation": "consumed_by",
-                    "source": src,
-                    "target": dst,
-                    "from": src,
-                    "to": dst,
-                    "label": e["injection_mode"].as_str().unwrap_or("consumed_by"),
-                    "relevance": e.get("relevance").cloned().unwrap_or(Value::Null),
-                }));
-            }
-        }
-        for e in &file_edges {
-            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
-                && (kept_atom_ids.is_empty() || kept_atom_ids.contains(&src))
-            {
-                edges.push(json!({
-                    "id": format!("file:{src}->{dst}"),
-                    "kind": "touches_file",
-                    "relation": "touches_file",
-                    "source": src,
-                    "target": dst,
-                    "from": src,
-                    "to": dst,
-                    "label": e["access"].as_str().unwrap_or("touches_file"),
-                }));
-            }
-        }
-        for e in &rel_edges {
-            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
-                && (kept_atom_ids.is_empty()
-                    || kept_atom_ids.contains(&src)
-                    || kept_atom_ids.contains(&dst))
-            {
-                let rel = e["relation"].as_str().unwrap_or("relates_to");
-                edges.push(json!({
-                    "id": format!("rel:{src}:{rel}:{dst}"),
-                    "kind": "relates_to",
-                    "relation": rel,
-                    "source": src,
-                    "target": dst,
-                    "from": src,
-                    "to": dst,
-                    "label": rel,
-                    "note": e.get("note").cloned().unwrap_or(Value::Null),
-                    "confidence": e.get("confidence").cloned().unwrap_or(Value::Null),
-                }));
-            }
-        }
-        for e in &follow_edges {
-            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
-                && sid_filter.is_none_or(|sid| src == sid || dst == sid)
-            {
-                // Edges written before the relation was normalized carry a
-                // shared space's name.
-                let rel = e["relation"]
-                    .as_str()
-                    .filter(|rel| matches!(*rel, "broadcast" | "shared_branch" | "linked"))
-                    .unwrap_or("shared_branch");
-                edges.push(json!({
-                    "id": format!("follow:{src}->{dst}"),
-                    "kind": "session_follows",
-                    "relation": rel,
-                    "source": src,
-                    "target": dst,
-                    "from": src,
-                    "to": dst,
-                    "label": rel,
-                    "created_at": e.get("created_at").cloned().unwrap_or(Value::Null),
-                }));
-            }
-        }
+        let has_filters = kind_filter.is_some() || q_filter.is_some() || sid_filter.is_some();
+        let is_paginated_subset = page_start > 0 || has_more;
+        let (symbols, symbol_edges) = build_symbol_graph_entries(
+            project_id,
+            &symbol_rows,
+            &symbol_edge_rows,
+            &kept_atom_ids,
+            if has_filters || is_paginated_subset {
+                q_filter.as_deref()
+            } else {
+                None
+            },
+            !has_filters && !is_paginated_subset,
+            kind_filter.is_none() && sid_filter.is_none(),
+        );
+
+        let mut edges = build_graph_edges(
+            &pub_edges,
+            &con_edges,
+            &file_edges,
+            &rel_edges,
+            &follow_edges,
+            &kept_atom_ids,
+            sid_filter,
+        );
+        edges.extend(symbol_edges.iter().cloned());
+
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let telemetry = json!({
+            "elapsed_ms": elapsed_ms,
+            "atom_count": atoms.len(),
+            "total_atoms": total_atoms,
+            "session_count": sessions.len(),
+            "file_count": files.len(),
+            "symbol_count": symbols.len(),
+            "edge_count": edges.len(),
+            "symbol_edge_count": symbol_edges.len(),
+            "commit_count": commits_json.len(),
+            "truncated": truncated,
+            "has_more": has_more,
+        });
 
         Ok(json!({
             "connected": true,
@@ -1318,7 +1303,16 @@ impl OmnigraphManager {
             "sessions": sessions,
             "atoms": atoms,
             "files": files,
+            "symbols": symbols,
             "edges": edges,
+            "symbol_edges": symbol_edges,
+            "total_atoms": total_atoms,
+            "limit": effective_limit,
+            "offset": page_start,
+            "has_more": has_more,
+            "truncated": truncated,
+            "next_cursor": next_cursor,
+            "telemetry": telemetry,
         }))
     }
 
@@ -4273,14 +4267,20 @@ impl Domain for OmnigraphDomain {
                     self.manager.link_sessions_json(body, store).await?
                 }
                 "omnigraph.graph" => {
+                    let limit = parse_opt_usize(&query["limit"], "limit")?;
+                    let offset = parse_opt_usize(&query["offset"], "offset")?;
+                    let cursor = clean_opt(query["cursor"].as_str());
                     self.manager
-                        .graph_view_json(
+                        .graph_view_json_paginated(
                             project_id,
                             query["branch"].as_str(),
                             query["snapshot"].as_str(),
                             query["kind"].as_str(),
                             query["q"].as_str(),
                             query["session_id"].as_str(),
+                            limit,
+                            offset,
+                            cursor,
                         )
                         .await?
                 }
@@ -4409,7 +4409,14 @@ impl Domain for OmnigraphDomain {
     }
 }
 
-fn empty_graph_view(graph_id: &str, active_branch: &str, snapshot_commit: Option<String>) -> Value {
+fn empty_graph_view(
+    graph_id: &str,
+    active_branch: &str,
+    snapshot_commit: Option<String>,
+    limit: usize,
+    offset: usize,
+    elapsed_ms: u64,
+) -> Value {
     json!({
         "connected": false,
         "graph_id": graph_id,
@@ -4421,12 +4428,121 @@ fn empty_graph_view(graph_id: &str, active_branch: &str, snapshot_commit: Option
         "sessions": [],
         "atoms": [],
         "files": [],
+        "symbols": [],
         "edges": [],
+        "symbol_edges": [],
+        "total_atoms": 0,
+        "limit": limit,
+        "offset": offset,
+        "has_more": false,
+        "truncated": false,
+        "next_cursor": Value::Null,
+        "telemetry": {
+            "elapsed_ms": elapsed_ms,
+            "atom_count": 0,
+            "total_atoms": 0,
+            "session_count": 0,
+            "file_count": 0,
+            "symbol_count": 0,
+            "edge_count": 0,
+            "symbol_edge_count": 0,
+            "commit_count": 0,
+            "truncated": false,
+            "has_more": false,
+        },
     })
 }
 
 async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Value> {
-    let branches_resp = client.list_branches(true).await?;
+    let params = json!({ "project_id": project_id });
+    let commit_query = CommitListQuery {
+        branch: Some("main".into()),
+        limit: Some(100),
+        page_token: None,
+    };
+    let (
+        branches_res,
+        commits_res,
+        atoms_res,
+        sessions_res,
+        symbols_rows,
+        pub_edges,
+        con_edges,
+        file_edges,
+        rel_edges,
+        follow_edges,
+        symbol_edges,
+    ) = tokio::join!(
+        client.list_branches(true),
+        client.list_commits(&commit_query),
+        run_recent_atoms_query(client, project_id, Some("main".into()), None),
+        query_edges_safe(
+            client,
+            GQ_LIST_SESSIONS,
+            "list_sessions",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_SYMBOLS,
+            "list_symbols",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_PUBLISHED_EDGES,
+            "list_published_edges",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_CONSUMED_EDGES,
+            "list_consumed_edges",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_FILE_EDGES,
+            "list_file_edges",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_ATOM_RELATIONS,
+            "list_atom_relations",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_SESSION_FOLLOWS,
+            "list_session_follows",
+            &params,
+            Some("main"),
+            None,
+        ),
+        query_edges_safe(
+            client,
+            GQ_LIST_SYMBOL_EDGES,
+            "list_symbol_edges",
+            &params,
+            Some("main"),
+            None,
+        ),
+    );
+
+    let branches_resp = branches_res?;
     let branches_count = branches_resp.branches.len();
     let main_head = branches_resp
         .details
@@ -4443,96 +4559,23 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         })
         .unwrap_or_else(|| branches_count.saturating_sub(1));
 
-    let commits_count = client
-        .list_commits(&CommitListQuery {
-            branch: Some("main".into()),
-            limit: Some(100),
-            page_token: None,
-        })
-        .await
-        .map(|c| c.commits.len())
-        .unwrap_or(0);
-
-    let params = json!({ "project_id": project_id });
-    let atoms_count = run_stored_or_inline(
-        client,
-        "recent_atoms",
-        schema::QUERY_RECENT_ATOMS,
-        params.clone(),
-        Some("main".into()),
-        None,
-    )
-    .await
-    .map(|r| r.rows.len())
-    .unwrap_or(0);
-    let sessions_count = client
-        .query(&QueryRequest {
-            query: GQ_LIST_SESSIONS.into(),
-            name: Some("list_sessions".into()),
-            params: Some(params.clone()),
-            branch: Some("main".into()),
-            snapshot: None,
-            settings: None,
-        })
-        .await
-        .map(|r| r.rows.len())
-        .unwrap_or(0);
-    let pub_cnt = query_edges_safe(
-        client,
-        GQ_LIST_PUBLISHED_EDGES,
-        "list_published_edges",
-        &params,
-        Some("main"),
-        None,
-    )
-    .await
-    .len();
-    let con_cnt = query_edges_safe(
-        client,
-        GQ_LIST_CONSUMED_EDGES,
-        "list_consumed_edges",
-        &params,
-        Some("main"),
-        None,
-    )
-    .await
-    .len();
-    let file_cnt = query_edges_safe(
-        client,
-        GQ_LIST_FILE_EDGES,
-        "list_file_edges",
-        &params,
-        Some("main"),
-        None,
-    )
-    .await
-    .len();
-    let rel_cnt = query_edges_safe(
-        client,
-        GQ_LIST_ATOM_RELATIONS,
-        "list_atom_relations",
-        &params,
-        Some("main"),
-        None,
-    )
-    .await
-    .len();
-    let follow_cnt = query_edges_safe(
-        client,
-        GQ_LIST_SESSION_FOLLOWS,
-        "list_session_follows",
-        &params,
-        Some("main"),
-        None,
-    )
-    .await
-    .len();
+    let commits_count = commits_res.map(|c| c.commits.len()).unwrap_or(0);
+    let atoms_count = atoms_res.map(|r| r.rows.len()).unwrap_or(0);
+    let sessions_count = sessions_res.len();
+    let symbols_count = symbols_rows.len();
+    let edges_count = pub_edges.len()
+        + con_edges.len()
+        + file_edges.len()
+        + rel_edges.len()
+        + follow_edges.len()
+        + symbol_edges.len();
 
     Ok(json!({
         "branches": branches_count,
         "atoms": atoms_count,
         "sessions": sessions_count,
-        "edges": pub_cnt + con_cnt + file_cnt + rel_cnt + follow_cnt,
+        "symbols": symbols_count,
+        "edges": edges_count,
         "commits": commits_count,
         "unmerged_branches": unmerged_branches,
     }))
@@ -5300,7 +5343,7 @@ async fn collect_branch_atom_ids(
             ids.insert(aid);
         }
     }
-    if rows.len() >= 100
+    if (rows.len() == 100 || rows.len() >= RECENT_ATOMS_LIMIT)
         && let Ok(ndjson) = client
             .export_branch(Some(branch), &["ContextAtom"], None)
             .await
@@ -5326,8 +5369,8 @@ async fn collect_branch_atom_rows(
 ) -> Result<Vec<Value>> {
     let mut rows = BTreeMap::new();
     let recent = fetch_branch_atoms(client, project_id, branch).await?;
-    // `recent_atoms` stops at 100 rows; past that the export has them all.
-    let capped = recent.len() >= 100;
+    // `recent_atoms` stops at 100 on legacy clusters or `RECENT_ATOMS_LIMIT`; past that the export has them all.
+    let capped = recent.len() == 100 || recent.len() >= RECENT_ATOMS_LIMIT;
     for mut row in recent {
         if row["project_id"].as_str().is_none() {
             // The query is scoped to the project.
@@ -5393,7 +5436,7 @@ async fn atoms_on_branch(
     }
     let mut whole = false;
     if let Ok(rows) = fetch_branch_atoms(client, project_id, branch).await {
-        whole = rows.len() < 100 && !project_id.is_empty();
+        whole = rows.len() != 100 && rows.len() < RECENT_ATOMS_LIMIT && !project_id.is_empty();
         for row in rows {
             if let Some(atom_id) = str_field(&row, "atom_id").filter(|id| ids.contains(id)) {
                 found.entry(atom_id).or_insert(row);
@@ -5765,10 +5808,12 @@ fn atom_matches_query(atom: &Value, q_lower: &str) -> bool {
             return true;
         }
     }
-    if let Some(tags) = atom["tags"].as_array() {
-        for tag in tags.iter().filter_map(Value::as_str) {
-            if tag.to_ascii_lowercase().contains(q_lower) {
-                return true;
+    for array_key in ["tags", "files", "symbols"] {
+        if let Some(items) = atom[array_key].as_array() {
+            for item in items.iter().filter_map(Value::as_str) {
+                if item.to_ascii_lowercase().contains(q_lower) {
+                    return true;
+                }
             }
         }
     }
@@ -6033,6 +6078,560 @@ fn build_commit_digest(c: &CommitOutput, changes: &[super::client::EntityChange]
         atom_delta,
         summary,
     }
+}
+
+fn parse_opt_usize(v: &Value, label: &str) -> Result<Option<usize>> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Number(n) => n
+            .as_u64()
+            .and_then(|val| usize::try_from(val).ok())
+            .map(Some)
+            .ok_or_else(|| HarnessError::invalid(format!("Invalid `{label}` parameter."))),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                trimmed
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|_| HarnessError::invalid(format!("Invalid `{label}` parameter.")))
+            }
+        }
+        _ => Err(HarnessError::invalid(format!(
+            "Invalid `{label}` parameter."
+        ))),
+    }
+}
+
+fn parse_graph_cursor(cursor: Option<&str>) -> Result<Option<usize>> {
+    let Some(raw) = clean_opt(cursor) else {
+        return Ok(None);
+    };
+    let numeric = raw.strip_prefix("offset:").unwrap_or(raw).trim();
+    numeric
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|_| HarnessError::invalid("Invalid `cursor` parameter."))
+}
+
+async fn run_recent_atoms_query(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: Option<String>,
+    snapshot: Option<String>,
+) -> Result<super::client::QueryResponse> {
+    let params = json!({ "project_id": project_id });
+    match client
+        .query(&QueryRequest {
+            query: schema::QUERY_RECENT_ATOMS.into(),
+            name: Some("recent_atoms".into()),
+            params: Some(params.clone()),
+            branch: branch.clone(),
+            snapshot: snapshot.clone(),
+            settings: None,
+        })
+        .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(err) if matches!(err.status, 401 | 403) => client
+            .stored_query(
+                "recent_atoms",
+                &StoredQueryRequest {
+                    params: Some(params),
+                    branch,
+                    snapshot,
+                    expect_mutation: Some(false),
+                },
+            )
+            .await
+            .map_err(Into::into),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn fetch_commits_with_digests(
+    client: &OmnigraphClient,
+    cache: &Arc<StdMutex<BTreeMap<String, CommitDigest>>>,
+    active_branch: &str,
+) -> (super::client::CommitListResponse, Vec<CommitDigest>) {
+    let commits_resp = client
+        .list_commits(&CommitListQuery {
+            branch: Some(active_branch.to_string()),
+            limit: Some(50),
+            page_token: None,
+        })
+        .await
+        .unwrap_or_default();
+    let digests = summarize_commits_concurrent(client, cache, &commits_resp.commits).await;
+    (commits_resp, digests)
+}
+
+async fn summarize_commits_concurrent(
+    client: &OmnigraphClient,
+    cache: &Arc<StdMutex<BTreeMap<String, CommitDigest>>>,
+    commits: &[CommitOutput],
+) -> Vec<CommitDigest> {
+    let mut digests: Vec<Option<CommitDigest>> = vec![None; commits.len()];
+    let mut to_fetch = Vec::new();
+    for (idx, c) in commits.iter().enumerate() {
+        if idx >= COMMIT_DIGEST_PREFETCH_COUNT {
+            digests[idx] = Some(fallback_commit_digest(c));
+            continue;
+        }
+        if let Ok(guard) = cache.lock()
+            && let Some(hit) = guard.get(&c.graph_commit_id)
+        {
+            digests[idx] = Some(hit.clone());
+            continue;
+        }
+        to_fetch.push((idx, c.clone()));
+    }
+
+    if !to_fetch.is_empty() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(COMMIT_DIGEST_CONCURRENCY));
+        let mut set = tokio::task::JoinSet::new();
+        for (idx, c) in to_fetch {
+            let client = client.clone();
+            let cache = Arc::clone(cache);
+            let permit_sem = Arc::clone(&sem);
+            set.spawn(async move {
+                let _permit = permit_sem.acquire_owned().await.ok();
+                let digest = summarize_commit_cached(&client, &cache, &c).await;
+                (idx, digest)
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok((idx, digest)) = res {
+                digests[idx] = Some(digest);
+            }
+        }
+    }
+
+    commits
+        .iter()
+        .zip(digests)
+        .map(|(c, d)| d.unwrap_or_else(|| fallback_commit_digest(c)))
+        .collect()
+}
+
+fn build_branches_json(branch_list: &super::client::BranchListResponse) -> Vec<Value> {
+    let main_head = branch_list
+        .details
+        .as_ref()
+        .and_then(|details| details.iter().find(|d| d.name == "main"))
+        .map(|d| d.head.graph_commit_id.clone());
+
+    if let Some(details) = &branch_list.details {
+        details
+            .iter()
+            .map(|d| {
+                let unmerged = d.name != "main"
+                    && main_head
+                        .as_deref()
+                        .is_some_and(|mh| mh != d.head.graph_commit_id);
+                json!({
+                    "name": d.name,
+                    "head_commit": d.head.graph_commit_id,
+                    "head_commit_id": d.head.graph_commit_id,
+                    "from": d.from,
+                    "from_commit_id": d.from_commit_id,
+                    "created_at": d.created_at,
+                    "updated_at": d.updated_at,
+                    "is_main": d.name == "main",
+                    "unmerged": unmerged,
+                })
+            })
+            .collect()
+    } else {
+        branch_list
+            .branches
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "is_main": name == "main",
+                    "unmerged": name != "main",
+                })
+            })
+            .collect()
+    }
+}
+
+fn commit_to_graph_json(c: &CommitOutput, active_branch: &str, digest: &CommitDigest) -> Value {
+    json!({
+        "graph_commit_id": c.graph_commit_id,
+        "commit_id": c.graph_commit_id,
+        "branch": c.graph_branch.as_deref().unwrap_or(active_branch),
+        "graph_branch": c.graph_branch,
+        "parent_commit_id": c.parent_commit_id,
+        "merged_parent_commit_id": c.merged_parent_commit_id,
+        "actor_id": c.actor_id,
+        "authored_at": c.created_at,
+        "created_at": format_omnigraph_ts(c.created_at)
+            .unwrap_or_else(|| c.created_at.to_string()),
+        "published": c.published,
+        "added_count": digest.added_count,
+        "updated_count": digest.updated_count,
+        "deleted_count": digest.deleted_count,
+        "atom_delta": digest.atom_delta,
+        "summary": digest.summary,
+    })
+}
+
+async fn expand_capped_graph_atoms(
+    client: &OmnigraphClient,
+    project_id: &str,
+    active_branch: &str,
+    snapshot_commit: Option<&str>,
+    initial_rows: Vec<Value>,
+) -> (Vec<Value>, bool) {
+    if snapshot_commit.is_some() {
+        return (initial_rows, true);
+    }
+    let Ok(ndjson) = client
+        .export_branch(Some(active_branch), &["ContextAtom"], None)
+        .await
+    else {
+        return (initial_rows, true);
+    };
+    let Ok(parsed) = parse_ndjson_records(&ndjson) else {
+        return (initial_rows, true);
+    };
+    let mut by_id: BTreeMap<String, Value> = BTreeMap::new();
+    for row in initial_rows {
+        if let Some(aid) = str_field(&row, "atom_id").or_else(|| str_field(&row, "id")) {
+            by_id.insert(aid, row);
+        }
+    }
+    for (aid, row) in parsed.atoms {
+        let proj_ok =
+            project_id.is_empty() || str_field(&row, "project_id").is_none_or(|p| p == project_id);
+        if proj_ok {
+            by_id.entry(aid).or_insert(row);
+        }
+    }
+    let mut combined: Vec<Value> = by_id.into_values().collect();
+    sort_atoms_recent_order(&mut combined);
+    (combined, false)
+}
+
+fn sort_atoms_recent_order(atoms: &mut [Value]) {
+    atoms.sort_by(|a, b| {
+        let pa = a["pin_priority"].as_i64().unwrap_or(0);
+        let pb = b["pin_priority"].as_i64().unwrap_or(0);
+        pb.cmp(&pa)
+            .then_with(|| {
+                atom_timestamp_sort_key(&b["updated_at"])
+                    .cmp(&atom_timestamp_sort_key(&a["updated_at"]))
+            })
+            .then_with(|| {
+                let ia = str_field(a, "atom_id")
+                    .or_else(|| str_field(a, "id"))
+                    .unwrap_or_default();
+                let ib = str_field(b, "atom_id")
+                    .or_else(|| str_field(b, "id"))
+                    .unwrap_or_default();
+                ia.cmp(&ib)
+            })
+    });
+}
+
+fn atom_timestamp_sort_key(v: &Value) -> (i64, String) {
+    if let Some(n) = v.as_i64() {
+        let ms = if n >= 1_000_000_000_000_000 {
+            n / 1_000
+        } else if n >= 1_000_000_000_000 {
+            n
+        } else {
+            n.saturating_mul(1_000)
+        };
+        return (ms, String::new());
+    }
+    let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        return (0, String::new());
+    };
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return (dt.timestamp_millis(), s.to_string());
+    }
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+        return (ndt.and_utc().timestamp_millis(), s.to_string());
+    }
+    (0, s.to_string())
+}
+
+fn symbol_owner_and_label(fqn: &str, file_path: &str, name: &str) -> (Option<String>, String) {
+    let scoped = if !file_path.is_empty() {
+        fqn.strip_prefix(&format!("{file_path}::"))
+    } else {
+        None
+    };
+    if let Some(rest) = scoped {
+        let owner = (!name.is_empty())
+            .then(|| rest.strip_suffix(&format!("::{name}")))
+            .flatten()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        return (owner, rest.to_string());
+    }
+    let label = if !name.is_empty() {
+        name.to_string()
+    } else {
+        fqn.to_string()
+    };
+    (None, label)
+}
+
+fn symbol_matches_query(symbol: &Value, q_lower: &str) -> bool {
+    for key in ["fqn", "name", "label", "owner", "file_path", "kind"] {
+        if symbol[key]
+            .as_str()
+            .is_some_and(|s| s.to_ascii_lowercase().contains(q_lower))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn build_symbol_graph_entries(
+    project_id: &str,
+    symbol_rows: &[Value],
+    symbol_edge_rows: &[Value],
+    kept_atom_ids: &BTreeSet<String>,
+    q_filter: Option<&str>,
+    include_unlinked_symbols: bool,
+    allow_symbol_q_match: bool,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut symbol_map: BTreeMap<String, Value> = BTreeMap::new();
+    let upsert_symbol_entry = |map: &mut BTreeMap<String, Value>,
+                               fqn: &str,
+                               file_path: String,
+                               kind: String,
+                               name: String,
+                               proj: String| {
+        let (owner, label) = symbol_owner_and_label(fqn, &file_path, &name);
+        map.entry(fqn.to_string())
+            .and_modify(|existing| {
+                if str_field(existing, "file_path").is_none() && !file_path.is_empty() {
+                    existing["file_path"] = json!(file_path);
+                    existing["path"] = json!(file_path);
+                }
+                if str_field(existing, "name").is_none() && !name.is_empty() {
+                    existing["name"] = json!(name);
+                }
+                if str_field(existing, "kind").is_none_or(|k| k == "symbol") && !kind.is_empty() {
+                    existing["kind"] = json!(kind);
+                }
+            })
+            .or_insert_with(|| {
+                json!({
+                    "id": fqn,
+                    "fqn": fqn,
+                    "project_id": proj,
+                    "file_path": file_path,
+                    "path": file_path,
+                    "kind": if kind.is_empty() { "symbol".to_string() } else { kind },
+                    "name": name,
+                    "owner": owner,
+                    "label": label,
+                })
+            });
+    };
+
+    for row in symbol_rows {
+        let Some(fqn) = str_field(row, "fqn").or_else(|| str_field(row, "id")) else {
+            continue;
+        };
+        let file_path = str_field(row, "file_path")
+            .or_else(|| str_field(row, "path"))
+            .unwrap_or_default();
+        let kind = str_field(row, "kind").unwrap_or_else(|| "symbol".to_string());
+        let name = str_field(row, "name").unwrap_or_default();
+        let proj = str_field(row, "project_id").unwrap_or_else(|| project_id.to_string());
+        upsert_symbol_entry(&mut symbol_map, &fqn, file_path, kind, name, proj);
+    }
+
+    let mut symbol_edges = Vec::new();
+    let mut seen_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut mentions_by_symbol: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in symbol_edge_rows {
+        let (Some(src), Some(fqn)) = (str_field(e, "source_id"), str_field(e, "target_id")) else {
+            continue;
+        };
+        let file_path = str_field(e, "file_path")
+            .or_else(|| str_field(e, "path"))
+            .unwrap_or_default();
+        let kind = str_field(e, "kind").unwrap_or_else(|| "symbol".to_string());
+        let name = str_field(e, "name").unwrap_or_default();
+        upsert_symbol_entry(
+            &mut symbol_map,
+            &fqn,
+            file_path,
+            kind,
+            name,
+            project_id.to_string(),
+        );
+
+        if !kept_atom_ids.contains(&src) || !seen_edges.insert((src.clone(), fqn.clone())) {
+            continue;
+        }
+        mentions_by_symbol
+            .entry(fqn.clone())
+            .or_default()
+            .push(src.clone());
+
+        let sym = symbol_map.get(&fqn);
+        let resolved_file = sym
+            .and_then(|s| str_field(s, "file_path"))
+            .unwrap_or_default();
+        let resolved_label = sym
+            .and_then(|s| str_field(s, "label"))
+            .unwrap_or_else(|| fqn.clone());
+        let resolved_kind = sym
+            .and_then(|s| str_field(s, "kind"))
+            .unwrap_or_else(|| "symbol".to_string());
+        let role = str_field(e, "role").unwrap_or_else(|| "named".to_string());
+        symbol_edges.push(json!({
+            "id": format!("sym:{src}->{fqn}"),
+            "kind": "mentions_symbol",
+            "type": "MentionsSymbol",
+            "relation": "mentions_symbol",
+            "source": src,
+            "target": fqn,
+            "from": src,
+            "to": fqn,
+            "atom_id": src,
+            "fqn": fqn,
+            "role": role,
+            "label": role,
+            "file_path": resolved_file,
+            "symbol_name": resolved_label,
+            "symbol_kind": resolved_kind,
+        }));
+    }
+
+    let mut symbols = Vec::new();
+    for (fqn, mut sym) in symbol_map {
+        let atom_ids = mentions_by_symbol.remove(&fqn).unwrap_or_default();
+        let mention_count = atom_ids.len();
+        let q_match =
+            allow_symbol_q_match && q_filter.is_some_and(|qf| symbol_matches_query(&sym, qf));
+        if include_unlinked_symbols || mention_count > 0 || q_match {
+            sym["mention_count"] = json!(mention_count);
+            sym["atom_ids"] = json!(atom_ids);
+            symbols.push(sym);
+        }
+    }
+
+    (symbols, symbol_edges)
+}
+
+fn build_graph_edges(
+    pub_edges: &[Value],
+    con_edges: &[Value],
+    file_edges: &[Value],
+    rel_edges: &[Value],
+    follow_edges: &[Value],
+    kept_atom_ids: &BTreeSet<String>,
+    sid_filter: Option<&str>,
+) -> Vec<Value> {
+    let mut edges = Vec::new();
+    for e in pub_edges {
+        if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+            && kept_atom_ids.contains(&src)
+        {
+            edges.push(json!({
+                "id": format!("pub:{src}->{dst}"),
+                "kind": "published_by",
+                "relation": "published_by",
+                "source": src,
+                "target": dst,
+                "from": src,
+                "to": dst,
+                "label": e["role"].as_str().unwrap_or("published_by"),
+                "published_at": e.get("published_at").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    for e in con_edges {
+        if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+            && kept_atom_ids.contains(&src)
+        {
+            edges.push(json!({
+                "id": format!("con:{src}->{dst}"),
+                "kind": "consumed_by",
+                "relation": "consumed_by",
+                "source": src,
+                "target": dst,
+                "from": src,
+                "to": dst,
+                "label": e["injection_mode"].as_str().unwrap_or("consumed_by"),
+                "relevance": e.get("relevance").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    for e in file_edges {
+        if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+            && kept_atom_ids.contains(&src)
+        {
+            edges.push(json!({
+                "id": format!("file:{src}->{dst}"),
+                "kind": "touches_file",
+                "relation": "touches_file",
+                "source": src,
+                "target": dst,
+                "from": src,
+                "to": dst,
+                "label": e["access"].as_str().unwrap_or("touches_file"),
+            }));
+        }
+    }
+    for e in rel_edges {
+        if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+            && (kept_atom_ids.contains(&src) || kept_atom_ids.contains(&dst))
+        {
+            let rel = e["relation"].as_str().unwrap_or("relates_to");
+            edges.push(json!({
+                "id": format!("rel:{src}:{rel}:{dst}"),
+                "kind": "relates_to",
+                "relation": rel,
+                "source": src,
+                "target": dst,
+                "from": src,
+                "to": dst,
+                "label": rel,
+                "note": e.get("note").cloned().unwrap_or(Value::Null),
+                "confidence": e.get("confidence").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    for e in follow_edges {
+        if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+            && sid_filter.is_none_or(|sid| src == sid || dst == sid)
+        {
+            // Edges written before the relation was normalized carry a
+            // shared space's name.
+            let rel = e["relation"]
+                .as_str()
+                .filter(|rel| matches!(*rel, "broadcast" | "shared_branch" | "linked"))
+                .unwrap_or("shared_branch");
+            edges.push(json!({
+                "id": format!("follow:{src}->{dst}"),
+                "kind": "session_follows",
+                "relation": rel,
+                "source": src,
+                "target": dst,
+                "from": src,
+                "to": dst,
+                "label": rel,
+                "created_at": e.get("created_at").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    edges
 }
 
 async fn summarize_commit_cached(

@@ -17,6 +17,8 @@ const ATOM_W: f64 = 240.0;
 const ATOM_H: f64 = 96.0;
 const FILE_W: f64 = 208.0;
 const FILE_H: f64 = 58.0;
+const SYMBOL_W: f64 = 208.0;
+const SYMBOL_H: f64 = 64.0;
 
 const MARGIN_X: f64 = 48.0;
 const MARGIN_Y: f64 = 58.0;
@@ -37,6 +39,13 @@ const NOMINAL_VIEWPORT_H: f64 = 580.0;
 const DAG_ROW_H: f64 = 56.0;
 const DAG_LANE_W: f64 = 24.0;
 const DAG_RAIL_PAD_X: f64 = 20.0;
+
+#[allow(dead_code)]
+pub const LOD_LABEL_MIN_SCALE: f64 = 0.95;
+
+pub fn lod(scale: f64) -> &'static str {
+    crate::graph_viewport::lod_with(scale, crate::graph_viewport::OMNIGRAPH_LOD)
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +94,7 @@ enum NodeKindGroup {
     Session,
     Atom,
     File,
+    Symbol,
 }
 
 impl NodeKindGroup {
@@ -93,6 +103,7 @@ impl NodeKindGroup {
             Self::Session => "session",
             Self::Atom => "atom",
             Self::File => "file",
+            Self::Symbol => "symbol",
         }
     }
 
@@ -101,6 +112,7 @@ impl NodeKindGroup {
             Self::Session => (SESSION_W, SESSION_H),
             Self::Atom => (ATOM_W, ATOM_H),
             Self::File => (FILE_W, FILE_H),
+            Self::Symbol => (SYMBOL_W, SYMBOL_H),
         }
     }
 }
@@ -161,6 +173,8 @@ const SESSION_SVG_BODY: &str =
     "<rect x=\"1.8\" y=\"2.5\" width=\"12.4\" height=\"11\" rx=\"2.2\"/><path d=\"M4.8 6.2 L7.3 8.1 L4.8 10 M8.4 10 H11.2\"/>";
 const FILE_SVG_BODY: &str =
     "<path d=\"M3.5 1.8 H9.5 L12.5 4.8 V14.2 H3.5 Z\"/><path d=\"M9.5 1.8 V4.8 H12.5 M5.5 8 H10.5 M5.5 10.8 H9\"/>";
+const SYMBOL_SVG_BODY: &str =
+    "<path d=\"M5.5 4 L2.5 8 L5.5 12 M10.5 4 L13.5 8 L10.5 12 M9.1 3 L6.9 13\"/>";
 
 struct EdgeVisualSpec {
     key: &'static str,
@@ -256,6 +270,10 @@ struct CanvasNode {
     session_id: String,
     status: String,
     provider: String,
+    file_path: String,
+    symbol_fqn: String,
+    symbol_kind: String,
+    symbols: Vec<String>,
     confidence: Option<u8>,
     pinned: bool,
     pin_priority: i64,
@@ -290,6 +308,7 @@ pub fn render_constellation(
     // Resolve edge endpoints onto canonical node IDs and compute touch counts.
     let mut resolved_edges = Vec::with_capacity(edges.len());
     let mut touch_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut atom_symbols_from_edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for mut edge in edges.drain(..) {
         if let Some(canon_from) = aliases.get(&edge.from) {
             edge.from = canon_from.clone();
@@ -298,11 +317,30 @@ pub fn render_constellation(
             edge.to = canon_to.clone();
         }
         *touch_counts.entry(edge.to.clone()).or_default() += 1;
+        if edge.relation == "mentions_symbol" {
+            let list = atom_symbols_from_edges
+                .entry(edge.from.clone())
+                .or_default();
+            if !list.contains(&edge.to) {
+                list.push(edge.to.clone());
+            }
+        }
         resolved_edges.push(edge);
     }
     for node in &mut nodes {
-        if node.group == NodeKindGroup::File && node.touch_count == 0 {
+        if matches!(node.group, NodeKindGroup::File | NodeKindGroup::Symbol)
+            && node.touch_count == 0
+        {
             node.touch_count = touch_counts.get(&node.id).copied().unwrap_or(0);
+        }
+        if node.group == NodeKindGroup::Atom {
+            if let Some(edge_syms) = atom_symbols_from_edges.get(&node.id) {
+                for sym in edge_syms {
+                    if !node.symbols.contains(sym) {
+                        node.symbols.push(sym.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -431,8 +469,9 @@ pub fn render_constellation(
         ));
     }
 
+    let plane_lod = lod(vp.scale);
     let mut html = format!(
-        "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{:.0}px;height:{:.0}px\" data-node-count=\"{}\" data-edge-count=\"{}\">",
+        "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{:.0}px;height:{:.0}px\" data-lod=\"{plane_lod}\" data-node-count=\"{}\" data-edge-count=\"{}\">",
         vp.pan_x,
         vp.pan_y,
         vp.scale,
@@ -442,34 +481,18 @@ pub fn render_constellation(
         routed.len()
     );
 
-    // SVG plane (orbital guides, arrow markers, gradient flows, Bezier paths, mid-edge labels)
+    // SVG plane (orbital guides, arrow markers, shared gradient flows, Bezier paths, mid-edge labels)
     html.push_str(&format!(
         "<svg class=\"omni-svg\" width=\"{:.0}\" height=\"{:.0}\" viewBox=\"0 0 {:.0} {:.0}\" aria-hidden=\"true\"><defs>",
         width, height, width, height
     ));
     html.push_str(&render_edge_marker_defs());
-    for (idx, (edge, r)) in routed.iter().enumerate() {
-        let subkind_attr = if edge.subkind.is_empty() {
-            ""
-        } else {
-            edge.subkind.as_str()
-        };
-        html.push_str(&format!(
-            "<linearGradient id=\"omni-flow-{idx}\" class=\"omni-flow omni-flow-{}\" data-rel=\"{}\" data-subkind=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"><stop offset=\"0\" class=\"omni-flow-from\"/><stop offset=\"0.5\" class=\"omni-flow-mid\"/><stop offset=\"1\" class=\"omni-flow-to\"/></linearGradient>",
-            escape_attr_token(&edge.arrow_key),
-            escape_attr_token(&edge.relation),
-            escape_attr_token(subkind_attr),
-            r.p0.0,
-            r.p0.1,
-            r.p3.0,
-            r.p3.1,
-        ));
-    }
+    html.push_str(&render_edge_gradient_defs());
     html.push_str("</defs>");
 
     html.push_str(&render_orbital_guides(&placed_nodes, width, height));
 
-    for (idx, (edge, r)) in routed.iter().enumerate() {
+    for (edge, r) in &routed {
         let spec = edge_spec(&edge.arrow_key);
         let dash_attr = spec
             .dash_array
@@ -480,11 +503,10 @@ pub fn render_constellation(
         } else {
             edge.subkind.as_str()
         };
+        let arrow_key = escape_attr_token(&edge.arrow_key);
         html.push_str(&format!(
-            "<path class=\"omni-edge omni-edge-{}\" d=\"{}\" stroke=\"url(#omni-flow-{idx})\" marker-end=\"url(#omni-arrow-{})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"{dash_attr}/>",
-            escape_attr_token(&edge.arrow_key),
+            "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"{dash_attr}><title>{} {} {}</title></path>",
             r.path_d,
-            escape_attr_token(&edge.arrow_key),
             escape_attr_token(&edge.relation),
             escape_attr_token(subkind_attr),
             esc(&edge.from),
@@ -492,23 +514,21 @@ pub fn render_constellation(
             bool_str(r.selected),
             bool_str(r.lit),
             bool_str(r.dimmed),
+            esc(&edge.from),
+            esc(&edge.label),
+            esc(&edge.to),
         ));
         html.push_str(&format!(
-            "<circle class=\"omni-edge-origin\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" data-rel=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"/>",
+            "<circle class=\"omni-edge-origin\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" data-rel=\"{arrow_key}\" data-lit=\"{}\" data-dimmed=\"{}\"/>",
             r.p0.0,
             r.p0.1,
-            escape_attr_token(&edge.arrow_key),
             bool_str(r.lit),
             bool_str(r.dimmed),
         ));
     }
 
-    // Mid-edge pill labels when zoomed in or connected to selected/highlighted node.
-    let zoomed_in = vp.scale >= 0.95;
+    // Mid-edge pill labels: always emitted so CSS `[data-lod]` toggles visibility on zoom without re-render.
     for (edge, r) in &routed {
-        if !(zoomed_in || r.selected || r.lit) {
-            continue;
-        }
         let pill_w = (edge.label.chars().count() as f64 * 6.2 + 16.0).max(52.0);
         html.push_str(&format!(
             "<g class=\"omni-edge-label\" data-rel=\"{}\" data-subkind=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"18\" rx=\"9\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
@@ -1698,6 +1718,10 @@ fn extract_graph_items(
                 session_id: id,
                 status,
                 provider,
+                file_path: String::new(),
+                symbol_fqn: String::new(),
+                symbol_kind: String::new(),
+                symbols: Vec::new(),
                 confidence: None,
                 pinned: false,
                 pin_priority: 0,
@@ -1735,6 +1759,8 @@ fn extract_graph_items(
             );
             let actor = str_field(item, &["actor", "actor_id"]);
             let tags = string_list(item, &["tags"]);
+            let files = string_list(item, &["files"]);
+            let symbols = string_list(item, &["symbols"]);
             let confidence = f64_field(item, &["confidence"]).map(|c| {
                 let pct = if (0.0..=1.0).contains(&c) {
                     c * 100.0
@@ -1746,8 +1772,10 @@ fn extract_graph_items(
             let pin_priority = i64_field(item, &["pin_priority"]).unwrap_or(0);
             let pinned = bool_field(item, &["pinned"]) || pin_priority > 0;
             let blob = format!(
-                "{id} {kind} {title} {summary} {branch} {session_id} {actor} {}",
-                tags.join(" ")
+                "{id} {kind} {title} {summary} {branch} {session_id} {actor} {} {} {}",
+                tags.join(" "),
+                files.join(" "),
+                symbols.join(" ")
             )
             .to_ascii_lowercase();
             let (w, h) = NodeKindGroup::Atom.size();
@@ -1762,6 +1790,10 @@ fn extract_graph_items(
                 session_id,
                 status: String::new(),
                 provider: String::new(),
+                file_path: String::new(),
+                symbol_fqn: String::new(),
+                symbol_kind: String::new(),
+                symbols,
                 confidence,
                 pinned,
                 pin_priority,
@@ -1811,6 +1843,10 @@ fn extract_graph_items(
                 session_id: String::new(),
                 status: String::new(),
                 provider: lang,
+                file_path: path,
+                symbol_fqn: String::new(),
+                symbol_kind: String::new(),
+                symbols: Vec::new(),
                 confidence: None,
                 pinned: false,
                 pin_priority: 0,
@@ -1825,22 +1861,79 @@ fn extract_graph_items(
         }
     }
 
-    let mut edges = Vec::new();
-    let mut seen_edges: BTreeSet<(String, String, String, String)> = BTreeSet::new();
-    if let Some(arr) = graph.get("edges").and_then(Value::as_array) {
+    if let Some(arr) = graph.get("symbols").and_then(Value::as_array) {
         for item in arr {
-            let Some(edge) = extract_canvas_edge(item) else {
-                continue;
-            };
-            if !seen_edges.insert((
-                edge.from.clone(),
-                edge.to.clone(),
-                edge.relation.clone(),
-                edge.subkind.clone(),
-            )) {
+            let id = str_field(item, &["id", "fqn", "@id"]);
+            if id.is_empty() || !seen_ids.insert(id.clone()) {
                 continue;
             }
-            edges.push(edge);
+            let fqn = str_field(item, &["fqn", "id"]).if_empty(&id);
+            if fqn != id && !fqn.is_empty() {
+                aliases.entry(fqn.clone()).or_insert_with(|| id.clone());
+            }
+            let file_path = str_field(item, &["file_path", "path"])
+                .if_empty_from(|| split_symbol_fqn_file(&fqn));
+            let owner = str_field(item, &["owner"]);
+            let name = str_field(item, &["name"]);
+            let title = str_field(item, &["label"])
+                .if_empty_from(|| format_symbol_title(&fqn, &owner, &name));
+            let symbol_kind = str_field(item, &["kind", "symbol_kind"]).if_empty("symbol");
+            let branch = str_field(item, &["branch", "source_branch", "graph_branch"]);
+            let atom_ids = string_list(item, &["atom_ids"]);
+            let mention_count = i64_field(item, &["mention_count", "atom_count"])
+                .unwrap_or(atom_ids.len() as i64)
+                .max(0) as usize;
+            let blob =
+                format!("{id} {fqn} {title} {file_path} {symbol_kind} {owner} {name} {branch}")
+                    .to_ascii_lowercase();
+            let (w, h) = NodeKindGroup::Symbol.size();
+            nodes.push(CanvasNode {
+                id,
+                group: NodeKindGroup::Symbol,
+                kind: "symbol".to_owned(),
+                title,
+                subtitle: file_path.clone(),
+                branch,
+                shared_space: String::new(),
+                session_id: String::new(),
+                status: String::new(),
+                provider: symbol_kind.clone(),
+                file_path,
+                symbol_fqn: fqn,
+                symbol_kind,
+                symbols: Vec::new(),
+                confidence: None,
+                pinned: false,
+                pin_priority: 0,
+                tags: Vec::new(),
+                touch_count: mention_count,
+                search_blob: blob,
+                x: 0.0,
+                y: 0.0,
+                w,
+                h,
+            });
+        }
+    }
+
+    let mut edges = Vec::new();
+    let mut seen_edges: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    for key in ["edges", "symbol_edges"] {
+        if let Some(arr) = graph.get(key).and_then(Value::as_array) {
+            for item in arr {
+                let Some(edge) = extract_canvas_edge(item) else {
+                    continue;
+                };
+                if !seen_edges.insert((
+                    edge.from.clone(),
+                    edge.to.clone(),
+                    edge.relation.clone(),
+                    edge.subkind.clone(),
+                )) {
+                    continue;
+                }
+                edges.push(edge);
+            }
         }
     }
 
@@ -1885,7 +1978,7 @@ fn apply_constellation_filter(
                     direct_match_ids.insert(node.id.clone());
                 }
             }
-            NodeKindGroup::File => {
+            NodeKindGroup::File | NodeKindGroup::Symbol => {
                 if filter.show_files && branch_ok && query_ok {
                     direct_match_ids.insert(node.id.clone());
                 }
@@ -1926,7 +2019,7 @@ fn apply_constellation_filter(
                     branch_ok || connected_to_kept_atom.contains(&node.id)
                 }
             }
-            NodeKindGroup::File => {
+            NodeKindGroup::File | NodeKindGroup::Symbol => {
                 if !filter.show_files {
                     false
                 } else if kind_active || !query.is_empty() {
@@ -1961,7 +2054,7 @@ fn layout_constellation(
         match n.group {
             NodeKindGroup::Session => session_indices.push(idx),
             NodeKindGroup::Atom => atom_indices.push(idx),
-            NodeKindGroup::File => file_indices.push(idx),
+            NodeKindGroup::File | NodeKindGroup::Symbol => file_indices.push(idx),
         }
     }
 
@@ -2086,10 +2179,10 @@ fn layout_constellation(
         0.0
     };
 
-    // 3. Place FileRefs on outer/right orbital arc ordered by barycenter of touching atoms.
+    // 3. Place FileRefs and SymbolRefs on outer/right orbital arc ordered by barycenter of touching atoms.
     let pos_by_id: BTreeMap<String, f64> = nodes
         .iter()
-        .filter(|n| n.group != NodeKindGroup::File)
+        .filter(|n| !matches!(n.group, NodeKindGroup::File | NodeKindGroup::Symbol))
         .map(|n| (n.id.clone(), n.y + n.h * 0.5))
         .collect();
     let mut file_bary: BTreeMap<String, f64> = BTreeMap::new();
@@ -2123,27 +2216,38 @@ fn layout_constellation(
         let ba = file_bary.get(&nodes[a].id).copied().unwrap_or(f64::MAX);
         let bb = file_bary.get(&nodes[b].id).copied().unwrap_or(f64::MAX);
         ba.total_cmp(&bb)
+            .then_with(|| nodes[a].file_path.cmp(&nodes[b].file_path))
+            .then_with(|| nodes[a].group.cmp(&nodes[b].group))
             .then_with(|| nodes[a].id.cmp(&nodes[b].id))
     });
 
     let file_span_h = if !file_indices.is_empty() {
         let f_cols = if file_indices.len() > 10 { 2 } else { 1 };
         let f_rows = file_indices.len().div_ceil(f_cols);
-        let col_h = f_rows as f64 * FILE_H + (f_rows.saturating_sub(1) as f64) * NODE_GAP_Y;
-        let mid_idx = (f_rows.saturating_sub(1)) as f64 * 0.5;
-        for (i, &idx) in file_indices.iter().enumerate() {
-            let col = i / f_rows;
-            let row = i % f_rows;
-            let t = if mid_idx > 0.0 {
-                (row as f64 - mid_idx) / mid_idx
-            } else {
-                0.0
-            };
-            let arc_dx = (1.0 - t * t) * 34.0;
-            nodes[idx].x = next_x + (col as f64) * (FILE_W + 30.0) + arc_dx;
-            nodes[idx].y = MARGIN_Y + (row as f64) * (FILE_H + NODE_GAP_Y);
+        let mut max_col_h: f64 = 0.0;
+        for col in 0..f_cols {
+            let start = col * f_rows;
+            let end = ((col + 1) * f_rows).min(file_indices.len());
+            if start >= end {
+                continue;
+            }
+            let slice = &file_indices[start..end];
+            let mid_idx = (slice.len().saturating_sub(1)) as f64 * 0.5;
+            let mut y = MARGIN_Y;
+            for (row, &idx) in slice.iter().enumerate() {
+                let t = if mid_idx > 0.0 {
+                    (row as f64 - mid_idx) / mid_idx
+                } else {
+                    0.0
+                };
+                let arc_dx = (1.0 - t * t) * 34.0;
+                nodes[idx].x = next_x + (col as f64) * (FILE_W + 30.0) + arc_dx;
+                nodes[idx].y = y;
+                y += nodes[idx].h + NODE_GAP_Y;
+            }
+            max_col_h = max_col_h.max(y - NODE_GAP_Y - MARGIN_Y);
         }
-        col_h
+        max_col_h
     } else {
         0.0
     };
@@ -2218,17 +2322,25 @@ fn resolve_node_overlaps(nodes: &mut [CanvasNode]) {
 
 fn render_orbital_guides(nodes: &[CanvasNode], width: f64, height: f64) -> String {
     let mut svg = String::new();
+    let has_symbols = nodes.iter().any(|n| n.group == NodeKindGroup::Symbol);
+    let anchor_label = if has_symbols {
+        "FILE & SYMBOL ANCHORS"
+    } else {
+        "FILE ANCHORS"
+    };
     for (group, label) in [
         (NodeKindGroup::Session, "SESSIONS"),
         (NodeKindGroup::Atom, "CONTEXT ATOMS"),
-        (NodeKindGroup::File, "FILE ANCHORS"),
+        (NodeKindGroup::File, anchor_label),
     ] {
         let mut min_x = f64::INFINITY;
         let mut max_x = f64::NEG_INFINITY;
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
         let mut count = 0usize;
-        for n in nodes.iter().filter(|n| n.group == group) {
+        for n in nodes.iter().filter(|n| {
+            n.group == group || (group == NodeKindGroup::File && n.group == NodeKindGroup::Symbol)
+        }) {
             min_x = min_x.min(n.x);
             max_x = max_x.max(n.x + n.w);
             min_y = min_y.min(n.y);
@@ -2244,7 +2356,7 @@ fn render_orbital_guides(nodes: &[CanvasNode], width: f64, height: f64) -> Strin
         let curve_x = match group {
             NodeKindGroup::Session => (cx - 26.0).max(16.0),
             NodeKindGroup::Atom => cx,
-            NodeKindGroup::File => (cx + 26.0).min(width - 16.0),
+            NodeKindGroup::File | NodeKindGroup::Symbol => (cx + 26.0).min(width - 16.0),
         };
         svg.push_str(&format!(
             "<path class=\"omni-orbit-ring\" data-track=\"{}\" d=\"M {cx:.1} {pad_top:.1} Q {curve_x:.1} {:.1}, {cx:.1} {pad_bot:.1}\"/>",
@@ -2252,9 +2364,10 @@ fn render_orbital_guides(nodes: &[CanvasNode], width: f64, height: f64) -> Strin
             (pad_top + pad_bot) * 0.5,
         ));
         svg.push_str(&format!(
-            "<text class=\"omni-orbit-label\" data-track=\"{}\" x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{label}</text>",
+            "<text class=\"omni-orbit-label\" data-track=\"{}\" x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
             group.as_str(),
             (pad_top - 4.0).max(16.0),
+            esc(label),
         ));
     }
     svg
@@ -2266,6 +2379,23 @@ fn render_edge_marker_defs() -> String {
         defs.push_str(&format!(
             "<marker id=\"omni-arrow-{}\" class=\"omni-arrow omni-arrow-{}\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\">{}</marker>",
             spec.key, spec.key, spec.marker_body,
+        ));
+    }
+    defs
+}
+
+fn render_edge_gradient_defs() -> String {
+    let mut defs = String::new();
+    for spec in EDGE_SPECS {
+        let (rel, subkind) = match spec.key {
+            "supports" | "contradicts" | "supersedes" | "depends_on" | "refines" => {
+                ("relates_to", spec.key)
+            }
+            _ => (spec.key, ""),
+        };
+        defs.push_str(&format!(
+            "<linearGradient id=\"omni-flow-{}\" class=\"omni-flow omni-flow-{}\" data-rel=\"{rel}\" data-subkind=\"{subkind}\" gradientUnits=\"objectBoundingBox\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" class=\"omni-flow-from\"/><stop offset=\"0.5\" class=\"omni-flow-mid\"/><stop offset=\"1\" class=\"omni-flow-to\"/></linearGradient>",
+            spec.key, spec.key,
         ));
     }
     defs
@@ -2313,20 +2443,31 @@ fn route_bezier_ports(
         let p0 = (u.x + u.w, ucy);
         let p3 = (v.x, vcy);
         let dx = ((p3.0 - p0.0).abs() * 0.46).max(46.0);
+        // Ensure a non-zero SVG bounding box height so `objectBoundingBox` gradients render on horizontal links.
+        let bow = if (p0.1 - p3.1).abs() < 0.2 && lane_offset == 0.0 {
+            0.4
+        } else {
+            0.0
+        };
         CubicCurve {
             p0,
-            p1: (p0.0 + dx, p0.1 + lane_offset),
-            p2: (p3.0 - dx, p3.1 + lane_offset),
+            p1: (p0.0 + dx, p0.1 + lane_offset - bow),
+            p2: (p3.0 - dx, p3.1 + lane_offset + bow),
             p3,
         }
     } else if ucx > vcx + v.w * 0.48 {
         let p0 = (u.x, ucy);
         let p3 = (v.x + v.w, vcy);
         let dx = ((p0.0 - p3.0).abs() * 0.46).max(46.0);
+        let bow = if (p0.1 - p3.1).abs() < 0.2 && lane_offset == 0.0 {
+            0.4
+        } else {
+            0.0
+        };
         CubicCurve {
             p0,
-            p1: (p0.0 - dx, p0.1 + lane_offset),
-            p2: (p3.0 + dx, p3.1 + lane_offset),
+            p1: (p0.0 - dx, p0.1 + lane_offset - bow),
+            p2: (p3.0 + dx, p3.1 + lane_offset + bow),
             p3,
         }
     } else {
@@ -2364,11 +2505,13 @@ fn render_constellation_node(
     let kind_label = match node.group {
         NodeKindGroup::Session => "Session",
         NodeKindGroup::File => "File",
+        NodeKindGroup::Symbol => "Symbol",
         NodeKindGroup::Atom => atom_kind_spec(&node.kind).label,
     };
     let kind_key = match node.group {
         NodeKindGroup::Session => "session",
         NodeKindGroup::File => "file",
+        NodeKindGroup::Symbol => "symbol",
         NodeKindGroup::Atom => atom_kind_spec(&node.kind).key,
     };
 
@@ -2419,6 +2562,19 @@ fn render_constellation_node(
                 node.touch_count
             ));
         }
+        NodeKindGroup::Symbol => {
+            if !node.symbol_kind.is_empty() {
+                indicators.push_str(&format!(
+                    "<span class=\"omni-symbol-kind-pill\">{}</span>",
+                    esc(&node.symbol_kind)
+                ));
+            }
+            let suffix = if node.touch_count == 1 { "ref" } else { "refs" };
+            indicators.push_str(&format!(
+                "<span class=\"omni-symbol-count\">{} {suffix}</span>",
+                node.touch_count
+            ));
+        }
     }
 
     let mut foot = String::new();
@@ -2435,6 +2591,25 @@ fn render_constellation_node(
             node.tags.len() - 2
         ));
     }
+    if node.group == NodeKindGroup::Atom && !node.symbols.is_empty() {
+        let first_label = short_symbol_label(&node.symbols[0]);
+        let badge_text = if node.symbols.len() == 1 {
+            first_label
+        } else {
+            format!("{first_label} +{}", node.symbols.len() - 1)
+        };
+        let full_title = node
+            .symbols
+            .iter()
+            .map(|s| short_symbol_label(s))
+            .collect::<Vec<_>>()
+            .join(", ");
+        foot.push_str(&format!(
+            "<span class=\"omni-symbol-badge\" title=\"Mentioned symbols: {}\">&lt;/&gt; {}</span>",
+            esc(&full_title),
+            esc(&badge_text),
+        ));
+    }
     if node.group == NodeKindGroup::Session && !node.shared_space.is_empty() {
         foot.push_str(&format!(
             "<span class=\"omni-space-pill\" title=\"Shared space: {}\"><span aria-hidden=\"true\">⇄</span> {}</span>",
@@ -2447,21 +2622,53 @@ fn render_constellation_node(
             "<span class=\"omni-branch-pill\">{}</span>",
             esc(&node.branch)
         ));
-    } else if node.group == NodeKindGroup::File && !node.subtitle.is_empty() {
+    } else if matches!(node.group, NodeKindGroup::File | NodeKindGroup::Symbol)
+        && !node.subtitle.is_empty()
+    {
         foot.push_str(&format!(
             "<span class=\"omni-file-dir\">{}</span>",
             esc(&node.subtitle)
         ));
     }
 
-    let aria_label = if node.branch.is_empty() {
-        format!("{kind_label}: {}", node.title)
-    } else {
-        format!("{kind_label}: {} on {}", node.title, node.branch)
+    let aria_label = match node.group {
+        NodeKindGroup::Symbol => {
+            if node.file_path.is_empty() {
+                format!("Symbol ({}): {}", node.symbol_kind, node.title)
+            } else {
+                format!(
+                    "Symbol ({}): {} in {} (double-click to open in Code Map)",
+                    node.symbol_kind, node.title, node.file_path
+                )
+            }
+        }
+        NodeKindGroup::File => {
+            format!(
+                "File: {} (double-click to open in Code Map)",
+                if node.file_path.is_empty() {
+                    &node.title
+                } else {
+                    &node.file_path
+                }
+            )
+        }
+        _ if node.branch.is_empty() => format!("{kind_label}: {}", node.title),
+        _ => format!("{kind_label}: {} on {}", node.title, node.branch),
     };
 
+    let mut extra_attrs = String::new();
+    if !node.file_path.is_empty() {
+        extra_attrs.push_str(&format!(" data-file-path=\"{}\"", esc(&node.file_path)));
+    }
+    if !node.symbol_fqn.is_empty() {
+        extra_attrs.push_str(&format!(" data-symbol-fqn=\"{}\"", esc(&node.symbol_fqn)));
+    }
+    if !node.symbol_kind.is_empty() {
+        extra_attrs.push_str(&format!(" data-symbol-kind=\"{}\"", esc(&node.symbol_kind)));
+    }
+
     format!(
-        "<button type=\"button\" class=\"omni-node omni-node-{} omni-kind-{kind_key}\" style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\" data-node-type=\"{}\" data-kind=\"{kind_key}\" data-branch=\"{}\" data-selected=\"{}\" data-neighbor=\"{}\" data-highlighted=\"{}\" data-dimmed=\"{}\" data-pinned=\"{}\" aria-pressed=\"{}\" aria-label=\"{}\" title=\"{}\"><span class=\"omni-node-head\">{icon}<span class=\"omni-kind-badge\" data-kind=\"{kind_key}\">{kind_label}</span><span class=\"omni-node-indicators\">{indicators}</span></span><span class=\"omni-node-title\">{}</span><span class=\"omni-node-foot\">{foot}</span></button>",
+        "<button type=\"button\" class=\"omni-node omni-node-{} omni-kind-{kind_key}\" style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\" data-node-type=\"{}\" data-kind=\"{kind_key}\" data-branch=\"{}\"{extra_attrs} data-selected=\"{}\" data-neighbor=\"{}\" data-highlighted=\"{}\" data-dimmed=\"{}\" data-pinned=\"{}\" aria-pressed=\"{}\" aria-label=\"{}\" title=\"{}\"><span class=\"omni-node-head\">{icon}<span class=\"omni-kind-badge\" data-kind=\"{kind_key}\">{kind_label}</span><span class=\"omni-node-indicators\">{indicators}</span></span><span class=\"omni-node-title\">{}</span><span class=\"omni-node-foot\">{foot}</span></button>",
         node.group.as_str(),
         node.x,
         node.y,
@@ -2522,7 +2729,7 @@ fn render_constellation_radar(
             13.0
         } else if node.group == NodeKindGroup::Session {
             10.0
-        } else if node.group == NodeKindGroup::File {
+        } else if matches!(node.group, NodeKindGroup::File | NodeKindGroup::Symbol) {
             7.5
         } else {
             9.0
@@ -2722,6 +2929,7 @@ fn render_kind_icon(kind: &str) -> String {
     let body = match kind {
         "session" => SESSION_SVG_BODY,
         "file" => FILE_SVG_BODY,
+        "symbol" => SYMBOL_SVG_BODY,
         other => atom_kind_spec(other).svg_body,
     };
     format!(
@@ -2863,6 +3071,39 @@ fn split_file_label(path: &str) -> (String, String) {
         Some((dir, file)) if !file.is_empty() => (file.to_owned(), dir.to_owned()),
         _ => (trimmed.to_owned(), String::new()),
     }
+}
+
+fn split_symbol_fqn_file(fqn: &str) -> String {
+    let trimmed = fqn.trim();
+    if let Some((head, _)) = trimmed.split_once("::") {
+        if head.contains('/') || head.contains('.') {
+            return head.to_owned();
+        }
+    }
+    String::new()
+}
+
+fn format_symbol_title(fqn: &str, owner: &str, name: &str) -> String {
+    if !owner.is_empty() && !name.is_empty() {
+        return format!("{owner}::{name}");
+    }
+    if !name.is_empty() {
+        return name.to_owned();
+    }
+    short_symbol_label(fqn)
+}
+
+fn short_symbol_label(fqn: &str) -> String {
+    let trimmed = fqn.trim();
+    let file = split_symbol_fqn_file(trimmed);
+    if !file.is_empty() {
+        if let Some(rest) = trimmed.strip_prefix(&format!("{file}::")) {
+            if !rest.is_empty() {
+                return rest.to_owned();
+            }
+        }
+    }
+    trimmed.to_owned()
 }
 
 fn format_diff_value(val: Option<&Value>) -> String {
@@ -3243,7 +3484,20 @@ mod tests {
             "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:-24.0px;--graph-pan-y:12.0px;--graph-scale:1.1500;"
         ));
         assert!(res.html.contains("<svg class=\"omni-svg\""));
-        assert!(res.html.contains("<linearGradient id=\"omni-flow-0\""));
+        assert_eq!(
+            res.html.matches("<linearGradient ").count(),
+            EDGE_SPECS.len()
+        );
+        for spec in EDGE_SPECS {
+            assert!(
+                res.html
+                    .contains(&format!("<linearGradient id=\"omni-flow-{}\"", spec.key)),
+                "missing gradient def for {}",
+                spec.key
+            );
+        }
+        assert!(res.html.contains("stroke=\"url(#omni-flow-published_by)\""));
+        assert!(res.html.contains("data-lod=\"near\""));
 
         // Distinct marker definitions and mid-edge pill labels when zoomed in
         for marker in [
@@ -3552,7 +3806,12 @@ mod tests {
             .contains("--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;"));
         assert!(!res.html.contains("NaN"));
 
-        // Zoomed out (<0.95) hides mid-edge pills unless connected to selected/highlighted node
+        // Zoomed out (<0.95) sets `data-lod="mid"` / `"far"` so CSS hides unlit mid-edge pills while keeping lit ones visible.
+        assert_eq!(lod(0.4), "far");
+        assert_eq!(lod(0.6), "mid");
+        assert_eq!(lod(0.94), "mid");
+        assert_eq!(lod(0.95), "near");
+        assert_eq!(lod(1.15), "near");
         let zoomed_out = CanvasViewport {
             pan_x: 0.0,
             pan_y: 0.0,
@@ -3564,7 +3823,9 @@ mod tests {
             ..ConstellationFilter::default()
         };
         let far = render_constellation(&graph, &all_filter, &zoomed_out);
-        assert!(!far.html.contains("class=\"omni-edge-label\""));
+        assert!(far.html.contains("data-lod=\"mid\""));
+        assert!(far.html.contains("class=\"omni-edge-label\""));
+        assert!(!far.html.contains("data-lit=\"true\""));
 
         // Highlighted IDs without selected_id dims non-highlighted nodes
         let mut lit = BTreeSet::new();
@@ -3990,5 +4251,179 @@ mod tests {
         let mut broken = keep.clone();
         broken["write_branch"] = json!("session/s1");
         assert!(conflict_keep_request("proj-1", &broken).is_err());
+    }
+
+    #[test]
+    fn symbol_ref_nodes_and_mentions_symbol_edges_render_without_inline_hex_colors() {
+        let mut graph = sample_graph();
+        graph["atoms"][0]["symbols"] = json!(["src/auth/jwt.rs::JwtVerifier::verify"]);
+        graph["symbols"] = json!([
+            {
+                "id": "src/auth/jwt.rs::JwtVerifier::verify",
+                "fqn": "src/auth/jwt.rs::JwtVerifier::verify",
+                "project_id": "proj-1",
+                "file_path": "src/auth/jwt.rs",
+                "path": "src/auth/jwt.rs",
+                "kind": "method",
+                "name": "verify",
+                "owner": "JwtVerifier",
+                "label": "JwtVerifier::verify",
+                "mention_count": 2,
+                "atom_ids": ["atom-1", "atom-3"]
+            }
+        ]);
+        graph["edges"].as_array_mut().unwrap().push(json!({
+            "id": "edge-sym-1",
+            "kind": "mentions_symbol",
+            "type": "MentionsSymbol",
+            "relation": "mentions_symbol",
+            "from": "atom-1",
+            "to": "src/auth/jwt.rs::JwtVerifier::verify",
+            "fqn": "src/auth/jwt.rs::JwtVerifier::verify",
+            "file_path": "src/auth/jwt.rs"
+        }));
+        graph["symbol_edges"] = json!([
+            {
+                "id": "edge-sym-1",
+                "kind": "mentions_symbol",
+                "relation": "mentions_symbol",
+                "source": "atom-1",
+                "target": "src/auth/jwt.rs::JwtVerifier::verify",
+                "fqn": "src/auth/jwt.rs::JwtVerifier::verify"
+            },
+            {
+                "id": "edge-sym-2",
+                "kind": "mentions_symbol",
+                "relation": "mentions_symbol",
+                "source": "atom-3",
+                "target": "src/auth/jwt.rs::JwtVerifier::verify",
+                "fqn": "src/auth/jwt.rs::JwtVerifier::verify"
+            }
+        ]);
+
+        let filter = ConstellationFilter {
+            show_files: true,
+            show_sessions: true,
+            ..Default::default()
+        };
+        let rendered = render_constellation(&graph, &filter, &CanvasViewport::default());
+        assert_no_inline_hex_colors(&rendered.html);
+        assert_no_inline_hex_colors(&rendered.radar_html);
+
+        // Symbol card renders on the outer orbital track with full bridge metadata.
+        assert!(
+            rendered.html.contains("data-kind=\"symbol\""),
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered
+                .html
+                .contains("data-symbol-fqn=\"src/auth/jwt.rs::JwtVerifier::verify\""),
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered.html.contains("data-file-path=\"src/auth/jwt.rs\""),
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered.html.contains("JwtVerifier::verify"),
+            "{}",
+            rendered.html
+        );
+
+        // MentionsSymbol edges are deduplicated (edge-sym-1 appears in edges & symbol_edges),
+        // while edge-sym-2 from symbol_edges is preserved.
+        assert_eq!(
+            rendered
+                .html
+                .matches("omni-edge omni-edge-mentions_symbol")
+                .count(),
+            2,
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered
+                .html
+                .contains("<title>atom-3 mentions src/auth/jwt.rs::JwtVerifier::verify</title>"),
+            "{}",
+            rendered.html
+        );
+
+        // Both atom-1 (from atom["symbols"]) and atom-3 (from edge fallback) get a symbol badge.
+        assert_eq!(
+            rendered.html.matches("class=\"omni-symbol-badge\"").count(),
+            2,
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered
+                .html
+                .contains("title=\"Mentioned symbols: JwtVerifier::verify\""),
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered
+                .radar_html
+                .contains("omni-radar-dot omni-radar-dot-symbol"),
+            "{}",
+            rendered.radar_html
+        );
+
+        // Symbol node does not overlap File node on Track 3.
+        let sym_pos = rendered
+            .positions
+            .get("src/auth/jwt.rs::JwtVerifier::verify")
+            .copied()
+            .expect("symbol position");
+        let file_pos = rendered
+            .positions
+            .get("file:src/auth/jwt.rs")
+            .copied()
+            .expect("file position");
+        let dx = (sym_pos.0 - file_pos.0).abs();
+        let dy = (sym_pos.1 - file_pos.1).abs();
+        assert!(
+            dx >= 150.0 || dy >= 50.0,
+            "overlap: {sym_pos:?} vs {file_pos:?}"
+        );
+    }
+
+    #[test]
+    fn show_files_false_hides_symbol_ref_nodes_and_mentions_symbol_edges() {
+        let mut graph = sample_graph();
+        graph["symbols"] = json!([
+            {
+                "id": "src/auth/jwt.rs::verify",
+                "fqn": "src/auth/jwt.rs::verify",
+                "file_path": "src/auth/jwt.rs",
+                "kind": "function",
+                "name": "verify",
+                "label": "verify"
+            }
+        ]);
+        graph["symbol_edges"] = json!([
+            {
+                "id": "se-1",
+                "kind": "mentions_symbol",
+                "relation": "mentions_symbol",
+                "from": "atom-1",
+                "to": "src/auth/jwt.rs::verify"
+            }
+        ]);
+        let filter = ConstellationFilter {
+            show_files: false,
+            show_sessions: true,
+            ..Default::default()
+        };
+        let rendered = render_constellation(&graph, &filter, &CanvasViewport::default());
+        assert!(!rendered.html.contains("data-kind=\"symbol\""));
+        assert!(!rendered.html.contains("omni-edge-mentions_symbol"));
+        assert_no_inline_hex_colors(&rendered.html);
     }
 }

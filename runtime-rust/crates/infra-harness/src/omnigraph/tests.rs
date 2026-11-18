@@ -1178,12 +1178,15 @@ fn evaluate_mock_query(
         return (rows, None);
     }
     if query_name == "recent_atoms" || query_text.contains("recent_atoms") {
-        let rows: Vec<Value> = snap
+        let mut rows: Vec<Value> = snap
             .atoms
             .values()
             .filter(|a| match_proj(a))
             .cloned()
             .collect();
+        if query_text.contains("limit 1000") && rows.len() > 1000 {
+            rows.truncate(1000);
+        }
         return (rows, None);
     }
     if query_name == "list_sessions" || query_text.contains("list_sessions") {
@@ -1200,6 +1203,15 @@ fn evaluate_mock_query(
             .files
             .values()
             .filter(|f| match_proj(f))
+            .cloned()
+            .collect();
+        return (rows, None);
+    }
+    if query_name == "list_symbols" || query_text.contains("list_symbols") {
+        let rows: Vec<Value> = snap
+            .symbols
+            .values()
+            .filter(|s| match_proj(s))
             .cloned()
             .collect();
         return (rows, None);
@@ -6190,5 +6202,511 @@ async fn contradicted_atoms_carry_a_caution_and_a_review_warning_without_change(
             .any(|edge| edge.to_string().contains("contradicts")),
         "{view}"
     );
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn graph_view_lifts_100_atom_cap_paginates_and_expands_past_1000() {
+    let (_state_dir, mgr, _mock) = connected_mock().await;
+    let client = mgr.client().await.unwrap();
+
+    // Seed 265 atoms (> 100 legacy cap and > 250 default page size) via NDJSON.
+    let mut ndjson_lines = Vec::with_capacity(265);
+    for i in 0..265usize {
+        ndjson_lines.push(
+            json!({
+                "type": "ContextAtom",
+                "id": format!("atom-{i:04}"),
+                "data": {
+                    "atom_id": format!("atom-{i:04}"),
+                    "project_id": "proj-1",
+                    "kind": if i % 2 == 0 { "finding" } else { "decision" },
+                    "title": format!("Atom title {i:04}"),
+                    "summary": format!("Summary {i:04}"),
+                    "body": format!("Body {i:04}"),
+                    "source_branch": "main",
+                    "confidence": 0.9,
+                    "pin_priority": (i % 5) as i32,
+                    "verified": false,
+                    "created_at": "2026-11-18T10:00:00.000Z",
+                    "updated_at": format!("2026-11-18T10:{:02}:{:02}.000Z", i / 60, i % 60),
+                }
+            })
+            .to_string(),
+        );
+    }
+    client
+        .load_ndjson(
+            "main",
+            None,
+            "merge",
+            &ndjson_lines.join("\n"),
+            Some("harness"),
+        )
+        .await
+        .unwrap();
+
+    // Default graph_view_json lifts the 100-atom cap to 250 and reports pagination + telemetry.
+    let default_view = mgr
+        .graph_view_json("proj-1", Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(default_view["atoms"].as_array().unwrap().len(), 250);
+    assert_eq!(default_view["total_atoms"], 265);
+    assert_eq!(default_view["limit"], 250);
+    assert_eq!(default_view["offset"], 0);
+    assert_eq!(default_view["has_more"], true);
+    assert_eq!(default_view["truncated"], true);
+    assert_eq!(default_view["next_cursor"], "250");
+    assert_eq!(default_view["telemetry"]["atom_count"], 250);
+    assert_eq!(default_view["telemetry"]["total_atoms"], 265);
+    assert_eq!(default_view["telemetry"]["truncated"], true);
+    assert!(default_view["telemetry"]["elapsed_ms"].as_u64().is_some());
+
+    // Follow `next_cursor` to read the final 15 atoms.
+    let page2 = mgr
+        .graph_view_json_paginated(
+            "proj-1",
+            Some("main"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            default_view["next_cursor"].as_str(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page2["atoms"].as_array().unwrap().len(), 15);
+    assert_eq!(page2["total_atoms"], 265);
+    assert_eq!(page2["offset"], 250);
+    assert_eq!(page2["has_more"], false);
+    assert_eq!(page2["truncated"], true);
+    assert!(page2["next_cursor"].is_null());
+
+    // Limit clamping (0 -> 1, >1000 -> 1000) and invalid cursor error.
+    let clamped_low = mgr
+        .graph_view_json_paginated(
+            "proj-1",
+            Some("main"),
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(clamped_low["limit"], 1);
+    assert_eq!(clamped_low["atoms"].as_array().unwrap().len(), 1);
+
+    let clamped_high = mgr
+        .graph_view_json_paginated(
+            "proj-1",
+            Some("main"),
+            None,
+            None,
+            None,
+            None,
+            Some(5000),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(clamped_high["limit"], 1000);
+    assert_eq!(clamped_high["atoms"].as_array().unwrap().len(), 265);
+    assert_eq!(clamped_high["has_more"], false);
+    assert_eq!(clamped_high["truncated"], false);
+
+    assert!(
+        mgr.graph_view_json_paginated(
+            "proj-1",
+            Some("main"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("not-a-cursor"),
+        )
+        .await
+        .is_err()
+    );
+
+    // Seed past 1,000 atoms (1,020 total) so `recent_atoms` hits limit 1000 and expands via export.
+    let extra_lines: Vec<String> = (265..1020usize)
+        .map(|i| {
+            json!({
+                "type": "ContextAtom",
+                "id": format!("atom-{i:04}"),
+                "data": {
+                    "atom_id": format!("atom-{i:04}"),
+                    "project_id": "proj-1",
+                    "kind": "insight",
+                    "title": format!("Extra atom {i:04}"),
+                    "summary": format!("Extra {i:04}"),
+                    "body": format!("Extra body {i:04}"),
+                    "source_branch": "main",
+                    "confidence": 0.8,
+                    "pin_priority": 1,
+                    "verified": false,
+                    "created_at": "2026-11-18T11:00:00.000Z",
+                    "updated_at": "2026-11-18T11:00:00.000Z",
+                }
+            })
+            .to_string()
+        })
+        .collect();
+    client
+        .load_ndjson(
+            "main",
+            None,
+            "merge",
+            &extra_lines.join("\n"),
+            Some("harness"),
+        )
+        .await
+        .unwrap();
+
+    let expanded = mgr
+        .graph_view_json_paginated(
+            "proj-1",
+            Some("main"),
+            None,
+            None,
+            None,
+            None,
+            Some(50),
+            Some(1000),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(expanded["total_atoms"], 1020);
+    assert_eq!(expanded["offset"], 1000);
+    assert_eq!(expanded["atoms"].as_array().unwrap().len(), 20);
+    assert_eq!(expanded["has_more"], false);
+    assert_eq!(expanded["truncated"], true);
+
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn graph_view_exposes_symbol_refs_mentions_edges_and_telemetry() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, _dir) = symbol_project(state_dir.path());
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-sym-1",
+        "kind": "finding",
+        "title": "TokenGuard::check must validate issuer",
+        "body": "Always call `refresh` before check().",
+        "files": ["src/Auth/TokenGuard.php"]
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-sym-2",
+        "kind": "decision",
+        "title": "backoff_delay doubles on retry",
+        "body": "Call backoff_delay() between attempts.",
+        "files": ["src/retry.rs"]
+    }))
+    .await
+    .unwrap();
+
+    let view = mgr
+        .graph_view_json(&project_id, Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    let symbols = view["symbols"].as_array().unwrap();
+    assert!(symbols.len() >= 3, "{symbols:?}");
+    let check_sym = symbols
+        .iter()
+        .find(|s| s["fqn"] == "src/Auth/TokenGuard.php::TokenGuard::check")
+        .expect("TokenGuard::check SymbolRef");
+    assert_eq!(check_sym["id"], check_sym["fqn"]);
+    assert_eq!(check_sym["file_path"], "src/Auth/TokenGuard.php");
+    assert_eq!(check_sym["path"], "src/Auth/TokenGuard.php");
+    assert_eq!(check_sym["name"], "check");
+    assert_eq!(check_sym["owner"], "TokenGuard");
+    assert_eq!(check_sym["label"], "TokenGuard::check");
+    assert_eq!(check_sym["mention_count"], 1);
+    assert_eq!(check_sym["atom_ids"], json!(["atom-sym-1"]));
+
+    let sym_edges = view["symbol_edges"].as_array().unwrap();
+    assert!(
+        sym_edges.iter().any(|e| {
+            e["kind"] == "mentions_symbol"
+                && e["type"] == "MentionsSymbol"
+                && e["source"] == "atom-sym-1"
+                && e["target"] == "src/Auth/TokenGuard.php::TokenGuard::check"
+                && e["role"] == "named"
+                && e["file_path"] == "src/Auth/TokenGuard.php"
+                && e["symbol_name"] == "TokenGuard::check"
+        }),
+        "{sym_edges:?}"
+    );
+    assert!(
+        view["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "mentions_symbol"
+                && e["to"] == "src/Auth/TokenGuard.php::TokenGuard::check"),
+        "{}",
+        view["edges"]
+    );
+    let atom1 = view["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["atom_id"] == "atom-sym-1")
+        .unwrap();
+    assert!(
+        atom1["symbols"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("src/Auth/TokenGuard.php::TokenGuard::check"))
+    );
+    assert_eq!(view["telemetry"]["symbol_count"], symbols.len());
+    assert_eq!(view["telemetry"]["symbol_edge_count"], sym_edges.len());
+
+    // Filtering by `q` scopes `symbols` and `symbol_edges` cleanly.
+    let filtered = mgr
+        .graph_view_json(
+            &project_id,
+            Some("main"),
+            None,
+            None,
+            Some("backoff_delay"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered["total_atoms"], 1);
+    assert_eq!(filtered["atoms"][0]["atom_id"], "atom-sym-2");
+    assert_eq!(
+        filtered["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["backoff_delay"]
+    );
+    assert_eq!(filtered["symbol_edges"].as_array().unwrap().len(), 1);
+
+    // Disconnected manager returns empty payload with symbol/pagination/telemetry defaults.
+    mgr.close().await.unwrap();
+    let off_mgr = OmnigraphManager::new(tempfile::tempdir().unwrap().keep(), None).unwrap();
+    let empty = off_mgr
+        .graph_view_json("proj-1", None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(empty["connected"], false);
+    assert_eq!(empty["symbols"], json!([]));
+    assert_eq!(empty["symbol_edges"], json!([]));
+    assert_eq!(empty["total_atoms"], 0);
+    assert_eq!(empty["has_more"], false);
+    assert_eq!(empty["truncated"], false);
+    assert_eq!(empty["telemetry"]["symbol_count"], 0);
+}
+
+#[tokio::test]
+async fn graph_view_parallelizes_sidecar_queries_and_commit_digests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_, _, mock) = connected_mock().await;
+    let base_port_app = Router::new()
+        .route("/graphs/{graph_id}/branches", get(mock_branches_list))
+        .route("/graphs/{graph_id}/commits", get(mock_commits))
+        .route(
+            "/graphs/{graph_id}/commits/{commit_id}/changes",
+            get(mock_commit_changes),
+        )
+        .route("/graphs/{graph_id}/query", post(mock_query));
+
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let max_inflight = Arc::new(AtomicUsize::new(0));
+    let delay_app = base_port_app
+        .with_state(MockServer {
+            state: mock.clone(),
+        })
+        .layer(axum::middleware::from_fn({
+            let inflight = inflight.clone();
+            let max_inflight = max_inflight.clone();
+            move |req: Request<Body>, next: axum::middleware::Next| {
+                let inflight = inflight.clone();
+                let max_inflight = max_inflight.clone();
+                async move {
+                    let cur = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_inflight.fetch_max(cur, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+                    let resp = next.run(req).await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                    resp
+                }
+            }
+        }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _srv = tokio::spawn(async move {
+        axum::serve(listener, delay_app).await.unwrap();
+    });
+    let delayed_url = format!("http://{addr}");
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.save_config(OmnigraphConfig {
+        mode: OmnigraphMode::External,
+        endpoint: Some(delayed_url),
+        token: Some("tok-harness".into()),
+        graph_id: schema::HARNESS_GRAPH_ID.into(),
+        actor_id: "harness".into(),
+        ..OmnigraphConfig::default()
+    })
+    .await
+    .unwrap();
+
+    // Seed 6 commits into mock state so both `tokio::join!` queries AND concurrent commit digests run.
+    {
+        let mut st = mock.lock().unwrap();
+        let mut parent = "c-0001".to_string();
+        for i in 0..6usize {
+            let cid = format!("c-par-{i}");
+            let commit = MockCommit {
+                id: cid.clone(),
+                branch: "main".into(),
+                parent: Some(parent.clone()),
+                merged_parent: None,
+                actor_id: Some("harness".into()),
+                created_at: 1_700_000_000_000_000 + (i as i64) * 1000,
+                snapshot: MockSnapshot::default(),
+                changes: vec![json!({
+                    "kind": "node",
+                    "type": { "id": "t-atom", "name": "ContextAtom" },
+                    "id": format!("atom-p-{i}"),
+                    "op": "insert",
+                    "after": { "properties": { "title": format!("Commit {i}") } }
+                })],
+            };
+            st.commits.insert(cid.clone(), commit);
+            st.commit_order.push(cid.clone());
+            st.branches.get_mut("main").unwrap().head_commit = cid.clone();
+            parent = cid;
+        }
+    }
+
+    let view = mgr
+        .graph_view_json("proj-1", Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(view["connected"], true);
+    assert!(
+        max_inflight.load(Ordering::SeqCst) >= 6,
+        "expected >= 6 concurrent sidecar requests, observed max_inflight={}",
+        max_inflight.load(Ordering::SeqCst)
+    );
+}
+
+#[tokio::test]
+async fn real_omnigraph_binary_graph_view_exposes_symbols_and_lifted_limit() {
+    let bin_cli = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph");
+    let bin_srv = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph-server");
+    if !bin_cli.is_file() || !bin_srv.is_file() {
+        eprintln!(
+            "skipping real_omnigraph_binary_graph_view_exposes_symbols_and_lifted_limit: /tmp/omnigraph-v0.15.0 not present"
+        );
+        return;
+    }
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, _dir) = symbol_project(state_dir.path());
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    std::fs::create_dir_all(mgr.tools_dir()).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::os::unix::fs::symlink(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::fs::copy(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+
+    let started = mgr.start_local(None).await.unwrap();
+    assert_eq!(started["connected"], true);
+
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-real-sym",
+        "kind": "decision",
+        "title": "TokenGuard::check verifies expiry",
+        "body": "Call backoff_delay() on transient errors and TokenGuard::refresh when expired.",
+        "files": ["src/Auth/TokenGuard.php", "src/retry.rs"]
+    }))
+    .await
+    .unwrap();
+
+    let view = mgr
+        .graph_view_json(&project_id, Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(view["connected"], true);
+    assert_eq!(view["total_atoms"], 1);
+    assert_eq!(view["has_more"], false);
+    assert_eq!(view["truncated"], false);
+    let symbols = view["symbols"].as_array().unwrap();
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s["fqn"] == "src/Auth/TokenGuard.php::TokenGuard::check"
+                && s["file_path"] == "src/Auth/TokenGuard.php"
+                && s["owner"] == "TokenGuard"
+                && s["label"] == "TokenGuard::check"
+                && s["mention_count"] == 1),
+        "{symbols:?}"
+    );
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s["fqn"] == "src/retry.rs::backoff_delay" && s["mention_count"] == 1),
+        "{symbols:?}"
+    );
+    assert!(
+        view["symbol_edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "mentions_symbol"
+                && e["source"] == "atom-real-sym"
+                && e["target"] == "src/retry.rs::backoff_delay"),
+        "{}",
+        view["symbol_edges"]
+    );
+    assert!(view["telemetry"]["symbol_count"].as_u64().unwrap_or(0) >= 2);
+
     mgr.close().await.unwrap();
 }

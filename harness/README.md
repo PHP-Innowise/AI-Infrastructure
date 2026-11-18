@@ -133,6 +133,12 @@ Alternatively, **Load system** reads an existing relative system file
 (contract kinds, `declared`/`verified`/`undeclared_in_code` provenance, version
 mismatch risks, cross-service cycles, shortest paths, shared providers/consumers,
 service tiers, and drill-down into any member service's Graphify code graph).
+Selecting a link between two services also opens **Code on both sides**, including
+a collapsible **Semantic framework & DB bridges** section (`semantic_bridges`)
+showing discovered cross-service HTTP/RPC `routes`, `events` between producers
+and consumers, `di_bindings`, and shared database `tables` (`shared_read`,
+`cross_read_write`, `shared_write`) with clickable file jumps onto each service's
+code map.
 A file chosen there, from what the search of the system map finds or with **Map**
 beside a file of a receipt, is selected in the code map of its service that is
 embedded in the view: the folders that hold it open in that picture, the picture
@@ -167,6 +173,30 @@ writes through `--add-dir` and the others through read rules (plan mode adds
 them all), Codex reads the whole disk and is granted only writable roots;
 Cursor Agent supports only own-service edits.
 
+In the **Launch** and **Recovery** cards, **Permissions** selects how edit
+dispatches handle host tool and file approvals: **Auto** (default), **Manual**,
+or **Bypass Permissions** (read-only dispatches always remain read-only
+regardless of the setting):
+
+- **Manual** routes every provider permission ask and native question through
+  Harness's permission desk (`SystemWorkflow` -> `PermissionDesk`) and surfaces
+  pending requests inline as `waiting_permissions` cards in System
+  Orchestration, resolved against the run's backing session
+  (`POST /api/sessions/{session_id}/permissions/{request_id}`).
+- **Auto** grants intra-service edits according to each provider's auto mode
+  while **escalating cross-service and contract-ownership boundary asks** to
+  human confirmation (`SystemBoundaryApprovals` marks escalated asks `Auto ->
+  Manual boundary escalation`, strips **Allow for this session**, and waits via
+  `waiting_permissions`); non-interactive `Transport::Text` edit dispatches
+  (such as Codex `Auto` and Cursor `Auto`) enforce write boundaries after the
+  step via post-step checks (`check_step_boundary_writes_with_extra`).
+- **Bypass Permissions** disables host approval prompts and sandboxes
+  (`bypassPermissions` / `--dangerously-bypass-approvals-and-sandbox` /
+  `--force --sandbox disabled`) within the selected dispatch folders; like all
+  non-interactive `Transport::Text` edit dispatches (`Auto` and `Bypass`), it
+  still enforces post-step boundary write checks (`__system__`, out-of-root, and
+  foreign-service/contract boundaries according to the selected `access` scope).
+
 The **Agents** panel follows a launched run live: one card per agent (contract,
 each service, verification) with state, time, granted folders, tool calls,
 tokens and changed files, structured `Timeline | Files | Plan | Commands` views
@@ -192,8 +222,11 @@ cannot grant host filesystem access. See the [system orchestration guide](../doc
 ## Infrastructure Creator in the browser
 
 Choose **Infrastructure Creator** (also available through Kit 1), a registered
-PHP project, Claude/Codex/Cursor, model, thinking effort and additional-agent
-limit. Choose the current project or a new Git worktree, select the integrations
+PHP project, Claude/Codex/Cursor, model, thinking effort, **Permissions**
+(**Auto** default, **Manual**, or **Bypass Permissions**) and additional-agent
+limit. The permission setting persists with the run across **Start**, **Revise**,
+**Generate** and **Rescan** (`waiting_permissions` appears inline on the
+Creator view and is answered against the run's backing session). Choose the current project or a new Git worktree, select the integrations
 to generate, and start a scan. A worktree starts from committed HEAD; uncommitted
 files are not copied. Targets must be outside the Harness source/state trees.
 
@@ -305,8 +338,10 @@ continuing the earlier ledger when the stage is the same. The option is not
 available for Plan, SDD or Fleet sessions, requires additional agents to be
 off, and cannot be combined with separate planning and editing models.
 Budgets apply to the whole cycle: Claude turns receive the remaining
-USD allowance as a native cap, the token threshold counts every turn's reported
-usage, and the time limit terminates the cycle. Cancel stops the running
+USD allowance as a native cap (persisting per-participant `cost_totals` in
+SQLite across turns and follow-up cycles so resumed sessions never
+double-count), the token threshold counts every turn's reported usage, and the
+time limit terminates the cycle (marking the cycle `incomplete` on exhaustion). Cancel stops the running
 participant; the ledger recorded up to the previous turn stays visible. The
 ledger reports what each participant claimed and which claims survived; it is
 not an independent verification of the work.
@@ -333,10 +368,11 @@ session/workspace; it does not transfer conversations between providers.
 
 ### Permissions: Auto, Manual, Bypass Permissions
 
-In Sessions, **Permissions** next to **Mode** says what an editing turn may do
-without asking. Planning (Plan mode and the Plan, Review and Fleet workflows)
+In **Sessions**, **Infrastructure Creator** and **System Orchestration**, **Permissions** selects what an editing turn may do
+without asking. Planning (Plan mode and the Plan, Review and Fleet workflows,
+and read-only System Orchestration dispatches)
 stays read-only whatever the setting, so nothing in it asks. The setting is kept
-with the session and can change between turns in **Next-turn settings**.
+with the session or run and can change between turns in **Next-turn settings** (or on Creator **Revise** / **Generate** / **Rescan** and System **Recovery**). In System Orchestration **Auto**, cross-service and contract-source boundary asks escalate automatically to **Manual** confirmation.
 
 | Setting | Claude Code | Codex | Cursor |
 | --- | --- | --- | --- |
@@ -346,17 +382,46 @@ with the session and can change between turns in **Next-turn settings**.
 
 In Auto nothing waits for a person: a request the host's own review would put to
 a person is declined, and the chat shows it as *declined automatically*. In
-Manual each request appears in the chat with the command, path or host it
-concerns and **Allow**, **Allow for this session** and **Deny**; the run waits for
-the answer, and the waiting does not count against the session's time budget.
-Allow for this session keeps the approval in the host's running session (Claude
-Code's suggested rules are scoped to the session, never written to the
-project's settings; Codex's `acceptForSession`). Cursor's always-allow outlives
-the session, so a Cursor request offers Allow and Deny only. A request the host
-withdraws, or one still open when the run ends or is cancelled, is answered no
-and marked as no longer waiting. Bypass Permissions runs every action without
-asking and without the sandbox: use it only in a disposable checkout or
-container.
+Manual each request appears in the chat with its semantic category (`ask_kind`:
+`command`, `file_change`, `permissions`, `question`, or `tool`), summary,
+optional collapsible unified `diff_preview` (bounded to 6,144 characters for
+file edits and writes), optional `rule_summary`, and **Allow**, **Allow for this
+session** and **Deny**; the run waits for the answer, and the waiting does not
+count against the session's time budget. Allow for this session keeps the
+approval within the running session:
+
+- **Claude Code:** suggested permission rules are scoped to `session`, never
+  written to the project's settings.
+- **Codex:** sends `acceptForSession` for the Codex thread.
+- **Cursor:** Cursor's native `allow_always` writes to `~/.cursor/cli-config.json`
+  and outlives the session, so Harness never sends `allow_always` to Cursor CLI.
+  Instead, for clean workspace-relative `edit`/`read`/`delete` paths and exact
+  chain-free shell commands (no `;`, `|`, `&`, `` ` ``, `$`, `>`, `<` or
+  newlines), Harness builds a canonical local `session_rule_key`
+  (`session_option: true`, `has_session_rule: true`). Choosing **Allow for this
+  session** caches that key only in the Harness server's in-memory per-session
+  allowlist (bounded per session) and replies `allow_once` to Cursor CLI;
+  repeated matching asks in the same Harness session auto-resolve immediately as
+  `allowed_session` (`by: "session_rule"`) with `allow_once` without prompting
+  again or touching `~/.cursor/cli-config.json`. Chained commands, paths outside
+  the workspace and other tools keep `session_option: false` and offer Allow
+  and Deny only.
+
+In Manual mode, native structured questions — Claude Code's `AskUserQuestion`,
+Codex's `item/tool/requestUserInput` and Cursor's `cursor/ask_question` — also
+surface as `ask_kind: "question"` cards (`session_option: false`) with
+single-select or multi-select options and optional `"Other"` freeform inputs,
+and **Submit answers** / **Decline** buttons. Auto mode declines native
+questions automatically.
+
+Setting `HARNESS_PERMISSION_TIMEOUT_SECONDS` to a positive integer configures a
+per-ask TTL on pending Manual waiters (disabled by default when unset or
+non-positive). If an ask remains unanswered after that TTL, Harness removes the
+waiter, emits an `expired` event (`by: "timeout"`) and sends `Deny` to the host
+so the CLI does not hang indefinitely. A request the host withdraws, or one
+still open when the run ends or is cancelled, is answered no and marked as no
+longer waiting. Bypass Permissions runs every action without asking and without
+the sandbox: use it only in a disposable checkout or container.
 
 Manual keeps the host's input open instead of closing it after the prompt:
 Claude Code reads stream-json, and Codex and Cursor run their protocol servers,
@@ -375,14 +440,17 @@ else declined.
 | Request | Response |
 | --- | --- |
 | `POST /api/sessions` or `POST /api/sessions/{session_id}/messages` with `"permissions": "auto"`, `"manual"` or `"bypass"` | The session with its `permissions`; any other value is refused with `400` |
-| `POST /api/sessions/{session_id}/permissions/{request_id}` with exactly `{"decision":"allow"}`, `"allow_session"` or `"deny"` | `200`, `{permission, session}`; `409` when the request no longer waits; `400` for `allow_session` on a request that cannot be remembered |
+| `POST /api/sessions/{session_id}/permissions/{request_id}` with `{"decision":"allow"\|"allow_session"\|"deny", "answers"?: <object\|null>}` | `200`, `{permission, session}`; `409` when the request no longer waits; `400` for `allow_session` on a request that cannot be remembered or non-object / >32 KiB `answers` |
 
 A request is the session event `{"kind":"permission","state":"pending","request_id",…}`
-with `provider`, `tool`, `summary`, `detail` and `session_option`; later events of
-the same `request_id` carry `allowed`, `allowed_session`, `denied`, `declined`,
-`withdrawn` or `expired`. Codex and Cursor number their requests afresh in every
-process, so `request_id` is the host's id followed by a tag of the run
-(`cursor-0-1c029d06`): each turn's requests stay apart.
+with `provider`, `tool`, `summary`, `detail`, `session_option`, `ask_kind`,
+`diff_preview`, `rule_summary`, `has_session_rule` and `questions`; later events
+of the same `request_id` carry `allowed`, `allowed_session`, `denied`,
+`declined`, `withdrawn` or `expired` (with `by` naming `"person"`, `"auto"`,
+`"session_rule"`, `"host"`, `"harness"` or `"timeout"`, plus `answers` when
+structured question answers were submitted). Codex and Cursor number their
+requests afresh in every process, so `request_id` is the host's id followed by a
+tag of the run (`cursor-0-1c029d06`): each turn's requests stay apart.
 
 ### Starting the server
 
@@ -957,6 +1025,12 @@ minutes, are single-use, and expire on restart. Lists show up to 100 non-merge
 commits after the recorded session baseline. Pending changes are bounded to 500
 files, 4 MiB per file and 64 MiB total; diff output is bounded to 512 KiB. Active
 or queued sessions and checks block Git delivery through the existing global lock.
+Commit and transfer previews (`delivery.preview_commit`, `delivery.preview_transfer`,
+`delivery.act` for `preview_commit`/`preview_transfer`, and `delivery.get` when a
+preview is present) also attach non-blocking `memory_warnings`
+(`contradiction_warnings`, `hygiene_warnings`) and `risk_callers` for the touched
+files, and surface them in the delivery panel before commit or apply without
+blocking delivery if Omnigraph or the Code graph is unavailable.
 
 Custom skill names use up to 64 lowercase letters, digits and single hyphens.
 Descriptions have up to 1,024 characters without angle brackets; instructions
@@ -1729,6 +1803,24 @@ memory still runs by itself for it. In a project without a governed context
 runtime, sessions start with excerpts of the project's reference files instead of
 retrieved memory, unless a task was chosen explicitly.
 
+Above the composer, **Check risks** (`#preflight-check`) — and a debounced
+check when `@file` mentions appear in the prompt — runs `POST
+/api/projects/{project_id}/preflight` without blocking sending, surfacing linked
+files, `contradiction_warnings`, `hygiene_warnings`, `risk_callers` and
+`blast_summary`. Ticking **Include graph risk callers** (`#preflight-risk-callers`,
+unchecked by default) passes `"risk_caller_hints": true` on that advisory check
+only; default session retrieval (`HARNESS_GRAPH_RISK_CALLER_HINTS`) stays off
+unless explicitly enabled (`docs/MEMORY-EVAL.md`).
+
+Inside **Results › Changes**, **Save verified memory** (`#results-memory-panel`)
+prefills editable `progress`, `next_steps` (up to 3), source-checked
+`learnings` (up to 3, excluding deleted files) and optional `used_memory`
+(up to 10 workspace-relative paths) from results, checks, Clash findings and
+`session["brain"]`. **Save to Memory** stays disabled until **I verified these
+claims against project files** (`verified: true`) is ticked and submits to
+`POST /api/sessions/{session_id}/memory` (`used_memory` is validated and echoed
+on the response while `ResultService::normalize` keeps its strict schema).
+
 #### Review context by hand
 
 Tick **Review context by hand** to review each turn's context before it runs. It
@@ -1771,23 +1863,41 @@ fields of a memory draft do.
 ### Code graph
 
 The **Graph** chip switches on an optional code graph for the selected project. It
-is off by default. [Graphify](https://github.com/Graphify-Labs/graphify) builds the
-graph on this machine with its `update` pass, which parses files and calls no
+is off by default. When [Graphify](https://github.com/Graphify-Labs/graphify) is
+installed on `PATH` (or named by `HARNESS_GRAPHIFY`), Harness can build the graph
+on this machine with Graphify's `update` pass, which parses files and calls no
 model; the Harness also removes model provider keys from the tool's environment and
 sets `GRAPHIFY_NO_AUTO_REFRESH=1`, so a Graphify newer than the assistant skills
 installed in your home directory does not rewrite them from a build.
-The Harness does not install Graphify. It looks for `graphify` on `PATH`
-(`HARNESS_GRAPHIFY` names another executable), and the panel says how to install it
-when it is missing.
+When Python `graphify` CLI is not installed (or when native mode is active via
+`HARNESS_GRAPH_BACKEND=native`), Harness automatically falls back to its built-in
+native `tree-sitter` SQLite Code Graph IR (`native-tree-sitter-ir`, shown as
+**Native tree-sitter IR** in the dependency map summary and status text), so code
+maps work out of the box with zero external Python tooling. (Configuring an explicit
+missing executable path still reports `missing`.)
 
-The graph lives in the Harness state directory under `graphs/<project id>/`, not in
-the project. Graphify releases before 0.9 still write a manifest into the project's
+The native extractor parses 14+ code languages via embedded `tree-sitter`
+grammars—PHP (`.php`, `.phtml`, `.inc`), Rust (`.rs`), TypeScript/TSX (`.ts`,
+`.mts`, `.cts`, `.tsx`), JavaScript/JSX (`.js`, `.jsx`, `.mjs`, `.cjs`), Python
+(`.py`, `.pyi`), Go (`.go`), Java (`.java`), C# (`.cs`), Ruby (`.rb`), Kotlin
+(`.kt`, `.kts`), Swift (`.swift`), and Scala (`.scala`, `.sc`)—alongside workspace
+manifest resolvers (`composer.json` PSR-4 and classmap,
+`tsconfig.json`/`jsconfig.json` `baseUrl`/`paths`/`extends`, `package.json`
+`name`/`exports`/`imports`/`workspaces`, `pyproject.toml`, and `go.mod`),
+cycle-safe Rust `pub use` re-export propagation (`ReexportIndex`), and framework/DB
+semantic edge extraction (`exposes_route`, `di_binds`, `publishes_event`,
+`handles_event`, `reads_table`, `writes_table`).
+
+The graph and its incremental SQLite Code Graph IR (`graphs/<project id>/graph_ir.sqlite3`)
+live in the Harness state directory under `graphs/<project id>/`, not in the
+project. Graphify releases before 0.9 still write a manifest into the project's
 own `graphify-out/`; the Harness puts back the manifest that was there, or removes
-the file and the folder it created, when the build ends. Each build starts without
-the previous graph, so a deleted file leaves
-no nodes behind; it keeps the tool's file cache and replaces the published graph
-only after it succeeds. A failed or interrupted build leaves the previous graph in
-use, and the panel shows the tool's last line.
+the file and the folder it created, when the build ends. Builds replace
+`live/graph.json` atomically only after succeeding so the previous published graph
+stays readable during rebuilds, and a bounded `notify` file-system watcher plus
+live session file-mutation hooks incrementally re-index edited code files without
+discarding the active graph. A failed or interrupted build leaves the previous
+graph in use, and the panel shows the tool's last line.
 
 A build starts when the graph is switched on, when **Rebuild** is pressed, and when
 the project's files changed since the last build and the project is opened, a run
@@ -2308,10 +2418,20 @@ the links it has with the change.
   reach them along directed links, nearest first. Expand a file and select a
   candidate to see the path. The map says when it finds no path, a changed file
   is absent from the graph, or the traversal reaches its limit. It uses test
-  naming conventions and test spans inside Rust files. The paths show what is
-  reachable in the graph. Execution coverage requires running the tests.
-  The section is available on a current change graph with **Without tests**
-  turned off.
+  naming conventions and test spans inside Rust files. When workspace `LCOV`
+  (`lcov.info`, `coverage/lcov.info`, `coverage.info`, `.coverage/lcov.info`,
+  `target/coverage/lcov.info`, `reports/lcov.info`, `build/logs/lcov.info`,
+  `var/coverage/lcov.info`) or `Clover` XML (`clover.xml`,
+  `coverage/clover.xml`, `build/logs/clover.xml`, `target/coverage/clover.xml`,
+  `reports/clover.xml`, `coverage/coverage.xml`, `coverage.xml`)
+  coverage artifacts exist under the project root (bounded to `<= 8 MiB` per
+  file and `<= 16 MiB` total without following symlinks outside the root),
+  `test_reach` attaches a per-file `coverage` summary (`format`,
+  `covered_lines`, `total_lines`, `rate`), merges LCOV `TN:` per-test hits
+  (`source: "coverage"`, `coverage_verified: true`) alongside static BFS
+  candidates, and displays accessible coverage pills (`LCOV 85% (34/40)`) and
+  `from coverage` / `coverage verified` badges in the side panel. The section
+  is available on a current change graph with **Without tests** turned off.
 - **Failing tests** ranks the changed files by how likely each is behind the
   tests that fail. Paste the failing tests under **Name the failing tests**, one
   on each line: a test, its file, or a line of the output of a test run as a
@@ -2322,7 +2442,11 @@ the links it has with the change.
   files that the failing tests reach along the links and the passing tests do
   not: the share of the failing tests that reach a file, times the share of
   failing among the tests that reach it, under a root, and of files as likely
-  the one nearer to a failing test. A ranked file carries `#1`, `#2` on its box,
+  the one nearer to a failing test. When `LCOV` or `Clover` coverage artifacts
+  are present, `suspects` rows also merge observed `TN:` test hits into the
+  Ochiai ranking, enrich each row with its `coverage` badge (`coverage_verified`
+  and `source: "coverage"` where matched only via coverage), and use coverage to
+  break ties. A ranked file carries `#1`, `#2` on its box,
   and a folder of a change drawn by folder the best rank inside it. The graph
   stands in for what a test runs, so this says where to look first, not what
   broke. Up to 64 tests are taken, the tests are looked for in the whole graph
@@ -2668,8 +2792,14 @@ Put `.harness-architecture.json` in the Harness project root. For example:
 }
 ```
 
-Each path is an exact file path or a directory prefix relative to the project
-root, with forward slashes. The longest matching path wins. Identical paths
+Each entry in `paths` is an exact file path, a directory prefix, or a safe relative
+glob pattern relative to the project root, using forward slashes: `*` matches
+within a single path segment, `?` matches a single non-`/` character, and `**`
+as a full segment matches zero or more directories (`a/**/b` or trailing `/**`).
+Leading `/`, empty segments, `.` / `..` traversal segments, `\`, `:`, control
+characters, and partial `**` inside a segment are rejected. Exact file paths
+win first, followed by the highest literal character count (breaking ties in
+favor of patterns without `**` and non-glob prefixes). Identical patterns
 cannot be declared twice. Dependencies within a layer are allowed. Each
 cross-layer dependency needs an entry in the source layer's `allows` list.
 The map checks calls, inheritance and type dependencies it finds in the graph.
@@ -2710,14 +2840,16 @@ All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in
 
 - `GET /api/omnigraph/status?project_id=...` — connection state, operating mode, MCP URL, and graph stats.
 - `POST /api/omnigraph/setup` — configure/start/stop/install/connect/disconnect (`local_sidecar`, `docker`, `external`, `off`).
-- `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...` — constellation nodes/edges, branches, and commits.
+- `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...&limit=...&offset=...&cursor=...` — constellation nodes/edges, branches, and commits. Optional `limit` (default `250`, clamped `1..=1000`), `offset` (default `0`), and `cursor` (offset token matching `next_cursor`) paginate `atoms`, returning `symbols` (`SymbolRef` declarations), `symbol_edges` (`MentionsSymbol` links), `total_atoms`, `limit`, `offset`, `has_more`, `truncated`, `next_cursor`, and `telemetry` (`elapsed_ms`, `atom_count`, `total_atoms`, `session_count`, `file_count`, `symbol_count`, `edge_count`, `symbol_edge_count`, `commit_count`, `truncated`, `has_more`).
 - `GET /api/omnigraph/search?project_id=...&q=...&branch=...&kind=...&limit=...` — BM25/lexical hybrid search across atoms and neighbor context.
 - `GET /api/omnigraph/branches/diff?project_id=...&source=...&target=...` — 3-way branch diff (`added_atoms`, `updated_atoms`, `deleted_atoms`, `added_edges`, `deleted_edges`, dry-run conflict preview).
 - `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts) or `delete` branches, or `keep` one atom of a conflict. Omnigraph's own 409 conflicts name an atom without its values, so the diff and a conflicting merge add to each `ContextAtom` `divergent_update` the whole atom as the source and the target branch hold it, null columns included (`source_value`, `target_value`): one read of each branch whatever the number of conflicts (the branch's export only when an atom is past its 100 most recent), nothing without a `project_id` or for an atom of another project, and every other conflict as Omnigraph returned it. Omnigraph v0.15.0 compares whole rows: two branches that both changed an atom conflict while any property differs, `updated_at` and `source_branch` included, and converge only on identical rows, so an atom update, which stamps its branch and time, cannot settle one. `keep` (`project_id`, `atom_id`, `from`, `to`, optional `expected_updated_at` and `replaced_updated_at`) copies the atom onto `to` exactly as `from` stores it, every property included, and refuses with `409` when `from` holds another version than `expected_updated_at` or `to` another than `replaced_updated_at`. In the merge preview such a conflict offers **Keep source**, which keeps the source's atom on the target branch, and **Keep target**, which keeps the target's on the source; each names the two versions the preview showed, so a version a session published since is neither copied nor overwritten unseen, and the preview runs again. A `delete_vs_update`, an edge conflict, or a conflict without both values shows the buttons disabled with the reason.
 - `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links. An update of a named atom keeps what it leaves out: the six provenance fields, the verification, the creation time and the publishing session (`source_session_id`); only an explicit `session_id` takes the atom over and links that session (`PublishedBy`), and a field sent as `null` clears.
 - `POST /api/omnigraph/share` — inject/share selected `atom_ids` into a target session (`inject`, `reference`, `inject_and_link`, or `copy`), updating `session["omnigraph"]` and emitting a session event.
 - `GET /api/omnigraph/file-context?project_id=…&path=…` — the context atoms that touch one file on `main` and `knowledge/canonical`, each once, with its capsule line and authority tag, the declarations of this file each names (`symbols`, as `Owner::name`), and the `contradictions` with one of them at either end.
-- `GET /api/projects/{project_id}/graph/memory-links?path=…[&previous_path=…]` — the project's memory that cites one file: active Project Brain records naming it among their files or sources, active Memory Bank chunks citing it (within the allowed privacy), and the Omnigraph atoms touching it. A file gone from the workspace, or a `previous_path` a commit renamed it from, adds a `hygiene_warnings` entry with `recommended_action: "review"`; nothing is retired or changed. `contradiction_warnings` lists the `contradicts` relations among the file's atoms (from `omnigraph.file_context`), each naming both atoms and, where an end is a Project Brain record or Memory Bank chunk, `linked` ids and `open` targets — also for review only. The dependency map's side panel shows these links for a selected file once they arrive, with each atom's named declarations and an **Open** button per contradicting record or chunk, opens a record or chunk in Knowledge, and says so when the request fails without touching the map. A commit's banner asks this route with `previous_path` for each file the commit renamed (at most 12, one request per file at a time, fresh for a minute) and shows the review warnings under the commit; once its answers are in, that commit's row in the commit dock shows **N to review**. Rows are never asked for a count of their own.
+- `GET /api/projects/{project_id}/graph/memory-links?path=…[&previous_path=…]` — the project's memory that cites one file: active Project Brain records naming it among their files or sources, active Memory Bank chunks citing it (within the allowed privacy), and the Omnigraph atoms touching it. A file gone from the workspace, or a `previous_path` a commit renamed it from, adds a `hygiene_warnings` entry with `recommended_action: "review"`; nothing is retired or changed. `contradiction_warnings` lists the `contradicts` relations among the file's atoms (from `omnigraph.file_context`), each naming both atoms and, where an end is a Project Brain record or Memory Bank chunk, `linked` ids and `open` targets — also for review only. The dependency map's side panel shows these links for a selected file once they arrive, with each atom's named declarations and an **Open** button per contradicting record or chunk, opens a record or chunk in Knowledge, and says so when the request fails without touching the map.
+- `POST /api/projects/{project_id}/graph/memory-links/batch` — CSRF-protected (`X-Harness-Token`) batch counterpart accepting `{"files": [{"path": "…", "previous_path": "…"}, …]}` (up to 24 entries, `previous_path` optional) and returning `{"project_id": "…", "items": […]}` in exact input order, scanning Project Brain and Memory Bank once per batch and enriching each entry via `omnigraph.file_context`. A commit's banner asks this route in a single batched request for the files the commit renamed (at most 12, cached per file for a minute) and shows the review warnings under the commit; once every check succeeds without error, that commit's row in the commit dock shows **N to review**. When the batch check fails, the banner and dock row surface the check failure without caching a `0` review count. Rows are never asked for a count of their own.
+- `POST /api/projects/{project_id}/preflight` — CSRF-protected (`X-Harness-Token`, `knowledge.preflight`) pre-run advisory endpoint accepting strict optional fields `["prompt", "session_id", "task_id", "paths", "risk_caller_hints"]`. Extracts candidate workspace-relative paths from `paths`, prompt `@file` mentions and the linked Brain task, returning `{"project_id", "files", "contradiction_warnings", "hygiene_warnings", "risk_callers", "blast_summary", "risk_caller_hints"}` (`risk_caller_hints` stays `[]` unless `"risk_caller_hints": true` is explicitly passed; default retrieval hints stay off).
 - `POST /api/omnigraph/sync-knowledge` — project verified `Project Brain` records and active `Memory Bank` chunks onto the `knowledge/canonical` branch (with `TouchesFile` and `supersedes` edges, and `MentionsSymbol` edges for the declarations a record or chunk names in its files, read from the registered project; `symbols` counts them, and a synced atom whose named set did not change is not rewritten). The collection is read in pages of at most 1,000 items sorted by atom id; once every page is in hand, a layer read whole (`project-brain`, `memory-bank`) also loses the project's synced atoms it no longer carries — a retired, archived, superseded or stale record or chunk — with their edges (`deleted`, `deleted_atom_ids`). Atoms another project or a session put on the branch are never pruned, and pages that disagree on the total prune nothing. A run whose automatic save wrote verified records or promoted chunks starts the same sync in the background.
 - `POST /api/omnigraph/promote` — human-gated promotion of a `ContextAtom` into `Project Brain` (`attestation: "person"`) after `sensitive_label`, `instruction_like`, `provenance_problems`, and workspace `PublicationFiles` freshness checks, linking `brain_record_id` back onto the graph atom.
 - `GET|POST /api/omnigraph/export` — export scoped task, branch, or main Omnigraph context (`bundle` `harness.omnigraph.bundle.v1` JSON or raw `ndjson`, with optional `download=1` attachment download).

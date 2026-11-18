@@ -386,6 +386,14 @@ pub const ROUTES: &[Route] = &[
         query: &["path", "previous_path"],
     },
     Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/graph/memory-links/batch",
+        operation: "knowledge.memory_links_batch",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
         method: "GET",
         pattern: "/api/omnigraph/file-context",
         operation: "omnigraph.file_context",
@@ -1069,6 +1077,14 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "POST",
+        pattern: "/api/projects/{project_id}/preflight",
+        operation: "knowledge.preflight",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
         pattern: "/api/projects/{project_id}/graph",
         operation: "graph.act",
         status: 200,
@@ -1312,6 +1328,9 @@ pub const ROUTES: &[Route] = &[
             "kind",
             "q",
             "session_id",
+            "limit",
+            "offset",
+            "cursor",
         ],
     },
     Route {
@@ -1793,6 +1812,26 @@ mod tests {
     }
 
     #[test]
+    fn graph_memory_links_batch_route_registered_with_csrf_token() {
+        let found = ROUTES
+            .iter()
+            .find(|r| {
+                r.method == "POST"
+                    && r.pattern == "/api/projects/{project_id}/graph/memory-links/batch"
+            })
+            .expect("missing POST memory-links/batch route");
+        assert_eq!(found.operation, "knowledge.memory_links_batch");
+        assert_eq!(found.status, 200);
+        assert!(found.token, "batch memory-links must require CSRF token");
+        assert!(found.query.is_empty());
+
+        let (matched, params) =
+            route("POST", "/api/projects/demo/graph/memory-links/batch").expect("route matches");
+        assert_eq!(matched.operation, "knowledge.memory_links_batch");
+        assert_eq!(params["project_id"], "demo");
+    }
+
+    #[test]
     fn omnigraph_sync_and_promote_routes_are_registered_with_csrf_tokens() {
         for (method, pattern, op) in [
             (
@@ -1815,5 +1854,55 @@ mod tests {
             assert_eq!(matched.operation, op);
             assert!(params.is_empty());
         }
+    }
+
+    #[test]
+    fn omnigraph_graph_route_allows_pagination_query_params() {
+        let found = ROUTES
+            .iter()
+            .find(|r| r.method == "GET" && r.pattern == "/api/omnigraph/graph")
+            .expect("missing GET /api/omnigraph/graph route");
+        assert_eq!(found.operation, "omnigraph.graph");
+        assert_eq!(found.status, 200);
+        assert!(!found.token);
+        assert_eq!(
+            found.query,
+            &[
+                "project_id",
+                "branch",
+                "snapshot",
+                "kind",
+                "q",
+                "session_id",
+                "limit",
+                "offset",
+                "cursor",
+            ]
+        );
+        let parsed = query(
+            Some("project_id=p1&branch=main&limit=100&offset=50&cursor=offset:50"),
+            found.query,
+        )
+        .expect("pagination query params accepted");
+        assert_eq!(parsed["limit"], "100");
+        assert_eq!(parsed["offset"], "50");
+        assert_eq!(parsed["cursor"], "offset:50");
+    }
+
+    #[test]
+    fn project_preflight_route_registered_with_csrf_token() {
+        let found = ROUTES
+            .iter()
+            .find(|r| r.method == "POST" && r.pattern == "/api/projects/{project_id}/preflight")
+            .expect("missing POST /api/projects/{project_id}/preflight route");
+        assert_eq!(found.operation, "knowledge.preflight");
+        assert_eq!(found.status, 200);
+        assert!(found.token, "preflight must require CSRF token");
+        assert!(found.query.is_empty());
+
+        let (matched, params) =
+            route("POST", "/api/projects/demo/preflight").expect("route matches");
+        assert_eq!(matched.operation, "knowledge.preflight");
+        assert_eq!(params["project_id"], "demo");
     }
 }

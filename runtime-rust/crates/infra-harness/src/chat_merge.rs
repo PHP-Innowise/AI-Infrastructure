@@ -31,6 +31,7 @@ const DESTINATION: &[&str] = &[
     "brain",
     "budgets",
     "model_routing",
+    "permissions",
 ];
 #[derive(Clone)]
 pub struct ChatMerge {

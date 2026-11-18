@@ -2,7 +2,7 @@ use crate::{HarnessError, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -171,6 +171,7 @@ impl SessionStore {
             restart.execute("INSERT INTO events(session_id,data)VALUES(?1,?2)",params![sid,json!({"kind":"status","text":"Server restarted; the previous run was interrupted."}).to_string()])?;
         }
         restart.execute("UPDATE sessions SET status='interrupted',updated_at=?1 WHERE status IN ('queued','running')",[now()])?;
+        expire_pending_permissions(&restart)?;
         crate::inbox::recover(&restart)?;
         restart.commit()?;
         Ok(Self {
@@ -773,6 +774,71 @@ impl SessionStore {
         crate::chat_merge::ChatMerge::new(self.clone()).delete(sid)
     }
 }
+fn expire_pending_permissions(tx: &Connection) -> Result<()> {
+    // No PermissionDesk waiters survive a process restart, so any still-pending
+    // permission event is closed before clients reload or poll again.
+    let rows = {
+        let mut q = tx.prepare(
+            "SELECT id,session_id,data FROM events WHERE data LIKE '%\"permission\"%' ORDER BY id",
+        )?;
+        q.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let mut resolved = BTreeMap::<(String, String), i64>::new();
+    let mut pending = Vec::new();
+    for (row_id, sid, raw) in rows {
+        let Ok(parsed) = crate::strict_json::parse(raw.as_bytes(), 4 * 1024 * 1024) else {
+            continue;
+        };
+        if parsed["kind"] != "permission" {
+            continue;
+        }
+        let request_id = parsed["request_id"].as_str().unwrap_or("").to_owned();
+        if parsed["state"] == "pending" {
+            pending.push((row_id, sid, request_id, parsed));
+        } else if !request_id.is_empty() {
+            resolved
+                .entry((sid, request_id))
+                .and_modify(|last| *last = (*last).max(row_id))
+                .or_insert(row_id);
+        }
+    }
+    for (row_id, sid, request_id, mut event) in pending {
+        if !request_id.is_empty()
+            && resolved
+                .get(&(sid, request_id))
+                .is_some_and(|&resolved_id| resolved_id > row_id)
+        {
+            continue;
+        }
+        if let Some(obj) = event.as_object_mut() {
+            obj.insert("state".into(), json!("expired"));
+            obj.insert("by".into(), json!("harness"));
+            if let (Some(tool), Some(summary)) = (
+                obj.get("tool").and_then(Value::as_str).map(str::to_owned),
+                obj.get("summary")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ) {
+                obj.insert(
+                    "text".into(),
+                    json!(format!("{tool} no longer waiting: {summary}")),
+                );
+            }
+        }
+        tx.execute(
+            "UPDATE events SET data=?1 WHERE id=?2",
+            params![event.to_string(), row_id],
+        )?;
+    }
+    Ok(())
+}
 fn encode_option(value: &Value) -> Option<String> {
     if value.is_null() {
         None
@@ -1171,5 +1237,104 @@ mod tests {
         assert_eq!(invalid_event.0, 400);
         assert_eq!(error(store.session_events("session", 0)), invalid_event);
         assert!(store.session_events("session", 1).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn reopen_expires_dangling_pending_permissions_without_touching_resolved_ones() {
+        let (directory, store) = fixture();
+        let state = directory.path().join("state");
+        {
+            let db = store.connection().unwrap();
+            insert(&db, "s1", "updated");
+            db.execute("UPDATE sessions SET status='running' WHERE id='s1'", [])
+                .unwrap();
+            // Already resolved request must keep its pending + allowed history.
+            db.execute(
+                "INSERT INTO events(session_id,data) VALUES('s1',?1)",
+                [json!({
+                    "kind": "permission",
+                    "state": "pending",
+                    "request_id": "req-resolved",
+                    "provider": "claude",
+                    "tool": "Bash",
+                    "summary": "ls",
+                    "session_option": true,
+                    "text": "Claude Code asks to run Bash: ls"
+                })
+                .to_string()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO events(session_id,data) VALUES('s1',?1)",
+                [json!({
+                    "kind": "permission",
+                    "state": "allowed",
+                    "request_id": "req-resolved",
+                    "provider": "claude",
+                    "tool": "Bash",
+                    "summary": "ls",
+                    "by": "person",
+                    "text": "Bash allowed: ls"
+                })
+                .to_string()],
+            )
+            .unwrap();
+            // Dangling request still pending when the process stopped.
+            db.execute(
+                "INSERT INTO events(session_id,data) VALUES('s1',?1)",
+                [json!({
+                    "kind": "permission",
+                    "state": "pending",
+                    "request_id": "req-dangling",
+                    "provider": "codex",
+                    "tool": "Shell",
+                    "summary": "touch probe.txt",
+                    "session_option": true,
+                    "text": "Codex asks to run Shell: touch probe.txt"
+                })
+                .to_string()],
+            )
+            .unwrap();
+            // Corrupt non-permission event must not break startup recovery.
+            db.execute(
+                "INSERT INTO events(session_id,data) VALUES('s1',?1)",
+                [r#"{"kind":"permission","kind":"dup"}"#],
+            )
+            .unwrap();
+        }
+        drop(store);
+        let reopened = SessionStore::open(&state).unwrap();
+        assert_eq!(reopened.get("s1").unwrap()["status"], "interrupted");
+        let rows = {
+            let db = reopened.connection().unwrap();
+            let mut q = db
+                .prepare("SELECT data FROM events WHERE session_id='s1' ORDER BY id")
+                .unwrap();
+            q.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let valid: Vec<Value> = rows
+            .into_iter()
+            .filter_map(|raw| crate::strict_json::parse(raw.as_bytes(), 65536).ok())
+            .collect();
+        let resolved_pending = valid
+            .iter()
+            .find(|e| e["request_id"] == "req-resolved" && e["state"] == "pending");
+        assert!(resolved_pending.is_some());
+        let dangling = valid
+            .iter()
+            .find(|e| e["request_id"] == "req-dangling")
+            .unwrap();
+        assert_eq!(dangling["state"], "expired");
+        assert_eq!(dangling["by"], "harness");
+        assert_eq!(dangling["text"], "Shell no longer waiting: touch probe.txt");
+        assert!(valid.iter().any(|e| {
+            e["kind"] == "status"
+                && e["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Server restarted"))
+        }));
     }
 }

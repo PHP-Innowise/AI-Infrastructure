@@ -183,9 +183,10 @@ while IFS= read -r line; do
       echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"chat-fake-1\"}}}}";;
     *'"method":"session/prompt"'*)
       prompt=$id
-      echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"chat-fake-1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"Creating the probe."}}}}}}}}'
-      echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"chat-fake-1","update":{{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"touch probe.txt","kind":"execute","status":"pending","rawInput":{{"command":"touch probe.txt"}}}}}}}}'
-      echo '{{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{{"sessionId":"chat-fake-1","toolCall":{{"toolCallId":"call-1","title":"touch probe.txt","kind":"execute","rawInput":{{"command":"touch probe.txt"}}}},"options":[{{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}},{{"optionId":"allow-always","name":"Always allow","kind":"allow_always"}},{{"optionId":"reject-once","name":"Reject","kind":"reject_once"}}]}}}}';;
+      case "$line" in *chained*) cmd='touch probe.txt && true';; *) cmd='touch probe.txt';; esac
+      printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"chat-fake-1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"Creating the probe."}}}}}}}}'
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"chat-fake-1\",\"update\":{{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"call-1\",\"title\":\"$cmd\",\"kind\":\"execute\",\"status\":\"pending\",\"rawInput\":{{\"command\":\"$cmd\"}}}}}}}}"
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"session/request_permission\",\"params\":{{\"sessionId\":\"chat-fake-1\",\"toolCall\":{{\"toolCallId\":\"call-1\",\"title\":\"$cmd\",\"kind\":\"execute\",\"rawInput\":{{\"command\":\"$cmd\"}}}},\"options\":[{{\"optionId\":\"allow-once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"}},{{\"optionId\":\"allow-always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"}},{{\"optionId\":\"reject-once\",\"name\":\"Reject\",\"kind\":\"reject_once\"}}]}}}}";;
     *'"optionId":"allow-once"'*|*'"optionId":"reject-once"'*)
       # Cursor reports a declined call completed too.
       case "$line" in *allow-once*) said="The person allowed it.";; *) said="The request was declined.";; esac
@@ -507,10 +508,14 @@ impl Fixture {
         lines(&self.arguments)
     }
     async fn answer(&self, sid: &str, request: &str, decision: &str) -> (u16, Value) {
+        self.answer_with(sid, request, json!({"decision": decision}))
+            .await
+    }
+    async fn answer_with(&self, sid: &str, request: &str, body: Value) -> (u16, Value) {
         self.http(
             Method::POST,
             &format!("/api/sessions/{sid}/permissions/{request}"),
-            Some(json!({"decision": decision})),
+            Some(body),
         )
         .await
     }
@@ -858,7 +863,9 @@ async fn codex_asks_through_its_app_server_and_is_stopped_after_the_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     let fx = Fixture::new(false).await;
-    let sid = fx.start_with("cursor", "manual").await;
+    let sid = fx
+        .start_task("cursor", "manual", None, "Create the probe file chained")
+        .await;
     let events = fx
         .until(&sid, "the Cursor request", |_, events| {
             !permission_events(events, "pending").is_empty()
@@ -868,12 +875,13 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     let request = pending["request_id"].as_str().unwrap().to_owned();
     assert!(request.starts_with("cursor-0-"), "{request}");
     assert_eq!(pending["tool"], "Shell");
-    assert_eq!(pending["summary"], "touch probe.txt");
+    assert_eq!(pending["summary"], "touch probe.txt && true");
     assert_eq!(pending["session_option"], false);
+    assert_eq!(pending["has_session_rule"], false);
     let arguments = lines(&fx.cursor_arguments);
     assert_eq!(arguments.last().map(String::as_str), Some("acp"));
     assert!(!arguments.contains(&"--print".to_owned()));
-    // Cursor keeps an always-allow beyond the session, so the Harness offers once only.
+    // Chained commands never receive a Harness-local session rule, so session approval is refused.
     let (status, _) = fx.answer(&sid, &request, "allow_session").await;
     assert_eq!(status, 400);
     let (status, answer) = fx.answer(&sid, &request, "deny").await;
@@ -904,7 +912,7 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     );
     // The next Manual turn's process numbers its request 0 again; the page
     // still gets a request of its own.
-    fx.send(&sid, "manual", "Once more").await;
+    fx.send(&sid, "manual", "Once more chained").await;
     let events = fx
         .until(&sid, "the next Cursor request", |_, events| {
             permission_events(events, "pending").len() == 2
@@ -947,6 +955,930 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     let arguments = lines(&fx.cursor_arguments);
     assert!(!arguments.contains(&"--force".to_owned()));
     assert_eq!(pair(&arguments, "--sandbox").as_deref(), Some("enabled"));
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waiting_permissions_surface_in_sessions_list_get_and_launch_history() {
+    let fx = Fixture::new(false).await;
+    let other_sid = fx.start("auto").await;
+    fx.until(&other_sid, "the auto session", |session, _| {
+        finished(session)
+    })
+    .await;
+
+    let sid = fx.start("manual").await;
+    let events = fx
+        .until(&sid, "the waiting permission request", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let request_id = permission_events(&events, "pending")[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Direct SessionsDomain::execute operations return live waiting requests and counts.
+    let Payload::Json(waiting) = fx
+        .services
+        .request(
+            "sessions.waiting_permissions",
+            json!({"params":{"session_id": sid},"query":{},"body":{}}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected json");
+    };
+    assert_eq!(waiting["items"].as_array().unwrap().len(), 1);
+    assert_eq!(waiting["items"][0]["request_id"], request_id);
+
+    let Payload::Json(counts) = fx
+        .services
+        .request(
+            "sessions.waiting_counts",
+            json!({"params":{},"query":{},"body":{}}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected json");
+    };
+    assert_eq!(counts["counts"][&sid], 1);
+
+    // HTTP GET /api/sessions and GET /api/sessions/{sid} expose waiting counts and items.
+    let (list_status, list_body) = fx.http(Method::GET, "/api/sessions", None).await;
+    assert_eq!(list_status, 200, "{list_body}");
+    let sessions = list_body["sessions"].as_array().unwrap();
+    let waiting_summary = sessions.iter().find(|s| s["id"] == sid).unwrap();
+    let idle_summary = sessions.iter().find(|s| s["id"] == other_sid).unwrap();
+    assert_eq!(waiting_summary["waiting_permissions"], 1);
+    assert_eq!(idle_summary["waiting_permissions"], 0);
+
+    let (get_status, get_body) = fx
+        .http(Method::GET, &format!("/api/sessions/{sid}"), None)
+        .await;
+    assert_eq!(get_status, 200, "{get_body}");
+    let get_waiting = get_body["waiting_permissions"].as_array().unwrap();
+    assert_eq!(get_waiting.len(), 1);
+    assert_eq!(get_waiting[0]["request_id"], request_id);
+
+    // Answering clears waiting permissions and launch history retains `"permissions": "manual"`.
+    let (answer_status, _) = fx.answer(&sid, &request_id, "allow").await;
+    assert_eq!(answer_status, 200);
+    fx.until(&sid, "answered manual run", |session, _| finished(session))
+        .await;
+
+    let (list_status, list_after) = fx.http(Method::GET, "/api/sessions", None).await;
+    assert_eq!(list_status, 200, "{list_after}");
+    let after_summary = list_after["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == sid)
+        .unwrap();
+    assert_eq!(after_summary["waiting_permissions"], 0);
+
+    let (get_status, get_after) = fx
+        .http(Method::GET, &format!("/api/sessions/{sid}"), None)
+        .await;
+    assert_eq!(get_status, 200, "{get_after}");
+    assert_eq!(get_after["waiting_permissions"], json!([]));
+
+    let (results_status, results_body) = fx
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/results?diff=none"),
+            None,
+        )
+        .await;
+    assert_eq!(results_status, 200, "{results_body}");
+    assert_eq!(
+        results_body["launches"][0]["settings"]["permissions"],
+        "manual"
+    );
+
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interactive_deadline_pauses_during_human_wait_and_excludes_wait_from_seconds() {
+    use infra_host::process::{Interactive, Limits, run_interactive, use_guardian};
+    use std::sync::atomic::AtomicUsize;
+
+    let _ = use_guardian(PathBuf::from(env!(
+        "CARGO_BIN_EXE_infra-harness-inbox-fixture"
+    )));
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let script = root.join("pause-check.sh");
+    fs::write(&script, "#!/bin/sh\necho ask\nIFS= read -r _\necho done\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 1. Waiting pauses the short deadline and is excluded from Output.seconds.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let finished = Arc::new(AtomicBool::new(false));
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let tx_holder = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(350);
+    let lines_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let lines_event = lines_seen.clone();
+    let waiting_event = waiting.clone();
+    let finished_event = finished.clone();
+    let tx_event = tx_holder.clone();
+    let output = run_interactive(
+        &[script.to_string_lossy().into_owned()],
+        &root,
+        &BTreeMap::new(),
+        &[],
+        &[],
+        Limits {
+            seconds: Some(1),
+            output: 65536,
+            line: 65536,
+        },
+        cancel.clone(),
+        None,
+        None,
+        Some(deadline),
+        Interactive {
+            input: rx,
+            finished,
+            waiting,
+        },
+        move |packet| {
+            let text = String::from_utf8_lossy(packet).trim().to_owned();
+            lines_event.lock().unwrap().push(text.clone());
+            if text == "ask" {
+                waiting_event.store(1, std::sync::atomic::Ordering::Release);
+                let w = waiting_event.clone();
+                let f = finished_event.clone();
+                let t = tx_event.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(650)).await;
+                    w.store(0, std::sync::atomic::Ordering::Release);
+                    if let Some(sender) = t.lock().unwrap().take() {
+                        let _ = sender.send(b"ok\n".to_vec());
+                    }
+                    f.store(true, std::sync::atomic::Ordering::Release);
+                });
+            }
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    let wall = started.elapsed();
+    assert_eq!(output.code, 0);
+    assert_eq!(
+        *lines_seen.lock().unwrap(),
+        vec!["ask".to_owned(), "done".to_owned()]
+    );
+    assert!(wall >= Duration::from_millis(650), "{wall:?}");
+    assert!(
+        output.seconds < 0.45,
+        "paused wait must not count toward Output.seconds: {} (wall={wall:?})",
+        output.seconds
+    );
+
+    // 2. Without waiting, an expired deadline still fails with native-timeout.
+    let (_tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+    let err = run_interactive(
+        &[script.to_string_lossy().into_owned()],
+        &root,
+        &BTreeMap::new(),
+        &[],
+        &[],
+        Limits {
+            seconds: Some(10),
+            output: 65536,
+            line: 65536,
+        },
+        Arc::new(AtomicBool::new(false)),
+        None,
+        None,
+        Some(Instant::now() + Duration::from_millis(250)),
+        Interactive {
+            input: rx2,
+            finished: Arc::new(AtomicBool::new(false)),
+            waiting: Arc::new(AtomicUsize::new(0)),
+        },
+        |_| Ok(()),
+    )
+    .await
+    .err()
+    .expect("unpaused deadline must time out");
+    assert_eq!(err.code, "native-timeout");
+}
+
+fn write_fake_host(root: &Path, name: &str, script: String) -> PathBuf {
+    let program = root.join(name);
+    fs::write(&program, script).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    program
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rich_diff_preview_and_rule_summary_events_from_claude_codex_and_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let unused = root.join("unused");
+
+    let claude = write_fake_host(
+        &root,
+        "fake-claude-rich",
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"harness-initialize","response":{"current_permission_mode":"default"}}}' ;;
+    *'"subtype":"set_permission_mode"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"harness-permission-mode","response":{"mode":"default"}}}' ;;
+    *'"type":"user"'*)
+      printf '%s\n' '{"type":"system","subtype":"init","session_id":"claude-rich-1"}'
+      printf '%s\n' '{"type":"control_request","request_id":"req-edit","request":{"subtype":"can_use_tool","tool_name":"Edit","display_name":"Edit","input":{"file_path":"src/app.rs","old_string":"let x = 1;","new_string":"let x = 2;"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Edit","ruleContent":"src/app.rs"}],"behavior":"allow","destination":"localSettings"}]}}' ;;
+    *'"behavior":"allow"'*)
+      printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Edited."}],"id":"msg-1"},"session_id":"claude-rich-1"}'
+      printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Edited.","session_id":"claude-rich-1","total_cost_usd":0.01}' ;;
+  esac
+done
+"#
+        .into(),
+    );
+
+    let codex = write_fake_host(
+        &root,
+        "fake-codex-rich",
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{\"id\":$id,\"result\":{\"userAgent\":\"fake\"}}" ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
+      printf '%s\n' "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"thread-rich-1\"}}}" ;;
+    *'"method":"turn/start"'*)
+      printf '%s\n' "{\"id\":$id,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-rich-1","turn":{"id":"turn-1"}}}'
+      printf '%s\n' '{"method":"item/started","params":{"threadId":"thread-rich-1","turnId":"turn-1","item":{"type":"fileChange","id":"item-fc","status":"inProgress","changes":[{"path":"src/lib.rs","kind":{"type":"update"},"diff":"@@ -1,1 +1,1 @@\n-old\n+new"}]}}}'
+      printf '%s\n' '{"id":7,"method":"item/fileChange/requestApproval","params":{"threadId":"thread-rich-1","turnId":"turn-1","itemId":"item-fc","reason":"Update library"}}' ;;
+    *'"id":7,'*'"decision":"accept"'*)
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-rich-1","turnId":"turn-1","item":{"type":"fileChange","id":"item-fc","status":"completed","changes":[{"path":"src/lib.rs","kind":{"type":"update"}}]}}}'
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-rich-1","turnId":"turn-1","item":{"type":"agentMessage","id":"item-msg","text":"Codex updated."}}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-rich-1","turn":{"id":"turn-1","status":"completed"}}}' ;;
+  esac
+done
+"#
+        .into(),
+    );
+
+    let cursor = write_fake_host(
+        &root,
+        "fake-cursor-rich",
+        r#"#!/bin/sh
+prompt=0
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}" ;;
+    *'"method":"session/new"'*|*'"method":"session/load"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"cursor-rich-1\"}}" ;;
+    *'"method":"session/prompt"'*)
+      prompt=$id
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-rich-1","update":{"sessionUpdate":"tool_call","toolCallId":"edit-1","title":"Edit src/main.rs","kind":"edit","status":"pending","rawInput":{"path":"src/main.rs","oldText":"fn a() {}","newText":"fn b() {}"}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":101,"method":"session/request_permission","params":{"sessionId":"cursor-rich-1","toolCall":{"toolCallId":"edit-1","title":"Edit src/main.rs","kind":"edit"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}' ;;
+    *'"optionId":"allow-once"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-rich-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-rich-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Cursor updated."}}}}'
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$prompt,\"result\":{\"stopReason\":\"end_turn\"}}" ;;
+  esac
+done
+"#
+        .into(),
+    );
+
+    let fx = Fixture::with_hosts(
+        dir,
+        [claude, codex, cursor],
+        [unused.clone(), unused.clone(), unused],
+        Duration::from_secs(20),
+    )
+    .await;
+
+    // 1. Claude Edit diff_preview & permission_suggestions rule_summary
+    let claude_sid = fx.start_with("claude", "manual").await;
+    let events = fx
+        .until(&claude_sid, "claude rich ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let pending = permission_events(&events, "pending")[0].clone();
+    assert_eq!(pending["ask_kind"], "file_change");
+    assert_eq!(pending["session_option"], true);
+    assert_eq!(pending["has_session_rule"], false);
+    assert_eq!(pending["rule_summary"], "Session rule: Edit(src/app.rs)");
+    let claude_diff = pending["diff_preview"].as_str().unwrap();
+    assert!(claude_diff.contains("--- a/src/app.rs"), "{claude_diff}");
+    assert!(
+        claude_diff.contains("-let x = 1;\n+let x = 2;"),
+        "{claude_diff}"
+    );
+    let (status, got) = fx
+        .http(Method::GET, &format!("/api/sessions/{claude_sid}"), None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(got["waiting_permissions"][0]["diff_preview"], claude_diff);
+    assert_eq!(
+        got["waiting_permissions"][0]["rule_summary"],
+        "Session rule: Edit(src/app.rs)"
+    );
+    let req_id = pending["request_id"].as_str().unwrap();
+    assert_eq!(fx.answer(&claude_sid, req_id, "allow").await.0, 200);
+    let events = fx
+        .until(&claude_sid, "claude finished", |session, _| {
+            finished(session)
+        })
+        .await;
+    assert!(completed(&fx.store.get(&claude_sid).unwrap()));
+    let resolved = permission_events(&events, "allowed")[0];
+    assert_eq!(resolved["diff_preview"], claude_diff);
+    assert_eq!(resolved["rule_summary"], "Session rule: Edit(src/app.rs)");
+
+    // 2. Codex File change diff_preview & thread rule_summary
+    let codex_sid = fx.start_with("codex", "manual").await;
+    let events = fx
+        .until(&codex_sid, "codex rich ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let pending = permission_events(&events, "pending")[0].clone();
+    assert_eq!(pending["ask_kind"], "file_change");
+    assert_eq!(pending["session_option"], true);
+    assert_eq!(pending["has_session_rule"], false);
+    assert_eq!(
+        pending["rule_summary"],
+        "Remember approval for this Codex thread"
+    );
+    let codex_diff = pending["diff_preview"].as_str().unwrap();
+    assert!(codex_diff.contains("--- a/src/lib.rs"), "{codex_diff}");
+    assert!(codex_diff.contains("-old\n+new"), "{codex_diff}");
+    let req_id = pending["request_id"].as_str().unwrap();
+    assert_eq!(fx.answer(&codex_sid, req_id, "allow").await.0, 200);
+    let events = fx
+        .until(&codex_sid, "codex finished", |session, _| finished(session))
+        .await;
+    assert!(completed(&fx.store.get(&codex_sid).unwrap()));
+    assert_eq!(
+        permission_events(&events, "allowed")[0]["diff_preview"],
+        codex_diff
+    );
+
+    // 3. Cursor Edit diff_preview & Harness-local session rule summary
+    let cursor_sid = fx.start_with("cursor", "manual").await;
+    let events = fx
+        .until(&cursor_sid, "cursor rich ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let pending = permission_events(&events, "pending")[0].clone();
+    assert_eq!(pending["ask_kind"], "file_change");
+    assert_eq!(pending["session_option"], true);
+    assert_eq!(pending["has_session_rule"], true);
+    assert_eq!(
+        pending["rule_summary"],
+        "Remember exact command/path in Harness for this session (never writes ~/.cursor)"
+    );
+    let cursor_diff = pending["diff_preview"].as_str().unwrap();
+    assert!(cursor_diff.contains("--- a/src/main.rs"), "{cursor_diff}");
+    assert!(
+        cursor_diff.contains("-fn a() {}\n+fn b() {}"),
+        "{cursor_diff}"
+    );
+    let req_id = pending["request_id"].as_str().unwrap();
+    assert_eq!(fx.answer(&cursor_sid, req_id, "allow").await.0, 200);
+    let events = fx
+        .until(&cursor_sid, "cursor finished", |session, _| {
+            finished(session)
+        })
+        .await;
+    assert!(completed(&fx.store.get(&cursor_sid).unwrap()));
+    assert_eq!(
+        permission_events(&events, "allowed")[0]["diff_preview"],
+        cursor_diff
+    );
+
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_allow_session_caches_ephemeral_rules_without_writing_cursor_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let unused = root.join("unused");
+    let replies_log = root.join("cursor-cache-replies.jsonl");
+
+    let cursor = write_fake_host(
+        &root,
+        "fake-cursor-cache",
+        r#"#!/bin/sh
+prompt=0
+mode=turn1
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}" ;;
+    *'"method":"session/new"'*|*'"method":"session/load"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"chat-cache-1\"}}" ;;
+    *'"method":"session/prompt"'*)
+      prompt=$id
+      case "$line" in *turn2*) mode=turn2;; *) mode=turn1;; esac
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"touch probe.txt","kind":"execute","status":"pending","rawInput":{"command":"touch probe.txt"}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":101,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c1","title":"touch probe.txt","kind":"execute","rawInput":{"command":"touch probe.txt"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}' ;;
+    *'"id":101,'*|*'"id":101}'*)
+      printf '%s\n' "$line" >> "__REPLIES_LOG__"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed"}}}'
+      if [ "$mode" = turn1 ]; then
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c2","title":"touch probe.txt","kind":"execute","status":"pending","rawInput":{"command":"touch probe.txt"}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":102,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c2","title":"touch probe.txt","kind":"execute","rawInput":{"command":"touch probe.txt"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+      else
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c2","title":"Edit src/app.rs","kind":"edit","status":"pending","rawInput":{"path":"src/app.rs","oldText":"1","newText":"2"}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":102,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c2","title":"Edit src/app.rs","kind":"edit","rawInput":{"path":"src/app.rs","oldText":"1","newText":"2"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+      fi ;;
+    *'"id":102,'*|*'"id":102}'*)
+      printf '%s\n' "$line" >> "__REPLIES_LOG__"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c2","status":"completed"}}}'
+      if [ "$mode" = turn1 ]; then
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c3","title":"Edit ./src/./app.rs","kind":"edit","status":"pending","rawInput":{"path":"./src/./app.rs","oldText":"1","newText":"2"}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":103,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c3","title":"Edit ./src/./app.rs","kind":"edit","rawInput":{"path":"./src/./app.rs","oldText":"1","newText":"2"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+      else
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c3","title":"touch other.txt","kind":"execute","status":"pending","rawInput":{"command":"touch other.txt"}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":103,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c3","title":"touch other.txt","kind":"execute","rawInput":{"command":"touch other.txt"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+      fi ;;
+    *'"id":103,'*|*'"id":103}'*)
+      printf '%s\n' "$line" >> "__REPLIES_LOG__"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c3","status":"completed"}}}'
+      if [ "$mode" = turn1 ]; then
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Turn 1 done."}}}}'
+        printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$prompt,\"result\":{\"stopReason\":\"end_turn\"}}"
+      else
+        printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c4","title":"Edit src/other.rs","kind":"edit","status":"pending","rawInput":{"path":"src/other.rs","oldText":"a","newText":"b"}}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":104,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c4","title":"Edit src/other.rs","kind":"edit","rawInput":{"path":"src/other.rs","oldText":"a","newText":"b"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+      fi ;;
+    *'"id":104,'*|*'"id":104}'*)
+      printf '%s\n' "$line" >> "__REPLIES_LOG__"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c4","status":"completed"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call","toolCallId":"c5","title":"touch other.txt","kind":"execute","status":"pending","rawInput":{"command":"touch other.txt"}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":105,"method":"session/request_permission","params":{"sessionId":"chat-cache-1","toolCall":{"toolCallId":"c5","title":"touch other.txt","kind":"execute","rawInput":{"command":"touch other.txt"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}' ;;
+    *'"id":105,'*|*'"id":105}'*)
+      printf '%s\n' "$line" >> "__REPLIES_LOG__"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c5","status":"completed"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-cache-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Turn 2 done."}}}}'
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$prompt,\"result\":{\"stopReason\":\"end_turn\"}}" ;;
+  esac
+done
+"#
+        .replace("__REPLIES_LOG__", &replies_log.display().to_string()),
+    );
+
+    let fx = Fixture::with_hosts(
+        dir,
+        [unused.clone(), unused.clone(), cursor],
+        [unused.clone(), unused.clone(), unused],
+        Duration::from_secs(20),
+    )
+    .await;
+
+    // Session A Turn 1: allow_session on touch probe.txt caches and auto-approves the repeat;
+    // then allow_session on ./src/./app.rs caches the normalized edit path.
+    let sid_a = fx.start_task("cursor", "manual", None, "turn1").await;
+    let events = fx
+        .until(&sid_a, "first cursor ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let req1 = permission_events(&events, "pending")[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        permission_events(&events, "pending")[0]["summary"],
+        "touch probe.txt"
+    );
+    assert_eq!(fx.answer(&sid_a, &req1, "allow_session").await.0, 200);
+
+    // Ask 102 ("touch probe.txt") must NOT become pending; the next pending is 103 ("./src/./app.rs").
+    let events = fx
+        .until(&sid_a, "edit prompt after cached repeat", |_, events| {
+            permission_events(events, "pending").len() == 2
+        })
+        .await;
+    let pending_edit = permission_events(&events, "pending")[1];
+    assert_eq!(pending_edit["summary"], "./src/./app.rs");
+    assert_eq!(pending_edit["ask_kind"], "file_change");
+    let req_edit = pending_edit["request_id"].as_str().unwrap().to_owned();
+    assert_eq!(fx.answer(&sid_a, &req_edit, "allow_session").await.0, 200);
+    let turn1_events = fx
+        .until(&sid_a, "turn 1 completed", |session, _| finished(session))
+        .await;
+    assert!(completed(&fx.store.get(&sid_a).unwrap()));
+    let turn1_session_rule: Vec<_> = permission_events(&turn1_events, "allowed_session")
+        .into_iter()
+        .filter(|e| e["by"] == "session_rule")
+        .collect();
+    assert_eq!(turn1_session_rule.len(), 1, "{turn1_events:#?}");
+    assert_eq!(turn1_session_rule[0]["summary"], "touch probe.txt");
+
+    // Session A Turn 2: cached command ("touch probe.txt") and normalized cached edit ("src/app.rs")
+    // auto-resolve immediately; different command/path and allow-once repeats still prompt.
+    let turn2_start = turn1_events.len();
+    fx.send(&sid_a, "manual", "turn2").await;
+    let events = fx
+        .until(&sid_a, "different command prompt", |_, events| {
+            permission_events(&events[turn2_start..], "pending").len() == 1
+        })
+        .await;
+    let req_other_cmd = permission_events(&events[turn2_start..], "pending")[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        permission_events(&events[turn2_start..], "pending")[0]["summary"],
+        "touch other.txt"
+    );
+    assert_eq!(fx.answer(&sid_a, &req_other_cmd, "allow").await.0, 200);
+
+    let events = fx
+        .until(&sid_a, "different edit path prompt", |_, events| {
+            permission_events(&events[turn2_start..], "pending").len() == 2
+        })
+        .await;
+    let req_other_edit = permission_events(&events[turn2_start..], "pending")[1]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        permission_events(&events[turn2_start..], "pending")[1]["summary"],
+        "src/other.rs"
+    );
+    assert_eq!(fx.answer(&sid_a, &req_other_edit, "allow").await.0, 200);
+
+    // Repeat of "touch other.txt" (which only got Decision::Allow) must still prompt!
+    let events = fx
+        .until(&sid_a, "repeat after allow-once", |_, events| {
+            permission_events(&events[turn2_start..], "pending").len() == 3
+        })
+        .await;
+    let req_repeat_once = permission_events(&events[turn2_start..], "pending")[2]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        permission_events(&events[turn2_start..], "pending")[2]["summary"],
+        "touch other.txt"
+    );
+    assert_eq!(fx.answer(&sid_a, &req_repeat_once, "allow").await.0, 200);
+    let all_a = fx
+        .until(&sid_a, "turn 2 completed", |session, events| {
+            finished(session)
+                && events
+                    .iter()
+                    .filter(|event| event["kind"] == "result")
+                    .count()
+                    >= 2
+        })
+        .await;
+    assert!(completed(&fx.store.get(&sid_a).unwrap()));
+    let turn2_rule_hits: Vec<_> = permission_events(&all_a[turn2_start..], "allowed_session")
+        .into_iter()
+        .filter(|e| e["by"] == "session_rule")
+        .collect();
+    assert_eq!(turn2_rule_hits.len(), 2, "{:#?}", &all_a[turn2_start..]);
+
+    // Session B on the same PermissionDesk does NOT inherit Session A's cached rules.
+    let sid_b = fx.start_task("cursor", "manual", None, "turn1").await;
+    for expected_summary in ["touch probe.txt", "touch probe.txt", "./src/./app.rs"] {
+        let count_before = permission_events(&fx.events(&sid_b), "allowed").len();
+        let events = fx
+            .until(&sid_b, "session B prompt", |_, events| {
+                permission_events(events, "pending").len() > count_before
+            })
+            .await;
+        let pending = permission_events(&events, "pending")[count_before].clone();
+        assert_eq!(pending["summary"], expected_summary);
+        let req = pending["request_id"].as_str().unwrap();
+        assert_eq!(fx.answer(&sid_b, req, "allow").await.0, 200);
+    }
+    fx.until(&sid_b, "session B completed", |session, _| {
+        finished(session)
+    })
+    .await;
+    assert!(completed(&fx.store.get(&sid_b).unwrap()));
+
+    // Cursor CLI must NEVER receive allow-always (so ~/.cursor/cli-config.json is never touched).
+    let raw_replies = lines(&replies_log);
+    assert_eq!(raw_replies.len(), 11, "{raw_replies:#?}");
+    for line in &raw_replies {
+        let parsed: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            parsed["result"]["outcome"]["optionId"], "allow-once",
+            "{parsed}"
+        );
+    }
+
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_structured_questions_route_answers_for_claude_codex_and_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let unused = root.join("unused");
+    let claude_log = root.join("claude-q-replies.jsonl");
+    let codex_log = root.join("codex-q-replies.jsonl");
+    let cursor_log = root.join("cursor-q-replies.jsonl");
+
+    let claude = write_fake_host(
+        &root,
+        "fake-claude-q",
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"harness-initialize","response":{"current_permission_mode":"default"}}}' ;;
+    *'"subtype":"set_permission_mode"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"harness-permission-mode","response":{"mode":"default"}}}' ;;
+    *'"type":"user"'*)
+      printf '%s\n' '{"type":"system","subtype":"init","session_id":"claude-q-1"}'
+      printf '%s\n' '{"type":"control_request","request_id":"req-q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","display_name":"AskUserQuestion","input":{"questions":[{"header":"Database","question":"Which database?","multiSelect":false,"options":[{"label":"PostgreSQL","description":"Relational"},{"label":"SQLite","description":"Embedded"}]},{"header":"Features","question":"Which features?","multiSelect":true,"options":[{"label":"Auth","description":"JWT"},{"label":"Audit","description":"Logs"}]}]}}}' ;;
+    *'"request_id":"req-q"'*)
+      printf '%s\n' "$line" >> "__CLAUDE_LOG__"
+      printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Got question answers."}]},"session_id":"claude-q-1"}'
+      printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Got question answers.","session_id":"claude-q-1","total_cost_usd":0.01}' ;;
+  esac
+done
+"#
+        .replace("__CLAUDE_LOG__", &claude_log.display().to_string()),
+    );
+
+    let codex = write_fake_host(
+        &root,
+        "fake-codex-q",
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{\"id\":$id,\"result\":{\"userAgent\":\"fake\"}}" ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
+      printf '%s\n' "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"thread-q-1\"}}}" ;;
+    *'"method":"turn/start"'*)
+      printf '%s\n' "{\"id\":$id,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-q-1","turn":{"id":"turn-1"}}}'
+      printf '%s\n' '{"id":77,"method":"item/tool/requestUserInput","params":{"threadId":"thread-q-1","turnId":"turn-1","questions":[{"id":"db","header":"Database","question":"Which database?","isOther":true,"options":[{"label":"PostgreSQL","description":"Full SQL"},{"label":"SQLite","description":"File DB"}]},{"id":"flags","header":"Flags","question":"Select flags","multiSelect":true,"isOther":false,"options":[{"label":"Verbose","description":"More logs"},{"label":"Strict","description":"Fail fast"}]}]}}' ;;
+    *'"id":77,'*|*'"id":77}'*)
+      printf '%s\n' "$line" >> "__CODEX_LOG__"
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-q-1","turnId":"turn-1","item":{"type":"agentMessage","id":"item-msg","text":"Codex got answers."}}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-q-1","turn":{"id":"turn-1","status":"completed"}}}' ;;
+  esac
+done
+"#
+        .replace("__CODEX_LOG__", &codex_log.display().to_string()),
+    );
+
+    let cursor = write_fake_host(
+        &root,
+        "fake-cursor-q",
+        r#"#!/bin/sh
+prompt=0
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}" ;;
+    *'"method":"session/new"'*|*'"method":"session/load"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"cursor-q-1\"}}" ;;
+    *'"method":"session/prompt"'*)
+      prompt=$id
+      case "$line" in *decline*) qid=89;; *) qid=88;; esac
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$qid,\"method\":\"cursor/ask_question\",\"params\":{\"toolCallId\":\"call-q\",\"title\":\"Configuration\",\"questions\":[{\"id\":\"q1\",\"prompt\":\"Pick runtime\",\"allowMultiple\":false,\"options\":[{\"id\":\"opt_tokio\",\"label\":\"Tokio\"},{\"id\":\"opt_async\",\"label\":\"Async-std\"}]},{\"id\":\"q2\",\"prompt\":\"Extra flags?\",\"allowMultiple\":true,\"options\":[{\"id\":\"opt_a\",\"label\":\"Flag A\"}]}]}}" ;;
+    *'"id":88,'*|*'"id":88}'*|*'"id":89,'*|*'"id":89}'*)
+      printf '%s\n' "$line" >> "__CURSOR_LOG__"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"cursor-q-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Cursor got answers."}}}}'
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$prompt,\"result\":{\"stopReason\":\"end_turn\"}}" ;;
+  esac
+done
+"#
+        .replace("__CURSOR_LOG__", &cursor_log.display().to_string()),
+    );
+
+    let fx = Fixture::with_hosts(
+        dir,
+        [claude, codex, cursor],
+        [unused.clone(), unused.clone(), unused],
+        Duration::from_secs(20),
+    )
+    .await;
+
+    // 1. Claude AskUserQuestion + validation
+    let claude_sid = fx.start_with("claude", "manual").await;
+    let events = fx
+        .until(&claude_sid, "claude question ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let pending = permission_events(&events, "pending")[0].clone();
+    assert_eq!(pending["ask_kind"], "question");
+    assert_eq!(pending["session_option"], false);
+    assert_eq!(pending["questions"].as_array().unwrap().len(), 2);
+    let req_id = pending["request_id"].as_str().unwrap();
+
+    // Non-object, oversized, allow_session, and unknown-field bodies are rejected.
+    assert_eq!(
+        fx.answer_with(
+            &claude_sid,
+            req_id,
+            json!({"decision": "allow", "answers": ["bad"]}),
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        fx.answer_with(
+            &claude_sid,
+            req_id,
+            json!({"decision": "allow", "answers": {"big": "x".repeat(40_000)}}),
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        fx.answer_with(
+            &claude_sid,
+            req_id,
+            json!({"decision": "allow_session", "answers": {"Which database?": "PostgreSQL"}}),
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        fx.answer_with(
+            &claude_sid,
+            req_id,
+            json!({"decision": "allow", "answers": {}, "extra": true}),
+        )
+        .await
+        .0,
+        400
+    );
+
+    let submitted = json!({
+        "Which database?": "PostgreSQL",
+        "Which features?": ["Auth", "Audit"],
+    });
+    let (status, res) = fx
+        .answer_with(
+            &claude_sid,
+            req_id,
+            json!({"decision": "allow", "answers": submitted}),
+        )
+        .await;
+    assert_eq!(status, 200, "{res}");
+    let events = fx
+        .until(&claude_sid, "claude question finished", |session, _| {
+            finished(session)
+        })
+        .await;
+    assert!(completed(&fx.store.get(&claude_sid).unwrap()));
+    assert_eq!(
+        permission_events(&events, "allowed")[0]["answers"],
+        submitted
+    );
+    let claude_reply: Value = serde_json::from_str(&lines(&claude_log)[0]).unwrap();
+    let updated = &claude_reply["response"]["response"]["updatedInput"];
+    assert_eq!(claude_reply["response"]["response"]["behavior"], "allow");
+    assert_eq!(updated["answers"]["Which database?"], "PostgreSQL");
+    assert_eq!(updated["answers"]["Which features?"], "Auth, Audit");
+
+    // 2. Codex item/tool/requestUserInput
+    let codex_sid = fx.start_with("codex", "manual").await;
+    let events = fx
+        .until(&codex_sid, "codex question ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let pending = permission_events(&events, "pending")[0].clone();
+    assert_eq!(pending["ask_kind"], "question");
+    assert_eq!(pending["session_option"], false);
+    assert_eq!(pending["questions"].as_array().unwrap().len(), 2);
+    let req_id = pending["request_id"].as_str().unwrap();
+    let (status, res) = fx
+        .answer_with(
+            &codex_sid,
+            req_id,
+            json!({
+                "decision": "allow",
+                "answers": {"db": "PostgreSQL", "flags": ["Verbose", "Strict"]}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{res}");
+    fx.until(&codex_sid, "codex question finished", |session, _| {
+        finished(session)
+    })
+    .await;
+    assert!(completed(&fx.store.get(&codex_sid).unwrap()));
+    let codex_reply: Value = serde_json::from_str(&lines(&codex_log)[0]).unwrap();
+    assert_eq!(codex_reply["id"], 77);
+    assert_eq!(
+        codex_reply["result"]["answers"],
+        json!({
+            "db": {"answers": ["PostgreSQL"]},
+            "flags": {"answers": ["Verbose", "Strict"]},
+        })
+    );
+
+    // 3. Cursor cursor/ask_question (answered + declined)
+    let cursor_sid = fx.start_task("cursor", "manual", None, "ask").await;
+    let events = fx
+        .until(&cursor_sid, "cursor question ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let pending = permission_events(&events, "pending")[0].clone();
+    assert_eq!(pending["ask_kind"], "question");
+    assert_eq!(pending["session_option"], false);
+    assert_eq!(pending["questions"].as_array().unwrap().len(), 2);
+    let req_id = pending["request_id"].as_str().unwrap();
+    let (status, res) = fx
+        .answer_with(
+            &cursor_sid,
+            req_id,
+            json!({
+                "decision": "allow",
+                "answers": {"q1": "Tokio", "q2": ["opt_a", "custom-flag"]}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{res}");
+    fx.until(&cursor_sid, "cursor question finished", |session, _| {
+        finished(session)
+    })
+    .await;
+    assert!(completed(&fx.store.get(&cursor_sid).unwrap()));
+
+    fx.send(&cursor_sid, "manual", "decline").await;
+    let events = fx
+        .until(&cursor_sid, "cursor declined question", |_, events| {
+            permission_events(events, "pending").len() == 2
+        })
+        .await;
+    let req_decline = permission_events(&events, "pending")[1]["request_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(fx.answer(&cursor_sid, req_decline, "deny").await.0, 200);
+    fx.until(
+        &cursor_sid,
+        "cursor declined question finished",
+        |session, events| {
+            finished(session)
+                && events
+                    .iter()
+                    .filter(|event| event["kind"] == "result")
+                    .count()
+                    >= 2
+        },
+    )
+    .await;
+    assert!(completed(&fx.store.get(&cursor_sid).unwrap()));
+
+    let cursor_replies = lines(&cursor_log);
+    assert_eq!(cursor_replies.len(), 2, "{cursor_replies:#?}");
+    let answered_reply: Value = serde_json::from_str(&cursor_replies[0]).unwrap();
+    assert_eq!(answered_reply["id"], 88);
+    assert_eq!(
+        answered_reply["result"]["outcome"],
+        json!({
+            "outcome": "answered",
+            "answers": [
+                {"questionId": "q1", "selectedOptionIds": ["opt_tokio"]},
+                {"questionId": "q2", "selectedOptionIds": ["opt_a"], "freeform": "custom-flag"}
+            ]
+        })
+    );
+    let declined_reply: Value = serde_json::from_str(&cursor_replies[1]).unwrap();
+    assert_eq!(declined_reply["id"], 89);
+    assert_eq!(
+        declined_reply["result"]["outcome"],
+        json!({"outcome": "cancelled"})
+    );
+
     fx.close().await;
 }
 

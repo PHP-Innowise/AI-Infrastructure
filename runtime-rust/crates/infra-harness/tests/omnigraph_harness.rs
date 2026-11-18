@@ -851,6 +851,12 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
             .filter(|f| match_proj(f))
             .cloned()
             .collect(),
+        "list_symbols" => snap
+            .symbols
+            .values()
+            .filter(|s| match_proj(s))
+            .cloned()
+            .collect(),
         "list_published_edges" => snap.published_by.values().cloned().collect(),
         "list_consumed_edges" => snap.consumed_by.values().cloned().collect(),
         "list_file_edges" => snap.touches_file.values().cloned().collect(),
@@ -1664,6 +1670,7 @@ struct HarnessFixture {
     store: SessionStore,
     _sessions: Arc<Sessions>,
     results: Arc<Results>,
+    knowledge: Arc<KnowledgeDomain>,
     omnigraph: Arc<OmnigraphManager>,
     services: Arc<NativeServices>,
     port: u16,
@@ -1784,7 +1791,6 @@ impl HarnessFixture {
             "discovery",
             "creator",
             "skills",
-            "delivery",
             "projects",
             "commands",
             "files",
@@ -1795,6 +1801,12 @@ impl HarnessFixture {
         .into_iter()
         .map(|k| (k.to_owned(), stub.clone()))
         .collect();
+        domains.insert(
+            "delivery".into(),
+            Arc::new(
+                infra_harness::delivery::Delivery::new(store.clone(), results.clone()).unwrap(),
+            ),
+        );
         domains.insert("knowledge".into(), knowledge.clone());
         for g in ["sessions", "brain", "context"] {
             domains.insert(g.into(), sessions.clone());
@@ -1868,6 +1880,7 @@ impl HarnessFixture {
             store,
             _sessions: sessions,
             results,
+            knowledge,
             omnigraph,
             services,
             port,
@@ -4439,6 +4452,970 @@ async fn real_omnigraph_binary_sync_and_promote_round_trip() {
     if !promoted["atom"]["privacy"].is_null() {
         assert_eq!(promoted["atom"]["privacy"], "team");
     }
+
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_memory_links_batch_returns_items_in_order_and_enforces_token_and_limits() {
+    let fx = HarnessFixture::new(None).await;
+    let ctx = setup_governed_fixture_project(&fx.project_path);
+    fs::write(
+        fx.project_path.join("src/auth/legacy.rs"),
+        "pub fn legacy() {}\n",
+    )
+    .unwrap();
+
+    let finding = infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "batch-links-finding-1",
+                "title": "JWT audience verification",
+                "goal": "Reject cross-service replay.",
+                "files": ["src/auth/jwt.rs"],
+                "sources": ["src/auth/jwt.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    let old_finding = infra_core::MemoryService::new(ctx, None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "batch-links-finding-2",
+                "title": "Legacy session token helper",
+                "goal": "Update callers on rename.",
+                "files": ["src/auth/legacy.rs"],
+                "sources": ["src/auth/legacy.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+
+    let batch_path = format!("/api/projects/{}/graph/memory-links/batch", fx.project_id);
+
+    // Requires X-Harness-Token.
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({ "files": [{ "path": "src/auth/jwt.rs" }] })),
+            false,
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // Valid batch preserves input order and matches single-file GET memory-links structure.
+    let (status, batch) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({
+                "files": [
+                    { "path": "src/auth/session.rs", "previous_path": "src/auth/legacy.rs" },
+                    { "path": "./src/auth/jwt.rs" }
+                ]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{batch}");
+    assert_eq!(batch["project_id"], fx.project_id);
+    let items = batch["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{batch}");
+
+    assert_eq!(items[0]["project_id"], fx.project_id);
+    assert_eq!(items[0]["path"], "src/auth/session.rs");
+    assert_eq!(items[0]["previous_path"], "src/auth/legacy.rs");
+    assert_eq!(items[0]["brain_records"][0]["id"], old_finding["id"]);
+    assert_eq!(
+        items[0]["hygiene_warnings"][0]["kind"],
+        "cited-file-renamed"
+    );
+    assert!(items[0]["contradiction_warnings"].is_array());
+
+    assert_eq!(items[1]["project_id"], fx.project_id);
+    assert_eq!(items[1]["path"], "src/auth/jwt.rs");
+    assert!(items[1]["previous_path"].is_null());
+    assert_eq!(items[1]["brain_records"][0]["id"], finding["id"]);
+    assert!(items[1]["contradiction_warnings"].is_array());
+
+    // Single-file GET endpoint remains backwards-compatible.
+    let (status, single) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/graph/memory-links?path=src/auth/jwt.rs",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{single}");
+    assert_eq!(single["path"], "src/auth/jwt.rs");
+    assert_eq!(single["brain_records"][0]["id"], finding["id"]);
+
+    // Rejects traversal and batches larger than 24 files.
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({ "files": [{ "path": "../secret.rs" }] })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    let too_many: Vec<_> = (0..25)
+        .map(|i| json!({ "path": format!("src/f{i}.rs") }))
+        .collect();
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({ "files": too_many })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+async fn omnigraph_graph_http_paginates_past_100_and_exposes_symbol_refs() {
+    let (mock_url, mock_task) = spawn_mock_omnigraph("tok-graph-http").await;
+    let fx = HarnessFixture::new(None).await;
+    fx.omnigraph
+        .connect_external(
+            &mock_url,
+            Some("tok-graph-http"),
+            Some(schema::HARNESS_GRAPH_ID),
+        )
+        .await
+        .unwrap();
+
+    fs::create_dir_all(fx.project_path.join("src")).unwrap();
+    fs::write(
+        fx.project_path.join("src/token.rs"),
+        "pub fn verify_token() -> bool { true }\n",
+    )
+    .unwrap();
+
+    // Seed 260 atoms (> 100 cap and > 250 default page size) and a SymbolRef-linked atom.
+    let client = fx.omnigraph.client().await.unwrap();
+    let mut lines = Vec::with_capacity(260);
+    for i in 0..259usize {
+        lines.push(
+            json!({
+                "type": "ContextAtom",
+                "id": format!("atom-http-{i:04}"),
+                "data": {
+                    "atom_id": format!("atom-http-{i:04}"),
+                    "project_id": fx.project_id,
+                    "kind": "finding",
+                    "title": format!("HTTP atom {i:04}"),
+                    "summary": format!("Summary {i:04}"),
+                    "body": format!("Body {i:04}"),
+                    "source_branch": "main",
+                    "confidence": 0.9,
+                    "pin_priority": 5,
+                    "verified": false,
+                    "created_at": "2026-11-18T09:00:00.000Z",
+                    "updated_at": "2026-11-18T09:00:00.000Z",
+                }
+            })
+            .to_string(),
+        );
+    }
+    client
+        .load_ndjson("main", None, "merge", &lines.join("\n"), Some("harness"))
+        .await
+        .unwrap();
+
+    let (pub_status, pub_res) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": "main",
+                "atom_id": "atom-http-sym",
+                "kind": "decision",
+                "title": "verify_token must reject expired tokens",
+                "body": "Call verify_token() before granting access.",
+                "files": ["src/token.rs"],
+                "pin_priority": 100
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(pub_status, 200, "{pub_res}");
+
+    // Default GET /api/omnigraph/graph (backwards-compatible when limit/offset omitted) returns 250 atoms (>100).
+    let (status, g_default) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=main",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{g_default}");
+    assert_eq!(g_default["connected"], true);
+    assert_eq!(g_default["atoms"].as_array().unwrap().len(), 250);
+    assert_eq!(g_default["total_atoms"], 260);
+    assert_eq!(g_default["limit"], 250);
+    assert_eq!(g_default["offset"], 0);
+    assert_eq!(g_default["has_more"], true);
+    assert_eq!(g_default["truncated"], true);
+    assert_eq!(g_default["next_cursor"], "250");
+    assert_eq!(g_default["telemetry"]["atom_count"], 250);
+    assert_eq!(g_default["telemetry"]["total_atoms"], 260);
+    assert_eq!(g_default["telemetry"]["truncated"], true);
+
+    // Cursor / offset pagination returns the remaining 10 atoms.
+    let (status, g_tail) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=main&limit=50&cursor=offset:250",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{g_tail}");
+    assert_eq!(g_tail["atoms"].as_array().unwrap().len(), 10);
+    assert_eq!(g_tail["offset"], 250);
+    assert_eq!(g_tail["has_more"], false);
+    assert!(g_tail["next_cursor"].is_null());
+
+    // Filtering by symbol name exposes SymbolRef + MentionsSymbol over HTTP.
+    let (status, g_sym) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=main&q=verify_token&limit=10&offset=0",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{g_sym}");
+    assert_eq!(g_sym["total_atoms"], 1);
+    assert_eq!(g_sym["has_more"], false);
+    assert_eq!(g_sym["truncated"], false);
+    assert_eq!(g_sym["atoms"][0]["atom_id"], "atom-http-sym");
+    assert_eq!(
+        g_sym["atoms"][0]["symbols"],
+        json!(["src/token.rs::verify_token"])
+    );
+    assert_eq!(g_sym["symbols"][0]["fqn"], "src/token.rs::verify_token");
+    assert_eq!(g_sym["symbols"][0]["file_path"], "src/token.rs");
+    assert_eq!(g_sym["symbols"][0]["mention_count"], 1);
+    assert_eq!(g_sym["symbol_edges"][0]["kind"], "mentions_symbol");
+    assert_eq!(g_sym["symbol_edges"][0]["source"], "atom-http-sym");
+    assert_eq!(
+        g_sym["symbol_edges"][0]["target"],
+        "src/token.rs::verify_token"
+    );
+    assert_eq!(g_sym["telemetry"]["symbol_count"], 1);
+    assert_eq!(g_sym["telemetry"]["symbol_edge_count"], 1);
+
+    // Invalid pagination inputs return HTTP 400.
+    let (bad_status, _) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&cursor=bogus",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(bad_status, 400);
+
+    fx.shutdown().await;
+    mock_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_project_preflight_enriches_contradictions_hygiene_blast_and_gates_risk_caller_hints()
+{
+    let (mock_url, mock_task) = spawn_mock_omnigraph("tok-preflight").await;
+    let fx = HarnessFixture::new(None).await;
+    let ctx = setup_governed_fixture_project(&fx.project_path);
+    fx.omnigraph
+        .connect_external(
+            &mock_url,
+            Some("tok-preflight"),
+            Some(schema::HARNESS_GRAPH_ID),
+        )
+        .await
+        .unwrap();
+
+    fs::create_dir_all(fx.project_path.join("src/api")).unwrap();
+    fs::create_dir_all(fx.project_path.join("src/app")).unwrap();
+    fs::write(
+        fx.project_path.join("src/api/login.rs"),
+        "use crate::auth::jwt::check_jwt;\npub fn handle_login() -> bool { check_jwt() }\n",
+    )
+    .unwrap();
+    fs::write(
+        fx.project_path.join("src/app/router.rs"),
+        "use crate::api::login::handle_login;\npub fn route_login() -> bool { handle_login() }\n",
+    )
+    .unwrap();
+    fs::write(
+        fx.project_path.join("src/task_scope.rs"),
+        "pub fn scope_helper() {}\n",
+    )
+    .unwrap();
+
+    let finding = infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "preflight-jwt-finding",
+                "title": "check_jwt must pin issuer",
+                "goal": "Prevents cross-tenant JWT acceptance.",
+                "files": ["src/auth/jwt.rs"],
+                "sources": ["src/auth/jwt.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    let brain_atom = format!("brain-{}", finding["id"].as_str().unwrap());
+
+    let task = infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "task",
+                "external_id": "preflight-task-http",
+                "title": "Harden JWT issuer validation",
+                "goal": "Audit JWT and task scope files.",
+                "files": ["src/task_scope.rs"],
+                "sources": ["src/task_scope.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    let task_id = task["id"].as_str().unwrap().to_owned();
+
+    // Missing file cited in Brain triggers `cited-file-missing` hygiene warning.
+    fs::write(
+        fx.project_path.join("src/auth/gone.rs"),
+        "pub fn gone() {}\n",
+    )
+    .unwrap();
+    infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "preflight-missing-finding",
+                "title": "Legacy session cookie check",
+                "goal": "Cookie helper was removed.",
+                "files": ["src/auth/gone.rs"],
+                "sources": ["src/auth/gone.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    fs::remove_file(fx.project_path.join("src/auth/gone.rs")).unwrap();
+
+    // Caller chunk on src/api/login.rs should only appear in `risk_caller_hints` when opted in.
+    write_fixture_mem_chunk(
+        &fx.project_path,
+        "MEM-20261118-dddd5555",
+        "login-caller",
+        "Login caller depends on check_jwt boolean",
+        "handle_login treats false as 401 unauthorized.",
+        &["src/api/login.rs"],
+    );
+    infra_core::MemoryService::new(ctx.clone(), None)
+        .execute("index", &json!({}), &[])
+        .unwrap();
+
+    let (status, synced) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/sync-knowledge",
+            Some(json!({ "project_id": fx.project_id })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{synced}");
+
+    // Publish contradicting Omnigraph atom for src/auth/jwt.rs.
+    let (status, pub_res) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": schema::CANONICAL_KNOWLEDGE_BRANCH,
+                "atom_id": "atom-preflight-contradict",
+                "kind": "finding",
+                "title": "check_jwt skips issuer in dev",
+                "files": ["src/auth/jwt.rs"],
+                "relates_to": [{"target_id": brain_atom, "relation": "contradicts", "note": "staging flag"}]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{pub_res}");
+
+    // Install Graphs with live graph.json: router.rs -> login.rs -> jwt.rs.
+    let graph_path = infra_harness::graph::live(&fx.store.state, &fx.project_id);
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    fs::write(
+        &graph_path,
+        json!({
+            "nodes": [
+                {"id": "jwt", "label": "check_jwt", "source_file": "src/auth/jwt.rs", "node_kind": "function", "source_location": "line 1"},
+                {"id": "login", "label": "handle_login", "source_file": "src/api/login.rs", "node_kind": "function", "source_location": "line 2"},
+                {"id": "router", "label": "route_login", "source_file": "src/app/router.rs", "node_kind": "function", "source_location": "line 2"}
+            ],
+            "links": [
+                {"source": "login", "target": "jwt", "relation": "calls"},
+                {"source": "router", "target": "login", "relation": "calls"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let graphs = infra_harness::graph::Graphs::new(fx.store.clone());
+    fx.knowledge.install_graphs(graphs.clone());
+
+    let preflight_url = format!("/api/projects/{}/preflight", fx.project_id);
+
+    // Requires CSRF token.
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &preflight_url,
+            Some(json!({ "paths": ["src/auth/jwt.rs"] })),
+            false,
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // Default call: `risk_caller_hints` omitted -> empty `risk_caller_hints`, full warnings + blast.
+    let (status, preflight) = fx
+        .http(
+            Method::POST,
+            &preflight_url,
+            Some(json!({
+                "prompt": "Audit @src/auth/jwt.rs before editing",
+                "task_id": task_id,
+                "paths": ["src/auth/gone.rs"],
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{preflight}");
+    assert_eq!(preflight["project_id"], fx.project_id);
+    let paths: Vec<&str> = preflight["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["src/auth/gone.rs", "src/auth/jwt.rs", "src/task_scope.rs"]
+    );
+    assert_eq!(
+        preflight["contradiction_warnings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{preflight}"
+    );
+    assert_eq!(
+        preflight["contradiction_warnings"][0]["kind"],
+        "atom-contradiction"
+    );
+    assert_eq!(
+        preflight["hygiene_warnings"][0]["kind"],
+        "cited-file-missing"
+    );
+    assert_eq!(preflight["hygiene_warnings"][0]["path"], "src/auth/gone.rs");
+    assert!(
+        preflight["risk_callers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["from"] == "src/api/login.rs" && c["to"] == "src/auth/jwt.rs"),
+        "{preflight}"
+    );
+    assert_eq!(preflight["blast_summary"]["direct_count"], 1);
+    assert_eq!(preflight["blast_summary"]["downstream_count"], 1);
+    assert_eq!(preflight["risk_caller_hints"], json!([]));
+
+    // Default session retrieval remains strictly OFF.
+    let session =
+        json!({"id": "s-http-pf", "project_id": fx.project_id, "omnigraph": {"enabled": false}});
+    assert_eq!(fx.knowledge.session_source_hints(&ctx, &session), None);
+
+    // Explicit opt-in returns `risk_caller_hints` while leaving `session_source_hints` untouched.
+    let (status, opted) = fx
+        .http(
+            Method::POST,
+            &preflight_url,
+            Some(json!({
+                "paths": ["src/auth/jwt.rs"],
+                "risk_caller_hints": true,
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{opted}");
+    assert_eq!(
+        opted["risk_caller_hints"][0]["path"], "src/api/login.rs",
+        "{opted}"
+    );
+    assert_eq!(
+        opted["risk_caller_hints"][0]["memory_chunks"][0]["id"],
+        "MEM-20261118-dddd5555"
+    );
+    assert_eq!(fx.knowledge.session_source_hints(&ctx, &session), None);
+
+    graphs.close();
+    fx.shutdown().await;
+    mock_task.abort();
+}
+
+#[test]
+fn http_delivery_preview_annotates_memory_warnings_and_risk_callers() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(http_delivery_preview_annotates_memory_warnings_and_risk_callers_inner());
+}
+
+async fn http_delivery_preview_annotates_memory_warnings_and_risk_callers_inner() {
+    let (mock_url, mock_task) = spawn_mock_omnigraph("tok-delivery").await;
+    let fx = HarnessFixture::new(None).await;
+    let ctx = setup_governed_fixture_project(&fx.project_path);
+    fx.omnigraph
+        .connect_external(
+            &mock_url,
+            Some("tok-delivery"),
+            Some(schema::HARNESS_GRAPH_ID),
+        )
+        .await
+        .unwrap();
+
+    fs::create_dir_all(fx.project_path.join("src/api")).unwrap();
+    fs::write(
+        fx.project_path.join("src/api/login.rs"),
+        "use crate::auth::jwt::check_jwt;\npub fn handle_login() -> bool { check_jwt() }\n",
+    )
+    .unwrap();
+    fs::write(
+        fx.project_path.join("src/auth/legacy.rs"),
+        "pub fn legacy_helper() {}\n",
+    )
+    .unwrap();
+
+    // Initialize a real Git repo with `main` branch + a linked worktree for Delivery.
+    let git = |dir: &std::path::Path, args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&fx.project_path, &["init", "-b", "main"]);
+    git(&fx.project_path, &["config", "user.name", "Test"]);
+    git(
+        &fx.project_path,
+        &["config", "user.email", "test@example.com"],
+    );
+    git(&fx.project_path, &["add", "."]);
+    git(&fx.project_path, &["commit", "-m", "initial"]);
+    git(&fx.project_path, &["branch", "target", "main"]);
+    let base_head = git(&fx.project_path, &["rev-parse", "HEAD"]);
+
+    let wt_path = fx.project_path.parent().unwrap().join("delivery-wt");
+    git(
+        &fx.project_path,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat/delivery",
+            wt_path.to_str().unwrap(),
+            "main",
+        ],
+    );
+
+    // Brain finding on `src/auth/jwt.rs` + Brain finding on `src/auth/legacy.rs` (deleted from project).
+    let finding = infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "del-jwt-finding",
+                "title": "check_jwt requires leeway",
+                "goal": "Clock skew tolerance.",
+                "files": ["src/auth/jwt.rs"],
+                "sources": ["src/auth/jwt.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    let brain_atom = format!("brain-{}", finding["id"].as_str().unwrap());
+
+    infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "del-legacy-finding",
+                "title": "Legacy helper invariant",
+                "goal": "Removed in this delivery.",
+                "files": ["src/auth/legacy.rs"],
+                "sources": ["src/auth/legacy.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+
+    let (status, synced) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/sync-knowledge",
+            Some(json!({ "project_id": fx.project_id })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{synced}");
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": schema::CANONICAL_KNOWLEDGE_BRANCH,
+                "atom_id": "atom-del-contradict",
+                "kind": "finding",
+                "title": "check_jwt rejects zero leeway",
+                "files": ["src/auth/jwt.rs"],
+                "relates_to": [{"target_id": brain_atom, "relation": "contradicts"}]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // Install Graphs with login.rs -> jwt.rs caller edge.
+    let graph_path = infra_harness::graph::live(&fx.store.state, &fx.project_id);
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    fs::write(
+        &graph_path,
+        json!({
+            "nodes": [
+                {"id": "jwt", "label": "check_jwt", "source_file": "src/auth/jwt.rs", "node_kind": "function", "source_location": "line 1"},
+                {"id": "login", "label": "handle_login", "source_file": "src/api/login.rs", "node_kind": "function", "source_location": "line 2"}
+            ],
+            "links": [
+                {"source": "login", "target": "jwt", "relation": "calls"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let graphs = infra_harness::graph::Graphs::new(fx.store.clone());
+    fx.knowledge.install_graphs(graphs.clone());
+
+    // Create a completed worktree session in Store pointing to `wt_path`.
+    let created = fx
+        .store
+        .create(
+            &json!({
+                "project_id": fx.project_id,
+                "provider": "claude",
+                "mode": "edit",
+                "workflow": "native",
+                "project_context": false,
+            }),
+            "Delivery check",
+            &[],
+        )
+        .unwrap();
+    let sid = created["id"].as_str().unwrap().to_owned();
+    {
+        let db = fx.store.connection().unwrap();
+        db.execute(
+            "UPDATE sessions SET project_path=?1 WHERE id=?2",
+            rusqlite::params![wt_path.to_string_lossy().as_ref(), sid],
+        )
+        .unwrap();
+    }
+    fx.store
+        .patch(
+            &sid,
+            &json!({
+                "workspace": "worktree",
+                "branch": "feat/delivery",
+                "status": "completed",
+                "result_base": {"head": base_head},
+            }),
+        )
+        .unwrap();
+
+    // Remove legacy.rs from project + worktree and edit jwt.rs in worktree.
+    fs::remove_file(fx.project_path.join("src/auth/legacy.rs")).unwrap();
+    fs::remove_file(wt_path.join("src/auth/legacy.rs")).unwrap();
+    fs::write(
+        wt_path.join("src/auth/jwt.rs"),
+        "pub fn check_jwt() -> bool { false }\n",
+    )
+    .unwrap();
+
+    let (status, del_state) = fx
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/delivery"),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{del_state}");
+    let snapshot_id = del_state["snapshot_id"].as_str().unwrap().to_owned();
+
+    // 1. preview_commit attaches memory_warnings + risk_callers.
+    let (status, commit_prev) = fx
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/delivery"),
+            Some(json!({
+                "action": "preview_commit",
+                "snapshot_id": snapshot_id,
+                "paths": ["src/auth/jwt.rs", "src/auth/legacy.rs"],
+                "message": "Update JWT and drop legacy helper",
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{commit_prev}");
+    assert_eq!(
+        commit_prev["memory_warnings"]["contradiction_warnings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{commit_prev}"
+    );
+    assert_eq!(
+        commit_prev["memory_warnings"]["hygiene_warnings"][0]["kind"], "cited-file-missing",
+        "{commit_prev}"
+    );
+    assert_eq!(
+        commit_prev["memory_warnings"]["hygiene_warnings"][0]["path"],
+        "src/auth/legacy.rs"
+    );
+    assert!(
+        commit_prev["risk_callers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["from"] == "src/api/login.rs" && c["to"] == "src/auth/jwt.rs"),
+        "{commit_prev}"
+    );
+
+    // 2. Commit on worktree and run preview_transfer against `target` -> also annotates preview & delivery.get.
+    git(&wt_path, &["add", "src/auth/jwt.rs"]);
+    git(&wt_path, &["commit", "-m", "update jwt"]);
+    let transfer_commit = git(&wt_path, &["rev-parse", "HEAD"]);
+    let (status, xfer_prev) = fx
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/delivery"),
+            Some(json!({
+                "action": "preview_transfer",
+                "commit": transfer_commit,
+                "target_branch": "target",
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{xfer_prev}");
+    assert_eq!(
+        xfer_prev["memory_warnings"]["contradiction_warnings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{xfer_prev}"
+    );
+    assert!(
+        xfer_prev["risk_callers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["from"] == "src/api/login.rs" && c["to"] == "src/auth/jwt.rs"),
+        "{xfer_prev}"
+    );
+
+    let (status, del_after) = fx
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/delivery"),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{del_after}");
+    assert_eq!(
+        del_after["preview"]["memory_warnings"]["contradiction_warnings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{del_after}"
+    );
+
+    graphs.close();
+    fx.shutdown().await;
+    mock_task.abort();
+}
+
+#[tokio::test]
+async fn http_save_memory_validates_used_memory_paths() {
+    let fx = HarnessFixture::new(None).await;
+    let ctx = setup_governed_fixture_project(&fx.project_path);
+
+    let started = infra_core::MemoryService::new(ctx, None)
+        .execute(
+            "start",
+            &json!({"task_id": "http-used-mem-task", "goal": "Validate used_memory over HTTP"}),
+            &[],
+        )
+        .unwrap();
+    let task_uuid = started["task_uuid"].as_str().unwrap().to_owned();
+
+    let created = fx
+        .store
+        .create(
+            &json!({
+                "project_id": fx.project_id,
+                "provider": "claude",
+                "mode": "edit",
+                "workflow": "native",
+                "project_context": false,
+            }),
+            "Save memory with used_memory",
+            &[],
+        )
+        .unwrap();
+    let sid = created["id"].as_str().unwrap().to_owned();
+    fx.store
+        .patch(
+            &sid,
+            &json!({
+                "status": "completed",
+                "brain": {
+                    "bank": "memory-bank",
+                    "task_id": "http-used-mem-task",
+                    "record_id": task_uuid,
+                }
+            }),
+        )
+        .unwrap();
+
+    // Invalid traversal path in used_memory fails with HTTP 400.
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/memory"),
+            Some(json!({
+                "progress": "Done",
+                "used_memory": ["../secret.md"],
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    // Valid used_memory succeeds with HTTP 200 and preserves deduplicated paths.
+    let (status, saved) = fx
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/memory"),
+            Some(json!({
+                "progress": "Verified check_jwt behavior.",
+                "next_steps": [],
+                "learnings": [{
+                    "type": "finding",
+                    "title": "JWT check validated",
+                    "consequence": "Confirmed check_jwt returns bool.",
+                    "sources": ["src/auth/jwt.rs"]
+                }],
+                "verified": true,
+                "used_memory": ["src/auth/jwt.rs", "src/auth/jwt.rs"],
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["ok"], true, "{saved}");
+    assert_eq!(saved["used_memory"], json!(["src/auth/jwt.rs"]));
 
     fx.shutdown().await;
 }

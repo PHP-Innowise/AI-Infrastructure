@@ -1,4 +1,5 @@
 use crate::{
+    boundary::{BoundaryScope, SystemBoundaryApprovals, check_step_boundary_writes_with_extra},
     catalog::{System, git_head},
     common::*,
     execution::{
@@ -11,10 +12,13 @@ use crate::{
     },
 };
 use infra_core::{ErrorKind, Result, RuntimeError};
+use infra_host::permission::{Approvals, PermissionMode};
 use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -22,12 +26,15 @@ use std::{
     time::Instant,
 };
 
-/// Optional code-graph bridge and launch identity hooks threaded through a system run.
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Optional code-graph bridge, launch identity, and approval hooks threaded through a system run.
 #[derive(Clone, Default)]
 pub struct RunnerGraphHooks {
     pub bridge: Option<Arc<dyn CodeGraphBridge>>,
     pub system_run_id: Option<String>,
     pub launch_id: Option<String>,
+    pub approvals: Option<Arc<dyn Approvals>>,
 }
 
 /// Opt-in dispatch context policy. The default runner has no extension.
@@ -78,7 +85,7 @@ fn experimental_context(directory: &Path, state: &Value, enabled: bool) -> Resul
     }
 }
 
-fn notify(event: &mut impl FnMut(Value) -> Result<()>, value: Value) {
+fn notify(event: &mut (impl FnMut(Value) -> Result<()> + ?Sized), value: Value) {
     let _ = event(value);
 }
 fn reference_mut<'a>(state: &'a mut Value, sid: &str) -> Result<&'a mut Value> {
@@ -516,6 +523,1256 @@ fn collect_step_git_changes(
     out.into_values().collect()
 }
 
+struct SystemLaunchAdapter {
+    inner: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
+    schema: Value,
+    schema_path: PathBuf,
+    extra: Vec<PathBuf>,
+    read: Vec<PathBuf>,
+    offers: Vec<crate::system_graph::ServiceGraphOffer>,
+}
+
+impl infra_host::provider::LaunchAdapter for SystemLaunchAdapter {
+    fn adapt(
+        &self,
+        input: &infra_host::provider::Launch,
+        mut command: infra_host::provider::PreparedCommand,
+    ) -> infra_host::Result<infra_host::provider::PreparedCommand> {
+        let active_transport = infra_host::provider::transport(input);
+        if input.provider == "cursor"
+            && active_transport == infra_host::provider::Transport::Text
+            && input.prompt.len() > native::CURSOR_PROMPT_BYTES
+        {
+            return Err(infra_host::HarnessError::invalid(
+                "Cursor prompt exceeds argument byte limit; narrow plan",
+            ));
+        }
+        native::apply_system_launch_flags(
+            &input.provider,
+            active_transport,
+            &input.mode,
+            &self.schema,
+            &self.schema_path,
+            &self.extra,
+            &self.read,
+            &mut command.argv,
+        )?;
+        if let Some(inner) = &self.inner {
+            command = inner.adapt(input, command)?;
+        }
+        Ok(crate::workers::prepare_worker_for_transport(
+            &input.provider,
+            &input.mode,
+            active_transport,
+            command,
+            &self.offers,
+        )?)
+    }
+}
+
+struct SystemRunEvents {
+    observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    collector: Mutex<NativeEvidenceCollector>,
+    raw_lines: Mutex<Vec<u8>>,
+    bridge: Option<Arc<dyn CodeGraphBridge>>,
+    graph_ctx: DispatchGraphContext,
+    provider: String,
+    root: PathBuf,
+    phase: String,
+    attempt: u64,
+    tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
+}
+
+impl SystemRunEvents {
+    fn close(&self) {
+        if let Ok(mut tx) = self.tx.lock() {
+            tx.take();
+        }
+    }
+    fn take_collector(&self) -> NativeEvidenceCollector {
+        self.collector
+            .lock()
+            .map(|mut c| std::mem::take(&mut *c))
+            .unwrap_or_default()
+    }
+    fn take_raw_bytes(&self) -> Vec<u8> {
+        self.raw_lines
+            .lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default()
+    }
+}
+
+impl infra_host::process::RunObserver for SystemRunEvents {
+    fn boundary(&self, signal: &str, details: &Value) -> infra_host::Result<()> {
+        if let Some(observer) = &self.observer {
+            observer.boundary(signal, details)?;
+        }
+        Ok(())
+    }
+}
+
+impl infra_host::provider::RunEvents for SystemRunEvents {
+    fn observe(&self, raw: Option<&Value>, _normalized: Option<&Value>) -> infra_host::Result<()> {
+        if let Some(raw) = raw
+            && let Ok(bytes) = serde_json::to_vec(raw)
+        {
+            if let Ok(mut collector) = self.collector.lock() {
+                collector.observe_line(&bytes, &self.provider, &self.root);
+            }
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.on_dispatch_signal(&self.graph_ctx, &bytes);
+            }
+            if let Ok(mut buf) = self.raw_lines.lock()
+                && buf.len().saturating_add(bytes.len()).saturating_add(1) <= 8 * MAX_BYTES
+            {
+                buf.extend_from_slice(&bytes);
+                buf.push(b'\n');
+            }
+            let line = String::from_utf8_lossy(&bytes).to_string();
+            if let Ok(tx) = self.tx.lock()
+                && let Some(tx) = tx.as_ref()
+            {
+                let _ = tx.send(object!({
+                    "type": "output",
+                    "phase": self.phase,
+                    "attempt": self.attempt,
+                    "line": line,
+                }));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn finalize_worker_report(
+    raw_bytes: &[u8],
+    provider: &str,
+    preview: &Value,
+    state: &Value,
+    untrusted_context: bool,
+    receipt: &mut Value,
+) {
+    match native::worker_result(raw_bytes, provider).and_then(|report| {
+        if untrusted_context && infra_core::domain::secret_label(&encoded(&report)?)?.is_some() {
+            return Err(fail("Sensitive experimental worker result"));
+        }
+        execution::validate_report(
+            &report,
+            preview,
+            &texts(&state["selected"]),
+            access_scope(state),
+        )?;
+        Ok(report)
+    }) {
+        Ok(report) => {
+            receipt["report"] = report;
+            receipt["ok"] = object!(execution::success(
+                receipt,
+                preview,
+                state["mode"] == "read-only"
+            ));
+            if receipt["ok"] != true {
+                receipt["error"] = if preview["mode"] == "read-only"
+                    && !texts(&receipt["report"]["changed_files"]).is_empty()
+                {
+                    "read_only_worker_reported_writes"
+                } else {
+                    "worker_blocked_or_verification_incomplete"
+                }
+                .into();
+            }
+        }
+        Err(error) => {
+            receipt["error"] = "invalid_or_sensitive_worker_result".into();
+            receipt["rejection"] = if untrusted_context {
+                "Invalid experimental worker report".into()
+            } else {
+                error.message.chars().take(500).collect::<String>().into()
+            };
+        }
+    }
+}
+
+struct HostDispatchArgs {
+    launch: infra_host::provider::Launch,
+    launch_adapter: SystemLaunchAdapter,
+    limits: infra_host::process::Limits,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<std::fs::File>>,
+    observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    bridge: Option<Arc<dyn CodeGraphBridge>>,
+    graph_ctx: DispatchGraphContext,
+    provider: String,
+    root: PathBuf,
+    phase: String,
+    attempt: u64,
+    preview: Value,
+    state: Value,
+    untrusted_context: bool,
+    started: Instant,
+    receipt: Value,
+}
+
+struct RawDispatchArgs {
+    prepared: infra_host::provider::PreparedCommand,
+    root: PathBuf,
+    timeout: u64,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<std::fs::File>>,
+    observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    bridge: Option<Arc<dyn CodeGraphBridge>>,
+    graph_ctx: DispatchGraphContext,
+    provider: String,
+    phase: String,
+    attempt: u64,
+    preview: Value,
+    state: Value,
+    untrusted_context: bool,
+    started: Instant,
+    receipt: Value,
+}
+
+struct RunStepsArgs<'a> {
+    system: &'a mut System,
+    directory: &'a Path,
+    retry: Option<&'a str>,
+    accept: Acceptance,
+    cancel: &'a Arc<AtomicBool>,
+    runner_lock: Option<Arc<std::fs::File>>,
+    adapter: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
+    observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    dispatch_context: &'a Option<SharedDispatchContext>,
+    hooks: &'a RunnerGraphHooks,
+    untrusted_context: bool,
+    brains: &'a BTreeMap<String, Brain>,
+    state: &'a mut Value,
+    plan: Value,
+    event: &'a mut (dyn FnMut(Value) -> Result<()> + Send),
+}
+
+#[inline(never)]
+fn validate_state_boxed<'a>(
+    system: &'a mut System,
+    directory: &'a Path,
+    verify_cli: bool,
+) -> BoxFuture<'a, Result<Value>> {
+    Box::pin(native::validate_state(system, directory, verify_cli))
+}
+
+#[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Isolates infra_host::provider::run_monitored_locked into its own heap-allocated future frame."
+)]
+fn run_monitored_locked_boxed(
+    launch: infra_host::provider::Launch,
+    limits: infra_host::process::Limits,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<std::fs::File>>,
+    launch_adapter: SystemLaunchAdapter,
+    run_events: Arc<SystemRunEvents>,
+    tx: tokio::sync::mpsc::UnboundedSender<Value>,
+    phase: String,
+    attempt: u64,
+) -> BoxFuture<'static, infra_host::Result<infra_host::provider::WorkerResult>> {
+    Box::pin(async move {
+        let empty_env = BTreeMap::new();
+        let res = infra_host::provider::run_monitored_locked(
+            &launch,
+            limits,
+            cancel,
+            None,
+            runner_lock,
+            Some(&launch_adapter),
+            &empty_env,
+            Some(run_events.clone()),
+            move |norm| {
+                if matches!(norm["kind"].as_str(), Some("permission" | "status")) {
+                    let _ = tx.send(object!({
+                        "type": norm["kind"],
+                        "phase": phase,
+                        "attempt": attempt,
+                        "event": norm,
+                    }));
+                }
+                Ok(())
+            },
+        )
+        .await;
+        run_events.close();
+        res
+    })
+}
+
+#[inline(never)]
+fn run_host_dispatch_boxed<'a>(
+    args: HostDispatchArgs,
+    event: &'a mut (dyn FnMut(Value) -> Result<()> + Send),
+) -> BoxFuture<'a, (NativeEvidenceCollector, Value)> {
+    Box::pin(async move {
+        let HostDispatchArgs {
+            launch,
+            launch_adapter,
+            limits,
+            cancel,
+            runner_lock,
+            observer,
+            bridge,
+            graph_ctx,
+            provider,
+            root,
+            phase,
+            attempt,
+            preview,
+            state,
+            untrusted_context,
+            started,
+            mut receipt,
+        } = args;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let run_events = Arc::new(SystemRunEvents {
+            observer,
+            collector: Mutex::new(NativeEvidenceCollector::default()),
+            raw_lines: Mutex::new(Vec::new()),
+            bridge,
+            graph_ctx,
+            provider: provider.clone(),
+            root,
+            phase: phase.clone(),
+            attempt,
+            tx: Mutex::new(Some(tx.clone())),
+        });
+        let run_fut = run_monitored_locked_boxed(
+            launch,
+            limits,
+            cancel.clone(),
+            runner_lock,
+            launch_adapter,
+            run_events.clone(),
+            tx,
+            phase,
+            attempt,
+        );
+        let drain_fut = async {
+            while let Some(ev) = rx.recv().await {
+                notify(event, ev);
+            }
+        };
+        let (output, ()) = tokio::join!(run_fut, drain_fut);
+        let elapsed = started.elapsed().as_secs_f64();
+        receipt["duration_seconds"] = object!(elapsed);
+        let native_collector = run_events.take_collector();
+        let raw_bytes = run_events.take_raw_bytes();
+        match output {
+            Ok(worker_res) => {
+                if worker_res.ok {
+                    receipt["returncode"] = object!(0);
+                    finalize_worker_report(
+                        &raw_bytes,
+                        &provider,
+                        &preview,
+                        &state,
+                        untrusted_context,
+                        &mut receipt,
+                    );
+                } else {
+                    receipt["error"] = "worker_exit_failure".into();
+                    if let Some(failure) = native::worker_failure(&raw_bytes, &provider)
+                        .or_else(|| worker_res.error.map(|e| native::shown_failure(&e)))
+                    {
+                        receipt["failure"] = failure.into();
+                    }
+                }
+            }
+            Err(error) => {
+                let interrupted = cancel.load(Ordering::SeqCst) || error.code == "native-cancelled";
+                receipt["error"] = if interrupted {
+                    "interrupted"
+                } else {
+                    error.code
+                }
+                .into();
+                if !interrupted && !error.message.trim().is_empty() {
+                    receipt["failure"] = native::shown_failure(&error.message).into();
+                }
+            }
+        }
+        (native_collector, receipt)
+    })
+}
+
+#[inline(never)]
+fn run_raw_dispatch_boxed<'a>(
+    args: RawDispatchArgs,
+    event: &'a mut (dyn FnMut(Value) -> Result<()> + Send),
+) -> BoxFuture<'a, (NativeEvidenceCollector, Value)> {
+    Box::pin(async move {
+        let RawDispatchArgs {
+            prepared,
+            root,
+            timeout,
+            cancel,
+            runner_lock,
+            observer,
+            bridge,
+            graph_ctx,
+            provider,
+            phase,
+            attempt,
+            preview,
+            state,
+            untrusted_context,
+            started,
+            mut receipt,
+        } = args;
+        let mut native_collector = NativeEvidenceCollector::default();
+        let output = Box::pin(native::run_raw_monitored(
+            &prepared.argv,
+            &root,
+            &prepared.environment,
+            &prepared.remove,
+            &prepared.input,
+            timeout,
+            cancel.clone(),
+            runner_lock,
+            observer,
+            |line| {
+                native_collector.observe_line(line, &provider, &root);
+                if let Some(bridge) = &bridge {
+                    let _ = bridge.on_dispatch_signal(&graph_ctx, line);
+                }
+                let line = String::from_utf8_lossy(line).to_string();
+                notify(
+                    event,
+                    object!({"type":"output","phase":phase,"attempt":attempt,"line":line}),
+                );
+                Ok(())
+            },
+        ))
+        .await;
+        let elapsed = started.elapsed().as_secs_f64();
+        receipt["duration_seconds"] = object!(elapsed);
+        match output {
+            Ok(output) => {
+                receipt["returncode"] = object!(output.code);
+                if output.code == 0 {
+                    finalize_worker_report(
+                        &output.bytes,
+                        &provider,
+                        &preview,
+                        &state,
+                        untrusted_context,
+                        &mut receipt,
+                    );
+                } else {
+                    receipt["error"] = "worker_exit_failure".into();
+                    if let Some(failure) = native::worker_failure(&output.bytes, &provider) {
+                        receipt["failure"] = failure.into();
+                    }
+                }
+            }
+            // A CLI that could not start or be supervised says why: a real verification stopped as only "unavailable" after the engine binary was replaced under a running Harness.
+            Err(error) => {
+                let interrupted = cancel.load(Ordering::SeqCst);
+                receipt["error"] = if interrupted {
+                    "interrupted"
+                } else {
+                    error.code.as_deref().unwrap_or("worker_process_failure")
+                }
+                .into();
+                if !interrupted && !error.message.trim().is_empty() {
+                    receipt["failure"] = native::shown_failure(&error.message).into();
+                }
+            }
+        }
+        (native_collector, receipt)
+    })
+}
+
+#[inline(never)]
+fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<Value>> {
+    Box::pin(async move {
+        let RunStepsArgs {
+            system,
+            directory,
+            retry,
+            accept,
+            cancel,
+            runner_lock,
+            adapter,
+            observer,
+            dispatch_context,
+            hooks,
+            untrusted_context,
+            brains,
+            state,
+            mut plan,
+            event,
+        } = args;
+        let retry = retry.map(str::to_string);
+        let blocked = state["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|step| ["running", "blocked", "interrupted"].contains(&string(&step["status"])))
+            .cloned();
+        if let Some(step) = blocked {
+            let receipt = match dispatch_receipt(directory, state, &step) {
+                Ok(value) => Some(value),
+                Err(error) if error.kind == ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            let unrun = receipt
+                .as_ref()
+                .and_then(|receipt| execution::unrun_checks(receipt, &step));
+            if accept.unrun_checks && unrun.is_none() {
+                return Err(fail(format!(
+                    "Only a completed verification whose only gaps are checks it could not run can be accepted; retry {id} instead (CLI: --retry-step {id})",
+                    id = string(&step["id"])
+                )));
+            }
+            if accept.unrun_checks && retry.is_some() {
+                return Err(fail(
+                    "Accept the checks verification could not run, or retry verification, not both",
+                ));
+            }
+            if receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt["ok"] == true)
+                || accept.unrun_checks
+            {
+                let receipt = receipt.ok_or_else(|| fail("Receipt disappeared"))?;
+                if system.verify(&plan)?["fresh"] != true {
+                    if !accept.source_changes {
+                        return Err(fail(
+                            "Successful receipt has uncheckpointed edits; inspect and explicitly accept source changes",
+                        ));
+                    }
+                    plan = check_changes(
+                        system,
+                        &plan,
+                        Some(&step),
+                        Some(&receipt["report"]),
+                        state,
+                        true,
+                    )?;
+                    save(directory, "checkpoint.json", &plan, false)?;
+                }
+                if let Some(unrun) = unrun.filter(|_| accept.unrun_checks) {
+                    let index = step_index(state, string(&step["id"]))?;
+                    state["steps"][index]["accepted_unrun_checks"] = object!(unrun);
+                }
+                finish(directory, state, &step, &receipt, brains)?;
+                context_completed(dispatch_context, state, &step, &receipt)?;
+            } else {
+                if retry.as_deref() != Some(string(&step["id"])) {
+                    return Err(fail(format!(
+                        "Dispatch {id} stopped without a successful receipt and may have changed files; inspect them, then retry {id} explicitly (CLI: --retry-step {id})",
+                        id = string(&step["id"])
+                    )));
+                }
+                if system.verify(&plan)?["fresh"] != true {
+                    if !accept.source_changes {
+                        return Err(fail(
+                            "Partial edits detected; inspect and explicitly accept source changes",
+                        ));
+                    }
+                    plan = check_changes(system, &plan, Some(&step), None, state, true)?;
+                    save(directory, "checkpoint.json", &plan, false)?;
+                }
+                let index = step_index(state, string(&step["id"]))?;
+                state["steps"][index]["status"] = "pending".into();
+            }
+        } else if retry.is_some() {
+            return Err(fail(
+                "No unfinished dispatch matches the dispatch chosen for retry",
+            ));
+        } else if accept.unrun_checks {
+            return Err(fail("No stopped verification has checks to accept"));
+        }
+        // Between dispatches only a person's accepted system-folder edit is adopted;
+        // any other change is named and needs a new plan.
+        if system.verify(&plan)?["fresh"] != true {
+            plan = check_changes(system, &plan, None, None, state, accept.source_changes)?;
+            save(directory, "checkpoint.json", &plan, false)?;
+        }
+        plan = system.refresh_checkpoint(&plan, &BTreeSet::new())?;
+        let ids = brains.keys().cloned().collect::<Vec<_>>();
+        for sid in &ids {
+            let brain = brains.get(sid).ok_or_else(|| fail("Missing Brain"))?;
+            let record = brain.ensure(reference_mut(state, sid)?)?;
+            if record["status"] == "completed" && !texts(&state["closed_tasks"]).contains(sid) {
+                if state["steps"]
+                    .as_array()
+                    .is_some_and(|steps| steps.iter().any(|step| step["status"] != "completed"))
+                {
+                    return Err(fail("Native task terminal before worker verification"));
+                }
+                let run = string(&state["run_id"]).to_string();
+                brain.complete(reference_mut(state, sid)?, &run)?;
+                state["closed_tasks"]
+                    .as_array_mut()
+                    .ok_or_else(|| fail("Closed tasks missing"))?
+                    .push(sid.clone().into());
+            }
+            save(directory, "run.json", state, false)?;
+        }
+        state["status"] = "running".into();
+        state["error"] = Value::Null;
+        save(directory, "run.json", state, false)?;
+        let steps = state["steps"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| fail("Missing steps"))?;
+        for step in steps {
+            if step["status"] == "completed" {
+                continue;
+            }
+            if cancel.load(Ordering::SeqCst) {
+                return Err(RuntimeError::coded(
+                    ErrorKind::Unavailable,
+                    "interrupted",
+                    "interrupted",
+                ));
+            }
+            let mut current = System::new(&system.config, &system.allow_roots)?;
+            let verdict = current.verify(&plan)?;
+            if verdict["fresh"] != true {
+                // Memory that stopped holding between dispatches leaves the shared context; any other change needs a new plan.
+                if verdict["changed"].as_array().is_some_and(|changed| {
+                    changed
+                        .iter()
+                        .all(|change| change["reason"] == "memory_ineligible")
+                }) {
+                    plan = current.refresh_checkpoint(&plan, &BTreeSet::new())?;
+                    save(directory, "checkpoint.json", &plan, false)?;
+                } else {
+                    check_changes(&mut current, &plan, None, None, state, false)?;
+                    return Err(fail("Sources changed between dispatches; prepare new plan"));
+                }
+            }
+            let prior = reports(directory, state)?;
+            let attempt = step["attempt"]
+                .as_u64()
+                .filter(|attempt| *attempt < 100)
+                .ok_or_else(|| fail("Dispatch retry limit reached"))?
+                + 1;
+            let mut preview = step.clone();
+            preview["dispatch_id"] = id32().into();
+            preview["status"] = "running".into();
+            preview["attempt"] = object!(attempt);
+            let sid = string(&step["service"]).to_string();
+            let provider = string(&state["provider"]).to_string();
+            let executable = PathBuf::from(string(&state["executable"]));
+            let scratch = native::read_only_scratch(
+                &provider,
+                &executable,
+                string(&step["mode"]),
+                directory,
+            )?;
+            let access = dispatch_access(state, &step);
+            let root = PathBuf::from(string(&state["roots"][&sid]));
+            let schema = execution::result_schema(&texts(&state["selected"]));
+            let roots_map = state["roots"]
+                .as_object()
+                .ok_or_else(|| fail("Missing run roots"))?
+                .iter()
+                .map(|(k, v)| (k.clone(), PathBuf::from(string(v))))
+                .collect::<BTreeMap<_, _>>();
+            let base_head = git_head(&root);
+            let pre_existing_dirty: BTreeSet<String> =
+                if access_scope(state) == "all" && step["mode"] == "edit" {
+                    texts(&state["selected"])
+                        .into_iter()
+                        .flat_map(|s| {
+                            let sr = Path::new(string(&state["roots"][&s]));
+                            git_worktree_changes(sr)
+                                .into_iter()
+                                .map(move |c| format!("{s}/{}", c.path))
+                        })
+                        .collect()
+                } else if step["mode"] == "edit" {
+                    git_worktree_changes(&root)
+                        .into_iter()
+                        .map(|c| c.path)
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+            let journal_run_id = string(&state["run_id"]).to_string();
+            let outer_run_id = hooks
+                .system_run_id
+                .clone()
+                .unwrap_or_else(|| journal_run_id.clone());
+            let mut graph_ctx = DispatchGraphContext {
+                run_id: outer_run_id,
+                journal_run_id,
+                launch_id: hooks.launch_id.clone(),
+                execution_dir: directory.to_path_buf(),
+                system_file: system.config.clone(),
+                provider: provider.clone(),
+                mode: string(&preview["mode"]).to_string(),
+                access: access_scope(state).to_string(),
+                tell_agents_graph: state.get("tell_agents_graph").and_then(Value::as_bool),
+                phase: string(&preview["id"]).to_string(),
+                dispatch_id: string(&preview["dispatch_id"]).to_string(),
+                attempt,
+                service: sid.clone(),
+                root: root.clone(),
+                roots: roots_map,
+                selected: texts(&state["selected"]),
+                readable: texts(&access["readable"]),
+                writable: texts(&access["writable"]),
+                base_head: base_head.clone(),
+                head_after: None,
+                plan: plan.clone(),
+                state: state.clone(),
+            };
+            let raw_offers = match &hooks.bridge {
+                Some(bridge) => bridge.offers_for_dispatch(&graph_ctx)?,
+                None => vec![],
+            };
+            let step_offers = crate::workers::offers_for_step(state, &preview, &raw_offers);
+            let prompt = match dispatch_context {
+                Some(context) => context
+                    .lock()
+                    .map_err(|_| fail("Dispatch context lock poisoned"))?
+                    .prompt(state, &plan, &preview, &prior, scratch.as_deref())?,
+                None => native::prompt_for_with_graphs(
+                    state,
+                    &plan,
+                    &preview,
+                    &prior,
+                    scratch.as_deref(),
+                    &step_offers,
+                )?,
+            };
+            let step_permissions = if step["mode"] == "edit" {
+                state
+                    .get("permissions")
+                    .and_then(Value::as_str)
+                    .and_then(PermissionMode::parse)
+            } else {
+                None
+            };
+            let use_host_permissions = provider != "command" && step_permissions.is_some();
+            let extra_dirs = execution::extra_directories(state, &step, directory);
+            let read_dirs = execution::read_directories(state, &step, directory);
+            let schema_path = directory.join("result-schema.json");
+            let boundary_scope = if step["mode"] == "edit" {
+                Some(BoundaryScope::from_run(&current, state, &plan, &preview)?)
+            } else {
+                None
+            };
+            let mut prepared_opt = None;
+            let mut host_launch_opt = None;
+            let mut active_transport = infra_host::provider::Transport::Text;
+            if use_host_permissions {
+                let perm_mode = step_permissions.unwrap();
+                let mut launch = infra_host::provider::Launch {
+                    provider: provider.clone(),
+                    executable: executable.clone(),
+                    project: root.clone(),
+                    prompt: prompt.clone(),
+                    mode: "edit".into(),
+                    model: None,
+                    session: None,
+                    agents: false,
+                    count: 1,
+                    effort: None,
+                    usd: None,
+                    hook_events: false,
+                    permissions: Some(perm_mode),
+                    approvals: None,
+                };
+                active_transport = infra_host::provider::transport(&launch);
+                if let Some(scope) = boundary_scope.as_ref() {
+                    let wrap = (perm_mode == PermissionMode::Manual && hooks.approvals.is_some())
+                        || (perm_mode == PermissionMode::Auto && provider == "claude");
+                    if wrap {
+                        launch.approvals = Some(Arc::new(SystemBoundaryApprovals::new(
+                            hooks.approvals.clone(),
+                            Some(perm_mode),
+                            scope.clone(),
+                        )));
+                    }
+                }
+                host_launch_opt = Some(launch);
+            } else {
+                let prepared = native::prepare_launch(
+                    &provider,
+                    &executable,
+                    &root,
+                    &prompt,
+                    &schema,
+                    &schema_path,
+                    string(&step["mode"]),
+                    &extra_dirs,
+                    &read_dirs,
+                    adapter.as_deref(),
+                )?;
+                let prepared = match &scratch {
+                    Some(scratch) => native::use_scratch(prepared, scratch)?,
+                    None => prepared,
+                };
+                let prepared = crate::workers::prepare_worker(
+                    &provider,
+                    string(&step["mode"]),
+                    prepared,
+                    &step_offers,
+                )?;
+                prepared_opt = Some(prepared);
+            }
+            let check_non_interactive_boundary = step["mode"] == "edit"
+                && step_permissions.is_some()
+                && active_transport == infra_host::provider::Transport::Text;
+            let (system_base_head, pre_existing_system_dirty, foreign_pre_existing) =
+                if check_non_interactive_boundary {
+                    let sys_head = git_head(&current.root);
+                    let sys_dirty: BTreeSet<String> = git_worktree_changes(&current.root)
+                        .into_iter()
+                        .map(|c| c.path)
+                        .collect();
+                    let mut foreign = BTreeMap::new();
+                    if access_scope(state) == "service" {
+                        for s in texts(&state["selected"]) {
+                            if s == sid {
+                                continue;
+                            }
+                            let sr = PathBuf::from(string(&state["roots"][&s]));
+                            let f_head = git_head(&sr);
+                            let f_dirty: BTreeSet<String> = git_worktree_changes(&sr)
+                                .into_iter()
+                                .map(|c| c.path)
+                                .collect();
+                            foreign.insert(s, (sr, f_head, f_dirty));
+                        }
+                    }
+                    (sys_head, sys_dirty, foreign)
+                } else {
+                    (None, BTreeSet::new(), BTreeMap::new())
+                };
+            preview["input_sha256"] = digest(prompt.as_bytes()).into();
+            let index = step_index(state, string(&step["id"]))?;
+            state["steps"][index] = preview.clone();
+            graph_ctx.state = state.clone();
+            save(directory, "run.json", state, false)?;
+            // The exact input this agent receives, next to its receipt: what every agent of the run shared can be read back.
+            save(
+                directory,
+                &input_name(&preview),
+                &object!({
+                    "schema_version": 1,
+                    "kind": "ai-system-dispatch-input",
+                    "dispatch_id": preview["dispatch_id"],
+                    "phase": preview["id"],
+                    "attempt": attempt,
+                    "input_sha256": preview["input_sha256"],
+                    "prompt": prompt
+                }),
+                false,
+            )?;
+            brains
+                .get(&sid)
+                .ok_or_else(|| fail("Missing dispatch Brain"))?
+                .progress(
+                    reference_mut(state, &sid)?,
+                    &format!(
+                        "Dispatch {} started: {}",
+                        string(&preview["dispatch_id"]),
+                        string(&preview["id"])
+                    ),
+                )?;
+            if let Some(bridge) = &hooks.bridge {
+                bridge.on_dispatch_start(&graph_ctx)?;
+            }
+            notify(
+                event,
+                object!({
+                    "type": "dispatch_started",
+                    "phase": preview["id"],
+                    "service": sid,
+                    "attempt": attempt,
+                    "dispatch_id": preview["dispatch_id"],
+                    "mode": preview["mode"],
+                    "provider": provider,
+                    "root": root,
+                    "readable": access["readable"],
+                    "writable": access["writable"]
+                }),
+            );
+            let started = Instant::now();
+            let timeout = state["timeout"]
+                .as_u64()
+                .ok_or_else(|| fail("Worker timeout missing"))?;
+            let phase = string(&preview["id"]).to_string();
+            let receipt = object!({
+                "dispatch_id": preview["dispatch_id"],
+                "phase": preview["id"],
+                "input_sha256": preview["input_sha256"],
+                "mode": preview["mode"],
+                "returncode": null,
+                "error": null,
+                "duration_seconds": 0.0,
+                "ok": false,
+                "report": null
+            });
+            let (native_collector, mut receipt) = if let Some(launch) = host_launch_opt {
+                let launch_adapter = SystemLaunchAdapter {
+                    inner: adapter.clone(),
+                    schema: schema.clone(),
+                    schema_path: schema_path.clone(),
+                    extra: extra_dirs,
+                    read: read_dirs,
+                    offers: step_offers.clone(),
+                };
+                let limits = infra_host::process::Limits {
+                    seconds: Some(timeout),
+                    output: 2 * MAX_BYTES,
+                    line: 2 * MAX_BYTES,
+                };
+                run_host_dispatch_boxed(
+                    HostDispatchArgs {
+                        launch,
+                        launch_adapter,
+                        limits,
+                        cancel: cancel.clone(),
+                        runner_lock: runner_lock.clone(),
+                        observer: observer.clone(),
+                        bridge: hooks.bridge.clone(),
+                        graph_ctx: graph_ctx.clone(),
+                        provider: provider.clone(),
+                        root: root.clone(),
+                        phase,
+                        attempt,
+                        preview: preview.clone(),
+                        state: state.clone(),
+                        untrusted_context,
+                        started,
+                        receipt,
+                    },
+                    event,
+                )
+                .await
+            } else {
+                let prepared = prepared_opt.expect("raw launch must prepare command");
+                run_raw_dispatch_boxed(
+                    RawDispatchArgs {
+                        prepared,
+                        root: root.clone(),
+                        timeout,
+                        cancel: cancel.clone(),
+                        runner_lock: runner_lock.clone(),
+                        observer: observer.clone(),
+                        bridge: hooks.bridge.clone(),
+                        graph_ctx: graph_ctx.clone(),
+                        provider: provider.clone(),
+                        phase,
+                        attempt,
+                        preview: preview.clone(),
+                        state: state.clone(),
+                        untrusted_context,
+                        started,
+                        receipt,
+                    },
+                    event,
+                )
+                .await
+            };
+            let elapsed = receipt["duration_seconds"].as_f64().unwrap_or(0.0);
+            let head_after = git_head(&root);
+            graph_ctx.head_after = head_after.clone();
+            let git_changed = collect_step_git_changes(
+                state,
+                &preview,
+                &root,
+                base_head.as_deref(),
+                &pre_existing_dirty,
+                receipt.get("report").filter(|v| v.is_object()),
+            );
+            if check_non_interactive_boundary
+                && receipt["ok"] == true
+                && let Some(scope) = boundary_scope.as_ref()
+            {
+                let mut extra_written = Vec::new();
+                for ch in git_changes_since(&current.root, system_base_head.as_deref()) {
+                    if !pre_existing_system_dirty.contains(&ch.path) {
+                        extra_written.push(current.root.join(&ch.path));
+                    }
+                }
+                for (_foreign_sid, (sr, f_head, f_dirty)) in foreign_pre_existing {
+                    for ch in git_changes_since(&sr, f_head.as_deref()) {
+                        if !f_dirty.contains(&ch.path) {
+                            extra_written.push(sr.join(&ch.path));
+                        }
+                    }
+                }
+                let reported_files = texts(&receipt["report"]["changed_files"]);
+                if let Err(boundary_err) = check_step_boundary_writes_with_extra(
+                    scope,
+                    &git_changed,
+                    &reported_files,
+                    &extra_written,
+                ) {
+                    receipt["ok"] = object!(false);
+                    receipt["error"] = "boundary_violation".into();
+                    receipt["rejection"] = boundary_err
+                        .message
+                        .chars()
+                        .take(500)
+                        .collect::<String>()
+                        .into();
+                }
+            }
+            save(directory, &receipt_name(&preview), &receipt, true)?;
+            let bridge_evidence = match &hooks.bridge {
+                Some(bridge) => bridge.on_dispatch_finish(&graph_ctx, &receipt)?,
+                None => None,
+            };
+            let evidence = match bridge_evidence {
+                Some(mut ev) => {
+                    ev.phase = string(&preview["id"]).to_string();
+                    ev.attempt = attempt;
+                    if ev.launch_id.is_none() {
+                        ev.launch_id = hooks.launch_id.clone();
+                    }
+                    ev.service = sid.clone();
+                    ev.root = path_string(&root)?;
+                    if ev.base_head.is_none() {
+                        ev.base_head = base_head;
+                    }
+                    if ev.head_after.is_none() {
+                        ev.head_after = head_after;
+                    }
+                    ev.git_changed = git_changed;
+                    ev
+                }
+                None => {
+                    let mut ledger_edited: Vec<EvidenceFileChange> = native_collector
+                        .edited
+                        .into_iter()
+                        .map(|(path, status)| EvidenceFileChange {
+                            path,
+                            status,
+                            from: None,
+                        })
+                        .collect();
+                    if ledger_edited.is_empty() {
+                        for entry in texts(&receipt["report"]["changed_files"]) {
+                            ledger_edited.push(EvidenceFileChange {
+                                path: entry,
+                                status: "modified".into(),
+                                from: None,
+                            });
+                        }
+                    }
+                    DispatchEvidence {
+                        phase: string(&preview["id"]).to_string(),
+                        attempt,
+                        launch_id: hooks.launch_id.clone(),
+                        service: sid.clone(),
+                        root: path_string(&root)?,
+                        base_head,
+                        head_after,
+                        git_changed,
+                        ledger_edited,
+                        opened: native_collector.opened.into_iter().collect(),
+                        shell_reads: native_collector.shell_reads,
+                        shell_events: native_collector.shell_events,
+                        graph_asked: native_collector.graph_asked,
+                        steps: native_collector.steps,
+                        searched: native_collector.searched,
+                        commands: native_collector.commands,
+                        helpers: native_collector.helpers,
+                        limited: false,
+                        created_entities: vec![],
+                        target_folders: vec![],
+                        target_paths: vec![],
+                        target_nodes: vec![],
+                        file_touches: native_collector.file_touches,
+                        plan_items: native_collector.plan_items,
+                        command_runs: native_collector.command_runs,
+                    }
+                }
+            };
+            save(
+                directory,
+                &evidence_name(&preview),
+                &serde_json::to_value(&evidence)?,
+                false,
+            )?;
+            let finished = object!({
+                "type": "dispatch_finished",
+                "phase": preview["id"],
+                "service": sid,
+                "attempt": attempt,
+                "ok": receipt["ok"],
+                "error": if receipt["rejection"].is_string() {
+                    object!(format!("{}: {}", string(&receipt["error"]), string(&receipt["rejection"])))
+                } else if receipt["failure"].is_string() {
+                    object!(format!("{}: {}", string(&receipt["error"]), string(&receipt["failure"])))
+                } else {
+                    receipt["error"].clone()
+                },
+                "duration_seconds": elapsed,
+                "report": receipt["report"]
+            });
+            if receipt["ok"] != true {
+                let interrupted =
+                    cancel.load(Ordering::SeqCst) || receipt["error"] == "interrupted";
+                state["steps"][index]["status"] = if interrupted {
+                    "interrupted"
+                } else {
+                    "blocked"
+                }
+                .into();
+                state["status"] = if interrupted {
+                    "interrupted"
+                } else {
+                    "blocked"
+                }
+                .into();
+                state["error"] = if receipt["failure"].is_string() {
+                    object!(match receipt["returncode"].as_i64() {
+                        Some(code) => format!(
+                            "The {provider} CLI exited with code {code}: {}",
+                            string(&receipt["failure"])
+                        ),
+                        None => format!(
+                            "The {provider} CLI could not run: {}",
+                            string(&receipt["failure"])
+                        ),
+                    })
+                } else if receipt["error"] == "boundary_violation"
+                    && receipt["rejection"].is_string()
+                {
+                    receipt["rejection"].clone()
+                } else {
+                    receipt["error"].clone()
+                };
+                save(directory, "run.json", state, false)?;
+                notify(event, finished);
+                return Ok(state.clone());
+            }
+            current = System::new(&system.config, &system.allow_roots)?;
+            plan = check_changes(
+                &mut current,
+                &plan,
+                Some(&preview),
+                Some(&receipt["report"]),
+                state,
+                false,
+            )?;
+            save(directory, "checkpoint.json", &plan, false)?;
+            finish(directory, state, &preview, &receipt, brains)?;
+            context_completed(dispatch_context, state, &preview, &receipt)?;
+            notify(event, finished);
+            if preview["id"] == "contracts" {
+                break;
+            }
+        }
+        if state["steps"]
+            .as_array()
+            .is_some_and(|steps| steps.iter().any(|step| step["status"] != "completed"))
+        {
+            return Ok(state.clone());
+        }
+        let reports = reports(directory, state)?;
+        // The run's outcome becomes the system's memory by itself; failing to share it never fails a completed run.
+        let memory = if untrusted_context {
+            object!({
+                "status": "skipped",
+                "reason": "experimental worker claims stay in receipts and the private journal; no verified Brain outcome or promotion"
+            })
+        } else {
+            match brains.get("__system__") {
+                Some(brain) => brain
+                    .share_outcome(state, &plan, &reports)
+                    .unwrap_or_else(|error| object!({"error": error.message})),
+                None => Value::Null,
+            }
+        };
+        let shared = if memory["status"] == "applied" {
+            " Its outcome is now the system's memory: later plans share it with every agent."
+        } else if memory["review_mode"] == "human" {
+            " Its outcome waits as a proposal for the system's memory, since the system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply."
+        } else {
+            ""
+        };
+        save(
+            directory,
+            "handoff.json",
+            &object!({
+                "schema_version": 1,
+                "kind": "ai-system-handoff",
+                "run_id": state["run_id"],
+                "change_id": state["change_id"],
+                "tasks": state["tasks"],
+                "reports": reports,
+                "memory": memory,
+                "receipts": state["steps"].as_array().into_iter().flatten().map(receipt_name).collect::<Vec<_>>(),
+                "knowledge": format!(
+                    "Review contract decisions and reusable lessons in receipts; publish through each owning runtime's promotion workflow. Raw context is not durable knowledge.{shared} If the change added, versioned or removed a contract or a dependency, update the service passports (Fill with AI or the system editor) before planning the next change: plans route and trace impact only through declared contracts."
+                ),
+                "meaning": "Worker-reported completion and checks; no commit, merge or deployment is implied."
+            }),
+            false,
+        )?;
+        for sid in &ids {
+            if !texts(&state["closed_tasks"]).contains(sid) {
+                let run = string(&state["run_id"]).to_string();
+                brains
+                    .get(sid)
+                    .ok_or_else(|| fail("Missing native Brain"))?
+                    .complete(reference_mut(state, sid)?, &run)?;
+                state["closed_tasks"]
+                    .as_array_mut()
+                    .ok_or_else(|| fail("Closed tasks missing"))?
+                    .push(sid.clone().into());
+                save(directory, "run.json", state, false)?;
+            }
+        }
+        state["status"] = "completed".into();
+        state["finished_at"] = now().into();
+        save(directory, "run.json", state, false)?;
+        Ok(state.clone())
+    })
+}
+
+#[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility API keeps explicit per-call custody and process controls."
+)]
+fn execute_run_context_boxed<'a>(
+    system: &'a mut System,
+    directory: &'a Path,
+    retry: Option<&'a str>,
+    accept: Acceptance,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<std::fs::File>>,
+    adapter: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
+    observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    dispatch_context: Option<SharedDispatchContext>,
+    hooks: &'a RunnerGraphHooks,
+    event: &'a mut (dyn FnMut(Value) -> Result<()> + Send),
+) -> BoxFuture<'a, Result<Value>> {
+    Box::pin(execute_run_context(
+        system,
+        directory,
+        retry,
+        accept,
+        cancel,
+        runner_lock,
+        adapter,
+        observer,
+        dispatch_context,
+        hooks,
+        event,
+    ))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Compatibility API keeps explicit per-call custody and process controls."
@@ -531,18 +1788,18 @@ async fn execute_run_context(
     observer: Option<Arc<dyn infra_host::process::RunObserver>>,
     dispatch_context: Option<SharedDispatchContext>,
     hooks: &RunnerGraphHooks,
-    event: &mut (impl FnMut(Value) -> Result<()> + Send),
+    event: &mut (dyn FnMut(Value) -> Result<()> + Send),
 ) -> Result<Value> {
     let directory = absolute(directory)?;
     let _run_lock = execution::lock(&directory, ".run.lock")?;
-    let initial = match native::validate_state(system, &directory, true).await {
+    let initial = match validate_state_boxed(system, &directory, true).await {
         Ok(state) => state,
         Err(error) => {
             // A CLI that went missing or changed (a self-updating CLI) stops
             // the run in its journal too, not only on the terminal that
             // resumed it: the run view showed such a run as interrupted with
             // no cause.
-            if let Ok(mut state) = native::validate_state(system, &directory, false).await
+            if let Ok(mut state) = validate_state_boxed(system, &directory, false).await
                 && state["status"] != "completed"
             {
                 state["status"] = "blocked".into();
@@ -553,7 +1810,7 @@ async fn execute_run_context(
         }
     };
     let _workspaces = execution::workspace_locks(system, &texts(&initial["selected"]))?;
-    let mut state = native::validate_state(system, &directory, true).await?;
+    let mut state = validate_state_boxed(system, &directory, true).await?;
     if state["status"] == "completed" {
         return Ok(state);
     }
@@ -566,102 +1823,26 @@ async fn execute_run_context(
     {
         brains.insert(sid.clone(), Brain::new(Path::new(string(root)), &owner)?);
     }
-    let mut plan = read_json(&directory, "checkpoint.json", execution::MAX_STATE)?;
+    let plan = read_json(&directory, "checkpoint.json", execution::MAX_STATE)?;
     system.selected_plan(&plan, true)?;
-    let mut retry = retry.map(str::to_string);
-    let result = Box::pin(async {
- let blocked=state["steps"].as_array().into_iter().flatten().find(|step|["running","blocked","interrupted"].contains(&string(&step["status"]))).cloned();
- if let Some(step)=blocked{let receipt=match dispatch_receipt(&directory,&state,&step){Ok(value)=>Some(value),Err(error)if error.kind==ErrorKind::NotFound=>None,Err(error)=>return Err(error)};
- let unrun=receipt.as_ref().and_then(|receipt|execution::unrun_checks(receipt,&step));
- if accept.unrun_checks&&unrun.is_none(){return Err(fail(format!("Only a completed verification whose only gaps are checks it could not run can be accepted; retry {id} instead (CLI: --retry-step {id})",id=string(&step["id"]))));}
- if accept.unrun_checks&&retry.is_some(){return Err(fail("Accept the checks verification could not run, or retry verification, not both"));}
- if receipt.as_ref().is_some_and(|receipt|receipt["ok"]==true)||accept.unrun_checks{let receipt=receipt.ok_or_else(||fail("Receipt disappeared"))?;if system.verify(&plan)?["fresh"]!=true{if !accept.source_changes{return Err(fail("Successful receipt has uncheckpointed edits; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),Some(&receipt["report"]),&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}
- if let Some(unrun)=unrun.filter(|_|accept.unrun_checks){let index=step_index(&state,string(&step["id"]))?;state["steps"][index]["accepted_unrun_checks"]=object!(unrun);}finish(&directory,&mut state,&step,&receipt,&brains)?;context_completed(&dispatch_context,&state,&step,&receipt)?;retry=None;}
- else{if retry.as_deref()!=Some(string(&step["id"])){return Err(fail(format!("Dispatch {id} stopped without a successful receipt and may have changed files; inspect them, then retry {id} explicitly (CLI: --retry-step {id})",id=string(&step["id"]))));}
- if system.verify(&plan)?["fresh"]!=true{if !accept.source_changes{return Err(fail("Partial edits detected; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),None,&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}
- let index=step_index(&state,string(&step["id"]))?;state["steps"][index]["status"]="pending".into();}}
- else if retry.is_some(){return Err(fail("No unfinished dispatch matches the dispatch chosen for retry"));}
- else if accept.unrun_checks{return Err(fail("No stopped verification has checks to accept"));}
- // Between dispatches only a person's accepted system-folder edit is adopted;
- // any other change is named and needs a new plan.
- if system.verify(&plan)?["fresh"]!=true{plan=check_changes(system,&plan,None,None,&state,accept.source_changes)?;save(&directory,"checkpoint.json",&plan,false)?;}plan=system.refresh_checkpoint(&plan,&BTreeSet::new())?;
- let ids=brains.keys().cloned().collect::<Vec<_>>();for sid in &ids{let brain=brains.get(sid).ok_or_else(||fail("Missing Brain"))?;let record=brain.ensure(reference_mut(&mut state,sid)?)?;if record["status"]=="completed"&&!texts(&state["closed_tasks"]).contains(sid){if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Err(fail("Native task terminal before worker verification"));}let run=string(&state["run_id"]).to_string();brain.complete(reference_mut(&mut state,sid)?,&run)?;state["closed_tasks"].as_array_mut().ok_or_else(||fail("Closed tasks missing"))?.push(sid.clone().into());}save(&directory,"run.json",&state,false)?;}
- state["status"]="running".into();state["error"]=Value::Null;save(&directory,"run.json",&state,false)?;
- let steps=state["steps"].as_array().cloned().ok_or_else(||fail("Missing steps"))?;
- for step in steps{if step["status"]=="completed"{continue;}
- if cancel.load(Ordering::SeqCst){return Err(RuntimeError::coded(ErrorKind::Unavailable,"interrupted","interrupted"));}
- let mut current=System::new(&system.config,&system.allow_roots)?;let verdict=current.verify(&plan)?;if verdict["fresh"]!=true{
- // Memory that stopped holding between dispatches leaves the shared context; any other change needs a new plan.
- if verdict["changed"].as_array().is_some_and(|changed|changed.iter().all(|change|change["reason"]=="memory_ineligible")){plan=current.refresh_checkpoint(&plan,&BTreeSet::new())?;save(&directory,"checkpoint.json",&plan,false)?;}else{check_changes(&mut current,&plan,None,None,&state,false)?;return Err(fail("Sources changed between dispatches; prepare new plan"));}}
- let prior=reports(&directory,&state)?;let attempt=step["attempt"].as_u64().filter(|attempt|*attempt<100).ok_or_else(||fail("Dispatch retry limit reached"))?+1;let mut preview=step.clone();preview["dispatch_id"]=id32().into();preview["status"]="running".into();preview["attempt"]=object!(attempt);
- let sid=string(&step["service"]).to_string();let provider=string(&state["provider"]).to_string();let executable=PathBuf::from(string(&state["executable"]));let scratch=native::read_only_scratch(&provider,&executable,string(&step["mode"]),&directory)?;
- let access=dispatch_access(&state,&step);let root=PathBuf::from(string(&state["roots"][&sid]));let schema=execution::result_schema(&texts(&state["selected"]));
- let roots_map=state["roots"].as_object().ok_or_else(||fail("Missing run roots"))?.iter().map(|(k,v)|(k.clone(),PathBuf::from(string(v)))).collect::<BTreeMap<_,_>>();
- let base_head=git_head(&root);
- let pre_existing_dirty:BTreeSet<String>=if access_scope(&state)=="all"&&step["mode"]=="edit"{texts(&state["selected"]).into_iter().flat_map(|s|{let sr=Path::new(string(&state["roots"][&s]));git_worktree_changes(sr).into_iter().map(move|c|format!("{s}/{}",c.path))}).collect()}else if step["mode"]=="edit"{git_worktree_changes(&root).into_iter().map(|c|c.path).collect()}else{BTreeSet::new()};
- let journal_run_id=string(&state["run_id"]).to_string();
- let outer_run_id=hooks.system_run_id.clone().unwrap_or_else(||journal_run_id.clone());
- let mut graph_ctx=DispatchGraphContext{run_id:outer_run_id,journal_run_id,launch_id:hooks.launch_id.clone(),execution_dir:directory.clone(),system_file:system.config.clone(),provider:provider.clone(),mode:string(&preview["mode"]).to_string(),access:access_scope(&state).to_string(),tell_agents_graph:state.get("tell_agents_graph").and_then(Value::as_bool),phase:string(&preview["id"]).to_string(),dispatch_id:string(&preview["dispatch_id"]).to_string(),attempt,service:sid.clone(),root:root.clone(),roots:roots_map,selected:texts(&state["selected"]),readable:texts(&access["readable"]),writable:texts(&access["writable"]),base_head:base_head.clone(),head_after:None,plan:plan.clone(),state:state.clone()};
- let raw_offers=match &hooks.bridge{Some(bridge)=>bridge.offers_for_dispatch(&graph_ctx)?,None=>vec![]};
- let step_offers=crate::workers::offers_for_step(&state,&preview,&raw_offers);
- let prompt=match &dispatch_context {Some(context)=>context.lock().map_err(|_|fail("Dispatch context lock poisoned"))?.prompt(&state,&plan,&preview,&prior,scratch.as_deref())?,None=>native::prompt_for_with_graphs(&state,&plan,&preview,&prior,scratch.as_deref(),&step_offers)?};
- let prepared=native::prepare_launch(&provider,&executable,&root,&prompt,&schema,&directory.join("result-schema.json"),string(&step["mode"]),&execution::extra_directories(&state,&step,&directory),&execution::read_directories(&state,&step,&directory),adapter.as_deref())?;
- let prepared=match &scratch{Some(scratch)=>native::use_scratch(prepared,scratch)?,None=>prepared};
- let prepared=crate::workers::prepare_worker(&provider,string(&step["mode"]),prepared,&step_offers)?;
- preview["input_sha256"]=digest(prompt.as_bytes()).into();let index=step_index(&state,string(&step["id"]))?;state["steps"][index]=preview.clone();graph_ctx.state=state.clone();save(&directory,"run.json",&state,false)?;
- // The exact input this agent receives, next to its receipt: what every agent of the run shared can be read back.
- save(&directory,&input_name(&preview),&object!({"schema_version":1,"kind":"ai-system-dispatch-input","dispatch_id":preview["dispatch_id"],"phase":preview["id"],"attempt":attempt,"input_sha256":preview["input_sha256"],"prompt":prompt}),false)?;
- brains.get(&sid).ok_or_else(||fail("Missing dispatch Brain"))?.progress(reference_mut(&mut state,&sid)?,&format!("Dispatch {} started: {}",string(&preview["dispatch_id"]),string(&preview["id"])))?;
- if let Some(bridge)=&hooks.bridge{bridge.on_dispatch_start(&graph_ctx)?;}
- notify(event,object!({"type":"dispatch_started","phase":preview["id"],"service":sid,"attempt":attempt,"dispatch_id":preview["dispatch_id"],"mode":preview["mode"],"provider":provider,"root":root,"readable":access["readable"],"writable":access["writable"]}));
- let started=Instant::now();let timeout=state["timeout"].as_u64().ok_or_else(||fail("Worker timeout missing"))?;let phase=string(&preview["id"]).to_string();
- let mut native_collector=NativeEvidenceCollector::default();
- let bridge_for_lines=hooks.bridge.clone();let ctx_for_lines=graph_ctx.clone();let provider_for_lines=provider.clone();let root_for_lines=root.clone();
- let output=Box::pin(native::run_raw_monitored(&prepared.argv,&root,&prepared.environment,&prepared.remove,&prepared.input,timeout,cancel.clone(),runner_lock.clone(),observer.clone(),|line|{native_collector.observe_line(line,&provider_for_lines,&root_for_lines);if let Some(bridge)=&bridge_for_lines{let _=bridge.on_dispatch_signal(&ctx_for_lines,line);}let line=String::from_utf8_lossy(line).to_string();notify(event,object!({"type":"output","phase":phase,"attempt":attempt,"line":line}));Ok(())})).await;
- let elapsed=started.elapsed().as_secs_f64();let mut receipt=object!({"dispatch_id":preview["dispatch_id"],"phase":preview["id"],"input_sha256":preview["input_sha256"],"mode":preview["mode"],"returncode":null,"error":null,"duration_seconds":elapsed,"ok":false,"report":null});
- match output{Ok(output)=>{receipt["returncode"]=object!(output.code);if output.code==0{match native::worker_result(&output.bytes,&provider).and_then(|report|{if untrusted_context&&infra_core::domain::secret_label(&encoded(&report)?)?.is_some(){return Err(fail("Sensitive experimental worker result"));}execution::validate_report(&report,&preview,&texts(&state["selected"]),access_scope(&state))?;Ok(report)}){Ok(report)=>{receipt["report"]=report;receipt["ok"]=object!(execution::success(&receipt,&preview,state["mode"]=="read-only"));if receipt["ok"]!=true{receipt["error"]=if preview["mode"]=="read-only"&&!texts(&receipt["report"]["changed_files"]).is_empty(){"read_only_worker_reported_writes"}else{"worker_blocked_or_verification_incomplete"}.into();}},Err(error)=>{receipt["error"]="invalid_or_sensitive_worker_result".into();receipt["rejection"]=if untrusted_context{"Invalid experimental worker report".into()}else{error.message.chars().take(500).collect::<String>().into()};}}}else{receipt["error"]="worker_exit_failure".into();if let Some(failure)=native::worker_failure(&output.bytes,&provider){receipt["failure"]=failure.into();}}},
- // A CLI that could not start or be supervised says why: a real verification stopped as only "unavailable" after the engine binary was replaced under a running Harness.
- Err(error)=>{let interrupted=cancel.load(Ordering::SeqCst);receipt["error"]=if interrupted{"interrupted"}else{error.code.as_deref().unwrap_or("worker_process_failure")}.into();if !interrupted&&!error.message.trim().is_empty(){receipt["failure"]=native::shown_failure(&error.message).into();}}}
- save(&directory,&receipt_name(&preview),&receipt,true)?;
- let head_after=git_head(&root);graph_ctx.head_after=head_after.clone();
- let git_changed=collect_step_git_changes(&state,&preview,&root,base_head.as_deref(),&pre_existing_dirty,receipt.get("report").filter(|v|v.is_object()));
- let bridge_evidence=match &hooks.bridge{Some(bridge)=>bridge.on_dispatch_finish(&graph_ctx,&receipt)?,None=>None};
- let evidence=match bridge_evidence{
-  Some(mut ev)=>{
-   ev.phase=string(&preview["id"]).to_string();
-   ev.attempt=attempt;
-   if ev.launch_id.is_none(){ev.launch_id=hooks.launch_id.clone();}
-   ev.service=sid.clone();
-   ev.root=path_string(&root)?;
-   if ev.base_head.is_none(){ev.base_head=base_head;}
-   if ev.head_after.is_none(){ev.head_after=head_after;}
-   ev.git_changed=git_changed;
-   ev
-  }
-  None=>{
-   let mut ledger_edited:Vec<EvidenceFileChange>=native_collector.edited.into_iter().map(|(path,status)|EvidenceFileChange{path,status,from:None}).collect();
-   if ledger_edited.is_empty(){
-    for entry in texts(&receipt["report"]["changed_files"]){
-     ledger_edited.push(EvidenceFileChange{path:entry,status:"modified".into(),from:None});
-    }
-   }
-   DispatchEvidence{phase:string(&preview["id"]).to_string(),attempt,launch_id:hooks.launch_id.clone(),service:sid.clone(),root:path_string(&root)?,base_head,head_after,git_changed,ledger_edited,opened:native_collector.opened.into_iter().collect(),shell_reads:native_collector.shell_reads,shell_events:native_collector.shell_events,graph_asked:native_collector.graph_asked,steps:native_collector.steps,searched:native_collector.searched,commands:native_collector.commands,helpers:native_collector.helpers,limited:false,created_entities:vec![],target_folders:vec![],target_paths:vec![],target_nodes:vec![],file_touches:native_collector.file_touches,plan_items:native_collector.plan_items,command_runs:native_collector.command_runs}
-  }
- };
- save(&directory,&evidence_name(&preview),&serde_json::to_value(&evidence)?,false)?;
- let finished=object!({"type":"dispatch_finished","phase":preview["id"],"service":sid,"attempt":attempt,"ok":receipt["ok"],"error":if receipt["rejection"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["rejection"])))}else if receipt["failure"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["failure"])))}else{receipt["error"].clone()},"duration_seconds":elapsed,"report":receipt["report"]});
- if receipt["ok"]!=true{let interrupted=cancel.load(Ordering::SeqCst)||receipt["error"]=="interrupted";state["steps"][index]["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["error"]=if receipt["failure"].is_string(){object!(match receipt["returncode"].as_i64(){Some(code)=>format!("The {provider} CLI exited with code {code}: {}",string(&receipt["failure"])),None=>format!("The {provider} CLI could not run: {}",string(&receipt["failure"]))})}else{receipt["error"].clone()};save(&directory,"run.json",&state,false)?;notify(event,finished);return Ok(state.clone());}
- current=System::new(&system.config,&system.allow_roots)?;plan=check_changes(&mut current,&plan,Some(&preview),Some(&receipt["report"]),&state,false)?;save(&directory,"checkpoint.json",&plan,false)?;finish(&directory,&mut state,&preview,&receipt,&brains)?;context_completed(&dispatch_context,&state,&preview,&receipt)?;notify(event,finished);
- if preview["id"]=="contracts"{break;}}
- if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Ok(state.clone());}
- let reports=reports(&directory,&state)?;
- // The run's outcome becomes the system's memory by itself; failing to share it never fails a completed run.
- let memory=if untrusted_context{object!({"status":"skipped","reason":"experimental worker claims stay in receipts and the private journal; no verified Brain outcome or promotion"})}else{match brains.get("__system__"){Some(brain)=>brain.share_outcome(&state,&plan,&reports).unwrap_or_else(|error|object!({"error":error.message})),None=>Value::Null}};
- let shared=if memory["status"]=="applied"{" Its outcome is now the system's memory: later plans share it with every agent."}else if memory["review_mode"]=="human"{" Its outcome waits as a proposal for the system's memory, since the system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply."}else{""};
- save(&directory,"handoff.json",&object!({"schema_version":1,"kind":"ai-system-handoff","run_id":state["run_id"],"change_id":state["change_id"],"tasks":state["tasks"],"reports":reports,"memory":memory,"receipts":state["steps"].as_array().into_iter().flatten().map(receipt_name).collect::<Vec<_>>(),"knowledge":format!("Review contract decisions and reusable lessons in receipts; publish through each owning runtime's promotion workflow. Raw context is not durable knowledge.{shared} If the change added, versioned or removed a contract or a dependency, update the service passports (Fill with AI or the system editor) before planning the next change: plans route and trace impact only through declared contracts."),"meaning":"Worker-reported completion and checks; no commit, merge or deployment is implied."}),false)?;
- for sid in &ids{if !texts(&state["closed_tasks"]).contains(sid){let run=string(&state["run_id"]).to_string();brains.get(sid).ok_or_else(||fail("Missing native Brain"))?.complete(reference_mut(&mut state,sid)?,&run)?;state["closed_tasks"].as_array_mut().ok_or_else(||fail("Closed tasks missing"))?.push(sid.clone().into());save(&directory,"run.json",&state,false)?;}}
- state["status"]="completed".into();state["finished_at"]=now().into();save(&directory,"run.json",&state,false)?;Ok(state.clone())
- }).await;
+    let result = execute_run_steps_boxed(RunStepsArgs {
+        system,
+        directory: &directory,
+        retry,
+        accept,
+        cancel: &cancel,
+        runner_lock,
+        adapter,
+        observer,
+        dispatch_context: &dispatch_context,
+        hooks,
+        untrusted_context,
+        brains: &brains,
+        state: &mut state,
+        plan,
+        event,
+    })
+    .await;
     match result {
         Ok(state) => Ok(state),
         Err(error) => {
@@ -701,7 +1882,7 @@ pub async fn execute_run_locked(
     event: &mut (impl FnMut(Value) -> Result<()> + Send),
 ) -> Result<Value> {
     let hooks = RunnerGraphHooks::default();
-    Box::pin(execute_run_context(
+    execute_run_context_boxed(
         system,
         directory,
         retry,
@@ -713,7 +1894,7 @@ pub async fn execute_run_locked(
         None,
         &hooks,
         event,
-    ))
+    )
     .await
 }
 pub async fn execute_run(
@@ -786,7 +1967,7 @@ pub(crate) async fn drive_run_context_with_hooks(
         let _ = bridge.on_run_start(&outer_id, &initial_state, system);
     }
 
-    let first = Box::pin(execute_run_context(
+    let first = execute_run_context_boxed(
         system,
         directory,
         retry,
@@ -798,7 +1979,7 @@ pub(crate) async fn drive_run_context_with_hooks(
         dispatch_context.clone(),
         &hooks,
         event,
-    ))
+    )
     .await;
 
     let final_result = match first {
@@ -808,7 +1989,7 @@ pub(crate) async fn drive_run_context_with_hooks(
                     .as_array()
                     .is_some_and(|steps| steps.iter().all(|step| step["status"] != "running")) =>
         {
-            Box::pin(execute_run_context(
+            execute_run_context_boxed(
                 system,
                 directory,
                 None,
@@ -820,7 +2001,7 @@ pub(crate) async fn drive_run_context_with_hooks(
                 dispatch_context,
                 &hooks,
                 event,
-            ))
+            )
             .await
         }
         other => other,
@@ -876,6 +2057,7 @@ pub async fn drive_run_with_bridge(
             bridge: Some(bridge),
             system_run_id: None,
             launch_id,
+            approvals: None,
         },
         event,
     )
@@ -969,4 +2151,280 @@ pub async fn drive_run_with_context(
         event,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system_graph::ServiceGraphOffer;
+    use infra_host::{
+        process::RunObserver,
+        provider::{Launch, LaunchAdapter, PreparedCommand, RunEvents, command_with_adapter},
+    };
+
+    #[test]
+    fn system_launch_adapter_applies_transport_appropriate_flags_and_worker_offers() {
+        let project = std::env::temp_dir();
+        let schema_path = project.join("result-schema.json");
+        let schema = execution::result_schema(&["orders".into()]);
+        let offer = ServiceGraphOffer {
+            service: "orders".into(),
+            command: "graphify".into(),
+            graph_path: project.join("orders-graph/graph.json"),
+            nodes: 3,
+            edges: 2,
+            commit: None,
+            readable_paths: vec![project.join("orders-graph/graph.json")],
+            claude_allow_rules: vec![],
+            env: BTreeMap::from([("EXTRA_GRAPH_ENV".into(), "ok".into())]),
+            prompt_instructions: None,
+        };
+
+        struct RecordingInner;
+        impl LaunchAdapter for RecordingInner {
+            fn adapt(
+                &self,
+                _input: &Launch,
+                mut command: PreparedCommand,
+            ) -> infra_host::Result<PreparedCommand> {
+                command
+                    .environment
+                    .insert("INNER_ADAPTED".into(), "yes".into());
+                Ok(command)
+            }
+        }
+
+        let adapter = SystemLaunchAdapter {
+            inner: Some(Arc::new(RecordingInner)),
+            schema,
+            schema_path: schema_path.clone(),
+            extra: vec![project.join("billing")],
+            read: vec![project.join("sys")],
+            offers: vec![offer],
+        };
+
+        // Codex Manual (`CodexServer`): skips `exec`-only flags (`--skip-git-repo-check`, `--add-dir`, `--output-schema`, `-`).
+        let codex_manual = Launch {
+            provider: "codex".into(),
+            executable: PathBuf::from("codex"),
+            project: project.clone(),
+            prompt: "Run service step".into(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions: Some(PermissionMode::Manual),
+            approvals: None,
+        };
+        let prepared = command_with_adapter(&codex_manual, &adapter).unwrap();
+        assert_eq!(prepared.argv.last().map(String::as_str), Some("app-server"));
+        assert!(!prepared.argv.iter().any(|a| a == "--skip-git-repo-check"));
+        assert!(!prepared.argv.iter().any(|a| a == "--add-dir"));
+        assert!(!prepared.argv.iter().any(|a| a == "--output-schema"));
+        assert!(!prepared.argv.iter().any(|a| a == "-"));
+        assert_eq!(
+            prepared.environment.get("GRAPHIFY_NO_AUTO_REFRESH"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            prepared.environment.get("INNER_ADAPTED"),
+            Some(&"yes".to_string())
+        );
+        assert!(
+            prepared
+                .readable
+                .contains(&project.join("orders-graph/graph.json"))
+        );
+
+        // Codex Auto (`Text`): keeps `--skip-git-repo-check`, `--add-dir`, `--output-schema`, `-`.
+        let codex_auto = Launch {
+            permissions: Some(PermissionMode::Auto),
+            ..codex_manual
+        };
+        let prepared_auto = command_with_adapter(&codex_auto, &adapter).unwrap();
+        assert!(
+            prepared_auto
+                .argv
+                .iter()
+                .any(|a| a == "--skip-git-repo-check")
+        );
+        assert!(prepared_auto.argv.iter().any(|a| a == "--add-dir"));
+        assert!(prepared_auto.argv.iter().any(|a| a == "--output-schema"));
+        assert_eq!(prepared_auto.argv.last().map(String::as_str), Some("-"));
+
+        // Cursor Manual (`CursorAcp`): skips Cursor CLI prompt byte limit; Cursor Auto (`Text`) enforces it.
+        let oversized_prompt = "x".repeat(native::CURSOR_PROMPT_BYTES + 200);
+        let cursor_adapter = SystemLaunchAdapter {
+            extra: vec![],
+            ..adapter
+        };
+        let cursor_manual = Launch {
+            provider: "cursor".into(),
+            executable: PathBuf::from("cursor-agent"),
+            project: project.clone(),
+            prompt: oversized_prompt.clone(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions: Some(PermissionMode::Manual),
+            approvals: None,
+        };
+        let cursor_prepared = command_with_adapter(&cursor_manual, &cursor_adapter).unwrap();
+        assert_eq!(cursor_prepared.argv.last().map(String::as_str), Some("acp"));
+
+        let cursor_auto = Launch {
+            permissions: Some(PermissionMode::Auto),
+            ..cursor_manual
+        };
+        assert!(command_with_adapter(&cursor_auto, &cursor_adapter).is_err());
+    }
+
+    #[test]
+    fn system_run_events_collects_raw_lines_for_worker_result_evidence_and_bridge() {
+        #[derive(Default)]
+        struct SignalBridge {
+            signals: Mutex<Vec<String>>,
+        }
+        impl CodeGraphBridge for SignalBridge {
+            fn on_dispatch_signal(
+                &self,
+                _ctx: &DispatchGraphContext,
+                raw_line: &[u8],
+            ) -> Result<()> {
+                self.signals
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(raw_line).to_string());
+                Ok(())
+            }
+        }
+        struct RecordingObserver(Mutex<Vec<String>>);
+        impl RunObserver for RecordingObserver {
+            fn boundary(&self, signal: &str, _details: &Value) -> infra_host::Result<()> {
+                self.0.lock().unwrap().push(signal.to_string());
+                Ok(())
+            }
+        }
+
+        let report = object!({
+            "status": "completed",
+            "summary": "Implemented",
+            "checks": [{"name": "unit", "status": "passed", "detail": "ok"}],
+            "changed_files": ["src/a.php"],
+            "service_order": []
+        });
+        let report_str = encoded(&report).unwrap();
+
+        for (provider, events) in [
+            (
+                "claude",
+                vec![object!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "structured_output": report.clone()
+                })],
+            ),
+            (
+                "codex",
+                vec![
+                    object!({
+                        "type": "item.completed",
+                        "item": {"id": "1", "type": "command_execution", "command": "cat src/a.php", "status": "completed"}
+                    }),
+                    object!({
+                        "type": "item.completed",
+                        "item": {"id": "2", "type": "agent_message", "text": report_str.clone()}
+                    }),
+                    object!({
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 10, "output_tokens": 5}
+                    }),
+                ],
+            ),
+            (
+                "cursor",
+                vec![object!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "result": report_str
+                })],
+            ),
+        ] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let bridge = Arc::new(SignalBridge::default());
+            let observer = Arc::new(RecordingObserver(Mutex::new(Vec::new())));
+            let run_events = SystemRunEvents {
+                observer: Some(observer.clone()),
+                collector: Mutex::new(NativeEvidenceCollector::default()),
+                raw_lines: Mutex::new(Vec::new()),
+                bridge: Some(bridge.clone()),
+                graph_ctx: DispatchGraphContext {
+                    run_id: "r1".into(),
+                    journal_run_id: "r1".into(),
+                    launch_id: None,
+                    execution_dir: PathBuf::from("/tmp/run"),
+                    system_file: PathBuf::from("/tmp/sys/system.json"),
+                    provider: provider.into(),
+                    mode: "edit".into(),
+                    access: "service".into(),
+                    tell_agents_graph: Some(true),
+                    phase: "service-orders".into(),
+                    dispatch_id: "d1".into(),
+                    attempt: 1,
+                    service: "orders".into(),
+                    root: PathBuf::from("/tmp/orders"),
+                    roots: BTreeMap::new(),
+                    selected: vec!["orders".into()],
+                    readable: vec![],
+                    writable: vec![],
+                    base_head: None,
+                    head_after: None,
+                    plan: object!({}),
+                    state: object!({}),
+                },
+                provider: provider.into(),
+                root: PathBuf::from("/tmp/orders"),
+                phase: "service-orders".into(),
+                attempt: 1,
+                tx: Mutex::new(Some(tx)),
+            };
+            run_events
+                .boundary("guardian_spawned", &object!({}))
+                .unwrap();
+            for raw in &events {
+                run_events.observe(Some(raw), None).unwrap();
+            }
+            run_events.close();
+
+            let raw_bytes = run_events.take_raw_bytes();
+            let parsed = native::worker_result(&raw_bytes, provider).unwrap();
+            assert_eq!(parsed, report, "{provider}");
+            assert_eq!(bridge.signals.lock().unwrap().len(), events.len());
+            assert_eq!(
+                observer.0.lock().unwrap().as_slice(),
+                &["guardian_spawned".to_string()]
+            );
+            let mut emitted = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                emitted.push(ev);
+            }
+            assert_eq!(emitted.len(), events.len());
+            assert!(emitted.iter().all(|e| e["type"] == "output"));
+            if provider == "codex" {
+                let collector = run_events.take_collector();
+                assert_eq!(collector.commands, 1);
+            }
+        }
+    }
 }

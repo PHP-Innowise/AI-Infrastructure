@@ -52,6 +52,7 @@ const FOLDERS: &[&str] = &[
 ];
 const READ_LIMIT: usize = 256 * 1024;
 const EXPORT_LIMIT: usize = 32 * 1024 * 1024;
+const MEMORY_LINKS_BATCH_LIMIT: usize = 24;
 type ExportCache = VecDeque<(String, Vec<u8>)>;
 #[derive(Clone)]
 pub struct KnowledgeDomain {
@@ -346,7 +347,7 @@ impl KnowledgeDomain {
                 "Automatic memory requires an installed governed native runtime.",
             ));
         }
-        self.preflight(&context)?;
+        self.preflight_storage(&context)?;
         Ok(context)
     }
     pub fn prepared_sources(
@@ -515,7 +516,7 @@ impl KnowledgeDomain {
         info["truncated"] = json!(truncated);
         Ok(info)
     }
-    fn preflight(&self, context: &RuntimeContext) -> Result<()> {
+    fn preflight_storage(&self, context: &RuntimeContext) -> Result<()> {
         let mut files = PublicationFiles::new(&context.roots.state)?;
         let mut queue = VecDeque::from(["memory-bank".to_owned(), "project-brain".to_owned()]);
         let mut count = 0;
@@ -592,7 +593,7 @@ impl KnowledgeDomain {
                 "Project Brain editing requires governed mode.",
             ));
         }
-        self.preflight(&context)?;
+        self.preflight_storage(&context)?;
         let mut request = data.clone();
         request
             .as_object_mut()
@@ -730,7 +731,7 @@ impl KnowledgeDomain {
                 "An installed governed native Brain runtime is required.",
             ));
         }
-        self.preflight(&context)?;
+        self.preflight_storage(&context)?;
         let brain = BrainRepository::new(context.clone())?;
         let current = if let Some(task) = task {
             core::serving::TaskService::new(context.clone(), None).task(task, false)?
@@ -1102,6 +1103,16 @@ impl KnowledgeDomain {
                 "Keep at most3 source-checked learnings and attest verified=true.",
             ));
         }
+        let used_memory = if let Some(raw_used) = data.get("used_memory") {
+            let entries = string_list(raw_used, 10, "used memory")?;
+            let mut cleaned = Vec::with_capacity(entries.len());
+            for entry in entries {
+                cleaned.push(relative(entry.trim())?.to_owned());
+            }
+            Some(core::domain::unique_strings(cleaned))
+        } else {
+            None
+        };
         let workspace = PathBuf::from(required(session, "project_path", 32768)?);
         let (context, _) = self.selected(
             required(session, "project_id", 200)?,
@@ -1109,6 +1120,10 @@ impl KnowledgeDomain {
             Some(&workspace),
         )?;
         let service = core::ResultService::new(context.clone());
+        // `infra_core::ResultService::normalize` (and `record-result`) only accept
+        // `["progress", "next_steps", "learnings", "verified", "capture_decision"]`,
+        // matching `memory_draft::usable`; `used_memory` is validated above and
+        // returned as provenance metadata without violating `ResultService` schema.
         let mut request =
             json!({"learnings":learnings,"verified":data["verified"],"next_steps":steps});
         if !progress.trim().is_empty() {
@@ -1145,7 +1160,16 @@ impl KnowledgeDomain {
             Some(&workspace),
             true,
         )?;
-        Ok(json!({"ok":result["ok"],"saved":result["result"],"skipped":[],"error":result["error"]}))
+        let mut response = json!({
+            "ok": result["ok"],
+            "saved": result["result"],
+            "skipped": [],
+            "error": result["error"],
+        });
+        if let Some(used) = used_memory {
+            response["used_memory"] = json!(used);
+        }
+        Ok(response)
     }
     fn usage(&self, project: &str, bank: Option<&str>) -> Result<V> {
         let (context, info) = self.selected(project, bank, None)?;
@@ -2068,7 +2092,6 @@ impl KnowledgeDomain {
     /// or a `previous_path` a commit renamed it from, raises a warning for a
     /// person to review; nothing is retired or changed here.
     pub fn memory_links(&self, project_id: &str, query: &V) -> Result<V> {
-        let _source_frame = core::git::source_frame_scope();
         let path = query["path"]
             .as_str()
             .and_then(clean_relative_path)
@@ -2082,22 +2105,421 @@ impl KnowledgeDomain {
             })
             .transpose()?
             .filter(|previous| *previous != path);
+        let items = self.memory_links_for_files(project_id, &[(path, previous)])?;
+        items
+            .into_iter()
+            .next()
+            .ok_or_else(|| HarnessError::unavailable("Memory links item missing."))
+    }
+
+    /// Batched `memory_links` lookup sharing one Project Brain + Memory Bank
+    /// scan across up to `MEMORY_LINKS_BATCH_LIMIT` files in input order.
+    pub fn memory_links_batch(&self, project_id: &str, body: &V) -> Result<V> {
+        if !crate::store::exact(body, &["files"], &[]) {
+            return Err(HarnessError::invalid(
+                "Provide a files list for memory links.",
+            ));
+        }
+        let raw_files = body["files"]
+            .as_array()
+            .ok_or_else(|| HarnessError::invalid("Provide a files list for memory links."))?;
+        if raw_files.len() > MEMORY_LINKS_BATCH_LIMIT {
+            return Err(HarnessError::invalid(format!(
+                "Request at most {MEMORY_LINKS_BATCH_LIMIT} files per memory-links batch."
+            )));
+        }
+        let mut specs = Vec::with_capacity(raw_files.len());
+        for entry in raw_files {
+            if !crate::store::exact(entry, &["path"], &["previous_path"]) {
+                return Err(HarnessError::invalid(
+                    "Each batch file must provide a path and optional previous_path.",
+                ));
+            }
+            let path = entry["path"]
+                .as_str()
+                .and_then(clean_relative_path)
+                .ok_or_else(|| HarnessError::invalid("Choose a file of the project."))?;
+            let previous = match entry.get("previous_path") {
+                None | Some(V::Null) => None,
+                Some(V::String(raw)) if raw.trim().is_empty() => None,
+                Some(V::String(raw)) => Some(
+                    clean_relative_path(raw)
+                        .ok_or_else(|| HarnessError::invalid("Choose a file of the project."))?,
+                ),
+                Some(_) => return Err(HarnessError::invalid("Choose a file of the project.")),
+            }
+            .filter(|previous| *previous != path);
+            specs.push((path, previous));
+        }
+        let items = self.memory_links_for_files(project_id, &specs)?;
+        Ok(json!({
+            "project_id": project_id,
+            "items": items,
+        }))
+    }
+
+    /// Pre-run preflight risk check for a prompt, session, Brain task, or
+    /// explicit workspace paths. Reuses `memory_links_for_files` for Brain/Bank
+    /// links and `hygiene_warnings`, queries `self.graphs` (when installed)
+    /// for `risk_callers` and compact `blast_summary`, and keeps
+    /// `risk_caller_hints` strictly off unless `"risk_caller_hints": true` is
+    /// explicitly passed in the request.
+    pub fn preflight(&self, project_id: &str, body: &V) -> Result<V> {
+        let _source_frame = core::git::source_frame_scope();
+        let project_id = project_id.trim();
+        let parsed = self.parse_preflight_request(project_id, body)?;
+        let (context, info) = self.preflight_context(project_id, parsed.session.as_ref())?;
+        let graph_index = self.graphs.get().and_then(|g| g.live_index(project_id));
+        let candidate_files =
+            self.collect_preflight_paths(&context, &info, &parsed, graph_index.as_deref())?;
+        let specs: Vec<(String, Option<String>)> = candidate_files
+            .iter()
+            .map(|path| (path.clone(), None))
+            .collect();
+        let file_items = self.memory_links_with_context(&context, &info, project_id, &specs)?;
+        let mut hygiene_warnings = Vec::new();
+        let mut seen_hygiene = BTreeSet::new();
+        for item in &file_items {
+            for warning in item["hygiene_warnings"].as_array().into_iter().flatten() {
+                let key = (
+                    warning["kind"].as_str().unwrap_or("").to_owned(),
+                    warning["path"].as_str().unwrap_or("").to_owned(),
+                    warning["previous_path"].as_str().unwrap_or("").to_owned(),
+                );
+                if seen_hygiene.insert(key) {
+                    hygiene_warnings.push(warning.clone());
+                }
+            }
+        }
+        let session_id = parsed
+            .session
+            .as_ref()
+            .and_then(|s| s["id"].as_str())
+            .map(str::to_owned);
+        let (risk_callers, blast_summary) = if let Some(graphs) = self.graphs.get() {
+            preflight_graph_risks(
+                graphs,
+                project_id,
+                &candidate_files,
+                session_id.as_deref(),
+                graph_index.as_deref(),
+            )
+        } else {
+            (
+                Vec::new(),
+                json!({
+                    "direct_count": 0,
+                    "downstream_count": 0,
+                    "files": [],
+                }),
+            )
+        };
+        let risk_caller_hints = if parsed.risk_caller_hints {
+            self.preflight_risk_caller_hints(
+                &context,
+                &info,
+                project_id,
+                &candidate_files,
+                &risk_callers,
+            )?
+        } else {
+            Vec::new()
+        };
+        Ok(json!({
+            "project_id": project_id,
+            "files": file_items,
+            "contradiction_warnings": [],
+            "hygiene_warnings": hygiene_warnings,
+            "risk_callers": risk_callers,
+            "blast_summary": blast_summary,
+            "risk_caller_hints": risk_caller_hints,
+        }))
+    }
+
+    fn parse_preflight_request(&self, project_id: &str, body: &V) -> Result<PreflightRequest> {
+        strict(
+            body,
+            &[
+                "prompt",
+                "session_id",
+                "task_id",
+                "paths",
+                "risk_caller_hints",
+            ],
+        )?;
+        let prompt = match body.get("prompt") {
+            None | Some(V::Null) => String::new(),
+            Some(V::String(raw)) => {
+                if raw.chars().count() > 32000
+                    || raw.chars().any(|c| {
+                        c == '\0'
+                            || c == '\u{7f}'
+                            || (c < ' ' && c != '\n' && c != '\t' && c != '\r')
+                    })
+                {
+                    return Err(HarnessError::invalid("Invalid prompt."));
+                }
+                raw.clone()
+            }
+            Some(_) => return Err(HarnessError::invalid("Invalid prompt.")),
+        };
+        let session_id = match body.get("session_id") {
+            None | Some(V::Null) => None,
+            Some(V::String(raw)) if raw.trim().is_empty() => None,
+            Some(V::String(raw)) => Some(text(raw.trim(), "session_id", 200)?.to_owned()),
+            Some(_) => return Err(HarnessError::invalid("Invalid session_id.")),
+        };
+        let session = if let Some(ref sid) = session_id {
+            let loaded = self.store.get(sid)?;
+            if loaded["project_id"].as_str() != Some(project_id) {
+                return Err(HarnessError::invalid(
+                    "Session does not belong to the requested project.",
+                ));
+            }
+            Some(loaded)
+        } else {
+            None
+        };
+        let task_id = match body.get("task_id") {
+            None | Some(V::Null) => None,
+            Some(V::String(raw)) if raw.trim().is_empty() => None,
+            Some(V::String(raw)) => Some(text(raw.trim(), "task_id", 200)?.to_owned()),
+            Some(_) => return Err(HarnessError::invalid("Invalid task_id.")),
+        };
+        let explicit_paths = match body.get("paths") {
+            None | Some(V::Null) => Vec::new(),
+            Some(V::Array(items)) => {
+                if items.len() > MEMORY_LINKS_BATCH_LIMIT {
+                    return Err(HarnessError::invalid(format!(
+                        "Request at most {MEMORY_LINKS_BATCH_LIMIT} paths for preflight."
+                    )));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let clean = item
+                        .as_str()
+                        .and_then(clean_relative_path)
+                        .ok_or_else(|| HarnessError::invalid("Choose files of the project."))?;
+                    out.push(clean);
+                }
+                out
+            }
+            Some(_) => {
+                return Err(HarnessError::invalid(
+                    "Provide paths as a list of project files.",
+                ));
+            }
+        };
+        let risk_caller_hints = match body.get("risk_caller_hints") {
+            None | Some(V::Null) => false,
+            Some(V::Bool(flag)) => *flag,
+            Some(_) => {
+                return Err(HarnessError::invalid(
+                    "risk_caller_hints must be a boolean.",
+                ));
+            }
+        };
+        Ok(PreflightRequest {
+            prompt,
+            session,
+            task_id,
+            explicit_paths,
+            risk_caller_hints,
+        })
+    }
+
+    fn preflight_context(
+        &self,
+        project_id: &str,
+        session: Option<&V>,
+    ) -> Result<(RuntimeContext, V)> {
+        let workspace = session
+            .and_then(|s| s["project_path"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir());
+        let bank = session
+            .and_then(|s| s["brain"]["bank"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match self.selected(project_id, bank, workspace.as_deref()) {
+            Ok(pair) => Ok(pair),
+            Err(err) if bank.is_some() && err.status == 404 => {
+                self.selected(project_id, None, workspace.as_deref())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn collect_preflight_paths(
+        &self,
+        context: &RuntimeContext,
+        info: &V,
+        parsed: &PreflightRequest,
+        graph_index: Option<&crate::graph_map::Index>,
+    ) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut push_path = |path: String| {
+            if out.len() < MEMORY_LINKS_BATCH_LIMIT && seen.insert(path.clone()) {
+                out.push(path);
+            }
+        };
+        for path in &parsed.explicit_paths {
+            push_path(path.clone());
+        }
+        for path in
+            extract_preflight_prompt_paths(&parsed.prompt, &context.roots.project, graph_index)
+        {
+            push_path(path);
+        }
+        let session_brain = parsed.session.as_ref().map(|s| &s["brain"]);
+        let session_matches_task = match (parsed.task_id.as_deref(), session_brain) {
+            (None, Some(b)) => b.is_object(),
+            (Some(tid), Some(b)) => {
+                b["task_id"].as_str() == Some(tid) || b["record_id"].as_str() == Some(tid)
+            }
+            (_, None) => false,
+        };
+        if session_matches_task
+            && let Some(task) = session_brain
+                .and_then(|b| b.get("task"))
+                .filter(|t| t.is_object())
+        {
+            for path in extract_record_paths(task) {
+                push_path(path);
+            }
+        }
+        let lookup_id = parsed
+            .task_id
+            .as_deref()
+            .or_else(|| session_brain.and_then(|b| b["record_id"].as_str()))
+            .or_else(|| session_brain.and_then(|b| b["task_id"].as_str()))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(tid) = lookup_id
+            && info["brain_available"] == true
+            && context.mode == "governed"
+        {
+            let allowed_privacy =
+                RuntimeConfig::load(&context.roots)?.strings("allowed_privacy")?;
+            if let Ok(image) = BrainRepository::new(context.clone())?.find(tid, None, false) {
+                let privacy = image.record["privacy"].as_str().unwrap_or("");
+                if allowed_privacy.iter().any(|allowed| allowed == privacy) {
+                    for path in extract_record_paths(&image.record) {
+                        push_path(path);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn preflight_risk_caller_hints(
+        &self,
+        context: &RuntimeContext,
+        info: &V,
+        project_id: &str,
+        candidate_files: &[String],
+        risk_callers: &[V],
+    ) -> Result<Vec<V>> {
+        let candidate_set: BTreeSet<&str> = candidate_files.iter().map(String::as_str).collect();
+        let mut caller_targets: Vec<(String, String, String)> = Vec::new();
+        let mut seen = BTreeSet::new();
+        for caller in risk_callers {
+            let Some(from) = caller["from"].as_str().and_then(clean_relative_path) else {
+                continue;
+            };
+            if candidate_set.contains(from.as_str()) || !seen.insert(from.clone()) {
+                continue;
+            }
+            let to = caller["to"].as_str().unwrap_or("").to_owned();
+            let impact = caller["impact"].as_str().unwrap_or("impacted").to_owned();
+            caller_targets.push((from, to, impact));
+            if caller_targets.len() >= RISK_CALLER_HINT_FILES {
+                break;
+            }
+        }
+        if caller_targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let specs: Vec<(String, Option<String>)> = caller_targets
+            .iter()
+            .map(|(from, _, _)| (from.clone(), None))
+            .collect();
+        let linked = self.memory_links_with_context(context, info, project_id, &specs)?;
+        let mut hints = Vec::new();
+        for ((from, to, impact), item) in caller_targets.into_iter().zip(linked) {
+            let source_hints = self
+                .build_source_hints(context, &[], std::slice::from_ref(&from))
+                .and_then(|payload| payload["references"].as_array().cloned())
+                .unwrap_or_default();
+            let has_brain = !item["brain_records"].as_array().is_none_or(Vec::is_empty);
+            let has_chunks = !item["memory_chunks"].as_array().is_none_or(Vec::is_empty);
+            let has_hygiene = !item["hygiene_warnings"]
+                .as_array()
+                .is_none_or(Vec::is_empty);
+            if has_brain || has_chunks || has_hygiene || !source_hints.is_empty() {
+                hints.push(json!({
+                    "path": from,
+                    "target": to,
+                    "impact": impact,
+                    "brain_records": item["brain_records"],
+                    "memory_chunks": item["memory_chunks"],
+                    "hygiene_warnings": item["hygiene_warnings"],
+                    "source_hints": source_hints,
+                }));
+            }
+        }
+        Ok(hints)
+    }
+
+    fn memory_links_for_files(
+        &self,
+        project_id: &str,
+        specs: &[(String, Option<String>)],
+    ) -> Result<Vec<V>> {
+        let _source_frame = core::git::source_frame_scope();
         let (context, info) = self.selected(project_id, None, None)?;
+        self.memory_links_with_context(&context, &info, project_id, specs)
+    }
+
+    fn memory_links_with_context(
+        &self,
+        context: &RuntimeContext,
+        info: &V,
+        project_id: &str,
+        specs: &[(String, Option<String>)],
+    ) -> Result<Vec<V>> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
         let config = RuntimeConfig::load(&context.roots)?;
         let allowed_privacy = config.strings("allowed_privacy")?;
-        let names = std::iter::once(path.clone())
-            .chain(previous.clone())
-            .collect::<Vec<_>>();
-        let cites = |values: &V| -> Option<String> {
+        let mut wanted = BTreeSet::new();
+        for (path, previous) in specs {
+            wanted.insert(path.clone());
+            if let Some(prev) = previous {
+                wanted.insert(prev.clone());
+            }
+        }
+        let matching_paths = |values: &V| -> Vec<String> {
             values
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(V::as_str)
                 .filter_map(|raw| clean_relative_path(raw.split('#').next().unwrap_or(raw)))
-                .find(|cited| names.contains(cited))
+                .filter(|cited| wanted.contains(cited))
+                .collect()
         };
-        let mut brain_records = Vec::new();
+        let pick_cited = |hits: &[String], path: &str, previous: Option<&str>| -> Option<String> {
+            hits.iter()
+                .find(|cited| cited.as_str() == path || previous == Some(cited.as_str()))
+                .cloned()
+        };
+        let mut per_brain: Vec<Vec<V>> = vec![Vec::new(); specs.len()];
         if info["brain_available"] == true && context.mode == "governed" {
             for image in BrainRepository::new(context.clone())?.records(false)? {
                 let r = &image.record;
@@ -2105,21 +2527,31 @@ impl KnowledgeDomain {
                 if !allowed_privacy.iter().any(|allowed| allowed == privacy) {
                     continue;
                 }
-                let Some(cited) = cites(&r["files"]).or_else(|| cites(&r["sources"])) else {
+                let file_hits = matching_paths(&r["files"]);
+                let source_hits = matching_paths(&r["sources"]);
+                if file_hits.is_empty() && source_hits.is_empty() {
                     continue;
-                };
-                brain_records.push(json!({
-                    "id": r["id"],
-                    "external_id": r["external_id"],
-                    "type": r["type"],
-                    "title": collapse_preview(r["title"].as_str().unwrap_or(""), 240),
-                    "status": r["status"],
-                    "authority": r["authority"],
-                    "cited_path": cited,
-                }));
+                }
+                let title = collapse_preview(r["title"].as_str().unwrap_or(""), 240);
+                for (idx, (path, previous)) in specs.iter().enumerate() {
+                    let Some(cited) = pick_cited(&file_hits, path, previous.as_deref())
+                        .or_else(|| pick_cited(&source_hits, path, previous.as_deref()))
+                    else {
+                        continue;
+                    };
+                    per_brain[idx].push(json!({
+                        "id": r["id"],
+                        "external_id": r["external_id"],
+                        "type": r["type"],
+                        "title": title,
+                        "status": r["status"],
+                        "authority": r["authority"],
+                        "cited_path": cited,
+                    }));
+                }
             }
         }
-        let mut memory_chunks = Vec::new();
+        let mut per_chunks: Vec<Vec<V>> = vec![Vec::new(); specs.len()];
         if info["bank_id"].is_string()
             && core::fs::admit_directory(&context.roots.state.join("memory-bank/chunks"))?
         {
@@ -2133,51 +2565,67 @@ impl KnowledgeDomain {
                 if m["status"] != "active" || core::index::memory_temporal_reason(m).is_some() {
                     continue;
                 }
-                let Some(cited) = cites(&m["sources"]) else {
+                let source_hits = matching_paths(&m["sources"]);
+                if source_hits.is_empty() {
                     continue;
-                };
-                memory_chunks.push(json!({
-                    "id": m["id"],
-                    "title": collapse_preview(m["title"].as_str().unwrap_or(""), 240),
-                    "type": m["type"],
-                    "review_after": m["review_after"],
-                    "auto_promoted": m["tags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "auto-promoted")),
-                    "cited_path": cited,
-                }));
+                }
+                let title = collapse_preview(m["title"].as_str().unwrap_or(""), 240);
+                let auto_promoted = m["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|tag| tag == "auto-promoted"));
+                for (idx, (path, previous)) in specs.iter().enumerate() {
+                    let Some(cited) = pick_cited(&source_hits, path, previous.as_deref()) else {
+                        continue;
+                    };
+                    per_chunks[idx].push(json!({
+                        "id": m["id"],
+                        "title": title,
+                        "type": m["type"],
+                        "review_after": m["review_after"],
+                        "auto_promoted": auto_promoted,
+                        "cited_path": cited,
+                    }));
+                }
             }
             state_files.check()?;
         }
-        let linked = |name: &str| {
-            brain_records
-                .iter()
-                .chain(&memory_chunks)
-                .filter(|row| row["cited_path"] == name)
-                .filter_map(|row| row["id"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        };
-        let mut hygiene_warnings = Vec::new();
-        let gone = !context.roots.project.join(&path).exists();
-        let here = linked(&path);
-        if gone && !here.is_empty() {
-            hygiene_warnings.push(json!({"kind":"cited-file-missing","path":path,"linked":here,"recommended_action":"review","text":"This file is gone from the workspace; the memory that cites it may be stale."}));
-        }
-        if let Some(previous) = &previous {
-            let before = linked(previous);
-            if !before.is_empty() {
-                hygiene_warnings.push(json!({"kind":"cited-file-renamed","path":path,"previous_path":previous,"linked":before,"recommended_action":"review","text":format!("This file was {previous}; the memory that cites the old name may need its citation updated.")}));
+        let mut items = Vec::with_capacity(specs.len());
+        for ((path, previous), (brain_records, memory_chunks)) in
+            specs.iter().zip(per_brain.into_iter().zip(per_chunks))
+        {
+            let linked = |name: &str| {
+                brain_records
+                    .iter()
+                    .chain(&memory_chunks)
+                    .filter(|row| row["cited_path"] == name)
+                    .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            };
+            let mut hygiene_warnings = Vec::new();
+            let gone = !context.roots.project.join(path).exists();
+            let here = linked(path);
+            if gone && !here.is_empty() {
+                hygiene_warnings.push(json!({"kind":"cited-file-missing","path":path,"linked":here,"recommended_action":"review","text":"This file is gone from the workspace; the memory that cites it may be stale."}));
             }
+            if let Some(previous) = previous {
+                let before = linked(previous);
+                if !before.is_empty() {
+                    hygiene_warnings.push(json!({"kind":"cited-file-renamed","path":path,"previous_path":previous,"linked":before,"recommended_action":"review","text":format!("This file was {previous}; the memory that cites the old name may need its citation updated.")}));
+                }
+            }
+            items.push(json!({
+                "project_id": project_id,
+                "path": path,
+                "previous_path": previous,
+                "brain_records": brain_records,
+                "memory_chunks": memory_chunks,
+                "hygiene_warnings": hygiene_warnings,
+                // The shared graph's `contradicts` relations among the file's
+                // atoms are added beside these, where Omnigraph answers.
+                "contradiction_warnings": [],
+            }));
         }
-        Ok(json!({
-            "project_id": project_id,
-            "path": path,
-            "previous_path": previous,
-            "brain_records": brain_records,
-            "memory_chunks": memory_chunks,
-            "hygiene_warnings": hygiene_warnings,
-            // The shared graph's `contradicts` relations among the file's
-            // atoms are added beside these, where Omnigraph answers.
-            "contradiction_warnings": [],
-        }))
+        Ok(items)
     }
 
     /// Review-only warnings for the `contradicts` relations among a file's
@@ -2324,7 +2772,7 @@ impl KnowledgeDomain {
                 "Promoting an Omnigraph atom to Project Brain requires an installed governed native runtime.",
             ));
         }
-        self.preflight(&context)?;
+        self.preflight_storage(&context)?;
 
         let config = RuntimeConfig::load(&context.roots)?;
         let allowed_privacy = config.strings("allowed_privacy")?;
@@ -2509,6 +2957,8 @@ impl KnowledgeDomain {
             "knowledge.run" => self.run(project, &request["body"], None, true)?,
             "knowledge.sync_collect" => self.sync_collect(project, &request["body"], bank)?,
             "knowledge.memory_links" => self.memory_links(project, &request["query"])?,
+            "knowledge.memory_links_batch" => self.memory_links_batch(project, &request["body"])?,
+            "knowledge.preflight" => self.preflight(project, &request["body"])?,
             "knowledge.promote_atom" => self.promote_atom(project, &request["body"], bank)?,
             "knowledge.download" => {
                 return self.download(request["params"]["id"].as_str().unwrap_or(""));
@@ -3739,7 +4189,7 @@ fn sync_page(
         "complete_layers": complete_layers,
     })
 }
-fn clean_relative_path(raw: &str) -> Option<String> {
+pub(crate) fn clean_relative_path(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         return None;
@@ -3747,6 +4197,362 @@ fn clean_relative_path(raw: &str) -> Option<String> {
     let path_only = trimmed.split('#').next().unwrap_or("");
     let clean = path_only.strip_prefix("./").unwrap_or(path_only);
     relative(clean).ok().map(str::to_owned)
+}
+
+struct PreflightRequest {
+    prompt: String,
+    session: Option<V>,
+    task_id: Option<String>,
+    explicit_paths: Vec<String>,
+    risk_caller_hints: bool,
+}
+
+#[derive(Clone)]
+struct BlastHit {
+    hop: u8,
+    left: f64,
+    via: String,
+    name: Option<String>,
+    is_test: bool,
+}
+
+#[derive(Clone)]
+struct RiskCallerEntry {
+    impact: String,
+    left: f64,
+    via: Option<String>,
+    name: Option<String>,
+    is_test: bool,
+}
+
+fn impact_severity_rank(impact: &str) -> u8 {
+    match impact {
+        "broken_risk" => 0,
+        "impacted" => 1,
+        "added_caller" => 2,
+        _ => 3,
+    }
+}
+
+fn extract_record_paths(record: &V) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["files", "sources", "targets"] {
+        for raw in record[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(V::as_str)
+        {
+            if let Some(clean) = clean_relative_path(raw) {
+                out.push(clean);
+            }
+        }
+    }
+    out
+}
+
+fn strip_prompt_line_suffix(raw: &str) -> &str {
+    let mut path = raw.split('#').next().unwrap_or(raw);
+    for _ in 0..2 {
+        let Some((head, tail)) = path.rsplit_once(':') else {
+            break;
+        };
+        if !head.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            path = head;
+        } else {
+            break;
+        }
+    }
+    path
+}
+
+fn has_file_extension(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && (1..=10).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn is_known_code_extension(rel: &str) -> bool {
+    const EXTS: &[&str] = &[
+        "rs", "php", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "rb", "cs",
+        "cpp", "cc", "c", "h", "hpp", "swift", "scala", "sql", "sh", "bash", "zsh", "ps1", "md",
+        "json", "yaml", "yml", "toml", "xml", "html", "htm", "css", "scss", "sass", "vue",
+        "svelte", "twig", "env", "ini", "cfg", "conf", "txt",
+    ];
+    let lower = rel.to_ascii_lowercase();
+    EXTS.iter().any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+fn extract_preflight_prompt_paths(
+    prompt: &str,
+    project_root: &Path,
+    graph_index: Option<&crate::graph_map::Index>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push = |path: String| {
+        if out.len() < MEMORY_LINKS_BATCH_LIMIT && seen.insert(path.clone()) {
+            out.push(path);
+        }
+    };
+    for raw in
+        prompt.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '"' | '\'' | '`'))
+    {
+        let trimmed = raw
+            .trim_matches(['(', ')', '[', ']', '{', '}', '<', '>', '?', '!'])
+            .trim_end_matches(['.', ':', ',', ';']);
+        if trimmed.is_empty() || trimmed.contains("://") {
+            continue;
+        }
+        let (is_at, body) = if let Some(rest) = trimmed.strip_prefix('@') {
+            (true, rest)
+        } else {
+            (false, trimmed)
+        };
+        if body.is_empty() || (!is_at && body.contains('@')) {
+            continue;
+        }
+        let stripped = strip_prompt_line_suffix(body).trim_end_matches('/');
+        let Some(clean) = clean_relative_path(stripped) else {
+            continue;
+        };
+        let exists_on_disk = project_root.join(&clean).is_file();
+        let in_graph = graph_index.is_some_and(|idx| idx.file_id(&clean).is_some());
+        if exists_on_disk || in_graph {
+            push(clean);
+            continue;
+        }
+        if !clean.contains('/')
+            && let Some(idx) = graph_index
+        {
+            let suffix = format!("/{clean}");
+            let mut matches: Vec<String> = idx
+                .indexed_files()
+                .iter()
+                .filter(|path| path.as_str() == clean || path.ends_with(&suffix))
+                .take(4)
+                .cloned()
+                .collect();
+            matches.sort();
+            if !matches.is_empty() {
+                for matched in matches {
+                    push(matched);
+                }
+                continue;
+            }
+        }
+        if (is_at && (clean.contains('/') || has_file_extension(&clean)))
+            || (clean.contains('/') && has_file_extension(&clean))
+            || (!clean.contains('/') && is_known_code_extension(&clean))
+        {
+            push(clean);
+        }
+    }
+    out
+}
+
+fn preflight_graph_risks(
+    graphs: &crate::graph::Graphs,
+    project_id: &str,
+    candidate_files: &[String],
+    session_id: Option<&str>,
+    graph_index: Option<&crate::graph_map::Index>,
+) -> (Vec<V>, V) {
+    let candidate_set: BTreeSet<&str> = candidate_files.iter().map(String::as_str).collect();
+    let mut caller_map: BTreeMap<(String, String), RiskCallerEntry> = BTreeMap::new();
+    let mut record_caller = |from: String, to: String, candidate: RiskCallerEntry| {
+        caller_map
+            .entry((from, to))
+            .and_modify(|existing| {
+                let new_rank = impact_severity_rank(&candidate.impact);
+                let old_rank = impact_severity_rank(&existing.impact);
+                if new_rank < old_rank || (new_rank == old_rank && candidate.left > existing.left) {
+                    *existing = candidate.clone();
+                } else {
+                    if existing.via.is_none() {
+                        existing.via = candidate.via.clone();
+                    }
+                    if existing.name.is_none() {
+                        existing.name = candidate.name.clone();
+                    }
+                }
+            })
+            .or_insert(candidate);
+    };
+
+    if let Some(sid) = session_id {
+        let run = crate::graph_changes::Target::Run(sid.to_owned());
+        if let Ok(catalog) = graphs.changes_catalog(project_id, Some(&run), Some(sid), true) {
+            for caller in catalog["edge_diffs"]["risk_callers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let (Some(from), Some(to)) = (
+                    caller["from"].as_str().and_then(clean_relative_path),
+                    caller["to"].as_str().and_then(clean_relative_path),
+                ) else {
+                    continue;
+                };
+                if !candidate_set.is_empty() && !candidate_set.contains(to.as_str()) {
+                    continue;
+                }
+                let impact = caller["impact"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("impacted")
+                    .to_owned();
+                let is_test = crate::graph_map::is_test_path(&from);
+                record_caller(
+                    from,
+                    to,
+                    RiskCallerEntry {
+                        impact,
+                        left: 1.0,
+                        via: None,
+                        name: None,
+                        is_test,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut blast_hits: BTreeMap<String, BlastHit> = BTreeMap::new();
+    if let Some(idx) = graph_index {
+        for target in candidate_files {
+            let Some(blast) = idx.blast(target, false) else {
+                continue;
+            };
+            let mut listed_meta: BTreeMap<String, &V> = BTreeMap::new();
+            for item in blast["listed"].as_array().into_iter().flatten() {
+                if let Some(path) = item["path"].as_str() {
+                    listed_meta.insert(path.to_owned(), item);
+                }
+            }
+            for row in blast["marked"].as_array().into_iter().flatten() {
+                let Some(arr) = row.as_array() else {
+                    continue;
+                };
+                let (Some(aff_path), Some(hop_raw)) = (
+                    arr.first().and_then(V::as_str),
+                    arr.get(1).and_then(V::as_u64),
+                ) else {
+                    continue;
+                };
+                if candidate_set.contains(aff_path) {
+                    continue;
+                }
+                let hop = hop_raw.min(u64::from(u8::MAX)) as u8;
+                let left = arr.get(2).and_then(V::as_f64).unwrap_or(0.0);
+                let meta = listed_meta.get(aff_path).copied();
+                let via = meta
+                    .and_then(|m| m["via"].as_str())
+                    .unwrap_or("uses")
+                    .to_owned();
+                let name = meta.and_then(|m| m["name"].as_str()).map(str::to_owned);
+                let is_test = meta
+                    .and_then(|m| m["test"].as_bool())
+                    .unwrap_or_else(|| crate::graph_map::is_test_path(aff_path));
+                blast_hits
+                    .entry(aff_path.to_owned())
+                    .and_modify(|existing| {
+                        if hop < existing.hop || (hop == existing.hop && left > existing.left) {
+                            existing.hop = hop;
+                            existing.left = left;
+                            existing.via = via.clone();
+                            existing.name = name.clone();
+                        }
+                    })
+                    .or_insert_with(|| BlastHit {
+                        hop,
+                        left,
+                        via: via.clone(),
+                        name: name.clone(),
+                        is_test,
+                    });
+                if hop == 1 {
+                    record_caller(
+                        aff_path.to_owned(),
+                        target.clone(),
+                        RiskCallerEntry {
+                            impact: "impacted".to_owned(),
+                            left,
+                            via: Some(via),
+                            name,
+                            is_test,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let mut callers_sorted: Vec<_> = caller_map.into_iter().collect();
+    callers_sorted.sort_by(|((af, at), ae), ((bf, bt), be)| {
+        impact_severity_rank(&ae.impact)
+            .cmp(&impact_severity_rank(&be.impact))
+            .then(ae.is_test.cmp(&be.is_test))
+            .then(be.left.total_cmp(&ae.left))
+            .then(af.cmp(bf))
+            .then(at.cmp(bt))
+    });
+    let risk_callers = callers_sorted
+        .into_iter()
+        .take(MEMORY_LINKS_BATCH_LIMIT)
+        .map(|((from, to), entry)| {
+            let mut obj = json!({
+                "from": from,
+                "to": to,
+                "impact": entry.impact,
+                "hop": 1,
+                "left": entry.left,
+                "test": entry.is_test,
+            });
+            if let Some(via) = entry.via {
+                obj["via"] = json!(via);
+            }
+            if let Some(name) = entry.name {
+                obj["name"] = json!(name);
+            }
+            obj
+        })
+        .collect::<Vec<_>>();
+
+    let direct_count = blast_hits.values().filter(|hit| hit.hop == 1).count();
+    let downstream_count = blast_hits.values().filter(|hit| hit.hop >= 2).count();
+    let mut blast_sorted: Vec<(String, BlastHit)> = blast_hits.into_iter().collect();
+    blast_sorted.sort_by(|(ap, ah), (bp, bh)| {
+        ah.hop
+            .cmp(&bh.hop)
+            .then(bh.left.total_cmp(&ah.left))
+            .then(ap.cmp(bp))
+    });
+    let blast_files = blast_sorted
+        .into_iter()
+        .take(12)
+        .map(|(path, hit)| {
+            json!({
+                "path": path,
+                "hop": hit.hop,
+                "left": hit.left,
+                "via": hit.via,
+                "name": hit.name,
+                "test": hit.is_test,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let blast_summary = json!({
+        "direct_count": direct_count,
+        "downstream_count": downstream_count,
+        "files": blast_files,
+    });
+    (risk_callers, blast_summary)
 }
 
 fn collapse_preview(raw: &str, max_chars: usize) -> String {
@@ -4084,6 +4890,137 @@ mod tests {
         assert!(
             knowledge
                 .memory_links(&project_id, &json!({"path": "../etc/passwd"}))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_links_batch_matches_single_file_results_and_validates_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        let finding = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({
+                    "type": "finding",
+                    "external_id": "finding-batch-1",
+                    "title": "Fresh fn stays pure",
+                    "goal": "Callers rely on it.",
+                    "files": ["src/fresh.rs"],
+                    "sources": ["src/fresh.rs#L1"],
+                    "privacy": "public",
+                    "authority": "verified",
+                    "attestation": "person",
+                    "json": true
+                }),
+                &[],
+            )
+            .unwrap();
+        std::fs::write(project.join("src/old.rs"), "pub fn old() {}\n").unwrap();
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-aaaa1111",
+            "fresh",
+            "Fresh is pure",
+            "No side effects.",
+            &["src/fresh.rs"],
+        );
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-bbbb2222",
+            "old",
+            "Old helper",
+            "Kept for the API.",
+            &["src/old.rs"],
+        );
+
+        let batch_req = json!({
+            "files": [
+                {"path": "src/new.rs", "previous_path": "src/old.rs"},
+                {"path": "./src/fresh.rs", "previous_path": null},
+                {"path": "src/unlinked.rs"}
+            ]
+        });
+        let Payload::Json(batch) = knowledge
+            .execute(
+                "knowledge.memory_links_batch",
+                json!({
+                    "params": {"project_id": project_id},
+                    "query": {},
+                    "body": batch_req,
+                }),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json payload");
+        };
+
+        assert_eq!(batch["project_id"], project_id);
+        let items = batch["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0],
+            knowledge
+                .memory_links(
+                    &project_id,
+                    &json!({"path": "src/new.rs", "previous_path": "src/old.rs"}),
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            items[1],
+            knowledge
+                .memory_links(&project_id, &json!({"path": "./src/fresh.rs"}))
+                .unwrap()
+        );
+        assert_eq!(items[1]["brain_records"][0]["id"], finding["id"]);
+        assert_eq!(
+            items[2],
+            knowledge
+                .memory_links(&project_id, &json!({"path": "src/unlinked.rs"}))
+                .unwrap()
+        );
+
+        let empty = knowledge
+            .memory_links_batch(&project_id, &json!({"files": []}))
+            .unwrap();
+        assert_eq!(empty, json!({"project_id": project_id, "items": []}));
+
+        // Strict validation: extra fields, non-string previous_path, traversal, and >24 limit fail.
+        assert!(
+            knowledge
+                .memory_links_batch(&project_id, &json!({"files": [], "extra": 1}))
+                .is_err()
+        );
+        assert!(
+            knowledge
+                .memory_links_batch(
+                    &project_id,
+                    &json!({"files": [{"path": "src/fresh.rs", "extra": true}]}),
+                )
+                .is_err()
+        );
+        assert!(
+            knowledge
+                .memory_links_batch(
+                    &project_id,
+                    &json!({"files": [{"path": "src/fresh.rs", "previous_path": 123}]}),
+                )
+                .is_err()
+        );
+        assert!(
+            knowledge
+                .memory_links_batch(&project_id, &json!({"files": [{"path": "../etc/passwd"}]}),)
+                .is_err()
+        );
+        let over_limit: Vec<_> = (0..=MEMORY_LINKS_BATCH_LIMIT)
+            .map(|i| json!({"path": format!("src/f{i}.rs")}))
+            .collect();
+        assert!(
+            knowledge
+                .memory_links_batch(&project_id, &json!({"files": over_limit}))
                 .is_err()
         );
     }
@@ -4607,5 +5544,326 @@ mod tests {
             targeted_paths.contains(&"memory-bank/chunks/MEM-20261117-00000002-item2.md"),
             "document_links should resolve src/linked.rs -> chunk 2: {targeted_paths:?}"
         );
+    }
+
+    #[test]
+    fn preflight_extracts_prompt_task_paths_hygiene_blast_and_gates_risk_caller_hints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+
+        std::fs::write(
+            project.join("src/caller.rs"),
+            "use crate::fresh::fresh;\npub fn call_fresh() { fresh(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("src/entry.rs"),
+            "use crate::caller::call_fresh;\npub fn main_entry() { call_fresh(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("src/task_file.rs"),
+            "pub fn task_target() {}\n",
+        )
+        .unwrap();
+
+        let task = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({
+                    "type": "task",
+                    "external_id": "preflight-task-1",
+                    "title": "Audit fresh function",
+                    "goal": "Check callers and missing file links.",
+                    "files": ["src/task_file.rs"],
+                    "sources": ["src/fresh.rs"],
+                    "privacy": "public",
+                    "authority": "verified",
+                    "attestation": "person",
+                    "json": true,
+                }),
+                &[],
+            )
+            .unwrap();
+        let task_uuid = task["id"].as_str().unwrap().to_string();
+
+        // Missing cited file triggers cited-file-missing hygiene warning.
+        std::fs::write(project.join("src/gone.rs"), "pub fn gone() {}\n").unwrap();
+        MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({
+                    "type": "finding",
+                    "external_id": "preflight-missing-1",
+                    "title": "Deleted helper rule",
+                    "goal": "Legacy helper is missing on disk.",
+                    "files": ["src/gone.rs"],
+                    "sources": ["src/gone.rs"],
+                    "privacy": "public",
+                    "authority": "verified",
+                    "attestation": "person",
+                    "json": true,
+                }),
+                &[],
+            )
+            .unwrap();
+        std::fs::remove_file(project.join("src/gone.rs")).unwrap();
+
+        // Caller memory chunk on src/caller.rs should only surface in risk_caller_hints on explicit opt-in.
+        write_mem_chunk(
+            &project,
+            "MEM-20261118-cccc4444",
+            "caller-contract",
+            "Caller expects fresh invariant",
+            "Caller relies on fresh remaining pure.",
+            &["src/caller.rs"],
+        );
+        MemoryService::new(ctx.clone(), None)
+            .execute("index", &json!({}), &[])
+            .unwrap();
+
+        // Publish a live graph with a 2-hop chain: entry.rs -> caller.rs -> fresh.rs.
+        let graph_path = crate::graph::live(&store.state, &project_id);
+        std::fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &graph_path,
+            json!({
+                "nodes": [
+                    {
+                        "id": "n_fresh",
+                        "label": "fresh",
+                        "source_file": "src/fresh.rs",
+                        "node_kind": "function",
+                        "source_location": "line 1"
+                    },
+                    {
+                        "id": "n_caller",
+                        "label": "call_fresh",
+                        "source_file": "src/caller.rs",
+                        "node_kind": "function",
+                        "source_location": "line 2"
+                    },
+                    {
+                        "id": "n_entry",
+                        "label": "main_entry",
+                        "source_file": "src/entry.rs",
+                        "node_kind": "function",
+                        "source_location": "line 2"
+                    }
+                ],
+                "links": [
+                    {"source": "n_caller", "target": "n_fresh", "relation": "calls"},
+                    {"source": "n_entry", "target": "n_caller", "relation": "calls"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        knowledge.install_graphs(crate::graph::Graphs::new(store.clone()));
+
+        // Default preflight: risk_caller_hints omitted -> strictly empty `risk_caller_hints`.
+        let default_res = knowledge
+            .preflight(
+                &project_id,
+                &json!({
+                    "prompt": "Check @src/fresh.rs:10, ignore https://example.com/a/b.rs and ../bad.rs",
+                    "task_id": task_uuid,
+                    "paths": ["./src/gone.rs"],
+                }),
+            )
+            .unwrap();
+        assert_eq!(default_res["project_id"], project_id);
+        let file_paths: Vec<&str> = default_res["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["path"].as_str())
+            .collect();
+        assert_eq!(
+            file_paths,
+            vec!["src/gone.rs", "src/fresh.rs", "src/task_file.rs"]
+        );
+        assert_eq!(
+            default_res["hygiene_warnings"][0]["kind"],
+            "cited-file-missing"
+        );
+        assert_eq!(default_res["hygiene_warnings"][0]["path"], "src/gone.rs");
+        assert_eq!(default_res["contradiction_warnings"], json!([]));
+        assert!(
+            default_res["risk_callers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["from"] == "src/caller.rs" && c["to"] == "src/fresh.rs"),
+            "{default_res}"
+        );
+        assert_eq!(default_res["blast_summary"]["direct_count"], 1);
+        assert_eq!(default_res["blast_summary"]["downstream_count"], 1);
+        let blast_paths: Vec<&str> = default_res["blast_summary"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["path"].as_str())
+            .collect();
+        assert_eq!(blast_paths, vec!["src/caller.rs", "src/entry.rs"]);
+        assert_eq!(default_res["risk_caller_hints"], json!([]));
+
+        // Normal retrieval source hints remain strictly OFF by default.
+        let session =
+            json!({"id": "s-preflight", "project_id": project_id, "omnigraph": {"enabled": false}});
+        assert_eq!(knowledge.session_source_hints(&ctx, &session), None);
+
+        // Explicit opt-in `"risk_caller_hints": true` returns advisory caller hints without altering `session_source_hints`.
+        let opted_in = knowledge
+            .preflight(
+                &project_id,
+                &json!({
+                    "paths": ["src/fresh.rs"],
+                    "risk_caller_hints": true,
+                }),
+            )
+            .unwrap();
+        let caller_hints = opted_in["risk_caller_hints"].as_array().unwrap();
+        assert_eq!(caller_hints.len(), 1, "{opted_in}");
+        assert_eq!(caller_hints[0]["path"], "src/caller.rs");
+        assert_eq!(caller_hints[0]["target"], "src/fresh.rs");
+        assert_eq!(
+            caller_hints[0]["memory_chunks"][0]["id"],
+            "MEM-20261118-cccc4444"
+        );
+        assert!(
+            caller_hints[0]["source_hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["path"] == "memory-bank/chunks/MEM-20261118-cccc4444-caller-contract.md"),
+            "{opted_in}"
+        );
+        assert_eq!(knowledge.session_source_hints(&ctx, &session), None);
+
+        // Validation errors.
+        assert_eq!(
+            knowledge
+                .preflight(&project_id, &json!({"unknown": 1}))
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(
+            knowledge
+                .preflight(&project_id, &json!({"paths": ["../escape.rs"]}))
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(
+            knowledge
+                .preflight(&project_id, &json!({"risk_caller_hints": "yes"}))
+                .unwrap_err()
+                .status,
+            400
+        );
+        let other_project = tmp.path().join("other-project");
+        std::fs::create_dir_all(&other_project).unwrap();
+        let other_pid = store.register(&other_project).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let other_sid = store
+            .create(
+                &json!({"project_id": other_pid, "provider": "claude", "mode": "edit", "workflow": "native", "project_context": false}),
+                "Other project session",
+                &[],
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            knowledge
+                .preflight(&project_id, &json!({"session_id": other_sid}))
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+
+    #[test]
+    fn save_memory_validates_used_memory_and_stays_compatible_with_result_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+
+        let task = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "start",
+                &json!({
+                    "task_id": "save-used-memory-1",
+                    "goal": "Validate used_memory handling",
+                }),
+                &[],
+            )
+            .unwrap();
+        let task_uuid = task["task_uuid"].as_str().unwrap().to_string();
+
+        let session = json!({
+            "id": "sess-used-mem-1",
+            "project_id": project_id,
+            "project_path": project.to_string_lossy().as_ref(),
+            "status": "completed",
+            "brain": {
+                "bank": "memory-bank",
+                "task_id": "save-used-memory-1",
+                "record_id": task_uuid,
+            }
+        });
+
+        // Rejects unsafe or over-limit used_memory.
+        for bad in [
+            json!({"progress": "Ok", "used_memory": "not-an-array"}),
+            json!({"progress": "Ok", "used_memory": ["../secret.md"]}),
+            json!({"progress": "Ok", "used_memory": ["/abs/path.md"]}),
+            json!({"progress": "Ok", "used_memory": [""]}),
+            json!({"progress": "Ok", "used_memory": (0..11).map(|i| format!("specs/f{i}.md")).collect::<Vec<_>>()}),
+        ] {
+            assert_eq!(
+                knowledge.save_memory(&session, &bad).unwrap_err().status,
+                400,
+                "{bad}"
+            );
+        }
+
+        // Valid used_memory succeeds against real ResultService::normalize + record-result without schema errors.
+        let saved = knowledge
+            .save_memory(
+                &session,
+                &json!({
+                    "progress": "Verified fresh invariant and updated task progress.",
+                    "next_steps": ["Add edge tests"],
+                    "learnings": [{
+                        "type": "finding",
+                        "title": "Fresh function stays pure",
+                        "consequence": "No IO inside fresh().",
+                        "sources": ["src/fresh.rs"]
+                    }],
+                    "verified": true,
+                    "used_memory": [
+                        "memory-bank/chunks/MEM-20261117-00000001-rule.md",
+                        "memory-bank/chunks/MEM-20261117-00000001-rule.md",
+                        "specs/authority.md"
+                    ]
+                }),
+            )
+            .unwrap();
+        assert_eq!(saved["ok"], true, "{saved}");
+        assert_eq!(
+            saved["used_memory"],
+            json!([
+                "memory-bank/chunks/MEM-20261117-00000001-rule.md",
+                "specs/authority.md"
+            ])
+        );
+        assert_eq!(saved["saved"]["records"][0]["state"], "created");
     }
 }

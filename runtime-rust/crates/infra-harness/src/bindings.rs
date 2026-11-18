@@ -166,6 +166,9 @@ impl infra_system::SessionBridge for SystemBridge {
         }
         Ok(None)
     }
+    fn waiting_permissions(&self, id: &str) -> infra_core::Result<Vec<Value>> {
+        Ok(self.links.runner().map_err(core)?.waiting_permissions(id))
+    }
 }
 pub struct ResultsBridge {
     pub links: Arc<SessionLinks>,
@@ -357,6 +360,14 @@ impl SpecialWorkflow for SystemWorkflow {
                 self.links.runner()?.system_launch_adapter()?
             };
             let sid = session["id"].as_str().unwrap_or("").to_owned();
+            let approvals = (!self.discovery)
+                .then(|| {
+                    self.links
+                        .runner()
+                        .ok()
+                        .and_then(|runner| runner.system_approvals(&sid, &session, &emit))
+                })
+                .flatten();
             let observer = Arc::new(WorkflowObserver {
                 store: self.store.clone(),
                 sid: sid.clone(),
@@ -475,7 +486,7 @@ impl SpecialWorkflow for SystemWorkflow {
                     bridge,
                     run_id: run.clone(),
                 };
-                infra_system::workers::run_system_request_with_bridge(
+                infra_system::workers::run_system_request_with_bridge_and_approvals(
                     &directory.join(name),
                     cancel,
                     lock,
@@ -483,17 +494,19 @@ impl SpecialWorkflow for SystemWorkflow {
                     observer,
                     bridge.clone(),
                     Some(sid),
+                    approvals,
                     move |event| emit(event).map_err(core),
                     agent,
                 )
                 .await?
             } else {
-                infra_system::workers::run_system_request_with_adapter(
+                infra_system::workers::run_system_request_with_adapter_and_approvals(
                     &directory.join(name),
                     cancel,
                     lock,
                     adapter,
                     observer,
+                    approvals,
                     move |event| emit(event).map_err(core),
                     agent,
                 )

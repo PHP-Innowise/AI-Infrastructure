@@ -3,7 +3,9 @@
 //! and verified membership precede ResumeThread. Stable Rust, no Nt* resume API.
 //! The trusted guardian stays outside the per-run Job to retain runner exclusion
 //! until Job accounting proves that every native descendant has stopped.
-use super::{Control, Interactive, Limits, Output, RunObserver};
+use super::{
+    Control, Interactive, Limits, Output, RunObserver, deadline_elapsed, interactive_read_wait,
+};
 use crate::{HarnessError, Result};
 use serde_json::Value;
 use std::{
@@ -1966,7 +1968,10 @@ pub async fn run_interactive(
     mut io: Interactive,
     mut event: impl FnMut(&[u8]) -> Result<()> + Send,
 ) -> Result<Output> {
-    // The session itself keeps no time limit: waiting for a person pauses it.
+    if deadline.is_some_and(|until| Instant::now() >= until) {
+        return Err(timeout_error());
+    }
+    // The session itself keeps neither time limit nor deadline: waiting for a person pauses both.
     let budget = limits.seconds;
     let mut session = NativeSession::spawn_options_until(
         argv,
@@ -1982,7 +1987,7 @@ pub async fn run_interactive(
         None,
         false,
         observer,
-        deadline,
+        None,
     )?;
     let started = Instant::now();
     let mut paused = Duration::ZERO;
@@ -2017,10 +2022,12 @@ pub async fn run_interactive(
             }
             if budget.is_some_and(|seconds| {
                 started.elapsed().saturating_sub(paused) >= Duration::from_secs(seconds)
-            }) {
+            }) || deadline_elapsed(now, deadline, paused)
+            {
                 return Err(timeout_error());
             }
-            match tokio::time::timeout(Duration::from_millis(100), session.next_line()).await {
+            let wait = interactive_read_wait(now, deadline, paused);
+            match tokio::time::timeout(wait, session.next_line()).await {
                 Err(_) => continue,
                 Ok(Ok(Some(packet))) => event(&packet)?,
                 Ok(Ok(None)) => break,
@@ -2034,9 +2041,12 @@ pub async fn run_interactive(
     match (finished, execute) {
         (Err(e), _) if e.code == "cleanup-unconfirmed" => Err(e),
         (_, Err(e)) => Err(e),
-        (Ok(mut output), Ok(())) if stopped => {
-            // The host answered everything it was asked and was then stopped.
-            output.code = 0;
+        (Ok(mut output), Ok(())) => {
+            output.seconds = (output.seconds - paused.as_secs_f64()).max(0.0);
+            if stopped {
+                // The host answered everything it was asked and was then stopped.
+                output.code = 0;
+            }
             Ok(output)
         }
         (result, _) => result,

@@ -329,6 +329,55 @@ fn save_budget_settings(store: &SessionStore, sid: &str, data: &Value) -> Result
     tx.commit()?;
     Ok(saved)
 }
+/// Observes a tool event in `LiveFocusTracker` and forwards completed workspace file mutations
+/// to `Graphs::record_live_paths` when a code graph manager is installed.
+fn observe_tool_event_with_graphs(
+    tracker: &mut crate::graph_live::LiveFocusTracker,
+    event: &Value,
+    graphs: Option<&crate::graph::Graphs>,
+    project_id: &str,
+    workspace: &Path,
+) -> Option<Value> {
+    let delta = tracker.observe_tool_event(event);
+    if event["kind"] == "tool"
+        && event["state"].as_str().unwrap_or("") != "started"
+        && event["ok"] != false
+        && let Some(graphs) = graphs
+        && !project_id.is_empty()
+    {
+        let tool = event["tool"].as_str().unwrap_or("").to_ascii_lowercase();
+        let has_changes = event["changes"]
+            .as_array()
+            .is_some_and(|changes| !changes.is_empty());
+        let is_mutation = matches!(
+            tool.as_str(),
+            "edit" | "write" | "multiedit" | "notebookedit" | "file_change" | "delete"
+        ) || has_changes;
+        if is_mutation {
+            let mut mutated = std::collections::BTreeSet::new();
+            if let Some(changes) = event["changes"].as_array().filter(|arr| !arr.is_empty()) {
+                for change in changes {
+                    if change["outside"] != true
+                        && let Some(raw) = change["path"].as_str()
+                        && let Some(rel) = crate::graph_ir::normalize_rel_path(workspace, raw)
+                    {
+                        mutated.insert(rel);
+                    }
+                }
+            } else if event["outside"] != true
+                && let Some(raw) = event["path"].as_str()
+                && let Some(rel) = crate::graph_ir::normalize_rel_path(workspace, raw)
+            {
+                mutated.insert(rel);
+            }
+            if !mutated.is_empty() {
+                let paths: Vec<String> = mutated.into_iter().collect();
+                graphs.record_live_paths(project_id, &paths);
+            }
+        }
+    }
+    delta
+}
 impl Sessions {
     pub fn new(
         store: SessionStore,
@@ -1294,17 +1343,68 @@ impl Sessions {
         (crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Manual))
             .then(|| self.permissions.approvals(sid, emit.clone()))
     }
+    /// Where a Creator launch puts permission requests when running in Manual mode.
+    pub(crate) fn creator_approvals(
+        &self,
+        sid: &str,
+        session: &Value,
+        emit: &Event,
+    ) -> Option<Arc<dyn infra_host::permission::Approvals>> {
+        self.approvals(sid, session, emit)
+    }
+    /// Where a System Orchestration run puts requests that require human confirmation
+    /// (Manual mode, or Auto mode when cross-service boundary escalation triggers).
+    pub(crate) fn system_approvals(
+        &self,
+        sid: &str,
+        session: &Value,
+        emit: &Event,
+    ) -> Option<Arc<dyn infra_host::permission::Approvals>> {
+        matches!(
+            crate::permissions::mode(session),
+            Some(
+                infra_host::permission::PermissionMode::Auto
+                    | infra_host::permission::PermissionMode::Manual
+            )
+        )
+        .then(|| self.permissions.approvals(sid, emit.clone()))
+    }
+    /// Expires any unanswered permission requests left waiting for `sid`.
+    pub(crate) fn expire_permissions(&self, sid: &str) {
+        self.permissions.expire(sid);
+    }
     /// A person's answer to a request a running session waits on.
     pub fn decide_permission(&self, sid: &str, request: &str, body: &Value) -> Result<Value> {
-        if !store::exact(body, &["decision"], &[]) {
-            return Err(HarnessError::invalid("Send only the decision."));
+        const MAX_PERMISSION_ANSWERS_BYTES: usize = 32 * 1024;
+        if !store::exact(body, &["decision"], &["answers"]) {
+            return Err(HarnessError::invalid(
+                "Send only the decision and optional answers.",
+            ));
         }
         let decision = body["decision"]
             .as_str()
             .and_then(infra_host::permission::Decision::parse)
             .ok_or_else(|| HarnessError::invalid("Choose allow, allow_session or deny."))?;
+        let answers = match body.get("answers") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(_)) => {
+                if body["answers"].to_string().len() > MAX_PERMISSION_ANSWERS_BYTES {
+                    return Err(HarnessError::invalid(
+                        "Question answers exceed the maximum payload size.",
+                    ));
+                }
+                Some(body["answers"].clone())
+            }
+            Some(_) => {
+                return Err(HarnessError::invalid("Question answers must be an object."));
+            }
+        };
         self.store.get(sid)?;
-        self.permissions.decide(sid, request, decision)
+        self.permissions.decide_answer(
+            sid,
+            request,
+            infra_host::permission::Answer { decision, answers },
+        )
     }
     /// The requests a session's run waits on now.
     pub fn waiting_permissions(&self, sid: &str) -> Vec<Value> {
@@ -1652,7 +1752,7 @@ impl Sessions {
         });
         for name in ["creator", "system_run", "system_discovery"] {
             if !session[name].is_null() {
-                return self
+                let result = self
                     .special
                     .get(name)
                     .ok_or_else(|| HarnessError::unavailable("Native workflow is unavailable."))?
@@ -1664,6 +1764,8 @@ impl Sessions {
                         emit,
                     )
                     .await;
+                self.permissions.expire(&job.sid);
+                return result;
             }
         }
         let mut graph_binding = None;
@@ -1962,6 +2064,9 @@ impl Sessions {
         let generation = job.generation.clone();
         let emit_events = emit.clone();
         let focus_for_stream = live_focus.clone();
+        let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
+        let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
+        let workspace_for_stream = workspace.clone();
         let observed = Box::pin(provider::run_monitored_locked(
             &launch,
             Limits {
@@ -1998,7 +2103,13 @@ impl Sessions {
                 let focus_delta = if event["kind"] == "tool"
                     && let Ok(mut tracker) = focus_for_stream.lock()
                 {
-                    let delta = tracker.observe_tool_event(&event);
+                    let delta = observe_tool_event_with_graphs(
+                        &mut tracker,
+                        &event,
+                        graphs_for_stream.as_deref(),
+                        &project_id_for_stream,
+                        &workspace_for_stream,
+                    );
                     if delta.is_some() {
                         let _ =
                             crate::graph_live::save_session_focus(&store, &sid, tracker.focus());
@@ -2272,6 +2383,16 @@ impl Domain for Sessions {
                     let answer = self.decide_permission(sid, request, body)?;
                     return Ok(Payload::Json(
                         json!({"permission": answer, "session": self.store.get(sid)?}),
+                    ));
+                }
+                "sessions.waiting_permissions" => {
+                    return Ok(Payload::Json(
+                        json!({"items": self.waiting_permissions(sid)}),
+                    ));
+                }
+                "sessions.waiting_counts" => {
+                    return Ok(Payload::Json(
+                        json!({"counts": self.permissions.waiting_counts()}),
                     ));
                 }
                 "sessions.cancel" => {
@@ -3301,6 +3422,14 @@ async fn notify_live_native_session_inbox(
     let refused = if let Err(reason) = crate::inbox::live_eligibility_reason(session) {
         outcome["reason"] = json!(reason);
         reason != "not_running"
+    } else if !sid.is_empty()
+        && store
+            .get(sid)
+            .ok()
+            .is_some_and(|fresh| fresh["permissions"] == "manual")
+    {
+        outcome["reason"] = json!("manual_permissions");
+        true
     } else if let Some(domain) = sessions_domain {
         let request_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
         match domain
@@ -3858,6 +3987,107 @@ pub(crate) mod generation_completion_tests {
         assert!(!events.iter().any(|event| event["kind"] == "error"));
         assert!(fixture.sessions.active.lock().unwrap().is_empty());
         assert!(!fixture.sessions.stopping.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn decide_permission_validates_optional_answers_object_and_size() {
+        let fixture = Fixture::new();
+        let sid = fixture.session("running");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let approvals = fixture.sessions.permissions.approvals(
+            &sid,
+            Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+                Ok(())
+            }),
+        );
+        let ask = infra_host::permission::PermissionAsk {
+            id: "q-1".into(),
+            provider: "claude".into(),
+            tool: "AskUserQuestion".into(),
+            summary: "Pick".into(),
+            kind: "question".into(),
+            ..Default::default()
+        };
+        let rx = approvals.ask_answer(&ask).unwrap();
+        let req_id = events.lock().unwrap()[0]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // Non-object, oversized, and extra keys are rejected with 400.
+        assert_eq!(
+            fixture
+                .sessions
+                .decide_permission(&sid, &req_id, &json!({"decision":"allow","answers":"text"}))
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(
+            fixture
+                .sessions
+                .decide_permission(
+                    &sid,
+                    &req_id,
+                    &json!({"decision":"allow","answers":{"k":"x".repeat(40_000)}})
+                )
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(
+            fixture
+                .sessions
+                .decide_permission(
+                    &sid,
+                    &req_id,
+                    &json!({"decision":"allow","answers":{},"extra":1})
+                )
+                .unwrap_err()
+                .status,
+            400
+        );
+
+        // Null answers behaves identically to omitted answers (backwards-compatible).
+        let rx_null = approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "q-null".into(),
+                ..ask.clone()
+            })
+            .unwrap();
+        let req_null = events.lock().unwrap()[1]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ok_null = fixture
+            .sessions
+            .decide_permission(&sid, &req_null, &json!({"decision":"allow","answers":null}))
+            .unwrap();
+        assert_eq!(ok_null["state"], "allowed");
+        assert_eq!(
+            rx_null.await.unwrap(),
+            infra_host::permission::Answer::from_decision(infra_host::permission::Decision::Allow)
+        );
+
+        // Object answers flows through to Answer.
+        let ok_obj = fixture
+            .sessions
+            .decide_permission(
+                &sid,
+                &req_id,
+                &json!({"decision":"allow","answers":{"q1":"PostgreSQL"}}),
+            )
+            .unwrap();
+        assert_eq!(ok_obj["state"], "allowed");
+        assert_eq!(
+            rx.await.unwrap(),
+            infra_host::permission::Answer {
+                decision: infra_host::permission::Decision::Allow,
+                answers: Some(json!({"q1": "PostgreSQL"})),
+            }
+        );
     }
 
     pub(super) fn git_fixture(fixture: &Fixture) -> (String, Job, Lease) {
@@ -4751,6 +4981,72 @@ mod graph_focus_tests {
         assert_eq!(delta["created_entities"][0]["parent"], "JwtGuard");
     }
 
+    #[test]
+    fn observe_tool_event_with_graphs_updates_native_ir_and_live_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/service.rs"),
+            "pub fn initial_fn() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let pid = store.register(&root).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let graphs =
+            crate::graph::Graphs::with_native_backend(store.clone(), std::time::Duration::ZERO);
+        graphs.act(&pid, "enable").unwrap();
+        let started = std::time::Instant::now();
+        while graphs.status(&pid, false).unwrap()["state"] == "building" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
+
+        let mut tracker = crate::graph_live::LiveFocusTracker::new(root.clone());
+        let _ = observe_tool_event_with_graphs(
+            &mut tracker,
+            &json!({
+                "kind": "tool",
+                "state": "started",
+                "tool": "Edit",
+                "path": "src/service.rs"
+            }),
+            Some(&graphs),
+            &pid,
+            &root,
+        );
+        std::fs::write(
+            root.join("src/service.rs"),
+            "pub fn initial_fn() -> i32 {\n    1\n}\npub fn newly_added_fn() -> i32 {\n    2\n}\n",
+        )
+        .unwrap();
+        let delta = observe_tool_event_with_graphs(
+            &mut tracker,
+            &json!({
+                "kind": "tool",
+                "state": "completed",
+                "ok": true,
+                "tool": "Edit",
+                "path": "src/service.rs"
+            }),
+            Some(&graphs),
+            &pid,
+            &root,
+        )
+        .expect("live focus delta");
+        assert_eq!(delta["created_entities"][0]["name"], "newly_added_fn");
+
+        let found = graphs.find(&pid, None, "newly_added_fn", false).unwrap();
+        assert_eq!(found["rows"][0]["file"], "src/service.rs", "{found}");
+        graphs.close();
+    }
+
     #[tokio::test]
     async fn saved_knowledge_syncs_the_canonical_branch_in_the_background() {
         assert!(saved_canonical_knowledge(
@@ -5019,6 +5315,48 @@ mod inbox_notify_tests {
         .await;
         assert_eq!(idle["reason"], "not_running");
         assert!(events("idle").is_empty());
+
+        // A running session with Manual permissions must never accept unattended auto-prompts.
+        let mut manual = store.get("live").unwrap();
+        manual["permissions"] = json!("manual");
+        let skipped_manual =
+            notify_live_native_session_inbox(&store, Some(&Refusing), &manual, "omni", "Update")
+                .await;
+        assert_eq!(skipped_manual["notified"], false);
+        assert_eq!(skipped_manual["reason"], "manual_permissions");
+        assert_eq!(events("live").len(), 2);
+        assert_eq!(events("live")[1]["reason"], "manual_permissions");
+
+        // An idle Manual session still reports not_running without noisy events.
+        let mut idle_manual = store.get("idle").unwrap();
+        idle_manual["permissions"] = json!("manual");
+        let skipped_idle_manual = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &idle_manual,
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(skipped_idle_manual["reason"], "not_running");
+        assert!(events("idle").is_empty());
+
+        // Even if the passed snapshot is stale, updating DB permissions to manual blocks delivery.
+        let stale_snapshot = store.get("live").unwrap();
+        store
+            .patch("live", &json!({"permissions": "manual"}))
+            .unwrap();
+        let skipped_stale = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &stale_snapshot,
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(skipped_stale["notified"], false);
+        assert_eq!(skipped_stale["reason"], "manual_permissions");
+        assert_eq!(events("live").len(), 3);
     }
 }
 
@@ -5057,5 +5395,87 @@ mod carried_authority_tests {
                 "{capsule}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod phase3c_approvals_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creator_and_system_approvals_gate_by_permission_mode_and_expire() {
+        let fixture = generation_completion_tests::Fixture::new();
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let recorded = events.clone();
+        let emit: Event = Arc::new(move |ev| {
+            recorded.lock().unwrap().push(ev);
+            Ok(())
+        });
+
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-null", &json!({"permissions": null}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-auto", &json!({"permissions": "auto"}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-bypass", &json!({"permissions": "bypass"}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-manual", &json!({"permissions": "manual"}), &emit)
+                .is_some()
+        );
+
+        assert!(
+            fixture
+                .sessions
+                .system_approvals("s-null", &json!({"permissions": null}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .system_approvals("s-bypass", &json!({"permissions": "bypass"}), &emit)
+                .is_none()
+        );
+        let auto_approvals = fixture
+            .sessions
+            .system_approvals("s-auto", &json!({"permissions": "auto"}), &emit)
+            .expect("Auto system runs need an approvals handle for boundary escalation");
+        assert!(
+            fixture
+                .sessions
+                .system_approvals("s-manual", &json!({"permissions": "manual"}), &emit)
+                .is_some()
+        );
+
+        let rx = auto_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "sys-1".into(),
+                provider: "claude".into(),
+                tool: "Edit".into(),
+                summary: "Edit foreign service".into(),
+                kind: "file_change".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(fixture.sessions.waiting_permissions("s-auto").len(), 1);
+        fixture.sessions.expire_permissions("s-auto");
+        assert!(fixture.sessions.waiting_permissions("s-auto").is_empty());
+        assert!(rx.await.is_err());
+        let logged = events.lock().unwrap();
+        assert_eq!(logged[0]["state"], "pending");
+        assert_eq!(logged[1]["state"], "expired");
     }
 }

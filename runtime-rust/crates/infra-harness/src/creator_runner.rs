@@ -1,26 +1,83 @@
 //! Native sandboxed Creator phases and deterministic publication gates.
 use crate::{
     HarnessError, Result, creator_files as files,
-    process::{self, Limits},
-    provider::{self, Launch},
+    process::{Limits, RunObserver},
+    provider::{self, Launch, LaunchAdapter, PreparedCommand, RunEvents, Transport},
     sandbox::{self, Spec},
     sessions::{Event, RunReply, SpecialWorkflow},
     store::SessionStore,
 };
 use infra_generator::{NativeGateServices, execute as gate};
+use infra_host::permission::PermissionMode;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 pub struct CreatorRunner {
     pub store: SessionStore,
     pub source: PathBuf,
     pub gates: Arc<dyn NativeGateServices + Send + Sync>,
+    pub links: Option<Arc<crate::bindings::SessionLinks>>,
+}
+struct CancelRelay(tokio::task::JoinHandle<()>);
+impl Drop for CancelRelay {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+struct CreatorLaunchAdapter {
+    spec: Spec,
+}
+impl LaunchAdapter for CreatorLaunchAdapter {
+    fn adapt(&self, input: &Launch, mut command: PreparedCommand) -> Result<PreparedCommand> {
+        if input.provider == "codex"
+            && provider::transport(input) == Transport::Text
+            && let Some(index) = command.argv.iter().position(|s| s == "exec")
+        {
+            command
+                .argv
+                .insert(index + 1, "--skip-git-repo-check".into());
+        }
+        // Creator hooks must read the copied generator's own runtime identity,
+        // rather than an attached project selected by the parent process.
+        for key in [
+            "ACCELERATOR_HOME",
+            "ACCELERATOR_STATE_DIR",
+            "ACCELERATOR_PROJECT_DIR",
+            "ACCELERATOR_EDITION",
+        ] {
+            command.environment.remove(key);
+            if !command.remove.iter().any(|existing| existing == key) {
+                command.remove.push(key.into());
+            }
+        }
+        command.argv = sandbox::creator(&self.spec, &command.argv)?;
+        Ok(command)
+    }
+}
+struct CreatorRunEvents {
+    cancel: Arc<AtomicBool>,
+}
+impl RunObserver for CreatorRunEvents {
+    fn boundary(&self, signal: &str, _details: &Value) -> Result<()> {
+        if self.cancel.load(Ordering::Acquire) && signal != "cleanup_confirmed" {
+            return Err(HarnessError::conflict("Cancellation requested."));
+        }
+        Ok(())
+    }
+}
+impl RunEvents for CreatorRunEvents {
+    fn observe(&self, _raw: Option<&Value>, _normalized: Option<&Value>) -> Result<()> {
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(HarnessError::conflict("Cancellation requested."));
+        }
+        Ok(())
+    }
 }
 struct ValidationGates<'a> {
     inner: &'a (dyn NativeGateServices + Send + Sync),
@@ -60,14 +117,51 @@ pub fn sandbox_spec(request: &Value) -> Result<Spec> {
             .as_str()
             .ok_or_else(|| HarnessError::invalid("Creator target missing."))?,
     );
-    let mut protected = request["protected_roots"]
+    let workspace_canon =
+        infra_core::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+    let mut protected = Vec::new();
+    for path in request["protected_roots"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .map(PathBuf::from)
         .filter(|p| p.exists())
-        .collect::<Vec<_>>();
+    {
+        let canon = infra_core::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if workspace_canon.starts_with(&canon) {
+            // Never pass an ancestor of `workspace` in `spec.protected`: bubblewrap
+            // mounts `spec.protected` read-only *after* `--bind workspace`, which would
+            // make the Creator workspace read-only. Protect non-ancestor siblings instead.
+            let mut dir = canon;
+            while workspace_canon.starts_with(&dir) && dir != workspace_canon {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let child = entry.path();
+                        if std::fs::symlink_metadata(&child)
+                            .is_ok_and(|m| !infra_core::fs::linked(&m))
+                        {
+                            let child_canon = infra_core::fs::canonicalize(&child).unwrap_or(child);
+                            if !workspace_canon.starts_with(&child_canon) {
+                                protected.push(child_canon);
+                            }
+                        }
+                    }
+                }
+                let Some(next) = workspace_canon
+                    .strip_prefix(&dir)
+                    .ok()
+                    .and_then(|rel| rel.components().next())
+                    .map(|c| dir.join(c))
+                else {
+                    break;
+                };
+                dir = next;
+            }
+        } else {
+            protected.push(path);
+        }
+    }
     protected.push(target.clone());
     let git = crate::projects::details(&target, false)?;
     if let Some(common) = git["common_dir"].as_str() {
@@ -310,7 +404,13 @@ impl CreatorRunner {
         }
         Ok(())
     }
-    async fn agent(&self, request: &Value, cancel: Arc<AtomicBool>, emit: Event) -> Result<()> {
+    async fn agent(
+        &self,
+        session: &Value,
+        request: &Value,
+        cancel: Arc<AtomicBool>,
+        emit: Event,
+    ) -> Result<()> {
         let spec = sandbox_spec(request)?;
         let task = spec.workspace.join(files::TASK);
         let old = files::read(&task, "harness-questions.md", false, 1024 * 1024)?;
@@ -323,6 +423,18 @@ impl CreatorRunner {
             message.push_str("\nPrevious questions to resolve:\n");
             message.push_str(&String::from_utf8_lossy(&bytes));
         }
+        let permissions =
+            crate::permissions::mode(session).or_else(|| crate::permissions::mode(request));
+        let sid = session["id"].as_str().unwrap_or("");
+        let approvals = if permissions == Some(PermissionMode::Manual) {
+            let links = self.links.as_ref().ok_or_else(|| {
+                HarnessError::invalid("Manual permissions need someone to answer the requests.")
+            })?;
+            let perm_session = json!({"permissions": "manual"});
+            links.runner()?.creator_approvals(sid, &perm_session, &emit)
+        } else {
+            None
+        };
         let input = Launch {
             provider: request["provider"].as_str().unwrap_or("").into(),
             executable: PathBuf::from(
@@ -340,112 +452,122 @@ impl CreatorRunner {
             effort: request["thinking_effort"].as_str().map(str::to_owned),
             usd: request["budgets"]["usd"].as_f64(),
             hook_events: false,
-            permissions: None,
-            approvals: None,
+            permissions,
+            approvals,
         };
-        let (mut command, environment, stdin) = provider::command(&input)?;
-        if input.provider == "codex" {
-            if let Some(index) = command.iter().position(|s| s == "exec") {
-                command.insert(index + 1, "--skip-git-repo-check".into());
-            }
-            if cfg!(windows)
-                && let Some(index) = command.iter().position(|s| s == "--sandbox")
-            {
-                command.splice(
-                    index..index + 2,
-                    [
-                        "-c".into(),
-                        "default_permissions=\":danger-full-access\"".into(),
-                    ],
-                );
-            }
-        }
-        if input.provider == "claude" {
-            if let Some(index) = command.iter().position(|s| s == "--allowedTools") {
-                command.insert(index + 1, "Bash".into());
-            } else {
-                command.extend(["--allowedTools".into(), "Bash".into()]);
-            }
-        }
-        let argv = sandbox::creator(&spec, &command)?;
+        let adapter = CreatorLaunchAdapter { spec };
         let count = if input.agents {
             input.count as usize
         } else {
             0
         };
         let output = (3 * 1024 * 1024 + count * 3 * 1024 * 1024).min(96 * 1024 * 1024);
-        let mut terminal = false;
-        let mut failed = false;
-        let mut tokens = 0u64;
-        let mut native_id: Option<String> = None;
-        let provider = input.provider.clone();
-        // Creator hooks must read the copied generator's own runtime identity,
-        // rather than an attached project selected by the parent process.
-        let remove = [
-            "ACCELERATOR_HOME".to_string(),
-            "ACCELERATOR_STATE_DIR".to_string(),
-            "ACCELERATOR_PROJECT_DIR".to_string(),
-            "ACCELERATOR_EDITION".to_string(),
-        ];
-        let outcome = process::run_environment(
-            &argv,
-            &spec.workspace,
-            &environment,
-            &remove,
-            &stdin,
+        let max_tokens = request["budgets"]["tokens"].as_u64();
+        let tokens = Arc::new(AtomicU64::new(0));
+        let token_limit_hit = Arc::new(AtomicBool::new(false));
+        let dispatch_cancel = Arc::new(AtomicBool::new(cancel.load(Ordering::Acquire)));
+        let forwarding = tokio::runtime::Handle::try_current().ok().map(|handle| {
+            let human = cancel.clone();
+            let dispatch_control = dispatch_cancel.clone();
+            CancelRelay(handle.spawn(async move {
+                loop {
+                    if human.load(Ordering::Acquire) {
+                        dispatch_control.store(true, Ordering::Release);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }))
+        });
+        let events: Arc<dyn RunEvents> = Arc::new(CreatorRunEvents {
+            cancel: cancel.clone(),
+        });
+        let stream_emit = emit.clone();
+        let stream_tokens = tokens.clone();
+        let stream_limit_hit = token_limit_hit.clone();
+        let stream_cancel = dispatch_cancel.clone();
+        let outcome = provider::run_monitored_locked(
+            &input,
             Limits {
                 seconds: request["budgets"]["seconds"].as_u64(),
                 output,
                 line: 2 * 1024 * 1024,
             },
-            cancel.clone(),
+            dispatch_cancel,
+            None,
             Some(self.store.runner_lock()),
-            |line| {
-                let Ok(raw) = crate::strict_json::parse(line, 2 * 1024 * 1024) else {
-                    return Ok(());
-                };
-                for event in provider::normalize(&provider, &raw) {
-                    let kind = event["kind"].as_str().unwrap_or("");
-                    if let Some(id) = event["native_session_id"].as_str() {
-                        native_id = Some(id.into());
-                    }
-                    if kind == "result" {
-                        terminal = true;
-                        failed |= event["ok"] != true;
-                    }
-                    if kind == "usage" {
-                        tokens = tokens.saturating_add(provider::total_tokens(&event).unwrap_or(0));
-                        if request["budgets"]["tokens"]
-                            .as_u64()
-                            .is_some_and(|limit| tokens >= limit)
-                        {
-                            cancel.store(true, Ordering::Release);
+            Some(&adapter),
+            &BTreeMap::new(),
+            Some(events),
+            move |event| {
+                let kind = event["kind"].as_str().unwrap_or("");
+                if kind == "usage" {
+                    if let Some(n) = provider::total_tokens(&event) {
+                        let used = stream_tokens
+                            .fetch_add(n, Ordering::AcqRel)
+                            .saturating_add(n);
+                        if max_tokens.is_some_and(|limit| used >= limit) {
+                            stream_limit_hit.store(true, Ordering::Release);
+                            stream_cancel.store(true, Ordering::Release);
                         }
-                        emit(event)?;
-                    } else if ["text", "error", "status", "session"].contains(&kind) {
-                        emit(event)?;
                     }
+                    stream_emit(event)?;
+                } else if ["text", "error", "status", "session", "permission", "result"]
+                    .contains(&kind)
+                {
+                    stream_emit(event)?;
                 }
                 Ok(())
             },
         )
         .await;
+        drop(forwarding);
+        if permissions == Some(PermissionMode::Manual)
+            && !sid.is_empty()
+            && let Some(links) = &self.links
+            && let Ok(runner) = links.runner()
+        {
+            runner.expire_permissions(sid);
+        }
         match outcome {
-            Ok(output) if output.code == 0 && terminal && !failed => Ok(()),
+            Ok(_) if token_limit_hit.load(Ordering::Acquire) && !cancel.load(Ordering::Acquire) => {
+                Err(HarnessError {
+                    status: 409,
+                    code: "native-token-budget",
+                    message: "The native token budget was reached.".into(),
+                })
+            }
+            Ok(result) if result.ok => Ok(()),
+            Ok(result) if result.limit_reached.as_deref() == Some("USD") => {
+                Err(HarnessError::conflict("The native USD budget was reached."))
+            }
+            Ok(_) => Err(HarnessError::unavailable(
+                "Native agent did not complete successfully.",
+            )),
+            Err(error)
+                if error.code == "native-cancelled"
+                    && token_limit_hit.load(Ordering::Acquire)
+                    && !cancel.load(Ordering::Acquire) =>
+            {
+                Err(HarnessError {
+                    status: 409,
+                    code: "native-token-budget",
+                    message: "The native token budget was reached.".into(),
+                })
+            }
             Err(error) if error.code == "output-limit" => {
-                emit(
-                    json!({"kind":"status","text":"Creator stream output limit reached. Existing artifacts are retained and independently verified."}),
-                )?;
+                emit(json!({
+                    "kind": "status",
+                    "text": "Creator stream output limit reached. Existing artifacts are retained and independently verified."
+                }))?;
                 Ok(())
             }
             Err(error) => Err(error),
-            _ => Err(HarnessError::unavailable(
-                "Native agent did not complete successfully.",
-            )),
         }
     }
     async fn execute(
         &self,
+        session: &Value,
         request: &Value,
         cancel: Arc<AtomicBool>,
         emit: Event,
@@ -463,7 +585,8 @@ impl CreatorRunner {
         if !["scan", "generate"].contains(&phase) {
             return Err(HarnessError::invalid("Unknown Creator phase."));
         }
-        self.agent(request, cancel.clone(), emit.clone()).await?;
+        self.agent(session, request, cancel.clone(), emit.clone())
+            .await?;
         if cancel.load(Ordering::Acquire) {
             return Err(HarnessError::conflict("Cancellation requested."));
         }
@@ -519,7 +642,7 @@ impl SpecialWorkflow for CreatorRunner {
                     "Creator request does not match the queued session.",
                 ));
             }
-            let result = self.execute(&request, cancel, emit.clone()).await;
+            let result = self.execute(&session, &request, cancel, emit.clone()).await;
             let (status, message, ok) = match &result {
                 Ok("review") => (
                     "review",
@@ -557,5 +680,165 @@ impl SpecialWorkflow for CreatorRunner {
             result?;
             Ok(json!({"kind":"result","ok":ok,"text":message,"creator_status":status}))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::command_with_adapter;
+
+    fn test_spec(dir: &Path) -> Spec {
+        let workspace = dir.join("run").join("agent");
+        let target = dir.join("target");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        Spec {
+            workspace,
+            target,
+            protected: vec![],
+            readable: vec![],
+            accounts: vec![],
+            runtime: vec![],
+            codex: None,
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn creator_launch_adapter_handles_permissions_transports_and_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let spec = test_spec(&root);
+        let adapter = CreatorLaunchAdapter { spec: spec.clone() };
+        let base_launch = |provider: &str, permissions: Option<PermissionMode>| Launch {
+            provider: provider.into(),
+            executable: PathBuf::from("/bin/echo"),
+            project: spec.workspace.clone(),
+            prompt: "Scan project".into(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions,
+            approvals: None,
+        };
+
+        // Codex Text variants include --skip-git-repo-check after exec and wrap in sandbox.
+        for perm in [
+            None,
+            Some(PermissionMode::Auto),
+            Some(PermissionMode::Bypass),
+        ] {
+            let mut prepared = command_with_adapter(&base_launch("codex", perm), &adapter).unwrap();
+            let exec_idx = prepared
+                .argv
+                .iter()
+                .position(|a| a == "exec")
+                .expect("codex text transport uses exec");
+            assert_eq!(prepared.argv[exec_idx + 1], "--skip-git-repo-check");
+            assert!(
+                !prepared
+                    .argv
+                    .iter()
+                    .any(|a| a.contains("danger-full-access")),
+                "{:?}",
+                prepared.argv
+            );
+            prepared.remove.sort();
+            for env_key in [
+                "ACCELERATOR_HOME",
+                "ACCELERATOR_STATE_DIR",
+                "ACCELERATOR_PROJECT_DIR",
+                "ACCELERATOR_EDITION",
+            ] {
+                assert!(prepared.remove.contains(&env_key.to_owned()));
+                assert!(!prepared.environment.contains_key(env_key));
+            }
+        }
+
+        // Codex Manual uses app-server and must NEVER receive --skip-git-repo-check.
+        let codex_manual = command_with_adapter(
+            &base_launch("codex", Some(PermissionMode::Manual)),
+            &adapter,
+        )
+        .unwrap();
+        assert!(codex_manual.argv.iter().any(|a| a == "app-server"));
+        assert!(
+            !codex_manual
+                .argv
+                .iter()
+                .any(|a| a == "--skip-git-repo-check" || a == "exec"),
+            "{:?}",
+            codex_manual.argv
+        );
+
+        // Claude modes use PermissionMode flags and never hardcode --allowedTools Bash.
+        for (perm, expected_mode) in [
+            (None, "acceptEdits"),
+            (Some(PermissionMode::Auto), "auto"),
+            (Some(PermissionMode::Manual), "default"),
+            (Some(PermissionMode::Bypass), "bypassPermissions"),
+        ] {
+            let prepared = command_with_adapter(&base_launch("claude", perm), &adapter).unwrap();
+            let mode_pos = prepared
+                .argv
+                .iter()
+                .position(|a| a == "--permission-mode")
+                .unwrap();
+            assert_eq!(prepared.argv[mode_pos + 1], expected_mode);
+            assert!(
+                !prepared.argv.iter().any(|a| a == "--allowedTools"),
+                "{:?}",
+                prepared.argv
+            );
+        }
+
+        // Cursor Manual uses acp.
+        let cursor_manual = command_with_adapter(
+            &base_launch("cursor", Some(PermissionMode::Manual)),
+            &adapter,
+        )
+        .unwrap();
+        assert_eq!(cursor_manual.argv.last().map(String::as_str), Some("acp"));
+    }
+
+    #[test]
+    fn sandbox_spec_protects_state_siblings_without_shadowing_writable_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let state = root.join("state");
+        let run_dir = state.join("creator").join("run-1");
+        let agent_dir = run_dir.join("agent");
+        let target = root.join("target");
+        let db = state.join("sessions.sqlite3");
+        let other_run = state.join("creator").join("run-other");
+        let req_file = run_dir.join("request-1.json");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&other_run).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(&db, b"sqlite").unwrap();
+        std::fs::write(&req_file, b"{}").unwrap();
+
+        let spec = sandbox_spec(&json!({
+            "directory": run_dir,
+            "target": target,
+            "provider": "claude",
+            "protected_roots": [state, target],
+        }))
+        .unwrap();
+
+        assert!(
+            !spec.protected.iter().any(|p| spec.workspace.starts_with(p)),
+            "protected must not contain an ancestor of workspace: {:?}",
+            spec.protected
+        );
+        assert!(spec.protected.contains(&db));
+        assert!(spec.protected.contains(&other_run));
+        assert!(spec.protected.contains(&req_file));
     }
 }

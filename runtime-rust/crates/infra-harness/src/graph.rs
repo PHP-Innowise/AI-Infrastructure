@@ -42,6 +42,13 @@ const LINE_LIMIT: usize = 300;
 const PULLS_AGE: Duration = Duration::from_secs(60);
 /// Graphs of other commits kept for a project; each is as large as its own.
 const REVISIONS: usize = 3;
+/// Maximum preserved source bytes kept per commit/PR revision tree for Access and Crates checks.
+const MAX_THIN_TREE_BYTES: u64 = 64 * 1024 * 1024;
+const WATCHER_DEBOUNCE: Duration = Duration::from_millis(150);
+const WATCHER_MAX_DELAY: Duration = Duration::from_millis(600);
+const MAX_WATCHER_BATCH: usize = 512;
+const NATIVE_READY_MESSAGE: &str =
+    "Code graph & dependency map ready (native tree-sitter SQLite IR).";
 /// What a build is doing before the tool runs.
 const WAITING: u8 = 1;
 const EXPORTING: u8 = 2;
@@ -418,39 +425,66 @@ fn revision(state: &Path, project: &str, commit: &str) -> PathBuf {
         .join(commit)
         .join("graph.json")
 }
-/// Removes the written-out files of a commit but for what says which links
-/// of its graph cannot be: Cargo manifests, Rust module declarations and
-/// Rust test spans. A link is removed and never followed.
+/// Preserves source files in a checked-out commit/PR tree up to per-file and
+/// per-tree byte bounds so `Access` and crate checks work accurately, falling
+/// back to `.rs.modules` when Rust files exceed bounds and stripping non-source clutter.
+fn is_preserved_source_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if name.ends_with(".min.js") || name.ends_with(".min.mjs") || name.ends_with(".min.cjs") {
+        return false;
+    }
+    if matches!(name, "composer.json" | "package.json" | "pyproject.toml") {
+        return true;
+    }
+    crate::graph_live::detect_language(name).is_some()
+}
+
 fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
+    thin_with_limits(tree, crate::graph_map::SOURCE_LIMIT, MAX_THIN_TREE_BYTES)
+}
+
+fn thin_with_limits(
+    tree: &Path,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+) -> Option<crate::graph_map::TestSpans> {
     let mut folders = vec![tree.to_path_buf()];
     let mut at = 0;
     let mut complete = true;
     let mut tests = BTreeMap::new();
+    let mut total_kept_bytes = 0u64;
     while at < folders.len() {
         // The folder is listed before anything is written into it.
-        let entries = std::fs::read_dir(&folders[at])
-            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>());
-        at += 1;
-        let Ok(entries) = entries else {
-            complete = false;
-            continue;
+        let mut entries = match std::fs::read_dir(&folders[at])
+            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
+        {
+            Ok(entries) => entries,
+            Err(_) => {
+                at += 1;
+                complete = false;
+                continue;
+            }
         };
+        entries.sort_by_key(|entry| entry.file_name());
+        at += 1;
         let mut kept = Vec::new();
         for entry in entries {
             let path = entry.path();
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
             match entry.file_type() {
                 Ok(kind) if kind.is_dir() => {
-                    folders.push(path);
+                    if WORKSPACE_PRINT_IGNORED.contains(&name_str.as_ref()) {
+                        let _ = std::fs::remove_dir_all(&path);
+                    } else {
+                        folders.push(path);
+                    }
                     continue;
                 }
-                Ok(kind) if kind.is_file() && entry.file_name() == "Cargo.toml" => continue,
+                Ok(kind) if kind.is_file() && name_str == "Cargo.toml" => continue,
                 Ok(kind) if kind.is_file() && path.extension().is_some_and(|end| end == "rs") => {
-                    if let Some(modules) = crate::graph_crates::kept(&path) {
-                        let mut name = path.clone().into_os_string();
-                        name.push(".");
-                        name.push(crate::graph_crates::MODULES);
-                        kept.push((PathBuf::from(name), modules));
-                    }
                     match crate::graph_map::kept_tests(&path) {
                         Ok(spans) if !spans.is_empty() => {
                             let relative = path.strip_prefix(tree).ok()?;
@@ -458,6 +492,30 @@ fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
                         }
                         Ok(_) => {}
                         Err(_) => complete = false,
+                    }
+                    let len = std::fs::symlink_metadata(&path).ok().map(|m| m.len());
+                    if let Some(len) = len
+                        && len <= max_file_bytes
+                        && total_kept_bytes.saturating_add(len) <= max_total_bytes
+                    {
+                        total_kept_bytes += len;
+                        continue;
+                    }
+                    if let Some(modules) = crate::graph_crates::kept(&path) {
+                        let mut name = path.clone().into_os_string();
+                        name.push(".");
+                        name.push(crate::graph_crates::MODULES);
+                        kept.push((PathBuf::from(name), modules));
+                    }
+                }
+                Ok(kind) if kind.is_file() && is_preserved_source_path(&path) => {
+                    let len = std::fs::symlink_metadata(&path).ok().map(|m| m.len());
+                    if let Some(len) = len
+                        && len <= max_file_bytes
+                        && total_kept_bytes.saturating_add(len) <= max_total_bytes
+                    {
+                        total_kept_bytes += len;
+                        continue;
                     }
                 }
                 Err(_) => complete = false,
@@ -477,6 +535,108 @@ fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
         let _ = std::fs::remove_dir(folder);
     }
     complete.then_some(tests)
+}
+
+fn stream_graph_summary_fields(path: &Path) -> Option<(usize, usize, Option<String>)> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct CountSeq;
+    impl<'de> Visitor<'de> for CountSeq {
+        type Value = usize;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON array")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<usize, A::Error> {
+            let mut count = 0usize;
+            while seq.next_element::<IgnoredAny>()?.is_some() {
+                count += 1;
+            }
+            Ok(count)
+        }
+    }
+    struct ArrayCount(usize);
+    impl<'de> serde::Deserialize<'de> for ArrayCount {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            Ok(Self(d.deserialize_seq(CountSeq)?))
+        }
+    }
+
+    struct SummaryVisitor;
+    impl<'de> Visitor<'de> for SummaryVisitor {
+        type Value = (usize, usize, Option<String>);
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a graph object")
+        }
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut nodes = 0usize;
+            let mut edges = 0usize;
+            let mut commit: Option<String> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "nodes" => nodes = map.next_value::<ArrayCount>()?.0,
+                    "links" | "edges" => edges = map.next_value::<ArrayCount>()?.0,
+                    "commit" => {
+                        let val: Option<String> = map.next_value()?;
+                        commit = val.filter(|s| !s.is_empty());
+                    }
+                    _ => {
+                        let _ = map.next_value::<IgnoredAny>()?;
+                    }
+                }
+            }
+            Ok((nodes, edges, commit))
+        }
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    de.deserialize_map(SummaryVisitor).ok()
+}
+
+fn write_live_summary(live_graph: &Path, commit: Option<&str>, fallback: Option<(u64, u64)>) {
+    let Ok(meta) = std::fs::metadata(live_graph) else {
+        return;
+    };
+    let streamed = stream_graph_summary_fields(live_graph);
+    let Some((nodes, edges)) = streamed
+        .as_ref()
+        .map(|(n, e, _)| (*n, *e))
+        .or_else(|| fallback.map(|(n, e)| (n as usize, e as usize)))
+    else {
+        return;
+    };
+    let resolved_commit = commit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| streamed.and_then(|(_, _, c)| c));
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    let summary = json!({
+        "nodes": nodes,
+        "edges": edges,
+        "commit": resolved_commit,
+        "graph_len": meta.len(),
+        "graph_mtime_secs": modified.map(|d| d.as_secs()),
+        "graph_mtime_nanos": modified.map(|d| d.subsec_nanos()),
+    });
+    let Ok(bytes) = serde_json::to_vec(&summary) else {
+        return;
+    };
+    let summary_path = live_graph.with_file_name("summary.json");
+    let tmp_path = live_graph.with_file_name("summary.json.tmp");
+    if std::fs::write(&tmp_path, bytes).is_err()
+        || std::fs::rename(&tmp_path, &summary_path).is_err()
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 }
 /// What was chosen, for the interface: the two sides and how many files.
 fn chosen(resolved: &Resolved) -> Value {
@@ -1140,13 +1300,28 @@ fn end(child: &mut Child) {
     let _ = child.wait();
 }
 fn status_message(state: &str, build: Option<&Value>, failure: Option<&str>) -> String {
+    status_message_for_tool(state, build, failure, None)
+}
+
+fn status_message_for_tool(
+    state: &str,
+    build: Option<&Value>,
+    failure: Option<&str>,
+    tool: Option<&str>,
+) -> String {
     match state {
         "building" => build
             .and_then(|value| value["message"].as_str())
             .filter(|text| !text.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| "Building code graph…".to_owned()),
-        "ready" => "Code graph & dependency map ready.".to_owned(),
+        "ready" => {
+            if tool == Some(crate::graph_ir::NATIVE_IR_TOOL) {
+                NATIVE_READY_MESSAGE.to_owned()
+            } else {
+                "Code graph & dependency map ready.".to_owned()
+            }
+        }
         "stale" => "Code graph is outdated; changes detected in project.".to_owned(),
         "failed" => match failure.filter(|text| !text.is_empty()) {
             Some(reason) => format!("Code graph build failed: {reason}"),
@@ -1315,10 +1490,56 @@ impl Followed {
         }))
     }
 }
+#[derive(Clone, Debug)]
+enum BuildBackend {
+    Graphify(Tool),
+    NativeIr,
+}
+
+impl BuildBackend {
+    fn tool_version(&self) -> Option<String> {
+        match self {
+            Self::Graphify(tool) => tool.version.clone(),
+            Self::NativeIr => Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+        }
+    }
+}
+
+enum WatcherMsg {
+    Paths(Vec<PathBuf>),
+    Stop,
+}
+
+struct ProjectWatcher {
+    root: PathBuf,
+    stop: Arc<AtomicBool>,
+    tx: std::sync::mpsc::Sender<WatcherMsg>,
+    watcher: Option<notify::RecommendedWatcher>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ProjectWatcher {
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.watcher.take();
+        let _ = self.tx.send(WatcherMsg::Stop);
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ProjectWatcher {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 pub struct Graphs {
     me: Weak<Graphs>,
     store: SessionStore,
     program: Option<PathBuf>,
+    force_native: bool,
     gap: Duration,
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -1326,9 +1547,12 @@ pub struct Graphs {
     prints: Mutex<BTreeMap<String, (Instant, Option<Print>)>>,
     finished: Mutex<BTreeMap<String, Instant>>,
     writing: Mutex<()>,
+    ir_write: Mutex<()>,
     stopping: AtomicBool,
     autostarting: AtomicBool,
     maps: crate::graph_map::Maps,
+    ir_stores: Mutex<BTreeMap<String, Arc<crate::graph_ir::GraphIrStore>>>,
+    watchers: Mutex<BTreeMap<String, ProjectWatcher>>,
     history: Mutex<BTreeMap<String, HistoryEntry>>,
     /// Open pull requests of each project as last listed, or why not.
     pulls: Mutex<BTreeMap<String, Listing>>,
@@ -1342,6 +1566,13 @@ pub struct Graphs {
     refused: Mutex<BTreeMap<(String, String), String>>,
     /// Synthetic system service graph targets (`sys-<hash>` -> `(root, name)`).
     targets: Mutex<BTreeMap<String, (PathBuf, String)>>,
+}
+
+impl Drop for Graphs {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        self.shutdown_watchers();
+    }
 }
 type Listing = (Instant, Vec<Pull>, Option<String>);
 struct HistoryEntry {
@@ -1358,10 +1589,23 @@ impl Graphs {
         Self::with(store, program, AUTOMATIC_GAP)
     }
     pub fn with(store: SessionStore, program: Option<PathBuf>, gap: Duration) -> Arc<Self> {
+        Self::with_options(store, program, Self::force_native_backend(), gap)
+    }
+    /// Constructs a `Graphs` service pinned to the native tree-sitter SQLite IR backend.
+    pub fn with_native_backend(store: SessionStore, gap: Duration) -> Arc<Self> {
+        Self::with_options(store, None, true, gap)
+    }
+    fn with_options(
+        store: SessionStore,
+        program: Option<PathBuf>,
+        force_native: bool,
+        gap: Duration,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             store,
             program,
+            force_native,
             gap,
             jobs: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(Vec::new()),
@@ -1369,9 +1613,12 @@ impl Graphs {
             prints: Mutex::new(BTreeMap::new()),
             finished: Mutex::new(BTreeMap::new()),
             writing: Mutex::new(()),
+            ir_write: Mutex::new(()),
             stopping: AtomicBool::new(false),
             autostarting: AtomicBool::new(false),
             maps: crate::graph_map::Maps::default(),
+            ir_stores: Mutex::new(BTreeMap::new()),
+            watchers: Mutex::new(BTreeMap::new()),
             history: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(BTreeMap::new()),
             searches: Mutex::new(BTreeMap::new()),
@@ -1453,7 +1700,7 @@ impl Graphs {
             return Ok(());
         }
         if setting["enabled"] != true {
-            let _ = self.tool(true);
+            let _ = self.resolve_backend(true);
             self.edit(project, |setting| {
                 setting["enabled"] = json!(true);
                 if let Some(fields) = setting.as_object_mut() {
@@ -1542,6 +1789,19 @@ impl Graphs {
     /// as it is without them. Reading a graph of a large project takes
     /// seconds, so callers keep this off the runtime.
     pub fn map(&self, project: &str, target: Option<&Target>, shown: &Shown) -> Result<Value> {
+        let started = Instant::now();
+        let (mut view, cache_hit) = self.map_inner(project, target, shown)?;
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        crate::graph_map::finalize_telemetry(&mut view, elapsed_ms, cache_hit);
+        Ok(view)
+    }
+
+    fn map_inner(
+        &self,
+        project: &str,
+        target: Option<&Target>,
+        shown: &Shown,
+    ) -> Result<(Value, bool)> {
         let (root, owned_name) = self.target_info(project)?;
         let name = owned_name.as_str();
         let built = &self.setting(project)?["built"];
@@ -1734,11 +1994,12 @@ impl Graphs {
             }
         };
         let Some(target) = target else {
-            let index = asked(self.maps.index(
+            let (raw_index, cache_hit) = self.maps.index_with_cache_hit(
                 project,
                 &live(&self.store.state, project),
                 &root,
-            )?);
+            )?;
+            let index = asked(raw_index);
             let rules = if reads_rules {
                 Rules::read(&root)
             } else {
@@ -1759,8 +2020,24 @@ impl Graphs {
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
-            view["built"] = json!({"commit": built["commit"], "at": built["at"]});
-            view["message"] = json!("Code graph & dependency map ready.");
+            let native_backend = built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL)
+                || index.backend() == Some(crate::graph_ir::NATIVE_IR_TOOL);
+            if native_backend {
+                view["built"] = json!({
+                    "commit": built["commit"],
+                    "at": built["at"],
+                    "tool": crate::graph_ir::NATIVE_IR_TOOL,
+                });
+                view["message"] = json!(NATIVE_READY_MESSAGE);
+            } else {
+                view["built"] = json!({"commit": built["commit"], "at": built["at"]});
+                view["message"] = json!("Code graph & dependency map ready.");
+            }
+            let backend_label = native_backend
+                .then_some(crate::graph_ir::NATIVE_IR_TOOL)
+                .or_else(|| index.backend());
+            let ir_summary = self.maps.ir_summary(&self.store.state, project);
+            crate::graph_map::attach_ir_metadata(&mut view, backend_label, ir_summary.as_ref());
             apply_graph_focus(
                 &self.store,
                 project,
@@ -1770,7 +2047,7 @@ impl Graphs {
                 false,
             )?;
             told(&mut view);
-            return Ok(view);
+            return Ok((view, cache_hit));
         };
         // A run is read from its session every time: it may still be going.
         let (ran, comparison) = match target {
@@ -1817,7 +2094,7 @@ impl Graphs {
             let (key, graph, tree) = found.graph.ok_or_else(|| {
                 HarnessError::unavailable("The PR base graph is no longer cached. Return to the PR cycle to prepare it again.")
             })?;
-            let index = self.maps.index(&key, &graph, &tree)?;
+            let (index, cache_hit) = self.maps.index_with_cache_hit(&key, &graph, &tree)?;
             if notests && index.has_rust_sources() && !index.has_test_spans() {
                 return Err(HarnessError::unavailable(
                     "This cached base graph cannot be shown with Without tests.",
@@ -1832,7 +2109,7 @@ impl Graphs {
             view["chosen"] = chosen;
             view["state"] = json!("ready");
             told(&mut view);
-            return Ok(view);
+            return Ok((view, cache_hit));
         }
         let rules = if reads_rules {
             match &resolved.revision {
@@ -1859,9 +2136,9 @@ impl Graphs {
             let now = self.print(project, &root, false);
             stale = now.is_some_and(|now| built["print"].as_str() != Some(now.hash.as_str()));
         }
-        let (mut view, active_index) = match &found.graph {
+        let (mut view, active_index, cache_hit) = match &found.graph {
             Some((kept, graph, base)) => {
-                let raw = self.maps.index(kept, graph, base)?;
+                let (raw, cache_hit) = self.maps.index_with_cache_hit(kept, graph, base)?;
                 let index = asked(raw.clone());
                 // The symbols a change touched are told by line, and the
                 // lines of a graph older than the files are not the files'
@@ -1933,11 +2210,17 @@ impl Graphs {
                     }
                 };
                 marked(&index, &mut view, &rules);
-                // Reads and writes are told from the sources, by line: on
-                // the checkout's own graph while it is of the same lines.
-                // The files kept beside the graph of a commit are no
-                // sources to read.
-                if own && !stale {
+                // Reads and writes are told from the preserved sources on disk:
+                // either the fresh checkout tree or the thinned commit/PR tree.
+                let access_sources_fresh = if own {
+                    !stale
+                } else if kept.contains('@') {
+                    true
+                } else {
+                    self.print(project, &root, false)
+                        .is_some_and(|now| built["print"].as_str() == Some(now.hash.as_str()))
+                };
+                if access_sources_fresh {
                     index.mark_access(&mut view);
                 }
                 index.mark_circles(&mut view);
@@ -1978,13 +2261,15 @@ impl Graphs {
                             .map(|(run, edited)| ((&run.opened, &run.shell_reads), edited)),
                     );
                 }
-                (view, Some(index))
+                (view, Some(index), cache_hit)
             }
             // Until the commit's own graph is there, the project's graph
             // gives a first picture: the files changed are the commit's, the
             // links are those the checkout's files have.
             None if published.is_file() => {
-                let index = asked(self.maps.index(project, &published, &root)?);
+                let (raw_index, cache_hit) =
+                    self.maps.index_with_cache_hit(project, &published, &root)?;
+                let index = asked(raw_index);
                 let mut view = follow(&index, &changed, &|_| None, &rules).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
@@ -2004,9 +2289,9 @@ impl Graphs {
                         json!({"state": "waiting_head"})
                     };
                 }
-                (view, Some(index))
+                (view, Some(index), cache_hit)
             }
-            None => (json!({"mode": "changes"}), None),
+            None => (json!({"mode": "changes"}), None, false),
         };
         let keep_run = view["run"].is_object();
         view["project_id"] = json!(project);
@@ -2024,11 +2309,28 @@ impl Graphs {
         view["state"] = json!(found.state);
         view["build"] = found.build;
         view["failure"] = json!(found.failure);
-        view["message"] = json!(revision_message(
-            found.state,
-            &view["build"],
-            found.failure.as_deref(),
-        ));
+        let native_backend = (own
+            && built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL))
+            || active_index.as_ref().and_then(|idx| idx.backend())
+                == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        let revision_tool =
+            (found.state == "ready" && native_backend).then_some(crate::graph_ir::NATIVE_IR_TOOL);
+        view["message"] = json!(match (found.state, revision_tool) {
+            ("missing", _) => "Code graph for this revision is not built yet.".to_owned(),
+            _ => status_message_for_tool(
+                found.state,
+                Some(&view["build"]),
+                found.failure.as_deref(),
+                revision_tool,
+            ),
+        });
+        let backend_label = native_backend
+            .then_some(crate::graph_ir::NATIVE_IR_TOOL)
+            .or_else(|| active_index.as_ref().and_then(|idx| idx.backend()));
+        let ir_summary = own
+            .then(|| self.maps.ir_summary(&self.store.state, project))
+            .flatten();
+        crate::graph_map::attach_ir_metadata(&mut view, backend_label, ir_summary.as_ref());
         let sysrun_focus_id;
         let focus_sid = match target {
             Target::Run(session) => Some(session.as_str()),
@@ -2049,10 +2351,18 @@ impl Graphs {
         if own {
             view["stale"] = json!(stale);
             view["rebuilding"] = json!(lock(&self.jobs)?.contains_key(project));
-            view["built"] = json!({"commit": built["commit"], "at": built["at"]});
+            view["built"] = if built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL) {
+                json!({
+                    "commit": built["commit"],
+                    "at": built["at"],
+                    "tool": crate::graph_ir::NATIVE_IR_TOOL,
+                })
+            } else {
+                json!({"commit": built["commit"], "at": built["at"]})
+            };
         }
         told(&mut view);
-        Ok(view)
+        Ok((view, cache_hit))
     }
     fn git_history(
         &self,
@@ -2485,6 +2795,283 @@ impl Graphs {
         *cached = Some((Instant::now(), found.clone()));
         found
     }
+    fn force_native_backend() -> bool {
+        std::env::var_os("HARNESS_GRAPH_BACKEND").is_some_and(|value| {
+            value
+                .to_string_lossy()
+                .trim()
+                .eq_ignore_ascii_case("native")
+        })
+    }
+    fn resolve_backend(&self, fresh: bool) -> Option<BuildBackend> {
+        if self.force_native || Self::force_native_backend() {
+            return Some(BuildBackend::NativeIr);
+        }
+        if self.program.is_some() {
+            return self.tool(fresh).map(BuildBackend::Graphify);
+        }
+        Some(match self.tool(fresh) {
+            Some(tool) => BuildBackend::Graphify(tool),
+            None => BuildBackend::NativeIr,
+        })
+    }
+    fn ir_store(&self, project: &str) -> Result<Arc<crate::graph_ir::GraphIrStore>> {
+        if let Some(existing) = lock(&self.ir_stores)?.get(project).cloned() {
+            return Ok(existing);
+        }
+        let opened = Arc::new(crate::graph_ir::GraphIrStore::open(
+            &self.store.state,
+            project,
+        )?);
+        let mut stores = lock(&self.ir_stores)?;
+        Ok(stores
+            .entry(project.to_owned())
+            .or_insert_with(|| opened)
+            .clone())
+    }
+    fn evict_ir_store(&self, project: &str) {
+        if let Ok(mut stores) = self.ir_stores.lock() {
+            stores.remove(project);
+        }
+    }
+    fn stop_watcher(&self, project: &str) {
+        let removed = self
+            .watchers
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(project));
+        if let Some(mut watcher) = removed {
+            watcher.shutdown();
+        }
+    }
+    fn ensure_watcher(&self, project: &str, root: &Path) {
+        if self.stopping.load(Ordering::Acquire) || !root.is_dir() {
+            return;
+        }
+        {
+            let Ok(watchers) = self.watchers.lock() else {
+                return;
+            };
+            if watchers
+                .get(project)
+                .is_some_and(|existing| existing.root == root)
+            {
+                return;
+            }
+        }
+        self.stop_watcher(project);
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<WatcherMsg>();
+        let tx_watch = tx.clone();
+        let Ok(mut watcher) = crate::graph_ast::create_code_watcher(move |paths| {
+            let _ = tx_watch.send(WatcherMsg::Paths(paths));
+        }) else {
+            return;
+        };
+        // Degrade gracefully when inotify watch limits are exhausted on constrained containers.
+        if crate::graph_ast::watch_root_recursive(&mut watcher, root).is_err() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let project_name = project.to_owned();
+        let watched_root = root.to_path_buf();
+        let weak_me = Arc::downgrade(&me);
+        let Ok(thread) = std::thread::Builder::new()
+            .name("harness-graph-watch".into())
+            .spawn(move || {
+                loop {
+                    if stop_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let first = match rx.recv() {
+                        Ok(WatcherMsg::Paths(paths)) => paths,
+                        Ok(WatcherMsg::Stop) | Err(_) => break,
+                    };
+                    let mut pending = BTreeSet::new();
+                    for path in first {
+                        if let Some(rel) = crate::graph_ir::normalize_rel_path(
+                            &watched_root,
+                            &path.to_string_lossy(),
+                        ) {
+                            pending.insert(rel);
+                        }
+                    }
+                    let batch_start = Instant::now();
+                    let mut deadline = batch_start + WATCHER_DEBOUNCE;
+                    while !stop_thread.load(Ordering::Acquire) {
+                        let max_deadline = batch_start + WATCHER_MAX_DELAY;
+                        let target_deadline = deadline.min(max_deadline);
+                        let wait = target_deadline.saturating_duration_since(Instant::now());
+                        if wait.is_zero() {
+                            break;
+                        }
+                        match rx.recv_timeout(wait) {
+                            Ok(WatcherMsg::Paths(more)) => {
+                                for path in more {
+                                    if pending.len() >= MAX_WATCHER_BATCH {
+                                        break;
+                                    }
+                                    if let Some(rel) = crate::graph_ir::normalize_rel_path(
+                                        &watched_root,
+                                        &path.to_string_lossy(),
+                                    ) {
+                                        pending.insert(rel);
+                                    }
+                                }
+                                deadline = Instant::now() + WATCHER_DEBOUNCE;
+                            }
+                            Ok(WatcherMsg::Stop)
+                            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        }
+                    }
+                    if stop_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if pending.is_empty() {
+                        continue;
+                    }
+                    let Some(graphs) = weak_me.upgrade() else {
+                        break;
+                    };
+                    if graphs.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let batch: Vec<String> = pending.into_iter().collect();
+                    let _ = graphs.apply_ir_path_updates(&project_name, &watched_root, &batch);
+                }
+            })
+        else {
+            return;
+        };
+        let mut pw = ProjectWatcher {
+            root: root.to_path_buf(),
+            stop,
+            tx,
+            watcher: Some(watcher),
+            thread: Some(thread),
+        };
+        if self.stopping.load(Ordering::Acquire) {
+            pw.shutdown();
+            return;
+        }
+        if let Ok(mut watchers) = self.watchers.lock() {
+            if let Some(mut old) = watchers.insert(project.to_owned(), pw) {
+                drop(watchers);
+                old.shutdown();
+            }
+        } else {
+            pw.shutdown();
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            self.stop_watcher(project);
+        }
+    }
+    /// Triggers incremental SQLite IR updates (and refreshes `live/graph.json` when using native IR)
+    /// for modified/deleted workspace relative paths.
+    pub fn record_live_paths(&self, project: &str, rel_paths: &[String]) {
+        if self.stopping.load(Ordering::Acquire) || project.is_empty() || rel_paths.is_empty() {
+            return;
+        }
+        let Ok(root) = self.root(project) else {
+            return;
+        };
+        if !root.is_dir() {
+            return;
+        }
+        let Ok(setting) = self.setting(project) else {
+            return;
+        };
+        if setting["enabled"] != true {
+            return;
+        }
+        let mut unique = BTreeSet::new();
+        for raw in rel_paths {
+            if let Some(rel) = crate::graph_ir::normalize_rel_path(&root, raw) {
+                unique.insert(rel);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = unique.into_iter().collect();
+        let _ = self.apply_ir_path_updates(project, &root, &paths);
+    }
+    fn apply_ir_path_updates(
+        &self,
+        project: &str,
+        root: &Path,
+        rel_paths: &[String],
+    ) -> Result<()> {
+        if self.stopping.load(Ordering::Acquire) || rel_paths.is_empty() || !root.is_dir() {
+            return Ok(());
+        }
+        let _guard = lock(&self.ir_write)?;
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let setting = self.setting(project)?;
+        if setting["enabled"] != true {
+            return Ok(());
+        }
+        if let Some(job) = lock(&self.jobs)?.get(project) {
+            job.again.store(true, Ordering::Release);
+            return Ok(());
+        }
+        let started = Instant::now();
+        let ir = self.ir_store(project)?;
+        if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
+            let _ = ir.sync_workspace(root)?;
+        } else {
+            let _ = ir.update_paths(root, rel_paths)?;
+        }
+        let backend = self.resolve_backend(false);
+        let using_native = matches!(backend, Some(BuildBackend::NativeIr))
+            || setting["built"]["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        if !using_native {
+            return Ok(());
+        }
+        if self.stopping.load(Ordering::Acquire) || self.setting(project)?["enabled"] != true {
+            return Ok(());
+        }
+        let home = folder(&self.store.state, project);
+        let live_graph = live(&self.store.state, project);
+        let (nodes, edges) = ir.write_live_graph_atomic(&live_graph)?;
+        let fresh_print = self.print(project, root, true);
+        let commit = fresh_print.as_ref().and_then(|p| p.commit.as_deref());
+        write_live_summary(&live_graph, commit, Some((nodes, edges)));
+        self.maps.forget(project);
+        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
+        let elapsed = tenth(started.elapsed().as_secs_f64());
+        let hash = fresh_print.as_ref().map(|p| p.hash.clone());
+        let commit_owned = fresh_print.and_then(|p| p.commit);
+        let disk = size(&home);
+        self.edit(project, |setting| {
+            if setting["enabled"] != true || self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            setting["built"] = json!({
+                "at": store::now(),
+                "seconds": elapsed,
+                "tail": 0.0,
+                "nodes": nodes,
+                "edges": edges,
+                "bytes": bytes,
+                "disk": disk,
+                "print": hash,
+                "commit": commit_owned,
+                "tool": crate::graph_ir::NATIVE_IR_TOOL,
+                "program": Value::Null,
+            });
+            if let Some(fields) = setting.as_object_mut() {
+                fields.remove("failure");
+            }
+        })?;
+        Ok(())
+    }
     fn print(&self, project: &str, root: &Path, fresh: bool) -> Option<Print> {
         let mut prints = self.prints.lock().ok()?;
         if !fresh
@@ -2529,16 +3116,24 @@ impl Graphs {
         if !asked && lock(&self.revisions)?.contains_key(project) {
             return Ok(());
         }
-        let Some(tool) = self.tool(asked) else {
+        let Some(backend) = self.resolve_backend(asked) else {
             return Ok(());
         };
         let root = self.root(project)?;
+        if matches!(backend, BuildBackend::NativeIr) {
+            self.ensure_watcher(project, &root);
+        }
         let print = self.print(project, &root, trigger != Trigger::Visit);
         if trigger != Trigger::Manual {
             let now = print.as_ref().map(|print| print.hash.as_str());
             let published =
                 setting["built"].is_object() && live(&self.store.state, project).is_file();
-            if published && (now.is_none() || setting["built"]["print"].as_str() == now) {
+            let ir_missing = matches!(backend, BuildBackend::NativeIr)
+                && !crate::graph_ir::GraphIrStore::exists(&self.store.state, project);
+            if published
+                && !ir_missing
+                && (now.is_none() || setting["built"]["print"].as_str() == now)
+            {
                 return Ok(());
             }
             if setting["failure"].is_object() && setting["failure"]["print"].as_str() == now {
@@ -2557,9 +3152,15 @@ impl Graphs {
                 return Ok(());
             }
         }
-        self.begin(project, root, tool, print)
+        self.begin(project, root, backend, print)
     }
-    fn begin(&self, project: &str, root: PathBuf, tool: Tool, print: Option<Print>) -> Result<()> {
+    fn begin(
+        &self,
+        project: &str,
+        root: PathBuf,
+        backend: BuildBackend,
+        print: Option<Print>,
+    ) -> Result<()> {
         if self.stopping.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -2578,8 +3179,16 @@ impl Graphs {
         let worker = std::thread::Builder::new()
             .name("harness-graph".into())
             .spawn(move || {
-                let outcome = me.build(&name, &root, &tool, &job);
-                me.settle(&name, &job, outcome, print, &tool);
+                let commit = print.as_ref().and_then(|p| p.commit.clone());
+                let outcome = match &backend {
+                    BuildBackend::Graphify(tool) => {
+                        me.build(&name, &root, tool, &job, commit.as_deref())
+                    }
+                    BuildBackend::NativeIr => {
+                        me.build_native(&name, &root, &job, commit.as_deref())
+                    }
+                };
+                me.settle(&name, &job, outcome, print, &backend);
             });
         match worker {
             Ok(handle) => {
@@ -2721,7 +3330,14 @@ impl Graphs {
             bytes,
         })
     }
-    fn build(&self, project: &str, root: &Path, tool: &Tool, job: &Arc<Job>) -> Outcome {
+    fn build(
+        &self,
+        project: &str,
+        root: &Path,
+        tool: &Tool,
+        job: &Arc<Job>,
+        commit: Option<&str>,
+    ) -> Outcome {
         let home = folder(&self.store.state, project);
         let work = home.join("work");
         let live = home.join("live");
@@ -2736,10 +3352,72 @@ impl Graphs {
             Ok(ran) => ran,
             Err(outcome) => return outcome,
         };
-        if std::fs::rename(&ran.fresh, live.join("graph.json")).is_err() {
+        let live_graph = live.join("graph.json");
+        if std::fs::rename(&ran.fresh, &live_graph).is_err() {
             return Outcome::Failed("The new graph could not be published.".into());
         }
+        write_live_summary(&live_graph, commit, ran.built);
+        self.maps.forget(project);
         Outcome::Built(ran.record(size(&home)))
+    }
+    fn build_native(
+        &self,
+        project: &str,
+        root: &Path,
+        job: &Arc<Job>,
+        commit: Option<&str>,
+    ) -> Outcome {
+        let stopped =
+            || job.cancel.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire);
+        if stopped() {
+            return Outcome::Cancelled;
+        }
+        let home = folder(&self.store.state, project);
+        let live_dir = home.join("live");
+        if std::fs::create_dir_all(&live_dir).is_err()
+            || infra_host::util::private_directory(&home).is_err()
+        {
+            return Outcome::Failed("The graph folder could not be prepared.".into());
+        }
+        let ir = match self.ir_store(project) {
+            Ok(ir) => ir,
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        let stats = match ir.sync_workspace(root) {
+            Ok(stats) => stats,
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        if stopped() {
+            return Outcome::Cancelled;
+        }
+        job.observe(
+            &format!(
+                "  AST extraction: {}/{} uncached files (100%)",
+                stats.files_scanned, stats.files_scanned
+            ),
+            false,
+        );
+        let live_graph = live_dir.join("graph.json");
+        let (nodes, edges) = match ir.write_live_graph_atomic(&live_graph) {
+            Ok(counts) => counts,
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        if stopped() {
+            return Outcome::Cancelled;
+        }
+        write_live_summary(&live_graph, commit, Some((nodes, edges)));
+        self.maps.forget(project);
+        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
+        let elapsed = job.started().elapsed().as_secs_f64();
+        Outcome::Built(json!({
+            "at": store::now(),
+            "seconds": tenth(elapsed),
+            "tail": 0.0,
+            "nodes": nodes,
+            "edges": edges,
+            "bytes": bytes,
+            "disk": size(&home),
+        }))
     }
     fn settle(
         &self,
@@ -2747,10 +3425,12 @@ impl Graphs {
         job: &Job,
         outcome: Outcome,
         print: Option<Print>,
-        tool: &Tool,
+        backend: &BuildBackend,
     ) {
         let purge = job.purge.load(Ordering::Acquire);
         if purge {
+            self.stop_watcher(project);
+            self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
         let hash = print.as_ref().map(|print| print.hash.clone());
@@ -2771,8 +3451,16 @@ impl Graphs {
                 Outcome::Built(mut built) => {
                     built["print"] = json!(hash);
                     built["commit"] = json!(print.as_ref().and_then(|print| print.commit.clone()));
-                    built["tool"] = json!(tool.version);
-                    built["program"] = json!(tool.path.to_string_lossy());
+                    match backend {
+                        BuildBackend::Graphify(tool) => {
+                            built["tool"] = json!(tool.version);
+                            built["program"] = json!(tool.path.to_string_lossy());
+                        }
+                        BuildBackend::NativeIr => {
+                            built["tool"] = json!(crate::graph_ir::NATIVE_IR_TOOL);
+                            built["program"] = Value::Null;
+                        }
+                    }
                     setting["built"] = built;
                     if let Some(fields) = setting.as_object_mut() {
                         fields.remove("failure");
@@ -2889,7 +3577,7 @@ impl Graphs {
     /// graph: the last such build, else the project's own, which runs the
     /// same passes over nearly the same files.
     fn pace(&self, setting: &Value) -> Option<History> {
-        let version = json!(self.tool(false).and_then(|tool| tool.version));
+        let version = json!(self.resolve_backend(false).and_then(|b| b.tool_version()));
         [&setting["revision"], &setting["built"]]
             .into_iter()
             .find(|built| built["tool"] == version && built["seconds"].is_number())
@@ -3351,7 +4039,7 @@ impl Graphs {
         {
             return Ok(());
         }
-        let tool = self.tool(true).ok_or_else(|| {
+        let backend = self.resolve_backend(true).ok_or_else(|| {
             HarnessError::unavailable(
                 "Graphify is not installed. Install it to build the graph of that commit.",
             )
@@ -3396,8 +4084,15 @@ impl Graphs {
                     .revision_gate
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let outcome = me.grow(&name, &root, &tool, &commit, &prefix, &running);
-                me.finish(&name, &commit, &running, outcome, &tool, paired.as_deref());
+                let outcome = me.grow(&name, &root, &backend, &commit, &prefix, &running);
+                me.finish(
+                    &name,
+                    &commit,
+                    &running,
+                    outcome,
+                    &backend,
+                    paired.as_deref(),
+                );
             });
         match worker {
             Ok(handle) => {
@@ -3420,6 +4115,50 @@ impl Graphs {
             }
         }
     }
+    fn run_native_revision(
+        &self,
+        source: &Path,
+        out: &Path,
+        job: &Arc<Job>,
+    ) -> std::result::Result<Ran, Outcome> {
+        let stopped =
+            || job.cancel.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire);
+        if stopped() {
+            return Err(Outcome::Cancelled);
+        }
+        let db_path = out.join("graph_ir.sqlite3");
+        let ir = crate::graph_ir::GraphIrStore::open_at(&db_path)
+            .map_err(|err| Outcome::Failed(err.message))?;
+        let stats = ir
+            .sync_workspace(source)
+            .map_err(|err| Outcome::Failed(err.message))?;
+        if stopped() {
+            return Err(Outcome::Cancelled);
+        }
+        job.observe(
+            &format!(
+                "  AST extraction: {}/{} uncached files (100%)",
+                stats.files_scanned, stats.files_scanned
+            ),
+            false,
+        );
+        let fresh = out.join("graph.json");
+        let (nodes, edges) = ir
+            .write_live_graph_atomic(&fresh)
+            .map_err(|err| Outcome::Failed(err.message))?;
+        drop(ir);
+        let bytes = std::fs::metadata(&fresh).map_or(0, |m| m.len());
+        if stopped() {
+            return Err(Outcome::Cancelled);
+        }
+        Ok(Ran {
+            fresh,
+            elapsed: job.started().elapsed().as_secs_f64(),
+            read: None,
+            built: Some((nodes, edges)),
+            bytes,
+        })
+    }
     /// Builds the graph of one commit: its files are written out beside the
     /// project's graph, the tool reads them as it reads the project, and of
     /// them only what the graph is read with is kept: see `thin`.
@@ -3427,7 +4166,7 @@ impl Graphs {
         &self,
         project: &str,
         root: &Path,
-        tool: &Tool,
+        backend: &BuildBackend,
         commit: &str,
         prefix: &str,
         job: &Arc<Job>,
@@ -3475,7 +4214,10 @@ impl Graphs {
             }
             job.restart();
             job.stage.store(0, Ordering::Release);
-            let ran = match self.run(tool, &source, &out, job) {
+            let ran = match match backend {
+                BuildBackend::Graphify(tool) => self.run(tool, &source, &out, job),
+                BuildBackend::NativeIr => self.run_native_revision(&source, &out, job),
+            } {
                 Ok(ran) => ran,
                 Err(outcome) => return outcome,
             };
@@ -3518,11 +4260,13 @@ impl Graphs {
         commit: &str,
         job: &Arc<Job>,
         outcome: Outcome,
-        tool: &Tool,
+        backend: &BuildBackend,
         paired: Option<&str>,
     ) {
         let purge = job.purge.load(Ordering::Acquire);
         if purge {
+            self.stop_watcher(project);
+            self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
         match outcome {
@@ -3531,7 +4275,7 @@ impl Graphs {
                     setting["revision"] = json!({
                         "seconds": built["seconds"],
                         "tail": built["tail"],
-                        "tool": tool.version,
+                        "tool": backend.tool_version(),
                     });
                 });
                 self.prune(project, commit, paired);
@@ -3553,6 +4297,8 @@ impl Graphs {
         // The graph was deleted while this build was ending: the folder
         // that was left to it goes now.
         if !purge && job.purge.load(Ordering::Acquire) {
+            self.stop_watcher(project);
+            self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
     }
@@ -3586,16 +4332,18 @@ impl Graphs {
         }
         let setting = self.setting(project)?;
         let enabled = setting["enabled"] == true;
-        let tool = self.tool(false);
+        let backend = self.resolve_backend(false);
+        let tool = match &backend {
+            Some(BuildBackend::Graphify(tool)) => Some(tool.clone()),
+            _ => None,
+        };
         let job = lock(&self.jobs)?.get(project).cloned();
         let built = &setting["built"];
         let published = built.is_object() && live(&self.store.state, project).is_file();
+        let expected_version = backend.as_ref().and_then(BuildBackend::tool_version);
         let history = built["seconds"]
             .as_f64()
-            .filter(|_| {
-                published
-                    && built["tool"] == json!(tool.as_ref().and_then(|tool| tool.version.clone()))
-            })
+            .filter(|_| published && built["tool"] == json!(expected_version))
             .map(|seconds| History {
                 seconds,
                 tail: built["tail"].as_f64(),
@@ -3610,7 +4358,7 @@ impl Graphs {
             "off"
         } else if job.is_some() {
             "building"
-        } else if tool.is_none() {
+        } else if backend.is_none() {
             "missing"
         } else if setting["failure"].is_object() {
             "failed"
@@ -3627,39 +4375,72 @@ impl Graphs {
         } else {
             None
         };
-        let message = status_message(
+        let published_native =
+            published && built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        let message = status_message_for_tool(
             state,
             build.as_ref(),
             failure.as_ref().and_then(|value| value["message"].as_str()),
+            published_native.then_some(crate::graph_ir::NATIVE_IR_TOOL),
         );
-        Ok(json!({
+        let tool_json = match &backend {
+            Some(BuildBackend::Graphify(tool)) => json!({
+                "available": true,
+                "version": tool.version,
+                "path": tool.path.to_string_lossy().into_owned(),
+            }),
+            Some(BuildBackend::NativeIr) => json!({
+                "available": true,
+                "backend": crate::graph_ir::NATIVE_IR_TOOL,
+                "version": crate::graph_ir::NATIVE_IR_TOOL,
+                "path": Value::Null,
+            }),
+            None => json!({
+                "available": false,
+                "version": Value::Null,
+                "path": Value::Null,
+            }),
+        };
+        let ir_summary = published_native
+            .then(|| self.maps.ir_summary(&self.store.state, project))
+            .flatten();
+        let graph_json = if published {
+            let mut g = json!({
+                "commit": built["commit"],
+                "built_at": built["at"],
+                "nodes": built["nodes"],
+                "edges": built["edges"],
+                "bytes": built["bytes"],
+                "disk": built["disk"],
+                "seconds": built["seconds"],
+            });
+            if published_native {
+                g["backend"] = json!(crate::graph_ir::NATIVE_IR_TOOL);
+                if let Some(summary) = &ir_summary {
+                    g["ir_summary"] = serde_json::to_value(summary).unwrap_or(Value::Null);
+                }
+            }
+            g
+        } else {
+            Value::Null
+        };
+        let mut response = json!({
             "project_id": project,
             "enabled": enabled,
             // Whether launches are told about the graph: a choice of its own.
             "agents": setting["agents"] == true,
             "state": state,
             "message": message,
-            "tool": {
-                "available": tool.is_some(),
-                "version": tool.as_ref().and_then(|tool| tool.version.clone()),
-                "path": tool.as_ref().map(|tool| tool.path.to_string_lossy().into_owned()),
-            },
-            "graph": if published {
-                json!({
-                    "commit": built["commit"],
-                    "built_at": built["at"],
-                    "nodes": built["nodes"],
-                    "edges": built["edges"],
-                    "bytes": built["bytes"],
-                    "disk": built["disk"],
-                    "seconds": built["seconds"],
-                })
-            } else {
-                Value::Null
-            },
+            "tool": tool_json,
+            "graph": graph_json,
             "build": build,
             "failure": failure,
-        }))
+        });
+        if published_native {
+            response["backend"] = json!(crate::graph_ir::NATIVE_IR_TOOL);
+        }
+        let _ = tool;
+        Ok(response)
     }
     pub fn act(&self, project: &str, action: &str) -> Result<Value> {
         self.root(project)?;
@@ -3674,6 +4455,7 @@ impl Graphs {
                 self.refresh(project, Trigger::Enabled)?;
             }
             "disable" => {
+                self.stop_watcher(project);
                 self.edit(project, |setting| {
                     setting["enabled"] = json!(false);
                     setting["disabled_by_user"] = json!(true);
@@ -3701,7 +4483,7 @@ impl Graphs {
                         "Turn the code graph on before rebuilding it.",
                     ));
                 }
-                if self.tool(true).is_none() {
+                if self.resolve_backend(true).is_none() {
                     return Err(HarnessError::unavailable(
                         "Graphify is not installed. Install it, then rebuild.",
                     ));
@@ -3714,6 +4496,8 @@ impl Graphs {
                 self.refresh(project, Trigger::Manual)?;
             }
             "delete" => {
+                self.stop_watcher(project);
+                self.evict_ir_store(project);
                 self.edit(project, |setting| {
                     let target_root = setting.get("target_root").cloned();
                     let target_name = setting.get("target_name").cloned();
@@ -3768,9 +4552,22 @@ impl Graphs {
         }
         self.status(project, false)
     }
+    fn shutdown_watchers(&self) {
+        if let Ok(mut watchers) = self.watchers.lock() {
+            let owned = std::mem::take(&mut *watchers);
+            drop(watchers);
+            for mut watcher in owned.into_values() {
+                watcher.shutdown();
+            }
+        }
+    }
     /// Ends every build; the tool and its workers do not outlive the Harness.
     pub fn close(&self) {
         self.stopping.store(true, Ordering::Release);
+        self.shutdown_watchers();
+        if let Ok(mut stores) = self.ir_stores.lock() {
+            stores.clear();
+        }
         let workers = match self.workers.lock() {
             Ok(mut workers) => std::mem::take(&mut *workers),
             Err(_) => return,
@@ -6005,7 +6802,16 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
             kept.sort();
-            assert_eq!(kept, ["graph.json", "test-spans.json"]);
+            assert_eq!(kept, ["graph.json", "test-spans.json", "tree"]);
+            assert_eq!(
+                held(
+                    &folder(&fixture.store.state, &fixture.project)
+                        .join("revisions")
+                        .join(&feature)
+                        .join("tree")
+                ),
+                ["cart.php", "order.php", "price.php"]
+            );
             assert_eq!(fixture.said(&["status", "--porcelain=v1"]), before);
             assert_eq!(fixture.said(&["rev-parse", "HEAD"]), main);
             assert_eq!(fixture.said(&["symbolic-ref", "--short", "HEAD"]), "main");
@@ -6172,7 +6978,8 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .unwrap();
             assert_eq!(plain["tests"]["inside"], 1);
             assert!(arrows(&plain).is_empty());
-            // Of the files of the commit that much is kept, and no source.
+            // Of the files of the commit, Cargo manifests and preserved sources are kept,
+            // while non-source fixtures are stripped.
             let home = folder(&fixture.store.state, &fixture.project)
                 .join("revisions")
                 .join(&feature);
@@ -6183,13 +6990,11 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     "test-spans.json",
                     "tree/Cargo.toml",
                     "tree/app/Cargo.toml",
+                    "tree/app/src/main.rs",
+                    "tree/app/src/shared/util.rs",
                     "tree/core/Cargo.toml",
-                    "tree/core/src/lib.rs.modules"
+                    "tree/core/src/lib.rs",
                 ]
-            );
-            assert_eq!(
-                std::fs::read_to_string(home.join("tree/core/src/lib.rs.modules")).unwrap(),
-                "#[path = \"../../app/src/shared/util.rs\"\nmod util;"
             );
         }
         #[test]
@@ -7550,6 +8355,165 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     .any(|caller| caller["path"] == "src/caller.rs"),
                 "{service_impact}"
             );
+        }
+
+        #[test]
+        fn live_summary_written_on_build_matches_graph_metadata_and_counts() {
+            let fixture = Fixture::new();
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            fixture.write("a.php", "<?php class A {}\n");
+            fixture.write("b.php", "<?php class B {}\n");
+            fixture.write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"a","source_file":"a.php"},{"id":"b","source_file":"b.php"}],"links":[{"source":"a","target":"b","relation":"calls","source_file":"a.php"}]}"#,
+            );
+            let head = fixture.commit("init");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+
+            let live_dir = folder(&fixture.store.state, &fixture.project).join("live");
+            let graph_meta = std::fs::metadata(live_dir.join("graph.json")).unwrap();
+            let modified = graph_meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            let summary: Value =
+                serde_json::from_slice(&std::fs::read(live_dir.join("summary.json")).unwrap())
+                    .unwrap();
+            assert_eq!(summary["nodes"], 2, "{summary}");
+            assert_eq!(summary["edges"], 1, "{summary}");
+            assert_eq!(summary["commit"], &head[..12], "{summary}");
+            assert_eq!(summary["graph_len"], graph_meta.len(), "{summary}");
+            assert_eq!(summary["graph_mtime_secs"], modified.as_secs(), "{summary}");
+            assert_eq!(
+                summary["graph_mtime_nanos"],
+                modified.subsec_nanos(),
+                "{summary}"
+            );
+        }
+
+        #[test]
+        fn thin_with_limits_preserves_sources_respects_bounds_and_cleans_garbage() {
+            let dir = tempfile::tempdir().unwrap();
+            let tree = dir.path();
+            std::fs::create_dir_all(tree.join("node_modules/pkg")).unwrap();
+            std::fs::create_dir_all(tree.join(".git/objects")).unwrap();
+            std::fs::create_dir_all(tree.join("src")).unwrap();
+            std::fs::write(tree.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
+            std::fs::write(
+                tree.join("node_modules/pkg/index.js"),
+                "export const x = 1;",
+            )
+            .unwrap();
+            std::fs::write(tree.join(".git/objects/abc"), "raw").unwrap();
+            std::fs::write(tree.join("src/app.php"), "<?php\nclass App {}\n").unwrap();
+            std::fs::write(tree.join("src/bundle.min.js"), "function a(){}").unwrap();
+            std::fs::write(tree.join("src/image.png"), [0u8, 1, 2]).unwrap();
+            std::fs::write(
+                tree.join("src/big.rs"),
+                "#[path = \"other.rs\"]\nmod other;\n#[test]\nfn oversized_test() {}\n",
+            )
+            .unwrap();
+
+            // `src/big.rs` (69 bytes) exceeds max_file_bytes=40 so it falls back to `.rs.modules`
+            // while still capturing its #[test] spans; `src/app.php` (17 bytes) is preserved.
+            let spans = thin_with_limits(tree, 40, 200).unwrap();
+            assert!(spans.contains_key("src/big.rs"), "{spans:?}");
+            assert_eq!(
+                held(tree),
+                ["Cargo.toml", "src/app.php", "src/big.rs.modules",]
+            );
+            assert_eq!(
+                std::fs::read_to_string(tree.join("src/big.rs.modules")).unwrap(),
+                "#[path = \"other.rs\"\nmod other;"
+            );
+        }
+
+        #[test]
+        fn commit_graph_map_runs_access_analysis_and_emits_telemetry() {
+            let fixture = Fixture::new();
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            fixture.write(
+                "user.php",
+                "<?php\nclass User {\n    public int $count = 0;\n    public string $name = '';\n}\n",
+            );
+            fixture.write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"u","source_file":"user.php"}],"links":[]}"#,
+            );
+            let _main = fixture.commit("main");
+            fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+            fixture.git(&["switch", "-q", "-c", "feat-access"]);
+            fixture.write(
+                "ctrl.php",
+                "<?php\nrequire_once 'user.php';\nclass Ctrl {\n    public function run(): int {\n        $u = new User();\n        $u->name = 'ok';\n        return $u->count;\n    }\n}\n",
+            );
+            fixture.write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"u","label":"User","source_file":"user.php"},{"id":"u_cnt","label":"$count","source_file":"user.php","source_location":"L3"},{"id":"u_name","label":"$name","source_file":"user.php","source_location":"L4"},{"id":"c","label":"Ctrl","source_file":"ctrl.php"},{"id":"c_run","label":"run","source_file":"ctrl.php","source_location":"L4"}],"links":[{"source":"c_run","target":"u_name","relation":"uses","confidence":"EXTRACTED","source_file":"ctrl.php"},{"source":"c_run","target":"u_cnt","relation":"uses","confidence":"EXTRACTED","source_file":"ctrl.php"}]}"#,
+            );
+            let _feat = fixture.commit("feat");
+            fixture.git(&["switch", "-q", "main"]);
+
+            // Commit/PR graph map preserves sources in `revisions/<commit>/tree`, runs `Access`,
+            // and attaches non-breaking `"telemetry"`.
+            let target = Target::Named("feat-access".into());
+            fixture.graphs.choose(&fixture.project, &target).unwrap();
+            let first = fixture.mapped(&target);
+            assert_eq!(first["state"], "ready", "{first}");
+            assert!(first["access"].is_object(), "{first}");
+            assert!(
+                first["access"]["sources"].as_u64().unwrap_or(0) >= 1,
+                "{first}"
+            );
+            let edge_kinds = first["edges"][0]["kinds"].as_array().unwrap();
+            assert!(
+                edge_kinds
+                    .iter()
+                    .any(|k| k["kind"] == "writes" && k["by"] == "source"),
+                "{first}"
+            );
+            assert!(
+                edge_kinds
+                    .iter()
+                    .any(|k| k["kind"] == "reads" && k["by"] == "source"),
+                "{first}"
+            );
+            assert!(
+                first["telemetry"]["elapsed_ms"].as_u64().is_some(),
+                "{first}"
+            );
+            assert!(
+                first["telemetry"]["shown"].as_u64().unwrap_or(0) >= 2,
+                "{first}"
+            );
+            assert!(
+                first["telemetry"]["drawn"].as_u64().unwrap_or(0) >= 1,
+                "{first}"
+            );
+            assert_eq!(first["telemetry"]["truncated"], false, "{first}");
+
+            let second = fixture
+                .graphs
+                .map(&fixture.project, Some(&target), &Shown::default())
+                .unwrap();
+            assert_eq!(second["telemetry"]["cache_hit"], true, "{second}");
+
+            // Verify live graph map transitions cache_hit from false -> true.
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let live_first = fixture
+                .graphs
+                .map(&fixture.project, None, &Shown::default())
+                .unwrap();
+            assert_eq!(live_first["telemetry"]["cache_hit"], false, "{live_first}");
+            let live_second = fixture
+                .graphs
+                .map(&fixture.project, None, &Shown::default())
+                .unwrap();
+            assert_eq!(live_second["telemetry"]["cache_hit"], true, "{live_second}");
         }
     }
 }

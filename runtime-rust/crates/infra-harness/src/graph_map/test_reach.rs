@@ -1,8 +1,689 @@
 use super::*;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fs, io::Read};
 
 const LISTED: usize = 8;
 const VISITS: usize = 250_000;
+const MAX_COVERAGE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_COVERAGE_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_COVERAGE_FILES: usize = 4;
+const MAX_COVERAGE_TESTS_PER_FILE: usize = 64;
+const MAX_COVERAGE_FILE_ENTRIES: usize = 20_000;
+const MAX_LCOV_LINES: usize = 500_000;
+const MAX_XML_ATTRS: usize = 64;
+const MAX_XML_TAG_BYTES: usize = 16 * 1024;
+
+const COVERAGE_CANDIDATES_LCOV: &[&str] = &[
+    "lcov.info",
+    "coverage/lcov.info",
+    "coverage.info",
+    ".coverage/lcov.info",
+    "target/coverage/lcov.info",
+    "reports/lcov.info",
+    "build/logs/lcov.info",
+    "var/coverage/lcov.info",
+];
+
+const COVERAGE_CANDIDATES_CLOVER: &[&str] = &[
+    "clover.xml",
+    "coverage/clover.xml",
+    "build/logs/clover.xml",
+    "target/coverage/clover.xml",
+    "reports/clover.xml",
+    "coverage/coverage.xml",
+    "coverage.xml",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoverageFormat {
+    Lcov,
+    Clover,
+}
+
+impl CoverageFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lcov => "lcov",
+            Self::Clover => "clover",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileCoverage {
+    format: CoverageFormat,
+    covered_lines: usize,
+    total_lines: usize,
+    tests: Vec<String>,
+    test_hits: BTreeSet<String>,
+}
+
+impl FileCoverage {
+    fn rate(&self) -> f64 {
+        if self.total_lines == 0 {
+            0.0
+        } else {
+            ((self.covered_lines as f64 / self.total_lines as f64) * 10_000.0).round() / 10_000.0
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "format": self.format.as_str(),
+            "covered_lines": self.covered_lines,
+            "total_lines": self.total_lines,
+            "rate": self.rate(),
+            "tests": self.tests,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct CoverageReport {
+    files: BTreeMap<String, FileCoverage>,
+    all_tests: BTreeSet<String>,
+}
+
+fn normalize_root_text(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() && raw.starts_with('/') {
+        "/".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn is_absolute_coverage_path(norm: &str) -> bool {
+    norm.starts_with('/')
+        || norm.starts_with("//")
+        || (norm.len() >= 3
+            && norm.as_bytes()[0].is_ascii_alphabetic()
+            && norm.as_bytes()[1] == b':'
+            && norm.as_bytes()[2] == b'/')
+}
+
+fn strip_root_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if root.is_empty() {
+        return None;
+    }
+    if root == "/" {
+        return path.strip_prefix('/');
+    }
+    path.strip_prefix(root)
+        .and_then(|rest| rest.strip_prefix('/'))
+}
+
+/// Normalize a source file path from an LCOV or Clover report relative to `root`,
+/// rejecting absolute paths outside `root` and any `..` traversal components.
+fn normalize_coverage_path(raw: &str, root: &Path, canon_root: Option<&Path>) -> Option<String> {
+    let cleaned = raw.trim().replace('\\', "/");
+    if cleaned.is_empty() || cleaned.contains('\0') {
+        return None;
+    }
+    let rel = if is_absolute_coverage_path(&cleaned) {
+        let root_str = normalize_root_text(root);
+        let canon_str = canon_root.map(normalize_root_text);
+        strip_root_prefix(&cleaned, &root_str).or_else(|| {
+            canon_str
+                .as_deref()
+                .and_then(|canon| strip_root_prefix(&cleaned, canon))
+        })?
+    } else {
+        cleaned.as_str()
+    };
+
+    let mut parts = Vec::new();
+    for segment in rel.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => return None,
+            part => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+fn read_bounded_coverage_file(root: &Path, canon_root: &Path, rel: &str) -> Option<(String, u64)> {
+    if rel.is_empty()
+        || rel.starts_with('/')
+        || rel.contains('\\')
+        || rel.split('/').any(|part| part.is_empty() || part == "..")
+    {
+        return None;
+    }
+    let candidate = root.join(rel);
+    let canon_file = infra_core::fs::canonicalize(&candidate).ok()?;
+    if !canon_file.starts_with(canon_root) {
+        return None;
+    }
+    let meta = fs::symlink_metadata(&canon_file).ok()?;
+    if !meta.is_file() || meta.len() > MAX_COVERAGE_FILE_BYTES {
+        return None;
+    }
+    let file = fs::File::open(&canon_file).ok()?;
+    let mut buf = Vec::with_capacity(meta.len().min(MAX_COVERAGE_FILE_BYTES) as usize);
+    file.take(MAX_COVERAGE_FILE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > MAX_COVERAGE_FILE_BYTES {
+        return None;
+    }
+    let bytes_read = buf.len() as u64;
+    let text = String::from_utf8(buf).ok()?;
+    Some((text, bytes_read))
+}
+
+#[derive(Default)]
+struct LcovFileAccum {
+    instrumented: BTreeSet<u32>,
+    covered: BTreeSet<u32>,
+    max_lf: usize,
+    max_lh: usize,
+    saw_da: bool,
+    test_hits: BTreeSet<String>,
+}
+
+fn parse_lcov(text: &str, root: &Path, canon_root: Option<&Path>, report: &mut CoverageReport) {
+    let mut accum: BTreeMap<String, LcovFileAccum> = BTreeMap::new();
+    let mut current_tn: Option<String> = None;
+    let mut current_sf: Option<String> = None;
+    let mut rec_da: Vec<(u32, u64)> = Vec::new();
+    let mut rec_lf: Option<usize> = None;
+    let mut rec_lh: Option<usize> = None;
+
+    let flush = |accum: &mut BTreeMap<String, LcovFileAccum>,
+                 all_tests: &mut BTreeSet<String>,
+                 current_tn: &mut Option<String>,
+                 current_sf: &mut Option<String>,
+                 rec_da: &mut Vec<(u32, u64)>,
+                 rec_lf: &mut Option<usize>,
+                 rec_lh: &mut Option<usize>,
+                 reset_tn: bool| {
+        if let Some(rel) = current_sf.take()
+            && (accum.contains_key(&rel) || accum.len() < MAX_COVERAGE_FILE_ENTRIES)
+        {
+            let entry = accum.entry(rel).or_default();
+            let mut rec_hit = false;
+            if !rec_da.is_empty() {
+                entry.saw_da = true;
+                for &(line, hits) in rec_da.iter() {
+                    entry.instrumented.insert(line);
+                    if hits > 0 {
+                        entry.covered.insert(line);
+                        rec_hit = true;
+                    }
+                }
+            }
+            if let Some(lf) = *rec_lf {
+                entry.max_lf = entry.max_lf.max(lf);
+            }
+            if let Some(lh) = *rec_lh {
+                entry.max_lh = entry.max_lh.max(lh);
+                if rec_da.is_empty() && lh > 0 {
+                    rec_hit = true;
+                }
+            }
+            if let Some(tn) = current_tn.as_ref() {
+                all_tests.insert(tn.clone());
+                if rec_hit && entry.test_hits.len() < 512 {
+                    entry.test_hits.insert(tn.clone());
+                }
+            }
+        }
+        rec_da.clear();
+        *rec_lf = None;
+        *rec_lh = None;
+        if reset_tn {
+            *current_tn = None;
+        }
+    };
+
+    for (idx, raw_line) in text.lines().enumerate() {
+        if idx >= MAX_LCOV_LINES {
+            break;
+        }
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "end_of_record" {
+            flush(
+                &mut accum,
+                &mut report.all_tests,
+                &mut current_tn,
+                &mut current_sf,
+                &mut rec_da,
+                &mut rec_lf,
+                &mut rec_lh,
+                true,
+            );
+            continue;
+        }
+        let Some((tag, rest)) = line.split_once(':') else {
+            continue;
+        };
+        match tag {
+            "TN" => {
+                let tn = clip(rest.trim(), 160).to_owned();
+                if tn.is_empty() {
+                    current_tn = None;
+                } else {
+                    report.all_tests.insert(tn.clone());
+                    current_tn = Some(tn);
+                }
+            }
+            "SF" => {
+                if current_sf.is_some() {
+                    flush(
+                        &mut accum,
+                        &mut report.all_tests,
+                        &mut current_tn,
+                        &mut current_sf,
+                        &mut rec_da,
+                        &mut rec_lf,
+                        &mut rec_lh,
+                        false,
+                    );
+                }
+                current_sf = normalize_coverage_path(rest, root, canon_root);
+            }
+            "DA" if current_sf.is_some() => {
+                let mut parts = rest.split(',');
+                if let (Some(line_str), Some(hits_str)) = (parts.next(), parts.next())
+                    && let (Ok(line_no), Ok(hits)) = (
+                        line_str.trim().parse::<u32>(),
+                        hits_str.trim().parse::<u64>(),
+                    )
+                {
+                    rec_da.push((line_no, hits));
+                }
+            }
+            "LF" if current_sf.is_some() => {
+                if let Ok(lf) = rest.trim().parse::<usize>() {
+                    rec_lf = Some(lf);
+                }
+            }
+            "LH" if current_sf.is_some() => {
+                if let Ok(lh) = rest.trim().parse::<usize>() {
+                    rec_lh = Some(lh);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    flush(
+        &mut accum,
+        &mut report.all_tests,
+        &mut current_tn,
+        &mut current_sf,
+        &mut rec_da,
+        &mut rec_lf,
+        &mut rec_lh,
+        true,
+    );
+
+    for (path, acc) in accum {
+        let total_lines = if acc.saw_da {
+            acc.instrumented.len().max(acc.max_lf)
+        } else {
+            acc.max_lf
+        };
+        let covered_lines = if acc.saw_da {
+            acc.covered.len().min(total_lines)
+        } else {
+            acc.max_lh.min(total_lines)
+        };
+        let tests = acc
+            .test_hits
+            .iter()
+            .take(MAX_COVERAGE_TESTS_PER_FILE)
+            .cloned()
+            .collect::<Vec<_>>();
+        match report.files.get_mut(&path) {
+            Some(existing) if existing.format == CoverageFormat::Lcov => {
+                existing.total_lines = existing.total_lines.max(total_lines);
+                existing.covered_lines = existing
+                    .covered_lines
+                    .max(covered_lines)
+                    .min(existing.total_lines);
+                for tn in acc.test_hits {
+                    if existing.test_hits.len() < 512 {
+                        existing.test_hits.insert(tn);
+                    }
+                }
+                existing.tests = existing
+                    .test_hits
+                    .iter()
+                    .take(MAX_COVERAGE_TESTS_PER_FILE)
+                    .cloned()
+                    .collect();
+            }
+            _ => {
+                report.files.insert(
+                    path,
+                    FileCoverage {
+                        format: CoverageFormat::Lcov,
+                        covered_lines,
+                        total_lines,
+                        tests,
+                        test_hits: acc.test_hits,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn unescape_xml(raw: &str) -> String {
+    if !raw.contains('&') {
+        return raw.to_owned();
+    }
+    raw.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+fn find_tag_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    let limit = (start + MAX_XML_TAG_BYTES).min(bytes.len());
+    let mut idx = start;
+    while idx < limit {
+        let b = bytes[idx];
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b'>' => return Some(idx),
+            None => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn parse_xml_attrs(raw: &str) -> Vec<(String, String)> {
+    let bytes = raw.as_bytes();
+    let mut attrs = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() && attrs.len() < MAX_XML_ATTRS {
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+        let key_start = idx;
+        while idx < bytes.len()
+            && !bytes[idx].is_ascii_whitespace()
+            && bytes[idx] != b'='
+            && bytes[idx] != b'/'
+        {
+            idx += 1;
+        }
+        if idx == key_start {
+            idx += 1;
+            continue;
+        }
+        let key = raw[key_start..idx].to_ascii_lowercase();
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() || bytes[idx] != b'=' {
+            continue;
+        }
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+        let quote = bytes[idx];
+        if quote != b'"' && quote != b'\'' {
+            continue;
+        }
+        idx += 1;
+        let val_start = idx;
+        while idx < bytes.len() && bytes[idx] != quote {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+        let val = unescape_xml(&raw[val_start..idx]);
+        attrs.push((key, val));
+        idx += 1;
+    }
+    attrs
+}
+
+fn xml_attr<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+#[derive(Default)]
+struct ActiveCloverFile {
+    rel_path: Option<String>,
+    depth: usize,
+    stmt_lines: BTreeMap<u32, u64>,
+    all_lines: BTreeMap<u32, u64>,
+    metrics_statements: Option<usize>,
+    metrics_covered: Option<usize>,
+}
+
+fn finalize_clover_file(active: ActiveCloverFile, report: &mut CoverageReport) {
+    let Some(rel_path) = active.rel_path else {
+        return;
+    };
+    if report.files.contains_key(&rel_path) || report.files.len() >= MAX_COVERAGE_FILE_ENTRIES {
+        return;
+    }
+    let (total_lines, covered_lines) = match (active.metrics_statements, active.metrics_covered) {
+        (Some(total), Some(covered)) if total > 0 || active.all_lines.is_empty() => {
+            (total, covered.min(total))
+        }
+        _ if !active.stmt_lines.is_empty() => {
+            let total = active.stmt_lines.len();
+            let covered = active.stmt_lines.values().filter(|c| **c > 0).count();
+            (total, covered)
+        }
+        _ => {
+            let total = active.all_lines.len();
+            let covered = active.all_lines.values().filter(|c| **c > 0).count();
+            (total, covered)
+        }
+    };
+    report.files.insert(
+        rel_path,
+        FileCoverage {
+            format: CoverageFormat::Clover,
+            covered_lines,
+            total_lines,
+            tests: Vec::new(),
+            test_hits: BTreeSet::new(),
+        },
+    );
+}
+
+fn parse_clover(text: &str, root: &Path, canon_root: Option<&Path>, report: &mut CoverageReport) {
+    let bytes = text.as_bytes();
+    let mut pos = 0usize;
+    let mut active: Option<ActiveCloverFile> = None;
+
+    while pos < bytes.len() {
+        let Some(rel_lt) = text[pos..].find('<') else {
+            break;
+        };
+        let lt = pos + rel_lt;
+        if text[lt..].starts_with("<!--") {
+            pos = text[lt + 4..]
+                .find("-->")
+                .map_or(bytes.len(), |end| lt + 4 + end + 3);
+            continue;
+        }
+        if text[lt..].starts_with("<![CDATA[") {
+            pos = text[lt + 9..]
+                .find("]]>")
+                .map_or(bytes.len(), |end| lt + 9 + end + 3);
+            continue;
+        }
+        if text[lt..].starts_with("<?") {
+            pos = text[lt + 2..]
+                .find("?>")
+                .map_or(bytes.len(), |end| lt + 2 + end + 2);
+            continue;
+        }
+        let Some(gt) = find_tag_end(bytes, lt + 1) else {
+            break;
+        };
+        pos = gt + 1;
+        let inner = text[lt + 1..gt].trim();
+        if inner.is_empty() || inner.starts_with('!') {
+            continue;
+        }
+        let closing = inner.starts_with('/');
+        let self_closing = !closing && inner.ends_with('/');
+        let body = inner.trim_start_matches('/').trim_end_matches('/').trim();
+        let name_end = body
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(body.len());
+        let tag_name = body[..name_end].to_ascii_lowercase();
+        let attrs_str = &body[name_end..];
+
+        if closing {
+            if let Some(mut cur) = active.take() {
+                if cur.depth == 0 && tag_name == "file" {
+                    finalize_clover_file(cur, report);
+                } else {
+                    cur.depth = cur.depth.saturating_sub(1);
+                    active = Some(cur);
+                }
+            }
+            continue;
+        }
+
+        match tag_name.as_str() {
+            "file" if active.is_none() => {
+                let attrs = parse_xml_attrs(attrs_str);
+                let raw_path = xml_attr(&attrs, "path")
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| xml_attr(&attrs, "name"));
+                let rel_path =
+                    raw_path.and_then(|raw| normalize_coverage_path(raw, root, canon_root));
+                if !self_closing {
+                    active = Some(ActiveCloverFile {
+                        rel_path,
+                        ..Default::default()
+                    });
+                }
+            }
+            "line" => {
+                if let Some(cur) = active.as_mut() {
+                    let attrs = parse_xml_attrs(attrs_str);
+                    if let (Some(num_str), Some(count_str)) =
+                        (xml_attr(&attrs, "num"), xml_attr(&attrs, "count"))
+                        && let (Ok(num), Ok(count)) = (
+                            num_str.trim().parse::<u32>(),
+                            count_str.trim().parse::<u64>(),
+                        )
+                    {
+                        cur.all_lines
+                            .entry(num)
+                            .and_modify(|existing| *existing = (*existing).max(count))
+                            .or_insert(count);
+                        let line_type = xml_attr(&attrs, "type").unwrap_or("stmt");
+                        if line_type.eq_ignore_ascii_case("stmt") {
+                            cur.stmt_lines
+                                .entry(num)
+                                .and_modify(|existing| *existing = (*existing).max(count))
+                                .or_insert(count);
+                        }
+                    }
+                    if !self_closing {
+                        cur.depth += 1;
+                    }
+                }
+            }
+            "metrics" => {
+                if let Some(cur) = active.as_mut() {
+                    if cur.depth == 0 {
+                        let attrs = parse_xml_attrs(attrs_str);
+                        let stmts = xml_attr(&attrs, "statements")
+                            .and_then(|v| v.trim().parse::<usize>().ok());
+                        let cov_stmts = xml_attr(&attrs, "coveredstatements")
+                            .and_then(|v| v.trim().parse::<usize>().ok());
+                        let (total, covered) = match (stmts, cov_stmts) {
+                            (Some(s), Some(c)) => (Some(s), Some(c)),
+                            _ => (
+                                xml_attr(&attrs, "elements")
+                                    .and_then(|v| v.trim().parse::<usize>().ok()),
+                                xml_attr(&attrs, "coveredelements")
+                                    .and_then(|v| v.trim().parse::<usize>().ok()),
+                            ),
+                        };
+                        if let (Some(total), Some(covered)) = (total, covered) {
+                            cur.metrics_statements = Some(total);
+                            cur.metrics_covered = Some(covered);
+                        }
+                    }
+                    if !self_closing {
+                        cur.depth += 1;
+                    }
+                }
+            }
+            _ => {
+                if let Some(cur) = active.as_mut()
+                    && !self_closing
+                {
+                    cur.depth += 1;
+                }
+            }
+        }
+    }
+}
+
+fn discover_workspace_coverage(root: &Path) -> Option<CoverageReport> {
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    let canon_root = infra_core::fs::canonicalize(root).ok()?;
+    let mut report = CoverageReport::default();
+    let mut files_loaded = 0usize;
+    let mut bytes_loaded = 0u64;
+
+    for rel in COVERAGE_CANDIDATES_LCOV {
+        if files_loaded >= MAX_COVERAGE_FILES || bytes_loaded >= MAX_COVERAGE_TOTAL_BYTES {
+            break;
+        }
+        if let Some((text, size)) = read_bounded_coverage_file(root, &canon_root, rel) {
+            parse_lcov(&text, root, Some(&canon_root), &mut report);
+            files_loaded += 1;
+            bytes_loaded += size;
+        }
+    }
+
+    for rel in COVERAGE_CANDIDATES_CLOVER {
+        if files_loaded >= MAX_COVERAGE_FILES || bytes_loaded >= MAX_COVERAGE_TOTAL_BYTES {
+            break;
+        }
+        if let Some((text, size)) = read_bounded_coverage_file(root, &canon_root, rel) {
+            parse_clover(&text, root, Some(&canon_root), &mut report);
+            files_loaded += 1;
+            bytes_loaded += size;
+        }
+    }
+
+    (!report.files.is_empty() || !report.all_tests.is_empty()).then_some(report)
+}
 
 struct Candidate {
     steps: u32,
@@ -46,6 +727,33 @@ fn walk(
     true
 }
 
+fn is_candidate_test_file(path: &str, test: bool) -> bool {
+    test && !path.split('/').any(|part| {
+        matches!(
+            part,
+            "fixtures" | "__fixtures__" | "__mocks__" | "testdata" | "conftest.py"
+        ) || part.ends_with("_fixture.rs")
+            || part.ends_with("_fixtures.rs")
+    })
+}
+
+fn match_coverage_test_file(
+    files: &[String],
+    candidates: &[bool],
+    tn: &str,
+    root: &Path,
+    canon_root: Option<&Path>,
+) -> Option<usize> {
+    let norm = normalize_coverage_path(tn, root, canon_root);
+    files
+        .iter()
+        .enumerate()
+        .find(|(id, path)| {
+            candidates[*id] && (norm.as_deref() == Some(path.as_str()) || names_test(tn, path))
+        })
+        .map(|(id, _)| id)
+}
+
 impl Index {
     pub(crate) fn tests_reaching_changes(
         &self,
@@ -85,17 +793,21 @@ impl Index {
             .files
             .iter()
             .zip(&test_files)
-            .map(|(path, test)| {
-                *test
-                    && !path.split('/').any(|part| {
-                        matches!(
-                            part,
-                            "fixtures" | "__fixtures__" | "__mocks__" | "testdata" | "conftest.py"
-                        ) || part.ends_with("_fixture.rs")
-                            || part.ends_with("_fixtures.rs")
-                    })
-            })
+            .map(|(path, test)| is_candidate_test_file(path, *test))
             .collect();
+        let coverage = discover_workspace_coverage(&self.root);
+        let canon_root = coverage
+            .as_ref()
+            .and_then(|_| infra_core::fs::canonicalize(&self.root).ok());
+        let match_coverage_test = |tn: &str| -> Option<usize> {
+            match_coverage_test_file(
+                &self.files,
+                &candidate_files,
+                tn,
+                &self.root,
+                canon_root.as_deref(),
+            )
+        };
         let test_symbols = self
             .test_symbols
             .get_or_init(|| self.test_symbols(&test_files, &|path| text_at(&self.root, path)));
@@ -111,8 +823,13 @@ impl Index {
         let names = Names::new(self, &[], &|_| None);
         let mut budget = VISITS;
         let rows: Vec<_> = paths.into_iter().map(|(path, status)| {
+            let cov = coverage.as_ref().and_then(|report| report.files.get(path.as_str()));
             let Some(file) = ids.get(path.as_str()).copied().filter(|_| *status != 'D') else {
-                return json!({"path": path, "state": if *status == 'D' { "deleted" } else { "missing" }});
+                let mut row = json!({"path": path, "state": if *status == 'D' { "deleted" } else { "missing" }});
+                if *status != 'D' && !is_test(path) && let Some(cov) = cov {
+                    row["coverage"] = cov.to_json();
+                }
+                return row;
             };
             if test_files[file as usize] {
                 return json!({"path": path, "state": "test_file"});
@@ -142,16 +859,94 @@ impl Index {
             found.sort_by(|a, b| a.steps.cmp(&b.steps)
                 .then(self.files[a.file as usize].cmp(&self.files[b.file as usize]))
                 .then(a.symbol.cmp(&b.symbol)));
-            let tests = found.iter().take(LISTED).map(|test| {
-                let file = &self.files[test.file as usize];
-                let (from, to, label) = test.symbol.map_or_else(
-                    || (file.clone(), path.clone(), file.clone()),
-                    |(at, goal)| (names.key(at), names.key(goal), self.shown(at)),
-                );
-                json!({"path": from, "to": to, "file": file, "name": label, "steps": test.steps})
-            }).collect::<Vec<_>>();
-            json!({"path": path, "state": if files_done && symbols_done { "ready" } else { "partial" },
-                "tests": tests, "total": found.len()})
+            struct ReachEntry {
+                steps: u32,
+                verified: bool,
+                file: String,
+                path: String,
+                name: String,
+                value: Value,
+            }
+            let mut merged = found
+                .iter()
+                .map(|test| {
+                    let test_file = &self.files[test.file as usize];
+                    let (from, to, label) = test.symbol.map_or_else(
+                        || (test_file.clone(), path.clone(), test_file.clone()),
+                        |(at, goal)| (names.key(at), names.key(goal), self.shown(at)),
+                    );
+                    ReachEntry {
+                        steps: test.steps,
+                        verified: false,
+                        file: test_file.clone(),
+                        path: from.clone(),
+                        name: label.clone(),
+                        value: json!({
+                            "path": from,
+                            "to": to,
+                            "file": test_file,
+                            "name": label,
+                            "steps": test.steps,
+                        }),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(cov) = cov {
+                for tn in &cov.test_hits {
+                    let matched_file = match_coverage_test(tn).map(|id| self.files[id].as_str());
+                    let existing = merged.iter_mut().find(|entry| {
+                        matched_file.is_some_and(|tf| entry.file == tf)
+                            || entry.file == tn.as_str()
+                            || entry.name == tn.as_str()
+                    });
+                    if let Some(entry) = existing {
+                        entry.verified = true;
+                        entry.value["coverage_verified"] = json!(true);
+                    } else {
+                        let file_label = matched_file.unwrap_or(tn.as_str()).to_owned();
+                        merged.push(ReachEntry {
+                            steps: 1,
+                            verified: true,
+                            file: file_label.clone(),
+                            path: file_label.clone(),
+                            name: tn.clone(),
+                            value: json!({
+                                "path": file_label,
+                                "to": path,
+                                "file": file_label,
+                                "name": tn,
+                                "steps": 1,
+                                "source": "coverage",
+                                "coverage_verified": true,
+                            }),
+                        });
+                    }
+                }
+                merged.sort_by(|a, b| {
+                    a.steps
+                        .cmp(&b.steps)
+                        .then(b.verified.cmp(&a.verified))
+                        .then(a.file.cmp(&b.file))
+                        .then(a.path.cmp(&b.path))
+                        .then(a.name.cmp(&b.name))
+                });
+            }
+            let total = merged.len();
+            let tests = merged
+                .into_iter()
+                .take(LISTED)
+                .map(|entry| entry.value)
+                .collect::<Vec<_>>();
+            let mut row = json!({
+                "path": path,
+                "state": if files_done && symbols_done { "ready" } else { "partial" },
+                "tests": tests,
+                "total": total,
+            });
+            if let Some(cov) = cov {
+                row["coverage"] = cov.to_json();
+            }
+            row
         }).collect();
         view["test_reach"] = Value::Array(rows);
     }
@@ -159,6 +954,17 @@ impl Index {
 
 /// How many of the changed files that failing tests reach are listed.
 const RANKED: usize = 12;
+
+fn has_word_match(haystack: &str, needle: &str) -> bool {
+    let word = |letter: char| letter.is_alphanumeric() || letter == '_';
+    haystack.match_indices(needle).any(|(at, _)| {
+        !haystack[..at].chars().next_back().is_some_and(word)
+            && !haystack[at + needle.len()..]
+                .chars()
+                .next()
+                .is_some_and(word)
+    })
+}
 
 /// Whether what a person named, or pasted from the output of a test run,
 /// names a test file: by its path, or by its name without the extension
@@ -169,14 +975,18 @@ fn names_test(told: &str, path: &str) -> bool {
     }
     let stem = name(path);
     let stem = stem.split('.').next().unwrap_or(stem);
-    if stem.len() < 4 {
+    stem.len() >= 4 && has_word_match(told, stem)
+}
+
+fn names_tn_token(told: &str, tn: &str) -> bool {
+    let told = told.trim();
+    if told.is_empty() || tn.is_empty() {
         return false;
     }
-    let word = |letter: char| letter.is_alphanumeric() || letter == '_';
-    told.match_indices(stem).any(|(at, _)| {
-        !told[..at].chars().next_back().is_some_and(word)
-            && !told[at + stem.len()..].chars().next().is_some_and(word)
-    })
+    if told == tn || told.contains(tn) {
+        return true;
+    }
+    told.len() >= 4 && has_word_match(tn, told)
 }
 
 impl Index {
@@ -193,8 +1003,10 @@ impl Index {
     /// and 0 where none does. Of files as suspect, the one nearer to the
     /// failing tests comes first.
     ///
-    /// This reads no test run: a link is not a call that happened, so the
-    /// order says where to look first, not what broke.
+    /// When an LCOV or Clover workspace coverage report exists under
+    /// `self.root`, observed coverage metrics and LCOV `TN:` per-test hits
+    /// enrich each suspect row and break ties / surface dynamically covered
+    /// files cleanly without altering static behavior when absent.
     pub(crate) fn suspects(
         &self,
         view: &mut Value,
@@ -208,25 +1020,44 @@ impl Index {
         let candidates = self
             .files
             .iter()
-            .map(|path| {
-                is_test(path)
-                    && !path.split('/').any(|part| {
-                        matches!(
-                            part,
-                            "fixtures" | "__fixtures__" | "__mocks__" | "testdata" | "conftest.py"
-                        ) || part.ends_with("_fixture.rs")
-                            || part.ends_with("_fixtures.rs")
-                    })
-            })
+            .map(|path| is_candidate_test_file(path, is_test(path)))
             .collect::<Vec<_>>();
+        let coverage = discover_workspace_coverage(&self.root);
+        let canon_root = coverage
+            .as_ref()
+            .and_then(|_| infra_core::fs::canonicalize(&self.root).ok());
+        let match_tn_file = |tn: &str| -> Option<usize> {
+            match_coverage_test_file(
+                &self.files,
+                &candidates,
+                tn,
+                &self.root,
+                canon_root.as_deref(),
+            )
+        };
+        let mut virtual_tns = BTreeSet::new();
+        if let Some(cov) = &coverage {
+            for tn in &cov.all_tests {
+                if match_tn_file(tn).is_none() {
+                    virtual_tns.insert(tn.clone());
+                }
+            }
+        }
         // The tests that are named, and what was named that is no test.
         let mut failed = vec![false; self.files.len()];
+        let mut failed_virtual_tns = BTreeSet::new();
         let mut unmatched = Vec::new();
         for told in failing {
             let mut any = false;
             for (file, path) in self.files.iter().enumerate() {
                 if candidates[file] && names_test(told, path) {
                     failed[file] = true;
+                    any = true;
+                }
+            }
+            for tn in &virtual_tns {
+                if names_tn_token(told, tn) {
+                    failed_virtual_tns.insert(tn.clone());
                     any = true;
                 }
             }
@@ -237,10 +1068,23 @@ impl Index {
         let failing_files = (0..self.files.len())
             .filter(|file| failed[*file])
             .collect::<Vec<_>>();
-        let total = failing_files.len();
+        let total = failing_files.len() + failed_virtual_tns.len();
         let net = Net::new(self, false, certain);
         let mut budget = VISITS;
         let mut complete = true;
+        struct SuspectRow<'a> {
+            path: &'a str,
+            status: char,
+            score: f64,
+            fail: usize,
+            pass: usize,
+            nearest: u32,
+            far: u64,
+            cov: Option<&'a FileCoverage>,
+            cov_failing_hit: bool,
+            cov_any_hit: bool,
+            bfs_fail: usize,
+        }
         let mut rows = Vec::new();
         let mut clear = 0usize;
         for (path, status) in changed {
@@ -251,46 +1095,107 @@ impl Index {
                 continue;
             }
             // Which tests reach it, and from how near the failing ones do.
-            let (mut fail, mut pass, mut nearest, mut far) = (0usize, 0usize, u32::MAX, 0u64);
+            let mut bfs_failing_files = BTreeSet::new();
+            let mut bfs_passing_files = BTreeSet::new();
+            let (mut nearest, mut far) = (u32::MAX, 0u64);
             complete &= walk(&net, vec![file], &mut budget, |at, steps, _| {
                 if !candidates[at as usize] {
                     return;
                 }
                 if failed[at as usize] {
-                    fail += 1;
-                    nearest = nearest.min(steps);
-                    far += u64::from(steps);
+                    if bfs_failing_files.insert(at as usize) {
+                        nearest = nearest.min(steps);
+                        far += u64::from(steps);
+                    }
                 } else {
-                    pass += 1;
+                    bfs_passing_files.insert(at as usize);
                 }
             });
+            let bfs_fail = bfs_failing_files.len();
+            let cov = coverage
+                .as_ref()
+                .and_then(|report| report.files.get(path.as_str()));
+            let mut cov_failing_hit = false;
+            let mut failing_virtual_hits = BTreeSet::new();
+            let mut passing_virtual_hits = BTreeSet::new();
+            if let Some(cov) = cov {
+                for tn in &cov.test_hits {
+                    if let Some(tf) = match_tn_file(tn) {
+                        if failed[tf] {
+                            cov_failing_hit = true;
+                            if bfs_failing_files.insert(tf) {
+                                nearest = nearest.min(1);
+                                far += 1;
+                            }
+                        } else if !bfs_failing_files.contains(&tf) {
+                            bfs_passing_files.insert(tf);
+                        }
+                    } else if failed_virtual_tns.contains(tn) {
+                        cov_failing_hit = true;
+                        if failing_virtual_hits.insert(tn.as_str()) {
+                            nearest = nearest.min(1);
+                            far += 1;
+                        }
+                    } else {
+                        passing_virtual_hits.insert(tn.as_str());
+                    }
+                }
+            }
+            let fail = bfs_failing_files.len() + failing_virtual_hits.len();
+            let pass = bfs_passing_files.len() + passing_virtual_hits.len();
             if fail == 0 {
                 clear += 1;
                 continue;
             }
+            let cov_any_hit = cov.is_some_and(|c| c.covered_lines > 0);
             let score = fail as f64 / ((total * (fail + pass)) as f64).sqrt();
-            rows.push((path.as_str(), *status, score, fail, pass, nearest, far));
+            rows.push(SuspectRow {
+                path: path.as_str(),
+                status: *status,
+                score,
+                fail,
+                pass,
+                nearest,
+                far,
+                cov,
+                cov_failing_hit,
+                cov_any_hit,
+                bfs_fail,
+            });
         }
         rows.sort_by(|a, b| {
-            b.2.total_cmp(&a.2)
-                .then((a.6 * b.3 as u64).cmp(&(b.6 * a.3 as u64)))
-                .then(a.0.cmp(b.0))
+            b.score
+                .total_cmp(&a.score)
+                .then(b.cov_failing_hit.cmp(&a.cov_failing_hit))
+                .then(b.cov_any_hit.cmp(&a.cov_any_hit))
+                .then((a.far * b.fail as u64).cmp(&(b.far * a.fail as u64)))
+                .then(a.path.cmp(b.path))
         });
         let ranked = rows.len();
         let listed = rows
             .iter()
             .take(RANKED)
             .enumerate()
-            .map(|(at, (path, status, score, fail, pass, nearest, _))| {
-                json!({
-                    "path": path,
-                    "status": status.to_string(),
+            .map(|(at, row)| {
+                let mut item = json!({
+                    "path": row.path,
+                    "status": row.status.to_string(),
                     "rank": at + 1,
-                    "score": (score * 100.0 + 1e-6).round() / 100.0,
-                    "failing": fail,
-                    "passing": pass,
-                    "nearest": nearest,
-                })
+                    "score": (row.score * 100.0 + 1e-6).round() / 100.0,
+                    "failing": row.fail,
+                    "passing": row.pass,
+                    "nearest": row.nearest,
+                });
+                if let Some(cov) = row.cov {
+                    item["coverage"] = cov.to_json();
+                }
+                if row.cov_failing_hit {
+                    item["coverage_verified"] = json!(true);
+                    if row.bfs_fail == 0 {
+                        item["source"] = json!("coverage");
+                    }
+                }
+                item
             })
             .collect::<Vec<_>>();
         // The boxes of the picture carry their rank, and a folder the best
@@ -321,13 +1226,17 @@ impl Index {
                 }
             }
         }
+        let mut failing_list = failing_files
+            .iter()
+            .map(|file| self.files[*file].as_str())
+            .collect::<Vec<_>>();
+        for tn in &failed_virtual_tns {
+            failing_list.push(tn.as_str());
+        }
         view["suspects"] = json!({
-            "failing": failing_files
-                .iter()
-                .map(|file| self.files[*file].as_str())
-                .collect::<Vec<_>>(),
+            "failing": failing_list,
             "unmatched": unmatched,
-            "tests": candidates.iter().filter(|test| **test).count(),
+            "tests": candidates.iter().filter(|test| **test).count() + virtual_tns.len(),
             "rows": listed,
             "more": ranked.saturating_sub(RANKED),
             "clear": clear,
@@ -559,5 +1468,354 @@ mod tests {
             "tests/test_cart.py"
         ));
         assert!(names_test("cart_test", "src/cart_test.go"));
+    }
+
+    #[test]
+    fn parses_lcov_with_multiple_tn_tests_and_normalizes_paths() {
+        let root = Path::new("/work/shop");
+        let lcov = "\
+TN:CartTest::testTotal
+SF:/work/shop/src/cart.php
+DA:10,2
+DA:11,0
+LF:2
+LH:1
+end_of_record
+TN:CheckoutTest::testPay
+SF:./src\\cart.php
+DA:10,0
+DA:11,3
+LF:2
+LH:1
+end_of_record
+TN:ZeroHitTest::testUnused
+SF:src/cart.php
+DA:10,0
+DA:11,0
+LF:2
+LH:0
+end_of_record
+TN:SummaryOnlyTest::testTax
+SF:src/tax.php
+LF:10
+LH:7
+end_of_record
+";
+        let mut report = CoverageReport::default();
+        parse_lcov(lcov, root, None, &mut report);
+
+        let cart = report.files.get("src/cart.php").expect("src/cart.php");
+        assert_eq!(cart.format, CoverageFormat::Lcov);
+        assert_eq!(cart.covered_lines, 2);
+        assert_eq!(cart.total_lines, 2);
+        assert_eq!(cart.rate(), 1.0);
+        assert_eq!(
+            cart.tests,
+            vec![
+                "CartTest::testTotal".to_owned(),
+                "CheckoutTest::testPay".to_owned()
+            ]
+        );
+
+        let tax = report.files.get("src/tax.php").expect("src/tax.php");
+        assert_eq!(tax.covered_lines, 7);
+        assert_eq!(tax.total_lines, 10);
+        assert_eq!(tax.rate(), 0.7);
+        assert_eq!(tax.tests, vec!["SummaryOnlyTest::testTax".to_owned()]);
+        assert!(report.all_tests.contains("ZeroHitTest::testUnused"));
+    }
+
+    #[test]
+    fn parses_clover_xml_variants_and_prefers_file_metrics_over_nested_class_metrics() {
+        let root = Path::new("/work/shop");
+        let clover = r#"<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1700000000">
+  <!-- PHPUnit clover with nested class metrics -->
+  <project timestamp="1700000000">
+    <package name="App">
+      <file name="/work/shop/src/Order.php">
+        <class name="App\Order">
+          <metrics statements="2" coveredstatements="1"/>
+        </class>
+        <line num="10" type="method" count="1"/>
+        <line num="12" type="stmt" count="2"/>
+        <line num="13" type="stmt" count="2"/>
+        <line num="14" type="stmt" count="0"/>
+        <metrics statements="8" coveredstatements="6"/>
+      </file>
+      <file name="Client.ts" path="/work/shop/web/Client.ts">
+        <line num="1" type="stmt" count="3"/>
+        <line num="2" type="stmt" count="0"/>
+        <line num="3" type="stmt" count="1"/>
+      </file>
+      <file name="Empty.php"/>
+    </package>
+  </project>
+</coverage>"#;
+        let mut report = CoverageReport::default();
+        parse_clover(clover, root, None, &mut report);
+
+        let order = report.files.get("src/Order.php").expect("src/Order.php");
+        assert_eq!(order.format, CoverageFormat::Clover);
+        assert_eq!(order.covered_lines, 6);
+        assert_eq!(order.total_lines, 8);
+        assert_eq!(order.rate(), 0.75);
+        assert!(order.tests.is_empty());
+
+        let client = report.files.get("web/Client.ts").expect("web/Client.ts");
+        assert_eq!(client.format, CoverageFormat::Clover);
+        assert_eq!(client.covered_lines, 2);
+        assert_eq!(client.total_lines, 3);
+        assert!(!report.files.contains_key("Empty.php"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_outside_root_and_oversized_or_symlinked_coverage_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::create_dir_all(ws.join("coverage")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let secret = outside.join("secret.info");
+        fs::write(&secret, "TN:Evil\nSF:src/a.php\nDA:1,1\nend_of_record\n").unwrap();
+
+        // Direct path normalization rejections.
+        let canon = infra_core::fs::canonicalize(&ws).unwrap();
+        assert_eq!(
+            normalize_coverage_path("../../etc/passwd", &ws, Some(&canon)),
+            None
+        );
+        assert_eq!(
+            normalize_coverage_path("/etc/passwd", &ws, Some(&canon)),
+            None
+        );
+        assert_eq!(
+            normalize_coverage_path("src/../../outside.php", &ws, Some(&canon)),
+            None
+        );
+        assert_eq!(
+            normalize_coverage_path(
+                &outside.join("secret.php").to_string_lossy(),
+                &ws,
+                Some(&canon)
+            ),
+            None
+        );
+        assert_eq!(
+            normalize_coverage_path(&ws.join("src/a.php").to_string_lossy(), &ws, Some(&canon)),
+            Some("src/a.php".to_owned())
+        );
+        assert_eq!(
+            normalize_coverage_path(
+                &canon.join("src/a.php").to_string_lossy(),
+                &ws,
+                Some(&canon)
+            ),
+            Some("src/a.php".to_owned())
+        );
+
+        // Symlink outside root must be rejected.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, ws.join("lcov.info")).unwrap();
+            std::os::unix::fs::symlink(&outside, ws.join("build")).unwrap();
+            assert!(discover_workspace_coverage(&ws).is_none());
+            fs::remove_file(ws.join("lcov.info")).unwrap();
+        }
+
+        // Oversized (> 8 MiB) file must be skipped safely.
+        let big = vec![b'#'; (MAX_COVERAGE_FILE_BYTES + 1024) as usize];
+        fs::write(ws.join("coverage/lcov.info"), big).unwrap();
+        assert!(discover_workspace_coverage(&ws).is_none());
+        fs::remove_file(ws.join("coverage/lcov.info")).unwrap();
+
+        // Internal traversal entries inside an otherwise valid report are dropped.
+        let report_text = format!(
+            "TN:Bad\nSF:../../etc/passwd\nDA:1,1\nend_of_record\nTN:BadAbs\nSF:/other/repo/src/a.php\nDA:1,1\nend_of_record\nTN:Good\nSF:{}/src/a.php\nDA:1,1\nend_of_record\n",
+            ws.display()
+        );
+        fs::write(ws.join("lcov.info"), report_text).unwrap();
+        let discovered = discover_workspace_coverage(&ws).expect("good file kept");
+        assert_eq!(discovered.files.len(), 1);
+        assert!(discovered.files.contains_key("src/a.php"));
+    }
+
+    #[test]
+    fn tests_reaching_changes_and_suspects_integrate_lcov_and_clover_coverage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("coverage")).unwrap();
+        fs::create_dir_all(root.join("build/logs")).unwrap();
+
+        // Static graph:
+        // - tests/CartTest.php calls src/cart.php
+        // - tests/PriceTest.php calls src/price.php
+        // - tests/DynamicTest.php has NO static edge to src/dynamic.php
+        // - tests/CartTest.php also statically reaches src/cold.php (1 hop) and src/hot.php (2 hops)
+        let node = |id: &str, file: &str| json!({"id": id, "label": id, "source_file": file});
+        let edge = |from: &str, to: &str| json!({"source": from, "target": to, "relation": "calls", "confidence": "EXTRACTED"});
+        let graph = json!({
+            "nodes": [
+                node("cart", "src/cart.php"),
+                node("price", "src/price.php"),
+                node("dynamic", "src/dynamic.php"),
+                node("cold", "src/cold.php"),
+                node("hot", "src/hot.php"),
+                node("hot_bridge", "src/hot_bridge.php"),
+                node("carttest", "tests/CartTest.php"),
+                node("pricetest", "tests/PriceTest.php"),
+                node("dynamictest", "tests/DynamicTest.php"),
+            ],
+            "links": [
+                edge("carttest", "cart"),
+                edge("pricetest", "price"),
+                edge("carttest", "cold"),
+                edge("carttest", "hot_bridge"),
+                edge("hot_bridge", "hot"),
+            ]
+        });
+        let index = Index::read(graph.to_string().as_bytes(), root).unwrap();
+
+        // LCOV:
+        // - CartTest::testTotal hits src/cart.php (confirming BFS) AND src/hot.php (confirming BFS) AND src/dynamic.php (missed by BFS!)
+        // - CartTest::testTotal did NOT cover src/cold.php (0 hits)
+        // - ExternalIntegrationTest hits src/dynamic.php (virtual TN not in graph)
+        let lcov = format!(
+            "\
+TN:CartTest::testTotal
+SF:{}/src/cart.php
+DA:1,1
+DA:2,1
+LF:2
+LH:2
+end_of_record
+TN:CartTest::testTotal
+SF:src/dynamic.php
+DA:5,2
+DA:6,0
+LF:2
+LH:1
+end_of_record
+TN:ExternalIntegrationTest
+SF:src/dynamic.php
+DA:6,1
+LF:2
+LH:1
+end_of_record
+TN:CartTest::testTotal
+SF:src/hot.php
+DA:3,4
+LF:1
+LH:1
+end_of_record
+TN:CartTest::testTotal
+SF:src/cold.php
+DA:1,0
+DA:2,0
+LF:2
+LH:0
+end_of_record
+",
+            root.display()
+        );
+        fs::write(root.join("coverage/lcov.info"), lcov).unwrap();
+        // Clover covers src/price.php (LCOV takes precedence on files it already parsed).
+        let clover = r#"<?xml version="1.0" encoding="UTF-8"?>
+<coverage>
+  <project>
+    <file name="src/price.php">
+      <metrics statements="4" coveredstatements="3"/>
+    </file>
+  </project>
+</coverage>"#;
+        fs::write(root.join("build/logs/clover.xml"), clover).unwrap();
+
+        let changed = [
+            ("src/cart.php", 'M'),
+            ("src/dynamic.php", 'M'),
+            ("src/price.php", 'M'),
+            ("src/cold.php", 'M'),
+            ("src/hot.php", 'M'),
+        ]
+        .map(|(p, s)| (p.to_owned(), s));
+
+        let mut view = json!({"mode": "changes", "scope": "src"});
+        index.tests_reaching_changes(&mut view, &changed, "", false);
+        let reach = view["test_reach"].as_array().unwrap();
+
+        let cart_row = reach.iter().find(|r| r["path"] == "src/cart.php").unwrap();
+        assert_eq!(cart_row["coverage"]["format"], "lcov");
+        assert_eq!(cart_row["coverage"]["covered_lines"], 2);
+        assert_eq!(cart_row["coverage"]["total_lines"], 2);
+        assert_eq!(cart_row["coverage"]["rate"], 1.0);
+        assert_eq!(
+            cart_row["coverage"]["tests"],
+            json!(["CartTest::testTotal"])
+        );
+        assert_eq!(cart_row["tests"][0]["path"], "tests/CartTest.php");
+        assert_eq!(cart_row["tests"][0]["coverage_verified"], true);
+
+        let dyn_row = reach
+            .iter()
+            .find(|r| r["path"] == "src/dynamic.php")
+            .unwrap();
+        assert_eq!(dyn_row["coverage"]["covered_lines"], 2);
+        assert_eq!(dyn_row["coverage"]["total_lines"], 2);
+        assert_eq!(dyn_row["total"], 2);
+        let dyn_tests = dyn_row["tests"].as_array().unwrap();
+        assert!(dyn_tests.iter().any(|t| {
+            t["path"] == "tests/CartTest.php"
+                && t["source"] == "coverage"
+                && t["coverage_verified"] == true
+        }));
+        assert!(dyn_tests.iter().any(|t| {
+            t["path"] == "ExternalIntegrationTest"
+                && t["source"] == "coverage"
+                && t["coverage_verified"] == true
+        }));
+
+        let price_row = reach.iter().find(|r| r["path"] == "src/price.php").unwrap();
+        assert_eq!(price_row["coverage"]["format"], "clover");
+        assert_eq!(price_row["coverage"]["covered_lines"], 3);
+        assert_eq!(price_row["coverage"]["total_lines"], 4);
+        assert_eq!(price_row["coverage"]["rate"], 0.75);
+
+        // Suspects with CartTest failing:
+        // - src/cart.php and src/hot.php have coverage_verified + passing=0 + score=1.0
+        // - src/dynamic.php is surfaced via LCOV TN:CartTest::testTotal (passing=1 from ExternalIntegrationTest -> score 0.71)
+        // - src/cold.php has 0 covered lines, so src/cart.php & src/hot.php rank ahead of src/cold.php despite cold.php being 1 static hop!
+        let mut s_view = json!({
+            "mode": "changes",
+            "nodes": [
+                {"path": "src/cart.php"},
+                {"path": "src/dynamic.php"},
+                {"path": "src/cold.php"},
+                {"path": "src/hot.php"},
+                {"path": "src/price.php"},
+            ]
+        });
+        index.suspects(&mut s_view, &changed, &["CartTest".to_owned()], false);
+        let s_rows = s_view["suspects"]["rows"].as_array().unwrap();
+        let rank_of = |p: &str| {
+            s_rows
+                .iter()
+                .find(|r| r["path"] == p)
+                .unwrap_or_else(|| panic!("missing suspect {p}: {s_view}"))
+        };
+        assert_eq!(rank_of("src/cart.php")["coverage_verified"], true);
+        assert_eq!(rank_of("src/cart.php")["score"], 1.0);
+        assert_eq!(rank_of("src/cart.php")["failing"], 1);
+        assert_eq!(rank_of("src/hot.php")["coverage_verified"], true);
+        assert!(
+            rank_of("src/hot.php")["rank"].as_u64().unwrap()
+                < rank_of("src/cold.php")["rank"].as_u64().unwrap()
+        );
+        assert_eq!(rank_of("src/dynamic.php")["source"], "coverage");
+        assert_eq!(rank_of("src/dynamic.php")["coverage_verified"], true);
+        assert_eq!(rank_of("src/dynamic.php")["failing"], 1);
+        assert_eq!(rank_of("src/dynamic.php")["passing"], 1);
+        assert!(rank_of("src/dynamic.php")["coverage"].is_object());
     }
 }

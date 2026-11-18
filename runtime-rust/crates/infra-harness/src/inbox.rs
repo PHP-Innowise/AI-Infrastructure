@@ -36,6 +36,7 @@ const FROZEN: &[&str] = &[
     "project_context",
     "budgets",
     "budget_revision",
+    "permissions",
 ];
 
 pub(crate) fn initialize(db: &Connection) -> Result<()> {
@@ -130,6 +131,9 @@ fn eligibility(session: &Value) -> std::result::Result<(), &'static str> {
 pub(crate) fn live_eligibility_reason(session: &Value) -> std::result::Result<(), &'static str> {
     if session["status"] != "running" {
         return Err("not_running");
+    }
+    if session["permissions"] == "manual" {
+        return Err("manual_permissions");
     }
     eligibility(session)
 }
@@ -663,6 +667,19 @@ mod tests {
             Err("unsupported_provider_or_mode")
         );
         assert_eq!(
+            changed("permissions", json!("manual")),
+            Err("manual_permissions")
+        );
+        // Idle manual sessions still report not_running rather than manual_permissions.
+        let mut idle_manual = session.clone();
+        idle_manual["status"] = json!("completed");
+        idle_manual["permissions"] = json!("manual");
+        assert_eq!(live_eligibility_reason(&idle_manual), Err("not_running"));
+        // Explicit user inbox authority still admits manual sessions and freezes permissions.
+        let mut live_manual = session.clone();
+        live_manual["permissions"] = json!("manual");
+        assert_eq!(authority(&live_manual).unwrap()["permissions"], "manual");
+        assert_eq!(
             changed("native_session_id", Value::Null),
             Err("missing_native_session_id")
         );
@@ -927,11 +944,11 @@ mod tests {
 
     #[test]
     fn changed_scope_or_binding_blocks_instead_of_assigning() {
-        for changed_scope in [false, true] {
+        for changed_field in ["scope", "model", "permissions"] {
             let (_dir, store, frozen) = fixture();
             accept(&store, &frozen, "request");
             source_completed(&store);
-            if !changed_scope {
+            if changed_field == "model" {
                 store
                     .connection()
                     .unwrap()
@@ -940,13 +957,23 @@ mod tests {
                         [],
                     )
                     .unwrap();
+            } else if changed_field == "permissions" {
+                store
+                    .connection()
+                    .unwrap()
+                    .execute("UPDATE sessions SET permissions='manual' WHERE id='s'", [])
+                    .unwrap();
             }
             assert!(
                 store
                     .inbox_claim(
                         "s",
                         "request",
-                        if changed_scope { "scope-2" } else { "scope-1" },
+                        if changed_field == "scope" {
+                            "scope-2"
+                        } else {
+                            "scope-1"
+                        },
                         &frozen
                     )
                     .unwrap()

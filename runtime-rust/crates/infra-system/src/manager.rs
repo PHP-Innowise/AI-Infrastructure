@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-pub const RUNNER_EVENTS: &[&str] = &["status", "text", "error", "result"];
+pub const RUNNER_EVENTS: &[&str] = &["status", "text", "error", "result", "permission"];
 pub fn active(value: &Value) -> bool {
     matches!(
         string(&value["status"]),
@@ -232,6 +232,40 @@ impl SystemManager {
         } else if session.is_some() && !is_active {
             result["status"] = "interrupted".into();
         }
+        let valid_perm = |value: Option<&Value>| -> Option<Value> {
+            value.and_then(|v| {
+                v.as_str()
+                    .and_then(infra_host::permission::PermissionMode::parse)
+                    .map(|mode| object!(mode.as_str()))
+            })
+        };
+        let state_perm = loaded_state
+            .as_ref()
+            .and_then(|state| valid_perm(state.get("permissions")));
+        let record_perm = valid_perm(record.get("permissions"));
+        let session_perm = session
+            .as_ref()
+            .and_then(|session| valid_perm(session.get("permissions")));
+        result["permissions"] = if is_active
+            && let Some(rec_val) = record.get("permissions")
+            && session
+                .as_ref()
+                .and_then(|s| s.get("permissions"))
+                .is_some_and(|sess_val| sess_val == rec_val)
+            && (rec_val.is_null() || valid_perm(Some(rec_val)).is_some())
+        {
+            rec_val.clone()
+        } else if is_active {
+            record_perm
+                .or(session_perm)
+                .or(state_perm)
+                .unwrap_or(Value::Null)
+        } else {
+            state_perm
+                .or(record_perm)
+                .or(session_perm)
+                .unwrap_or(Value::Null)
+        };
         if detail {
             result["plan"] = read_json(&directory, "approved-plan.json", MAX_BYTES)?;
             result["events"] = if let Some(session) = &session {
@@ -239,6 +273,15 @@ impl SystemManager {
                     self.state
                         .host
                         .events(string(&session["id"]), RUNNER_EVENTS)?
+                )
+            } else {
+                object!([])
+            };
+            result["waiting_permissions"] = if let Some(session) = &session {
+                object!(
+                    self.state
+                        .host
+                        .waiting_permissions(string(&session["id"]))?
                 )
             } else {
                 object!([])
@@ -356,7 +399,7 @@ impl SystemManager {
         let directory = self.state.state.join("ai-system").join(&rid);
         create_private(&directory)?;
         create_new(&directory, "approved-plan.json", &plan)?;
-        let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"plan_status":plan["status"],"session_id":null,"provider":null,"mode":null,"timeout":null});
+        let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"plan_status":plan["status"],"session_id":null,"provider":null,"mode":null,"timeout":null,"permissions":null});
         self.save(&record)?;
         self.view(Some(editor), &record, true)
     }
@@ -373,6 +416,7 @@ impl SystemManager {
                 "accept_source_changes",
                 "accept_unrun_checks",
                 "tell_agents_graph",
+                "permissions",
             ],
         )?;
         let mut record = self.record(rid)?;
@@ -391,6 +435,7 @@ impl SystemManager {
                 "provider",
                 "access",
                 "tell_agents_graph",
+                "permissions",
             ],
             "resume" => vec![
                 "action",
@@ -399,6 +444,7 @@ impl SystemManager {
                 "accept_source_changes",
                 "accept_unrun_checks",
                 "tell_agents_graph",
+                "permissions",
             ],
             "cancel" | "archive" => vec!["action", "revision"],
             _ => return Err(fail("Invalid system run action")),
@@ -450,7 +496,7 @@ impl SystemManager {
         )?;
         let directory = self.state.state.join("ai-system").join(rid);
         let plan = read_json(&directory, "approved-plan.json", MAX_BYTES)?;
-        let (provider, mode, timeout, access) = if action == "execute" {
+        let (provider, mode, timeout, access, permissions) = if action == "execute" {
             if !record["session_id"].is_null() {
                 return Err(fail(
                     "This plan was already launched. Use explicit recovery",
@@ -479,7 +525,8 @@ impl SystemManager {
                     "Selected provider cannot grant requested service folders",
                 ));
             }
-            (provider, mode, timeout, access)
+            let permissions = validate_permissions(data.get("permissions"))?;
+            (provider, mode, timeout, access, permissions)
         } else {
             if record["session_id"].is_null() || view["status"] == "completed" {
                 return Err(fail("Only unfinished launches can be resumed"));
@@ -495,6 +542,11 @@ impl SystemManager {
             }) {
                 return Err(fail("Choose an unfinished dispatch to retry"));
             }
+            let permissions = if let Some(raw) = data.get("permissions") {
+                validate_permissions(Some(raw))?
+            } else {
+                validate_permissions(view.get("permissions"))?
+            };
             let provider = string(&view["provider"]).to_string();
             if directory.join("execution/run.json").exists() {
                 let state =
@@ -525,6 +577,7 @@ impl SystemManager {
                     .as_u64()
                     .ok_or_else(|| fail("Invalid saved timeout"))?,
                 string(&view["access"]).to_string(),
+                permissions,
             )
         };
         let executable = self
@@ -537,7 +590,7 @@ impl SystemManager {
             .and_then(Value::as_bool)
             .or_else(|| record.get("tell_agents_graph").and_then(Value::as_bool));
         let nonce = id32();
-        let mut request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true,"accept_unrun_checks":data["accept_unrun_checks"]==true});
+        let mut request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true,"accept_unrun_checks":data["accept_unrun_checks"]==true,"permissions":permissions});
         if let Some(tell) = tell_agents_graph {
             request["tell_agents_graph"] = object!(tell);
             record["tell_agents_graph"] = object!(tell);
@@ -548,11 +601,12 @@ impl SystemManager {
         record["mode"] = mode.clone().into();
         record["timeout"] = timeout.into();
         record["access"] = access.into();
+        record["permissions"] = permissions.clone();
         record["revision"] = (record["revision"].as_u64().unwrap_or(0) + 1).into();
         self.save(&record)?;
         let internal = object!({"run_id":rid,"nonce":nonce});
         let prompt = launch_title(&record, &plan, data["retry_step"].as_str());
-        let session=self.state.host.launch(&object!({"project_id":record["project_id"],"provider":provider,"workflow":"native","mode":if mode=="edit"{"edit"}else{"plan"},"prompt":prompt,"project_context":false,"agents_enabled":false,"budgets":{"seconds":null,"tokens":null,"usd":null}}),Some(&internal),None)?;
+        let session=self.state.host.launch(&object!({"project_id":record["project_id"],"provider":provider,"workflow":"native","mode":if mode=="edit"{"edit"}else{"plan"},"prompt":prompt,"project_context":false,"agents_enabled":false,"permissions":permissions,"budgets":{"seconds":null,"tokens":null,"usd":null}}),Some(&internal),None)?;
         let sid = string(&session["id"]);
         if sid.is_empty() {
             return Err(fail("Queue returned no session identity"));
@@ -647,6 +701,15 @@ pub fn integer(value: Option<&Value>, default: u64, min: u64, max: u64) -> Resul
             .as_u64()
             .filter(|value| *value >= min && *value <= max)
             .ok_or_else(|| fail("Integer option outside bounds")),
+    }
+}
+fn validate_permissions(value: Option<&Value>) -> Result<Value> {
+    match value {
+        None | Some(Value::Null) => Ok(Value::Null),
+        Some(Value::String(name)) => infra_host::permission::PermissionMode::parse(name)
+            .map(|mode| object!(mode.as_str()))
+            .ok_or_else(|| fail("Choose Auto, Manual or Bypass permissions.")),
+        Some(_) => Err(fail("Choose Auto, Manual or Bypass permissions.")),
     }
 }
 fn bounded_selections(value: Option<&Value>) -> Result<Vec<String>> {

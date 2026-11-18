@@ -2,7 +2,7 @@ use crate::{
     api, classify, dom, model as m,
     run::files_map::{
         self, count_words, focus_element_no_scroll, normalize_view, offered_filters, splice_draft,
-        tidy_path, truth, FileCardAction, FileTouchEntry, FilesSurfaceOptions,
+        tidy_path, truth, FileCardAction, FileTouchEntry,
     },
 };
 use serde_json::{json, Value as V};
@@ -2760,6 +2760,209 @@ fn render_agent_card(root: &str, a: &V, is_selected: bool) -> web_sys::Element {
     card
 }
 
+fn folder_restore_key(folder_name: &str) -> String {
+    format!("folder:{folder_name}")
+}
+
+fn build_folder_render_items(
+    folders: &[(String, Vec<FileTouchEntry>)],
+    show_agent_badge: bool,
+) -> Vec<V> {
+    folders
+        .iter()
+        .map(|(folder_name, entries)| {
+            let files = entries
+                .iter()
+                .map(|file| {
+                    let agent_note = if show_agent_badge && !file.agents.is_empty() {
+                        format!(" · {}", files_map::format_agent_badge(&file.agents))
+                    } else {
+                        String::new()
+                    };
+                    json!({
+                        "key": file.key(),
+                        "path": file.path,
+                        "reads": file.reads,
+                        "edits": file.edits,
+                        "outside": file.outside,
+                        "agent_note": agent_note,
+                        "timeline_agent": file.timeline_agent,
+                        "event_id": file.event_id,
+                        "service_id": file.service_id,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "key": folder_restore_key(folder_name),
+                "folder_name": folder_name,
+                "files": files,
+            })
+        })
+        .collect()
+}
+
+fn build_folder_details_element(root: &str, item: &V) -> web_sys::Element {
+    let folder_name = m::text(item, "folder_name");
+    let files = m::array(&item["files"]);
+    let restore_key = m::text(item, "key");
+    let details = dom::el("details", "run-tree-folder", "");
+    let _ = details.set_attribute("open", "");
+    let _ = details.set_attribute("data-restore-key", &restore_key);
+    let summary = dom::el("summary", "", &format!("{folder_name} · {}", files.len()));
+    let _ = summary.set_attribute("data-focus-key", &format!("summary:{restore_key}"));
+    dom::add(&details, &summary);
+    for file in &files {
+        let row = dom::el("div", "run-row-actions", "");
+        let path = m::text(file, "path");
+        let reads = file["reads"].as_u64().unwrap_or(0);
+        let edits = file["edits"].as_u64().unwrap_or(0);
+        let agent_note = m::text(file, "agent_note");
+        let label = format!(
+            "{path} · {} · {}{agent_note}",
+            count_words(reads, "read"),
+            count_words(edits, "edit")
+        );
+        let reveal = dom::button(
+            &label,
+            "activity-reveal",
+            json!({
+                "root": root,
+                "agent": file["timeline_agent"],
+                "event_id": file["event_id"],
+                "path": path,
+                "service": file["service_id"],
+            }),
+        );
+        let _ = reveal.set_attribute("data-focus-key", &format!("list:{}", m::text(file, "key")));
+        dom::add(&row, &reveal);
+        if !m::yes(&file["outside"]) && !path.is_empty() {
+            let svc = file["service_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("__system__")
+                .to_owned();
+            let map_btn = dom::button(
+                "Map",
+                "inspect-system-file-graph",
+                json!({"service": svc, "path": path}),
+            );
+            map_btn.set_class_name("button compact");
+            let _ = map_btn.set_attribute("data-service", &svc);
+            let _ = map_btn.set_attribute("data-path", &path);
+            let _ = map_btn.set_attribute("aria-label", &format!("Show {path} on dependency map"));
+            dom::add(&row, &map_btn);
+        }
+        dom::add(&details, &row);
+    }
+    details
+}
+
+fn command_restore_keys(commands: &[V]) -> Vec<String> {
+    let mut seen = BTreeMap::<String, usize>::new();
+    commands
+        .iter()
+        .enumerate()
+        .map(|(index, cmd)| {
+            let call = m::text(cmd, "call");
+            let base = if !call.is_empty() {
+                format!("cmd:{call}")
+            } else {
+                let agent = m::text(cmd, "agent_key");
+                let command = m::text(cmd, "command");
+                if !command.is_empty() {
+                    format!("cmd:{agent}:{command}")
+                } else {
+                    format!("cmd:idx:{index}")
+                }
+            };
+            let count = seen.entry(base.clone()).or_insert(0);
+            let key = if *count == 0 {
+                base
+            } else {
+                format!("{base}#{}", *count)
+            };
+            *count += 1;
+            key
+        })
+        .collect()
+}
+
+fn build_command_render_items(snap: &InspectorSnapshot) -> (String, usize, usize, Vec<V>) {
+    let checks_count = snap
+        .commands
+        .iter()
+        .filter(|c| m::yes(&c["class"]["check"]))
+        .count();
+    let failed_count = snap
+        .commands
+        .iter()
+        .filter(|c| !m::yes(&c["running"]) && !m::yes(&c["ok"]) && !m::yes(&c["not_run"]))
+        .count();
+    let resolved_cmd_filter = match snap.cmd_filter.as_str() {
+        "checks" if checks_count > 0 => "checks",
+        "failed" if failed_count > 0 => "failed",
+        _ => "all",
+    }
+    .to_owned();
+    let keys = command_restore_keys(&snap.commands);
+    let mut items = Vec::new();
+    for (cmd, key) in snap.commands.iter().zip(keys) {
+        let keep = match resolved_cmd_filter.as_str() {
+            "checks" => m::yes(&cmd["class"]["check"]),
+            "failed" => !m::yes(&cmd["running"]) && !m::yes(&cmd["ok"]) && !m::yes(&cmd["not_run"]),
+            _ => true,
+        };
+        if keep {
+            items.push(json!({
+                "key": key,
+                "selected": snap.selected,
+                "cmd": cmd,
+            }));
+        }
+    }
+    (resolved_cmd_filter, checks_count, failed_count, items)
+}
+
+fn build_command_details_element(item: &V) -> web_sys::Element {
+    let key = m::text(item, "key");
+    let selected = m::text(item, "selected");
+    let cmd = &item["cmd"];
+    let class = &cmd["class"];
+    let glyph = if m::yes(&cmd["running"]) {
+        "●"
+    } else if m::yes(&cmd["not_run"]) || !class["masked"].is_null() {
+        "?"
+    } else if m::yes(&cmd["ok"]) {
+        "✓"
+    } else {
+        "✗"
+    };
+    let prefix = if selected == "all" {
+        let ag = m::text(cmd, "agent");
+        if !ag.is_empty() {
+            format!("{} · ", files_map::short_agent_name(&ag))
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let family = class["family"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|f| format!(" [{f}]"))
+        .unwrap_or_default();
+    let block = dom::details(
+        &format!("{glyph} {prefix}{}{family}", m::text(cmd, "command")),
+        &serde_json::to_string_pretty(cmd).unwrap_or_default(),
+    );
+    let _ = block.set_attribute("data-restore-key", &key);
+    if let Some(summary) = block.first_element_child() {
+        let _ = summary.set_attribute("data-focus-key", &format!("summary:{key}"));
+    }
+    block
+}
+
 fn render_files_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::Element {
     let pane = dom::el("div", "run-pane", "");
     let _ = pane.set_attribute("role", "tabpanel");
@@ -2768,15 +2971,15 @@ fn render_files_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::Eleme
     let list_mode = snap.files_view == "list";
 
     let head = dom::el("div", "run-files-head", "");
-    dom::add(
-        &head,
-        &dom::el(
-            "p",
-            "run-files-summary",
-            &files_map::files_summary(&snap.files),
-        ),
+    let summary = dom::el(
+        "p",
+        "run-files-summary",
+        &files_map::files_summary(&snap.files),
     );
+    let _ = summary.set_attribute("id", &format!("{root}-files-summary"));
+    dom::add(&head, &summary);
     let seg = dom::el("div", "run-seg", "");
+    let _ = seg.set_attribute("id", &format!("{root}-files-seg"));
     let _ = seg.set_attribute("role", "group");
     let _ = seg.set_attribute("aria-label", "File view");
     for (view_id, label, pressed) in [("map", "Map", !list_mode), ("list", "List", list_mode)] {
@@ -2841,63 +3044,13 @@ fn render_files_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::Eleme
     } else {
         let folders = files_map::group_list_folders(&snap.files, group_by_service);
         let tree = dom::el("div", "run-tree", "");
+        let _ = tree.set_attribute("id", &format!("{root}-tree"));
         let _ = tree.set_attribute("role", "tree");
         let _ = tree.set_attribute("aria-label", "Files named in tool calls");
-        for (folder_name, entries) in &folders {
-            let details = dom::el("details", "run-tree-folder", "");
-            let _ = details.set_attribute("open", "");
-            dom::add(
-                &details,
-                &dom::el("summary", "", &format!("{folder_name} · {}", entries.len())),
-            );
-            for file in entries {
-                let row = dom::el("div", "run-row-actions", "");
-                let agent_note = if show_agent_badge && !file.agents.is_empty() {
-                    format!(" · {}", files_map::format_agent_badge(&file.agents))
-                } else {
-                    String::new()
-                };
-                let label = format!(
-                    "{} · {} · {}{agent_note}",
-                    file.path,
-                    count_words(file.reads, "read"),
-                    count_words(file.edits, "edit")
-                );
-                let reveal = dom::button(
-                    &label,
-                    "activity-reveal",
-                    json!({
-                        "root": root,
-                        "agent": file.timeline_agent,
-                        "event_id": file.event_id,
-                        "path": file.path,
-                        "service": file.service_id,
-                    }),
-                );
-                let _ = reveal.set_attribute("data-focus-key", &format!("list:{}", file.key()));
-                dom::add(&row, &reveal);
-                if !file.outside && !file.path.is_empty() {
-                    let svc = file
-                        .service_id
-                        .clone()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "__system__".into());
-                    let map_btn = dom::button(
-                        "Map",
-                        "inspect-system-file-graph",
-                        json!({"service": svc, "path": file.path}),
-                    );
-                    map_btn.set_class_name("button compact");
-                    let _ = map_btn.set_attribute("data-service", &svc);
-                    let _ = map_btn.set_attribute("data-path", &file.path);
-                    let _ = map_btn.set_attribute(
-                        "aria-label",
-                        &format!("Show {} on dependency map", file.path),
-                    );
-                    dom::add(&row, &map_btn);
-                }
-                dom::add(&details, &row);
-            }
+        for item in build_folder_render_items(&folders, show_agent_badge) {
+            let details = build_folder_details_element(root, &item);
+            let _ = details.set_attribute("data-key", &m::text(&item, "key"));
+            let _ = details.set_attribute("data-signature", &item.to_string());
             dom::add(&tree, &details);
         }
         dom::add(&pane, &tree);
@@ -2929,41 +3082,19 @@ fn render_plan_pane_dom(snap: &InspectorSnapshot) -> web_sys::Element {
     pane
 }
 
-fn render_commands_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::Element {
-    let pane = dom::el("div", "run-pane", "");
-    let _ = pane.set_attribute("role", "tabpanel");
-    if snap.commands.is_empty() {
-        dom::add(
-            &pane,
-            &dom::el(
-                "p",
-                "run-empty",
-                "No shell commands or checks recorded yet.",
-            ),
-        );
-        return pane;
+fn populate_command_filters(
+    filters: &web_sys::Element,
+    root: &str,
+    resolved_cmd_filter: &str,
+    checks_count: usize,
+    failed_count: usize,
+) {
+    let sig = json!([resolved_cmd_filter, checks_count, failed_count]).to_string();
+    if filters.get_attribute("data-signature").as_deref() == Some(sig.as_str()) {
+        return;
     }
-
-    let checks_count = snap
-        .commands
-        .iter()
-        .filter(|c| m::yes(&c["class"]["check"]))
-        .count();
-    let failed_count = snap
-        .commands
-        .iter()
-        .filter(|c| !m::yes(&c["running"]) && !m::yes(&c["ok"]) && !m::yes(&c["not_run"]))
-        .count();
-
-    let resolved_cmd_filter = match snap.cmd_filter.as_str() {
-        "checks" if checks_count > 0 => "checks",
-        "failed" if failed_count > 0 => "failed",
-        _ => "all",
-    };
-
-    let filters = dom::el("div", "run-filters", "");
-    let _ = filters.set_attribute("role", "group");
-    let _ = filters.set_attribute("aria-label", "Filter commands");
+    let _ = filters.set_attribute("data-signature", &sig);
+    filters.set_text_content(None);
     for (fid, label) in [
         ("all", Some("All".to_owned())),
         (
@@ -2984,127 +3115,97 @@ fn render_commands_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::El
         btn.set_class_name("run-filter");
         let _ = btn.set_attribute("aria-pressed", truth(fid == resolved_cmd_filter));
         let _ = btn.set_attribute("data-focus-key", &format!("cmdfilter:{fid}"));
-        dom::add(&filters, &btn);
+        dom::add(filters, &btn);
     }
-    dom::add(&pane, &filters);
-
-    for cmd in &snap.commands {
-        let keep = match resolved_cmd_filter {
-            "checks" => m::yes(&cmd["class"]["check"]),
-            "failed" => !m::yes(&cmd["running"]) && !m::yes(&cmd["ok"]) && !m::yes(&cmd["not_run"]),
-            _ => true,
-        };
-        if !keep {
-            continue;
-        }
-        let class = &cmd["class"];
-        let glyph = if m::yes(&cmd["running"]) {
-            "●"
-        } else if m::yes(&cmd["not_run"]) || !class["masked"].is_null() {
-            "?"
-        } else if m::yes(&cmd["ok"]) {
-            "✓"
-        } else {
-            "✗"
-        };
-        let prefix = if snap.selected == "all" {
-            let ag = m::text(cmd, "agent");
-            if !ag.is_empty() {
-                format!("{} · ", files_map::short_agent_name(&ag))
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-        let family = class["family"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(|f| format!(" [{f}]"))
-            .unwrap_or_default();
-        let block = dom::details(
-            &format!("{glyph} {prefix}{}{family}", m::text(cmd, "command")),
-            &serde_json::to_string_pretty(cmd).unwrap_or_default(),
-        );
-        dom::add(&pane, &block);
-    }
-    pane
 }
 
-#[allow(dead_code)]
-pub(crate) fn render_inspector_html(root: &str, snap: &InspectorSnapshot) -> String {
-    let opts = FilesSurfaceOptions {
-        group_by_service: snap.selected == "all",
-        show_agent_badge: snap.selected == "all",
-        chip_action: "activity-file".into(),
-        view_action: "activity-files-view".into(),
-        filter_action: "activity-file-filter".into(),
-        reveal_action: "activity-reveal".into(),
-        inspect_graph_action: "inspect-system-file-graph".into(),
-        root_id: Some(root.to_owned()),
-    };
-    let tabs_html = format!(
-        "<div class=\"run-tabs\" role=\"tablist\"><button type=\"button\" class=\"run-tab\" role=\"tab\" aria-selected=\"{}\">Timeline</button><button type=\"button\" class=\"run-tab\" role=\"tab\" aria-label=\"Files ({})\" aria-selected=\"{}\">Files <span class=\"run-badge\">{}</span></button><button type=\"button\" class=\"run-tab\" role=\"tab\" aria-label=\"Plan ({})\" aria-selected=\"{}\">Plan <span class=\"run-badge\">{}</span></button><button type=\"button\" class=\"run-tab\" role=\"tab\" aria-label=\"Commands ({})\" aria-selected=\"{}\">Commands <span class=\"run-badge\">{}</span></button></div>",
-        truth(snap.tab == "timeline"),
-        snap.files.len(),
-        truth(snap.tab == "files"),
-        snap.files.len(),
-        snap.plan_items.len(),
-        truth(snap.tab == "plan"),
-        snap.plan_items.len(),
-        snap.commands.len(),
-        truth(snap.tab == "commands"),
-        snap.commands.len(),
+fn render_commands_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::Element {
+    let pane = dom::el("div", "run-pane", "");
+    let _ = pane.set_attribute("role", "tabpanel");
+    if snap.commands.is_empty() {
+        dom::add(
+            &pane,
+            &dom::el(
+                "p",
+                "run-empty",
+                "No shell commands or checks recorded yet.",
+            ),
+        );
+        return pane;
+    }
+
+    let (resolved_cmd_filter, checks_count, failed_count, items) = build_command_render_items(snap);
+
+    let filters = dom::el("div", "run-filters", "");
+    let _ = filters.set_attribute("id", &format!("{root}-commands-filters"));
+    let _ = filters.set_attribute("role", "group");
+    let _ = filters.set_attribute("aria-label", "Filter commands");
+    populate_command_filters(
+        &filters,
+        root,
+        &resolved_cmd_filter,
+        checks_count,
+        failed_count,
     );
-    let body_html = match snap.tab.as_str() {
-        "files" => files_map::render_files_surface(
-            &snap.files,
-            &snap.files_view,
-            &snap.file_filter,
-            snap.running,
-            &opts,
-        ),
-        "plan" => snap
-            .plan_items
-            .iter()
-            .map(|p| {
-                format!(
-                    "<p class=\"run-plan-item\">{} · {}</p>",
-                    files_map::escape_html(&status(p["status"].as_str().unwrap_or("pending"))),
-                    files_map::escape_html(&m::text(p, "text"))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-        "commands" => snap
-            .commands
-            .iter()
-            .map(|c| {
-                format!(
-                    "<div class=\"run-command\">{}</div>",
-                    files_map::escape_html(&m::text(c, "command"))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => snap
-            .timeline_events
-            .iter()
-            .map(|ev| {
-                format!(
-                    "<li class=\"agent-event\">{}</li>",
-                    files_map::escape_html(&describe(ev))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-    };
-    format!("{tabs_html}{body_html}")
+    dom::add(&pane, &filters);
+
+    let list = dom::el("div", "run-commands-list", "");
+    let _ = list.set_attribute("id", &format!("{root}-commands-list"));
+    for item in &items {
+        let block = build_command_details_element(item);
+        let _ = block.set_attribute("data-key", &m::text(item, "key"));
+        let _ = block.set_attribute("data-signature", &item.to_string());
+        dom::add(&list, &block);
+    }
+    dom::add(&pane, &list);
+    pane
 }
 
 #[allow(dead_code)]
 pub(crate) fn render_into(root: &str) {
     render(root);
+}
+
+fn capture_details_open_state(root_el: &web_sys::Element) -> BTreeMap<String, bool> {
+    let mut states = BTreeMap::new();
+    if let Ok(nodes) = root_el.query_selector_all("details[data-restore-key]") {
+        for i in 0..nodes.length() {
+            if let Some(el) = nodes
+                .item(i)
+                .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+            {
+                if let Some(key) = el.get_attribute("data-restore-key") {
+                    states.insert(key, el.has_attribute("open"));
+                }
+            }
+        }
+    }
+    states
+}
+
+fn apply_details_open_state(root_el: &web_sys::Element, states: &BTreeMap<String, bool>) {
+    if states.is_empty() {
+        return;
+    }
+    if let Ok(nodes) = root_el.query_selector_all("details[data-restore-key]") {
+        for i in 0..nodes.length() {
+            if let Some(el) = nodes
+                .item(i)
+                .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+            {
+                if let Some(was_open) = el
+                    .get_attribute("data-restore-key")
+                    .and_then(|key| states.get(&key).copied())
+                {
+                    if was_open {
+                        let _ = el.set_attribute("open", "");
+                    } else {
+                        let _ = el.remove_attribute("open");
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn render(root: &str) {
@@ -3120,6 +3221,8 @@ pub(crate) fn render(root: &str) {
         .filter(|el| host.contains(Some(el)))
         .and_then(|el| el.get_attribute("data-focus-key"));
 
+    let previous_details = capture_details_open_state(&host);
+
     let scroll = host
         .query_selector(".agent-events")
         .ok()
@@ -3132,268 +3235,444 @@ pub(crate) fn render(root: &str) {
             )
         });
 
-    host.set_text_content(None);
+    let commands_list_id = format!("{root}-commands-list");
+    let tree_id = format!("{root}-tree");
+    let pane_id = format!("{root}-timeline-pane");
+    let timeline_id = format!("{root}-timeline");
+    let cards_id = format!("{root}-cards");
+    let heading_id = format!("{root}-timeline-heading");
+    let tabs_id = format!("{root}-timeline-tabs");
+    let follow_id = format!("{root}-follow-input");
 
-    let label = dom::el("label", "checkbox agent-follow", "");
-    let input = dom::el("input", "", "");
-    let _ = input.set_attribute("type", "checkbox");
-    let _ = input.set_attribute("data-action", "agent-follow");
-    let _ = input.set_attribute("data-payload", &json!(root).to_string());
-    if let Some(e) = input.dyn_ref::<web_sys::HtmlInputElement>() {
-        e.set_checked(p.follow);
+    let reuse_shell = dom::get(&timeline_id).is_some()
+        && dom::get(&cards_id).is_some()
+        && dom::get(&pane_id).is_some();
+
+    if !reuse_shell {
+        host.set_text_content(None);
+
+        let label = dom::el("label", "checkbox agent-follow", "");
+        let input = dom::el("input", "", "");
+        let _ = input.set_attribute("id", &follow_id);
+        let _ = input.set_attribute("type", "checkbox");
+        let _ = input.set_attribute("data-action", "agent-follow");
+        let _ = input.set_attribute("data-payload", &json!(root).to_string());
+        if let Some(e) = input.dyn_ref::<web_sys::HtmlInputElement>() {
+            e.set_checked(p.follow);
+        }
+        dom::add(&label, &input);
+        dom::add(&label, &dom::el("span", "", "Follow the active agent"));
+        dom::add(&host, &label);
+
+        let cards = dom::el("div", "agent-cards", "");
+        let _ = cards.set_attribute("id", &cards_id);
+        dom::add(&host, &cards);
+
+        let timeline = dom::el("div", "agent-timeline", "");
+        let _ = timeline.set_attribute("id", &timeline_id);
+        let _ = timeline.set_attribute("aria-live", "polite");
+        let heading = dom::el("div", "agent-timeline-heading", "");
+        let _ = heading.set_attribute("id", &heading_id);
+        dom::add(&timeline, &heading);
+        let tabs_bar = dom::el("div", "run-tabs", "");
+        let _ = tabs_bar.set_attribute("id", &tabs_id);
+        let _ = tabs_bar.set_attribute("role", "tablist");
+        let _ = tabs_bar.set_attribute("aria-label", "Agent inspector views");
+        dom::add(&timeline, &tabs_bar);
+        let pane_host = dom::el("div", "", "");
+        let _ = pane_host.set_attribute("id", &pane_id);
+        dom::add(&timeline, &pane_host);
+        dom::add(&host, &timeline);
+    } else if let Some(input) =
+        dom::get(&follow_id).and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
+    {
+        if input.checked() != p.follow {
+            input.set_checked(p.follow);
+        }
     }
-    dom::add(&label, &input);
-    dom::add(&label, &dom::el("span", "", "Follow the active agent"));
-    dom::add(&host, &label);
 
-    let cards = dom::el("div", "agent-cards", "");
-    dom::add(&host, &cards);
+    let mut card_items = Vec::new();
     if snap.show_all_card {
-        dom::add(
-            &cards,
-            &render_all_agents_card(root, &snap.items, snap.files.len(), snap.selected == "all"),
-        );
+        card_items.push(json!({
+            "key": "all",
+            "selected": snap.selected == "all",
+            "files_count": snap.files.len(),
+            "items": snap.items,
+        }));
     }
     for a in &snap.items {
-        let is_selected = selection(a) == snap.selected;
-        dom::add(&cards, &render_agent_card(root, a, is_selected));
+        let sel_key = selection(a);
+        card_items.push(json!({
+            "key": sel_key,
+            "selected": sel_key == snap.selected,
+            "agent": a,
+        }));
+    }
+    dom::keyed_render(
+        &cards_id,
+        &card_items,
+        |item| m::text(item, "key"),
+        |item| {
+            if item["key"] == "all" {
+                render_all_agents_card(
+                    root,
+                    &m::array(&item["items"]),
+                    item["files_count"].as_u64().unwrap_or(0) as usize,
+                    m::yes(&item["selected"]),
+                )
+            } else {
+                render_agent_card(root, &item["agent"], m::yes(&item["selected"]))
+            }
+        },
+    );
+
+    if let Some(heading) = dom::get(&heading_id) {
+        let heading_sig = if snap.selected == "all" {
+            let ran_count = snap.items.iter().filter(|a| a["key"].is_string()).count();
+            json!(["all", ran_count.max(snap.items.len()), snap.files.len()])
+        } else if let Some(a) = snap.items.iter().find(|i| selection(i) == snap.selected) {
+            let title = a["label"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| a["agent"].as_str())
+                .unwrap_or("Agent");
+            let meta = [
+                m::summary(&m::provider(&m::text(a, "provider"))),
+                m::text(a, "root"),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+            json!(["one", title, meta])
+        } else {
+            json!(["empty", root])
+        }
+        .to_string();
+        if heading.get_attribute("data-signature").as_deref() != Some(heading_sig.as_str()) {
+            let _ = heading.set_attribute("data-signature", &heading_sig);
+            heading.set_text_content(None);
+            if snap.selected == "all" {
+                dom::add(&heading, &dom::el("strong", "", "All agents"));
+                let ran_count = snap.items.iter().filter(|a| a["key"].is_string()).count();
+                dom::add(
+                    &heading,
+                    &dom::el(
+                        "span",
+                        "",
+                        &format!(
+                            "{} · {}",
+                            count_words(ran_count.max(snap.items.len()) as u64, "agent"),
+                            count_words(snap.files.len() as u64, "file")
+                        ),
+                    ),
+                );
+            } else if let Some(a) = snap.items.iter().find(|i| selection(i) == snap.selected) {
+                let title = a["label"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| a["agent"].as_str())
+                    .unwrap_or("Agent");
+                dom::add(&heading, &dom::el("strong", "", title));
+                let meta = [
+                    m::summary(&m::provider(&m::text(a, "provider"))),
+                    m::text(a, "root"),
+                ]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+                if !meta.is_empty() {
+                    dom::add(&heading, &dom::el("span", "", &meta));
+                }
+            } else {
+                dom::add(
+                    &heading,
+                    &dom::el(
+                        "span",
+                        "",
+                        if root == "system-discovery-agent" {
+                            "The discovery agent has not started yet."
+                        } else {
+                            "Select an agent card to follow its work."
+                        },
+                    ),
+                );
+            }
+        }
     }
 
-    let timeline = dom::el("div", "agent-timeline", "");
-    let _ = timeline.set_attribute("aria-live", "polite");
-    let heading = dom::el("div", "agent-timeline-heading", "");
-    dom::add(&timeline, &heading);
+    if let Some(tabs_bar) = dom::get(&tabs_id) {
+        let tabs_sig = json!([
+            snap.tab,
+            snap.files.len(),
+            snap.plan_items.len(),
+            snap.commands.len()
+        ])
+        .to_string();
+        if tabs_bar.get_attribute("data-signature").as_deref() != Some(tabs_sig.as_str()) {
+            let _ = tabs_bar.set_attribute("data-signature", &tabs_sig);
+            tabs_bar.set_text_content(None);
+            for (tab_id, title, badge_count) in [
+                ("timeline", "Timeline", None),
+                ("files", "Files", Some(snap.files.len())),
+                ("plan", "Plan", Some(snap.plan_items.len())),
+                ("commands", "Commands", Some(snap.commands.len())),
+            ] {
+                let active_tab = snap.tab == tab_id;
+                let btn = dom::button("", "activity-tab", json!({"root": root, "tab": tab_id}));
+                btn.set_class_name("run-tab");
+                let _ = btn.set_attribute("role", "tab");
+                let _ = btn.set_attribute("aria-selected", truth(active_tab));
+                let _ = btn.set_attribute("tabindex", roving_tabindex(active_tab));
+                let _ = btn.set_attribute("data-focus-key", &format!("tab:{tab_id}"));
+                if let Some(n) = badge_count {
+                    let _ = btn.set_attribute("aria-label", &format!("{title} ({n})"));
+                    btn.set_text_content(Some(&format!("{title} ")));
+                    dom::add(&btn, &dom::el("span", "run-badge", &n.to_string()));
+                } else {
+                    btn.set_text_content(Some(title));
+                }
+                dom::add(&tabs_bar, &btn);
+            }
+            dom::sync_roving_widget(&tabs_bar);
+        }
+    }
 
-    if snap.selected == "all" {
-        dom::add(&heading, &dom::el("strong", "", "All agents"));
-        let ran_count = snap.items.iter().filter(|a| a["key"].is_string()).count();
-        dom::add(
-            &heading,
-            &dom::el(
-                "span",
-                "",
-                &format!(
-                    "{} · {}",
-                    count_words(ran_count.max(snap.items.len()) as u64, "agent"),
-                    count_words(snap.files.len() as u64, "file")
-                ),
-            ),
+    let Some(pane_host) = dom::get(&pane_id) else {
+        return;
+    };
+
+    if snap.tab == "commands" && !snap.commands.is_empty() && dom::get(&commands_list_id).is_some()
+    {
+        let (resolved_cmd_filter, checks_count, failed_count, items) =
+            build_command_render_items(&snap);
+        if let Some(filters) = dom::get(&format!("{root}-commands-filters")) {
+            populate_command_filters(
+                &filters,
+                root,
+                &resolved_cmd_filter,
+                checks_count,
+                failed_count,
+            );
+        }
+        dom::keyed_render(
+            &commands_list_id,
+            &items,
+            |item| m::text(item, "key"),
+            build_command_details_element,
         );
-    } else if let Some(a) = snap.items.iter().find(|i| selection(i) == snap.selected) {
-        let title = a["label"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| a["agent"].as_str())
-            .unwrap_or("Agent");
-        dom::add(&heading, &dom::el("strong", "", title));
-        let meta = [
-            m::summary(&m::provider(&m::text(a, "provider"))),
-            m::text(a, "root"),
-        ]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-        if !meta.is_empty() {
-            dom::add(&heading, &dom::el("span", "", &meta));
+    } else if snap.tab == "files"
+        && snap.files_view == "list"
+        && !snap.files.is_empty()
+        && dom::get(&tree_id).is_some()
+    {
+        let summary_text = files_map::files_summary(&snap.files);
+        let summary_id = format!("{root}-files-summary");
+        if dom::get(&summary_id)
+            .and_then(|e| e.text_content())
+            .as_deref()
+            != Some(summary_text.as_str())
+        {
+            dom::text(&summary_id, &summary_text);
+        }
+        let group_by_service = snap.selected == "all";
+        let show_agent_badge = snap.selected == "all";
+        let folders = files_map::group_list_folders(&snap.files, group_by_service);
+        let items = build_folder_render_items(&folders, show_agent_badge);
+        let root_owned = root.to_owned();
+        dom::keyed_render(
+            &tree_id,
+            &items,
+            |item| m::text(item, "key"),
+            move |item| build_folder_details_element(&root_owned, item),
+        );
+        if let Some(tree) = dom::get(&tree_id) {
+            apply_details_open_state(&tree, &previous_details);
         }
     } else {
-        dom::add(
-            &heading,
-            &dom::el(
-                "span",
-                "",
-                if root == "system-discovery-agent" {
-                    "The discovery agent has not started yet."
+        match snap.tab.as_str() {
+            "files" => {
+                pane_host.set_text_content(None);
+                let pane = render_files_pane_dom(root, &snap);
+                apply_details_open_state(&pane, &previous_details);
+                dom::add(&pane_host, &pane);
+            }
+            "plan" => {
+                pane_host.set_text_content(None);
+                dom::add(&pane_host, &render_plan_pane_dom(&snap));
+            }
+            "commands" => {
+                pane_host.set_text_content(None);
+                let pane = render_commands_pane_dom(root, &snap);
+                apply_details_open_state(&pane, &previous_details);
+                dom::add(&pane_host, &pane);
+            }
+            _ => {
+                let timeline_sig = json!([
+                    snap.selected,
+                    snap.running,
+                    snap.timeline_events,
+                    snap.items
+                ])
+                .to_string();
+                let current_timeline_sig = pane_host
+                    .query_selector(".agent-events")
+                    .ok()
+                    .flatten()
+                    .and_then(|el| el.get_attribute("data-signature"));
+                if current_timeline_sig.as_deref() == Some(timeline_sig.as_str()) {
+                    // Nothing in the timeline changed; preserve DOM and scroll untouched.
                 } else {
-                    "Select an agent card to follow its work."
-                },
-            ),
-        );
-    }
-
-    let tabs_bar = dom::el("div", "run-tabs", "");
-    let _ = tabs_bar.set_attribute("role", "tablist");
-    let _ = tabs_bar.set_attribute("aria-label", "Agent inspector views");
-    for (tab_id, title, badge_count) in [
-        ("timeline", "Timeline", None),
-        ("files", "Files", Some(snap.files.len())),
-        ("plan", "Plan", Some(snap.plan_items.len())),
-        ("commands", "Commands", Some(snap.commands.len())),
-    ] {
-        let active_tab = snap.tab == tab_id;
-        let btn = dom::button("", "activity-tab", json!({"root": root, "tab": tab_id}));
-        btn.set_class_name("run-tab");
-        let _ = btn.set_attribute("role", "tab");
-        let _ = btn.set_attribute("aria-selected", truth(active_tab));
-        let _ = btn.set_attribute("data-focus-key", &format!("tab:{tab_id}"));
-        if let Some(n) = badge_count {
-            let _ = btn.set_attribute("aria-label", &format!("{title} ({n})"));
-            btn.set_text_content(Some(&format!("{title} ")));
-            dom::add(&btn, &dom::el("span", "run-badge", &n.to_string()));
-        } else {
-            btn.set_text_content(Some(title));
-        }
-        dom::add(&tabs_bar, &btn);
-    }
-    dom::add(&timeline, &tabs_bar);
-
-    match snap.tab.as_str() {
-        "files" => {
-            dom::add(&timeline, &render_files_pane_dom(root, &snap));
-        }
-        "plan" => {
-            dom::add(&timeline, &render_plan_pane_dom(&snap));
-        }
-        "commands" => {
-            dom::add(&timeline, &render_commands_pane_dom(root, &snap));
-        }
-        _ => {
-            let list = dom::el("ol", "agent-events", "");
-            if snap.timeline_events.is_empty() {
-                let msg = if snap.selected == "all" {
-                    if snap.running {
-                        "Waiting for the first agent action…"
-                    } else {
-                        "No timeline events recorded in this launch."
-                    }
-                } else if let Some(a) = snap.items.iter().find(|i| selection(i) == snap.selected) {
-                    if a["status"] == "running" {
-                        "Waiting for the first action…"
-                    } else if a["earlier"] == true {
-                        "This agent completed in an earlier launch; choose that launch above."
-                    } else if a["key"].is_null() {
-                        "This agent has not run in this launch."
-                    } else {
-                        "No activity was recorded for this agent."
-                    }
-                } else {
-                    "Select an agent card to follow its work."
-                };
-                dom::add(&list, &dom::el("li", "agent-placeholder", msg));
-            } else {
-                for item in &snap.timeline_events {
-                    let kind = m::text(item, "type");
-                    let row = dom::el(
-                        "li",
-                        &format!(
-                            "agent-event {kind}{}",
-                            if item["ok"] == false { " failed" } else { "" }
-                        ),
-                        "",
-                    );
-                    let ev_id = m::string(&item["event_id"]);
-                    if !ev_id.is_empty() {
-                        let _ = row.set_attribute("data-event-id", &ev_id);
-                    }
-                    let ev_path = m::text(item, "path");
-                    if !ev_path.is_empty() {
-                        let _ = row.set_attribute("data-file-path", &ev_path);
-                    }
-                    dom::add(
-                        &row,
-                        &dom::el("time", "agent-event-time", &clock(&item["at"])),
-                    );
-                    let base_title = if kind == "tool" {
-                        item["tool"].as_str().unwrap_or("Tool").to_owned()
-                    } else {
-                        match kind.as_str() {
-                            "text" => "Says".into(),
-                            "thinking" => "Reasons".into(),
-                            "plan" => "Plan".into(),
-                            "error" => "Error".into(),
-                            "status" => "Note".into(),
-                            _ => m::label(&kind),
-                        }
-                    };
-                    let title = if snap.selected == "all" {
-                        let ag = m::text(item, "agent");
-                        if !ag.is_empty() {
-                            format!("{} · {base_title}", files_map::short_agent_name(&ag))
-                        } else {
-                            base_title
-                        }
-                    } else {
-                        base_title
-                    };
-                    dom::add(&row, &dom::el("span", "agent-event-kind", &title));
-                    dom::add(
-                        &row,
-                        &dom::el(
-                            if ["text", "thinking", "plan"].contains(&kind.as_str()) {
-                                "pre"
+                    pane_host.set_text_content(None);
+                    let list = dom::el("ol", "agent-events", "");
+                    let _ = list.set_attribute("data-signature", &timeline_sig);
+                    if snap.timeline_events.is_empty() {
+                        let msg = if snap.selected == "all" {
+                            if snap.running {
+                                "Waiting for the first agent action…"
                             } else {
-                                "span"
-                            },
-                            "agent-event-body",
-                            &describe(item),
-                        ),
-                    );
-                    if kind == "tool" {
-                        dom::add(
-                            &row,
-                            &dom::el(
-                                "span",
-                                "agent-event-state",
-                                if item["state"] == "completed" {
-                                    if item["ok"] == false {
-                                        "failed"
-                                    } else {
-                                        "done"
-                                    }
-                                } else {
-                                    "running"
-                                },
-                            ),
-                        );
-                    }
-                    dom::add(&list, &row);
-                }
-            }
-
-            if snap.selected != "all" {
-                if let Some(a) = snap
-                    .items
-                    .iter()
-                    .find(|i| selection(i) == snap.selected && i["key"].is_string())
-                {
-                    let outcome = [m::text(a, "summary"), m::text(a, "reason")]
-                        .into_iter()
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let outcome = if outcome.is_empty() {
-                        m::text(a, "error")
+                                "No timeline events recorded in this launch."
+                            }
+                        } else if let Some(a) =
+                            snap.items.iter().find(|i| selection(i) == snap.selected)
+                        {
+                            if a["status"] == "running" {
+                                "Waiting for the first action…"
+                            } else if a["earlier"] == true {
+                                "This agent completed in an earlier launch; choose that launch above."
+                            } else if a["key"].is_null() {
+                                "This agent has not run in this launch."
+                            } else {
+                                "No activity was recorded for this agent."
+                            }
+                        } else {
+                            "Select an agent card to follow its work."
+                        };
+                        dom::add(&list, &dom::el("li", "agent-placeholder", msg));
                     } else {
-                        outcome
-                    };
-                    if !outcome.is_empty() {
-                        dom::add(
-                            &list,
-                            &dom::el(
+                        for item in &snap.timeline_events {
+                            let kind = m::text(item, "type");
+                            let row = dom::el(
                                 "li",
-                                if a["ok"] == true {
-                                    "agent-outcome ok"
+                                &format!(
+                                    "agent-event {kind}{}",
+                                    if item["ok"] == false { " failed" } else { "" }
+                                ),
+                                "",
+                            );
+                            let ev_id = m::string(&item["event_id"]);
+                            if !ev_id.is_empty() {
+                                let _ = row.set_attribute("data-event-id", &ev_id);
+                            }
+                            let ev_path = m::text(item, "path");
+                            if !ev_path.is_empty() {
+                                let _ = row.set_attribute("data-file-path", &ev_path);
+                            }
+                            dom::add(
+                                &row,
+                                &dom::el("time", "agent-event-time", &clock(&item["at"])),
+                            );
+                            let base_title = if kind == "tool" {
+                                item["tool"].as_str().unwrap_or("Tool").to_owned()
+                            } else {
+                                match kind.as_str() {
+                                    "text" => "Says".into(),
+                                    "thinking" => "Reasons".into(),
+                                    "plan" => "Plan".into(),
+                                    "error" => "Error".into(),
+                                    "status" => "Note".into(),
+                                    _ => m::label(&kind),
+                                }
+                            };
+                            let title = if snap.selected == "all" {
+                                let ag = m::text(item, "agent");
+                                if !ag.is_empty() {
+                                    format!("{} · {base_title}", files_map::short_agent_name(&ag))
                                 } else {
-                                    "agent-outcome failed"
-                                },
-                                &outcome,
-                            ),
-                        );
+                                    base_title
+                                }
+                            } else {
+                                base_title
+                            };
+                            dom::add(&row, &dom::el("span", "agent-event-kind", &title));
+                            dom::add(
+                                &row,
+                                &dom::el(
+                                    if ["text", "thinking", "plan"].contains(&kind.as_str()) {
+                                        "pre"
+                                    } else {
+                                        "span"
+                                    },
+                                    "agent-event-body",
+                                    &describe(item),
+                                ),
+                            );
+                            if kind == "tool" {
+                                dom::add(
+                                    &row,
+                                    &dom::el(
+                                        "span",
+                                        "agent-event-state",
+                                        if item["state"] == "completed" {
+                                            if item["ok"] == false {
+                                                "failed"
+                                            } else {
+                                                "done"
+                                            }
+                                        } else {
+                                            "running"
+                                        },
+                                    ),
+                                );
+                            }
+                            dom::add(&list, &row);
+                        }
                     }
-                }
-            }
 
-            dom::add(&timeline, &list);
-            if let Ok(e) = list.dyn_into::<web_sys::HtmlElement>() {
-                if let Some((top, stick)) = scroll {
-                    e.set_scroll_top(if stick { e.scroll_height() } else { top });
+                    if snap.selected != "all" {
+                        if let Some(a) = snap
+                            .items
+                            .iter()
+                            .find(|i| selection(i) == snap.selected && i["key"].is_string())
+                        {
+                            let outcome = [m::text(a, "summary"), m::text(a, "reason")]
+                                .into_iter()
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let outcome = if outcome.is_empty() {
+                                m::text(a, "error")
+                            } else {
+                                outcome
+                            };
+                            if !outcome.is_empty() {
+                                dom::add(
+                                    &list,
+                                    &dom::el(
+                                        "li",
+                                        if a["ok"] == true {
+                                            "agent-outcome ok"
+                                        } else {
+                                            "agent-outcome failed"
+                                        },
+                                        &outcome,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+
+                    dom::add(&pane_host, &list);
+                    if let Ok(e) = list.dyn_into::<web_sys::HtmlElement>() {
+                        if let Some((top, stick)) = scroll {
+                            e.set_scroll_top(if stick { e.scroll_height() } else { top });
+                        }
+                    }
                 }
             }
         }
     }
-
-    dom::add(&host, &timeline);
 
     if let Some(card_key) = p.card_key.as_deref() {
         if snap.tab == "files" && snap.files_view == "map" {
@@ -3418,11 +3697,16 @@ pub(crate) fn render(root: &str) {
     }
 
     if let Some(fk) = focused_key {
-        let restored = dom::all(&format!("#{root} [data-focus-key]"))
-            .into_iter()
-            .find(|el| el.get_attribute("data-focus-key").as_deref() == Some(fk.as_str()));
-        if let Some(node) = restored {
-            focus_element_no_scroll(&node);
+        let focus_still_in_host = dom::document()
+            .active_element()
+            .is_some_and(|el| host.contains(Some(&el)));
+        if !focus_still_in_host {
+            let restored = dom::all(&format!("#{root} [data-focus-key]"))
+                .into_iter()
+                .find(|el| el.get_attribute("data-focus-key").as_deref() == Some(fk.as_str()));
+            if let Some(node) = restored {
+                focus_element_no_scroll(&node);
+            }
         }
     }
 }
@@ -3571,6 +3855,14 @@ pub fn event(kind: &str, action: &str, payload: &V, checked: bool) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+fn roving_tabindex(active: bool) -> &'static str {
+    if active {
+        "0"
+    } else {
+        "-1"
     }
 }
 
@@ -3928,10 +4220,29 @@ mod tests {
             false
         ));
 
-        let html = render_inspector_html("system-agents", &all_snap);
-        assert!(html.contains("Timeline"));
-        assert!(html.contains("Files (3)"));
-        assert!(html.contains("Commands (1)"));
+        assert_eq!(all_snap.tab, "timeline");
+        assert_eq!(all_snap.files.len(), 3);
+        assert_eq!(all_snap.commands.len(), 1);
+    }
+
+    fn render_files_surface_for_test(root: &str, snap: &InspectorSnapshot) -> String {
+        let opts = crate::run::files_map::FilesSurfaceOptions {
+            group_by_service: snap.selected == "all",
+            show_agent_badge: snap.selected == "all",
+            chip_action: "activity-file".into(),
+            view_action: "activity-files-view".into(),
+            filter_action: "activity-file-filter".into(),
+            reveal_action: "activity-reveal".into(),
+            inspect_graph_action: "inspect-system-file-graph".into(),
+            root_id: Some(root.to_owned()),
+        };
+        files_map::render_files_surface(
+            &snap.files,
+            &snap.files_view,
+            &snap.file_filter,
+            snap.running,
+            &opts,
+        )
     }
 
     #[test]
@@ -4138,7 +4449,7 @@ mod tests {
         ));
         let failed_snap = snapshot_for_root("system-agents");
         assert_eq!(failed_snap.file_filter, "failed");
-        let map_html = render_inspector_html("system-agents", &failed_snap);
+        let map_html = render_files_surface_for_test("system-agents", &failed_snap);
         assert!(map_html.contains("Edited 1"));
         assert!(map_html.contains("Failed 1"));
         assert!(map_html.contains("Outside 1"));
@@ -4165,7 +4476,7 @@ mod tests {
         ));
         let list_snap = snapshot_for_root("system-agents");
         assert_eq!(list_snap.files_view, "list");
-        let list_html = render_inspector_html("system-agents", &list_snap);
+        let list_html = render_files_surface_for_test("system-agents", &list_snap);
         assert!(list_html.contains("class=\"run-tree\""));
         assert!(list_html.contains("data-action=\"inspect-system-file-graph\""));
 
@@ -4192,5 +4503,82 @@ mod tests {
         let revealed = snapshot_for_root("system-agents");
         assert_eq!(revealed.tab, "timeline");
         assert_eq!(revealed.selected, "service-orders#1");
+    }
+
+    #[test]
+    fn command_and_folder_restore_keys_stay_stable_across_status_updates_and_dedup_collisions() {
+        let cmds = vec![
+            json!({
+                "call": "c-1",
+                "agent_key": "service-orders#1",
+                "command": "cargo test",
+                "running": true,
+                "ok": true,
+                "class": { "check": true }
+            }),
+            json!({
+                "agent_key": "service-orders#1",
+                "command": "git status",
+                "running": false,
+                "ok": true,
+                "class": { "check": false }
+            }),
+            json!({
+                "agent_key": "service-orders#1",
+                "command": "git status",
+                "running": false,
+                "ok": false,
+                "class": { "check": false }
+            }),
+        ];
+        assert_eq!(
+            command_restore_keys(&cmds),
+            vec![
+                "cmd:c-1",
+                "cmd:service-orders#1:git status",
+                "cmd:service-orders#1:git status#1",
+            ]
+        );
+        // Key stays identical when running -> completed so keyed_render preserves open <details>
+        let mut finished = cmds.clone();
+        finished[0]["running"] = json!(false);
+        assert_eq!(command_restore_keys(&finished)[0], "cmd:c-1");
+
+        let snap = InspectorSnapshot {
+            items: Vec::new(),
+            show_all_card: false,
+            selected: "all".into(),
+            tab: "commands".into(),
+            files_view: "map".into(),
+            file_filter: "all".into(),
+            cmd_filter: "checks".into(),
+            running: false,
+            timeline_events: Vec::new(),
+            files: Vec::new(),
+            plan_items: Vec::new(),
+            commands: finished,
+        };
+        let (filter, checks_count, failed_count, items) = build_command_render_items(&snap);
+        assert_eq!(filter, "checks");
+        assert_eq!(checks_count, 1);
+        assert_eq!(failed_count, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["key"], "cmd:c-1");
+
+        let folders = vec![(
+            "orders · src/".to_owned(),
+            vec![FileTouchEntry {
+                path: "src/Order.php".to_owned(),
+                service_id: Some("orders".to_owned()),
+                reads: 2,
+                edits: 1,
+                ..FileTouchEntry::default()
+            }],
+        )];
+        let folder_items = build_folder_render_items(&folders, true);
+        assert_eq!(folder_items.len(), 1);
+        assert_eq!(folder_items[0]["key"], "folder:orders · src/");
+        assert_eq!(super::roving_tabindex(true), "0");
+        assert_eq!(super::roving_tabindex(false), "-1");
     }
 }

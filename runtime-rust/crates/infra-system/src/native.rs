@@ -156,6 +156,24 @@ pub fn use_scratch(
     }
     Ok(prepared)
 }
+#[inline(never)]
+fn discover_providers_boxed() -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = infra_host::Result<Vec<infra_host::provider::Provider>>>
+            + Send,
+    >,
+> {
+    Box::pin(async move { infra_host::provider::discover(&BTreeMap::new()).await })
+}
+
+#[inline(never)]
+fn executable_boxed<'a>(
+    provider: &'a str,
+    explicit: Option<&'a str>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf>> + Send + 'a>> {
+    Box::pin(executable(provider, explicit))
+}
+
 pub async fn executable(provider: &str, explicit: Option<&str>) -> Result<PathBuf> {
     if !["codex", "claude", "cursor", "command"].contains(&provider) {
         return Err(fail("Invalid worker provider"));
@@ -168,7 +186,7 @@ pub async fn executable(provider: &str, explicit: Option<&str>) -> Result<PathBu
                 "Command provider requires explicit trusted executable",
             ));
         }
-        infra_host::provider::discover(&BTreeMap::new())
+        discover_providers_boxed()
             .await
             .map_err(host)?
             .into_iter()
@@ -193,54 +211,24 @@ pub async fn executable(provider: &str, explicit: Option<&str>) -> Result<PathBu
 pub type LaunchCommand = (Vec<String>, BTreeMap<String, String>, Vec<u8>);
 #[expect(
     clippy::too_many_arguments,
-    reason = "Compatibility API keeps explicit per-call custody and process controls."
+    reason = "Shared launch flag helper configures provider- and transport-specific system flags."
 )]
-pub fn launch(
+pub(crate) fn apply_system_launch_flags(
     provider: &str,
-    executable: &Path,
-    root: &Path,
-    prompt: &str,
+    transport: infra_host::provider::Transport,
+    mode: &str,
     schema: &Value,
     schema_path: &Path,
-    mode: &str,
     extra: &[PathBuf],
     read: &[PathBuf],
-) -> Result<LaunchCommand> {
+    argv: &mut Vec<String>,
+) -> Result<()> {
     if !extra.is_empty() && !["codex", "claude", "command"].contains(&provider) {
         return Err(fail(
             "Provider CLI cannot be granted additional service folders",
         ));
     }
-    if provider == "command" {
-        return Ok((
-            vec![path_string(executable)?],
-            BTreeMap::new(),
-            prompt.as_bytes().to_vec(),
-        ));
-    }
-    if provider == "cursor" && prompt.len() > CURSOR_PROMPT_BYTES {
-        return Err(fail(
-            "Cursor prompt exceeds argument byte limit; narrow plan",
-        ));
-    }
-    let options = infra_host::provider::Launch {
-        provider: provider.into(),
-        executable: executable.to_path_buf(),
-        project: root.to_path_buf(),
-        prompt: prompt.into(),
-        mode: if mode == "edit" { "edit" } else { "plan" }.into(),
-        model: None,
-        session: None,
-        effort: None,
-        agents: false,
-        count: 1,
-        usd: None,
-        hook_events: false,
-        permissions: None,
-        approvals: None,
-    };
-    let (mut argv, environment, input) = infra_host::provider::command(&options).map_err(host)?;
-    if provider == "codex" {
+    if provider == "codex" && transport == infra_host::provider::Transport::Text {
         let mut additions = vec!["--skip-git-repo-check".into()];
         if mode == "edit" {
             for path in extra {
@@ -265,7 +253,37 @@ pub fn launch(
         }
         argv.extend(["--json-schema".into(), encoded(schema)?]);
     }
-    Ok((argv, environment, input))
+    Ok(())
+}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility API keeps explicit per-call custody and process controls."
+)]
+pub fn launch(
+    provider: &str,
+    executable: &Path,
+    root: &Path,
+    prompt: &str,
+    schema: &Value,
+    schema_path: &Path,
+    mode: &str,
+    extra: &[PathBuf],
+    read: &[PathBuf],
+) -> Result<LaunchCommand> {
+    let prepared = prepare_launch_with_permissions(
+        provider,
+        executable,
+        root,
+        prompt,
+        schema,
+        schema_path,
+        mode,
+        extra,
+        read,
+        None,
+        None,
+    )?;
+    Ok((prepared.argv, prepared.environment, prepared.input))
 }
 /// A Claude Code permission rule that lets the agent read a folder outside
 /// its working folders without making it writable. Rules name absolute paths
@@ -645,8 +663,11 @@ fn build_prompt(
             payload["code_graphs"] = object!(code_graphs_meta);
         }
         let prompt = format!("{head}{}", encoded(&payload)?);
+        let cursor_cli_prompt = state["provider"] == "cursor"
+            && !(step["mode"] == "edit"
+                && state.get("permissions").and_then(Value::as_str) == Some("manual"));
         if prompt.chars().count() <= PROMPT_CHARS
-            && (state["provider"] != "cursor" || prompt.len() <= CURSOR_PROMPT_BYTES)
+            && (!cursor_cli_prompt || prompt.len() <= CURSOR_PROMPT_BYTES)
         {
             return Ok(prompt);
         }
@@ -654,7 +675,10 @@ fn build_prompt(
             break;
         }
     }
-    let limit = if state["provider"] == "cursor" {
+    let cursor_cli_prompt = state["provider"] == "cursor"
+        && !(step["mode"] == "edit"
+            && state.get("permissions").and_then(Value::as_str) == Some("manual"));
+    let limit = if cursor_cli_prompt {
         format!("Cursor's argument limit of {CURSOR_PROMPT_BYTES} bytes")
     } else {
         format!("{PROMPT_CHARS} characters")
@@ -758,6 +782,72 @@ pub(crate) async fn create_run_context_with_options(
     tell_agents_graph: Option<bool>,
     adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
 ) -> Result<Value> {
+    create_run_context_with_permissions_boxed(
+        system,
+        plan,
+        directory,
+        provider,
+        explicit,
+        mode,
+        timeout,
+        access,
+        tell_agents_graph,
+        None,
+        adapter,
+    )
+    .await
+}
+
+#[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Boxing helper isolates create_run_context_with_permissions onto the heap for 2 MiB debug stacks."
+)]
+fn create_run_context_with_permissions_boxed<'a>(
+    system: &'a mut System,
+    plan: &'a Value,
+    directory: &'a Path,
+    provider: &'a str,
+    explicit: Option<&'a str>,
+    mode: &'a str,
+    timeout: u64,
+    access: &'a str,
+    tell_agents_graph: Option<bool>,
+    permissions: Option<&'a str>,
+    adapter: Option<&'a dyn infra_host::provider::LaunchAdapter>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    Box::pin(create_run_context_with_permissions(
+        system,
+        plan,
+        directory,
+        provider,
+        explicit,
+        mode,
+        timeout,
+        access,
+        tell_agents_graph,
+        permissions,
+        adapter,
+    ))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Permission-aware run setup keeps explicit per-call custody and process controls."
+)]
+pub(crate) async fn create_run_context_with_permissions(
+    system: &mut System,
+    plan: &Value,
+    directory: &Path,
+    provider: &str,
+    explicit: Option<&str>,
+    mode: &str,
+    timeout: u64,
+    access: &str,
+    tell_agents_graph: Option<bool>,
+    permissions: Option<&str>,
+    adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
+) -> Result<Value> {
     let selected = system.selected_plan(plan, true)?;
     if system.verify(plan)?["fresh"] != true {
         return Err(fail("Plan stale; regenerate before execution"));
@@ -768,10 +858,17 @@ pub(crate) async fn create_run_context_with_options(
     {
         return Err(fail("Invalid worker mode/access/timeout"));
     }
+    let parsed_permissions = match permissions {
+        None => None,
+        Some(raw) => Some(
+            infra_host::permission::PermissionMode::parse(raw)
+                .ok_or_else(|| fail("Choose Auto, Manual or Bypass permissions."))?,
+        ),
+    };
     if access == "all" && !["codex", "claude", "command"].contains(&provider) {
         return Err(fail("Provider CLI cannot access other service folders"));
     }
-    let executable = executable(provider, explicit).await?;
+    let executable = executable_boxed(provider, explicit).await?;
     let directory = absolute(directory)?;
     let run = id32();
     let mut roots = object!({"__system__":system.root});
@@ -781,6 +878,9 @@ pub(crate) async fn create_run_context_with_options(
     let mut state = object!({"schema_version":1,"kind":"ai-system-run","run_id":run,"change_id":plan["change_id"],"system_file":system.config,"roots":roots,"selected":selected,"provider":provider,"executable":executable,"executable_sha256":digest(&std::fs::read(&executable)?),"mode":mode,"access":access,"timeout":timeout,"status":"prepared","created_at":now(),"tasks":{},"steps":[],"closed_tasks":[],"error":null,"plan_sha256":digest((encoded(plan)?+"\n").as_bytes())});
     if let Some(tell) = tell_agents_graph {
         state["tell_agents_graph"] = object!(tell);
+    }
+    if let Some(perm) = parsed_permissions {
+        state["permissions"] = object!(perm.as_str());
     }
     for sid in roots
         .as_object()
@@ -802,7 +902,12 @@ pub(crate) async fn create_run_context_with_options(
             let mut preview = step.clone();
             preview["dispatch_id"] = "0".repeat(32).into();
             let prompt = prompt_for(&state, plan, &preview, &[], None)?;
-            prepare_launch(
+            let step_permissions = if step["mode"] == "edit" {
+                parsed_permissions
+            } else {
+                None
+            };
+            prepare_launch_with_permissions(
                 provider,
                 &executable,
                 Path::new(string(&roots[string(&step["service"])])),
@@ -812,6 +917,7 @@ pub(crate) async fn create_run_context_with_options(
                 string(&step["mode"]),
                 &extra_directories(&state, step, &directory),
                 &read_directories(&state, step, &directory),
+                step_permissions,
                 adapter,
             )?;
         }
@@ -863,13 +969,21 @@ pub fn validate_state_sync(
             "error",
             "plan_sha256",
         ],
-        &["finished_at", "access", "tell_agents_graph"],
+        &["finished_at", "access", "tell_agents_graph", "permissions"],
     )?;
     if state
         .get("tell_agents_graph")
         .is_some_and(|value| !value.is_null() && !value.is_boolean())
     {
         return Err(fail("Invalid tell_agents_graph execution option"));
+    }
+    if state.get("permissions").is_some_and(|value| {
+        !value.is_null()
+            && !value
+                .as_str()
+                .is_some_and(|s| infra_host::permission::PermissionMode::parse(s).is_some())
+    }) {
+        return Err(fail("Invalid permissions execution option"));
     }
     if state["schema_version"] != 1
         || state["kind"] != "ai-system-run"
@@ -1129,7 +1243,7 @@ pub fn prepare_launch(
     read: &[PathBuf],
     adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
 ) -> Result<infra_host::provider::PreparedCommand> {
-    let (argv, environment, input) = launch(
+    prepare_launch_with_permissions(
         provider,
         executable,
         root,
@@ -1139,36 +1253,131 @@ pub fn prepare_launch(
         mode,
         extra,
         read,
-    )?;
-    let prepared = infra_host::provider::PreparedCommand {
-        argv,
-        environment,
-        input,
-        readable: vec![],
-        remove: vec![],
-        prompt_prefix: String::new(),
+        None,
+        adapter,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Permission-aware launch API keeps explicit per-call custody and process controls."
+)]
+pub fn prepare_launch_with_permissions(
+    provider: &str,
+    executable: &Path,
+    root: &Path,
+    prompt: &str,
+    schema: &Value,
+    schema_path: &Path,
+    mode: &str,
+    extra: &[PathBuf],
+    read: &[PathBuf],
+    permissions: Option<infra_host::permission::PermissionMode>,
+    adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
+) -> Result<infra_host::provider::PreparedCommand> {
+    let step_mode = if mode == "edit" { "edit" } else { "plan" };
+    let step_permissions = if step_mode == "edit" {
+        permissions
+    } else {
+        None
+    };
+    let options = infra_host::provider::Launch {
+        provider: provider.into(),
+        executable: executable.into(),
+        project: root.into(),
+        prompt: prompt.into(),
+        mode: step_mode.into(),
+        model: None,
+        session: None,
+        effort: None,
+        agents: false,
+        count: 1,
+        usd: None,
+        hook_events: false,
+        permissions: step_permissions,
+        approvals: None,
+    };
+    let prepared = if provider == "command" {
+        infra_host::provider::PreparedCommand {
+            argv: vec![path_string(executable)?],
+            environment: BTreeMap::new(),
+            input: prompt.as_bytes().to_vec(),
+            readable: vec![],
+            remove: vec![],
+            prompt_prefix: String::new(),
+        }
+    } else {
+        if !extra.is_empty() && !["codex", "claude", "command"].contains(&provider) {
+            return Err(fail(
+                "Provider CLI cannot be granted additional service folders",
+            ));
+        }
+        let active_transport = infra_host::provider::transport(&options);
+        if provider == "cursor"
+            && active_transport == infra_host::provider::Transport::Text
+            && prompt.len() > CURSOR_PROMPT_BYTES
+        {
+            return Err(fail(
+                "Cursor prompt exceeds argument byte limit; narrow plan",
+            ));
+        }
+        let (mut argv, environment, input) =
+            infra_host::provider::command(&options).map_err(host)?;
+        apply_system_launch_flags(
+            provider,
+            active_transport,
+            step_mode,
+            schema,
+            schema_path,
+            extra,
+            read,
+            &mut argv,
+        )?;
+        infra_host::provider::PreparedCommand {
+            argv,
+            environment,
+            input,
+            readable: vec![],
+            remove: vec![],
+            prompt_prefix: String::new(),
+        }
     };
     if let Some(adapter) = adapter {
-        let options = infra_host::provider::Launch {
-            provider: provider.into(),
-            executable: executable.into(),
-            project: root.into(),
-            prompt: prompt.into(),
-            mode: if mode == "edit" { "edit" } else { "plan" }.into(),
-            model: None,
-            session: None,
-            effort: None,
-            agents: false,
-            count: 1,
-            usd: None,
-            hook_events: false,
-            permissions: None,
-            approvals: None,
-        };
         adapter.adapt(&options, prepared).map_err(host)
     } else {
         Ok(prepared)
     }
+}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Permission-aware run setup keeps explicit per-call custody and process controls."
+)]
+pub async fn create_run_with_permissions(
+    system: &mut System,
+    plan: &Value,
+    directory: &Path,
+    provider: &str,
+    explicit: Option<&str>,
+    mode: &str,
+    timeout: u64,
+    access: &str,
+    tell_agents_graph: Option<bool>,
+    permissions: Option<&str>,
+) -> Result<Value> {
+    create_run_context_with_permissions_boxed(
+        system,
+        plan,
+        directory,
+        provider,
+        explicit,
+        mode,
+        timeout,
+        access,
+        tell_agents_graph,
+        permissions,
+        None,
+    )
+    .await
 }
 #[expect(
     clippy::too_many_arguments,

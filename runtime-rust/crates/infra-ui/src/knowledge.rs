@@ -1,8 +1,88 @@
 use crate::{api, dom, model as m, session};
 use serde_json::{json, Value as V};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use wasm_bindgen::JsCast;
+use std::rc::Rc;
+use wasm_bindgen::{closure::Closure, JsCast};
+
+const MOBILE_BREAKPOINT_QUERY: &str = "(max-width:760px)";
+
+fn viewport_is_mobile() -> bool {
+    dom::window()
+        .match_media(MOBILE_BREAKPOINT_QUERY)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.matches())
+}
+
+fn usage_page_size(mobile: bool) -> usize {
+    if mobile {
+        6
+    } else {
+        12
+    }
+}
+
+fn analytics_slice(raw: &[V], mobile: bool) -> &[V] {
+    if mobile && raw.len() > 80 {
+        &raw[raw.len() - 80..]
+    } else {
+        raw
+    }
+}
+
+fn horizon_bin_days(mobile: bool) -> i64 {
+    if mobile {
+        14
+    } else {
+        7
+    }
+}
+
+fn horizon_ticks(mobile: bool) -> &'static [i64] {
+    if mobile {
+        &[0, 180, 365]
+    } else {
+        &[-30, 0, 90, 180, 270, 365]
+    }
+}
+
+fn reflow_responsive_views() {
+    if m::data("memory-use").is_object() {
+        render_memory();
+    }
+    if !m::array(&m::data("context-turns")).is_empty() {
+        render_usage();
+    }
+}
+
+fn sync_responsive_viewport(last_mobile: &Cell<bool>) {
+    let mobile = viewport_is_mobile();
+    if last_mobile.replace(mobile) != mobile {
+        reflow_responsive_views();
+    }
+}
+
+fn wire_responsive_reflow() {
+    let last_mobile = Rc::new(Cell::new(viewport_is_mobile()));
+    if let Ok(Some(media)) = dom::window().match_media(MOBILE_BREAKPOINT_QUERY) {
+        let tracked = Rc::clone(&last_mobile);
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            sync_responsive_viewport(&tracked);
+        });
+        let _ = media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    let resize_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        sync_responsive_viewport(&last_mobile);
+    });
+    let _ = dom::window()
+        .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref());
+    resize_cb.forget();
+}
+
 pub fn initialize() {
+    wire_responsive_reflow();
     m::set("memory-window", json!(30));
     for (days, label) in [(7, "7 d"), (30, "30 d"), (90, "90 d"), (0, "All")] {
         let b = dom::button(label, "memory-window", json!(days));
@@ -511,12 +591,20 @@ pub async fn load(scope: &str, bank_changed: bool) {
                 && m::scope_current(&scope_key, generation, &p, &bank) =>
         {
             v["project_id"] = json!(p);
-            let selected =
+            let entries = m::array(&v["entries"]);
+            let jump_peek = m::data(&format!("{scope}-jump-target"))
+                .as_str()
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty());
+            let initial_saved =
                 if !bank_changed && old["project_id"] == p && old["bank_id"] == v["bank_id"] {
                     m::text(&old, "selected_path")
                 } else {
                     String::new()
                 };
+            let selected =
+                resolve_initial_selection(scope, &entries, &initial_saved, jump_peek.as_deref())
+                    .unwrap_or_default();
             v["selected_path"] = json!(selected);
             dom::options(
                 &format!("{scope}-bank"),
@@ -540,8 +628,8 @@ pub async fn load(scope: &str, bank_changed: bool) {
             dom::hidden(&format!("{scope}-list-notice"), !m::yes(&v["truncated"]));
             if scope == "brain" {
                 let mut cats = BTreeSet::new();
-                for e in m::array(&v["entries"]) {
-                    cats.insert(category(&e));
+                for e in &entries {
+                    cats.insert(category(e));
                 }
                 let mut options = vec![json!({"id":"","name":"All categories"})];
                 options.extend(
@@ -559,23 +647,10 @@ pub async fn load(scope: &str, bank_changed: bool) {
                 .as_str()
                 .map(str::to_owned)
                 .filter(|s| !s.is_empty());
-            let entries = m::array(&v["entries"]);
-            let selected = jump
-                .as_deref()
-                .and_then(|target| jump_entry(&entries, target))
-                .or_else(|| entries.iter().find(|x| x["path"] == selected))
-                .or_else(|| {
-                    entries.iter().find(|x| {
-                        if scope == "memory" {
-                            x["kind"] == "chunk"
-                        } else {
-                            x["type"] == "task" && !m::text(x, "path").starts_with("archive/")
-                        }
-                    })
-                })
-                .or_else(|| entries.first());
-            if let Some(v) = selected {
-                select(scope, &m::text(v, "path")).await;
+            let selected_path =
+                resolve_initial_selection(scope, &entries, &selected, jump.as_deref());
+            if let Some(path) = selected_path {
+                select(scope, &path).await;
             } else {
                 dom::text(&format!("{scope}-message"), "No readable records found.");
             }
@@ -591,6 +666,43 @@ pub async fn load(scope: &str, bank_changed: bool) {
         Err(_) => {}
     }
 }
+fn resolve_initial_selection(
+    scope: &str,
+    entries: &[V],
+    saved_path: &str,
+    jump_target: Option<&str>,
+) -> Option<String> {
+    jump_target
+        .and_then(|target| jump_entry(entries, target))
+        .or_else(|| entries.iter().find(|x| x["path"] == saved_path))
+        .or_else(|| {
+            entries.iter().find(|x| {
+                if scope == "memory" {
+                    x["kind"] == "chunk"
+                } else {
+                    x["type"] == "task" && !m::text(x, "path").starts_with("archive/")
+                }
+            })
+        })
+        .or_else(|| entries.first())
+        .map(|v| m::text(v, "path"))
+}
+
+fn sync_list_selection(scope: &str, selected_path: &str) {
+    let Some(container) = dom::get(&format!("{scope}-files")) else {
+        return;
+    };
+    for child in dom::children(&container) {
+        if child.get_attribute("data-path").as_deref() == Some(selected_path) {
+            if child.get_attribute("aria-current").as_deref() != Some("true") {
+                let _ = child.set_attribute("aria-current", "true");
+            }
+        } else if child.has_attribute("aria-current") {
+            let _ = child.remove_attribute("aria-current");
+        }
+    }
+}
+
 fn category(v: &V) -> String {
     let p = m::text(v, "path");
     let c = v["category"].as_str().unwrap_or(&p);
@@ -638,6 +750,7 @@ fn render_list(scope: &str) {
         let b = dom::button("", "knowledge-file", json!({"scope":scope,"path":p}));
         b.set_inner_html(&render_list_entry_inner_html(v));
         b.set_class_name("memory-entry");
+        let _ = b.set_attribute("data-path", &p);
         if state["selected_path"] == p {
             let _ = b.set_attribute("aria-current", "true");
         }
@@ -722,7 +835,7 @@ async fn select(scope: &str, path: &str) {
     clear_knowledge_detail(scope);
     state["selected_path"] = json!(path);
     m::set(&key(scope), state.clone());
-    render_list(scope);
+    sync_list_selection(scope, path);
     let project = m::text(&state, "project_id");
     let bank = m::text(&state, "bank_id");
     let channel = format!("{scope}-file");
@@ -1785,7 +1898,11 @@ fn render_promotion_item_html(item: &V, group: &str, busy: bool) -> String {
         format!(
             "<button type=\"button\" class=\"button compact\" data-action=\"{action}\" data-payload=\"{}\"{}>{label}</button>",
             esc(&payload.to_string()),
-            if id.is_none() || busy { " disabled" } else { "" }
+            if id.is_none() || busy {
+                " disabled"
+            } else {
+                ""
+            }
         )
     };
     let promotion = id.unwrap_or("");
@@ -2048,102 +2165,121 @@ fn memory_stage_metrics(stage: &str, stage_model: &V) -> Option<Vec<(String, Str
     Some(rows)
 }
 
-fn render_memory() {
-    let v = m::data("memory-use");
-    let window = m::data("memory-window").as_u64().unwrap_or(30);
-    let model = memory_model(&v, window);
-    m::set("memory-use-model", model.clone());
-    dom::clear("memory-use-body");
-    let flow = dom::el("ol", "memory-flow", "");
-    for (stage, title) in [
-        ("brain", "Project Brain"),
-        ("promotion", "Promotion"),
-        ("bank", "Memory bank"),
-        ("selected", "Selected by retrieval"),
-    ] {
-        let card = dom::el("li", "memory-stage", "");
-        let _ = card.set_attribute("data-stage", stage);
-        dom::add(&card, &dom::el("h3", "", title));
-        if let Some(metrics) =
-            memory_stage_metrics(stage, &model[stage]).filter(|rows| !rows.is_empty())
-        {
-            let list = dom::el("dl", "memory-metrics", "");
-            for (label, value, is_zero) in metrics {
-                dom::add(&list, &dom::el("dt", "", &label));
-                let dd = dom::el("dd", "", &value);
-                if is_zero {
-                    let _ = dd.set_attribute("data-zero", "true");
-                }
-                dom::add(&list, &dd);
-            }
-            dom::add(&card, &list);
-        } else {
-            dom::add(
-                &card,
-                &dom::el("p", "knowledge-note", "Not recorded for this memory root."),
-            );
-        }
-        dom::add(&flow, &card);
+fn set_text_if_changed(id: &str, value: &str) {
+    if dom::get(id).and_then(|e| e.text_content()).as_deref() != Some(value) {
+        dom::text(id, value);
     }
-    dom::append("memory-use-body", &flow);
-    if v["promotions"].is_object() {
-        let since = if window == 0 {
-            String::new()
+}
+
+fn memory_chunk_matches_ui_filter(chunk: &V, today: &str, mode: &str) -> bool {
+    !(mode == "past"
+        && !chunk["review_after"]
+            .as_str()
+            .map(|s| s < today)
+            .unwrap_or(false)
+        || mode == "changed" && chunk["sources_changed"] != true
+        || mode == "active" && chunk["status"] != "active"
+        || mode == "retired"
+            && !["superseded", "archived"].contains(&chunk["status"].as_str().unwrap_or("")))
+}
+
+fn build_memory_chunk_items(chunks: &[V], today: &str, mode: &str) -> Vec<V> {
+    let mut seen = BTreeMap::<String, usize>::new();
+    let mut items = Vec::new();
+    for (index, c) in chunks.iter().enumerate() {
+        if !memory_chunk_matches_ui_filter(c, today, mode) {
+            continue;
+        }
+        let id = m::text(c, "id");
+        let path = m::text(c, "path");
+        let base = if !id.is_empty() {
+            format!("chunk:{id}")
+        } else if !path.is_empty() {
+            format!("chunk:{path}")
         } else {
-            js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
-                js_sys::Date::now() - window as f64 * 86_400_000.,
-            ))
-            .to_iso_string()
-            .as_string()
-            .unwrap_or_default()
+            format!("chunk:idx:{index}")
         };
-        let html = render_promotion_queue_html(
-            &m::array(&v["promotions"]["items"]),
-            &since,
-            &promotion_reviewer(),
-            m::yes(&m::data("memory-promotion-busy")),
-            m::data("memory-promotion-status").as_str().unwrap_or(""),
-        );
-        if let Some(body) = dom::get("memory-use-body") {
-            let _ = body.insert_adjacent_html("beforeend", &html);
-        }
-    }
-    if m::yes(&v["check_available"]) {
-        dom::append(
-            "memory-use-body",
-            &dom::button("Check current memory state", "memory-use-check", V::Null),
-        );
-    }
-    if !m::data("memory-use-check").is_null() {
-        dom::append(
-            "memory-use-body",
-            &dom::details(
-                "Current check",
-                &serde_json::to_string_pretty(&m::data("memory-use-check")).unwrap_or_default(),
-            ),
-        );
-    }
-    let anchor_key = format!(
-        "harness.memory-use.v1:{}:{}",
-        dom::value("memory-use-project"),
-        m::text(&v, "bank_id")
-    );
-    let before = dom::json_storage(&anchor_key);
-    let mut added = 0;
-    let chunks = m::array(&v["chunks"]["items"]);
-    for c in &chunks {
-        if before["chunks"][m::text(c, "id")].is_null() {
-            added += 1;
-        }
-    }
-    dom::text(
-        "memory-use-since",
-        &if before["at"].is_string() {
-            format!("{added} chunks added since {}", m::text(&before, "at"))
+        let count = seen.entry(base.clone()).or_insert(0);
+        let key = if *count == 0 {
+            base
         } else {
-            "First visit to this knowledge root".into()
-        },
-    );
+            format!("{base}#{}", *count)
+        };
+        *count += 1;
+        items.push(json!({
+            "key": key,
+            "chunk": c,
+        }));
+    }
+    items
+}
+
+fn build_memory_trace_items(rows: &[V], feedback: &V, supported: bool) -> Vec<V> {
+    let mut seen = BTreeMap::<String, usize>::new();
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let manifest = m::text(row, "manifest_id");
+            let at = m::text(row, "at");
+            let base = if !manifest.is_empty() {
+                format!("trace:{manifest}")
+            } else if !at.is_empty() {
+                format!("trace:{at}")
+            } else {
+                format!("trace:idx:{index}")
+            };
+            let count = seen.entry(base.clone()).or_insert(0);
+            let key = if *count == 0 {
+                base
+            } else {
+                format!("{base}#{}", *count)
+            };
+            *count += 1;
+            let row_feedback = if manifest.is_empty() {
+                V::Null
+            } else {
+                feedback[&manifest].clone()
+            };
+            json!({
+                "key": key,
+                "row": row,
+                "feedback": row_feedback,
+                "supported": supported,
+            })
+        })
+        .collect()
+}
+
+fn ensure_memory_layout() {
+    if dom::get("memory-use-flow").is_some()
+        && dom::get("memory-use-promotions").is_some()
+        && dom::get("memory-use-check-slot").is_some()
+        && dom::get("memory-ui-filter").is_some()
+        && dom::get("memory-use-chunks").is_some()
+        && dom::get("memory-use-strip").is_some()
+        && dom::get("memory-use-horizon").is_some()
+        && dom::get("memory-use-history").is_some()
+        && dom::get("memory-table-chunk").is_some()
+        && dom::get("memory-table-retrieval").is_some()
+        && dom::get("memory-use-daily-history").is_some()
+        && dom::get("memory-use-traces").is_some()
+    {
+        return;
+    }
+    dom::clear("memory-use-body");
+
+    let flow = dom::el("ol", "memory-flow", "");
+    let _ = flow.set_attribute("id", "memory-use-flow");
+    dom::append("memory-use-body", &flow);
+
+    let promotions = dom::el("div", "", "");
+    let _ = promotions.set_attribute("id", "memory-use-promotions");
+    dom::append("memory-use-body", &promotions);
+
+    let check_slot = dom::el("div", "", "");
+    let _ = check_slot.set_attribute("id", "memory-use-check-slot");
+    dom::append("memory-use-body", &check_slot);
+
     let filter = dom::el("select", "", "");
     let _ = filter.set_attribute("id", "memory-ui-filter");
     for (id, label) in [
@@ -2157,69 +2293,369 @@ fn render_memory() {
         let _ = o.set_attribute("value", id);
         dom::add(&filter, &o);
     }
-    dom::set_element_value(&filter, m::data("memory-filter").as_str().unwrap_or("all"));
     dom::append("memory-use-body", &filter);
-    let mode = m::data("memory-filter");
-    for c in chunks {
-        if mode == "past"
-            && !c["review_after"]
-                .as_str()
-                .map(|s| s < v["today"].as_str().unwrap_or(""))
-                .unwrap_or(false)
-            || mode == "changed" && c["sources_changed"] != true
-            || mode == "active" && c["status"] != "active"
-            || mode == "retired"
-                && !["superseded", "archived"].contains(&c["status"].as_str().unwrap_or(""))
-        {
-            continue;
-        }
-        let row = dom::details(
-            &format!(
-                "{} · {} · review {}",
-                m::summary(&c),
-                m::text(&c, "status"),
-                m::text(&c, "review_after")
-            ),
-            &serde_json::to_string_pretty(&c).unwrap_or_default(),
-        );
-        dom::add(
-            &row,
-            &dom::button("Open chunk", "memory-chunk-open", c.clone()),
-        );
-        dom::append("memory-use-body", &row);
-    }
-    analytics(&v, &model);
-    let history = dom::details(
-        "Daily retrieval history",
-        &serde_json::to_string_pretty(&v["history"]).unwrap_or_default(),
-    );
+
+    let chunks = dom::el("div", "", "");
+    let _ = chunks.set_attribute("id", "memory-use-chunks");
+    dom::append("memory-use-body", &chunks);
+
+    let strip = dom::el("section", "memory-section memory-strip-section", "");
+    let _ = strip.set_attribute("id", "memory-use-strip");
+    dom::append("memory-use-body", &strip);
+
+    let horizon = dom::el("section", "memory-section memory-horizon-section", "");
+    let _ = horizon.set_attribute("id", "memory-use-horizon");
+    dom::append("memory-use-body", &horizon);
+
+    let history = dom::el("section", "memory-history", "");
+    let _ = history.set_attribute("id", "memory-use-history");
     dom::append("memory-use-body", &history);
+
+    for kind in ["chunk", "retrieval"] {
+        let details = dom::el("details", "fleet-report", "");
+        let _ = details.set_attribute("id", &format!("memory-table-{kind}"));
+        let summary = dom::el("summary", "", &format!("{} table (0)", m::label(kind)));
+        let _ = summary.set_attribute("id", &format!("memory-table-{kind}-summary"));
+        dom::add(&details, &summary);
+        let host = dom::el("div", "", "");
+        let _ = host.set_attribute("id", &format!("memory-table-{kind}-host"));
+        dom::add(&details, &host);
+        dom::append("memory-use-body", &details);
+    }
+
+    let daily = dom::el("details", "setup-file", "");
+    let _ = daily.set_attribute("id", "memory-use-daily-history");
+    dom::add(&daily, &dom::el("summary", "", "Daily retrieval history"));
+    let pre = dom::el("pre", "knowledge-result", "");
+    let _ = pre.set_attribute("id", "memory-use-daily-history-pre");
+    dom::add(&daily, &pre);
+    dom::append("memory-use-body", &daily);
+
+    let traces = dom::el("div", "", "");
+    let _ = traces.set_attribute("id", "memory-use-traces");
+    dom::append("memory-use-body", &traces);
+}
+
+fn sync_memory_promotions(v: &V, window: u64) {
+    let Some(host) = dom::get("memory-use-promotions") else {
+        return;
+    };
+    if !v["promotions"].is_object() {
+        dom::hide(&host, true);
+        if host.first_element_child().is_some() {
+            host.set_text_content(None);
+        }
+        let _ = host.remove_attribute("data-base-signature");
+        let _ = host.remove_attribute("data-full-signature");
+        return;
+    }
+    dom::hide(&host, false);
+    let since = if window == 0 {
+        String::new()
+    } else {
+        js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+            js_sys::Date::now() - window as f64 * 86_400_000.,
+        ))
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_default()
+    };
+    let items = m::array(&v["promotions"]["items"]);
+    let reviewer = promotion_reviewer();
+    let busy = m::yes(&m::data("memory-promotion-busy"));
+    let status = m::data("memory-promotion-status")
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let base_sig = json!([items, since]).to_string();
+    let full_sig = json!([items, since, reviewer, busy, status]).to_string();
+    if host.get_attribute("data-full-signature").as_deref() == Some(full_sig.as_str()) {
+        return;
+    }
+    if host.get_attribute("data-base-signature").as_deref() == Some(base_sig.as_str())
+        && host
+            .query_selector(".promotion-queue")
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        let _ = host.set_attribute("data-full-signature", &full_sig);
+        if let Ok(buttons) = host.query_selector_all(
+            "button[data-action=\"memory-promotion-review\"],button[data-action=\"memory-promotion-apply\"]",
+        ) {
+            for i in 0..buttons.length() {
+                if let Some(btn) = buttons.item(i).and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                {
+                    let has_id = btn
+                        .get_attribute("data-payload")
+                        .and_then(|s| serde_json::from_str::<V>(&s).ok())
+                        .and_then(|p| p["promotion_id"].as_str().map(|s| !s.is_empty()))
+                        .unwrap_or(false);
+                    if busy || !has_id {
+                        let _ = btn.set_attribute("disabled", "");
+                    } else {
+                        let _ = btn.remove_attribute("disabled");
+                    }
+                }
+            }
+        }
+        if let Ok(Some(queue)) = host.query_selector(".promotion-queue") {
+            let existing = queue.query_selector(".promotion-status").ok().flatten();
+            if status.is_empty() {
+                if let Some(p) = existing {
+                    p.remove();
+                }
+            } else if let Some(p) = existing {
+                if p.text_content().as_deref() != Some(status.as_str()) {
+                    p.set_text_content(Some(&status));
+                }
+            } else {
+                let p = dom::el("p", "knowledge-note promotion-status", &status);
+                let _ = p.set_attribute("role", "status");
+                let anchor = queue
+                    .query_selector(".promotion-group-title")
+                    .ok()
+                    .flatten();
+                let _ = queue.insert_before(&p, anchor.as_ref().map(|e| e.as_ref()));
+            }
+        }
+        if let Some(input) = dom::get("memory-promotion-reviewer") {
+            let active = dom::document().active_element().as_ref() == Some(&input);
+            if !active && dom::value_of(&input) != reviewer {
+                dom::set_element_value(&input, &reviewer);
+            }
+        }
+        return;
+    }
+
+    let focused_reviewer = dom::get("memory-promotion-reviewer")
+        .filter(|input| dom::document().active_element().as_ref() == Some(input))
+        .and_then(|input| input.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|input| {
+            (
+                input.value(),
+                input.selection_start().ok().flatten(),
+                input.selection_end().ok().flatten(),
+            )
+        });
+    let _ = host.set_attribute("data-base-signature", &base_sig);
+    let _ = host.set_attribute("data-full-signature", &full_sig);
+    let html = render_promotion_queue_html(&items, &since, &reviewer, busy, &status);
+    host.set_inner_html(&html);
+    if let Some((val, start, end)) = focused_reviewer {
+        if let Some(input) = dom::get("memory-promotion-reviewer")
+            .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok())
+        {
+            input.set_value(&val);
+            let _ = input.focus();
+            if let (Some(s), Some(e)) = (start, end) {
+                let _ = input.set_selection_range(s, e);
+            }
+        }
+    }
+}
+
+fn render_memory() {
+    let v = m::data("memory-use");
+    let window = m::data("memory-window").as_u64().unwrap_or(30);
+    let model = memory_model(&v, window);
+    m::set("memory-use-model", model.clone());
+    ensure_memory_layout();
+
+    let stage_items = [
+        ("brain", "Project Brain"),
+        ("promotion", "Promotion"),
+        ("bank", "Memory bank"),
+        ("selected", "Selected by retrieval"),
+    ]
+    .into_iter()
+    .map(|(stage, title)| {
+        let metrics = memory_stage_metrics(stage, &model[stage])
+            .filter(|rows| !rows.is_empty())
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(label, value, is_zero)| json!([label, value, is_zero]))
+                    .collect::<Vec<_>>()
+            });
+        json!({
+            "stage": stage,
+            "title": title,
+            "metrics": metrics,
+        })
+    })
+    .collect::<Vec<_>>();
+    dom::keyed_render(
+        "memory-use-flow",
+        &stage_items,
+        |item| m::text(item, "stage"),
+        |item| {
+            let stage = m::text(item, "stage");
+            let title = m::text(item, "title");
+            let card = dom::el("li", "memory-stage", "");
+            let _ = card.set_attribute("data-stage", &stage);
+            dom::add(&card, &dom::el("h3", "", &title));
+            if let Some(rows) = item["metrics"].as_array() {
+                let list = dom::el("dl", "memory-metrics", "");
+                for row in rows {
+                    let label = m::string(&row[0]);
+                    let value = m::string(&row[1]);
+                    let is_zero = m::yes(&row[2]);
+                    dom::add(&list, &dom::el("dt", "", &label));
+                    let dd = dom::el("dd", "", &value);
+                    if is_zero {
+                        let _ = dd.set_attribute("data-zero", "true");
+                    }
+                    dom::add(&list, &dd);
+                }
+                dom::add(&card, &list);
+            } else {
+                dom::add(
+                    &card,
+                    &dom::el("p", "knowledge-note", "Not recorded for this memory root."),
+                );
+            }
+            card
+        },
+    );
+
+    sync_memory_promotions(&v, window);
+
+    let mut check_items = Vec::new();
+    if m::yes(&v["check_available"]) {
+        check_items.push(json!({ "key": "check-btn" }));
+    }
+    if !m::data("memory-use-check").is_null() {
+        check_items.push(json!({
+            "key": "check-details",
+            "value": m::data("memory-use-check"),
+        }));
+    }
+    dom::keyed_render(
+        "memory-use-check-slot",
+        &check_items,
+        |item| m::text(item, "key"),
+        |item| {
+            if item["key"] == "check-btn" {
+                let btn = dom::button("Check current memory state", "memory-use-check", V::Null);
+                let _ = btn.set_attribute("data-focus-key", "memory-use-check-btn");
+                btn
+            } else {
+                let details = dom::details(
+                    "Current check",
+                    &serde_json::to_string_pretty(&item["value"]).unwrap_or_default(),
+                );
+                let _ = details.set_attribute("data-restore-key", "memory-use-check");
+                details
+            }
+        },
+    );
+
+    let anchor_key = format!(
+        "harness.memory-use.v1:{}:{}",
+        dom::value("memory-use-project"),
+        m::text(&v, "bank_id")
+    );
+    let before = dom::json_storage(&anchor_key);
+    let chunks = m::array(&v["chunks"]["items"]);
+    if !before["at"].is_string() {
+        set_text_if_changed("memory-use-since", "First visit to this knowledge root");
+    } else {
+        memory_changes(&v, &before);
+    }
+
+    let filter_val = m::data("memory-filter")
+        .as_str()
+        .unwrap_or("all")
+        .to_owned();
+    if dom::value("memory-ui-filter") != filter_val {
+        dom::set_value("memory-ui-filter", &filter_val);
+    }
+    let chunk_items =
+        build_memory_chunk_items(&chunks, v["today"].as_str().unwrap_or(""), &filter_val);
+    dom::keyed_render(
+        "memory-use-chunks",
+        &chunk_items,
+        |item| m::text(item, "key"),
+        |item| {
+            let key = m::text(item, "key");
+            let c = &item["chunk"];
+            let row = dom::details(
+                &format!(
+                    "{} · {} · review {}",
+                    m::summary(c),
+                    m::text(c, "status"),
+                    m::text(c, "review_after")
+                ),
+                &serde_json::to_string_pretty(c).unwrap_or_default(),
+            );
+            let _ = row.set_attribute("data-restore-key", &key);
+            if let Some(summary) = row.first_element_child() {
+                let _ = summary.set_attribute("data-focus-key", &format!("chunk-summary:{key}"));
+            }
+            dom::add(
+                &row,
+                &dom::button("Open chunk", "memory-chunk-open", c.clone()),
+            );
+            row
+        },
+    );
+
+    analytics(&v, &model);
+
+    if let Some(pre) = dom::get("memory-use-daily-history-pre") {
+        let hist_sig = v["history"].to_string();
+        if pre.get_attribute("data-signature").as_deref() != Some(hist_sig.as_str()) {
+            let _ = pre.set_attribute("data-signature", &hist_sig);
+            pre.set_text_content(Some(
+                &serde_json::to_string_pretty(&v["history"]).unwrap_or_default(),
+            ));
+        }
+    }
+
     let supported = v["feedback_supported"] == true;
-    for row in m::array(&v["retrievals"]["items"]) {
-        let block = dom::el("details", "setup-file retrieval-trace", "");
-        dom::add(
-            &block,
-            &dom::el(
+    let trace_items = build_memory_trace_items(
+        &m::array(&v["retrievals"]["items"]),
+        &v["feedback"],
+        supported,
+    );
+    dom::keyed_render(
+        "memory-use-traces",
+        &trace_items,
+        |item| m::text(item, "key"),
+        |item| {
+            let key = m::text(item, "key");
+            let row = &item["row"];
+            let mut feedback_map = serde_json::Map::new();
+            let manifest = m::text(row, "manifest_id");
+            if !manifest.is_empty() && !item["feedback"].is_null() {
+                feedback_map.insert(manifest, item["feedback"].clone());
+            }
+            let feedback_obj = V::Object(feedback_map);
+            let block = dom::el("details", "setup-file retrieval-trace", "");
+            let _ = block.set_attribute("data-restore-key", &key);
+            let summary = dom::el(
                 "summary",
                 "",
                 &format!(
                     "{} · {} · {} chunks",
-                    m::text(&row, "at"),
-                    m::text(&row, "route"),
+                    m::text(row, "at"),
+                    m::text(row, "route"),
                     m::array(&row["chunks"]).len()
                 ),
-            ),
-        );
-        let body = dom::el("div", "", "");
-        body.set_inner_html(&render_retrieval_trace_html(
-            &row,
-            &v["feedback"],
-            supported,
-        ));
-        dom::add(&block, &body);
-        dom::append("memory-use-body", &block);
-    }
-    memory_changes(&v, &before);
+            );
+            let _ = summary.set_attribute("data-focus-key", &format!("trace-summary:{key}"));
+            dom::add(&block, &summary);
+            let body = dom::el("div", "", "");
+            body.set_inner_html(&render_retrieval_trace_html(
+                row,
+                &feedback_obj,
+                m::yes(&item["supported"]),
+            ));
+            dom::add(&block, &body);
+            block
+        },
+    );
+
     let mut snapshot = json!({"at":js_sys::Date::new_0().to_iso_string().as_string(),"today":v["today"],"chunks":{},"promotions":{},"newest":m::array(&v["retrievals"]["items"]).last().map(|r|r["at"].clone())});
     for c in m::array(&v["chunks"]["items"]) {
         snapshot["chunks"][m::text(&c, "id")] =
@@ -2288,118 +2724,22 @@ pub fn usage(v: &V) {
     m::set("context-turns", json!(turns));
     render_usage();
 }
-fn render_usage() {
-    let turns = m::array(&m::data("context-turns"));
-    dom::hidden("context-usage", turns.is_empty());
-    if turns.is_empty() {
-        return;
-    }
-    let selected = m::data("context-turn-selected");
-    let turn = turns
+fn context_turn_roving_states(shown: &[V], selected_id: &V) -> Vec<(String, bool, &'static str)> {
+    let checked_idx = shown.iter().position(|t| &t["id"] == selected_id);
+    let tab_idx = checked_idx.unwrap_or_else(|| shown.len().saturating_sub(1));
+    shown
         .iter()
-        .find(|v| v["id"] == selected)
-        .or_else(|| turns.last())
-        .cloned()
-        .unwrap_or(V::Null);
-    dom::clear("context-usage");
-    dom::append("context-usage", &dom::el("h3", "", "Context"));
-    let headline =
-        if let (Some(end), Some(window)) = (m::number(&turn["end"]), m::number(&turn["window"])) {
-            format!(
-                "{end:.0} of {window:.0} tokens · {:.0}%",
-                end / window * 100.
-            )
-        } else {
-            "Context size not reported by this provider".into()
-        };
-    dom::append(
-        "context-usage",
-        &dom::el("p", "context-headline", &headline),
-    );
-    dom::append(
-        "context-usage",
-        &dom::el(
-            "p",
-            "knowledge-note",
-            &format!(
-                "Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",
-                turn["memory"].as_f64().unwrap_or(0.)
-            ),
-        ),
-    );
-    let bar = dom::el("div", "context-bar", "");
-    let _ = bar.set_attribute("role", "img");
-    for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
-        let value = turn_part(&turn, kind);
-        let window = m::number(&turn["window"]).unwrap_or(0.);
-        if value <= 0. || window <= 0. {
-            continue;
-        }
-        let part = dom::el("span", "context-part", "");
-        let _ = part.set_attribute("data-kind", kind);
-        let _ = part.set_attribute("title", &format!("{} ≈ {value:.0} tokens", m::label(kind)));
-        if let Some(e) = part.dyn_ref::<web_sys::HtmlElement>() {
-            let _ = e
-                .style()
-                .set_property("width", &format!("{}%", (value / window * 100.).max(0.33)));
-        }
-        dom::add(&bar, &part);
-    }
-    dom::append("context-usage", &bar);
-    let legend = dom::el("table", "context-legend", "");
-    legend.set_inner_html(&render_usage_legend_html(&turn));
-    dom::append("context-usage", &legend);
-    let page = m::data("context-page").as_u64().unwrap_or(0) as usize;
-    let size = if dom::window()
-        .match_media("(max-width:760px)")
-        .ok()
-        .flatten()
-        .map(|m| m.matches())
-        .unwrap_or(false)
-    {
-        6
-    } else {
-        12
-    };
-    let page = page.min(turns.len().saturating_sub(1) / size);
-    let end = turns.len() - page * size;
-    let shown = &turns[end.saturating_sub(size)..end];
-    if end > size {
-        dom::append(
-            "context-usage",
-            &dom::button("‹ Earlier", "context-page", json!(page + 1)),
-        );
-    }
-    if page > 0 {
-        dom::append(
-            "context-usage",
-            &dom::button("Newer ›", "context-page", json!(page - 1)),
-        );
-    }
-    let strip = dom::el("div", "context-turns", "");
-    let _ = strip.set_attribute("id", "context-turns");
-    let _ = strip.set_attribute("role", "radiogroup");
-    for t in shown {
-        let b = dom::button("", "context-turn", t["id"].clone());
-        b.set_class_name("context-turn");
-        b.set_inner_html(&render_usage_turn_button_html(t));
-        let _ = b.set_attribute("aria-label", &format!("Turn {}", m::string(&t["ordinal"])));
-        let _ = b.set_attribute("role", "radio");
-        let _ = b.set_attribute(
-            "aria-checked",
-            if t["id"] == turn["id"] {
-                "true"
-            } else {
-                "false"
-            },
-        );
-        dom::add(&strip, &b);
-    }
-    dom::append("context-usage", &strip);
-    dom::append(
-        "context-usage",
-        &dom::button("Latest", "context-latest", V::Null),
-    );
+        .enumerate()
+        .map(|(i, t)| {
+            let checked = checked_idx == Some(i);
+            let tabindex = if i == tab_idx { "0" } else { "-1" };
+            (m::string(&t["id"]), checked, tabindex)
+        })
+        .collect()
+}
+
+fn build_usage_detail_items(turn: &V, turns: &[V]) -> Vec<V> {
+    let mut items = Vec::new();
     for (field, title) in [
         ("ledger", "Exact delivered context ledger"),
         ("hooks", "Hook context"),
@@ -2407,33 +2747,236 @@ fn render_usage() {
         ("compactions", "Compactions"),
     ] {
         if !turn[field].is_null() {
-            dom::append(
-                "context-usage",
-                &dom::details(
-                    title,
-                    &serde_json::to_string_pretty(&turn[field]).unwrap_or_default(),
-                ),
-            );
+            items.push(json!({
+                "key": field,
+                "title": title,
+                "kind": "json",
+                "value": turn[field],
+            }));
         }
     }
-    let all = dom::details("Turn table", "");
-    for t in turns {
-        dom::add(
-            &all,
-            &dom::el(
-                "p",
-                "",
-                &format!(
-                    "Turn {} · end {} · window {} · memory ≈ {:.0}",
-                    m::string(&t["ordinal"]),
-                    m::string(&t["end"]),
-                    m::string(&t["window"]),
-                    t["memory"].as_f64().unwrap_or(0.)
-                ),
-            ),
-        );
+    items.push(json!({
+        "key": "turn-table",
+        "title": "Turn table",
+        "kind": "table",
+        "turns": turns,
+    }));
+    items
+}
+
+fn ensure_usage_layout() {
+    if dom::get("context-usage-summary").is_some()
+        && dom::get("context-usage-pager").is_some()
+        && dom::get("context-turns").is_some()
+        && dom::get("context-usage-details").is_some()
+    {
+        return;
     }
-    dom::append("context-usage", &all);
+    dom::clear("context-usage");
+    let summary = dom::el("div", "", "");
+    let _ = summary.set_attribute("id", "context-usage-summary");
+    dom::append("context-usage", &summary);
+
+    let pager = dom::el("div", "", "");
+    let _ = pager.set_attribute("id", "context-usage-pager");
+    dom::append("context-usage", &pager);
+
+    let strip = dom::el("div", "context-turns", "");
+    let _ = strip.set_attribute("id", "context-turns");
+    let _ = strip.set_attribute("role", "radiogroup");
+    let _ = strip.set_attribute("aria-label", "Context turns");
+    dom::append("context-usage", &strip);
+
+    let details = dom::el("div", "", "");
+    let _ = details.set_attribute("id", "context-usage-details");
+    dom::append("context-usage", &details);
+}
+
+fn sync_context_turns_selection(shown: &[V], selected_id: &V) {
+    let Some(strip) = dom::get("context-turns") else {
+        return;
+    };
+    let states = context_turn_roving_states(shown, selected_id);
+    for (child, (_, checked, tabindex)) in dom::children(&strip).into_iter().zip(states) {
+        let checked_str = if checked { "true" } else { "false" };
+        if child.get_attribute("aria-checked").as_deref() != Some(checked_str) {
+            let _ = child.set_attribute("aria-checked", checked_str);
+        }
+        if child.get_attribute("tabindex").as_deref() != Some(tabindex) {
+            let _ = child.set_attribute("tabindex", tabindex);
+        }
+    }
+}
+
+fn render_usage() {
+    let turns = m::array(&m::data("context-turns"));
+    dom::hidden("context-usage", turns.is_empty());
+    if turns.is_empty() {
+        return;
+    }
+    ensure_usage_layout();
+    let selected = m::data("context-turn-selected");
+    let turn = turns
+        .iter()
+        .find(|v| v["id"] == selected)
+        .or_else(|| turns.last())
+        .cloned()
+        .unwrap_or(V::Null);
+
+    if let Some(summary) = dom::get("context-usage-summary") {
+        let sig = turn.to_string();
+        if summary.get_attribute("data-signature").as_deref() != Some(sig.as_str()) {
+            let _ = summary.set_attribute("data-signature", &sig);
+            summary.set_text_content(None);
+            dom::add(&summary, &dom::el("h3", "", "Context"));
+            let headline = if let (Some(end), Some(window)) =
+                (m::number(&turn["end"]), m::number(&turn["window"]))
+            {
+                format!(
+                    "{end:.0} of {window:.0} tokens · {:.0}%",
+                    end / window * 100.
+                )
+            } else {
+                "Context size not reported by this provider".into()
+            };
+            dom::add(&summary, &dom::el("p", "context-headline", &headline));
+            dom::add(
+                &summary,
+                &dom::el(
+                    "p",
+                    "knowledge-note",
+                    &format!(
+                        "Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",
+                        turn["memory"].as_f64().unwrap_or(0.)
+                    ),
+                ),
+            );
+            let bar = dom::el("div", "context-bar", "");
+            let _ = bar.set_attribute("role", "img");
+            for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
+                let value = turn_part(&turn, kind);
+                let window = m::number(&turn["window"]).unwrap_or(0.);
+                if value <= 0. || window <= 0. {
+                    continue;
+                }
+                let part = dom::el("span", "context-part", "");
+                let _ = part.set_attribute("data-kind", kind);
+                let _ =
+                    part.set_attribute("title", &format!("{} ≈ {value:.0} tokens", m::label(kind)));
+                if let Some(e) = part.dyn_ref::<web_sys::HtmlElement>() {
+                    let _ = e
+                        .style()
+                        .set_property("width", &format!("{}%", (value / window * 100.).max(0.33)));
+                }
+                dom::add(&bar, &part);
+            }
+            dom::add(&summary, &bar);
+            let legend = dom::el("table", "context-legend", "");
+            legend.set_inner_html(&render_usage_legend_html(&turn));
+            dom::add(&summary, &legend);
+        }
+    }
+
+    let page = m::data("context-page").as_u64().unwrap_or(0) as usize;
+    let size = usage_page_size(viewport_is_mobile());
+    let page = page.min(turns.len().saturating_sub(1) / size);
+    let end = turns.len() - page * size;
+    let shown = &turns[end.saturating_sub(size)..end];
+
+    if let Some(pager) = dom::get("context-usage-pager") {
+        let pager_sig = json!([end > size, page > 0, page]).to_string();
+        if pager.get_attribute("data-signature").as_deref() != Some(pager_sig.as_str()) {
+            let focus_key = dom::document()
+                .active_element()
+                .filter(|f| pager.contains(Some(f)))
+                .and_then(|f| f.get_attribute("data-focus-key"));
+            let _ = pager.set_attribute("data-signature", &pager_sig);
+            pager.set_text_content(None);
+            if end > size {
+                let earlier = dom::button("‹ Earlier", "context-page", json!(page + 1));
+                let _ = earlier.set_attribute("data-focus-key", "context-earlier");
+                dom::add(&pager, &earlier);
+            }
+            if page > 0 {
+                let newer = dom::button("Newer ›", "context-page", json!(page - 1));
+                let _ = newer.set_attribute("data-focus-key", "context-newer");
+                dom::add(&pager, &newer);
+            }
+            let latest = dom::button("Latest", "context-latest", V::Null);
+            let _ = latest.set_attribute("data-focus-key", "context-latest");
+            dom::add(&pager, &latest);
+            if let Some(fk) = focus_key {
+                if let Ok(nodes) = pager.query_selector_all("[data-focus-key]") {
+                    for i in 0..nodes.length() {
+                        if let Some(e) = nodes
+                            .item(i)
+                            .and_then(|v| v.dyn_into::<web_sys::HtmlElement>().ok())
+                        {
+                            if e.get_attribute("data-focus-key").as_deref() == Some(fk.as_str()) {
+                                let _ = e.focus();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    dom::keyed_render(
+        "context-turns",
+        shown,
+        |t| m::string(&t["id"]),
+        |t| {
+            let b = dom::button("", "context-turn", t["id"].clone());
+            b.set_class_name("context-turn");
+            b.set_inner_html(&render_usage_turn_button_html(t));
+            let _ = b.set_attribute("aria-label", &format!("Turn {}", m::string(&t["ordinal"])));
+            let _ = b.set_attribute("role", "radio");
+            let _ = b.set_attribute("aria-checked", "false");
+            let _ = b.set_attribute("tabindex", "-1");
+            b
+        },
+    );
+    sync_context_turns_selection(shown, &turn["id"]);
+
+    let detail_items = build_usage_detail_items(&turn, &turns);
+    dom::keyed_render(
+        "context-usage-details",
+        &detail_items,
+        |item| m::text(item, "key"),
+        |item| {
+            let key = m::text(item, "key");
+            let title = m::text(item, "title");
+            let details = if item["kind"] == "table" {
+                let all = dom::details(&title, "");
+                for t in m::array(&item["turns"]) {
+                    dom::add(
+                        &all,
+                        &dom::el(
+                            "p",
+                            "",
+                            &format!(
+                                "Turn {} · end {} · window {} · memory ≈ {:.0}",
+                                m::string(&t["ordinal"]),
+                                m::string(&t["end"]),
+                                m::string(&t["window"]),
+                                t["memory"].as_f64().unwrap_or(0.)
+                            ),
+                        ),
+                    );
+                }
+                all
+            } else {
+                dom::details(
+                    &title,
+                    &serde_json::to_string_pretty(&item["value"]).unwrap_or_default(),
+                )
+            };
+            let _ = details.set_attribute("data-restore-key", &key);
+            details
+        },
+    );
 }
 /// Where this browser keeps the reviewer name a person last typed on Memory
 /// use.
@@ -2791,6 +3334,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         }
         "context-latest" => {
             m::take("context-turn-selected");
+            m::set("context-page", json!(0));
             render_usage();
         }
         "context-meter" => session::open_view("usage", true).await,
@@ -2884,349 +3428,429 @@ fn chunk_matches(chunk: &V, data: &V, filter: &str) -> bool {
         _ => true,
     }
 }
+fn memory_table_sort_dir(sort: &V, default_field: &str, field: &str) -> Option<&'static str> {
+    let active = sort["field"].as_str().unwrap_or(default_field);
+    if active != field {
+        return None;
+    }
+    Some(if sort["desc"] == true {
+        "descending"
+    } else {
+        "ascending"
+    })
+}
+
 fn analytics(data: &V, _model: &V) {
     let raw = m::array(&data["retrievals"]["items"]);
-    let mobile = dom::window()
-        .match_media("(max-width:760px)")
-        .ok()
-        .flatten()
-        .map(|m| m.matches())
-        .unwrap_or(false);
-    let shown = if mobile && raw.len() > 80 {
-        &raw[raw.len() - 80..]
-    } else {
-        &raw[..]
-    };
+    let mobile = viewport_is_mobile();
+    let shown = analytics_slice(&raw, mobile);
     let offset = raw.len() - shown.len();
-    let section = dom::el("section", "memory-section memory-strip-section", "");
-    dom::add(
-        &section,
-        &dom::el("h3", "", &format!("Last {} retrievals", shown.len())),
-    );
-    let strip = dom::el("div", "memory-strip", "");
-    let labels = dom::el("div", "memory-strip-labels", "");
-    let columns = dom::el("div", "memory-strip-columns", "");
-    let _ = columns.set_attribute("role", "listbox");
-    let _ = columns.set_attribute("data-memory-options", "retrieval");
-    let _ = columns.set_attribute("aria-label", "Recorded retrievals");
-    for (kind, label) in [
-        ("brain", "Project Brain"),
-        ("bank", "Memory bank"),
-        ("rules", "Rules & docs"),
-    ] {
-        let most = shown
-            .iter()
-            .map(|r| {
-                r[kind].as_u64().unwrap_or(0)
-                    + if kind == "bank" {
-                        m::array(&r["cuts"]).len() as u64
-                    } else {
-                        0
-                    }
-            })
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        let e = dom::el("span", "memory-strip-label", label);
-        style(&e, "--row", &format!("{}px", most * 4));
-        dom::add(&labels, &e);
-    }
-    for (index, row) in shown.iter().enumerate() {
-        let position = index + offset;
-        let col = dom::button("", "memory-retrieval", json!(position));
-        col.set_class_name("memory-column");
-        let _ = col.set_attribute("role", "option");
-        let selected = m::data("memory-pinned-retrieval")
+
+    if let Some(section) = dom::get("memory-use-strip") {
+        let selected_pos = m::data("memory-pinned-retrieval")
             .as_u64()
-            .map(|n| n as usize == position)
-            .unwrap_or(position + 1 == raw.len());
-        let _ = col.set_attribute("tabindex", if selected { "0" } else { "-1" });
-        let _ = col.set_attribute("aria-selected", if selected { "true" } else { "false" });
-        let _ = col.set_attribute(
-            "aria-label",
-            &format!(
-                "{} · {} · {} chunks",
-                m::text(row, "at"),
-                m::text(row, "route"),
-                m::array(&row["chunks"]).len()
-            ),
-        );
-        for kind in ["brain", "bank", "rules"] {
-            let most = shown
-                .iter()
-                .map(|r| {
-                    r[kind].as_u64().unwrap_or(0)
-                        + if kind == "bank" {
-                            m::array(&r["cuts"]).len() as u64
-                        } else {
-                            0
-                        }
-                })
-                .max()
-                .unwrap_or(1)
-                .max(1);
-            let cell = dom::el("span", "memory-cell", "");
-            let _ = cell.set_attribute("data-kind", kind);
-            style(&cell, "--row", &format!("{}px", most * 4));
-            if kind == "bank" && !m::array(&row["cuts"]).is_empty() {
-                let cuts = dom::el("span", "memory-units cut", "");
-                style(
-                    &cuts,
-                    "--units",
-                    &format!("{}px", m::array(&row["cuts"]).len() * 4),
-                );
-                dom::add(&cell, &cuts);
+            .map(|n| n as usize)
+            .unwrap_or_else(|| raw.len().saturating_sub(1));
+        let strip_sig = json!([shown, mobile, selected_pos]).to_string();
+        if section.get_attribute("data-signature").as_deref() != Some(strip_sig.as_str()) {
+            let _ = section.set_attribute("data-signature", &strip_sig);
+            section.set_text_content(None);
+            dom::add(
+                &section,
+                &dom::el("h3", "", &format!("Last {} retrievals", shown.len())),
+            );
+            let strip = dom::el("div", "memory-strip", "");
+            let labels = dom::el("div", "memory-strip-labels", "");
+            let columns = dom::el("div", "memory-strip-columns", "");
+            let _ = columns.set_attribute("role", "listbox");
+            let _ = columns.set_attribute("data-memory-options", "retrieval");
+            let _ = columns.set_attribute("aria-label", "Recorded retrievals");
+            for (kind, label) in [
+                ("brain", "Project Brain"),
+                ("bank", "Memory bank"),
+                ("rules", "Rules & docs"),
+            ] {
+                let most = shown
+                    .iter()
+                    .map(|r| {
+                        r[kind].as_u64().unwrap_or(0)
+                            + if kind == "bank" {
+                                m::array(&r["cuts"]).len() as u64
+                            } else {
+                                0
+                            }
+                    })
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                let e = dom::el("span", "memory-strip-label", label);
+                style(&e, "--row", &format!("{}px", most * 4));
+                dom::add(&labels, &e);
             }
-            let units = dom::el("span", "memory-units", "");
-            let count = row[kind].as_u64().unwrap_or(0);
-            style(&units, "--units", &format!("{}px", count * 4));
-            dom::hide(&units, count == 0);
-            dom::add(&cell, &units);
-            dom::add(&col, &cell);
+            for (index, row) in shown.iter().enumerate() {
+                let position = index + offset;
+                let col = dom::button("", "memory-retrieval", json!(position));
+                col.set_class_name("memory-column");
+                let _ = col.set_attribute("role", "option");
+                let selected = m::data("memory-pinned-retrieval")
+                    .as_u64()
+                    .map(|n| n as usize == position)
+                    .unwrap_or(position + 1 == raw.len());
+                let _ = col.set_attribute("tabindex", if selected { "0" } else { "-1" });
+                let _ = col.set_attribute("aria-selected", if selected { "true" } else { "false" });
+                let _ = col.set_attribute(
+                    "aria-label",
+                    &format!(
+                        "{} · {} · {} chunks",
+                        m::text(row, "at"),
+                        m::text(row, "route"),
+                        m::array(&row["chunks"]).len()
+                    ),
+                );
+                for kind in ["brain", "bank", "rules"] {
+                    let most = shown
+                        .iter()
+                        .map(|r| {
+                            r[kind].as_u64().unwrap_or(0)
+                                + if kind == "bank" {
+                                    m::array(&r["cuts"]).len() as u64
+                                } else {
+                                    0
+                                }
+                        })
+                        .max()
+                        .unwrap_or(1)
+                        .max(1);
+                    let cell = dom::el("span", "memory-cell", "");
+                    let _ = cell.set_attribute("data-kind", kind);
+                    style(&cell, "--row", &format!("{}px", most * 4));
+                    if kind == "bank" && !m::array(&row["cuts"]).is_empty() {
+                        let cuts = dom::el("span", "memory-units cut", "");
+                        style(
+                            &cuts,
+                            "--units",
+                            &format!("{}px", m::array(&row["cuts"]).len() * 4),
+                        );
+                        dom::add(&cell, &cuts);
+                    }
+                    let units = dom::el("span", "memory-units", "");
+                    let count = row[kind].as_u64().unwrap_or(0);
+                    style(&units, "--units", &format!("{}px", count * 4));
+                    dom::hide(&units, count == 0);
+                    dom::add(&cell, &units);
+                    dom::add(&col, &cell);
+                }
+                dom::add(&columns, &col);
+            }
+            let scroller = dom::el("div", "memory-strip-scroll", "");
+            dom::add(&scroller, &columns);
+            dom::add(&strip, &labels);
+            dom::add(&strip, &scroller);
+            dom::add(&section, &strip);
+            let detail = dom::el("div", "memory-detail", "");
+            let _ = detail.set_attribute("id", "memory-strip-detail");
+            dom::add(&section, &detail);
+            if !raw.is_empty() {
+                retrieval_detail(selected_pos);
+            }
         }
-        dom::add(&columns, &col);
     }
-    let scroller = dom::el("div", "memory-strip-scroll", "");
-    dom::add(&scroller, &columns);
-    dom::add(&strip, &labels);
-    dom::add(&strip, &scroller);
-    dom::add(&section, &strip);
-    let detail = dom::el("div", "memory-detail", "");
-    let _ = detail.set_attribute("id", "memory-strip-detail");
-    dom::add(&section, &detail);
-    dom::append("memory-use-body", &section);
-    if !raw.is_empty() {
-        retrieval_detail(
-            m::data("memory-pinned-retrieval")
-                .as_u64()
-                .map(|n| n as usize)
-                .unwrap_or(raw.len() - 1),
-        );
-    }
-    let horizon = dom::el("section", "memory-section memory-horizon-section", "");
-    dom::add(&horizon, &dom::el("h3", "", "Review horizon"));
-    let chips = dom::el("div", "memory-chips", "");
+
     let mut chunks = m::array(&data["chunks"]["items"])
         .into_iter()
         .filter(|c| c["status"] == "active" && c["review_after"].is_string())
         .collect::<Vec<_>>();
     chunks.sort_by_key(|c| (m::text(c, "review_after"), m::text(c, "id")));
     let filters = m::array(&m::data("memory-filters"));
-    for (filter, label) in [
-        ("all", "All"),
-        ("past", "Past review"),
-        ("due", "Due ≤30d"),
-        ("changed", "Sources changed"),
-        ("unattested", "Not re-attested since promotion"),
-        ("never", "Never selected"),
-    ] {
-        let count = chunks
-            .iter()
-            .filter(|c| chunk_matches(c, data, filter))
-            .count();
-        let b = dom::button(
-            &format!("{label} {count}"),
-            "memory-filter-chip",
-            json!(filter),
-        );
-        b.set_class_name("chip");
-        let on = if filter == "all" {
-            filters.is_empty()
-        } else {
-            filters.iter().any(|v| v == filter)
-        };
-        let _ = b.set_attribute("aria-pressed", if on { "true" } else { "false" });
-        if count == 0 && filter != "all" {
-            let _ = b.set_attribute("disabled", "");
-        }
-        dom::add(&chips, &b);
-    }
-    dom::add(&horizon, &chips);
-    let chart = dom::el("div", "memory-horizon", "");
-    let past = dom::el("div", "memory-horizon-past", "Past review date");
-    style(&past, "width", &format!("{}%", 30. / 395. * 100.));
-    dom::add(&chart, &past);
-    let zero = dom::el("div", "memory-horizon-zero", "");
-    style(&zero, "left", &format!("{}%", 30. / 395. * 100.));
-    dom::add(&chart, &zero);
-    let bins = dom::el("div", "memory-horizon-bins", "");
-    let _ = bins.set_attribute("role", "group");
-    let _ = bins.set_attribute("data-memory-options", "chunks");
-    let bin = if mobile { 14 } else { 7 };
-    let mut groups: BTreeMap<i64, Vec<V>> = BTreeMap::new();
-    for chunk in &chunks {
-        if let Some(day) = day_distance(
-            data["today"].as_str().unwrap_or(""),
-            chunk["review_after"].as_str().unwrap_or(""),
-        ) {
-            groups
-                .entry((day.clamp(-30, 365) + 30) / bin)
-                .or_default()
-                .push(chunk.clone());
-        }
-    }
-    for (key, members) in groups {
-        let column = dom::el("div", "memory-bin", "");
-        style(
-            &column,
-            "left",
-            &format!("{}%", key as f64 * bin as f64 / 395. * 100.),
-        );
-        style(&column, "width", &format!("{}%", bin as f64 / 395. * 100.));
-        for (index, chunk) in members.iter().enumerate() {
-            let id = m::text(chunk, "id");
-            let dot = dom::button("", "memory-horizon-chunk", chunk.clone());
-            dot.set_class_name("memory-dot");
-            let provenance = if chunk["auto"] == true {
-                if m::text(chunk, "last_verified") > m::text(chunk, "created") {
-                    "auto-attested"
-                } else {
-                    "auto"
-                }
-            } else {
-                "person"
-            };
-            let _ = dot.set_attribute("data-provenance", provenance);
-            let _ = dot.set_attribute("data-id", &id);
-            let _ = dot.set_attribute(
-                "tabindex",
-                if m::data("memory-selected-chunk") == id
-                    || m::data("memory-selected-chunk").is_null()
-                        && chunks.first().is_some_and(|v| v["id"] == id)
+
+    if let Some(horizon) = dom::get("memory-use-horizon") {
+        let base_sig = json!([
+            chunks,
+            data["today"],
+            data["retrievals"]["items"],
+            data["history"]["days"],
+            mobile
+        ])
+        .to_string();
+        let filters_sig = json!(filters).to_string();
+        if horizon.get_attribute("data-base-signature").as_deref() == Some(base_sig.as_str()) {
+            if horizon.get_attribute("data-filters-signature").as_deref()
+                != Some(filters_sig.as_str())
+            {
+                let _ = horizon.set_attribute("data-filters-signature", &filters_sig);
+                if let Ok(chips) =
+                    horizon.query_selector_all("button[data-action=\"memory-filter-chip\"]")
                 {
-                    "0"
+                    for i in 0..chips.length() {
+                        if let Some(b) = chips
+                            .item(i)
+                            .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                        {
+                            let filter = b
+                                .get_attribute("data-payload")
+                                .and_then(|s| serde_json::from_str::<V>(&s).ok())
+                                .and_then(|v| v.as_str().map(str::to_owned))
+                                .unwrap_or_default();
+                            let on = if filter == "all" {
+                                filters.is_empty()
+                            } else {
+                                filters.iter().any(|v| v == &filter)
+                            };
+                            let _ =
+                                b.set_attribute("aria-pressed", if on { "true" } else { "false" });
+                        }
+                    }
+                }
+                let by_id = chunks
+                    .iter()
+                    .map(|c| (m::text(c, "id"), c))
+                    .collect::<BTreeMap<_, _>>();
+                if let Ok(dots) = horizon.query_selector_all(".memory-dot[data-id]") {
+                    for i in 0..dots.length() {
+                        if let Some(dot) = dots
+                            .item(i)
+                            .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                        {
+                            if let Some(chunk) =
+                                dot.get_attribute("data-id").and_then(|id| by_id.get(&id))
+                            {
+                                let dim = !filters
+                                    .iter()
+                                    .all(|f| chunk_matches(chunk, data, f.as_str().unwrap_or("")));
+                                let _ = dot
+                                    .set_attribute("data-dim", if dim { "true" } else { "false" });
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let _ = horizon.set_attribute("data-base-signature", &base_sig);
+            let _ = horizon.set_attribute("data-filters-signature", &filters_sig);
+            horizon.set_text_content(None);
+            dom::add(&horizon, &dom::el("h3", "", "Review horizon"));
+            let chips = dom::el("div", "memory-chips", "");
+            for (filter, label) in [
+                ("all", "All"),
+                ("past", "Past review"),
+                ("due", "Due ≤30d"),
+                ("changed", "Sources changed"),
+                ("unattested", "Not re-attested since promotion"),
+                ("never", "Never selected"),
+            ] {
+                let count = chunks
+                    .iter()
+                    .filter(|c| chunk_matches(c, data, filter))
+                    .count();
+                let b = dom::button(
+                    &format!("{label} {count}"),
+                    "memory-filter-chip",
+                    json!(filter),
+                );
+                b.set_class_name("chip");
+                let on = if filter == "all" {
+                    filters.is_empty()
                 } else {
-                    "-1"
-                },
+                    filters.iter().any(|v| v == filter)
+                };
+                let _ = b.set_attribute("aria-pressed", if on { "true" } else { "false" });
+                if count == 0 && filter != "all" {
+                    let _ = b.set_attribute("disabled", "");
+                }
+                dom::add(&chips, &b);
+            }
+            dom::add(&horizon, &chips);
+            let chart = dom::el("div", "memory-horizon", "");
+            let past = dom::el("div", "memory-horizon-past", "Past review date");
+            style(&past, "width", &format!("{}%", 30. / 395. * 100.));
+            dom::add(&chart, &past);
+            let zero = dom::el("div", "memory-horizon-zero", "");
+            style(&zero, "left", &format!("{}%", 30. / 395. * 100.));
+            dom::add(&chart, &zero);
+            let bins = dom::el("div", "memory-horizon-bins", "");
+            let _ = bins.set_attribute("role", "group");
+            let _ = bins.set_attribute("data-memory-options", "chunks");
+            let bin = horizon_bin_days(mobile);
+            let mut groups: BTreeMap<i64, Vec<V>> = BTreeMap::new();
+            for chunk in &chunks {
+                if let Some(day) = day_distance(
+                    data["today"].as_str().unwrap_or(""),
+                    chunk["review_after"].as_str().unwrap_or(""),
+                ) {
+                    groups
+                        .entry((day.clamp(-30, 365) + 30) / bin)
+                        .or_default()
+                        .push(chunk.clone());
+                }
+            }
+            for (key, members) in groups {
+                let column = dom::el("div", "memory-bin", "");
+                style(
+                    &column,
+                    "left",
+                    &format!("{}%", key as f64 * bin as f64 / 395. * 100.),
+                );
+                style(&column, "width", &format!("{}%", bin as f64 / 395. * 100.));
+                for (index, chunk) in members.iter().enumerate() {
+                    let id = m::text(chunk, "id");
+                    let dot = dom::button("", "memory-horizon-chunk", chunk.clone());
+                    dot.set_class_name("memory-dot");
+                    let provenance = if chunk["auto"] == true {
+                        if m::text(chunk, "last_verified") > m::text(chunk, "created") {
+                            "auto-attested"
+                        } else {
+                            "auto"
+                        }
+                    } else {
+                        "person"
+                    };
+                    let _ = dot.set_attribute("data-provenance", provenance);
+                    let _ = dot.set_attribute("data-id", &id);
+                    let _ = dot.set_attribute(
+                        "tabindex",
+                        if m::data("memory-selected-chunk") == id
+                            || m::data("memory-selected-chunk").is_null()
+                                && chunks.first().is_some_and(|v| v["id"] == id)
+                        {
+                            "0"
+                        } else {
+                            "-1"
+                        },
+                    );
+                    let _ = dot.set_attribute(
+                        "aria-label",
+                        &format!(
+                            "{id}, {provenance}, review {}, selected in {} retrievals",
+                            m::text(chunk, "review_after"),
+                            selected_count(data, &id)
+                        ),
+                    );
+                    let _ = dot.set_attribute(
+                        "data-dim",
+                        if filters
+                            .iter()
+                            .all(|f| chunk_matches(chunk, data, f.as_str().unwrap_or("")))
+                        {
+                            "false"
+                        } else {
+                            "true"
+                        },
+                    );
+                    if index >= 4 {
+                        let _ = dot.set_attribute("data-overflow", "true");
+                    }
+                    dom::add(&column, &dot);
+                }
+                if members.len() > 4 {
+                    dom::add(
+                        &column,
+                        &dom::el(
+                            "span",
+                            "memory-bin-more",
+                            &format!("+{}", members.len() - 4),
+                        ),
+                    );
+                }
+                dom::add(&bins, &column);
+            }
+            dom::add(&chart, &bins);
+            dom::add(&horizon, &chart);
+            let ticks = dom::el("div", "memory-horizon-ticks", "");
+            for &day in horizon_ticks(mobile) {
+                let tick = dom::el(
+                    "span",
+                    "",
+                    &format!("{day}{}", if day == 365 { " d" } else { "" }),
+                );
+                style(
+                    &tick,
+                    "left",
+                    &format!("{}%", (day + 30) as f64 / 395. * 100.),
+                );
+                dom::add(&ticks, &tick);
+            }
+            dom::add(&horizon, &ticks);
+            let detail = dom::el(
+                "div",
+                "memory-detail",
+                "Focus or point at a dot to see its chunk.",
             );
-            let _ = dot.set_attribute(
+            let _ = detail.set_attribute("id", "memory-horizon-detail");
+            dom::add(&horizon, &detail);
+            if let Some(chunk) = chunks
+                .iter()
+                .find(|c| c["id"] == m::data("memory-selected-chunk"))
+            {
+                chunk_detail(chunk);
+            }
+        }
+    }
+
+    if let Some(section) = dom::get("memory-use-history") {
+        let days = m::array(&data["history"]["days"]);
+        let hist_sig = json!(days).to_string();
+        if section.get_attribute("data-signature").as_deref() != Some(hist_sig.as_str()) {
+            let _ = section.set_attribute("data-signature", &hist_sig);
+            section.set_text_content(None);
+            dom::add(&section, &dom::el("h4", "", "Retrievals per day"));
+            let plot = dom::el("div", "memory-history-plot", "");
+            let history = dom::el("div", "memory-history-chart", "");
+            let _ = history.set_attribute("role", "img");
+            let most = days
+                .iter()
+                .filter_map(|d| d["retrievals"].as_u64())
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            let total = days
+                .iter()
+                .filter_map(|d| d["retrievals"].as_u64())
+                .sum::<u64>();
+            let delivered = days
+                .iter()
+                .filter_map(|d| d["with_chunk"].as_u64())
+                .sum::<u64>();
+            let _ = history.set_attribute(
                 "aria-label",
                 &format!(
-                    "{id}, {provenance}, review {}, selected in {} retrievals",
-                    m::text(chunk, "review_after"),
-                    selected_count(data, &id)
+                    "{total} retrievals over {} days, {delivered} of them with a Memory Bank chunk",
+                    days.len()
                 ),
             );
-            let _ = dot.set_attribute(
-                "data-dim",
-                if filters
-                    .iter()
-                    .all(|f| chunk_matches(chunk, data, f.as_str().unwrap_or("")))
+            for day in &days {
+                let column = dom::el("div", "memory-history-day", "");
+                let _ = column.set_attribute(
+                    "title",
+                    &format!(
+                        "{} · {} retrievals · {} with a chunk",
+                        m::text(day, "day"),
+                        m::string(&day["retrievals"]),
+                        day["with_chunk"].as_u64().unwrap_or(0)
+                    ),
+                );
+                let (rest, bank) = history_day_heights(day, most);
+                for (class, height) in
+                    [("memory-history-rest", rest), ("memory-history-bank", bank)]
                 {
-                    "false"
-                } else {
-                    "true"
-                },
-            );
-            if index >= 4 {
-                let _ = dot.set_attribute("data-overflow", "true");
+                    if height > 0. {
+                        let part = dom::el("span", class, "");
+                        style(&part, "height", &format!("{height:.2}%"));
+                        dom::add(&column, &part);
+                    }
+                }
+                dom::add(&history, &column);
             }
-            dom::add(&column, &dot);
-        }
-        if members.len() > 4 {
-            dom::add(
-                &column,
-                &dom::el(
-                    "span",
-                    "memory-bin-more",
-                    &format!("+{}", members.len() - 4),
-                ),
-            );
-        }
-        dom::add(&bins, &column);
-    }
-    dom::add(&chart, &bins);
-    dom::add(&horizon, &chart);
-    let ticks = dom::el("div", "memory-horizon-ticks", "");
-    for day in if mobile {
-        vec![0, 180, 365]
-    } else {
-        vec![-30, 0, 90, 180, 270, 365]
-    } {
-        let tick = dom::el(
-            "span",
-            "",
-            &format!("{day}{}", if day == 365 { " d" } else { "" }),
-        );
-        style(
-            &tick,
-            "left",
-            &format!("{}%", (day + 30) as f64 / 395. * 100.),
-        );
-        dom::add(&ticks, &tick);
-    }
-    dom::add(&horizon, &ticks);
-    let detail = dom::el(
-        "div",
-        "memory-detail",
-        "Focus or point at a dot to see its chunk.",
-    );
-    let _ = detail.set_attribute("id", "memory-horizon-detail");
-    dom::add(&horizon, &detail);
-    dom::append("memory-use-body", &horizon);
-    if let Some(chunk) = chunks
-        .iter()
-        .find(|c| c["id"] == m::data("memory-selected-chunk"))
-    {
-        chunk_detail(chunk);
-    }
-    let section = dom::el("section", "memory-history", "");
-    dom::add(&section, &dom::el("h4", "", "Retrievals per day"));
-    let plot = dom::el("div", "memory-history-plot", "");
-    let history = dom::el("div", "memory-history-chart", "");
-    let _ = history.set_attribute("role", "img");
-    let days = m::array(&data["history"]["days"]);
-    let most = days
-        .iter()
-        .filter_map(|d| d["retrievals"].as_u64())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let total = days
-        .iter()
-        .filter_map(|d| d["retrievals"].as_u64())
-        .sum::<u64>();
-    let delivered = days
-        .iter()
-        .filter_map(|d| d["with_chunk"].as_u64())
-        .sum::<u64>();
-    let _ = history.set_attribute(
-        "aria-label",
-        &format!(
-            "{total} retrievals over {} days, {delivered} of them with a Memory Bank chunk",
-            days.len()
-        ),
-    );
-    for day in &days {
-        let column = dom::el("div", "memory-history-day", "");
-        let _ = column.set_attribute(
-            "title",
-            &format!(
-                "{} · {} retrievals · {} with a chunk",
-                m::text(day, "day"),
-                m::string(&day["retrievals"]),
-                day["with_chunk"].as_u64().unwrap_or(0)
-            ),
-        );
-        let (rest, bank) = history_day_heights(day, most);
-        for (class, height) in [("memory-history-rest", rest), ("memory-history-bank", bank)] {
-            if height > 0. {
-                let part = dom::el("span", class, "");
-                style(&part, "height", &format!("{height:.2}%"));
-                dom::add(&column, &part);
+            dom::add(&plot, &history);
+            if let (Some(first), Some(last)) = (days.first(), days.last()) {
+                let axis = dom::el("div", "memory-history-axis", "");
+                dom::add(&axis, &dom::el("span", "", &m::text(first, "day")));
+                dom::add(&axis, &dom::el("span", "", &m::text(last, "day")));
+                dom::add(&plot, &axis);
             }
+            dom::add(&section, &plot);
         }
-        dom::add(&history, &column);
     }
-    dom::add(&plot, &history);
-    if let (Some(first), Some(last)) = (days.first(), days.last()) {
-        let axis = dom::el("div", "memory-history-axis", "");
-        dom::add(&axis, &dom::el("span", "", &m::text(first, "day")));
-        dom::add(&axis, &dom::el("span", "", &m::text(last, "day")));
-        dom::add(&plot, &axis);
-    }
-    dom::add(&section, &plot);
-    dom::append("memory-use-body", &section);
+
     sortable(
         "chunk",
         &chunks,
@@ -3252,6 +3876,14 @@ fn analytics(data: &V, _model: &V) {
 }
 fn sortable(kind: &str, rows: &[V], columns: &[(&str, &str)]) {
     let sort = m::data(&format!("memory-sort-{kind}"));
+    let Some(details) = dom::get(&format!("memory-table-{kind}")) else {
+        return;
+    };
+    let table_sig = json!([rows, sort]).to_string();
+    if details.get_attribute("data-signature").as_deref() == Some(table_sig.as_str()) {
+        return;
+    }
+    let _ = details.set_attribute("data-signature", &table_sig);
     let key = sort["field"].as_str().unwrap_or(columns[0].0);
     let desc = sort["desc"] == true;
     let mut values = rows.to_vec();
@@ -3267,24 +3899,30 @@ fn sortable(kind: &str, rows: &[V], columns: &[(&str, &str)]) {
             order
         }
     });
-    let details = dom::el("details", "fleet-report", "");
-    dom::add(
-        &details,
-        &dom::el(
-            "summary",
-            "",
-            &format!("{} table ({})", m::label(kind), values.len()),
-        ),
+    set_text_if_changed(
+        &format!("memory-table-{kind}-summary"),
+        &format!("{} table ({})", m::label(kind), values.len()),
     );
+    let Some(host) = dom::get(&format!("memory-table-{kind}-host")) else {
+        return;
+    };
+    let focus_key = dom::document()
+        .active_element()
+        .filter(|el| host.contains(Some(el)))
+        .and_then(|el| el.get_attribute("data-focus-key"));
+    host.set_text_content(None);
     let table = dom::el("table", "memory-table", "");
     let head = dom::el("tr", "", "");
     for (field, label) in columns {
         let th = dom::el("th", "", "");
         let _ = th.set_attribute("scope", "col");
-        dom::add(
-            &th,
-            &dom::button(label, "memory-sort", json!({"kind":kind,"field":field})),
-        );
+        if let Some(dir) = memory_table_sort_dir(&sort, columns[0].0, field) {
+            let _ = th.set_attribute("aria-sort", dir);
+        }
+        let btn = dom::button(label, "memory-sort", json!({"kind":kind,"field":field}));
+        btn.set_class_name("memory-sort");
+        let _ = btn.set_attribute("data-focus-key", &format!("sort:{kind}:{field}"));
+        dom::add(&th, &btn);
         dom::add(&head, &th);
     }
     dom::add(&table, &head);
@@ -3295,8 +3933,22 @@ fn sortable(kind: &str, rows: &[V], columns: &[(&str, &str)]) {
         }
         dom::add(&table, &tr);
     }
-    dom::add(&details, &table);
-    dom::append("memory-use-body", &details);
+    dom::add(&host, &table);
+    if let Some(fk) = focus_key {
+        if let Ok(nodes) = host.query_selector_all("[data-focus-key]") {
+            for i in 0..nodes.length() {
+                if let Some(e) = nodes
+                    .item(i)
+                    .and_then(|v| v.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    if e.get_attribute("data-focus-key").as_deref() == Some(fk.as_str()) {
+                        let _ = e.focus();
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 fn retrieval_detail(index: usize) {
     let data = m::data("memory-use");
@@ -3555,7 +4207,7 @@ fn memory_changes(data: &V, before: &V) {
     if retrievals > 0 {
         parts.push(format!("{retrievals} retrievals"));
     }
-    dom::text(
+    set_text_if_changed(
         "memory-use-since",
         &format!(
             "Since {}: {}",
@@ -4043,5 +4695,138 @@ mod tests {
 
         let no_id = json!({ "title": "INDEX.md" });
         assert!(render_detail_omnigraph_action_html("memory", "proj-1", &no_id).is_empty());
+    }
+
+    #[test]
+    fn resolve_initial_selection_prefers_jump_then_saved_then_default_active_record() {
+        let entries = vec![
+            json!({"id": "arch", "type": "task", "kind": "doc", "path": "archive/old.md"}),
+            json!({"id": "t1", "type": "task", "kind": "chunk", "path": "dynamic/tasks/t1.md"}),
+            json!({"id": "t2", "type": "finding", "kind": "chunk", "path": "dynamic/findings/f2.md"}),
+        ];
+        assert_eq!(
+            super::resolve_initial_selection(
+                "brain",
+                &entries,
+                "dynamic/findings/f2.md",
+                Some("arch")
+            ),
+            Some("archive/old.md".to_owned())
+        );
+        assert_eq!(
+            super::resolve_initial_selection("brain", &entries, "dynamic/findings/f2.md", None),
+            Some("dynamic/findings/f2.md".to_owned())
+        );
+        assert_eq!(
+            super::resolve_initial_selection("brain", &entries, "", None),
+            Some("dynamic/tasks/t1.md".to_owned())
+        );
+        assert_eq!(
+            super::resolve_initial_selection("memory", &entries, "", None),
+            Some("dynamic/tasks/t1.md".to_owned())
+        );
+        assert_eq!(
+            super::resolve_initial_selection("brain", &[], "", None),
+            None
+        );
+    }
+
+    #[test]
+    fn context_turn_roving_states_and_detail_items_decouple_selection_and_preserve_tab_stop() {
+        let shown = vec![
+            json!({"id": "t1", "ordinal": 1}),
+            json!({"id": "t2", "ordinal": 2}),
+            json!({"id": "t3", "ordinal": 3}),
+        ];
+        // Selected turn on current page gets aria-checked=true and tabindex=0
+        assert_eq!(
+            super::context_turn_roving_states(&shown, &json!("t2")),
+            vec![
+                ("t1".into(), false, "-1"),
+                ("t2".into(), true, "0"),
+                ("t3".into(), false, "-1"),
+            ]
+        );
+        // When selected turn is on another page, last shown turn remains tab-reachable
+        assert_eq!(
+            super::context_turn_roving_states(&shown, &json!("t99")),
+            vec![
+                ("t1".into(), false, "-1"),
+                ("t2".into(), false, "-1"),
+                ("t3".into(), false, "0"),
+            ]
+        );
+
+        let turn = json!({
+            "id": "t2",
+            "ledger": {"chars": 100},
+            "hooks": null,
+            "cli_files": ["a.rs"],
+            "compactions": []
+        });
+        let details = super::build_usage_detail_items(&turn, &shown);
+        let keys: Vec<String> = details
+            .iter()
+            .map(|d| d["key"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["ledger", "cli_files", "compactions", "turn-table"]
+        );
+    }
+
+    #[test]
+    fn memory_chunk_and_trace_items_key_stably_and_table_sort_reports_aria_sort() {
+        let chunks = vec![
+            json!({"id": "c1", "status": "active", "review_after": "2026-10-01", "sources_changed": false}),
+            json!({"id": "c2", "status": "archived", "review_after": "2026-12-01", "sources_changed": true}),
+            json!({"id": "", "path": "memory-bank/c3.md", "status": "active", "review_after": "2026-12-01", "sources_changed": true}),
+        ];
+        let past = super::build_memory_chunk_items(&chunks, "2026-11-01", "past");
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0]["key"], "chunk:c1");
+
+        let changed = super::build_memory_chunk_items(&chunks, "2026-11-01", "changed");
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[0]["key"], "chunk:c2");
+        assert_eq!(changed[1]["key"], "chunk:memory-bank/c3.md");
+
+        let traces = vec![
+            json!({"manifest_id": "m1", "at": "2026-11-17T10:00:00Z"}),
+            json!({"manifest_id": "m1", "at": "2026-11-17T10:01:00Z"}),
+        ];
+        let feedback = json!({"m1": {"c1": {"vote": "helped"}}});
+        let trace_items = super::build_memory_trace_items(&traces, &feedback, true);
+        assert_eq!(trace_items[0]["key"], "trace:m1");
+        assert_eq!(trace_items[1]["key"], "trace:m1#1");
+
+        assert_eq!(
+            super::memory_table_sort_dir(&json!({}), "id", "id"),
+            Some("ascending")
+        );
+        assert_eq!(
+            super::memory_table_sort_dir(&json!({"field": "bytes", "desc": true}), "id", "bytes"),
+            Some("descending")
+        );
+        assert_eq!(
+            super::memory_table_sort_dir(&json!({"field": "bytes", "desc": true}), "id", "id"),
+            None
+        );
+    }
+
+    #[test]
+    fn responsive_knowledge_density_scales_by_breakpoint() {
+        assert_eq!(super::usage_page_size(true), 6);
+        assert_eq!(super::usage_page_size(false), 12);
+        assert_eq!(super::horizon_bin_days(true), 14);
+        assert_eq!(super::horizon_bin_days(false), 7);
+        assert_eq!(super::horizon_ticks(true), &[0, 180, 365]);
+        assert_eq!(super::horizon_ticks(false), &[-30, 0, 90, 180, 270, 365]);
+
+        let items: Vec<_> = (0..100).map(|i| json!(i)).collect();
+        let mobile_slice = super::analytics_slice(&items, true);
+        assert_eq!(mobile_slice.len(), 80);
+        assert_eq!(mobile_slice[0], json!(20));
+        assert_eq!(super::analytics_slice(&items, false).len(), 100);
     }
 }

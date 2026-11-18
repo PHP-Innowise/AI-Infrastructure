@@ -1,4 +1,4 @@
-use crate::{api, dom, model as m, session, systems};
+use crate::{api, dom, model as m, run, session, systems};
 use serde_json::{json, Value as V};
 use wasm_bindgen_futures::spawn_local;
 pub fn initialize() {
@@ -35,6 +35,7 @@ pub fn creator_models() {
         "creator-model-detail",
         metadata["detail"].as_str().unwrap_or(""),
     );
+    creator_permissions_hint();
 }
 
 pub fn registered(projects: V) {
@@ -198,6 +199,11 @@ fn preview_controls(scope: &str) {
         },
         !ready,
     );
+    if scope == "skills" {
+        skills_controls();
+    } else if scope == "create-skill" {
+        create_skill_controls();
+    }
     crate::session::sync_working_indicator();
 }
 fn file_list(id: &str, files: &[V]) {
@@ -211,25 +217,266 @@ fn file_list(id: &str, files: &[V]) {
                 .unwrap_or("File"),
             m::text(file, "path")
         );
-        let body = format!(
-            "{} → {} bytes\n{}\n{}{}",
-            m::string(&file["before_bytes"]),
-            m::string(&file["after_bytes"]),
-            m::text(file, "reason"),
-            m::text(file, "diff"),
-            if m::yes(&file["diff_truncated"]) {
-                "\nDiff truncated; inspect the complete file locally."
-            } else {
-                ""
-            }
-        );
+        let before = m::string(&file["before_bytes"]);
+        let after = m::string(&file["after_bytes"]);
+        let bytes = if !before.is_empty() || !after.is_empty() {
+            format!("{before} → {after} bytes")
+        } else {
+            String::new()
+        };
+        let reason = m::text(file, "reason");
+        let diff = m::text(file, "diff");
+        let truncated = if m::yes(&file["diff_truncated"]) {
+            "Diff truncated; inspect the complete file locally."
+        } else {
+            ""
+        };
+        let body = [bytes.as_str(), reason.as_str(), diff.as_str(), truncated]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         dom::append(id, &dom::details(&label, &body));
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupCheckCard {
+    key: String,
+    title: String,
+    state: String,
+    detail: String,
+    ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreatorReportView {
+    key: String,
+    summary: String,
+    text: String,
+}
+
+fn readiness_cards(readiness: &V) -> Vec<SetupCheckCard> {
+    const KNOWN: [(&str, &str, &str); 3] = [
+        ("policy", "Policy guide", "AGENTS.md and stack policy rules"),
+        (
+            "memory_runtime",
+            "Memory runtime",
+            "memory-bank runtime & database",
+        ),
+        (
+            "brain_runtime",
+            "Project brain",
+            "project-brain runtime & state",
+        ),
+    ];
+    if let Some(obj) = readiness.as_object() {
+        let mut cards = Vec::new();
+        for (key, title, detail) in KNOWN {
+            if let Some(val) = obj.get(key) {
+                let ok = val.as_bool().unwrap_or_else(|| m::yes(&val["ok"]));
+                let state = if let Some(s) = val
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    m::label(s)
+                } else if ok {
+                    "Ready".to_owned()
+                } else {
+                    "Not detected".to_owned()
+                };
+                cards.push(SetupCheckCard {
+                    key: key.to_owned(),
+                    title: title.to_owned(),
+                    state,
+                    detail: detail.to_owned(),
+                    ok,
+                });
+            }
+        }
+        let mut extras = obj
+            .keys()
+            .filter(|k| !KNOWN.iter().any(|(known, _, _)| known == &k.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        extras.sort();
+        for key in extras {
+            if let Some(val) = obj.get(&key) {
+                let ok = val.as_bool().unwrap_or_else(|| m::yes(&val["ok"]));
+                cards.push(SetupCheckCard {
+                    key: key.clone(),
+                    title: m::label(&key),
+                    state: if ok {
+                        "Ready".to_owned()
+                    } else {
+                        "Not detected".to_owned()
+                    },
+                    detail: m::text(val, "detail"),
+                    ok,
+                });
+            }
+        }
+        return cards;
+    }
+    m::array(readiness)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let key = m::text(&item, "id");
+            let key = if key.trim().is_empty() {
+                format!("check-{idx}")
+            } else {
+                key
+            };
+            let title = [
+                m::text(&item, "title"),
+                m::text(&item, "name"),
+                m::text(&item, "label"),
+            ]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| m::label(&key));
+            let ok = item["ok"]
+                .as_bool()
+                .unwrap_or_else(|| m::yes(&item["ready"]) || m::yes(&item["installed"]));
+            let status = m::text(&item, "status");
+            let state = if !status.trim().is_empty() {
+                m::label(status.trim())
+            } else if ok {
+                "Ready".to_owned()
+            } else {
+                "Not detected".to_owned()
+            };
+            let detail = m::text(&item, "detail");
+            SetupCheckCard {
+                key,
+                title,
+                state,
+                detail,
+                ok,
+            }
+        })
+        .collect()
+}
+
+fn setup_provider_card(item: &V, idx: usize) -> SetupCheckCard {
+    let id = m::text(item, "id");
+    let name = m::text(item, "name");
+    let title = if !name.trim().is_empty() {
+        name.trim().to_owned()
+    } else if !id.trim().is_empty() {
+        id.trim().to_owned()
+    } else if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        s.to_owned()
+    } else {
+        format!("Provider {}", idx + 1)
+    };
+    let ok = item["available"]
+        .as_bool()
+        .unwrap_or_else(|| m::yes(&item["ok"]));
+    let state = if ok {
+        "Available".to_owned()
+    } else {
+        "Unavailable".to_owned()
+    };
+    let detail = [
+        m::text(item, "detail"),
+        m::text(item, "agent_control_detail"),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_owned())
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    SetupCheckCard {
+        key: if id.trim().is_empty() {
+            title.clone()
+        } else {
+            id
+        },
+        title,
+        state,
+        detail,
+        ok,
+    }
+}
+
+fn format_setup_diagnostic(item: &V) -> String {
+    if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return s.to_owned();
+    }
+    let head = [
+        m::text(item, "severity"),
+        m::text(item, "code"),
+        m::text(item, "title"),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_owned())
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let body = [
+        m::text(item, "message"),
+        m::text(item, "detail"),
+        m::text(item, "summary"),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_owned())
+    .find(|s| !s.is_empty())
+    .unwrap_or_default();
+    match (head.is_empty(), body.is_empty()) {
+        (false, false) => format!("{head}: {body}"),
+        (false, true) => head,
+        (true, false) => body,
+        (true, true) => m::summary(item),
+    }
+}
+
+fn creator_report_view(item: &V, idx: usize) -> CreatorReportView {
+    let raw_name = m::text(item, "name");
+    let name = if raw_name.trim().is_empty() {
+        format!("report-{}", idx + 1)
+    } else {
+        raw_name.trim().to_owned()
+    };
+    let text = if !m::text(item, "text").is_empty() {
+        m::text(item, "text")
+    } else {
+        m::summary(item)
+    };
+    let mut meta = vec![format!("{} chars", text.chars().count())];
+    if m::yes(&item["truncated"]) {
+        meta.push("truncated".to_owned());
+    }
+    let hash = m::text(item, "hash");
+    if !hash.trim().is_empty() {
+        let short: String = hash.trim().chars().take(8).collect();
+        meta.push(format!("#{short}"));
+    }
+    CreatorReportView {
+        key: format!("{idx}:{name}"),
+        summary: format!("{name} ({})", meta.join(" · ")),
+        text,
+    }
+}
+
+fn render_setup_card(class: &str, card: &SetupCheckCard) -> web_sys::Element {
+    let el = dom::el("div", class, "");
+    let _ = el.set_attribute("data-ok", if card.ok { "true" } else { "false" });
+    dom::add(&el, &dom::el("strong", "", &card.title));
+    dom::add(&el, &dom::el("span", "setup-check-state", &card.state));
+    if !card.detail.trim().is_empty() {
+        dom::add(&el, &dom::el("span", "", &card.detail));
+    }
+    el
+}
+
 pub async fn load_setup() {
     invalidate("setup");
     let project = dom::value("setup-project");
     if project.is_empty() {
+        dom::hidden("setup-readiness", true);
         return;
     }
     match api::scoped(
@@ -240,12 +487,15 @@ pub async fn load_setup() {
     {
         Ok((e, v)) if m::current("setup", e) && dom::value("setup-project") == project => {
             if v["project_id"] != project || !v["editions"].is_array() || !v["tools"].is_array() {
+                dom::hidden("setup-readiness", true);
                 dom::error(
                     "setup-readiness-error",
                     "Incomplete project setup information. Refresh before installing.",
                 );
                 return;
             }
+            dom::text("setup-readiness-error", "");
+            dom::hidden("setup-readiness-error", true);
             m::set("setup", v.clone());
             dom::text("setup-project-location", &m::text(&v, "path"));
             dom::options(
@@ -276,9 +526,48 @@ pub async fn load_setup() {
                     ),
                 );
             }
-            dom::rows("setup-readiness-grid", &m::array(&v["readiness"]));
-            dom::rows("setup-providers", &m::array(&v["providers"]));
-            dom::rows("setup-diagnostics", &m::array(&v["diagnostics"]));
+            dom::clear("setup-readiness-grid");
+            let readiness = readiness_cards(&v["readiness"]);
+            if readiness.is_empty() {
+                dom::append(
+                    "setup-readiness-grid",
+                    &dom::el("p", "fleet-note", "No readiness checks reported."),
+                );
+            } else {
+                for card in &readiness {
+                    dom::append(
+                        "setup-readiness-grid",
+                        &render_setup_card("setup-check", card),
+                    );
+                }
+            }
+            dom::clear("setup-providers");
+            let providers = m::array(&v["providers"]);
+            if providers.is_empty() {
+                dom::append(
+                    "setup-providers",
+                    &dom::el("p", "fleet-note", "No providers reported."),
+                );
+            } else {
+                for (idx, item) in providers.iter().enumerate() {
+                    let card = setup_provider_card(item, idx);
+                    dom::append(
+                        "setup-providers",
+                        &render_setup_card("setup-provider", &card),
+                    );
+                }
+            }
+            dom::clear("setup-diagnostics");
+            for item in m::array(&v["diagnostics"]) {
+                let text = format_setup_diagnostic(&item);
+                if !text.trim().is_empty() {
+                    let callout =
+                        dom::el("div", "system-side-callout system-side-callout-warn", "");
+                    dom::add(&callout, &dom::el("p", "", text.trim()));
+                    dom::append("setup-diagnostics", &callout);
+                }
+            }
+            dom::hidden("setup-readiness", false);
             dom::text(
                 "setup-readiness-status",
                 if v["available"] == false {
@@ -287,10 +576,15 @@ pub async fn load_setup() {
                     "Project inspected."
                 },
             );
+            let no_editions = m::array(&v["editions"]).is_empty();
+            dom::disabled("setup-edition", v["available"] == false || no_editions);
             dom::disabled("setup-preview-button", v["available"] == false);
         }
         Ok(_) => {}
-        Err(e) if !e.aborted => dom::error("setup-readiness-error", &e.message),
+        Err(e) if !e.aborted => {
+            dom::hidden("setup-readiness", true);
+            dom::error("setup-readiness-error", &e.message);
+        }
         Err(_) => {}
     }
 }
@@ -355,34 +649,188 @@ async fn hooks(trust: bool) {
         Err(e) => dom::error("setup-attach-error", &e.message),
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreateSkillValidation {
+    valid: bool,
+    name_error: &'static str,
+    description_error: &'static str,
+    instructions_error: &'static str,
+    agents_error: &'static str,
+    summary_error: &'static str,
+}
+
+fn valid_skill_slug(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn validate_create_skill_inputs(
+    project: &str,
+    name: &str,
+    description: &str,
+    instructions: &str,
+    agent_count: usize,
+) -> CreateSkillValidation {
+    let name_valid = valid_skill_slug(name);
+    let desc_trimmed = description.trim();
+    let desc_chars = desc_trimmed.chars().count();
+    let desc_valid = !desc_trimmed.is_empty() && desc_chars <= 1024;
+    let inst_trimmed = instructions.trim();
+    let inst_bytes = instructions.len();
+    let inst_valid = !inst_trimmed.is_empty() && inst_bytes <= 32000;
+    let agents_valid = agent_count > 0;
+
+    let name_error = if !name.is_empty() && !name_valid {
+        "Use lowercase letters, digits, and single hyphens (up to 64 chars)."
+    } else {
+        ""
+    };
+    let description_error = if desc_chars > 1024 {
+        "Use a description of at most 1,024 characters."
+    } else {
+        ""
+    };
+    let instructions_error = if inst_bytes > 32000 {
+        "Use instructions of at most 32,000 UTF-8 bytes."
+    } else {
+        ""
+    };
+    let agents_error = if agents_valid {
+        ""
+    } else {
+        "Choose at least one tool."
+    };
+    let summary_error = if project.is_empty() {
+        "Choose a project first."
+    } else if !name_valid {
+        "Use a lowercase hyphen-separated skill name."
+    } else if !desc_valid {
+        "Use a description of 1–1024 characters."
+    } else if !inst_valid {
+        "Use instructions of 1–32,000 UTF-8 bytes."
+    } else if !agents_valid {
+        "Choose at least one tool."
+    } else {
+        ""
+    };
+    let valid = summary_error.is_empty();
+    CreateSkillValidation {
+        valid,
+        name_error,
+        description_error,
+        instructions_error,
+        agents_error,
+        summary_error,
+    }
+}
+
+fn skills_controls() {
+    let catalog = m::data("skills-catalog");
+    let loaded = catalog.is_object();
+    let available = loaded && catalog["available"] != false;
+    let has_sources = !m::array(&catalog["sources"]).is_empty();
+    let has_source = available && has_sources && !dom::value("skills-source").is_empty();
+    let discovery = m::data("skills-discovery");
+    let has_items = discovery["skills"]
+        .as_array()
+        .or_else(|| discovery["items"].as_array())
+        .is_some_and(|items| !items.is_empty());
+    let pending = m::yes(&m::data("skills-pending"));
+    let selected_skills = m::array(&m::data("skills-selection"));
+    let selected_agents = dom::selected_checks("skills-agents");
+
+    dom::disabled("skills-source", !available || !has_sources);
+    dom::disabled("skills-discover", !has_source || pending);
+    dom::disabled("skills-source-refresh", !has_source || pending);
+    dom::disabled("skills-filter", !available || !has_items);
+    dom::disabled(
+        "skills-preview-button",
+        !available
+            || pending
+            || dom::value("skills-project").is_empty()
+            || selected_skills.is_empty()
+            || selected_agents.is_empty(),
+    );
+    dom::text(
+        "skills-selection-summary",
+        &if selected_skills.is_empty() || selected_agents.is_empty() {
+            "Select at least one skill and one tool.".to_owned()
+        } else {
+            format!(
+                "{} skill{} for {} tool{} ready to preview.",
+                selected_skills.len(),
+                if selected_skills.len() == 1 { "" } else { "s" },
+                selected_agents.len(),
+                if selected_agents.len() == 1 { "" } else { "s" }
+            )
+        },
+    );
+}
+
+fn create_skill_controls() {
+    let catalog = m::data("skills-catalog");
+    let loaded = catalog.is_object();
+    let available = loaded && catalog["available"] != false;
+    let agent_total = m::array(&catalog["agents"]).len();
+    if loaded {
+        dom::text(
+            "create-skill-catalog-status",
+            &if available {
+                format!("Supported tools ready ({agent_total}).")
+            } else {
+                catalog["detail"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("Skill creation is currently unavailable.")
+                    .to_owned()
+            },
+        );
+    }
+    let name = dom::value("create-skill-name");
+    let trimmed_name = name.trim();
+    let desc = dom::value("create-skill-description");
+    let inst = dom::value("create-skill-instructions");
+    let agents = dom::selected_checks("create-skill-agents");
+    let project = dom::value("create-skill-project");
+    let check = validate_create_skill_inputs(&project, trimmed_name, &desc, &inst, agents.len());
+
+    dom::error("create-skill-name-error", check.name_error);
+    dom::error("create-skill-description-error", check.description_error);
+    dom::error("create-skill-instructions-error", check.instructions_error);
+    dom::error(
+        "create-skill-agents-error",
+        if loaded && available {
+            check.agents_error
+        } else {
+            ""
+        },
+    );
+    let pending = m::yes(&m::data("create-skill-pending"));
+    dom::disabled(
+        "create-skill-preview-button",
+        !available || pending || !check.valid,
+    );
+}
+
 async fn preview(scope: &str) {
     let draft = selection(scope);
     if scope == "create-skill" {
-        let name = m::text(&draft, "name");
-        let valid = !name.is_empty()
-            && name.len() <= 64
-            && name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            && !name.starts_with('-')
-            && !name.ends_with('-');
-        let error = if !valid {
-            "Use a lowercase hyphen-separated skill name."
-        } else if m::text(&draft, "description").trim().is_empty()
-            || m::text(&draft, "description").chars().count() > 1024
-        {
-            "Use a description of 1–1024 characters."
-        } else if m::text(&draft, "instructions").trim().is_empty()
-            || m::text(&draft, "instructions").len() > 32000
-        {
-            "Use instructions of 1–32,000 UTF-8 bytes."
-        } else if m::array(&draft["agents"]).is_empty() {
-            "Choose at least one tool."
-        } else {
-            ""
-        };
-        if !error.is_empty() {
-            dom::error("create-skill-action-error", error);
+        let check = validate_create_skill_inputs(
+            &m::text(&draft, "project_id"),
+            &m::text(&draft, "name"),
+            &m::text(&draft, "description"),
+            &m::text(&draft, "instructions"),
+            m::array(&draft["agents"]).len(),
+        );
+        if !check.valid {
+            dom::error("create-skill-action-error", check.summary_error);
+            create_skill_controls();
             return;
         }
     }
@@ -522,22 +970,56 @@ async fn install(scope: &str) {
         installed_skills().await;
     }
 }
+fn filtered_setup_files(preview: &V, query: &str, filter: &str) -> Vec<V> {
+    let needle = query.trim().to_lowercase();
+    let matches_query = |path: &str| needle.is_empty() || path.to_lowercase().contains(&needle);
+    let mut rows = Vec::new();
+    let mut seen_collision_paths = std::collections::BTreeSet::new();
+    for f in m::array(&preview["files"]) {
+        let path = m::text(&f, "path");
+        if !matches_query(&path) {
+            continue;
+        }
+        let action = f["action"].as_str().unwrap_or("");
+        let include = match filter {
+            "all" => true,
+            "collision" => action == "collision",
+            _ => action != "unchanged" && action != "kept",
+        };
+        if include {
+            if action == "collision" {
+                seen_collision_paths.insert(path);
+            }
+            rows.push(f);
+        }
+    }
+    if matches!(filter, "all" | "collision") {
+        for c in m::array(&preview["collisions"]) {
+            let path = m::text(&c, "path");
+            if path.is_empty() || !matches_query(&path) || seen_collision_paths.contains(&path) {
+                continue;
+            }
+            let reason = m::text(&c, "reason");
+            let detail = if reason.is_empty() {
+                "Collision blocks installation.".to_owned()
+            } else {
+                format!("Collision blocks installation ({reason}).")
+            };
+            rows.push(json!({
+                "path": path,
+                "action": "collision",
+                "reason": reason,
+                "diff": detail,
+            }));
+        }
+    }
+    rows
+}
 fn setup_files() {
     let v = m::data("setup-preview");
-    let query = dom::value("setup-preview-path").to_lowercase();
+    let query = dom::value("setup-preview-path");
     let filter = dom::value("setup-preview-actions");
-    let files = m::array(&v["files"])
-        .into_iter()
-        .filter(|f| {
-            m::text(f, "path").to_lowercase().contains(&query)
-                && (filter == "all"
-                    || if filter == "collision" {
-                        f["action"] == "collision"
-                    } else {
-                        f["action"] != "unchanged" && f["action"] != "kept"
-                    })
-        })
-        .collect::<Vec<_>>();
+    let files = filtered_setup_files(&v, &query, &filter);
     dom::text(
         "setup-preview-count",
         &format!("{} files shown", files.len()),
@@ -776,9 +1258,16 @@ pub async fn load_skills() {
                 None,
             );
             installed_skills().await;
+            skills_controls();
+            create_skill_controls();
         }
         Ok(_) => {}
-        Err(e) if !e.aborted => dom::error("skills-catalog-error", &e.message),
+        Err(e) if !e.aborted => {
+            dom::error("skills-catalog-error", &e.message);
+            dom::text("create-skill-catalog-status", &e.message);
+            skills_controls();
+            create_skill_controls();
+        }
         Err(_) => {}
     }
 }
@@ -805,6 +1294,7 @@ async fn discover(refresh: bool) {
         Ok(_) => {}
         Err(e) => dom::error("skills-catalog-error", &e.message),
     }
+    skills_controls();
 }
 fn render_skills() {
     let query = dom::value("skills-filter").to_lowercase();
@@ -1003,6 +1493,117 @@ async fn apply_change() {
     }
     installed_skills().await;
 }
+fn normalized_creator_permission(value: Option<&str>) -> &'static str {
+    match value {
+        Some("manual") => "manual",
+        Some("bypass") => "bypass",
+        _ => "auto",
+    }
+}
+
+fn creator_restored_permissions(run: &V) -> &'static str {
+    session::restored_value(
+        "permissions",
+        normalized_creator_permission(run["permissions"].as_str()),
+    )
+}
+
+fn creator_permissions_hint_text(provider: &str, permission: &str) -> &'static str {
+    session::permissions_hint(provider, "edit", permission)
+}
+
+fn creator_permissions_hint() {
+    let provider = dom::value("creator-provider");
+    let permission = dom::value("creator-permissions");
+    dom::text(
+        "creator-permissions-hint",
+        creator_permissions_hint_text(&provider, &permission),
+    );
+    dom::attr(
+        "creator-permissions-hint",
+        "data-mode",
+        session::permissions_hint_mode(false, "edit", &permission),
+    );
+}
+
+fn creator_target_summary(run: &V) -> String {
+    let perm = match normalized_creator_permission(run["permissions"].as_str()) {
+        "manual" => "Manual",
+        "bypass" => "Bypass",
+        _ => "Auto",
+    };
+    format!(
+        "{} · {} · {} / {} · Permissions: {perm}",
+        m::text(run, "target"),
+        m::text(run, "workspace"),
+        m::text(run, "provider"),
+        m::text(run, "model")
+    )
+}
+
+fn creator_status_text(run: &V, waiting: &[V]) -> String {
+    let base = m::label(run["status"].as_str().unwrap_or(""));
+    if creator_busy(run) && !waiting.is_empty() {
+        format!("{base} · Waiting for your answer to a permission request…")
+    } else {
+        base
+    }
+}
+
+fn creator_permissions_panel_state(v: &V) -> (bool, String) {
+    let waiting = m::array(&v["waiting_permissions"]);
+    (!waiting.is_empty(), run::permission_panel_lead(&waiting))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn creator_start_body(
+    budgets: V,
+    project: &str,
+    provider: &str,
+    model: V,
+    thinking_effort: V,
+    permissions: &str,
+    operation: &str,
+    workspace: &str,
+    worktree_branch: String,
+    agents_enabled: bool,
+    agent_count: V,
+    goal: &str,
+    tools: Vec<String>,
+) -> V {
+    json!({
+        "budgets": budgets,
+        "project_id": project,
+        "provider": provider,
+        "model": model,
+        "thinking_effort": thinking_effort,
+        "permissions": normalized_creator_permission(Some(permissions)),
+        "operation": operation,
+        "workspace": workspace,
+        "worktree_branch": worktree_branch,
+        "agents_enabled": agents_enabled,
+        "agent_count": agent_count,
+        "goal": goal,
+        "tools": tools,
+    })
+}
+
+fn creator_routing_payload(
+    model: V,
+    thinking_effort: V,
+    permissions: &str,
+    agents_enabled: bool,
+    agent_count: V,
+) -> V {
+    json!({
+        "model": model,
+        "thinking_effort": thinking_effort,
+        "permissions": normalized_creator_permission(Some(permissions)),
+        "agents_enabled": agents_enabled,
+        "agent_count": agent_count,
+    })
+}
+
 fn creator_current(project: &str, id: &str, generation: u64) -> bool {
     dom::value("creator-project") == project
         && m::scope_current("creator-scope", generation, project, id)
@@ -1025,6 +1626,9 @@ fn creator_mutation_controls(locked: bool) {
             let _ = input.remove_attribute("disabled");
         }
     }
+    let busy = creator_busy(&m::data("creator-detail")["run"]);
+    dom::disabled("creator-permissions", locked || busy);
+    creator_permissions_hint();
     if locked {
         for action in dom::all("#creator-actions button") {
             let _ = action.set_attribute("disabled", "");
@@ -1035,8 +1639,12 @@ fn creator_mutation_controls(locked: bool) {
 fn creator_reset_detail() {
     m::take("creator-detail");
     dom::hidden("creator-detail", true);
+    dom::hidden("creator-permissions-panel", true);
+    dom::text("creator-permissions-lead", "");
+    run::sync_waiting_permissions("creator-permissions-list", &[], false);
     dom::clear("creator-actions");
     dom::options("creator-runs", &[], m::summary, None);
+    creator_permissions_hint();
     crate::session::sync_working_indicator();
 }
 pub fn reset_creator_project() {
@@ -1044,7 +1652,9 @@ pub fn reset_creator_project() {
     m::next("creator-read");
     dom::cancel_timer("creator-poll");
     m::take("creator-list");
+    dom::set_value("creator-permissions", "auto");
     creator_reset_detail();
+    creator_mutation_controls(false);
 }
 pub async fn creator_list() {
     dom::cancel_timer("creator-poll");
@@ -1088,6 +1698,7 @@ pub async fn creator_list() {
             let id = dom::value("creator-runs");
             if id.is_empty() {
                 creator_reset_detail();
+                creator_mutation_controls(false);
             } else {
                 creator_read(&id).await;
             }
@@ -1135,7 +1746,9 @@ async fn creator_read_scoped(id: &str, project: &str, generation: u64) {
                 ] {
                     dom::set_value(target, &m::string(&run[key]));
                 }
+                dom::set_value("creator-permissions", creator_restored_permissions(run));
                 dom::set_checked("creator-agents", m::yes(&run["agents_enabled"]));
+                creator_permissions_hint();
             }
             if prior["run"]["revision"] != value["run"]["revision"] {
                 dom::set_value("creator-answers", "");
@@ -1173,23 +1786,44 @@ fn render_creator() {
         return;
     }
     dom::hidden("creator-detail", false);
-    dom::text(
-        "creator-status",
-        &m::label(run["status"].as_str().unwrap_or("")),
-    );
-    dom::text(
-        "creator-target",
-        &format!(
-            "{} · {} · {} / {}",
-            m::text(run, "target"),
-            m::text(run, "workspace"),
-            m::text(run, "provider"),
-            m::text(run, "model")
-        ),
-    );
+    let waiting = m::array(&v["waiting_permissions"]);
+    dom::text("creator-status", &creator_status_text(run, &waiting));
+    dom::text("creator-target", &creator_target_summary(run));
     dom::text("creator-message", &m::text(run, "message"));
     session::restore_budgets("creator-run-budgets", &run["budgets"]);
-    dom::rows("creator-reports", &m::array(&v["reports"]));
+    let active = creator_busy(run) || m::active(&v["session"]);
+    let (show_waiting, lead) = creator_permissions_panel_state(&v);
+    run::sync_waiting_permissions("creator-permissions-list", &waiting, active);
+    dom::hidden("creator-permissions-panel", !show_waiting);
+    dom::text("creator-permissions-lead", &lead);
+    let reports = m::array(&v["reports"])
+        .into_iter()
+        .enumerate()
+        .map(|(idx, item)| json!({"idx": idx, "item": item}))
+        .collect::<Vec<_>>();
+    dom::keyed_render(
+        "creator-reports",
+        &reports,
+        |entry| {
+            let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+            creator_report_view(&entry["item"], idx).key
+        },
+        |entry| {
+            let idx = entry["idx"].as_u64().unwrap_or(0) as usize;
+            let report = creator_report_view(&entry["item"], idx);
+            let details = dom::el("details", "setup-file creator-report", "");
+            let _ = details.set_attribute("data-restore-key", &report.key);
+            dom::add(&details, &dom::el("summary", "", &report.summary));
+            dom::add(&details, &dom::el("pre", "knowledge-result", &report.text));
+            details
+        },
+    );
+    if reports.is_empty() {
+        dom::append(
+            "creator-reports",
+            &dom::el("p", "fleet-note", "No reports recorded yet."),
+        );
+    }
     dom::text(
         "creator-events",
         &m::array(&v["events"])
@@ -1277,7 +1911,28 @@ async fn creator_start() {
     if project.is_empty() {
         return;
     }
-    let body = json!({"budgets":session::budgets("creator-budgets"),"project_id":project,"provider":dom::value("creator-provider"),"model":session::nullable(dom::value("creator-model").trim().into()),"thinking_effort":session::nullable(dom::value("creator-effort")),"operation":dom::value("creator-operation"),"workspace":dom::value("creator-workspace"),"worktree_branch":if dom::value("creator-workspace")=="worktree"{dom::value("creator-branch").trim().to_owned()}else{String::new()},"agents_enabled":dom::checked("creator-agents"),"agent_count":dom::num("creator-count"),"goal":dom::value("creator-goal"),"tools":dom::all("[name=creator-tool]:checked").iter().map(dom::value_of).collect::<Vec<_>>()});
+    let body = creator_start_body(
+        session::budgets("creator-budgets"),
+        &project,
+        &dom::value("creator-provider"),
+        session::nullable(dom::value("creator-model").trim().into()),
+        session::nullable(dom::value("creator-effort")),
+        &dom::value("creator-permissions"),
+        &dom::value("creator-operation"),
+        &dom::value("creator-workspace"),
+        if dom::value("creator-workspace") == "worktree" {
+            dom::value("creator-branch").trim().to_owned()
+        } else {
+            String::new()
+        },
+        dom::checked("creator-agents"),
+        dom::num("creator-count"),
+        &dom::value("creator-goal"),
+        dom::all("[name=creator-tool]:checked")
+            .iter()
+            .map(dom::value_of)
+            .collect::<Vec<_>>(),
+    );
     let generation = m::bind_scope("creator-scope", &project, "");
     dom::cancel_timer("creator-poll");
     m::next("creator-read");
@@ -1341,7 +1996,13 @@ async fn creator_action(action: &str) {
             );
             return;
         }
-        body["routing"] = json!({"model":session::nullable(dom::value("creator-model").trim().into()),"thinking_effort":session::nullable(dom::value("creator-effort")),"agents_enabled":dom::checked("creator-agents"),"agent_count":dom::num("creator-count")});
+        body["routing"] = creator_routing_payload(
+            session::nullable(dom::value("creator-model").trim().into()),
+            session::nullable(dom::value("creator-effort")),
+            &dom::value("creator-permissions"),
+            dom::checked("creator-agents"),
+            dom::num("creator-count"),
+        );
     }
     if action == "apply" {
         let approved = dom::selected_checks("creator-files");
@@ -1423,21 +2084,25 @@ pub async fn event(
             }
             m::set("skills-selection", json!(selected));
             invalidate("skills");
+            skills_controls();
             return true;
         }
         if action == "skills-agent" {
             invalidate("skills");
+            skills_controls();
             return true;
         }
         if id == "skills-source" {
             invalidate("skills");
             m::take("skills-discovery");
             render_skills();
+            skills_controls();
             return true;
         }
         if id == "skills-project" {
             invalidate("skills");
             m::take("skills-change-preview");
+            skills_controls();
             installed_skills().await;
             return true;
         }
@@ -1458,6 +2123,7 @@ pub async fn event(
                     dom::value("create-skill-instructions").len()
                 ),
             );
+            create_skill_controls();
             return true;
         }
         if id == "creator-project" {
@@ -1487,6 +2153,10 @@ pub async fn event(
         }
         if id == "creator-provider" {
             creator_models();
+            return true;
+        }
+        if id == "creator-permissions" {
+            creator_permissions_hint();
             return true;
         }
     }
@@ -1577,7 +2247,30 @@ pub async fn event(
         "creator-refresh" => creator_list().await,
         "creator-new-run" => {
             dom::hidden("creator-form", false);
+            dom::set_value(
+                "creator-permissions",
+                session::restored_value("permissions", &dom::value("creator-permissions")),
+            );
+            creator_permissions_hint();
             dom::focus("creator-goal");
+        }
+        "permission-decide" => {
+            if run::permission_event_container(payload) != "creator-permissions-list" {
+                return false;
+            }
+            let detail = m::data("creator-detail");
+            let sid = detail["session"]["id"]
+                .as_str()
+                .or_else(|| detail["run"]["session_id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let run_id = m::text(&detail["run"], "id");
+            if !sid.is_empty()
+                && run::decide_permission_for("creator-permissions-list", &sid, payload).await
+                && !run_id.is_empty()
+            {
+                creator_read(&run_id).await;
+            }
         }
         "creator-action" => creator_action(payload.as_str().unwrap_or("")).await,
         "creator-run-budgets-save" => creator_action("budgets").await,
@@ -1592,7 +2285,7 @@ pub async fn event(
         }
         "accelerator-setup" => {
             dom::set_value("setup-project", &dom::value("accelerator-project"));
-            dom::set_value("setup-edition", &dom::value(payload.as_str().unwrap_or("")));
+            dom::set_value("setup-edition", payload.as_str().unwrap_or(""));
             session::open_view("setup", true).await;
         }
         "accelerator-startup" => {
@@ -1608,4 +2301,230 @@ pub async fn event(
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        creator_report_view, format_setup_diagnostic, readiness_cards, setup_provider_card,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn setup_readiness_providers_diagnostics_and_creator_reports_format_cleanly() {
+        let readiness = json!({
+            "policy": true,
+            "memory_runtime": false,
+            "brain_runtime": true
+        });
+        let checks = readiness_cards(&readiness);
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].title, "Policy guide");
+        assert!(checks[0].ok);
+        assert_eq!(checks[0].state, "Ready");
+        assert_eq!(checks[1].title, "Memory runtime");
+        assert!(!checks[1].ok);
+        assert_eq!(checks[1].state, "Not detected");
+
+        let provider = json!({
+            "id": "codex",
+            "name": "Codex",
+            "available": true,
+            "detail": "CLI ready",
+            "agent_control_detail": "Interactive TTY"
+        });
+        let provider_card = setup_provider_card(&provider, 0);
+        assert_eq!(provider_card.title, "Codex");
+        assert!(provider_card.ok);
+        assert_eq!(provider_card.state, "Available");
+        assert_eq!(provider_card.detail, "CLI ready · Interactive TTY");
+
+        assert_eq!(
+            format_setup_diagnostic(&json!("Missing PHP binary on PATH")),
+            "Missing PHP binary on PATH"
+        );
+
+        let report = json!({
+            "name": "infra-scan-project-profile.md",
+            "text": "# Scan\nAll good",
+            "truncated": true,
+            "hash": "abcdef123456"
+        });
+        let view = creator_report_view(&report, 0);
+        assert!(view
+            .summary
+            .contains("infra-scan-project-profile.md (15 chars · truncated · #abcdef12)"));
+        assert_eq!(view.text, "# Scan\nAll good");
+    }
+
+    #[test]
+    fn creator_permissions_hints_payloads_restoration_and_inline_cards_preserve_contracts() {
+        assert!(super::creator_permissions_hint_text("claude", "auto").contains("auto mode"));
+        assert!(super::creator_permissions_hint_text("codex", "manual").contains("Allow and Deny"));
+        assert!(super::creator_permissions_hint_text("cursor", "bypass")
+            .contains("without the sandbox"));
+
+        assert_eq!(
+            super::creator_restored_permissions(&json!({"permissions": "bypass"})),
+            "auto"
+        );
+        assert_eq!(
+            super::creator_restored_permissions(&json!({"permissions": "manual"})),
+            "manual"
+        );
+        assert_eq!(super::creator_restored_permissions(&json!({})), "auto");
+
+        let run = json!({
+            "target": "/srv/app",
+            "workspace": "project",
+            "provider": "claude",
+            "model": "sonnet",
+            "permissions": "manual",
+            "status": "scanning"
+        });
+        assert_eq!(
+            super::creator_target_summary(&run),
+            "/srv/app · project · claude / sonnet · Permissions: Manual"
+        );
+        assert!(super::creator_busy(&run));
+
+        let waiting = vec![json!({
+            "request_id": "cr-1",
+            "provider": "claude",
+            "tool": "Bash",
+            "summary": "composer test",
+            "detail": "Manual approval requested",
+            "session_option": true,
+            "rule_summary": "Allow Bash(composer test)",
+        })];
+        assert_eq!(
+            super::creator_status_text(&run, &waiting),
+            "scanning · Waiting for your answer to a permission request…"
+        );
+        assert_eq!(super::creator_status_text(&run, &[]), "scanning");
+
+        let detail = json!({"run": run, "waiting_permissions": waiting});
+        assert_eq!(
+            super::creator_permissions_panel_state(&detail),
+            (
+                true,
+                "Waiting for your answer to a permission request…".to_owned()
+            )
+        );
+        assert_eq!(
+            super::creator_permissions_panel_state(&json!({"waiting_permissions": []})),
+            (false, String::new())
+        );
+
+        let start = super::creator_start_body(
+            json!({"usd": 5}),
+            "proj-1",
+            "claude",
+            json!(null),
+            json!("high"),
+            "manual",
+            "generate",
+            "project",
+            String::new(),
+            true,
+            json!(3),
+            "Build PHP kit",
+            vec!["claude".to_owned()],
+        );
+        assert_eq!(start["permissions"], "manual");
+        assert_eq!(start["project_id"], "proj-1");
+
+        let routing =
+            super::creator_routing_payload(json!("opus"), json!(null), "bypass", false, json!(3));
+        assert_eq!(routing["permissions"], "bypass");
+        assert_eq!(routing["model"], "opus");
+
+        let html = crate::run::render_permission_card_html(
+            "creator-permissions-list",
+            &detail["waiting_permissions"][0],
+            true,
+        );
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("data-permission-id=\"cr-1\""));
+        assert!(html.contains("Allow for this session: Allow Bash(composer test)"));
+        let payloads = crate::test_support::payloads(&html, "permission-decide");
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0]["container"], "creator-permissions-list");
+        assert_eq!(payloads[0]["request_id"], "cr-1");
+        assert_eq!(payloads[1]["decision"], "allow_session");
+    }
+
+    #[test]
+    fn create_skill_validation_enforces_slug_bounds_and_tools() {
+        let bad_name = super::validate_create_skill_inputs(
+            "proj-1",
+            "BAD NAME",
+            "Valid trigger description",
+            "# Steps",
+            1,
+        );
+        assert!(!bad_name.valid);
+        assert!(!bad_name.name_error.is_empty());
+
+        let double_hyphen = super::validate_create_skill_inputs(
+            "proj-1",
+            "bad--name",
+            "Valid trigger description",
+            "# Steps",
+            1,
+        );
+        assert!(!double_hyphen.valid);
+        assert!(!double_hyphen.name_error.is_empty());
+
+        let no_tools = super::validate_create_skill_inputs(
+            "proj-1",
+            "check-tax-rounding",
+            "Valid trigger description",
+            "# Steps",
+            0,
+        );
+        assert!(!no_tools.valid);
+        assert!(!no_tools.agents_error.is_empty());
+
+        let ok = super::validate_create_skill_inputs(
+            "proj-1",
+            "check-tax-rounding",
+            "Use when verifying tax calculations",
+            "# Steps\nVerify 2-decimal precision.",
+            2,
+        );
+        assert!(ok.valid);
+        assert!(ok.name_error.is_empty());
+        assert!(ok.summary_error.is_empty());
+    }
+
+    #[test]
+    fn setup_preview_filter_surfaces_reported_collisions_and_all_files() {
+        let preview = json!({
+            "files": [
+                {"path": "AGENTS.md", "action": "merge"},
+                {"path": ".gitignore", "action": "unchanged"},
+            ],
+            "collisions": [
+                {"path": "ACCELERATOR.md", "reason": "accelerator-readme-exists"},
+            ],
+        });
+
+        let changed = super::filtered_setup_files(&preview, "", "changed");
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0]["path"], "AGENTS.md");
+
+        let collisions = super::filtered_setup_files(&preview, "", "collision");
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0]["path"], "ACCELERATOR.md");
+        assert_eq!(collisions[0]["action"], "collision");
+        assert_eq!(collisions[0]["reason"], "accelerator-readme-exists");
+
+        let all = super::filtered_setup_files(&preview, "", "all");
+        assert_eq!(all.len(), 3);
+
+        let searched = super::filtered_setup_files(&preview, "accelerator", "collision");
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0]["path"], "ACCELERATOR.md");
+    }
 }

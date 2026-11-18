@@ -486,6 +486,143 @@ fn topology_spread_whole_provenance_and_contract_risks() {
 }
 
 #[test]
+fn enrich_summaries_uses_matching_live_summary_read_only_and_streams_fallback() {
+    let root = TempRoot::new("summary-fastpath");
+    let (config, allow) = build_polyglot_fixture(&root.0);
+    let system = System::new(&config, &allow).unwrap();
+    let base_summaries = collect_git_service_summaries(&system, &[]);
+    let orders_head = base_summaries["orders"].commit.clone().unwrap();
+
+    let state_dir = root.0.join("harness-state");
+    let orders_live = state_dir.join("graphs/orders/live");
+    let orders_graph = orders_live.join("graph.json");
+    let orders_summary = orders_live.join("summary.json");
+    // Sentinel invalid JSON proves `enrich_summaries_from_graph_store` does not read/parse `graph.json`
+    // when `live/summary.json` matches `graph.json`'s `len` and `mtime`.
+    write_text(&orders_graph, "{not-parsed-when-summary-matches");
+    let g_meta = fs::metadata(&orders_graph).unwrap();
+    let g_mtime = g_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    write_json(
+        &orders_summary,
+        &json!({
+            "nodes": 42,
+            "edges": 99,
+            "commit": orders_head,
+            "graph_len": g_meta.len(),
+            "graph_mtime_secs": g_mtime.as_secs(),
+            "graph_mtime_nanos": g_mtime.subsec_nanos(),
+        }),
+    );
+
+    // Mismatched `summary.json` (wrong `graph_len`) for `gateway` must be ignored in favor of streaming `graph.json`.
+    let gw_live = state_dir.join("graphs/gateway/live");
+    let gw_graph = gw_live.join("graph.json");
+    let gw_summary = gw_live.join("summary.json");
+    write_json(
+        &gw_graph,
+        &json!({
+            "nodes": [{"id": "n1", "meta": {"tags": [1, 2]}}, {"id": "n2"}],
+            "edges": [{"source": "n1", "target": "n2"}],
+            "meta": {"commit": "deadbeef1234"}
+        }),
+    );
+    let gw_meta = fs::metadata(&gw_graph).unwrap();
+    let gw_mtime = gw_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let stale_gw_summary = json!({
+        "nodes": 999,
+        "edges": 999,
+        "commit": "stale0000000",
+        "graph_len": gw_meta.len() + 1,
+        "graph_mtime_secs": gw_mtime.as_secs(),
+        "graph_mtime_nanos": gw_mtime.subsec_nanos(),
+    });
+    write_json(&gw_summary, &stale_gw_summary);
+    let gw_summary_before = fs::read_to_string(&gw_summary).unwrap();
+
+    // Absent `summary.json` for `payments`: streaming fallback counts `"links"` over `"edges"` and `"commit"`.
+    let pay_graph = state_dir.join("graphs/payments/live/graph.json");
+    let pay_head = base_summaries["payments"].commit.clone().unwrap();
+    write_json(
+        &pay_graph,
+        &json!({
+            "extra": {"nested": [1, 2, 3]},
+            "nodes": [{"id": "p1"}, {"id": "p2"}, {"id": "p3"}],
+            "links": [{"source": "p1", "target": "p2"}, {"source": "p2", "target": "p3"}],
+            "edges": [{"source": "ignored", "target": "ignored"}],
+            "commit": pay_head
+        }),
+    );
+
+    // Mismatched `mtime` in `summary.json` for `notifications` must also fall back to streaming `graph.json`.
+    let notif_live = state_dir.join("graphs/notifications/live");
+    let notif_graph = notif_live.join("graph.json");
+    let notif_summary = notif_live.join("summary.json");
+    let notif_head = base_summaries["notifications"].commit.clone().unwrap();
+    write_json(
+        &notif_graph,
+        &json!({
+            "nodes": [{"id": "m1"}],
+            "links": [],
+            "commit": notif_head
+        }),
+    );
+    let notif_meta = fs::metadata(&notif_graph).unwrap();
+    let notif_mtime = notif_meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    write_json(
+        &notif_summary,
+        &json!({
+            "nodes": 555,
+            "edges": 777,
+            "commit": "wrongcommit",
+            "graph_len": notif_meta.len(),
+            "graph_mtime_secs": notif_mtime.as_secs().saturating_sub(5),
+            "graph_mtime_nanos": notif_mtime.subsec_nanos(),
+        }),
+    );
+
+    let mut enriched = base_summaries;
+    enrich_summaries_from_graph_store(&system, Some(&state_dir), &mut enriched);
+
+    assert_eq!(enriched["orders"].state, "ready");
+    assert_eq!(enriched["orders"].nodes, 42);
+    assert_eq!(enriched["orders"].edges, 99);
+    assert_eq!(
+        enriched["orders"].commit.as_deref(),
+        Some(orders_head.as_str())
+    );
+
+    assert_eq!(enriched["gateway"].state, "stale");
+    assert_eq!(enriched["gateway"].nodes, 2);
+    assert_eq!(enriched["gateway"].edges, 1);
+    assert_eq!(enriched["gateway"].commit.as_deref(), Some("deadbeef1234"));
+
+    assert_eq!(enriched["payments"].state, "ready");
+    assert_eq!(enriched["payments"].nodes, 3);
+    assert_eq!(enriched["payments"].edges, 2);
+
+    assert_eq!(enriched["notifications"].state, "ready");
+    assert_eq!(enriched["notifications"].nodes, 1);
+    assert_eq!(enriched["notifications"].edges, 0);
+
+    // Strictly read-only: no SQLite DB created and no summary file mutated or created.
+    assert!(!state_dir.join("sessions.sqlite3").exists());
+    assert!(!pay_graph.with_file_name("summary.json").exists());
+    assert_eq!(fs::read_to_string(&gw_summary).unwrap(), gw_summary_before);
+}
+
+#[test]
 fn link_shortest_path_shared_cycles_blast_radius_layers_and_find() {
     let root = TempRoot::new("queries");
     let (config, allow) = build_polyglot_fixture(&root.0);
@@ -1269,6 +1406,8 @@ fn code_graph_bridge_and_dispatch_evidence_persist_and_enrich_system_manager_vie
         )
         .unwrap();
     assert_eq!(launched["tell_agents_graph"], true);
+    assert_eq!(launched["permissions"], Value::Null);
+    assert_eq!(launched["waiting_permissions"], json!([]));
     assert!(launched["evidence"].is_object());
     assert_eq!(launched["launches"][0]["launch_number"], 1);
 }
