@@ -346,17 +346,46 @@ with the session and can change between turns in **Next-turn settings**.
 
 In Auto nothing waits for a person: a request the host's own review would put to
 a person is declined, and the chat shows it as *declined automatically*. In
-Manual each request appears in the chat with the command, path or host it
-concerns and **Allow**, **Allow for this session** and **Deny**; the run waits for
-the answer, and the waiting does not count against the session's time budget.
-Allow for this session keeps the approval in the host's running session (Claude
-Code's suggested rules are scoped to the session, never written to the
-project's settings; Codex's `acceptForSession`). Cursor's always-allow outlives
-the session, so a Cursor request offers Allow and Deny only. A request the host
-withdraws, or one still open when the run ends or is cancelled, is answered no
-and marked as no longer waiting. Bypass Permissions runs every action without
-asking and without the sandbox: use it only in a disposable checkout or
-container.
+Manual each request appears in the chat with its semantic category (`ask_kind`:
+`command`, `file_change`, `permissions`, `question`, or `tool`), summary,
+optional collapsible unified `diff_preview` (bounded to 6,144 characters for
+file edits and writes), optional `rule_summary`, and **Allow**, **Allow for this
+session** and **Deny**; the run waits for the answer, and the waiting does not
+count against the session's time budget. Allow for this session keeps the
+approval within the running session:
+
+- **Claude Code:** suggested permission rules are scoped to `session`, never
+  written to the project's settings.
+- **Codex:** sends `acceptForSession` for the Codex thread.
+- **Cursor:** Cursor's native `allow_always` writes to `~/.cursor/cli-config.json`
+  and outlives the session, so Harness never sends `allow_always` to Cursor CLI.
+  Instead, for clean workspace-relative `edit`/`read`/`delete` paths and exact
+  chain-free shell commands (no `;`, `|`, `&`, `` ` ``, `$`, `>`, `<` or
+  newlines), Harness builds a canonical local `session_rule_key`
+  (`session_option: true`, `has_session_rule: true`). Choosing **Allow for this
+  session** caches that key only in the Harness server's in-memory per-session
+  allowlist (bounded per session) and replies `allow_once` to Cursor CLI;
+  repeated matching asks in the same Harness session auto-resolve immediately as
+  `allowed_session` (`by: "session_rule"`) with `allow_once` without prompting
+  again or touching `~/.cursor/cli-config.json`. Chained commands, paths outside
+  the workspace and other tools keep `session_option: false` and offer Allow
+  and Deny only.
+
+In Manual mode, native structured questions — Claude Code's `AskUserQuestion`,
+Codex's `item/tool/requestUserInput` and Cursor's `cursor/ask_question` — also
+surface as `ask_kind: "question"` cards (`session_option: false`) with
+single-select or multi-select options and optional `"Other"` freeform inputs,
+and **Submit answers** / **Decline** buttons. Auto mode declines native
+questions automatically.
+
+Setting `HARNESS_PERMISSION_TIMEOUT_SECONDS` to a positive integer configures a
+per-ask TTL on pending Manual waiters (disabled by default when unset or
+non-positive). If an ask remains unanswered after that TTL, Harness removes the
+waiter, emits an `expired` event (`by: "timeout"`) and sends `Deny` to the host
+so the CLI does not hang indefinitely. A request the host withdraws, or one
+still open when the run ends or is cancelled, is answered no and marked as no
+longer waiting. Bypass Permissions runs every action without asking and without
+the sandbox: use it only in a disposable checkout or container.
 
 Manual keeps the host's input open instead of closing it after the prompt:
 Claude Code reads stream-json, and Codex and Cursor run their protocol servers,
@@ -375,14 +404,17 @@ else declined.
 | Request | Response |
 | --- | --- |
 | `POST /api/sessions` or `POST /api/sessions/{session_id}/messages` with `"permissions": "auto"`, `"manual"` or `"bypass"` | The session with its `permissions`; any other value is refused with `400` |
-| `POST /api/sessions/{session_id}/permissions/{request_id}` with exactly `{"decision":"allow"}`, `"allow_session"` or `"deny"` | `200`, `{permission, session}`; `409` when the request no longer waits; `400` for `allow_session` on a request that cannot be remembered |
+| `POST /api/sessions/{session_id}/permissions/{request_id}` with `{"decision":"allow"\|"allow_session"\|"deny", "answers"?: <object\|null>}` | `200`, `{permission, session}`; `409` when the request no longer waits; `400` for `allow_session` on a request that cannot be remembered or non-object / >32 KiB `answers` |
 
 A request is the session event `{"kind":"permission","state":"pending","request_id",…}`
-with `provider`, `tool`, `summary`, `detail` and `session_option`; later events of
-the same `request_id` carry `allowed`, `allowed_session`, `denied`, `declined`,
-`withdrawn` or `expired`. Codex and Cursor number their requests afresh in every
-process, so `request_id` is the host's id followed by a tag of the run
-(`cursor-0-1c029d06`): each turn's requests stay apart.
+with `provider`, `tool`, `summary`, `detail`, `session_option`, `ask_kind`,
+`diff_preview`, `rule_summary`, `has_session_rule` and `questions`; later events
+of the same `request_id` carry `allowed`, `allowed_session`, `denied`,
+`declined`, `withdrawn` or `expired` (with `by` naming `"person"`, `"auto"`,
+`"session_rule"`, `"host"`, `"harness"` or `"timeout"`, plus `answers` when
+structured question answers were submitted). Codex and Cursor number their
+requests afresh in every process, so `request_id` is the host's id followed by a
+tag of the run (`cursor-0-1c029d06`): each turn's requests stay apart.
 
 ### Starting the server
 
@@ -957,6 +989,12 @@ minutes, are single-use, and expire on restart. Lists show up to 100 non-merge
 commits after the recorded session baseline. Pending changes are bounded to 500
 files, 4 MiB per file and 64 MiB total; diff output is bounded to 512 KiB. Active
 or queued sessions and checks block Git delivery through the existing global lock.
+Commit and transfer previews (`delivery.preview_commit`, `delivery.preview_transfer`,
+`delivery.act` for `preview_commit`/`preview_transfer`, and `delivery.get` when a
+preview is present) also attach non-blocking `memory_warnings`
+(`contradiction_warnings`, `hygiene_warnings`) and `risk_callers` for the touched
+files, and surface them in the delivery panel before commit or apply without
+blocking delivery if Omnigraph or the Code graph is unavailable.
 
 Custom skill names use up to 64 lowercase letters, digits and single hyphens.
 Descriptions have up to 1,024 characters without angle brackets; instructions
@@ -1728,6 +1766,24 @@ Choose an existing task, or a new task with your own ID and goal, under **Memory
 memory still runs by itself for it. In a project without a governed context
 runtime, sessions start with excerpts of the project's reference files instead of
 retrieved memory, unless a task was chosen explicitly.
+
+Above the composer, **Check risks** (`#preflight-check`) — and a debounced
+check when `@file` mentions appear in the prompt — runs `POST
+/api/projects/{project_id}/preflight` without blocking sending, surfacing linked
+files, `contradiction_warnings`, `hygiene_warnings`, `risk_callers` and
+`blast_summary`. Ticking **Include graph risk callers** (`#preflight-risk-callers`,
+unchecked by default) passes `"risk_caller_hints": true` on that advisory check
+only; default session retrieval (`HARNESS_GRAPH_RISK_CALLER_HINTS`) stays off
+unless explicitly enabled (`docs/MEMORY-EVAL.md`).
+
+Inside **Results › Changes**, **Save verified memory** (`#results-memory-panel`)
+prefills editable `progress`, `next_steps` (up to 3), source-checked
+`learnings` (up to 3, excluding deleted files) and optional `used_memory`
+(up to 10 workspace-relative paths) from results, checks, Clash findings and
+`session["brain"]`. **Save to Memory** stays disabled until **I verified these
+claims against project files** (`verified: true`) is ticked and submits to
+`POST /api/sessions/{session_id}/memory` (`used_memory` is validated and echoed
+on the response while `ResultService::normalize` keeps its strict schema).
 
 #### Review context by hand
 
@@ -2725,6 +2781,7 @@ All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in
 - `GET /api/omnigraph/file-context?project_id=…&path=…` — the context atoms that touch one file on `main` and `knowledge/canonical`, each once, with its capsule line and authority tag, the declarations of this file each names (`symbols`, as `Owner::name`), and the `contradictions` with one of them at either end.
 - `GET /api/projects/{project_id}/graph/memory-links?path=…[&previous_path=…]` — the project's memory that cites one file: active Project Brain records naming it among their files or sources, active Memory Bank chunks citing it (within the allowed privacy), and the Omnigraph atoms touching it. A file gone from the workspace, or a `previous_path` a commit renamed it from, adds a `hygiene_warnings` entry with `recommended_action: "review"`; nothing is retired or changed. `contradiction_warnings` lists the `contradicts` relations among the file's atoms (from `omnigraph.file_context`), each naming both atoms and, where an end is a Project Brain record or Memory Bank chunk, `linked` ids and `open` targets — also for review only. The dependency map's side panel shows these links for a selected file once they arrive, with each atom's named declarations and an **Open** button per contradicting record or chunk, opens a record or chunk in Knowledge, and says so when the request fails without touching the map.
 - `POST /api/projects/{project_id}/graph/memory-links/batch` — CSRF-protected (`X-Harness-Token`) batch counterpart accepting `{"files": [{"path": "…", "previous_path": "…"}, …]}` (up to 24 entries, `previous_path` optional) and returning `{"project_id": "…", "items": […]}` in exact input order, scanning Project Brain and Memory Bank once per batch and enriching each entry via `omnigraph.file_context`. A commit's banner asks this route in a single batched request for the files the commit renamed (at most 12, cached per file for a minute) and shows the review warnings under the commit; once every check succeeds without error, that commit's row in the commit dock shows **N to review**. When the batch check fails, the banner and dock row surface the check failure without caching a `0` review count. Rows are never asked for a count of their own.
+- `POST /api/projects/{project_id}/preflight` — CSRF-protected (`X-Harness-Token`, `knowledge.preflight`) pre-run advisory endpoint accepting strict optional fields `["prompt", "session_id", "task_id", "paths", "risk_caller_hints"]`. Extracts candidate workspace-relative paths from `paths`, prompt `@file` mentions and the linked Brain task, returning `{"project_id", "files", "contradiction_warnings", "hygiene_warnings", "risk_callers", "blast_summary", "risk_caller_hints"}` (`risk_caller_hints` stays `[]` unless `"risk_caller_hints": true` is explicitly passed; default retrieval hints stay off).
 - `POST /api/omnigraph/sync-knowledge` — project verified `Project Brain` records and active `Memory Bank` chunks onto the `knowledge/canonical` branch (with `TouchesFile` and `supersedes` edges, and `MentionsSymbol` edges for the declarations a record or chunk names in its files, read from the registered project; `symbols` counts them, and a synced atom whose named set did not change is not rewritten). The collection is read in pages of at most 1,000 items sorted by atom id; once every page is in hand, a layer read whole (`project-brain`, `memory-bank`) also loses the project's synced atoms it no longer carries — a retired, archived, superseded or stale record or chunk — with their edges (`deleted`, `deleted_atom_ids`). Atoms another project or a session put on the branch are never pruned, and pages that disagree on the total prune nothing. A run whose automatic save wrote verified records or promoted chunks starts the same sync in the background.
 - `POST /api/omnigraph/promote` — human-gated promotion of a `ContextAtom` into `Project Brain` (`attestation: "person"`) after `sensitive_label`, `instruction_like`, `provenance_problems`, and workspace `PublicationFiles` freshness checks, linking `brain_record_id` back onto the graph atom.
 - `GET|POST /api/omnigraph/export` — export scoped task, branch, or main Omnigraph context (`bundle` `harness.omnigraph.bundle.v1` JSON or raw `ndjson`, with optional `download=1` attachment download).
