@@ -165,6 +165,7 @@ pub fn check(label: &str, id: &str, value: &str, checked: bool) -> Element {
     let _ = i.set_attribute("data-action", id);
     let _ = i.set_attribute("value", value);
     if let Some(x) = i.dyn_ref::<HtmlInputElement>() {
+        x.set_value(value);
         x.set_checked(checked);
     }
     add(&e, &i);

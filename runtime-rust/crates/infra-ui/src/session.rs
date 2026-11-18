@@ -772,8 +772,13 @@ pub fn models(prefix: &str, requested: Option<String>) {
         m::summary,
         None,
     );
+    let custom_field = if prefix.is_empty() {
+        "custom-model-field".to_owned()
+    } else {
+        format!("{prefix}custom-field")
+    };
     dom::hidden(
-        &format!("{prefix}custom-field"),
+        &custom_field,
         !custom && dom::value(&format!("{prefix}model-choice")) != "--custom--",
     );
     dom::disabled(
@@ -811,6 +816,12 @@ pub fn selected_model(prefix: &str) -> V {
         V::Null
     } else {
         json!(v)
+    }
+}
+pub(crate) fn model_selection_valid(custom_selected: bool, selected: &V) -> bool {
+    match selected.as_str() {
+        Some(x) => x.len() <= 120 && !x.starts_with('-') && !x.chars().any(char::is_control),
+        None => !custom_selected,
     }
 }
 pub fn routing() -> V {
@@ -996,10 +1007,8 @@ pub fn controls() {
     let max = m::read(|s| s.boot["runtime"]["max_agents"].as_u64().unwrap_or(40));
     let helper_valid = !dom::checked("agents-enabled") || (1..=max).contains(&count);
     let model = selected_model("");
-    let model_valid = model
-        .as_str()
-        .map(|x| x.len() <= 120 && !x.starts_with('-') && !x.chars().any(char::is_control))
-        .unwrap_or(true);
+    let custom_model = dom::value("model-choice") == "--custom--";
+    let model_valid = model_selection_valid(custom_model, &model);
     let inbox_active = inbox::eligible(&session);
     let valid = ready
         && !m::read(|s| s.pending)
@@ -1023,6 +1032,7 @@ pub fn controls() {
     dom::disabled("preflight-check", !ready || project_id.is_empty());
     dom::disabled("preflight-risk-callers", !ready || project_id.is_empty());
     dom::disabled("send", !valid);
+    dom::hidden("cancel-session", sid.is_empty() || !m::active(&session));
     dom::disabled(
         "cancel-session",
         !m::active(&session) || m::read(|s| s.pending),
@@ -1058,17 +1068,39 @@ pub fn controls() {
     ] {
         dom::disabled(id, !ready || locked || !sid.is_empty());
     }
+    let git = m::data("project-git");
+    let worktree_ok = m::yes(&git["worktree_available"]);
+    let worktrees = m::array(&m::data("project-worktrees")["worktrees"]);
+    dom::disabled(
+        "refresh-project-git",
+        !ready || locked || project_id.is_empty(),
+    );
+    dom::disabled("workspace-worktree-option", !worktree_ok);
+    dom::disabled(
+        "workspace-existing-option",
+        !worktree_ok || worktrees.is_empty(),
+    );
+    if git.is_object() {
+        dom::text("project-git-status", &format_project_git_status(&git));
+        dom::text(
+            "workspace-hint",
+            &format_workspace_hint(&dom::value("workspace"), &git),
+        );
+    }
     for id in [
         "model-choice",
         "thinking-effort",
         "agents-enabled",
-        "agent-count",
         "mode",
         "prompt",
         "attach-files",
     ] {
         dom::disabled(id, !ready || locked);
     }
+    dom::disabled(
+        "agent-count",
+        !ready || locked || !dom::checked("agents-enabled"),
+    );
     dom::disabled(
         "prompt",
         !ready || m::read(|s| s.pending) || inbox_retry || (m::active(&session) && !inbox_active),
@@ -1086,6 +1118,9 @@ pub fn controls() {
         commands::close();
     }
     dom::hidden("fleet-settings", !fleet);
+    for id in ["fleet-dry-run", "fleet-budget", "fleet-worker-timeout"] {
+        dom::disabled(id, !ready || locked || !fleet);
+    }
     let sdd_locked = !ready || locked || session["status"] == "awaiting_context";
     dom::hidden("sdd-settings", !sdd);
     dom::disabled("sdd-feature", !sdd || sdd_locked || !sid.is_empty());
@@ -1154,7 +1189,34 @@ pub fn controls() {
             || sdd_locked
             || m::yes(&m::data("sdd-documents-pending")),
     );
-    dom::hidden("clash-settings", !dom::checked("clash-enabled"));
+    let merging = m::data("merge-draft").is_object();
+    let clash_supported = ["native", "review"].contains(&workflow.as_str());
+    dom::disabled(
+        "clash-enabled",
+        !ready || locked || merging || !clash_supported,
+    );
+    let clash_active = dom::checked("clash-enabled");
+    dom::hidden("clash-settings", !clash_active);
+    for id in [
+        "clash-challenger",
+        "clash-rounds",
+        "clash-model-choice",
+        "clash-thinking-effort",
+    ] {
+        dom::disabled(id, !ready || locked || !clash_active || !clash_supported);
+    }
+    dom::disabled(
+        "clash-model",
+        !ready
+            || locked
+            || !clash_active
+            || !clash_supported
+            || dom::value("clash-model-choice") != "--custom--",
+    );
+    dom::hidden(
+        "clash-custom-field",
+        dom::value("clash-model-choice") != "--custom--",
+    );
     dom::hidden(
         "worktree-branch-field",
         dom::value("workspace") != "worktree",
@@ -1169,7 +1231,7 @@ pub fn controls() {
     );
     dom::disabled(
         "model",
-        locked || dom::value("model-choice") != "--custom--",
+        !ready || locked || dom::value("model-choice") != "--custom--",
     );
     let route_enabled = !routing().is_null();
     dom::hidden(
@@ -2708,7 +2770,16 @@ pub async fn send() {
         return;
     }
     let dry = workflow == "fleet-review" && dom::checked("fleet-dry-run");
-    let mut turn = json!({"prompt":prompt,"agents_enabled":dom::checked("agents-enabled"),"agent_count":dom::num("agent-count"),"model_routing":routing(),"model":if dry{V::Null}else{selected_model("")},"thinking_effort":if dry{V::Null}else{nullable(dom::value("thinking-effort"))},"permissions":dom::value("permissions")});
+    let agent_count = if dom::checked("agents-enabled") {
+        dom::num("agent-count")
+    } else {
+        json!(m::read(|s| {
+            s.boot["runtime"]["default_agent_count"]
+                .as_u64()
+                .unwrap_or(3)
+        }))
+    };
+    let mut turn = json!({"prompt":prompt,"agents_enabled":dom::checked("agents-enabled"),"agent_count":agent_count,"model_routing":routing(),"model":if dry{V::Null}else{selected_model("")},"thinking_effort":if dry{V::Null}else{nullable(dom::value("thinking-effort"))},"permissions":dom::value("permissions")});
     if follow && workflow == "native" && !routing().is_null() {
         turn["mode"] = json!(dom::value("mode"));
     }
@@ -2885,6 +2956,46 @@ pub async fn session_action(action: &str, body: V, error: &str) {
     poll(e).await;
     controls();
 }
+pub(crate) fn format_project_git_status(v: &V) -> String {
+    let explicit = m::summary(v);
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    if !m::yes(&v["is_git"]) {
+        return v["reason"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Select a Git working directory to use a worktree.")
+            .to_owned();
+    }
+    let branch = v["branch"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("HEAD (detached)");
+    if m::yes(&v["worktree_available"]) {
+        format!("Git branch: {branch} · Worktrees ready")
+    } else if let Some(reason) = v["reason"].as_str().filter(|s| !s.trim().is_empty()) {
+        format!("Git branch: {branch} · {reason}")
+    } else {
+        format!("Git branch: {branch} · Worktrees unavailable")
+    }
+}
+
+pub(crate) fn format_workspace_hint(workspace: &str, git: &V) -> String {
+    match workspace {
+        "worktree" => {
+            "Creates an isolated Git worktree from committed HEAD for this session.".into()
+        }
+        "existing-worktree" => "Reuses an existing Git worktree listed for this repository.".into(),
+        _ if git.is_object() && !m::yes(&git["worktree_available"]) => git["reason"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("The agent runs in the selected project folder.")
+            .to_owned(),
+        _ => "The agent runs in the selected project folder.".into(),
+    }
+}
+
 pub async fn load_git() {
     let p = dom::value("project");
     if p.is_empty() {
@@ -2903,7 +3014,7 @@ pub async fn load_git() {
             }
             m::set(&format!("project-{kind}"), v.clone());
             if kind == "git" {
-                dom::text("project-git-status", &m::summary(&v));
+                dom::text("project-git-status", &format_project_git_status(&v));
                 crate::graph_map::sync_embedded_changes();
                 synced_changes = true;
             } else {
@@ -2919,6 +3030,7 @@ pub async fn load_git() {
     if !synced_changes && dom::value("project") == p {
         crate::graph_map::sync_embedded_changes();
     }
+    controls();
     knowledge::load_brain_link().await;
     management::load_attachment().await;
 }
@@ -7174,6 +7286,32 @@ mod update_tests {
         assert_eq!(
             learnings[0]["sources"],
             json!(["services/orders/src/OrderService.php"])
+        );
+    }
+
+    #[test]
+    fn custom_model_selection_rejects_empty_and_flag_like_values() {
+        assert!(model_selection_valid(false, &V::Null));
+        assert!(!model_selection_valid(true, &V::Null));
+        assert!(!model_selection_valid(true, &json!("-bad")));
+        assert!(model_selection_valid(true, &json!("claude-sonnet-4-test")));
+    }
+
+    #[test]
+    fn project_git_status_and_workspace_hint_format_worktree_readiness() {
+        assert_eq!(
+            format_project_git_status(
+                &json!({"is_git": true, "branch": "master", "worktree_available": true})
+            ),
+            "Git branch: master · Worktrees ready"
+        );
+        assert_eq!(
+            format_project_git_status(&json!({"is_git": false, "reason": "Not a git repo"})),
+            "Not a git repo"
+        );
+        assert!(
+            format_workspace_hint("worktree", &json!({"worktree_available": true}))
+                .contains("worktree")
         );
     }
 }

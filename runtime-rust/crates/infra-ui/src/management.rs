@@ -199,6 +199,11 @@ fn preview_controls(scope: &str) {
         },
         !ready,
     );
+    if scope == "skills" {
+        skills_controls();
+    } else if scope == "create-skill" {
+        create_skill_controls();
+    }
     crate::session::sync_working_indicator();
 }
 fn file_list(id: &str, files: &[V]) {
@@ -564,6 +569,8 @@ pub async fn load_setup() {
                     "Project inspected."
                 },
             );
+            let no_editions = m::array(&v["editions"]).is_empty();
+            dom::disabled("setup-edition", v["available"] == false || no_editions);
             dom::disabled("setup-preview-button", v["available"] == false);
         }
         Ok(_) => {}
@@ -635,34 +642,188 @@ async fn hooks(trust: bool) {
         Err(e) => dom::error("setup-attach-error", &e.message),
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreateSkillValidation {
+    valid: bool,
+    name_error: &'static str,
+    description_error: &'static str,
+    instructions_error: &'static str,
+    agents_error: &'static str,
+    summary_error: &'static str,
+}
+
+fn valid_skill_slug(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn validate_create_skill_inputs(
+    project: &str,
+    name: &str,
+    description: &str,
+    instructions: &str,
+    agent_count: usize,
+) -> CreateSkillValidation {
+    let name_valid = valid_skill_slug(name);
+    let desc_trimmed = description.trim();
+    let desc_chars = desc_trimmed.chars().count();
+    let desc_valid = !desc_trimmed.is_empty() && desc_chars <= 1024;
+    let inst_trimmed = instructions.trim();
+    let inst_bytes = instructions.len();
+    let inst_valid = !inst_trimmed.is_empty() && inst_bytes <= 32000;
+    let agents_valid = agent_count > 0;
+
+    let name_error = if !name.is_empty() && !name_valid {
+        "Use lowercase letters, digits, and single hyphens (up to 64 chars)."
+    } else {
+        ""
+    };
+    let description_error = if desc_chars > 1024 {
+        "Use a description of at most 1,024 characters."
+    } else {
+        ""
+    };
+    let instructions_error = if inst_bytes > 32000 {
+        "Use instructions of at most 32,000 UTF-8 bytes."
+    } else {
+        ""
+    };
+    let agents_error = if agents_valid {
+        ""
+    } else {
+        "Choose at least one tool."
+    };
+    let summary_error = if project.is_empty() {
+        "Choose a project first."
+    } else if !name_valid {
+        "Use a lowercase hyphen-separated skill name."
+    } else if !desc_valid {
+        "Use a description of 1–1024 characters."
+    } else if !inst_valid {
+        "Use instructions of 1–32,000 UTF-8 bytes."
+    } else if !agents_valid {
+        "Choose at least one tool."
+    } else {
+        ""
+    };
+    let valid = summary_error.is_empty();
+    CreateSkillValidation {
+        valid,
+        name_error,
+        description_error,
+        instructions_error,
+        agents_error,
+        summary_error,
+    }
+}
+
+fn skills_controls() {
+    let catalog = m::data("skills-catalog");
+    let loaded = catalog.is_object();
+    let available = loaded && catalog["available"] != false;
+    let has_sources = !m::array(&catalog["sources"]).is_empty();
+    let has_source = available && has_sources && !dom::value("skills-source").is_empty();
+    let discovery = m::data("skills-discovery");
+    let has_items = discovery["skills"]
+        .as_array()
+        .or_else(|| discovery["items"].as_array())
+        .is_some_and(|items| !items.is_empty());
+    let pending = m::yes(&m::data("skills-pending"));
+    let selected_skills = m::array(&m::data("skills-selection"));
+    let selected_agents = dom::selected_checks("skills-agents");
+
+    dom::disabled("skills-source", !available || !has_sources);
+    dom::disabled("skills-discover", !has_source || pending);
+    dom::disabled("skills-source-refresh", !has_source || pending);
+    dom::disabled("skills-filter", !available || !has_items);
+    dom::disabled(
+        "skills-preview-button",
+        !available
+            || pending
+            || dom::value("skills-project").is_empty()
+            || selected_skills.is_empty()
+            || selected_agents.is_empty(),
+    );
+    dom::text(
+        "skills-selection-summary",
+        &if selected_skills.is_empty() || selected_agents.is_empty() {
+            "Select at least one skill and one tool.".to_owned()
+        } else {
+            format!(
+                "{} skill{} for {} tool{} ready to preview.",
+                selected_skills.len(),
+                if selected_skills.len() == 1 { "" } else { "s" },
+                selected_agents.len(),
+                if selected_agents.len() == 1 { "" } else { "s" }
+            )
+        },
+    );
+}
+
+fn create_skill_controls() {
+    let catalog = m::data("skills-catalog");
+    let loaded = catalog.is_object();
+    let available = loaded && catalog["available"] != false;
+    let agent_total = m::array(&catalog["agents"]).len();
+    if loaded {
+        dom::text(
+            "create-skill-catalog-status",
+            &if available {
+                format!("Supported tools ready ({agent_total}).")
+            } else {
+                catalog["detail"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("Skill creation is currently unavailable.")
+                    .to_owned()
+            },
+        );
+    }
+    let name = dom::value("create-skill-name");
+    let trimmed_name = name.trim();
+    let desc = dom::value("create-skill-description");
+    let inst = dom::value("create-skill-instructions");
+    let agents = dom::selected_checks("create-skill-agents");
+    let project = dom::value("create-skill-project");
+    let check = validate_create_skill_inputs(&project, trimmed_name, &desc, &inst, agents.len());
+
+    dom::error("create-skill-name-error", check.name_error);
+    dom::error("create-skill-description-error", check.description_error);
+    dom::error("create-skill-instructions-error", check.instructions_error);
+    dom::error(
+        "create-skill-agents-error",
+        if loaded && available {
+            check.agents_error
+        } else {
+            ""
+        },
+    );
+    let pending = m::yes(&m::data("create-skill-pending"));
+    dom::disabled(
+        "create-skill-preview-button",
+        !available || pending || !check.valid,
+    );
+}
+
 async fn preview(scope: &str) {
     let draft = selection(scope);
     if scope == "create-skill" {
-        let name = m::text(&draft, "name");
-        let valid = !name.is_empty()
-            && name.len() <= 64
-            && name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            && !name.starts_with('-')
-            && !name.ends_with('-');
-        let error = if !valid {
-            "Use a lowercase hyphen-separated skill name."
-        } else if m::text(&draft, "description").trim().is_empty()
-            || m::text(&draft, "description").chars().count() > 1024
-        {
-            "Use a description of 1–1024 characters."
-        } else if m::text(&draft, "instructions").trim().is_empty()
-            || m::text(&draft, "instructions").len() > 32000
-        {
-            "Use instructions of 1–32,000 UTF-8 bytes."
-        } else if m::array(&draft["agents"]).is_empty() {
-            "Choose at least one tool."
-        } else {
-            ""
-        };
-        if !error.is_empty() {
-            dom::error("create-skill-action-error", error);
+        let check = validate_create_skill_inputs(
+            &m::text(&draft, "project_id"),
+            &m::text(&draft, "name"),
+            &m::text(&draft, "description"),
+            &m::text(&draft, "instructions"),
+            m::array(&draft["agents"]).len(),
+        );
+        if !check.valid {
+            dom::error("create-skill-action-error", check.summary_error);
+            create_skill_controls();
             return;
         }
     }
@@ -1056,9 +1217,16 @@ pub async fn load_skills() {
                 None,
             );
             installed_skills().await;
+            skills_controls();
+            create_skill_controls();
         }
         Ok(_) => {}
-        Err(e) if !e.aborted => dom::error("skills-catalog-error", &e.message),
+        Err(e) if !e.aborted => {
+            dom::error("skills-catalog-error", &e.message);
+            dom::text("create-skill-catalog-status", &e.message);
+            skills_controls();
+            create_skill_controls();
+        }
         Err(_) => {}
     }
 }
@@ -1085,6 +1253,7 @@ async fn discover(refresh: bool) {
         Ok(_) => {}
         Err(e) => dom::error("skills-catalog-error", &e.message),
     }
+    skills_controls();
 }
 fn render_skills() {
     let query = dom::value("skills-filter").to_lowercase();
@@ -1874,21 +2043,25 @@ pub async fn event(
             }
             m::set("skills-selection", json!(selected));
             invalidate("skills");
+            skills_controls();
             return true;
         }
         if action == "skills-agent" {
             invalidate("skills");
+            skills_controls();
             return true;
         }
         if id == "skills-source" {
             invalidate("skills");
             m::take("skills-discovery");
             render_skills();
+            skills_controls();
             return true;
         }
         if id == "skills-project" {
             invalidate("skills");
             m::take("skills-change-preview");
+            skills_controls();
             installed_skills().await;
             return true;
         }
@@ -1909,6 +2082,7 @@ pub async fn event(
                     dom::value("create-skill-instructions").len()
                 ),
             );
+            create_skill_controls();
             return true;
         }
         if id == "creator-project" {
@@ -2070,7 +2244,7 @@ pub async fn event(
         }
         "accelerator-setup" => {
             dom::set_value("setup-project", &dom::value("accelerator-project"));
-            dom::set_value("setup-edition", &dom::value(payload.as_str().unwrap_or("")));
+            dom::set_value("setup-edition", payload.as_str().unwrap_or(""));
             session::open_view("setup", true).await;
         }
         "accelerator-startup" => {
@@ -2237,5 +2411,49 @@ mod tests {
         assert_eq!(payloads[0]["container"], "creator-permissions-list");
         assert_eq!(payloads[0]["request_id"], "cr-1");
         assert_eq!(payloads[1]["decision"], "allow_session");
+    }
+
+    #[test]
+    fn create_skill_validation_enforces_slug_bounds_and_tools() {
+        let bad_name = super::validate_create_skill_inputs(
+            "proj-1",
+            "BAD NAME",
+            "Valid trigger description",
+            "# Steps",
+            1,
+        );
+        assert!(!bad_name.valid);
+        assert!(!bad_name.name_error.is_empty());
+
+        let double_hyphen = super::validate_create_skill_inputs(
+            "proj-1",
+            "bad--name",
+            "Valid trigger description",
+            "# Steps",
+            1,
+        );
+        assert!(!double_hyphen.valid);
+        assert!(!double_hyphen.name_error.is_empty());
+
+        let no_tools = super::validate_create_skill_inputs(
+            "proj-1",
+            "check-tax-rounding",
+            "Valid trigger description",
+            "# Steps",
+            0,
+        );
+        assert!(!no_tools.valid);
+        assert!(!no_tools.agents_error.is_empty());
+
+        let ok = super::validate_create_skill_inputs(
+            "proj-1",
+            "check-tax-rounding",
+            "Use when verifying tax calculations",
+            "# Steps\nVerify 2-decimal precision.",
+            2,
+        );
+        assert!(ok.valid);
+        assert!(ok.name_error.is_empty());
+        assert!(ok.summary_error.is_empty());
     }
 }
