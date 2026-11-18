@@ -754,10 +754,19 @@ mod probe_tests {
             let (ready_read, ready_write) = pipe()?;
             let (release_read, release_write) = pipe()?;
             let writer_fd = writer.as_raw_fd();
-            let ready_input = ready_read.as_raw_fd();
             let ready_output = ready_write.as_raw_fd();
             let release_input = release_read.as_raw_fd();
-            let release_output = release_write.as_raw_fd();
+            let max_fd = {
+                let mut limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+                    i32::try_from(limit.rlim_cur.clamp(1024, 65536)).unwrap_or(65536)
+                } else {
+                    4096
+                }
+            };
             // SAFETY: the child below uses only async-signal-safe libc calls;
             // no allocation, locks, destructors or Rust test assertions run there.
             let pid = unsafe { libc::fork() };
@@ -766,8 +775,11 @@ mod probe_tests {
             }
             if pid == 0 {
                 unsafe {
-                    libc::close(ready_input);
-                    libc::close(release_output);
+                    for fd in 3..max_fd {
+                        if fd != writer_fd && fd != ready_output && fd != release_input {
+                            libc::close(fd);
+                        }
+                    }
                     let flags = libc::fcntl(writer_fd, libc::F_GETFD);
                     let ready = if flags >= 0 && flags & libc::FD_CLOEXEC != 0 {
                         1u8

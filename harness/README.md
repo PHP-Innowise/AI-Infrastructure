@@ -181,12 +181,15 @@ regardless of the setting):
   while **escalating cross-service and contract-ownership boundary asks** to
   human confirmation (`SystemBoundaryApprovals` marks escalated asks `Auto ->
   Manual boundary escalation`, strips **Allow for this session**, and waits via
-  `waiting_permissions`); non-interactive `Text`-transport dispatches (Codex
-  `Auto` and Cursor `Auto`) enforce write boundaries via post-step checks on
-  `service`-scoped runs.
+  `waiting_permissions`); non-interactive `Transport::Text` edit dispatches
+  (such as Codex `Auto` and Cursor `Auto`) enforce write boundaries after the
+  step via post-step checks (`check_step_boundary_writes_with_extra`).
 - **Bypass Permissions** disables host approval prompts and sandboxes
   (`bypassPermissions` / `--dangerously-bypass-approvals-and-sandbox` /
-  `--force --sandbox disabled`) within the selected dispatch folders.
+  `--force --sandbox disabled`) within the selected dispatch folders; like all
+  non-interactive `Transport::Text` edit dispatches (`Auto` and `Bypass`), it
+  still enforces post-step boundary write checks (`__system__`, out-of-root, and
+  foreign-service/contract boundaries according to the selected `access` scope).
 
 The **Agents** panel follows a launched run live: one card per agent (contract,
 each service, verification) with state, time, granted folders, tool calls,
