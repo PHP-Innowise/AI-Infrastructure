@@ -1751,9 +1751,22 @@ pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> St
             } else {
                 "Other (custom answer)…"
             };
+            let aria_target = if !header.is_empty() {
+                header.as_str()
+            } else if !prompt.is_empty() {
+                prompt.as_str()
+            } else {
+                ""
+            };
+            let aria_label = if aria_target.is_empty() {
+                format!("Other answer for question {}", idx + 1)
+            } else {
+                format!("Other answer for {aria_target}")
+            };
             out.push_str(&format!(
-                "<input type=\"text\" class=\"permission-question-other-input\" data-question-index=\"{idx}\" data-action=\"permission-question-other\" data-payload=\"{}\" maxlength=\"2000\" placeholder=\"{placeholder}\" aria-label=\"Other answer\">",
-                files_map::escape_html(&payload)
+                "<input type=\"text\" class=\"permission-question-other-input\" data-question-index=\"{idx}\" data-action=\"permission-question-other\" data-payload=\"{}\" maxlength=\"2000\" placeholder=\"{placeholder}\" aria-label=\"{}\">",
+                files_map::escape_html(&payload),
+                files_map::escape_html(&aria_label)
             ));
         }
         out.push_str("</div></fieldset>");
@@ -6021,6 +6034,8 @@ mod permission_tests {
         assert!(html.contains("Stateless bearer token"));
         assert!(html.contains("permission-question-other-radio"));
         assert!(html.contains("permission-question-other-input"));
+        assert!(html.contains("aria-label=\"Other answer for Auth\""));
+        assert!(html.contains("aria-label=\"Other answer for Targets\""));
 
         let allow_body = build_permission_decision_body(
             "allow",

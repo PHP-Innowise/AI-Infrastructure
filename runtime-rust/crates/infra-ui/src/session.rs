@@ -3273,15 +3273,6 @@ fn inspect_file_button_html(path: &str, label: &str) -> String {
     )
 }
 
-fn inspect_knowledge_path_button_html(project_id: &str, path: &str, label: &str) -> String {
-    let payload = json!({"project_id": project_id, "path": path}).to_string();
-    format!(
-        "<button type=\"button\" class=\"button compact advisory-inspect\" data-action=\"preflight-open-knowledge\" data-payload=\"{}\">{}</button>",
-        escape_html(&payload),
-        escape_html(label)
-    )
-}
-
 fn open_memory_target_button_html(
     scope: &str,
     project_id: &str,
@@ -3299,6 +3290,60 @@ fn open_memory_target_button_html(
         escape_html(&payload),
         escape_html(label)
     )
+}
+
+fn render_linked_record_buttons_html(
+    project_id: &str,
+    brain_records: &[V],
+    memory_chunks: &[V],
+) -> String {
+    let mut out = String::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for rec in brain_records.iter().take(4) {
+        let target_id = rec["id"]
+            .as_str()
+            .or_else(|| rec["external_id"].as_str())
+            .or_else(|| rec.as_str())
+            .unwrap_or("")
+            .trim();
+        if target_id.is_empty() || !seen.insert(("brain", target_id.to_owned())) {
+            continue;
+        }
+        let title = rec["title"]
+            .as_str()
+            .or_else(|| rec["external_id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(target_id);
+        out.push_str(&open_memory_target_button_html(
+            "brain",
+            project_id,
+            target_id,
+            &format!("Open {title}"),
+        ));
+    }
+    for chunk in memory_chunks.iter().take(4) {
+        let target_id = chunk["id"]
+            .as_str()
+            .or_else(|| chunk.as_str())
+            .unwrap_or("")
+            .trim();
+        if target_id.is_empty() || !seen.insert(("memory", target_id.to_owned())) {
+            continue;
+        }
+        let title = chunk["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(target_id);
+        out.push_str(&open_memory_target_button_html(
+            "memory",
+            project_id,
+            target_id,
+            &format!("Open {title}"),
+        ));
+    }
+    out
 }
 
 fn advisory_path(value: &V) -> String {
@@ -3332,13 +3377,26 @@ pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: 
         && hygiene.is_empty()
         && risk_callers.is_empty()
         && files.is_empty()
+        && hints.is_empty()
         && !blast.is_object()
     {
         return "<p class=\"knowledge-note advisory-empty\">No referenced files, memory warnings, or graph risk callers flagged.</p>".to_owned();
     }
 
+    let mut links_by_path: std::collections::BTreeMap<String, (Vec<V>, Vec<V>)> =
+        std::collections::BTreeMap::new();
+    for entry in files.iter().chain(hints.iter()) {
+        let p = advisory_path(entry);
+        if p.is_empty() {
+            continue;
+        }
+        let entry_links = links_by_path.entry(p).or_default();
+        entry_links.0.extend(m::array(&entry["brain_records"]));
+        entry_links.1.extend(m::array(&entry["memory_chunks"]));
+    }
+
     let mut out = String::new();
-    if is_preflight && (blast.is_object() || !files.is_empty()) {
+    if is_preflight && (blast.is_object() || !files.is_empty() || !hints.is_empty()) {
         let blast_files = m::array(&blast["files"]);
         let file_count = if !files.is_empty() {
             files.len()
@@ -3380,11 +3438,13 @@ pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: 
                     escape_html(path)
                 ));
                 out.push_str(&inspect_file_button_html(path, "Code graph"));
-                out.push_str(&inspect_knowledge_path_button_html(
-                    project_id,
-                    path,
-                    "Knowledge",
-                ));
+                if let Some((brain_records, memory_chunks)) = links_by_path.get(path) {
+                    out.push_str(&render_linked_record_buttons_html(
+                        project_id,
+                        brain_records,
+                        memory_chunks,
+                    ));
+                }
                 out.push_str("</span></li>");
             }
             out.push_str("</ul>");
@@ -3408,17 +3468,36 @@ pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: 
             if !path.is_empty() {
                 out.push_str(&inspect_file_button_html(&path, "Code graph"));
             }
-            for open in m::array(&w["open"]) {
-                let scope = open["scope"].as_str().unwrap_or("");
-                let target_id = open["target_id"].as_str().unwrap_or("");
-                if matches!(scope, "brain" | "memory") && !target_id.is_empty() {
-                    let title = open["title"].as_str().unwrap_or(target_id);
-                    out.push_str(&open_memory_target_button_html(
-                        scope,
-                        project_id,
-                        target_id,
-                        &format!("Open {title}"),
-                    ));
+            let opens = m::array(&w["open"]);
+            if opens.is_empty() {
+                for target in m::array(&w["linked"]).iter().take(4) {
+                    if let Some(id) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        let scope = if id.starts_with("MEM-") {
+                            "memory"
+                        } else {
+                            "brain"
+                        };
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            id,
+                            &format!("Open {id}"),
+                        ));
+                    }
+                }
+            } else {
+                for open in opens {
+                    let scope = open["scope"].as_str().unwrap_or("");
+                    let target_id = open["target_id"].as_str().unwrap_or("");
+                    if matches!(scope, "brain" | "memory") && !target_id.is_empty() {
+                        let title = open["title"].as_str().unwrap_or(target_id);
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            target_id,
+                            &format!("Open {title}"),
+                        ));
+                    }
                 }
             }
             out.push_str("</span></li>");
@@ -3450,30 +3529,19 @@ pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: 
             if !path.is_empty() {
                 out.push_str(&inspect_file_button_html(&path, "Code graph"));
             }
-            let linked = m::array(&w["linked"]);
-            if linked.is_empty() {
-                if !path.is_empty() {
-                    out.push_str(&inspect_knowledge_path_button_html(
+            for target in m::array(&w["linked"]).iter().take(4) {
+                if let Some(id) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    let scope = if id.starts_with("MEM-") {
+                        "memory"
+                    } else {
+                        "brain"
+                    };
+                    out.push_str(&open_memory_target_button_html(
+                        scope,
                         project_id,
-                        &path,
-                        "Knowledge",
+                        id,
+                        &format!("Open {id}"),
                     ));
-                }
-            } else {
-                for target in linked.iter().take(4) {
-                    if let Some(id) = target.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                        let scope = if id.starts_with("MEM-") {
-                            "memory"
-                        } else {
-                            "brain"
-                        };
-                        out.push_str(&open_memory_target_button_html(
-                            scope,
-                            project_id,
-                            id,
-                            &format!("Open {id}"),
-                        ));
-                    }
                 }
             }
             out.push_str("</span></li>");
@@ -3534,11 +3602,13 @@ pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: 
             if !from.is_empty() {
                 out.push_str("<span class=\"advisory-actions\">");
                 out.push_str(&inspect_file_button_html(from, "Code graph"));
-                out.push_str(&inspect_knowledge_path_button_html(
-                    project_id,
-                    from,
-                    "Knowledge",
-                ));
+                if let Some((brain_records, memory_chunks)) = links_by_path.get(from) {
+                    out.push_str(&render_linked_record_buttons_html(
+                        project_id,
+                        brain_records,
+                        memory_chunks,
+                    ));
+                }
                 out.push_str("</span>");
             }
             out.push_str("</li>");
@@ -3546,7 +3616,108 @@ pub(crate) fn render_advisory_panel_html(project_id: &str, v: &V, is_preflight: 
         out.push_str("</ul></div>");
     }
 
-    if is_preflight && contradictions.is_empty() && hygiene.is_empty() && risk_callers.is_empty() {
+    if is_preflight && !hints.is_empty() {
+        out.push_str("<div class=\"advisory-group\" data-kind=\"risk-caller-hints\"><p class=\"advisory-group-title\">Advisory risk-caller hints</p><ul class=\"advisory-list\">");
+        for hint in &hints {
+            let path = advisory_path(hint);
+            let target = hint["target"]
+                .as_str()
+                .or_else(|| hint["to"].as_str())
+                .unwrap_or("")
+                .trim();
+            let impact = hint["impact"].as_str().unwrap_or("hint");
+            let brain_records = m::array(&hint["brain_records"]);
+            let memory_chunks = m::array(&hint["memory_chunks"]);
+            let hint_hygiene = m::array(&hint["hygiene_warnings"]);
+            let source_hints = m::array(&hint["source_hints"]);
+            if path.is_empty()
+                && brain_records.is_empty()
+                && memory_chunks.is_empty()
+                && hint_hygiene.is_empty()
+                && source_hints.is_empty()
+            {
+                continue;
+            }
+            let label = if !path.is_empty() && !target.is_empty() {
+                format!("{path} → {target}")
+            } else {
+                path.clone()
+            };
+            let mut details = Vec::new();
+            for hw in &hint_hygiene {
+                if let Some(txt) = hw["text"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    details.push(txt.to_owned());
+                }
+            }
+            let source_paths: Vec<String> = source_hints
+                .iter()
+                .filter_map(|item| {
+                    item["path"]
+                        .as_str()
+                        .or_else(|| item.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .take(4)
+                .collect();
+            if !source_paths.is_empty() {
+                details.push(format!("Sources: {}", source_paths.join(", ")));
+            }
+            out.push_str("<li class=\"advisory-item\" data-kind=\"risk-caller-hint\">");
+            out.push_str(&format!(
+                "<span class=\"advisory-badge\" data-kind=\"arch\">{}</span>",
+                escape_html(impact)
+            ));
+            if !label.is_empty() {
+                out.push_str(&format!(
+                    "<code class=\"advisory-path\">{}</code>",
+                    escape_html(&label)
+                ));
+            }
+            if !details.is_empty() {
+                out.push_str(&format!(
+                    "<span class=\"advisory-text\">{}</span>",
+                    escape_html(&details.join(" · "))
+                ));
+            }
+            out.push_str("<span class=\"advisory-actions\">");
+            if !path.is_empty() {
+                out.push_str(&inspect_file_button_html(&path, "Code graph"));
+            }
+            out.push_str(&render_linked_record_buttons_html(
+                project_id,
+                &brain_records,
+                &memory_chunks,
+            ));
+            for hw in &hint_hygiene {
+                for target_id in m::array(&hw["linked"]).iter().take(4) {
+                    if let Some(id) = target_id.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        let scope = if id.starts_with("MEM-") {
+                            "memory"
+                        } else {
+                            "brain"
+                        };
+                        out.push_str(&open_memory_target_button_html(
+                            scope,
+                            project_id,
+                            id,
+                            &format!("Open {id}"),
+                        ));
+                    }
+                }
+            }
+            out.push_str("</span></li>");
+        }
+        out.push_str("</ul></div>");
+    }
+
+    if is_preflight
+        && contradictions.is_empty()
+        && hygiene.is_empty()
+        && risk_callers.is_empty()
+        && hints.is_empty()
+    {
         out.push_str("<p class=\"knowledge-note advisory-empty\">No contradictions, hygiene warnings, or graph risk callers flagged.</p>");
     }
     out
@@ -3556,8 +3727,9 @@ fn preflight_status_summary(v: &V) -> String {
     let c = m::array(&v["contradiction_warnings"]).len();
     let h = m::array(&v["hygiene_warnings"]).len();
     let r = m::array(&v["risk_callers"]).len();
+    let hints = m::array(&v["risk_caller_hints"]).len();
     let f = m::array(&v["files"]).len();
-    if c + h + r == 0 {
+    if c + h + r + hints == 0 {
         if f == 0 {
             "No risks flagged".to_owned()
         } else {
@@ -3573,6 +3745,9 @@ fn preflight_status_summary(v: &V) -> String {
         }
         if r > 0 {
             parts.push(format!("{r} risk caller(s)"));
+        }
+        if hints > 0 {
+            parts.push(format!("{hints} hint(s)"));
         }
         parts.join(" · ")
     }
@@ -5555,15 +5730,6 @@ pub async fn event(
                 knowledge::open_from_omnigraph(scope, &project_id, target_id).await;
             }
         }
-        "preflight-open-knowledge" => {
-            let project_id = payload["project_id"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| dom::value("project"));
-            let path = payload["path"].as_str().unwrap_or("");
-            knowledge::open_from_omnigraph("brain", &project_id, path).await;
-        }
         "results-memory-add-learning" => {
             let mut learnings = read_memory_learnings_from_dom();
             if learnings.len() < 3 {
@@ -6692,7 +6858,11 @@ mod update_tests {
     #[test]
     fn advisory_panel_renders_preflight_and_delivery_warnings_without_inline_hex() {
         let preflight = json!({
-            "files": ["src/auth.rs"],
+            "files": [{
+                "path": "src/auth.rs",
+                "brain_records": [{"id": "rec-auth-1", "external_id": "finding-auth", "title": "Auth contract"}],
+                "memory_chunks": [{"id": "MEM-20261117-aabbccdd", "title": "Token guard note"}]
+            }],
             "blast_summary": {"direct_count": 2, "downstream_count": 5, "files": ["src/auth.rs", "src/api.rs"]},
             "contradiction_warnings": [{
                 "kind": "atom-contradiction",
@@ -6712,7 +6882,15 @@ mod update_tests {
                 "impact": "broken_risk",
                 "reason": "Calls removed validate()"
             }],
-            "risk_caller_hints": ["src/routes.rs"]
+            "risk_caller_hints": [{
+                "path": "src/routes.rs",
+                "target": "src/auth.rs",
+                "impact": "impacted",
+                "brain_records": [{"id": "rec-routes-1", "title": "Routes handler note"}],
+                "memory_chunks": [{"id": "MEM-20261118-cccc4444", "title": "Route caller contract"}],
+                "hygiene_warnings": [],
+                "source_hints": [{"path": "memory-bank/chunks/MEM-20261118-cccc4444-caller-contract.md", "source_sha256": "deadbeef"}]
+            }]
         });
         let html = render_advisory_panel_html("proj-1", &preflight, true);
         crate::test_support::assert_no_inline_hex_colors(&html);
@@ -6721,7 +6899,15 @@ mod update_tests {
         assert!(html.contains("1 hint(s)"));
         assert!(html.contains("data-action=\"inspect-file-graph\""));
         assert!(html.contains("data-action=\"preflight-open-memory\""));
-        assert!(html.contains("data-action=\"preflight-open-knowledge\""));
+        assert!(!html.contains("preflight-open-knowledge"));
+        assert!(html.contains("Open Auth contract"));
+        assert!(html.contains("Open Token guard note"));
+        assert!(html.contains("Advisory risk-caller hints"));
+        assert!(html.contains("Open Routes handler note"));
+        assert!(html.contains("Open Route caller contract"));
+        assert!(
+            html.contains("Sources: memory-bank/chunks/MEM-20261118-cccc4444-caller-contract.md")
+        );
         assert!(html.contains("Token TTL &lt;24h&gt; contradicts 5m"));
         assert!(html.contains("src/routes.rs → src/auth.rs"));
 
