@@ -107,7 +107,7 @@ fn outputs(container: &Element, files: &[V]) {
             "text" | "error" => {
                 let pre = add(&content, "pre", "", &text(file, "content"));
                 if file["type"] == "error" {
-                    let _ = pre.set_attribute("style", "color:var(--red)");
+                    let _ = pre.set_attribute("style", "color:var(--error, var(--red))");
                 }
             }
             "image" => {
@@ -1071,6 +1071,7 @@ fn render_editor() {
         );
         let td = add(&tr, "td", "", "");
         let button = add(&td, "button", "btn-delete", "Delete");
+        let _ = button.set_attribute("type", "button");
         let _ = button.set_attribute("data-editor-action", "delete");
         let _ = button.set_attribute("data-editor-index", &index.to_string());
     }

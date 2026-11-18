@@ -375,6 +375,7 @@ pub async fn bootstrap() {
                 s.boot = boot;
                 s.auth_failed = false;
             });
+            reset_session_settings_state();
             dom::hidden("connection-banner", true);
             render_update();
             spawn_local(async {
@@ -392,6 +393,7 @@ pub async fn bootstrap() {
             spawn_local(async {
                 sign_in(false).await;
             });
+            m::set("bootstrapping", json!(true));
             let wanted = dom::json_storage(PREFS);
             let sid = m::text(&wanted, "session_id");
             if !sid.is_empty() && m::read(|s| s.sessions.iter().any(|x| m::text(x, "id") == sid)) {
@@ -399,6 +401,7 @@ pub async fn bootstrap() {
             }
             let view = dom::hash_view();
             open_view(if view.is_empty() { "sessions" } else { &view }, false).await;
+            m::take("bootstrapping");
             if m::read(|s| s.view != "sessions") && !dom::value("project").is_empty() {
                 crate::graph_map::sync_embedded(false);
                 spawn_local(async {
@@ -912,7 +915,11 @@ pub fn controls() {
         "permissions-hint",
         permissions_hint(&dom::value("provider"), &editing, &permission),
     );
-    dom::attr("permissions-hint", "data-mode", &permission);
+    dom::attr(
+        "permissions-hint",
+        "data-mode",
+        permissions_hint_mode(read_only, &editing, &permission),
+    );
     let description = phases
         .iter()
         .find(|entry| entry["id"] == phase)
@@ -1035,14 +1042,65 @@ pub fn controls() {
             "Off"
         },
     );
+    let settings_invalid = !helper_valid
+        || !model_valid
+        || !sdd_valid
+        || !budget_fields_valid("session-budgets")
+        || !valid_budgets(&budgets("session-budgets"));
+    if sid.is_empty() {
+        m::take("session-settings-owner");
+        dom::hidden("session-summary", true);
+        dom::hidden("session-settings", false);
+        dom::attr("session-settings-toggle", "aria-expanded", "false");
+        dom::attr("session-settings-toggle", "data-invalid", "false");
+    } else {
+        let provider_name = {
+            let name = m::summary(&provider);
+            if name.is_empty() {
+                dom::value("provider")
+            } else {
+                name
+            }
+        };
+        let model_label = selected_model("")
+            .as_str()
+            .map(|id| {
+                m::array(&provider["model_options"]["models"])
+                    .into_iter()
+                    .find(|entry| entry["id"] == id)
+                    .and_then(|entry| entry["label"].as_str().map(str::to_owned))
+                    .filter(|label| !label.is_empty())
+                    .unwrap_or_else(|| id.to_owned())
+            })
+            .unwrap_or_default();
+        let summary = format_session_summary(
+            &provider_name,
+            &dom::value("mode"),
+            &permission,
+            &model_label,
+            !routing().is_null(),
+        );
+        dom::text("session-summary-text", &summary);
+        dom::hidden("session-summary", false);
+        dom::attr(
+            "session-settings-toggle",
+            "data-invalid",
+            if settings_invalid { "true" } else { "false" },
+        );
+        let owner = json!([m::read(|s| s.epoch), sid]);
+        if m::data("session-settings-owner") != owner {
+            m::set("session-settings-owner", owner);
+            dom::hidden("session-settings", true);
+            dom::attr("session-settings-toggle", "aria-expanded", "false");
+        }
+    }
     dom::hidden("waiting", !m::active(&session));
     dom::text(
         "waiting-text",
-        if session["status"] == "queued" {
-            "Queued — waiting for an available runner."
-        } else {
-            "Agent is running."
-        },
+        waiting_banner_text(
+            session["status"].as_str().unwrap_or(""),
+            run::permission_waiting(),
+        ),
     );
     knowledge::linked_controls();
     omnigraph::session_controls();
@@ -1052,6 +1110,69 @@ pub fn controls() {
     inbox::render();
     run::render();
     sync_working_indicator();
+}
+
+pub(crate) fn permissions_hint_mode<'a>(
+    read_only: bool,
+    editing: &str,
+    permission: &'a str,
+) -> &'a str {
+    if read_only || editing != "edit" {
+        "plan"
+    } else {
+        permission
+    }
+}
+
+pub(crate) fn waiting_banner_text(status: &str, permission_waiting: bool) -> &'static str {
+    if status == "queued" {
+        "Queued — waiting for an available runner."
+    } else if permission_waiting {
+        "Waiting for your answer to a permission request…"
+    } else {
+        "Agent is running."
+    }
+}
+
+fn permission_display_label(permission: &str) -> &'static str {
+    match permission {
+        "manual" => "Manual",
+        "bypass" => "Bypass Permissions",
+        _ => "Auto",
+    }
+}
+
+fn mode_display_label(mode: &str) -> &'static str {
+    match mode {
+        "edit" => "Edit",
+        _ => "Plan",
+    }
+}
+
+pub(crate) fn format_session_summary(
+    provider: &str,
+    mode: &str,
+    permissions: &str,
+    model: &str,
+    routing_enabled: bool,
+) -> String {
+    let provider = if provider.trim().is_empty() {
+        "Provider"
+    } else {
+        provider.trim()
+    };
+    let model_text = if routing_enabled {
+        "Routing (Plan + Edit)"
+    } else if model.trim().is_empty() {
+        "Provider default"
+    } else {
+        model.trim()
+    };
+    format!(
+        "{provider} · {} · {} · {model_text}",
+        mode_display_label(mode),
+        permission_display_label(permissions),
+    )
 }
 
 pub(crate) struct WorkingSignals<'a> {
@@ -1132,6 +1253,13 @@ pub(crate) fn working_message(signals: &WorkingSignals<'_>) -> Option<&'static s
     if signals.booting {
         return Some("Loading workspace…");
     }
+    if signals
+        .sessions
+        .iter()
+        .any(|s| s["waiting_permissions"].as_u64().unwrap_or(0) > 0)
+    {
+        return Some("Another session is waiting for approval…");
+    }
     if signals.sessions.iter().any(m::active) {
         return Some("Another session is running…");
     }
@@ -1202,6 +1330,10 @@ pub fn sync_working_indicator() {
     dom::attr("session-form", "data-working", active);
 }
 pub async fn open_view(view: &str, record: bool) {
+    open_view_inner(view, record, record).await;
+}
+
+async fn open_view_inner(view: &str, record: bool, focus_heading: bool) {
     let previous_view = m::read(|state| state.view.clone());
     if ["systems", "system-changes"].contains(&previous_view.as_str())
         && !["systems", "system-changes"].contains(&view)
@@ -1312,7 +1444,11 @@ pub async fn open_view(view: &str, record: bool) {
     dom::text("page-title", title);
     dom::text("page-subtitle", subtitle);
     dom::class("sidebar", "open", false);
-    dom::focus("view-heading");
+    dom::class("scrim", "open", false);
+    dom::attr("menu-toggle", "aria-expanded", "false");
+    if focus_heading {
+        dom::focus("view-heading");
+    }
     match view {
         "changes" | "checks" | "usage" => results().await,
         "context" => knowledge::load_context().await,
@@ -1340,7 +1476,27 @@ fn history_projection(sessions: &[V], sid: &str) -> V {
             .iter()
             .map(|session| {
                 let id = m::text(session, "id");
-                json!({"id":id,"label":format!("{} · {}",m::summary(session),m::label(session["status"].as_str().unwrap_or(""))),"selected":id==sid})
+                let title = m::summary(session);
+                let status = session["status"].as_str().unwrap_or("").to_owned();
+                let waiting_permissions = session["waiting_permissions"].as_u64().unwrap_or(0);
+                let status_text = if waiting_permissions > 0 {
+                    if waiting_permissions == 1 {
+                        "Waiting for approval".to_owned()
+                    } else {
+                        format!("{waiting_permissions} approvals waiting")
+                    }
+                } else {
+                    m::label(&status)
+                };
+                json!({
+                    "id": id,
+                    "title": title,
+                    "status": status,
+                    "status_text": status_text,
+                    "waiting_permissions": waiting_permissions,
+                    "label": format!("{title} · {status_text}"),
+                    "selected": id == sid,
+                })
             })
             .collect(),
     )
@@ -1356,11 +1512,37 @@ pub fn history() {
     dom::clear("history");
     for v in projection.as_array().into_iter().flatten() {
         let id = m::text(v, "id");
-        let b = dom::button(&m::text(v, "label"), "session-open", json!(id));
+        let title = m::text(v, "title");
+        let status = m::text(v, "status");
+        let status_text = m::text(v, "status_text");
+        let waiting = v["waiting_permissions"].as_u64().unwrap_or(0);
+        let b = dom::button("", "session-open", json!(id));
         b.set_class_name("history-item");
+        if waiting > 0 {
+            let _ = b.set_attribute("data-waiting-approval", "true");
+        }
         if m::yes(&v["selected"]) {
             let _ = b.set_attribute("aria-current", "true");
         }
+        dom::add(&b, &dom::el("span", "history-title", &title));
+        let meta = dom::el("span", "history-meta", "");
+        let dot_class = if waiting > 0 {
+            "status-dot awaiting_approval"
+        } else {
+            match status.as_str() {
+                "running" => "status-dot running",
+                "queued" => "status-dot queued",
+                "failed" => "status-dot failed",
+                "awaiting_approval" => "status-dot awaiting_approval",
+                "rejected" => "status-dot rejected",
+                _ => "status-dot",
+            }
+        };
+        let dot = dom::el("span", dot_class, "");
+        let _ = dot.set_attribute("aria-hidden", "true");
+        dom::add(&meta, &dot);
+        dom::add(&meta, &dom::el("span", "", &status_text));
+        dom::add(&b, &meta);
         dom::append("history", &b);
     }
     m::set("history-projection", projection);
@@ -1582,6 +1764,8 @@ pub fn new_session(project: Option<&str>) {
         s.seen.clear();
         s.cursor = 0;
     });
+    reset_session_settings_state();
+    m::take("session-settings-owner");
     m::take("merge-draft");
     crate::graph_map::apply_focus(&V::Null);
     crate::graph::run_state(false);
@@ -1620,14 +1804,20 @@ pub async fn select(id: &str) {
         s.seen.clear();
         s.cursor = 0;
     });
+    reset_session_settings_state();
+    m::take("session-settings-owner");
+    dom::hidden("session-settings", true);
+    dom::attr("session-settings-toggle", "aria-expanded", "false");
     clear_files();
     dom::clear("events");
     dom::set_value("prompt", "");
     inbox::restore(id);
     run::reset();
-    spawn_local(async {
-        open_view("sessions", true).await;
-    });
+    if !m::yes(&m::data("bootstrapping")) {
+        spawn_local(async {
+            open_view("sessions", true).await;
+        });
+    }
     let epoch = m::read(|s| s.epoch);
     poll(epoch).await;
     if !m::read(|s| m::selection_matches(&s.sid, s.epoch, id, epoch)) {
@@ -1733,8 +1923,15 @@ pub async fn poll(epoch: u64) {
                 );
                 return;
             }
-            m::upsert(data["session"].clone());
-            apply_settings(&data["session"]);
+            let waiting_list = data["waiting_permissions"].as_array().cloned();
+            let mut session = data["session"].clone();
+            if let Some(waiting) = &waiting_list {
+                if session.is_object() {
+                    session["waiting_permissions"] = json!(waiting.len());
+                }
+            }
+            m::upsert(session.clone());
+            apply_settings(&session);
             let events = m::array(&data["events"]);
             let length = events.len();
             let mut fresh_events = Vec::new();
@@ -1758,6 +1955,9 @@ pub async fn poll(epoch: u64) {
                     fresh_events.push(event.clone());
                     run::observe(event);
                 }
+            }
+            if let Some(waiting) = &waiting_list {
+                run::reconcile_waiting_permissions(waiting);
             }
             let current_focus = m::data("session-graph-focus");
             let focus_update =
@@ -1854,25 +2054,181 @@ pub(crate) fn permissions_hint(provider: &str, mode: &str, permission: &str) -> 
         _ => "The agent works on its own and the host declines what needs approval; nothing waits for you.",
     }
 }
-pub fn apply_settings(v: &V) {
-    for (id, key) in [
-        ("provider", "provider"),
-        ("workflow", "workflow"),
-        ("mode", "mode"),
-        ("workspace", "workspace"),
-        ("agent-count", "agent_count"),
-    ] {
-        if !v[key].is_null() {
-            dom::set_value(id, &m::string(&v[key]));
-        }
+pub(crate) fn mark_dirty(group: &str) {
+    if m::read(|s| s.restoring || s.sid.is_empty()) {
+        return;
     }
-    dom::set_checked("agents-enabled", m::yes(&v["agents_enabled"]));
-    dom::set_value("permissions", v["permissions"].as_str().unwrap_or("auto"));
-    models("", Some(m::text(v, "model")));
-    dom::set_value("thinking-effort", &m::text(v, "thinking_effort"));
-    restore_model_routing(&v["model_routing"]);
-    dom::set_value("sdd-feature", &m::text(&v["sdd"], "feature"));
-    dom::set_value("sdd-phase", v["sdd"]["phase"].as_str().unwrap_or("specify"));
+    let mut dirty = m::data("session-dirty-fields")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    dirty.insert(group.to_owned(), json!(true));
+    m::set("session-dirty-fields", V::Object(dirty));
+}
+
+fn mark_dirty_for_id(id: &str) {
+    match id {
+        "permissions" => mark_dirty("permissions"),
+        "mode" => mark_dirty("mode"),
+        "agents-enabled" | "agent-count" => mark_dirty("agents"),
+        "model-choice" | "model" | "thinking-effort" => mark_dirty("model"),
+        "model-routing-enabled"
+        | "routing-plan-model-choice"
+        | "routing-plan-model"
+        | "routing-plan-thinking-effort"
+        | "routing-edit-model-choice"
+        | "routing-edit-model"
+        | "routing-edit-thinking-effort" => mark_dirty("model_routing"),
+        "sdd-phase" | "sdd-feature" => mark_dirty("sdd"),
+        "clash-enabled"
+        | "clash-challenger"
+        | "clash-rounds"
+        | "clash-model-choice"
+        | "clash-model"
+        | "clash-thinking-effort" => mark_dirty("clash"),
+        _ => {}
+    }
+}
+
+fn reset_session_settings_state() {
+    m::take("session-dirty-fields");
+    m::take("applied-session-snapshot");
+}
+
+fn session_settings_snapshot_fields(v: &V) -> V {
+    let clash = if v["clash"].is_object() {
+        json!({
+            "enabled": true,
+            "challenger": m::text(&v["clash"], "challenger"),
+            "rounds": m::string(&v["clash"]["rounds"]),
+            "model": m::text(&v["clash"], "challenger_model"),
+            "effort": m::text(&v["clash"], "challenger_thinking_effort"),
+        })
+    } else {
+        json!({"enabled": false})
+    };
+    json!({
+        "base": {
+            "provider": v["provider"],
+            "workflow": v["workflow"],
+            "workspace": v["workspace"],
+        },
+        "mode": v["mode"],
+        "permissions": v["permissions"].as_str().unwrap_or("auto"),
+        "agents": {
+            "enabled": m::yes(&v["agents_enabled"]),
+            "count": v["agent_count"],
+        },
+        "model": {
+            "model": m::text(v, "model"),
+            "effort": m::text(v, "thinking_effort"),
+        },
+        "model_routing": v["model_routing"],
+        "sdd": {
+            "feature": m::text(&v["sdd"], "feature"),
+            "phase": v["sdd"]["phase"].as_str().unwrap_or("specify"),
+        },
+        "clash": clash,
+    })
+}
+
+fn should_apply_setting_group(
+    snapshot: &V,
+    dirty: &V,
+    epoch: u64,
+    sid: &str,
+    group: &str,
+    incoming: &V,
+) -> bool {
+    let same_selection =
+        snapshot["epoch"].as_u64() == Some(epoch) && snapshot["sid"].as_str() == Some(sid);
+    if !same_selection {
+        return true;
+    }
+    if dirty[group] == true {
+        return false;
+    }
+    snapshot["fields"][group] != *incoming
+}
+
+pub fn apply_settings(v: &V) {
+    let epoch = m::read(|s| s.epoch);
+    let sid = m::text(v, "id");
+    let snapshot = m::data("applied-session-snapshot");
+    let dirty = m::data("session-dirty-fields");
+    let incoming = session_settings_snapshot_fields(v);
+    let mut next_fields = if snapshot["epoch"].as_u64() == Some(epoch)
+        && snapshot["sid"].as_str() == Some(sid.as_str())
+        && snapshot["fields"].is_object()
+    {
+        snapshot["fields"].clone()
+    } else {
+        json!({})
+    };
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "base", &incoming["base"]) {
+        for (id, key) in [
+            ("provider", "provider"),
+            ("workflow", "workflow"),
+            ("workspace", "workspace"),
+        ] {
+            if !v[key].is_null() {
+                dom::set_value(id, &m::string(&v[key]));
+            }
+        }
+        next_fields["base"] = incoming["base"].clone();
+    }
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "mode", &incoming["mode"]) {
+        if !v["mode"].is_null() {
+            dom::set_value("mode", &m::string(&v["mode"]));
+        }
+        next_fields["mode"] = incoming["mode"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "permissions",
+        &incoming["permissions"],
+    ) {
+        dom::set_value("permissions", v["permissions"].as_str().unwrap_or("auto"));
+        next_fields["permissions"] = incoming["permissions"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "agents",
+        &incoming["agents"],
+    ) {
+        if !v["agent_count"].is_null() {
+            dom::set_value("agent-count", &m::string(&v["agent_count"]));
+        }
+        dom::set_checked("agents-enabled", m::yes(&v["agents_enabled"]));
+        next_fields["agents"] = incoming["agents"].clone();
+    }
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "model", &incoming["model"]) {
+        models("", Some(m::text(v, "model")));
+        dom::set_value("thinking-effort", &m::text(v, "thinking_effort"));
+        next_fields["model"] = incoming["model"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "model_routing",
+        &incoming["model_routing"],
+    ) {
+        restore_model_routing(&v["model_routing"]);
+        next_fields["model_routing"] = incoming["model_routing"].clone();
+    }
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "sdd", &incoming["sdd"]) {
+        dom::set_value("sdd-feature", &m::text(&v["sdd"], "feature"));
+        dom::set_value("sdd-phase", v["sdd"]["phase"].as_str().unwrap_or("specify"));
+        next_fields["sdd"] = incoming["sdd"].clone();
+    }
     let revision = format!("{}:{}", m::text(v, "id"), m::string(&v["budget_revision"]));
     if m::data("budget-revision") != revision {
         restore_budgets("session-budgets", &v["budgets"]);
@@ -1896,16 +2252,23 @@ pub fn apply_settings(v: &V) {
         }
         m::set("budget-revision", json!(revision));
     }
-    dom::set_checked("clash-enabled", v["clash"].is_object());
-    if v["clash"].is_object() {
-        dom::set_value("clash-challenger", &m::text(&v["clash"], "challenger"));
-        dom::set_value("clash-rounds", &m::string(&v["clash"]["rounds"]));
-        models("clash-", Some(m::text(&v["clash"], "challenger_model")));
-        dom::set_value(
-            "clash-thinking-effort",
-            &m::text(&v["clash"], "challenger_thinking_effort"),
-        );
+    if should_apply_setting_group(&snapshot, &dirty, epoch, &sid, "clash", &incoming["clash"]) {
+        dom::set_checked("clash-enabled", v["clash"].is_object());
+        if v["clash"].is_object() {
+            dom::set_value("clash-challenger", &m::text(&v["clash"], "challenger"));
+            dom::set_value("clash-rounds", &m::string(&v["clash"]["rounds"]));
+            models("clash-", Some(m::text(&v["clash"], "challenger_model")));
+            dom::set_value(
+                "clash-thinking-effort",
+                &m::text(&v["clash"], "challenger_thinking_effort"),
+            );
+        }
+        next_fields["clash"] = incoming["clash"].clone();
     }
+    m::set(
+        "applied-session-snapshot",
+        json!({"epoch": epoch, "sid": sid, "fields": next_fields}),
+    );
     dom::text("workspace-session-branch", &m::text(v, "branch"));
     dom::text("workspace-session-path", &m::text(v, "project_path"));
     knowledge::render_linked(v);
@@ -2268,6 +2631,7 @@ pub async fn send() {
                 }
                 dom::set_value("prompt", "");
                 clear_files();
+                reset_session_settings_state();
                 m::write(|s| s.pending = false);
                 if follow {
                     let e = m::read(|s| s.epoch);
@@ -3106,6 +3470,16 @@ fn resize_column_height() -> f64 {
         .or_else(|| dom::get("sessions-view").map(|e| e.client_height()))
         .unwrap_or(500) as f64
 }
+fn output_resize_percent(height: f64, max_height: f64) -> u64 {
+    let min_h = 80.;
+    let max_h = max_height.max(min_h);
+    if max_h <= min_h {
+        return 100;
+    }
+    let clamped = height.clamp(min_h, max_h);
+    let ratio = (max_h - clamped) / (max_h - min_h);
+    (ratio * 100.).round().clamp(0., 100.) as u64
+}
 fn resize(height: f64) {
     let available = resize_column_height()
         - dom::get("composer-area")
@@ -3113,7 +3487,8 @@ fn resize(height: f64) {
             .unwrap_or(0) as f64
         - dom::get("run-view").map(|e| e.client_height()).unwrap_or(0) as f64
         - 100.;
-    let h = height.max(80.).min(available.max(80.));
+    let max_h = available.max(80.);
+    let h = height.max(80.).min(max_h);
     if let Some(e) =
         dom::get("sessions-view").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
     {
@@ -3122,7 +3497,12 @@ fn resize(height: f64) {
             .set_property("--configuration-height", &format!("{h}px"));
         let _ = e.class_list().add_1("output-resized");
     }
-    m::set("output-height", json!(height));
+    m::set("output-height", json!(h));
+    dom::attr(
+        "output-resizer",
+        "aria-valuenow",
+        &output_resize_percent(h, max_h).to_string(),
+    );
 }
 pub fn resize_key(event: &web_sys::KeyboardEvent) {
     if event
@@ -3157,6 +3537,8 @@ pub fn resize_event(kind: &str, event: &web_sys::Event) {
     }
     if kind == "dblclick" {
         dom::class("sessions-view", "output-resized", false);
+        m::take("output-height");
+        dom::attr("output-resizer", "aria-valuenow", "50");
         return;
     }
     let Some(p) = event.dyn_ref::<web_sys::PointerEvent>() else {
@@ -3267,6 +3649,7 @@ pub async fn event(
                     models(prefix, Some(String::new()));
                 }
             }
+            mark_dirty_for_id(id);
             controls();
             save_preferences();
             return true;
@@ -3292,14 +3675,18 @@ pub async fn event(
         if [
             "workflow",
             "mode",
+            "permissions",
             "sdd-phase",
             "agents-enabled",
             "agent-count",
             "workspace",
             "clash-enabled",
             "clash-rounds",
+            "clash-thinking-effort",
             "thinking-effort",
             "model-routing-enabled",
+            "routing-plan-thinking-effort",
+            "routing-edit-thinking-effort",
             "brain-link-kind",
             "brain-link-review",
             "fleet-dry-run",
@@ -3312,6 +3699,7 @@ pub async fn event(
         ]
         .contains(&id)
         {
+            mark_dirty_for_id(id);
             controls();
             save_preferences();
             return true;
@@ -3322,6 +3710,10 @@ pub async fn event(
             || id == "model"
             || id == "agent-count"
             || id == "sdd-feature"
+            || id == "clash-model"
+            || id == "clash-rounds"
+            || id == "routing-plan-model"
+            || id == "routing-edit-model"
             || id == "omnigraph-pull-branches"
             || id == "omnigraph-session-query"
             || id == "omnigraph-shared-space")
@@ -3329,6 +3721,7 @@ pub async fn event(
         if id.starts_with("omnigraph-") {
             save_preferences();
         }
+        mark_dirty_for_id(id);
         controls();
         return true;
     }
@@ -3444,7 +3837,7 @@ pub async fn event(
         "reconnect" => bootstrap().await,
         "new-session" => {
             new_session(None);
-            open_view("sessions", true).await;
+            open_view_inner("sessions", true, false).await;
         }
         "refresh-sessions" => {
             refresh().await;
@@ -3504,7 +3897,11 @@ pub async fn event(
                 .map(|e| e.has_attribute("hidden"))
                 .unwrap_or(true);
             dom::hidden("session-settings", !open);
-            dom::attr(id, "aria-expanded", if open { "true" } else { "false" });
+            dom::attr(
+                "session-settings-toggle",
+                "aria-expanded",
+                if open { "true" } else { "false" },
+            );
         }
         "menu-toggle" => {
             let open = dom::get("sidebar")
@@ -4034,12 +4431,38 @@ mod history_projection_tests {
         let sessions = vec![
             json!({"id":"a","name":"Named chat","title":"Unused title","status":"running"}),
             json!({"id":"b","title":"Second chat","status":"awaiting_approval"}),
+            json!({"id":"c","title":"Background ask","status":"running","waiting_permissions":2}),
         ];
         assert_eq!(
             history_projection(&sessions, "b"),
             json!([
-                {"id":"a","label":"Named chat · running","selected":false},
-                {"id":"b","label":"Second chat · awaiting approval","selected":true}
+                {
+                    "id":"a",
+                    "title":"Named chat",
+                    "status":"running",
+                    "status_text":"running",
+                    "waiting_permissions":0,
+                    "label":"Named chat · running",
+                    "selected":false
+                },
+                {
+                    "id":"b",
+                    "title":"Second chat",
+                    "status":"awaiting_approval",
+                    "status_text":"awaiting approval",
+                    "waiting_permissions":0,
+                    "label":"Second chat · awaiting approval",
+                    "selected":true
+                },
+                {
+                    "id":"c",
+                    "title":"Background ask",
+                    "status":"running",
+                    "status_text":"2 approvals waiting",
+                    "waiting_permissions":2,
+                    "label":"Background ask · 2 approvals waiting",
+                    "selected":false
+                }
             ])
         );
         let original = history_projection(&sessions, "b");
@@ -4059,18 +4482,27 @@ mod history_projection_tests {
         report_changed["fleet_result"] = json!({"report":"new report"});
         assert_eq!(original, history_projection(&[report_changed], "a"));
         for (field, value) in [
-            ("id", "b"),
-            ("title", "Renamed chat"),
-            ("name", "Preferred name"),
-            ("status", "completed"),
+            ("id", json!("b")),
+            ("title", json!("Renamed chat")),
+            ("name", json!("Preferred name")),
+            ("status", json!("completed")),
+            ("waiting_permissions", json!(1)),
         ] {
             let mut changed = session.clone();
-            changed[field] = json!(value);
+            changed[field] = value;
             assert_ne!(original, history_projection(&[changed], "a"), "{field}");
         }
         assert_eq!(
             history_projection(&[json!({"id":"fallback"})], ""),
-            json!([{"id":"fallback","label":"fallback · ","selected":false}])
+            json!([{
+                "id":"fallback",
+                "title":"fallback",
+                "status":"",
+                "status_text":"",
+                "waiting_permissions":0,
+                "label":"fallback · ",
+                "selected":false
+            }])
         );
     }
 }
@@ -4083,6 +4515,108 @@ mod session_contract_tests {
         assert_eq!(restored_value("permissions", "bypass"), "auto");
         assert_eq!(restored_value("permissions", "manual"), "manual");
         assert_eq!(restored_value("mode", "bypass"), "bypass");
+    }
+    #[test]
+    fn read_only_planning_hint_never_shows_bypass_warning_style() {
+        assert_eq!(permissions_hint_mode(true, "plan", "bypass"), "plan");
+        assert_eq!(permissions_hint_mode(false, "plan", "bypass"), "plan");
+        assert_eq!(permissions_hint_mode(false, "edit", "bypass"), "bypass");
+        assert_eq!(permissions_hint_mode(false, "edit", "manual"), "manual");
+    }
+    #[test]
+    fn waiting_banner_matches_permission_wait_state() {
+        assert_eq!(
+            waiting_banner_text("queued", true),
+            "Queued — waiting for an available runner."
+        );
+        assert_eq!(
+            waiting_banner_text("running", true),
+            "Waiting for your answer to a permission request…"
+        );
+        assert_eq!(waiting_banner_text("running", false), "Agent is running.");
+    }
+    #[test]
+    fn session_summary_formats_provider_mode_permissions_and_model() {
+        assert_eq!(
+            format_session_summary("Claude Code", "edit", "manual", "claude-sonnet-4-6", false),
+            "Claude Code · Edit · Manual · claude-sonnet-4-6"
+        );
+        assert_eq!(
+            format_session_summary("Codex", "plan", "bypass", "", false),
+            "Codex · Plan · Bypass Permissions · Provider default"
+        );
+        assert_eq!(
+            format_session_summary("Cursor", "edit", "auto", "gpt-5", true),
+            "Cursor · Edit · Auto · Routing (Plan + Edit)"
+        );
+    }
+    #[test]
+    fn resize_percent_maps_configuration_height_inversely_to_output_height() {
+        assert_eq!(output_resize_percent(80., 480.), 100);
+        assert_eq!(output_resize_percent(480., 480.), 0);
+        assert_eq!(output_resize_percent(280., 480.), 50);
+        assert_eq!(output_resize_percent(40., 480.), 100);
+        assert_eq!(output_resize_percent(600., 480.), 0);
+        assert_eq!(output_resize_percent(80., 80.), 100);
+    }
+    #[test]
+    fn poll_apply_settings_skips_dirty_and_unchanged_groups() {
+        let session = json!({"id":"s1","provider":"claude","workflow":"native","workspace":"project","mode":"edit","permissions":"auto","agents_enabled":false,"agent_count":3,"model":"sonnet","thinking_effort":"medium","sdd":{"feature":"","phase":"specify"},"clash":null});
+        let fields = session_settings_snapshot_fields(&session);
+        let empty = V::Null;
+        assert!(should_apply_setting_group(
+            &empty,
+            &empty,
+            1,
+            "s1",
+            "permissions",
+            &fields["permissions"]
+        ));
+        let snapshot = json!({"epoch": 1, "sid": "s1", "fields": fields});
+        assert!(!should_apply_setting_group(
+            &snapshot,
+            &empty,
+            1,
+            "s1",
+            "permissions",
+            &fields["permissions"]
+        ));
+        // Server change applies when clean, and is suppressed when locally dirty.
+        let manual = json!("manual");
+        assert!(should_apply_setting_group(
+            &snapshot,
+            &empty,
+            1,
+            "s1",
+            "permissions",
+            &manual
+        ));
+        let dirty = json!({"permissions": true});
+        assert!(!should_apply_setting_group(
+            &snapshot,
+            &dirty,
+            1,
+            "s1",
+            "permissions",
+            &manual
+        ));
+        // Session/epoch switch resets and applies again.
+        assert!(should_apply_setting_group(
+            &snapshot,
+            &dirty,
+            2,
+            "s1",
+            "permissions",
+            &manual
+        ));
+        assert!(should_apply_setting_group(
+            &snapshot,
+            &dirty,
+            1,
+            "s2",
+            "permissions",
+            &manual
+        ));
     }
     #[test]
     fn the_permissions_hint_says_what_each_mode_does_for_the_host() {

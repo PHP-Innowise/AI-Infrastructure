@@ -1543,14 +1543,51 @@ pub(crate) fn permission_waiting() -> bool {
             .is_some_and(|pending| !pending.is_empty())
 }
 
-/// The heading of a permission request in each state it can reach.
-pub(crate) fn permission_heading(event: &V) -> String {
+fn permission_tool(event: &V) -> String {
     let tool = m::text(event, "tool");
-    let tool = if tool.is_empty() {
+    if tool.is_empty() {
         "Tool".to_owned()
     } else {
         tool
-    };
+    }
+}
+
+pub(crate) fn permission_button_aria_label(decision: &str, label: &str, tool: &str) -> String {
+    match decision {
+        "allow" => format!("Allow {tool}"),
+        "allow_session" => format!("Allow {tool} for this session"),
+        "deny" => format!("Deny {tool}"),
+        _ => format!("{label} {tool}"),
+    }
+}
+
+fn permission_choices(session_option: bool) -> &'static [(&'static str, &'static str)] {
+    if session_option {
+        &[
+            ("allow", "Allow"),
+            ("allow_session", "Allow for this session"),
+            ("deny", "Deny"),
+        ]
+    } else {
+        &[("allow", "Allow"), ("deny", "Deny")]
+    }
+}
+
+fn permission_notification_body(event: &V) -> String {
+    let summary = clean(&m::text(event, "summary"));
+    if !summary.is_empty() {
+        return summary;
+    }
+    let detail = clean(&m::text(event, "detail"));
+    if !detail.is_empty() {
+        return detail;
+    }
+    "Waiting for your answer in Harness.".to_owned()
+}
+
+/// The heading of a permission request in each state it can reach.
+pub(crate) fn permission_heading(event: &V) -> String {
+    let tool = permission_tool(event);
     let host = match event["provider"].as_str() {
         Some("claude") => "Claude Code",
         Some("codex") => "Codex",
@@ -1569,8 +1606,87 @@ pub(crate) fn permission_heading(event: &V) -> String {
     }
 }
 
+fn permission_child(
+    block: &web_sys::Element,
+    class: &str,
+    role: Option<&str>,
+) -> Option<web_sys::Element> {
+    dom::children(block).into_iter().find(|child| {
+        child.class_list().contains(class)
+            && role.is_none_or(|expected| {
+                child.get_attribute("data-role").as_deref() == Some(expected)
+            })
+    })
+}
+
+fn sync_permission_text_slot(
+    block: &web_sys::Element,
+    tag: &str,
+    class: &str,
+    role: Option<&str>,
+    text: &str,
+    before: Option<&web_sys::Element>,
+) -> Option<web_sys::Element> {
+    let existing = permission_child(block, class, role);
+    if text.is_empty() {
+        if let Some(el) = existing {
+            el.remove();
+        }
+        return None;
+    }
+    match existing {
+        Some(el) => {
+            if el.text_content().as_deref() != Some(text) {
+                el.set_text_content(Some(text));
+            }
+            Some(el)
+        }
+        None => {
+            let el = dom::el(tag, class, text);
+            if let Some(r) = role {
+                let _ = el.set_attribute("data-role", r);
+            }
+            let _ = block.insert_before(&el, before.map(|b| b.as_ref()));
+            Some(el)
+        }
+    }
+}
+
+fn notify_permission(event: &V) {
+    if m::text(event, "state") != "pending" || !m::active(&m::read(|s| s.selected.clone())) {
+        return;
+    }
+    if !dom::document().hidden()
+        || web_sys::Notification::permission() != web_sys::NotificationPermission::Granted
+    {
+        return;
+    }
+    let sid = m::read(|s| s.sid.clone());
+    let request = m::text(event, "request_id");
+    if sid.is_empty() || request.is_empty() {
+        return;
+    }
+    let key = format!("{sid}:{request}");
+    let mut notified = m::data("permission-notified")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if notified.contains_key(&key) {
+        return;
+    }
+    if notified.len() >= 200 {
+        notified.clear();
+    }
+    notified.insert(key, json!(true));
+    m::set("permission-notified", V::Object(notified));
+    let title = permission_heading(event);
+    let body = permission_notification_body(event);
+    let tag = format!("harness-permission-{sid}-{request}");
+    fire_browser_notification(&title, &body, &tag, false, Some(request));
+}
+
 /// A request the agent's host asked permission for, and what became of it. Every
-/// event of one request redraws the same block.
+/// event of one request patches the existing block in place without dropping focus.
 fn permission(event: &V) {
     let request = m::text(event, "request_id");
     if request.is_empty() {
@@ -1592,11 +1708,9 @@ fn permission(event: &V) {
         .find(|block| {
             block.get_attribute("data-permission-id").as_deref() == Some(request.as_str())
         });
+    let is_new = found.is_none();
     let block = match found {
-        Some(block) => {
-            block.set_inner_html("");
-            block
-        }
+        Some(block) => block,
         None => {
             let block = dom::el("div", "conversation-permission", "");
             let _ = block.set_attribute("data-permission-id", &request);
@@ -1605,54 +1719,202 @@ fn permission(event: &V) {
             block
         }
     };
-    let _ = block.set_attribute("data-event-id", &m::string(&event["id"]));
-    let _ = block.set_attribute("data-state", &state);
+    let event_id = m::string(&event["id"]);
+    if !event_id.is_empty() && block.get_attribute("data-event-id").as_deref() != Some(&event_id) {
+        let _ = block.set_attribute("data-event-id", &event_id);
+    }
+    if let Some(provider) = event["provider"].as_str().filter(|p| !p.is_empty()) {
+        if block.get_attribute("data-provider").as_deref() != Some(provider) {
+            let _ = block.set_attribute("data-provider", provider);
+        }
+    }
+    let tool = permission_tool(event);
+    if block.get_attribute("data-tool").as_deref() != Some(tool.as_str()) {
+        let _ = block.set_attribute("data-tool", &tool);
+    }
+    if block.get_attribute("data-state").as_deref() != Some(state.as_str()) {
+        let _ = block.set_attribute("data-state", &state);
+    }
     let heading = permission_heading(event);
-    let _ = block.set_attribute("aria-label", &heading);
-    dom::add(&block, &dom::el("p", "permission-heading", &heading));
+    if block.get_attribute("aria-label").as_deref() != Some(heading.as_str()) {
+        let _ = block.set_attribute("aria-label", &heading);
+    }
+    match permission_child(&block, "permission-heading", None) {
+        Some(existing) if existing.text_content().as_deref() == Some(heading.as_str()) => {}
+        Some(existing) => {
+            // #events uses aria-relevant="additions", so replacing only the changed heading
+            // announces state transitions without rebuilding buttons or stealing focus.
+            let fresh = dom::el("p", "permission-heading", &heading);
+            let _ = block.replace_child(&fresh, &existing);
+        }
+        None => {
+            let first = dom::children(&block).into_iter().next();
+            let fresh = dom::el("p", "permission-heading", &heading);
+            let _ = block.insert_before(&fresh, first.as_ref().map(|e| e.as_ref()));
+        }
+    }
+    let existing_actions = permission_child(&block, "permission-actions", None);
+    let existing_error = permission_child(&block, "permission-error", None);
+    let existing_ended = permission_child(&block, "permission-detail", Some("ended"));
     let summary = clean(&m::text(event, "summary"));
-    if !summary.is_empty() {
-        dom::add(&block, &dom::el("code", "permission-summary", &summary));
-    }
     let detail = clean(&m::text(event, "detail"));
-    if !detail.is_empty() {
-        dom::add(&block, &dom::el("p", "permission-detail", &detail));
-    }
+    let existing_detail = permission_child(&block, "permission-detail", Some("detail"));
+    let before_summary = existing_detail
+        .as_ref()
+        .or(existing_ended.as_ref())
+        .or(existing_actions.as_ref())
+        .or(existing_error.as_ref());
+    sync_permission_text_slot(
+        &block,
+        "code",
+        "permission-summary",
+        None,
+        &summary,
+        before_summary,
+    );
+    let before_detail = existing_ended
+        .as_ref()
+        .or(existing_actions.as_ref())
+        .or(existing_error.as_ref());
+    sync_permission_text_slot(
+        &block,
+        "p",
+        "permission-detail",
+        Some("detail"),
+        &detail,
+        before_detail,
+    );
     if state != "pending" {
+        if let Some(el) = existing_ended {
+            el.remove();
+        }
+        if let Some(el) = existing_actions {
+            el.remove();
+        }
+        if let Some(el) = existing_error {
+            el.remove();
+        }
         return;
     }
     if !m::active(&m::read(|s| s.selected.clone())) {
-        dom::add(
+        sync_permission_text_slot(
             &block,
-            &dom::el("p", "permission-detail", "The run that asked has ended."),
+            "p",
+            "permission-detail",
+            Some("ended"),
+            "The run that asked has ended.",
+            existing_actions.as_ref().or(existing_error.as_ref()),
         );
+        if let Some(el) = existing_actions {
+            el.remove();
+        }
+        if let Some(el) = existing_error {
+            el.remove();
+        }
         return;
     }
-    let actions = dom::el("div", "permission-actions", "");
-    let choices: &[(&str, &str)] = if m::yes(&event["session_option"]) {
-        &[
-            ("allow", "Allow"),
-            ("allow_session", "Allow for this session"),
-            ("deny", "Deny"),
-        ]
-    } else {
-        &[("allow", "Allow"), ("deny", "Deny")]
-    };
-    for (decision, label) in choices {
-        let button = dom::button(
-            label,
-            "permission-decide",
-            json!({"request_id": request, "decision": decision}),
-        );
-        if *decision == "allow" {
-            let _ = button.set_attribute("class", "button primary compact");
-        } else {
-            let _ = button.set_attribute("class", "button compact");
-        }
-        dom::add(&actions, &button);
+    if let Some(el) = existing_ended {
+        el.remove();
     }
-    dom::add(&block, &actions);
-    dom::add(&block, &dom::el("p", "permission-error error-text", ""));
+    let session_option = m::yes(&event["session_option"]);
+    let actions_key = format!("{session_option}:{tool}");
+    let keep_actions = existing_actions
+        .as_ref()
+        .is_some_and(|el| el.get_attribute("data-actions-key").as_deref() == Some(&actions_key));
+    if !keep_actions {
+        let actions = dom::el("div", "permission-actions", "");
+        let _ = actions.set_attribute("data-actions-key", &actions_key);
+        for (decision, label) in permission_choices(session_option) {
+            let button = dom::button(
+                label,
+                "permission-decide",
+                json!({"request_id": request, "decision": decision}),
+            );
+            let _ = button.set_attribute(
+                "class",
+                if *decision == "allow" {
+                    "button primary compact"
+                } else {
+                    "button compact"
+                },
+            );
+            let _ = button.set_attribute("data-decision", decision);
+            let _ = button.set_attribute("data-label", label);
+            let _ = button.set_attribute(
+                "aria-label",
+                &permission_button_aria_label(decision, label, &tool),
+            );
+            dom::add(&actions, &button);
+        }
+        if let Some(old_actions) = existing_actions {
+            let _ = block.replace_child(&actions, &old_actions);
+        } else {
+            let _ = block.insert_before(&actions, existing_error.as_ref().map(|e| e.as_ref()));
+        }
+    }
+    match existing_error {
+        Some(err) => {
+            if err.get_attribute("role").as_deref() != Some("alert") {
+                let _ = err.set_attribute("role", "alert");
+            }
+        }
+        None => {
+            let err = dom::el("p", "permission-error error-text", "");
+            let _ = err.set_attribute("role", "alert");
+            dom::add(&block, &err);
+        }
+    }
+    if is_new {
+        notify_permission(event);
+    }
+}
+
+/// Reconciles live waiting permission requests returned by `sessions.get`.
+pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
+    let mut live_ids = std::collections::BTreeSet::new();
+    for ask in waiting {
+        let id = m::text(ask, "request_id");
+        if id.is_empty() {
+            continue;
+        }
+        live_ids.insert(id.clone());
+        let mut pending_ask = ask.clone();
+        if pending_ask["state"].is_null() {
+            pending_ask["state"] = json!("pending");
+        }
+        permission(&pending_ask);
+    }
+    let stale_ids: Vec<String> = m::data("permission-pending")
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, _)| id.clone())
+        .filter(|id| !live_ids.contains(id))
+        .collect();
+    if stale_ids.is_empty() {
+        return;
+    }
+    for id in stale_ids {
+        let card = dom::all("#events [data-permission-id]")
+            .into_iter()
+            .find(|block| {
+                block.get_attribute("data-permission-id").as_deref() == Some(id.as_str())
+            });
+        let provider = card
+            .as_ref()
+            .and_then(|block| block.get_attribute("data-provider"))
+            .unwrap_or_default();
+        let tool = card
+            .as_ref()
+            .and_then(|block| block.get_attribute("data-tool"))
+            .unwrap_or_default();
+        permission(&json!({
+            "request_id": id,
+            "state": "expired",
+            "provider": provider,
+            "tool": tool,
+        }));
+    }
 }
 
 /// Sends the person's answer to a waiting request.
@@ -1660,7 +1922,7 @@ async fn decide_permission(payload: &V) {
     let sid = m::read(|s| s.sid.clone());
     let request = m::text(payload, "request_id");
     let decision = m::text(payload, "decision");
-    if sid.is_empty() || request.is_empty() {
+    if sid.is_empty() || request.is_empty() || m::read(|s| s.auth_failed) {
         return;
     }
     let block = dom::all("#events [data-permission-id]")
@@ -1674,8 +1936,37 @@ async fn decide_permission(payload: &V) {
         .filter(|child| child.class_list().contains("permission-actions"))
         .flat_map(|actions| dom::children(&actions))
         .collect();
+    if buttons.iter().any(|button| {
+        button.has_attribute("disabled")
+            || button.get_attribute("aria-busy").as_deref() == Some("true")
+    }) {
+        return;
+    }
+    let saved_labels: Vec<(web_sys::Element, String)> = buttons
+        .iter()
+        .map(|button| {
+            let original = button
+                .get_attribute("data-label")
+                .unwrap_or_else(|| button.text_content().unwrap_or_default());
+            (button.clone(), original)
+        })
+        .collect();
+    let error_el = block
+        .iter()
+        .flat_map(dom::children)
+        .find(|child| child.class_list().contains("permission-error"));
+    if let Some(note) = &error_el {
+        if note.get_attribute("role").as_deref() != Some("alert") {
+            let _ = note.set_attribute("role", "alert");
+        }
+        note.set_text_content(Some(""));
+    }
     for button in &buttons {
         let _ = button.set_attribute("disabled", "");
+        if button.get_attribute("data-decision").as_deref() == Some(decision.as_str()) {
+            let _ = button.set_attribute("aria-busy", "true");
+            button.set_text_content(Some("Sending…"));
+        }
     }
     let answered = crate::api::post(
         &format!(
@@ -1687,14 +1978,12 @@ async fn decide_permission(payload: &V) {
     )
     .await;
     if let Err(error) = answered {
-        for button in &buttons {
+        for (button, label) in &saved_labels {
             let _ = button.remove_attribute("disabled");
+            let _ = button.remove_attribute("aria-busy");
+            button.set_text_content(Some(label));
         }
-        if let Some(note) = block
-            .iter()
-            .flat_map(dom::children)
-            .find(|child| child.class_list().contains("permission-error"))
-        {
+        if let Some(note) = &error_el {
             note.set_text_content(Some(&error.message));
         }
     }
@@ -3170,6 +3459,40 @@ pub fn visibility() {
     dom::text("run-announcer", &text);
 }
 
+fn fire_browser_notification(
+    title: &str,
+    body: &str,
+    tag: &str,
+    silent: bool,
+    focus_permission_id: Option<String>,
+) {
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&options, &"body".into(), &body.into());
+    let _ = js_sys::Reflect::set(&options, &"tag".into(), &tag.into());
+    let _ = js_sys::Reflect::set(&options, &"silent".into(), &silent.into());
+    let options: web_sys::NotificationOptions = options.unchecked_into();
+    if let Ok(note) = web_sys::Notification::new_with_options(title, &options) {
+        let n = note.clone();
+        let cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            let _ = dom::window().focus();
+            if let Some(request_id) = &focus_permission_id {
+                if let Some(el) = dom::all("#events [data-permission-id]")
+                    .into_iter()
+                    .find(|el| {
+                        el.get_attribute("data-permission-id").as_deref()
+                            == Some(request_id.as_str())
+                    })
+                {
+                    el.scroll_into_view();
+                }
+            }
+            n.close();
+        });
+        note.set_onclick(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+}
+
 fn notify_finished() {
     if !dom::document().hidden()
         || web_sys::Notification::permission() != web_sys::NotificationPermission::Granted
@@ -3203,24 +3526,7 @@ fn notify_finished() {
         m::text(&run, "outcome"),
         m::string(&run["steps"])
     );
-    let options = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&options, &"body".into(), &body.into());
-    let _ = js_sys::Reflect::set(
-        &options,
-        &"tag".into(),
-        &format!("harness-run-{sid}").into(),
-    );
-    let _ = js_sys::Reflect::set(&options, &"silent".into(), &true.into());
-    let options: web_sys::NotificationOptions = options.unchecked_into();
-    if let Ok(note) = web_sys::Notification::new_with_options(title, &options) {
-        let n = note.clone();
-        let cb = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-            let _ = dom::window().focus();
-            n.close();
-        });
-        note.set_onclick(Some(cb.as_ref().unchecked_ref()));
-        cb.forget();
-    }
+    fire_browser_notification(title, &body, &format!("harness-run-{sid}"), true, None);
 }
 
 #[cfg(test)]
@@ -4374,6 +4680,34 @@ mod permission_tests {
         assert_eq!(
             permission_heading(&unnamed),
             "Claude Code asks permission · Tool"
+        );
+    }
+
+    #[test]
+    fn permission_buttons_and_notifications_include_tool_context() {
+        assert_eq!(
+            permission_button_aria_label("allow", "Allow", "Bash"),
+            "Allow Bash"
+        );
+        assert_eq!(
+            permission_button_aria_label("allow_session", "Allow for this session", "Edit"),
+            "Allow Edit for this session"
+        );
+        assert_eq!(
+            permission_button_aria_label("deny", "Deny", "Shell"),
+            "Deny Shell"
+        );
+        assert_eq!(
+            permission_notification_body(&json!({"summary":"git status","detail":"detail"})),
+            "git status"
+        );
+        assert_eq!(
+            permission_notification_body(&json!({"summary":"","detail":"Not in allowlist"})),
+            "Not in allowlist"
+        );
+        assert_eq!(
+            permission_notification_body(&json!({})),
+            "Waiting for your answer in Harness."
         );
     }
 }

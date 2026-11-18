@@ -160,11 +160,70 @@ fn rank(items: Vec<V>, needle: &str) -> Vec<V> {
     out.sort_by_key(|(score, index, _)| (*score, *index));
     out.into_iter().map(|(_, _, v)| v).collect()
 }
+fn clear_active_descendant() {
+    if let Some(prompt) = dom::get("prompt") {
+        let _ = prompt.remove_attribute("aria-activedescendant");
+    }
+}
+fn active_option_id(count: usize, active: usize) -> Option<String> {
+    if count == 0 {
+        None
+    } else {
+        Some(format!("composer-option-{}", active.min(count - 1)))
+    }
+}
+fn next_option_index(count: usize, current: usize, down: bool) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let current = current.min(count - 1);
+    if down {
+        (current + 1) % count
+    } else {
+        (current + count - 1) % count
+    }
+}
+fn scroll_option_into_view(option: &web_sys::Element) {
+    let Some(panel) = dom::get("skill-hints-panel") else {
+        return;
+    };
+    let Some(el) = option.dyn_ref::<web_sys::HtmlElement>() else {
+        return;
+    };
+    let top = el.offset_top();
+    let bottom = top + el.offset_height();
+    let view_top = panel.scroll_top();
+    let view_bottom = view_top + panel.client_height();
+    if top < view_top {
+        panel.set_scroll_top(top);
+    } else if bottom > view_bottom {
+        panel.set_scroll_top((bottom - panel.client_height()).max(0));
+    }
+}
+fn select_active(previous: usize, next: usize, count: usize) {
+    let next = if count == 0 { 0 } else { next.min(count - 1) };
+    m::set("composer-active", json!(next));
+    if previous != next {
+        if let Some(prev_el) = dom::get(&format!("composer-option-{previous}")) {
+            let _ = prev_el.set_attribute("aria-selected", "false");
+        }
+    }
+    if let Some(next_id) = active_option_id(count, next) {
+        if let Some(next_el) = dom::get(&next_id) {
+            let _ = next_el.set_attribute("aria-selected", "true");
+            scroll_option_into_view(&next_el);
+        }
+        dom::attr("prompt", "aria-activedescendant", &next_id);
+    } else {
+        clear_active_descendant();
+    }
+}
 pub(crate) fn close() {
     m::next("composer");
     m::set("composer-open", json!(false));
     dom::hidden("skill-hints-panel", true);
     dom::attr("prompt", "aria-expanded", "false");
+    clear_active_descendant();
 }
 pub async fn update() {
     if m::read(|s| m::active(&s.selected)) || crate::inbox::needs_confirmation() {
@@ -240,6 +299,7 @@ async fn load(path: &str, files: bool) {
         Err(e) if !e.aborted => {
             dom::text("skill-hints-status", &e.message);
             dom::clear("skill-hints");
+            clear_active_descendant();
         }
         Err(_) => {}
     }
@@ -261,7 +321,12 @@ fn present(data: &V, files: bool) {
 }
 fn render() {
     let items = m::array(&m::data("composer-items"));
-    let active = m::data("composer-active").as_u64().unwrap_or(0) as usize;
+    let count = items.len().min(200);
+    let active = if count == 0 {
+        0
+    } else {
+        (m::data("composer-active").as_u64().unwrap_or(0) as usize).min(count - 1)
+    };
     dom::clear("skill-hints");
     for (index, item) in items.iter().take(200).enumerate() {
         let name = item["name"]
@@ -291,11 +356,11 @@ fn render() {
         dom::append("skill-hints", &e);
     }
     dom::text("skill-hints-status", &format!("{} matches", items.len()));
-    dom::attr(
-        "prompt",
-        "aria-activedescendant",
-        &format!("composer-option-{active}"),
-    );
+    if let Some(id) = active_option_id(count, active) {
+        dom::attr("prompt", "aria-activedescendant", &id);
+    } else {
+        clear_active_descendant();
+    }
 }
 async fn choose(index: usize, run: bool) {
     let Some(item) = m::array(&m::data("composer-items")).get(index).cloned() else {
@@ -366,7 +431,7 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
     {
         return false;
     }
-    let count = m::array(&m::data("composer-items")).len();
+    let count = m::array(&m::data("composer-items")).len().min(200);
     let index = m::data("composer-active").as_u64().unwrap_or(0) as usize;
     match e.key().as_str() {
         "Escape" => {
@@ -376,26 +441,23 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
             true
         }
         "ArrowDown" | "ArrowUp" if count > 0 => {
-            let next = if e.key() == "ArrowDown" {
-                (index + 1) % count
-            } else {
-                (index + count - 1) % count
-            };
-            m::set("composer-active", json!(next));
-            render();
+            let next = next_option_index(count, index, e.key() == "ArrowDown");
+            select_active(index, next, count);
             true
         }
         "Tab" if count > 0 && !e.shift_key() => {
+            let chosen = index.min(count - 1);
             spawn_local(async move {
-                choose(index, false).await;
+                choose(chosen, false).await;
             });
             true
         }
         "Enter"
             if count > 0 && !e.shift_key() && !e.ctrl_key() && !e.meta_key() && !e.alt_key() =>
         {
+            let chosen = index.min(count - 1);
             spawn_local(async move {
-                choose(index, true).await;
+                choose(chosen, true).await;
             });
             true
         }
@@ -447,15 +509,19 @@ pub async fn intercept(text: &str) -> bool {
         "model" => {
             if !argument.is_empty() {
                 session::models("", Some(argument.into()));
+                session::mark_dirty("model");
             }
             dom::hidden("session-settings", false);
+            dom::attr("session-settings-toggle", "aria-expanded", "true");
             dom::focus("model-choice");
         }
         "effort" => {
             if !argument.is_empty() {
                 dom::set_value("thinking-effort", argument);
+                session::mark_dirty("model");
             }
             dom::hidden("session-settings", false);
+            dom::attr("session-settings-toggle", "aria-expanded", "true");
             dom::focus("thinking-effort");
         }
         "help" => {
@@ -513,4 +579,33 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_option_id_omits_when_empty_and_clamps_otherwise() {
+        assert_eq!(active_option_id(0, 0), None);
+        assert_eq!(active_option_id(0, 5), None);
+        assert_eq!(
+            active_option_id(3, 1),
+            Some("composer-option-1".to_string())
+        );
+        assert_eq!(
+            active_option_id(3, 9),
+            Some("composer-option-2".to_string())
+        );
+    }
+
+    #[test]
+    fn next_option_index_wraps_within_visible_items() {
+        assert_eq!(next_option_index(0, 0, true), 0);
+        assert_eq!(next_option_index(3, 0, true), 1);
+        assert_eq!(next_option_index(3, 2, true), 0);
+        assert_eq!(next_option_index(3, 0, false), 2);
+        assert_eq!(next_option_index(3, 2, false), 1);
+        assert_eq!(next_option_index(3, 99, false), 1);
+    }
 }
