@@ -1,13 +1,13 @@
-use crate::{api, dom, model as m, omnigraph_canvas};
+use crate::{api, dom, graph_viewport, model as m, omnigraph_canvas};
 use serde_json::{json, Value as V};
 use std::collections::BTreeSet;
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-const CAMERA_MIN: f64 = 0.25;
-const CAMERA_MAX: f64 = 2.6;
+const CAMERA_MIN: f64 = graph_viewport::DEFAULT_MIN_SCALE;
+const CAMERA_MAX: f64 = graph_viewport::DEFAULT_MAX_SCALE;
 const ZOOM_STEP: f64 = 1.22;
-const DRAG_THRESHOLD_PX: f64 = 4.0;
+const DRAG_THRESHOLD_PX: f64 = graph_viewport::DEFAULT_DRAG_THRESHOLD_PX;
 const PULSE_INTERVAL_MS: i32 = 3500;
 const MAX_PULSE_EVENTS: usize = 80;
 pub const CAPSULE_CHAR_LIMIT: usize = 6000;
@@ -36,6 +36,19 @@ impl Default for OmnigraphCamera {
     }
 }
 
+impl OmnigraphCamera {
+    fn to_viewport(&self) -> graph_viewport::Camera {
+        graph_viewport::Camera::new(self.pan_x, self.pan_y, self.scale)
+    }
+
+    fn apply_viewport(&mut self, cam: graph_viewport::Camera) {
+        self.scale = cam.scale;
+        self.pan_x = cam.tx;
+        self.pan_y = cam.ty;
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn zoom_at(
     scale: f64,
     pan_x: f64,
@@ -43,37 +56,30 @@ pub fn zoom_at(
     anchor: (f64, f64),
     target_scale: f64,
 ) -> (f64, f64, f64) {
-    let cur = scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let next = target_scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let world_x = (anchor.0 - pan_x) / cur;
-    let world_y = (anchor.1 - pan_y) / cur;
-    let next_pan_x = (anchor.0 - world_x * next).round();
-    let next_pan_y = (anchor.1 - world_y * next).round();
-    (next, next_pan_x, next_pan_y)
+    let next = graph_viewport::zoom_at(
+        graph_viewport::Camera::new(pan_x, pan_y, scale),
+        anchor,
+        target_scale,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    (next.scale, next.tx, next.ty)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn camera_for_fit(plane: (f64, f64), viewport: (f64, f64)) -> (f64, f64, f64) {
-    const FIT_MARGIN_X: f64 = 36.0;
-    const FIT_MARGIN_Y: f64 = 24.0;
-    let pw = plane.0.max(1.0);
-    let ph = plane.1.max(1.0);
-    let vw = (viewport.0 - FIT_MARGIN_X * 2.0).max(160.0);
-    let vh = (viewport.1 - FIT_MARGIN_Y * 2.0).max(140.0);
-    let scale = (vw / pw).min(vh / ph).clamp(CAMERA_MIN, 1.15);
-    let pan_x = ((viewport.0 - pw * scale) / 2.0).max(FIT_MARGIN_X).round();
-    let pan_y = ((viewport.1 - ph * scale) / 2.0).max(FIT_MARGIN_Y).round();
-    (scale, pan_x, pan_y)
+    let next = graph_viewport::fit(plane, viewport, graph_viewport::FitOptions::for_omnigraph());
+    (next.scale, next.tx, next.ty)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn camera_for_fly_to(
     node_pos: (f64, f64),
     viewport: (f64, f64),
     current_scale: f64,
 ) -> (f64, f64, f64) {
-    let scale = current_scale.clamp(0.75, CAMERA_MAX);
-    let pan_x = (viewport.0 / 2.0 - node_pos.0 * scale).round();
-    let pan_y = (viewport.1 / 2.0 - node_pos.1 * scale).round();
-    (scale, pan_x, pan_y)
+    let next = graph_viewport::fly_to_point(node_pos, viewport, current_scale, 0.75, CAMERA_MAX);
+    (next.scale, next.tx, next.ty)
 }
 
 pub fn esc(s: &str) -> String {
@@ -1523,6 +1529,7 @@ fn kind_glyph(kind: &str) -> &'static str {
         "question" => "?",
         "session" => "◎",
         "file" => "▤",
+        "symbol" => "⟨⟩",
         _ => "◈",
     }
 }
@@ -1538,6 +1545,7 @@ fn kind_title(kind: &str) -> &'static str {
         "question" => "Question",
         "session" => "Session",
         "file" => "File",
+        "symbol" => "Symbol",
         _ => "Atom",
     }
 }
@@ -1634,6 +1642,74 @@ fn file_node_id(file: &V) -> String {
         .or_else(|| file["path"].as_str())
         .unwrap_or("")
         .to_owned()
+}
+
+fn symbol_node_id(symbol: &V) -> String {
+    symbol["id"]
+        .as_str()
+        .or_else(|| symbol["fqn"].as_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn symbol_file_path(symbol: &V) -> String {
+    let direct = symbol["file_path"]
+        .as_str()
+        .or_else(|| symbol["path"].as_str())
+        .unwrap_or("")
+        .trim();
+    if !direct.is_empty() {
+        return direct.to_owned();
+    }
+    let fqn = symbol["fqn"]
+        .as_str()
+        .or_else(|| symbol["id"].as_str())
+        .unwrap_or("")
+        .trim();
+    if let Some((head, _)) = fqn.split_once("::") {
+        if head.contains('/') || head.contains('.') {
+            return head.to_owned();
+        }
+    }
+    String::new()
+}
+
+fn symbol_display_label(symbol: &V) -> String {
+    if let Some(label) = symbol["label"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return label.to_owned();
+    }
+    let owner = symbol["owner"].as_str().unwrap_or("").trim();
+    let name = symbol["name"].as_str().unwrap_or("").trim();
+    if !owner.is_empty() && !name.is_empty() {
+        return format!("{owner}::{name}");
+    }
+    if !name.is_empty() {
+        return name.to_owned();
+    }
+    let fqn = symbol_node_id(symbol);
+    let path = symbol_file_path(symbol);
+    if !path.is_empty() {
+        if let Some(rest) = fqn.strip_prefix(&format!("{path}::")) {
+            if !rest.is_empty() {
+                return rest.to_owned();
+            }
+        }
+    }
+    fqn
+}
+
+fn short_symbol_from_fqn(fqn: &str) -> String {
+    let trimmed = fqn.trim();
+    if let Some((head, rest)) = trimmed.split_once("::") {
+        if (head.contains('/') || head.contains('.')) && !rest.is_empty() {
+            return rest.to_owned();
+        }
+    }
+    trimmed.to_owned()
 }
 
 fn edge_from(edge: &V) -> String {
@@ -1797,6 +1873,12 @@ pub fn render_node_inspector_html(
     {
         return render_file_node_inspector_html(graph, &file_node);
     }
+    if let Some(symbol_node) = m::array(&graph["symbols"])
+        .into_iter()
+        .find(|s| symbol_node_id(s) == selected_id || s["fqn"].as_str() == Some(selected_id))
+    {
+        return render_symbol_node_inspector_html(graph, &symbol_node);
+    }
     format!(
         "<div class=\"omni-inspector-card\"><p class=\"knowledge-note\">Node <code>{}</code> is not present in the current filter or snapshot.</p></div>",
         esc(selected_id)
@@ -1878,12 +1960,82 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
     let files = m::array(&atom["files"]);
     if !files.is_empty() {
         html.push_str("<div class=\"omni-inspector-group\"><h4>Linked files</h4><div class=\"omni-chip-list\">");
-        for file in files {
+        for file in &files {
             if let Some(f) = file.as_str().filter(|s| !s.is_empty()) {
+                let jump_payload = json!({ "path": f }).to_string();
                 html.push_str(&format!(
-                    "<button type=\"button\" class=\"omni-session-atom-chip omni-mono\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\">▤ {}</button>",
+                    "<button type=\"button\" class=\"omni-session-atom-chip omni-mono\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\">▤ {}</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-code-map\" data-payload=\"{}\" title=\"Open {} in Code Map\">Map ↗</button>",
                     esc(f),
-                    esc(f)
+                    esc(f),
+                    esc(&jump_payload),
+                    esc(f),
+                ));
+            }
+        }
+        html.push_str("</div></div>");
+    }
+
+    let mut symbol_fqns: Vec<String> = Vec::new();
+    for sym in m::array(&atom["symbols"]) {
+        if let Some(s) = sym.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if !symbol_fqns.iter().any(|existing| existing == s) {
+                symbol_fqns.push(s.to_owned());
+            }
+        }
+    }
+    for edge in m::array(&graph["edges"])
+        .into_iter()
+        .chain(m::array(&graph["symbol_edges"]))
+    {
+        let rel = edge_rel(&edge);
+        if matches!(
+            rel.as_str(),
+            "mentions_symbol" | "MentionsSymbol" | "mentions"
+        ) && edge_from(&edge) == id
+        {
+            let target = edge_to(&edge);
+            if !target.is_empty() && !symbol_fqns.iter().any(|existing| existing == &target) {
+                symbol_fqns.push(target);
+            }
+        }
+    }
+    if !symbol_fqns.is_empty() {
+        let graph_symbols = m::array(&graph["symbols"]);
+        html.push_str("<div class=\"omni-inspector-group\"><h4>Mentioned symbols</h4><div class=\"omni-chip-list\">");
+        for fqn in &symbol_fqns {
+            let sym_node = graph_symbols
+                .iter()
+                .find(|s| symbol_node_id(s) == *fqn || s["fqn"].as_str() == Some(fqn.as_str()));
+            let label = sym_node
+                .map(symbol_display_label)
+                .unwrap_or_else(|| short_symbol_from_fqn(fqn));
+            let file_path = sym_node
+                .map(symbol_file_path)
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| {
+                    fqn.split_once("::")
+                        .map(|(head, _)| head)
+                        .filter(|head| head.contains('/') || head.contains('.'))
+                        .unwrap_or("")
+                        .to_owned()
+                });
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"omni-symbol-badge\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\" title=\"{}\">&lt;/&gt; {}</button>",
+                esc(fqn),
+                esc(fqn),
+                esc(&label),
+            ));
+            if !file_path.is_empty() {
+                let jump_payload = json!({
+                    "path": file_path,
+                    "fqn": fqn,
+                    "symbol": label,
+                })
+                .to_string();
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-code-map\" data-payload=\"{}\" title=\"Open {} in Code Map\">Code Map ↗</button>",
+                    esc(&jump_payload),
+                    esc(&file_path),
                 ));
             }
         }
@@ -2124,20 +2276,42 @@ fn render_file_node_inspector_html(graph: &V, file: &V) -> String {
         "<article class=\"omni-inspector-card\"><div class=\"omni-node-head\"><span class=\"omni-badge\" data-kind=\"file\"><span aria-hidden=\"true\">▤</span> File Anchor</span></div><h3 class=\"omni-inspector-title omni-mono\">{}</h3>",
         esc(path)
     );
-    let touching: Vec<String> = m::array(&graph["edges"])
+    let symbols: Vec<V> = m::array(&graph["symbols"])
         .into_iter()
-        .filter_map(|e| {
-            let f = edge_from(&e);
-            let t = edge_to(&e);
-            if t == path {
-                Some(f)
-            } else if f == path {
-                Some(t)
-            } else {
-                None
-            }
-        })
+        .filter(|s| symbol_file_path(s) == path)
         .collect();
+    if !symbols.is_empty() {
+        html.push_str("<div class=\"omni-inspector-group\"><h4>Mentioned symbols</h4><div class=\"omni-chip-list\">");
+        for sym in symbols.iter().take(16) {
+            let sid = symbol_node_id(sym);
+            let label = symbol_display_label(sym);
+            let skind = sym["kind"].as_str().unwrap_or("");
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"omni-symbol-badge\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\">&lt;/&gt; {}{}</button>",
+                esc(&sid),
+                esc(&label),
+                if skind.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", esc(skind))
+                }
+            ));
+        }
+        html.push_str("</div></div>");
+    }
+    let mut touching: Vec<String> = Vec::new();
+    for e in m::array(&graph["edges"])
+        .into_iter()
+        .chain(m::array(&graph["symbol_edges"]))
+    {
+        let f = edge_from(&e);
+        let t = edge_to(&e);
+        if t == path && !f.is_empty() && !touching.contains(&f) {
+            touching.push(f);
+        } else if f == path && !t.is_empty() && !touching.contains(&t) {
+            touching.push(t);
+        }
+    }
     if !touching.is_empty() {
         html.push_str("<div class=\"omni-inspector-group\"><h4>Referencing atoms</h4><div class=\"omni-chip-list\">");
         for node_id in touching.iter().take(16) {
@@ -2150,9 +2324,102 @@ fn render_file_node_inspector_html(graph: &V, file: &V) -> String {
         html.push_str("</div></div>");
     }
     html.push_str(&format!(
-        "<div class=\"omni-chip-list\"><button type=\"button\" class=\"button compact\" data-action=\"inspect-file-graph\" data-payload=\"{}\">Inspect in Code Graph</button></div></article>",
+        "<div class=\"omni-chip-list\"><button type=\"button\" class=\"button compact primary\" data-action=\"inspect-file-graph\" data-payload=\"{}\">Inspect in Code Graph</button></div></article>",
         esc(&json!({ "path": path }).to_string())
     ));
+    html
+}
+
+fn render_symbol_node_inspector_html(graph: &V, symbol: &V) -> String {
+    let sid = symbol_node_id(symbol);
+    let fqn = symbol["fqn"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&sid);
+    let title = symbol_display_label(symbol);
+    let skind = symbol["kind"].as_str().unwrap_or("symbol");
+    let file_path = symbol_file_path(symbol);
+    let owner = symbol["owner"].as_str().unwrap_or("").trim();
+
+    let mut html = format!(
+        "<article class=\"omni-inspector-card\"><div class=\"omni-node-head\"><span class=\"omni-badge\" data-kind=\"symbol\"><span aria-hidden=\"true\">⟨⟩</span> Symbol</span><span class=\"omni-symbol-kind-pill\">{}</span></div><h3 class=\"omni-inspector-title omni-mono\">{}</h3><p class=\"knowledge-note\">FQN: <code>{}</code></p>",
+        esc(skind),
+        esc(&title),
+        esc(fqn),
+    );
+    if !file_path.is_empty() || !owner.is_empty() {
+        let mut parts = Vec::new();
+        if !file_path.is_empty() {
+            parts.push(format!("File: <code>{}</code>", esc(&file_path)));
+        }
+        if !owner.is_empty() {
+            parts.push(format!("Owner: <code>{}</code>", esc(owner)));
+        }
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">{}</p>",
+            parts.join(" · ")
+        ));
+    }
+
+    let mut atom_refs: Vec<String> = m::array(&symbol["atom_ids"])
+        .into_iter()
+        .filter_map(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .collect();
+    for e in m::array(&graph["edges"])
+        .into_iter()
+        .chain(m::array(&graph["symbol_edges"]))
+    {
+        let f = edge_from(&e);
+        let t = edge_to(&e);
+        if (t == sid || t == fqn) && !f.is_empty() && !atom_refs.contains(&f) {
+            atom_refs.push(f);
+        }
+    }
+    if !atom_refs.is_empty() {
+        let graph_atoms = m::array(&graph["atoms"]);
+        html.push_str("<div class=\"omni-inspector-group\"><h4>Mentioning atoms</h4><div class=\"omni-chip-list\">");
+        for aid in atom_refs.iter().take(16) {
+            let label = graph_atoms
+                .iter()
+                .find(|a| atom_id(a) == *aid)
+                .and_then(|a| a["title"].as_str().filter(|s| !s.is_empty()))
+                .unwrap_or(aid.as_str());
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"omni-session-atom-chip\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\">{}</button>",
+                esc(aid),
+                esc(label),
+            ));
+        }
+        html.push_str("</div></div>");
+    }
+
+    html.push_str("<div class=\"omni-chip-list\">");
+    if !file_path.is_empty() {
+        let jump_payload = json!({
+            "path": file_path,
+            "fqn": fqn,
+            "symbol": title,
+        })
+        .to_string();
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"button compact primary\" data-action=\"omnigraph-open-code-map\" data-payload=\"{}\">Open in Code Map ↗</button>",
+            esc(&jump_payload),
+        ));
+        if let Some(file_node) = m::array(&graph["files"]).into_iter().find(|f| {
+            f["path"].as_str() == Some(file_path.as_str()) || file_node_id(f) == file_path
+        }) {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\">Focus File Anchor</button>",
+                esc(&file_node_id(&file_node)),
+            ));
+        }
+    }
+    html.push_str("</div></article>");
     html
 }
 
@@ -2464,7 +2731,7 @@ pub fn session_bar_summary(session: &V) -> (bool, String, String, Vec<V>, bool) 
     (true, branch, parts.join(" · "), combined, can_merge)
 }
 
-fn current_project_id() -> String {
+pub(crate) fn current_project_id() -> String {
     let p = dom::value("omnigraph-project");
     if !p.is_empty() {
         return p;
@@ -2533,61 +2800,39 @@ fn save_camera(cam: &OmnigraphCamera) {
     );
 }
 
+fn viewport_size_measured() -> (f64, f64, bool) {
+    graph_viewport::viewport_size("omnigraph-canvas", 40.0, (760.0, 420.0))
+}
+
 fn viewport_size() -> (f64, f64) {
-    let Some(el) =
-        dom::get("omnigraph-canvas").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return (760.0, 420.0);
-    };
-    let w = el.client_width() as f64;
-    let h = el.client_height() as f64;
-    if w > 40.0 && h > 40.0 {
-        (w, h)
-    } else {
-        (760.0, 420.0)
-    }
+    let (w, h, _) = viewport_size_measured();
+    (w, h)
 }
 
 fn apply_camera(cam: &OmnigraphCamera) {
-    let pct = format!("{}%", (cam.scale * 100.0).round() as i64);
-    dom::text("omni-zoom-level", &pct);
-    let Some(canvas) = dom::get("omnigraph-canvas") else {
-        return;
-    };
-    let lod = omnigraph_canvas::lod(cam.scale);
-    let _ = canvas.set_attribute("data-lod", lod);
-    let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
-        return;
-    };
-    let Some(plane_el) = plane.dyn_into::<web_sys::HtmlElement>().ok() else {
-        return;
-    };
-    let _ = plane_el.set_attribute("data-lod", lod);
-    let style = format!(
-        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
-        cam.plane_w.max(320.0),
-        cam.plane_h.max(240.0),
-        cam.scale,
-        cam.pan_x,
-        cam.pan_y,
-        cam.pan_x,
-        cam.pan_y,
-        cam.scale,
+    let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(240.0));
+    graph_viewport::apply_transform_3d_by_id(
+        "omnigraph-canvas",
+        Some("omni-zoom-level"),
+        cam.to_viewport(),
+        plane_size,
+        graph_viewport::OMNIGRAPH_LOD,
     );
-    let _ = plane_el.set_attribute("style", &style);
     if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
         if let Some(radar_view) = dom::get("omnigraph-canvas-radar")
             .and_then(|r| r.query_selector(".omni-radar-view").ok().flatten())
         {
-            let (vp_w, vp_h) = viewport_size();
-            let vx = (-cam.pan_x / cam.scale).clamp(0.0, cam.plane_w);
-            let vy = (-cam.pan_y / cam.scale).clamp(0.0, cam.plane_h);
-            let vw = (vp_w / cam.scale).clamp(16.0, (cam.plane_w - vx).max(16.0));
-            let vh = (vp_h / cam.scale).clamp(16.0, (cam.plane_h - vy).max(16.0));
-            let _ = radar_view.set_attribute("x", &format!("{vx:.1}"));
-            let _ = radar_view.set_attribute("y", &format!("{vy:.1}"));
-            let _ = radar_view.set_attribute("width", &format!("{vw:.1}"));
-            let _ = radar_view.set_attribute("height", &format!("{vh:.1}"));
+            if let Some((vx, vy, vw, vh)) = graph_viewport::radar_viewport_rect(
+                cam.to_viewport(),
+                viewport_size(),
+                (cam.plane_w, cam.plane_h),
+                16.0,
+            ) {
+                let _ = radar_view.set_attribute("x", &format!("{vx:.1}"));
+                let _ = radar_view.set_attribute("y", &format!("{vy:.1}"));
+                let _ = radar_view.set_attribute("width", &format!("{vw:.1}"));
+                let _ = radar_view.set_attribute("height", &format!("{vh:.1}"));
+            }
         }
     }
 }
@@ -2597,10 +2842,12 @@ fn fit_camera() {
     let vw_vh = viewport_size();
     cam.fit_mode = true;
     if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
-        let (s, px, py) = camera_for_fit((cam.plane_w, cam.plane_h), vw_vh);
-        cam.scale = s;
-        cam.pan_x = px;
-        cam.pan_y = py;
+        let fitted = graph_viewport::fit(
+            (cam.plane_w, cam.plane_h),
+            vw_vh,
+            graph_viewport::FitOptions::for_omnigraph(),
+        );
+        cam.apply_viewport(fitted);
     }
     save_camera(&cam);
     apply_camera(&cam);
@@ -2608,18 +2855,8 @@ fn fit_camera() {
 
 fn reset_camera_100() {
     let mut cam = load_camera();
-    let (vw, vh) = viewport_size();
-    cam.scale = 1.0;
-    cam.pan_x = if cam.plane_w > 0.0 && cam.plane_w < vw {
-        ((vw - cam.plane_w) / 2.0).round()
-    } else {
-        16.0
-    };
-    cam.pan_y = if cam.plane_h > 0.0 && cam.plane_h < vh {
-        ((vh - cam.plane_h) / 2.0).round()
-    } else {
-        16.0
-    };
+    let next = graph_viewport::reset_100((cam.plane_w, cam.plane_h), viewport_size(), 16.0);
+    cam.apply_viewport(next);
     cam.fit_mode = false;
     save_camera(&cam);
     apply_camera(&cam);
@@ -2641,10 +2878,14 @@ fn zoom_canvas_at(factor: f64, client_anchor: Option<(f64, f64)>) {
     } else {
         (vw / 2.0, vh / 2.0)
     };
-    let (s, px, py) = zoom_at(cam.scale, cam.pan_x, cam.pan_y, anchor, cam.scale * factor);
-    cam.scale = s;
-    cam.pan_x = px;
-    cam.pan_y = py;
+    let zoomed = graph_viewport::zoom_at(
+        cam.to_viewport(),
+        anchor,
+        cam.scale * factor,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    cam.apply_viewport(zoomed);
     cam.fit_mode = false;
     save_camera(&cam);
     apply_camera(&cam);
@@ -2662,13 +2903,46 @@ fn fly_to_node(node_id: &str) {
         return;
     };
     let mut cam = load_camera();
-    let (s, px, py) = camera_for_fly_to((nx, ny), viewport_size(), cam.scale);
-    cam.scale = s;
-    cam.pan_x = px;
-    cam.pan_y = py;
+    let next = graph_viewport::fly_to_point((nx, ny), viewport_size(), cam.scale, 0.75, CAMERA_MAX);
+    cam.apply_viewport(next);
     cam.fit_mode = false;
     save_camera(&cam);
     apply_camera(&cam);
+}
+
+fn refit_if_visible() {
+    if m::read(|s| s.view != "omnigraph") || m::text(&ui_state(), "stage_tab") != "constellation" {
+        return;
+    }
+    let (vw, vh, measured) = viewport_size_measured();
+    let mut cam = load_camera();
+    match graph_viewport::resize_refit_decision(
+        cam.to_viewport(),
+        cam.fit_mode,
+        (cam.plane_w, cam.plane_h),
+        (vw, vh),
+        measured,
+        graph_viewport::FitOptions::for_omnigraph(),
+    ) {
+        graph_viewport::ResizeAction::Skip => {}
+        graph_viewport::ResizeAction::Refit(next) => {
+            cam.apply_viewport(next);
+            save_camera(&cam);
+            apply_camera(&cam);
+        }
+        graph_viewport::ResizeAction::SyncRadar(_) => {
+            apply_camera(&cam);
+        }
+    }
+}
+
+fn ensure_resize_watch() {
+    graph_viewport::ensure_resize_observer(
+        "omnigraph-resize-watched",
+        Some("omnigraph-resize-debounce"),
+        80,
+        refit_if_visible,
+    );
 }
 
 pub fn initialize() {
@@ -2676,6 +2950,7 @@ pub fn initialize() {
     render_tabs();
     sync_pulse_toggle();
     attach_transfer_dropzone_listeners();
+    ensure_resize_watch();
 }
 
 fn reset_pulse_cursor() {
@@ -2982,22 +3257,196 @@ fn schedule_pulse_poll() {
     });
 }
 
+const GRAPH_PAGE_LIMIT: usize = 250;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPaginationSummary {
+    pub shown_atoms: usize,
+    pub total_atoms: usize,
+    pub symbol_count: usize,
+    pub has_more: bool,
+    pub truncated: bool,
+    pub next_cursor: String,
+    pub next_offset: usize,
+}
+
+pub fn graph_pagination_summary(graph: &V) -> GraphPaginationSummary {
+    let shown_atoms = m::array(&graph["atoms"]).len();
+    let total_atoms = graph["total_atoms"]
+        .as_u64()
+        .or_else(|| graph["telemetry"]["total_atoms"].as_u64())
+        .map(|n| (n as usize).max(shown_atoms))
+        .unwrap_or(shown_atoms);
+    let symbol_count = m::array(&graph["symbols"]).len();
+    let has_more = graph["has_more"].as_bool().unwrap_or(false)
+        || graph["telemetry"]["has_more"].as_bool().unwrap_or(false)
+        || shown_atoms < total_atoms;
+    let truncated = graph["truncated"].as_bool().unwrap_or(false)
+        || graph["telemetry"]["truncated"].as_bool().unwrap_or(false);
+    let next_cursor = graph["next_cursor"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let offset = graph["offset"].as_u64().unwrap_or(0) as usize;
+    let next_offset = offset.saturating_add(shown_atoms).max(shown_atoms);
+    GraphPaginationSummary {
+        shown_atoms,
+        total_atoms,
+        symbol_count,
+        has_more,
+        truncated,
+        next_cursor,
+        next_offset,
+    }
+}
+
+pub fn render_pagination_bar_html(graph: &V) -> (bool, String) {
+    if !graph.is_object() {
+        return (false, String::new());
+    }
+    let summary = graph_pagination_summary(graph);
+    let show = summary.has_more
+        || summary.truncated
+        || (summary.total_atoms > 0 && summary.shown_atoms < summary.total_atoms);
+    if !show {
+        return (false, String::new());
+    }
+    let mut parts = vec![format!(
+        "Showing {} of {} atoms",
+        format_count(summary.shown_atoms),
+        format_count(summary.total_atoms)
+    )];
+    if summary.symbol_count > 0 {
+        parts.push(format!("{} symbols", format_count(summary.symbol_count)));
+    }
+    if summary.truncated && !summary.has_more {
+        parts.push("truncated at backend limit".to_owned());
+    }
+    let mut html = format!(
+        "<span class=\"omni-pagination-meta\">{}</span>",
+        esc(&parts.join(" · "))
+    );
+    if summary.has_more {
+        let remaining = summary.total_atoms.saturating_sub(summary.shown_atoms);
+        let btn_label = if remaining > 0 {
+            format!(
+                "Load more (+{} remaining)",
+                format_count(remaining.min(GRAPH_PAGE_LIMIT))
+            )
+        } else {
+            "Load more atoms".to_owned()
+        };
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"button compact\" id=\"omnigraph-load-more\" data-action=\"omnigraph-load-more\">{}</button>",
+            esc(&btn_label)
+        ));
+    }
+    (true, html)
+}
+
+pub fn merge_graph_page(mut existing: V, page: V) -> V {
+    if !existing.is_object() {
+        return page;
+    }
+    if !page.is_object() {
+        return existing;
+    }
+    let merge_array = |dst_root: &mut V, src_root: &V, key: &str, id_fn: fn(&V) -> String| {
+        let mut combined = m::array(&dst_root[key]);
+        let mut seen: BTreeSet<String> = combined
+            .iter()
+            .map(id_fn)
+            .filter(|id| !id.is_empty())
+            .collect();
+        for item in m::array(&src_root[key]) {
+            let id = id_fn(&item);
+            if id.is_empty() || seen.insert(id) {
+                combined.push(item);
+            }
+        }
+        dst_root[key] = V::Array(combined);
+    };
+    merge_array(&mut existing, &page, "atoms", atom_id);
+    merge_array(&mut existing, &page, "sessions", session_node_id);
+    merge_array(&mut existing, &page, "files", file_node_id);
+    merge_array(&mut existing, &page, "symbols", symbol_node_id);
+
+    let edge_key = |e: &V| -> String {
+        let eid = e["id"].as_str().unwrap_or("").trim();
+        if !eid.is_empty() {
+            return eid.to_owned();
+        }
+        format!("{}|{}|{}", edge_from(e), edge_rel(e), edge_to(e))
+    };
+    for key in ["edges", "symbol_edges"] {
+        let mut combined = m::array(&existing[key]);
+        let mut seen: BTreeSet<String> = combined
+            .iter()
+            .map(edge_key)
+            .filter(|k| !k.is_empty())
+            .collect();
+        for edge in m::array(&page[key]) {
+            let k = edge_key(&edge);
+            if k.is_empty() || seen.insert(k) {
+                combined.push(edge);
+            }
+        }
+        existing[key] = V::Array(combined);
+    }
+
+    for meta_key in [
+        "total_atoms",
+        "has_more",
+        "truncated",
+        "next_cursor",
+        "limit",
+        "telemetry",
+    ] {
+        if !page[meta_key].is_null() {
+            existing[meta_key] = page[meta_key].clone();
+        }
+    }
+    existing
+}
+
+fn graph_request_path(
+    project: String,
+    branch: String,
+    snapshot: String,
+    kind: String,
+    query: String,
+    cursor: String,
+    offset: Option<usize>,
+) -> String {
+    let mut params = vec![
+        ("project_id", project),
+        ("branch", branch),
+        ("snapshot", snapshot),
+        ("kind", kind),
+        ("q", query),
+        ("limit", GRAPH_PAGE_LIMIT.to_string()),
+    ];
+    if !cursor.is_empty() {
+        params.push(("cursor", cursor));
+    } else if let Some(off) = offset.filter(|n| *n > 0) {
+        params.push(("offset", off.to_string()));
+    }
+    format!("/api/omnigraph/graph{}", dom::query(&params))
+}
+
 async fn refresh_graph() {
     let project = current_project_id();
     let st = ui_state();
-    let branch = m::text(&st, "branch");
-    let snapshot = m::text(&st, "snapshot");
-    let kind = m::text(&st, "kind");
-    let query = m::text(&st, "query");
-    let path = format!(
-        "/api/omnigraph/graph{}",
-        dom::query(&[
-            ("project_id", project),
-            ("branch", branch),
-            ("snapshot", snapshot),
-            ("kind", kind),
-            ("q", query),
-        ])
+    let path = graph_request_path(
+        project,
+        m::text(&st, "branch"),
+        m::text(&st, "snapshot"),
+        m::text(&st, "kind"),
+        m::text(&st, "query"),
+        String::new(),
+        None,
     );
     match api::scoped("omnigraph-graph", &path).await {
         Ok((epoch, graph)) if m::current("omnigraph-graph", epoch) => {
@@ -3008,6 +3457,42 @@ async fn refresh_graph() {
         }
         Err(e) if !e.aborted => dom::error("omnigraph-error", &e.message),
         _ => {}
+    }
+}
+
+async fn load_more_graph() {
+    let current = m::data("omnigraph-graph");
+    if !current.is_object() {
+        return;
+    }
+    let summary = graph_pagination_summary(&current);
+    if !summary.has_more {
+        return;
+    }
+    dom::disabled("omnigraph-load-more", true);
+    let st = ui_state();
+    let path = graph_request_path(
+        current_project_id(),
+        m::text(&st, "branch"),
+        m::text(&st, "snapshot"),
+        m::text(&st, "kind"),
+        m::text(&st, "query"),
+        summary.next_cursor,
+        Some(summary.next_offset),
+    );
+    match api::scoped("omnigraph-graph", &path).await {
+        Ok((epoch, page)) if m::current("omnigraph-graph", epoch) => {
+            let merged = merge_graph_page(m::data("omnigraph-graph"), page);
+            m::set("omnigraph-graph", merged.clone());
+            sync_branch_selectors(&merged);
+            sync_session_selectors(&merged);
+            render_studio();
+        }
+        Err(e) if !e.aborted => {
+            dom::disabled("omnigraph-load-more", false);
+            dom::error("omnigraph-error", &e.message);
+        }
+        _ => dom::disabled("omnigraph-load-more", false),
     }
 }
 
@@ -3423,10 +3908,36 @@ fn sync_session_selectors(graph: &V) {
     dom::options("omni-pub-session", &items, m::summary, None);
 }
 
+fn render_pagination_bar(graph: &V) {
+    let (show, html) = render_pagination_bar_html(graph);
+    let bar = if let Some(existing) = dom::get("omnigraph-pagination-bar") {
+        existing
+    } else if show {
+        let Some(pane) = dom::get("omni-pane-constellation") else {
+            return;
+        };
+        let el = dom::el("div", "omni-pagination-bar", "");
+        let _ = el.set_attribute("id", "omnigraph-pagination-bar");
+        let _ = el.set_attribute("role", "status");
+        let legend = pane.query_selector(".omni-legend").ok().flatten();
+        let _ = pane.insert_before(&el, legend.as_ref().map(|n| n.as_ref()));
+        el
+    } else {
+        return;
+    };
+    dom::hide(&bar, !show);
+    if show {
+        bar.set_inner_html(&html);
+    } else {
+        bar.set_inner_html("");
+    }
+}
+
 fn render_studio() {
     render_tabs();
     sync_controls_from_state();
     render_constellation();
+    render_pagination_bar(&m::data("omnigraph-graph"));
     render_dag();
     render_merge();
     render_inspector();
@@ -3917,45 +4428,11 @@ pub fn render_session_atoms_html(atoms: &[V], branch: &str, expanded: bool) -> S
 }
 
 pub fn attach_wheel_listeners() {
-    let Some(canvas) = dom::get("omnigraph-canvas") else {
-        return;
-    };
-    if canvas.get_attribute("data-wheel-bound").as_deref() == Some("true") {
-        return;
-    }
-    let _ = canvas.set_attribute("data-wheel-bound", "true");
-    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
-        let Ok(wheel) = event.dyn_into::<web_sys::WheelEvent>() else {
-            return;
-        };
-        wheel.prevent_default();
-        wheel.stop_propagation();
-        let dy = wheel.delta_y();
-        if dy.abs() < f64::EPSILON {
-            return;
-        }
-        let factor = if dy < 0.0 { 1.14 } else { 1.0 / 1.14 };
-        dom::attr("omnigraph-canvas", "data-wheeling", "true");
-        zoom_canvas_at(
-            factor,
-            Some((wheel.client_x() as f64, wheel.client_y() as f64)),
-        );
-        dom::later("omnigraph-canvas-wheel-end", 140, || {
-            dom::attr("omnigraph-canvas", "data-wheeling", "false");
-        });
-    });
-    let options = web_sys::AddEventListenerOptions::new();
-    options.set_passive(false);
-    if canvas
-        .add_event_listener_with_callback_and_add_event_listener_options(
-            "wheel",
-            callback.as_ref().unchecked_ref(),
-            &options,
-        )
-        .is_ok()
-    {
-        callback.forget();
-    }
+    graph_viewport::attach_wheel_zoom(
+        "omnigraph-canvas",
+        "omnigraph-canvas-wheel-end",
+        |factor, pt| zoom_canvas_at(factor, Some(pt)),
+    );
 }
 
 fn radar_element() -> Option<web_sys::Element> {
@@ -3965,30 +4442,6 @@ fn radar_element() -> Option<web_sys::Element> {
             .flatten()
             .or(Some(el))
     })
-}
-
-fn jump_from_radar(client_x: f64, client_y: f64, capture_pointer_id: Option<i32>) {
-    let Some(radar) = radar_element() else {
-        return;
-    };
-    if let Some(pointer_id) = capture_pointer_id {
-        let _ = radar.set_pointer_capture(pointer_id);
-    }
-    let rect = radar.get_bounding_client_rect();
-    if rect.width() <= 1.0 || rect.height() <= 1.0 {
-        return;
-    }
-    let rx = ((client_x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-    let ry = ((client_y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-    let mut cam = load_camera();
-    let (vw, vh) = viewport_size();
-    let world_x = rx * cam.plane_w.max(320.0);
-    let world_y = ry * cam.plane_h.max(240.0);
-    cam.pan_x = (vw / 2.0 - world_x * cam.scale).round();
-    cam.pan_y = (vh / 2.0 - world_y * cam.scale).round();
-    cam.fit_mode = false;
-    save_camera(&cam);
-    apply_camera(&cam);
 }
 
 pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
@@ -4002,138 +4455,118 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         .as_ref()
         .and_then(|el| el.closest("#omnigraph-canvas-radar").ok().flatten())
         .is_some();
-    if in_radar {
-        if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
-            match kind {
-                "pointerdown" if pe.button() == 0 => {
-                    event.prevent_default();
-                    dom::attr("omnigraph-canvas", "data-panning", "true");
-                    jump_from_radar(
-                        pe.client_x() as f64,
-                        pe.client_y() as f64,
-                        Some(pe.pointer_id()),
-                    );
+    let mut radar_drag = graph_viewport::RadarDrag::from_json(&m::data("omnigraph-radar-drag"));
+    if in_radar || radar_drag.active {
+        if let Some(radar) = radar_element() {
+            let mut cam = load_camera();
+            let plane = (cam.plane_w.max(320.0), cam.plane_h.max(240.0));
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &radar,
+                Some("omnigraph-canvas"),
+                plane,
+                &mut radar_drag,
+            ) {
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    m::set("omnigraph-radar-drag", radar_drag.to_json());
+                    let next =
+                        graph_viewport::center_camera_on(world_point, viewport_size(), cam.scale);
+                    cam.apply_viewport(next);
+                    cam.fit_mode = false;
+                    save_camera(&cam);
+                    apply_camera(&cam);
                     return true;
                 }
-                "pointermove" if pe.buttons() == 1 => {
-                    jump_from_radar(pe.client_x() as f64, pe.client_y() as f64, None);
+                graph_viewport::RadarAction::Released => {
+                    m::set("omnigraph-radar-drag", radar_drag.to_json());
                     return true;
                 }
-                "pointerup" | "pointercancel" => {
-                    dom::attr("omnigraph-canvas", "data-panning", "false");
-                    if let Some(radar) = radar_element() {
-                        let _ = radar.release_pointer_capture(pe.pointer_id());
+                graph_viewport::RadarAction::Ignored => {
+                    if in_radar {
+                        return false;
                     }
-                    return true;
                 }
-                _ => {}
             }
         }
-        return false;
     }
     let in_canvas = target_el
         .as_ref()
         .and_then(|el| el.closest("#omnigraph-canvas").ok().flatten())
         .is_some();
-    let drag = m::data("omnigraph-drag");
-    let drag_active = m::yes(&drag["active"]);
-    match kind {
-        "pointerdown" if in_canvas => {
-            let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                return false;
-            };
-            if pe.button() != 0 {
-                return false;
-            }
-            let cam = load_camera();
-            m::set(
-                "omnigraph-drag",
-                json!({
-                    "active": true,
-                    "pointer_id": pe.pointer_id(),
-                    "start_x": pe.client_x() as f64,
-                    "start_y": pe.client_y() as f64,
-                    "orig_pan_x": cam.pan_x,
-                    "orig_pan_y": cam.pan_y,
-                    "moved": false,
-                    "suppress_click": false,
-                }),
-            );
-            true
-        }
-        "pointermove" if drag_active => {
-            let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                return true;
-            };
-            if pe.pointer_id() as i64 != drag["pointer_id"].as_i64().unwrap_or(-1) {
+    let mut drag = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
+    if kind == "pointerdown" && !in_canvas {
+        return false;
+    }
+    if matches!(
+        kind,
+        "pointerdown" | "pointermove" | "pointerup" | "pointercancel"
+    ) {
+        let mut cam = load_camera();
+        match graph_viewport::handle_canvas_drag(
+            kind,
+            event,
+            "omnigraph-canvas",
+            cam.to_viewport(),
+            DRAG_THRESHOLD_PX,
+            &mut drag,
+        ) {
+            graph_viewport::CanvasDragOutcome::Down => {
+                m::set("omnigraph-drag", drag.to_json());
                 return true;
             }
-            let dx = pe.client_x() as f64 - drag["start_x"].as_f64().unwrap_or(0.0);
-            let dy = pe.client_y() as f64 - drag["start_y"].as_f64().unwrap_or(0.0);
-            let mut moved = m::yes(&drag["moved"]);
-            if !moved {
-                if (dx * dx + dy * dy).sqrt() <= DRAG_THRESHOLD_PX {
+            graph_viewport::CanvasDragOutcome::Panned { tx, ty } => {
+                m::set("omnigraph-drag", drag.to_json());
+                cam.pan_x = tx;
+                cam.pan_y = ty;
+                cam.fit_mode = false;
+                save_camera(&cam);
+                apply_camera(&cam);
+                return true;
+            }
+            graph_viewport::CanvasDragOutcome::Ended { suppress_click } => {
+                m::set("omnigraph-drag", drag.to_json());
+                if suppress_click {
+                    dom::later("omnigraph-drag-clear", 70, || {
+                        let mut d = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
+                        d.clear_suppress();
+                        m::set("omnigraph-drag", d.to_json());
+                    });
+                }
+                return true;
+            }
+            graph_viewport::CanvasDragOutcome::Ignored => {
+                if drag.active {
                     return true;
                 }
-                moved = true;
-                dom::attr("omnigraph-canvas", "data-panning", "true");
-                if let Some(c) = dom::get("omnigraph-canvas") {
-                    let _ = c.set_pointer_capture(pe.pointer_id());
-                }
             }
-            let orig_x = drag["orig_pan_x"].as_f64().unwrap_or(0.0);
-            let orig_y = drag["orig_pan_y"].as_f64().unwrap_or(0.0);
-            let mut next_drag = drag;
-            next_drag["moved"] = json!(moved);
-            m::set("omnigraph-drag", next_drag);
-            let mut cam = load_camera();
-            cam.pan_x = (orig_x + dx).round();
-            cam.pan_y = (orig_y + dy).round();
-            cam.fit_mode = false;
-            save_camera(&cam);
-            apply_camera(&cam);
-            true
         }
-        "pointerup" | "pointercancel" if drag_active => {
-            dom::attr("omnigraph-canvas", "data-panning", "false");
-            if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
-                if m::yes(&drag["moved"]) {
-                    if let Some(c) = dom::get("omnigraph-canvas") {
-                        let _ = c.release_pointer_capture(pe.pointer_id());
-                    }
-                }
-            }
-            let suppress = kind == "pointerup" && m::yes(&drag["moved"]);
-            m::set(
-                "omnigraph-drag",
-                json!({
-                    "active": false,
-                    "moved": false,
-                    "suppress_click": suppress,
-                }),
-            );
-            if suppress {
-                dom::later("omnigraph-drag-clear", 70, || {
-                    let mut d = m::data("omnigraph-drag");
-                    if d.is_object() {
-                        d["suppress_click"] = json!(false);
-                        m::set("omnigraph-drag", d);
-                    }
-                });
-            }
-            true
-        }
-        "dblclick" if in_canvas => {
-            if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
-                zoom_canvas_at(
-                    ZOOM_STEP,
-                    Some((me.client_x() as f64, me.client_y() as f64)),
-                );
-            }
-            true
-        }
-        _ => false,
     }
+    if kind == "dblclick" && in_canvas {
+        if let Some(node_el) = target_el
+            .as_ref()
+            .and_then(|el| el.closest(".omni-node[data-file-path]").ok().flatten())
+        {
+            if let Some(path) = node_el
+                .get_attribute("data-file-path")
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+            {
+                spawn_local(async move {
+                    open_file_in_code_map(&path).await;
+                });
+                return true;
+            }
+        }
+        if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
+            zoom_canvas_at(
+                ZOOM_STEP,
+                Some((me.client_x() as f64, me.client_y() as f64)),
+            );
+        }
+        return true;
+    }
+    false
 }
 
 pub fn key(event: &web_sys::KeyboardEvent) -> bool {
@@ -5097,6 +5530,39 @@ async fn submit_share_form() {
     crate::session::sync_working_indicator();
 }
 
+pub fn resolve_code_map_target_path(payload: &V) -> Option<String> {
+    let direct = payload
+        .as_str()
+        .or_else(|| payload["path"].as_str())
+        .or_else(|| payload["file_path"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(path) = direct {
+        return Some(path.to_owned());
+    }
+    let fqn = payload["fqn"]
+        .as_str()
+        .or_else(|| payload["symbol_fqn"].as_str())
+        .or_else(|| payload["node_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    fqn.split_once("::")
+        .map(|(head, _)| head.trim())
+        .filter(|head| !head.is_empty() && (head.contains('/') || head.contains('.')))
+        .map(str::to_owned)
+}
+
+async fn open_file_in_code_map(path: &str) {
+    let project = current_project_id();
+    if !project.is_empty() && dom::value("project") != project {
+        crate::session::sync_project(&project);
+    }
+    if m::read(|s| s.view != "sessions") {
+        crate::session::open_view("sessions", true).await;
+    }
+    crate::graph_map::focus_file_in_session(path);
+}
+
 pub async fn event(
     kind: &str,
     id: &str,
@@ -5673,6 +6139,16 @@ pub async fn event(
                 }
                 crate::graph_map::open_project_commit(&project, &sha);
             }
+            true
+        }
+        "omnigraph-open-code-map" => {
+            if let Some(path) = resolve_code_map_target_path(payload) {
+                open_file_in_code_map(&path).await;
+            }
+            true
+        }
+        "omnigraph-load-more" => {
+            load_more_graph().await;
             true
         }
         "omnigraph-select-commit" => {
@@ -7262,5 +7738,172 @@ mod tests {
         );
         assert_no_inline_hex_colors(&folded);
         assert_no_inline_hex_colors(&open);
+    }
+
+    #[test]
+    fn inspector_renders_symbol_ref_atom_symbol_badges_and_code_map_jumps() {
+        use crate::test_support::{assert_no_inline_hex_colors, payloads};
+        let graph = json!({
+            "active_branch": "session/s1",
+            "atoms": [
+                {
+                    "id": "atom-1",
+                    "kind": "finding",
+                    "title": "Token verifier skips leeway",
+                    "branch": "session/s1",
+                    "symbols": ["src/Auth/Token.php::Token::verify"]
+                }
+            ],
+            "files": [
+                {"id": "src/Auth/Token.php", "path": "src/Auth/Token.php"}
+            ],
+            "symbols": [
+                {
+                    "id": "src/Auth/Token.php::Token::verify",
+                    "fqn": "src/Auth/Token.php::Token::verify",
+                    "file_path": "src/Auth/Token.php",
+                    "kind": "method",
+                    "name": "verify",
+                    "owner": "Token",
+                    "label": "Token::verify",
+                    "atom_ids": ["atom-1"]
+                }
+            ],
+            "symbol_edges": [
+                {
+                    "id": "se-1",
+                    "kind": "mentions_symbol",
+                    "relation": "mentions_symbol",
+                    "from": "atom-1",
+                    "to": "src/Auth/Token.php::Token::verify"
+                }
+            ]
+        });
+
+        let sym_html = render_node_inspector_html(
+            &graph,
+            "src/Auth/Token.php::Token::verify",
+            &[],
+            "session/s1",
+        );
+        assert!(sym_html.contains("data-kind=\"symbol\""), "{sym_html}");
+        assert!(
+            sym_html.contains("omni-symbol-kind-pill\">method</span>"),
+            "{sym_html}"
+        );
+        assert!(
+            sym_html.contains("src/Auth/Token.php::Token::verify"),
+            "{sym_html}"
+        );
+        assert!(
+            sym_html.contains("Token verifier skips leeway"),
+            "{sym_html}"
+        );
+        assert!(sym_html.contains("Focus File Anchor"), "{sym_html}");
+        let sym_jumps = payloads(&sym_html, "omnigraph-open-code-map");
+        assert_eq!(sym_jumps.len(), 1);
+        assert_eq!(sym_jumps[0]["path"], "src/Auth/Token.php");
+        assert_eq!(sym_jumps[0]["fqn"], "src/Auth/Token.php::Token::verify");
+        assert_no_inline_hex_colors(&sym_html);
+
+        let atom_html = render_node_inspector_html(&graph, "atom-1", &[], "session/s1");
+        assert!(atom_html.contains("Mentioned symbols"), "{atom_html}");
+        assert!(atom_html.contains("omni-symbol-badge"), "{atom_html}");
+        assert!(atom_html.contains("Token::verify"), "{atom_html}");
+        let atom_jumps = payloads(&atom_html, "omnigraph-open-code-map");
+        assert_eq!(atom_jumps.len(), 1);
+        assert_eq!(atom_jumps[0]["path"], "src/Auth/Token.php");
+        assert_no_inline_hex_colors(&atom_html);
+
+        let file_html = render_node_inspector_html(&graph, "src/Auth/Token.php", &[], "session/s1");
+        assert!(
+            file_html.contains("data-action=\"inspect-file-graph\""),
+            "{file_html}"
+        );
+        assert!(file_html.contains("Mentioned symbols"), "{file_html}");
+        assert!(file_html.contains("Token::verify (method)"), "{file_html}");
+        assert_no_inline_hex_colors(&file_html);
+    }
+
+    #[test]
+    fn resolve_code_map_target_path_handles_direct_path_and_fqn_fallback() {
+        assert_eq!(
+            resolve_code_map_target_path(&json!("src/Repo.php")).as_deref(),
+            Some("src/Repo.php")
+        );
+        assert_eq!(
+            resolve_code_map_target_path(&json!({"file_path": " app/Auth.php "})).as_deref(),
+            Some("app/Auth.php")
+        );
+        assert_eq!(
+            resolve_code_map_target_path(&json!({"fqn": "src/Auth/Token.php::Token::verify"}))
+                .as_deref(),
+            Some("src/Auth/Token.php")
+        );
+        assert_eq!(
+            resolve_code_map_target_path(&json!({"fqn": "App\\Auth\\Token::verify"})),
+            None
+        );
+        assert_eq!(resolve_code_map_target_path(&json!({})), None);
+    }
+
+    #[test]
+    fn pagination_summary_bar_and_page_merge_deduplicate_nodes_and_edges() {
+        use crate::test_support::assert_no_inline_hex_colors;
+        let page1 = json!({
+            "active_branch": "main",
+            "total_atoms": 3,
+            "limit": 2,
+            "offset": 0,
+            "has_more": true,
+            "next_cursor": "cursor-2",
+            "atoms": [{"id": "a1", "title": "A1"}, {"id": "a2", "title": "A2"}],
+            "files": [{"id": "src/A.php", "path": "src/A.php"}],
+            "symbols": [{"id": "src/A.php::foo", "fqn": "src/A.php::foo"}],
+            "sessions": [{"id": "s1"}],
+            "edges": [{"id": "e1", "from": "a1", "to": "src/A.php", "relation": "touches_file"}],
+            "symbol_edges": [{"id": "se1", "from": "a1", "to": "src/A.php::foo", "relation": "mentions_symbol"}]
+        });
+        let summary = graph_pagination_summary(&page1);
+        assert_eq!(summary.shown_atoms, 2);
+        assert_eq!(summary.total_atoms, 3);
+        assert_eq!(summary.symbol_count, 1);
+        assert!(summary.has_more);
+        assert_eq!(summary.next_cursor, "cursor-2");
+        assert_eq!(summary.next_offset, 2);
+
+        let (visible, bar_html) = render_pagination_bar_html(&page1);
+        assert!(visible);
+        assert!(bar_html.contains("Showing 2 of 3 atoms"), "{bar_html}");
+        assert!(bar_html.contains("Load more (+1 remaining)"), "{bar_html}");
+        assert!(
+            bar_html.contains("data-action=\"omnigraph-load-more\""),
+            "{bar_html}"
+        );
+        assert_no_inline_hex_colors(&bar_html);
+
+        let page2 = json!({
+            "total_atoms": 3,
+            "limit": 2,
+            "offset": 2,
+            "has_more": false,
+            "truncated": false,
+            "next_cursor": null,
+            "atoms": [{"id": "a2", "title": "A2-dup"}, {"id": "a3", "title": "A3"}],
+            "files": [{"id": "src/A.php", "path": "src/A.php"}, {"id": "src/B.php", "path": "src/B.php"}],
+            "symbols": [{"id": "src/A.php::foo", "fqn": "src/A.php::foo"}],
+            "sessions": [{"id": "s1"}],
+            "edges": [{"id": "e1", "from": "a1", "to": "src/A.php", "relation": "touches_file"}, {"id": "e2", "from": "a3", "to": "src/B.php", "relation": "touches_file"}],
+            "symbol_edges": [{"id": "se1", "from": "a1", "to": "src/A.php::foo", "relation": "mentions_symbol"}]
+        });
+        let merged = merge_graph_page(page1, page2);
+        assert_eq!(merged["atoms"].as_array().unwrap().len(), 3);
+        assert_eq!(merged["files"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(merged["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["symbol_edges"].as_array().unwrap().len(), 1);
+
+        let (visible_after, _) = render_pagination_bar_html(&merged);
+        assert!(!visible_after);
     }
 }

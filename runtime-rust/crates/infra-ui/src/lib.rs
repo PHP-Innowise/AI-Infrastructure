@@ -13,6 +13,7 @@ mod git_commit_graph;
 mod graph;
 mod graph_explanation;
 mod graph_map;
+pub(crate) mod graph_viewport;
 mod inbox;
 mod knowledge;
 mod management;
