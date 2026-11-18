@@ -217,18 +217,25 @@ fn file_list(id: &str, files: &[V]) {
                 .unwrap_or("File"),
             m::text(file, "path")
         );
-        let body = format!(
-            "{} → {} bytes\n{}\n{}{}",
-            m::string(&file["before_bytes"]),
-            m::string(&file["after_bytes"]),
-            m::text(file, "reason"),
-            m::text(file, "diff"),
-            if m::yes(&file["diff_truncated"]) {
-                "\nDiff truncated; inspect the complete file locally."
-            } else {
-                ""
-            }
-        );
+        let before = m::string(&file["before_bytes"]);
+        let after = m::string(&file["after_bytes"]);
+        let bytes = if !before.is_empty() || !after.is_empty() {
+            format!("{before} → {after} bytes")
+        } else {
+            String::new()
+        };
+        let reason = m::text(file, "reason");
+        let diff = m::text(file, "diff");
+        let truncated = if m::yes(&file["diff_truncated"]) {
+            "Diff truncated; inspect the complete file locally."
+        } else {
+            ""
+        };
+        let body = [bytes.as_str(), reason.as_str(), diff.as_str(), truncated]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         dom::append(id, &dom::details(&label, &body));
     }
 }
@@ -963,22 +970,56 @@ async fn install(scope: &str) {
         installed_skills().await;
     }
 }
+fn filtered_setup_files(preview: &V, query: &str, filter: &str) -> Vec<V> {
+    let needle = query.trim().to_lowercase();
+    let matches_query = |path: &str| needle.is_empty() || path.to_lowercase().contains(&needle);
+    let mut rows = Vec::new();
+    let mut seen_collision_paths = std::collections::BTreeSet::new();
+    for f in m::array(&preview["files"]) {
+        let path = m::text(&f, "path");
+        if !matches_query(&path) {
+            continue;
+        }
+        let action = f["action"].as_str().unwrap_or("");
+        let include = match filter {
+            "all" => true,
+            "collision" => action == "collision",
+            _ => action != "unchanged" && action != "kept",
+        };
+        if include {
+            if action == "collision" {
+                seen_collision_paths.insert(path);
+            }
+            rows.push(f);
+        }
+    }
+    if matches!(filter, "all" | "collision") {
+        for c in m::array(&preview["collisions"]) {
+            let path = m::text(&c, "path");
+            if path.is_empty() || !matches_query(&path) || seen_collision_paths.contains(&path) {
+                continue;
+            }
+            let reason = m::text(&c, "reason");
+            let detail = if reason.is_empty() {
+                "Collision blocks installation.".to_owned()
+            } else {
+                format!("Collision blocks installation ({reason}).")
+            };
+            rows.push(json!({
+                "path": path,
+                "action": "collision",
+                "reason": reason,
+                "diff": detail,
+            }));
+        }
+    }
+    rows
+}
 fn setup_files() {
     let v = m::data("setup-preview");
-    let query = dom::value("setup-preview-path").to_lowercase();
+    let query = dom::value("setup-preview-path");
     let filter = dom::value("setup-preview-actions");
-    let files = m::array(&v["files"])
-        .into_iter()
-        .filter(|f| {
-            m::text(f, "path").to_lowercase().contains(&query)
-                && (filter == "all"
-                    || if filter == "collision" {
-                        f["action"] == "collision"
-                    } else {
-                        f["action"] != "unchanged" && f["action"] != "kept"
-                    })
-        })
-        .collect::<Vec<_>>();
+    let files = filtered_setup_files(&v, &query, &filter);
     dom::text(
         "setup-preview-count",
         &format!("{} files shown", files.len()),
@@ -2455,5 +2496,35 @@ mod tests {
         assert!(ok.valid);
         assert!(ok.name_error.is_empty());
         assert!(ok.summary_error.is_empty());
+    }
+
+    #[test]
+    fn setup_preview_filter_surfaces_reported_collisions_and_all_files() {
+        let preview = json!({
+            "files": [
+                {"path": "AGENTS.md", "action": "merge"},
+                {"path": ".gitignore", "action": "unchanged"},
+            ],
+            "collisions": [
+                {"path": "ACCELERATOR.md", "reason": "accelerator-readme-exists"},
+            ],
+        });
+
+        let changed = super::filtered_setup_files(&preview, "", "changed");
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0]["path"], "AGENTS.md");
+
+        let collisions = super::filtered_setup_files(&preview, "", "collision");
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0]["path"], "ACCELERATOR.md");
+        assert_eq!(collisions[0]["action"], "collision");
+        assert_eq!(collisions[0]["reason"], "accelerator-readme-exists");
+
+        let all = super::filtered_setup_files(&preview, "", "all");
+        assert_eq!(all.len(), 3);
+
+        let searched = super::filtered_setup_files(&preview, "accelerator", "collision");
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0]["path"], "ACCELERATOR.md");
     }
 }
