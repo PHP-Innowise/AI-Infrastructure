@@ -2420,9 +2420,10 @@ the links it has with the change.
   is absent from the graph, or the traversal reaches its limit. It uses test
   naming conventions and test spans inside Rust files. When workspace `LCOV`
   (`lcov.info`, `coverage/lcov.info`, `coverage.info`, `.coverage/lcov.info`,
-  `target/coverage/lcov.info`, `var/coverage/lcov.info`) or `Clover` XML
-  (`clover.xml`, `coverage/clover.xml`, `build/logs/clover.xml`,
-  `target/coverage/clover.xml`, `coverage/coverage.xml`, `coverage.xml`)
+  `target/coverage/lcov.info`, `reports/lcov.info`, `build/logs/lcov.info`,
+  `var/coverage/lcov.info`) or `Clover` XML (`clover.xml`,
+  `coverage/clover.xml`, `build/logs/clover.xml`, `target/coverage/clover.xml`,
+  `reports/clover.xml`, `coverage/coverage.xml`, `coverage.xml`)
   coverage artifacts exist under the project root (bounded to `<= 8 MiB` per
   file and `<= 16 MiB` total without following symlinks outside the root),
   `test_reach` attaches a per-file `coverage` summary (`format`,
