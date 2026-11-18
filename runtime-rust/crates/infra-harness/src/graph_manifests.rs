@@ -9,6 +9,7 @@ use crate::graph_live::clean_rel_key;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
+    io::Read,
     path::{Component, Path},
 };
 
@@ -167,7 +168,7 @@ impl ManifestIndex {
                 let Some(rel) = normalize_path_buf(rel_buf) else {
                     continue;
                 };
-                let Ok(text) = fs::read_to_string(&path) else {
+                let Some(text) = read_bounded_manifest_file(&path, MAX_MANIFEST_BYTES) else {
                     continue;
                 };
                 index.ingest(&rel, &text);
@@ -1428,6 +1429,40 @@ fn normalize_path_buf(path: &Path) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
+#[allow(dead_code)]
+fn read_bounded_manifest_file(path: &Path, max_bytes: u64) -> Option<String> {
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = opts.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > max_bytes {
+        return None;
+    }
+    read_bounded_utf8_stream(file, max_bytes, meta.len().min(max_bytes) as usize)
+}
+
+#[allow(dead_code)]
+fn read_bounded_utf8_stream<R: Read>(
+    reader: R,
+    max_bytes: u64,
+    capacity_hint: usize,
+) -> Option<String> {
+    let mut buf = Vec::with_capacity(capacity_hint);
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > max_bytes {
+        return None;
+    }
+    String::from_utf8(buf).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1681,5 +1716,44 @@ packages = [{ include = "helpers", from = "custom_dir" }]
                 .as_deref(),
             Some("packages/ui/src/index.ts")
         );
+    }
+
+    #[test]
+    fn from_root_and_bounded_reader_reject_oversized_and_symlink_manifests() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+
+        let ok_manifest = r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#;
+        fs::write(root.join("composer.json"), ok_manifest).unwrap();
+
+        let oversized_len = (MAX_MANIFEST_BYTES as usize) + 1;
+        let padding = " ".repeat(oversized_len.saturating_sub(2));
+        let oversized_pkg = format!("{{{padding}}}");
+        assert_eq!(oversized_pkg.len(), oversized_len);
+        fs::write(root.join("package.json"), oversized_pkg).unwrap();
+
+        let disk_idx = ManifestIndex::from_root(root);
+        assert_eq!(disk_idx.composers.len(), 1);
+        assert_eq!(disk_idx.packages.len(), 0);
+
+        // Enforce `.take(max_bytes + 1)` rejection even without prior metadata size knowledge
+        // (guards against files growing between `symlink_metadata` and read).
+        let over_stream = std::io::Cursor::new(b"{\"name\":\"too-long\"}".to_vec());
+        assert!(read_bounded_utf8_stream(over_stream, 8, 8).is_none());
+
+        let exact_stream = std::io::Cursor::new(b"{\"a\":1}".to_vec());
+        assert_eq!(
+            read_bounded_utf8_stream(exact_stream, 7, 7).as_deref(),
+            Some("{\"a\":1}")
+        );
+
+        #[cfg(unix)]
+        {
+            let target = root.join("real_package.json");
+            fs::write(&target, r#"{"name":"@acme/sym"}"#).unwrap();
+            let link = root.join("sub_package.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(read_bounded_manifest_file(&link, MAX_MANIFEST_BYTES).is_none());
+        }
     }
 }
