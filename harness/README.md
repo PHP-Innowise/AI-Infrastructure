@@ -167,6 +167,27 @@ writes through `--add-dir` and the others through read rules (plan mode adds
 them all), Codex reads the whole disk and is granted only writable roots;
 Cursor Agent supports only own-service edits.
 
+In the **Launch** and **Recovery** cards, **Permissions** selects how edit
+dispatches handle host tool and file approvals: **Auto** (default), **Manual**,
+or **Bypass Permissions** (read-only dispatches always remain read-only
+regardless of the setting):
+
+- **Manual** routes every provider permission ask and native question through
+  Harness's permission desk (`SystemWorkflow` -> `PermissionDesk`) and surfaces
+  pending requests inline as `waiting_permissions` cards in System
+  Orchestration, resolved against the run's backing session
+  (`POST /api/sessions/{session_id}/permissions/{request_id}`).
+- **Auto** grants intra-service edits according to each provider's auto mode
+  while **escalating cross-service and contract-ownership boundary asks** to
+  human confirmation (`SystemBoundaryApprovals` marks escalated asks `Auto ->
+  Manual boundary escalation`, strips **Allow for this session**, and waits via
+  `waiting_permissions`); non-interactive `Text`-transport dispatches (Codex
+  `Auto` and Cursor `Auto`) enforce write boundaries via post-step checks on
+  `service`-scoped runs.
+- **Bypass Permissions** disables host approval prompts and sandboxes
+  (`bypassPermissions` / `--dangerously-bypass-approvals-and-sandbox` /
+  `--force --sandbox disabled`) within the selected dispatch folders.
+
 The **Agents** panel follows a launched run live: one card per agent (contract,
 each service, verification) with state, time, granted folders, tool calls,
 tokens and changed files, structured `Timeline | Files | Plan | Commands` views
@@ -192,8 +213,11 @@ cannot grant host filesystem access. See the [system orchestration guide](../doc
 ## Infrastructure Creator in the browser
 
 Choose **Infrastructure Creator** (also available through Kit 1), a registered
-PHP project, Claude/Codex/Cursor, model, thinking effort and additional-agent
-limit. Choose the current project or a new Git worktree, select the integrations
+PHP project, Claude/Codex/Cursor, model, thinking effort, **Permissions**
+(**Auto** default, **Manual**, or **Bypass Permissions**) and additional-agent
+limit. The permission setting persists with the run across **Start**, **Revise**,
+**Generate** and **Rescan** (`waiting_permissions` appears inline on the
+Creator view and is answered against the run's backing session). Choose the current project or a new Git worktree, select the integrations
 to generate, and start a scan. A worktree starts from committed HEAD; uncommitted
 files are not copied. Targets must be outside the Harness source/state trees.
 
@@ -305,8 +329,10 @@ continuing the earlier ledger when the stage is the same. The option is not
 available for Plan, SDD or Fleet sessions, requires additional agents to be
 off, and cannot be combined with separate planning and editing models.
 Budgets apply to the whole cycle: Claude turns receive the remaining
-USD allowance as a native cap, the token threshold counts every turn's reported
-usage, and the time limit terminates the cycle. Cancel stops the running
+USD allowance as a native cap (persisting per-participant `cost_totals` in
+SQLite across turns and follow-up cycles so resumed sessions never
+double-count), the token threshold counts every turn's reported usage, and the
+time limit terminates the cycle (marking the cycle `incomplete` on exhaustion). Cancel stops the running
 participant; the ledger recorded up to the previous turn stays visible. The
 ledger reports what each participant claimed and which claims survived; it is
 not an independent verification of the work.
@@ -333,10 +359,11 @@ session/workspace; it does not transfer conversations between providers.
 
 ### Permissions: Auto, Manual, Bypass Permissions
 
-In Sessions, **Permissions** next to **Mode** says what an editing turn may do
-without asking. Planning (Plan mode and the Plan, Review and Fleet workflows)
+In **Sessions**, **Infrastructure Creator** and **System Orchestration**, **Permissions** selects what an editing turn may do
+without asking. Planning (Plan mode and the Plan, Review and Fleet workflows,
+and read-only System Orchestration dispatches)
 stays read-only whatever the setting, so nothing in it asks. The setting is kept
-with the session and can change between turns in **Next-turn settings**.
+with the session or run and can change between turns in **Next-turn settings** (or on Creator **Revise** / **Generate** / **Rescan** and System **Recovery**). In System Orchestration **Auto**, cross-service and contract-source boundary asks escalate automatically to **Manual** confirmation.
 
 | Setting | Claude Code | Codex | Cursor |
 | --- | --- | --- | --- |

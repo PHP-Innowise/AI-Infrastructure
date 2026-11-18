@@ -1305,7 +1305,6 @@ impl Sessions {
     }
     /// Where a System Orchestration run puts requests that require human confirmation
     /// (Manual mode, or Auto mode when cross-service boundary escalation triggers).
-    #[allow(dead_code)]
     pub(crate) fn system_approvals(
         &self,
         sid: &str,

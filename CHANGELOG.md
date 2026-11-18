@@ -24,6 +24,40 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Unified Permissions for System Orchestration & Infrastructure Creator and
+  Cycle-Wide Clash Budgets (`infra-system`, `infra-harness`, `infra-ui`,
+  `harness/web/`):
+  - **System Orchestration permissions & cross-service escalation**:
+    `SystemManager` validates and persists optional `permissions`
+    (`auto`, `manual`, `bypass`, `null`) on `execute` and `resume` and exposes
+    `permissions` plus `waiting_permissions` on run views (`SystemBridge::waiting_permissions`).
+    `SystemWorkflow::run` threads `Sessions::system_approvals` into
+    `run_system_request_with_bridge_and_approvals` and
+    `run_system_request_with_adapter_and_approvals`; `SystemBoundaryApprovals`
+    escalates cross-service and contract-source boundary asks from `Auto` to
+    `Manual` confirmation while stripping `session_option`, non-interactive
+    `Text`-transport runs check post-step write boundaries, and `systems.rs` /
+    `harness/web/` add launch/recovery `Permissions` controls, hints, and inline
+    `waiting_permissions` cards answered via the backing session.
+  - **Infrastructure Creator permissions & `PermissionDesk` wiring**:
+    `CreatorManager` validates and stores `permissions` on `start`, `revise`,
+    `generate`, and `rescan`, forwards it to `Sessions::launch_internal`, and
+    surfaces `waiting_permissions` on Creator run views. `CreatorRunner` executes
+    sandboxed provider runs through `CreatorLaunchAdapter` and
+    `infra_host::provider::run_monitored_locked` with `PermissionMode` and
+    `PermissionDesk` (`Sessions::creator_approvals`, passing
+    `--skip-git-repo-check` only for Codex `Text` transport and expanding
+    ancestor `protected_roots` in `sandbox_spec` so the task workspace remains
+    writable); `management.rs` / `harness/web/` add Creator `Permissions`
+    controls, hints, and inline permission cards.
+  - **Clash cycle-wide budgets & SQLite `cost_totals`**: `Cycle::drive` enforces
+    cycle-wide `seconds`, cumulative `tokens` (`state["tokens"]` and per-turn
+    `tokens`), and `usd` budgets across protagonist and challenger turns via
+    `infra_host::provider::run_monitored_until`, persisting SQLite
+    `session["cost_totals"]` per native participant ID across turns and
+    follow-up cycles to avoid USD double-counting and stopping cleanly with
+    `incomplete` when any cycle budget is exhausted.
+
 - Wave 3 Approval Richness, Ephemeral Cursor Rules, Native Questions, Preflight & Verified Memory (`infra-host`, `infra-harness`, `infra-ui`, `harness/web/`):
   - **Phase 3A — Rich Approvals, Cursor Ephemeral Session Allowlist, Native Structured Questions & Ask TTL (`infra-host`, `infra-harness`, `infra-ui`, `harness/web/`)**:
     - Enriched `PermissionAsk` (`ask_kind`, `diff_preview` bounded to `<= 6144` chars, `rule_summary`, `session_rule_key`, `questions`) and added `Answer` plus `Approvals::ask_answer` across Claude (`Edit`/`MultiEdit`/`Write`/`NotebookEdit` diffs, `permission_suggestions` rule summaries, `AskUserQuestion`), Codex (`item/fileChange/requestApproval` unified diffs, thread rule summary, `item/tool/requestUserInput`), and Cursor (`editToolCall` diffs, ACP `cursor/ask_question`).

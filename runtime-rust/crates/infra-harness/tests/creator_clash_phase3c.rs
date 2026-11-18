@@ -1442,3 +1442,631 @@ esac
         fx.close().await;
     });
 }
+
+fn fake_system_claude(bin_dir: &Path) -> PathBuf {
+    let program = bin_dir.join("fake-system-claude");
+    let script = r#"#!/bin/sh
+case " $* " in
+  *" --input-format stream-json "*)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"subtype":"initialize"'*)
+          echo '{"type":"control_response","response":{"subtype":"success","request_id":"harness-initialize","response":{"current_permission_mode":"auto"}}}'
+          ;;
+        *'"subtype":"set_permission_mode"'*)
+          echo '{"type":"control_response","response":{"subtype":"success","request_id":"harness-auto-mode","response":{"mode":"auto"}}}'
+          ;;
+        *'"type":"user"'*)
+          echo '{"type":"system","subtype":"init","claude_code_version":"2.1.300","session_id":"sys-claude-1"}'
+          mode="$(cat .test-mode 2>/dev/null || echo manual)"
+          if [ "$mode" = "auto" ]; then
+            own_file="$(pwd)/src/internal.php"
+            printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"sys-auto-intra\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Edit\",\"display_name\":\"Edit\",\"input\":{\"file_path\":\"${own_file}\"},\"description\":\"${own_file}\"}}"
+          else
+            echo '{"type":"control_request","request_id":"sys-manual-1","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"php -v"},"description":"Run PHP check"}}'
+          fi
+          ;;
+        *'"request_id":"sys-auto-intra"'*'"behavior":"allow"'*|*'"behavior":"allow"'*'"request_id":"sys-auto-intra"'*)
+          foreign_file="$(cd ../billing && pwd)/src/api.php"
+          printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"sys-auto-cross\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Edit\",\"display_name\":\"Edit\",\"input\":{\"file_path\":\"${foreign_file}\"},\"description\":\"${foreign_file}\"}}"
+          ;;
+        *'"behavior":"allow"'*)
+          echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Updated orders."}]},"session_id":"sys-claude-1"}'
+          echo '{"type":"result","subtype":"success","is_error":false,"result":"Updated orders.","structured_output":{"status":"completed","summary":"Updated orders cleanly","checks":[{"name":"php","status":"passed","detail":"ok"}],"changed_files":[],"service_order":["orders"]},"session_id":"sys-claude-1","total_cost_usd":0.02,"usage":{"input_tokens":10,"output_tokens":5}}'
+          exit 0
+          ;;
+        *'"behavior":"deny"'*)
+          echo '{"type":"result","subtype":"success","is_error":false,"result":"Denied.","structured_output":{"status":"blocked","summary":"Permission denied","checks":[{"name":"php","status":"not_run","detail":"denied"}],"changed_files":[],"service_order":["orders"]},"session_id":"sys-claude-1","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":2}}'
+          exit 0
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+cat >/dev/null
+echo '{"type":"system","subtype":"init","claude_code_version":"2.1.300","session_id":"sys-verify-1"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Verified.","structured_output":{"status":"completed","summary":"Verified orders","checks":[{"name":"verify","status":"passed","detail":"ok"}],"changed_files":[],"service_order":["orders"]},"session_id":"sys-verify-1","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":3}}'
+exit 0
+"#;
+    fs::write(&program, script).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    program
+}
+
+struct SystemPhase3cFixture {
+    _dir: tempfile::TempDir,
+    sys_project_id: String,
+    orders_dir: PathBuf,
+    sessions: Arc<Sessions>,
+    port: u16,
+    token: String,
+    client: reqwest::Client,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl SystemPhase3cFixture {
+    async fn new() -> Self {
+        let _ = infra_host::process::use_guardian(PathBuf::from(env!(
+            "CARGO_BIN_EXE_infra-harness-inbox-fixture"
+        )));
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let source = root.join("source");
+        let bin_dir = source.join("bin");
+        let sys_dir = root.join("sys");
+        let orders_dir = root.join("orders");
+        let billing_dir = root.join("billing");
+        for path in [
+            bin_dir.clone(),
+            sys_dir.join("contracts"),
+            orders_dir.join("src"),
+            billing_dir.join("src"),
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(sys_dir.join("AGENTS.md"), "# System Policy\n").unwrap();
+        fs::write(sys_dir.join("contracts/shared.md"), "# Shared Contract\n").unwrap();
+        fs::write(
+            sys_dir.join("system.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "phase3c-sys",
+                "services": [
+                    { "id": "orders", "root": "../orders", "manifest": "ai-service.json" },
+                    { "id": "billing", "root": "../billing", "manifest": "ai-service.json" }
+                ],
+                "shared_sources": [
+                    { "kind": "policy", "path": "AGENTS.md" },
+                    { "kind": "contract", "path": "contracts/shared.md" }
+                ]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        fs::write(orders_dir.join("src/order.php"), "<?php // order\n").unwrap();
+        fs::write(orders_dir.join("src/internal.php"), "<?php // internal\n").unwrap();
+        fs::write(
+            orders_dir.join("ai-service.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "id": "orders",
+                "owner": "@orders",
+                "description": "Orders",
+                "capabilities": [{
+                    "id": "orders.place",
+                    "description": "Place order",
+                    "status": "implemented",
+                    "sources": ["src/order.php"]
+                }],
+                "provides": [{
+                    "id": "order.placed",
+                    "kind": "event",
+                    "version": "1",
+                    "sources": ["src/order.php"]
+                }],
+                "consumes": [],
+                "sources": [{ "kind": "code", "path": "src/order.php" }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        fs::write(billing_dir.join("src/api.php"), "<?php // billing api\n").unwrap();
+        fs::write(
+            billing_dir.join("ai-service.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "id": "billing",
+                "owner": "@billing",
+                "description": "Billing",
+                "capabilities": [{
+                    "id": "billing.charge",
+                    "description": "Charge",
+                    "status": "implemented",
+                    "sources": ["src/api.php"]
+                }],
+                "provides": [{
+                    "id": "billing.api",
+                    "kind": "http",
+                    "version": "1",
+                    "sources": ["src/api.php"]
+                }],
+                "consumes": [],
+                "sources": [{ "kind": "code", "path": "src/api.php" }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+
+        let claude = fake_system_claude(&bin_dir);
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let sys_project_id = store.register(&sys_dir).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        store.register(&orders_dir).unwrap();
+        store.register(&billing_dir).unwrap();
+
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::from([
+                (
+                    "claude".to_owned(),
+                    Provider {
+                        id: "claude".into(),
+                        name: "Fake System Claude".into(),
+                        available: true,
+                        executable: Some(claude),
+                        detail: "Test".into(),
+                    },
+                ),
+                (
+                    "codex".to_owned(),
+                    Provider {
+                        id: "codex".into(),
+                        name: "Fake Codex".into(),
+                        available: false,
+                        executable: None,
+                        detail: "Unused".into(),
+                    },
+                ),
+                (
+                    "cursor".to_owned(),
+                    Provider {
+                        id: "cursor".into(),
+                        name: "Fake Cursor".into(),
+                        available: false,
+                        executable: None,
+                        detail: "Unused".into(),
+                    },
+                ),
+            ]))),
+        });
+        static SYS_CATALOG: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        SYS_CATALOG
+            .get_or_init(|| async {
+                for id in ["claude", "codex", "cursor"] {
+                    infra_host::model_catalog::model_options(id, None, None)
+                        .await
+                        .unwrap();
+                }
+            })
+            .await;
+        let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
+        let links = Arc::new(SessionLinks::new());
+        let special: BTreeMap<String, Arc<dyn SpecialWorkflow>> = BTreeMap::from([
+            (
+                "creator".into(),
+                Arc::new(UnusedSpecial) as Arc<dyn SpecialWorkflow>,
+            ),
+            (
+                "system_run".into(),
+                Arc::new(infra_harness::bindings::SystemWorkflow {
+                    store: store.clone(),
+                    links: links.clone(),
+                    discovery: false,
+                    bridge: None,
+                }) as Arc<dyn SpecialWorkflow>,
+            ),
+            (
+                "system_discovery".into(),
+                Arc::new(infra_harness::bindings::SystemWorkflow {
+                    store: store.clone(),
+                    links: links.clone(),
+                    discovery: true,
+                    bridge: None,
+                }) as Arc<dyn SpecialWorkflow>,
+            ),
+        ]);
+        let sessions = Sessions::new(
+            store.clone(),
+            source.clone(),
+            providers.clone(),
+            knowledge.clone(),
+            Arc::new(UnusedSpecial),
+            special,
+            SessionLimits {
+                seconds: 60,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        links.bind(Arc::downgrade(&sessions)).unwrap();
+        let results = Arc::new(
+            Results::new(
+                store.clone(),
+                Arc::new(ResultsBridge {
+                    links: links.clone(),
+                    knowledge: knowledge.clone(),
+                    operation: sessions.operation_lock(),
+                    cancel: sessions.shutdown_cancel(),
+                }),
+            )
+            .unwrap(),
+        );
+        sessions.install_results(results.clone()).unwrap();
+        sessions
+            .install_commands(Arc::new(CommandCatalog::new(
+                store.clone(),
+                source.clone(),
+                providers.providers.clone(),
+            )))
+            .unwrap();
+        sessions
+            .install_accelerators(Arc::new(
+                Accelerators::new(
+                    store.clone(),
+                    source.clone(),
+                    providers,
+                    Arc::downgrade(&sessions),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        sessions.activate().unwrap();
+        let system_bridge = Arc::new(infra_harness::bindings::SystemBridge {
+            links: links.clone(),
+            store: store.clone(),
+        });
+        let system_manager = Arc::new(
+            infra_system::SystemManager::new(source.clone(), store.state.clone(), system_bridge)
+                .unwrap(),
+        );
+        let systems = Arc::new(infra_harness::bindings::SystemsDomain::new(system_manager));
+
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "setup",
+            "accelerators",
+            "creator",
+            "discovery",
+            "skills",
+            "delivery",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "omnigraph",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), Arc::new(StubDomain) as Arc<dyn Domain>))
+        .collect();
+        domains.insert("systems".into(), systems);
+        domains.insert("knowledge".into(), knowledge);
+        for name in ["sessions", "brain", "context"] {
+            domains.insert(name.into(), sessions.clone());
+        }
+        domains.insert(
+            "results".into(),
+            Arc::new(infra_harness::results::ResultService { results }),
+        );
+        let boot = store.clone();
+        let closing = sessions.clone();
+        let services = Arc::new(
+            NativeServices::new(
+                store,
+                domains,
+                Arc::new(move || {
+                    Ok(json!({"projects": boot.projects()?, "sessions": boot.summaries()?}))
+                }),
+                BTreeMap::from([(
+                    "memory.save".to_owned(),
+                    sessions.clone() as Arc<dyn Domain>,
+                )]),
+                Arc::new(move || {
+                    let closing = closing.clone();
+                    Box::pin(async move {
+                        let requested = closing.close();
+                        let reaped = closing.wait_closed().await;
+                        requested.and(reaped)
+                    }) as CloseFuture<'static>
+                }),
+            )
+            .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let token = "phase3c-sys-token".to_owned();
+        let app = App {
+            services,
+            token: token.clone(),
+            instance: "phase3c-sys-test".into(),
+            port,
+            source,
+            shutdown: shutdown.clone(),
+            assets: Arc::new(BTreeMap::new()),
+        };
+        let server = tokio::spawn(async move {
+            let _ = http::serve_listener(listener, app).await;
+        });
+        Self {
+            _dir: dir,
+            sys_project_id,
+            orders_dir,
+            sessions,
+            port,
+            token,
+            client: reqwest::Client::new(),
+            shutdown,
+            server,
+        }
+    }
+
+    async fn http(&self, method: Method, path: &str, body: Option<Value>) -> (u16, Value) {
+        let mut request = self
+            .client
+            .request(method, format!("http://127.0.0.1:{}{path}", self.port))
+            .header("x-harness-token", &self.token);
+        if let Some(body) = body {
+            let raw = body.to_string();
+            request = request
+                .header("content-type", "application/json")
+                .header("content-length", raw.len())
+                .body(raw);
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status().as_u16();
+        let bytes = response.bytes().await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn wait_run(&self, rid: &str, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (status, view) = self
+                .http(Method::GET, &format!("/api/system-runs/{rid}"), None)
+                .await;
+            assert_eq!(status, 200, "{what}: {view}");
+            if done(&view) {
+                return view;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {view}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn close(self) {
+        let _ = self.shutdown.send(true);
+        let _ = self.sessions.close();
+        let _ = self.sessions.wait_closed().await;
+        let _ = self.server.await;
+    }
+}
+
+fn run_large_stack<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .thread_stack_size(32 << 20)
+        .build()
+        .unwrap();
+    rt.block_on(async { tokio::spawn(future).await.unwrap() });
+}
+
+#[test]
+fn system_workflow_manual_permissions_ask_wait_allow_and_verify_via_http() {
+    run_large_stack(async {
+        let fx = SystemPhase3cFixture::new().await;
+        fs::write(fx.orders_dir.join(".test-mode"), "manual").unwrap();
+
+        let (prep_status, prep) = fx
+            .http(
+                Method::POST,
+                "/api/system-runs",
+                Some(json!({
+                    "project_id": fx.sys_project_id,
+                    "config_path": "system.json",
+                    "task": "Update orders service",
+                    "change_id": "chg-3c-manual",
+                    "services": ["orders"]
+                })),
+            )
+            .await;
+        assert_eq!(prep_status, 201, "{prep}");
+        let rid = prep["id"].as_str().unwrap().to_owned();
+
+        let (exec_status, exec) = fx
+            .http(
+                Method::POST,
+                &format!("/api/system-runs/{rid}"),
+                Some(json!({
+                    "action": "execute",
+                    "revision": 0,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "timeout": 30,
+                    "access": "service",
+                    "permissions": "manual"
+                })),
+            )
+            .await;
+        assert_eq!(exec_status, 200, "{exec}");
+        assert_eq!(exec["permissions"], "manual");
+
+        let waiting_view = fx
+            .wait_run(&rid, "manual waiting permission", |view| {
+                !view["waiting_permissions"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+            })
+            .await;
+        assert_eq!(waiting_view["permissions"], "manual");
+        let waiting = waiting_view["waiting_permissions"].as_array().unwrap();
+        assert_eq!(waiting.len(), 1);
+        let req_id = waiting[0]["request_id"].as_str().unwrap().to_owned();
+        assert!(req_id.starts_with("claude-sys-manual-1-"), "{waiting:?}");
+        let sid = waiting_view["session_id"].as_str().unwrap().to_owned();
+
+        let (decide_status, decide) = fx
+            .http(
+                Method::POST,
+                &format!("/api/sessions/{sid}/permissions/{req_id}"),
+                Some(json!({"decision": "allow"})),
+            )
+            .await;
+        assert_eq!(decide_status, 200, "{decide}");
+
+        let completed = fx
+            .wait_run(&rid, "manual system run completion", |view| {
+                view["active"] == false && view["status"] == "completed"
+            })
+            .await;
+        assert_eq!(completed["permissions"], "manual");
+        assert!(
+            completed["waiting_permissions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            completed["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ev| ev["kind"] == "permission"
+                    && ev["request_id"] == req_id
+                    && ev["state"] == "allowed"
+                    && ev["by"] == "person"),
+            "{}",
+            completed["events"]
+        );
+
+        fx.close().await;
+    });
+}
+
+#[test]
+fn system_workflow_auto_mode_auto_allows_own_service_and_escalates_boundary_ask_via_http() {
+    run_large_stack(async {
+        let fx = SystemPhase3cFixture::new().await;
+        fs::write(fx.orders_dir.join(".test-mode"), "auto").unwrap();
+
+        let (prep_status, prep) = fx
+            .http(
+                Method::POST,
+                "/api/system-runs",
+                Some(json!({
+                    "project_id": fx.sys_project_id,
+                    "config_path": "system.json",
+                    "task": "Update orders cleanly",
+                    "change_id": "chg-3c-auto",
+                    "services": ["orders"]
+                })),
+            )
+            .await;
+        assert_eq!(prep_status, 201, "{prep}");
+        let rid = prep["id"].as_str().unwrap().to_owned();
+
+        let (exec_status, exec) = fx
+            .http(
+                Method::POST,
+                &format!("/api/system-runs/{rid}"),
+                Some(json!({
+                    "action": "execute",
+                    "revision": 0,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "timeout": 30,
+                    "access": "service",
+                    "permissions": "auto"
+                })),
+            )
+            .await;
+        assert_eq!(exec_status, 200, "{exec}");
+        assert_eq!(exec["permissions"], "auto");
+
+        // Own-service Edit (`sys-auto-intra`) must auto-allow without surfacing a waiter;
+        // foreign-service Edit (`sys-auto-cross`) escalates to human confirmation.
+        let waiting_view = fx
+            .wait_run(&rid, "auto boundary escalation waiter", |view| {
+                !view["waiting_permissions"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+            })
+            .await;
+        assert_eq!(waiting_view["permissions"], "auto");
+        let waiting = waiting_view["waiting_permissions"].as_array().unwrap();
+        assert_eq!(waiting.len(), 1);
+        let req_id = waiting[0]["request_id"].as_str().unwrap().to_owned();
+        assert!(req_id.starts_with("claude-sys-auto-cross-"), "{waiting:?}");
+        assert_eq!(waiting[0]["session_option"], false);
+        assert!(
+            waiting[0]["detail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("[Auto -> Manual boundary escalation:"),
+            "{waiting:?}"
+        );
+        let sid = waiting_view["session_id"].as_str().unwrap().to_owned();
+
+        let (decide_status, decide) = fx
+            .http(
+                Method::POST,
+                &format!("/api/sessions/{sid}/permissions/{req_id}"),
+                Some(json!({"decision": "allow"})),
+            )
+            .await;
+        assert_eq!(decide_status, 200, "{decide}");
+
+        let completed = fx
+            .wait_run(&rid, "auto boundary escalated run completion", |view| {
+                view["active"] == false && view["status"] == "completed"
+            })
+            .await;
+        assert_eq!(completed["permissions"], "auto");
+        assert!(
+            completed["waiting_permissions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            completed["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ev| ev["kind"] == "permission"
+                    && ev["request_id"] == req_id
+                    && ev["state"] == "allowed"
+                    && ev["by"] == "person"),
+            "{}",
+            completed["events"]
+        );
+
+        fx.close().await;
+    });
+}

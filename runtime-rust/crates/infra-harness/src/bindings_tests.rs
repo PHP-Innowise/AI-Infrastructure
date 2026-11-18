@@ -325,3 +325,138 @@ fn manager_requests_still_work_without_a_tokio_runtime() {
         Poll::Pending => panic!("The closed synchronous fallback unexpectedly yielded"),
     }
 }
+
+#[test]
+fn system_bridge_waiting_permissions_delegates_through_links() {
+    use crate::sessions::{
+        BlackboardFactory, Event, RunReply, SessionLimits, Sessions, SpecialWorkflow,
+    };
+    use std::sync::{Arc, Mutex, RwLock};
+
+    struct NoopSpecial;
+    impl SpecialWorkflow for NoopSpecial {
+        fn run<'a>(
+            &'a self,
+            _: Value,
+            _: String,
+            _: String,
+            _: Arc<std::sync::atomic::AtomicBool>,
+            _: Event,
+        ) -> RunReply<'a> {
+            Box::pin(async { Ok(json!({})) })
+        }
+    }
+    impl BlackboardFactory for NoopSpecial {
+        fn for_session(&self, _: &Value) -> Result<Arc<dyn crate::fleet::Blackboard>> {
+            Err(HarnessError::unavailable("unused"))
+        }
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let source = root.join("source");
+    let project = root.join("project");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let store = SessionStore::open(&root.join("state")).unwrap();
+    let project_id = store.register(&project).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sid = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "claude",
+                "mode": "edit",
+                "permissions": "manual"
+            }),
+            "hi",
+            &[],
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store
+        .connection()
+        .unwrap()
+        .execute("UPDATE sessions SET status='running' WHERE id=?1", [&sid])
+        .unwrap();
+    let links = Arc::new(SessionLinks::new());
+    let bridge = SystemBridge {
+        links: links.clone(),
+        store: store.clone(),
+    };
+
+    // Unbound links fail rather than silently claiming zero waiting permissions.
+    assert!(bridge.waiting_permissions(&sid).is_err());
+
+    runtime().block_on(async {
+        let providers = Arc::new(crate::provider::ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::new())),
+        });
+        let knowledge = Arc::new(crate::knowledge::KnowledgeDomain::new(
+            store.clone(),
+            source.clone(),
+        ));
+        let noop: Arc<dyn SpecialWorkflow> = Arc::new(NoopSpecial);
+        let special = BTreeMap::from([
+            ("creator".to_owned(), noop.clone()),
+            ("system_run".to_owned(), noop.clone()),
+            ("system_discovery".to_owned(), noop),
+        ]);
+        let sessions = Sessions::new(
+            store,
+            source,
+            providers,
+            knowledge,
+            Arc::new(NoopSpecial),
+            special,
+            SessionLimits {
+                seconds: 60,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        links.bind(Arc::downgrade(&sessions)).unwrap();
+
+        assert!(bridge.waiting_permissions(&sid).unwrap().is_empty());
+
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let recorded = events.clone();
+        let emit: Event = Arc::new(move |ev| {
+            recorded.lock().unwrap().push(ev);
+            Ok(())
+        });
+        let approvals = sessions
+            .system_approvals(&sid, &json!({"permissions": "manual"}), &emit)
+            .expect("Manual system sessions need an approvals desk handle");
+        let rx = approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "req-bridge-1".into(),
+                provider: "claude".into(),
+                tool: "Edit".into(),
+                summary: "Edit foreign service".into(),
+                kind: "file_change".into(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let waiting = bridge.waiting_permissions(&sid).unwrap();
+        assert_eq!(waiting.len(), 1);
+        let request_id = waiting[0]["request_id"].as_str().unwrap().to_owned();
+        assert!(request_id.starts_with("req-bridge-1-"));
+        assert_eq!(waiting[0]["summary"], "Edit foreign service");
+
+        sessions
+            .decide_permission(&sid, &request_id, &json!({"decision": "allow"}))
+            .unwrap();
+        let answer = rx.await.unwrap();
+        assert_eq!(answer.decision, infra_host::permission::Decision::Allow);
+        assert!(bridge.waiting_permissions(&sid).unwrap().is_empty());
+
+        let _ = sessions.close();
+        let _ = sessions.wait_closed().await;
+    });
+}
