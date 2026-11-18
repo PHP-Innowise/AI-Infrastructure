@@ -329,6 +329,55 @@ fn save_budget_settings(store: &SessionStore, sid: &str, data: &Value) -> Result
     tx.commit()?;
     Ok(saved)
 }
+/// Observes a tool event in `LiveFocusTracker` and forwards completed workspace file mutations
+/// to `Graphs::record_live_paths` when a code graph manager is installed.
+fn observe_tool_event_with_graphs(
+    tracker: &mut crate::graph_live::LiveFocusTracker,
+    event: &Value,
+    graphs: Option<&crate::graph::Graphs>,
+    project_id: &str,
+    workspace: &Path,
+) -> Option<Value> {
+    let delta = tracker.observe_tool_event(event);
+    if event["kind"] == "tool"
+        && event["state"].as_str().unwrap_or("") != "started"
+        && event["ok"] != false
+        && let Some(graphs) = graphs
+        && !project_id.is_empty()
+    {
+        let tool = event["tool"].as_str().unwrap_or("").to_ascii_lowercase();
+        let has_changes = event["changes"]
+            .as_array()
+            .is_some_and(|changes| !changes.is_empty());
+        let is_mutation = matches!(
+            tool.as_str(),
+            "edit" | "write" | "multiedit" | "notebookedit" | "file_change" | "delete"
+        ) || has_changes;
+        if is_mutation {
+            let mut mutated = std::collections::BTreeSet::new();
+            if let Some(changes) = event["changes"].as_array().filter(|arr| !arr.is_empty()) {
+                for change in changes {
+                    if change["outside"] != true
+                        && let Some(raw) = change["path"].as_str()
+                        && let Some(rel) = crate::graph_ir::normalize_rel_path(workspace, raw)
+                    {
+                        mutated.insert(rel);
+                    }
+                }
+            } else if event["outside"] != true
+                && let Some(raw) = event["path"].as_str()
+                && let Some(rel) = crate::graph_ir::normalize_rel_path(workspace, raw)
+            {
+                mutated.insert(rel);
+            }
+            if !mutated.is_empty() {
+                let paths: Vec<String> = mutated.into_iter().collect();
+                graphs.record_live_paths(project_id, &paths);
+            }
+        }
+    }
+    delta
+}
 impl Sessions {
     pub fn new(
         store: SessionStore,
@@ -2015,6 +2064,9 @@ impl Sessions {
         let generation = job.generation.clone();
         let emit_events = emit.clone();
         let focus_for_stream = live_focus.clone();
+        let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
+        let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
+        let workspace_for_stream = workspace.clone();
         let observed = Box::pin(provider::run_monitored_locked(
             &launch,
             Limits {
@@ -2051,7 +2103,13 @@ impl Sessions {
                 let focus_delta = if event["kind"] == "tool"
                     && let Ok(mut tracker) = focus_for_stream.lock()
                 {
-                    let delta = tracker.observe_tool_event(&event);
+                    let delta = observe_tool_event_with_graphs(
+                        &mut tracker,
+                        &event,
+                        graphs_for_stream.as_deref(),
+                        &project_id_for_stream,
+                        &workspace_for_stream,
+                    );
                     if delta.is_some() {
                         let _ =
                             crate::graph_live::save_session_focus(&store, &sid, tracker.focus());
@@ -4921,6 +4979,72 @@ mod graph_focus_tests {
         assert_eq!(delta["created_entities"].as_array().map(Vec::len), Some(1));
         assert_eq!(delta["created_entities"][0]["name"], "verifyToken");
         assert_eq!(delta["created_entities"][0]["parent"], "JwtGuard");
+    }
+
+    #[test]
+    fn observe_tool_event_with_graphs_updates_native_ir_and_live_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/service.rs"),
+            "pub fn initial_fn() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let pid = store.register(&root).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let graphs =
+            crate::graph::Graphs::with_native_backend(store.clone(), std::time::Duration::ZERO);
+        graphs.act(&pid, "enable").unwrap();
+        let started = std::time::Instant::now();
+        while graphs.status(&pid, false).unwrap()["state"] == "building" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
+
+        let mut tracker = crate::graph_live::LiveFocusTracker::new(root.clone());
+        let _ = observe_tool_event_with_graphs(
+            &mut tracker,
+            &json!({
+                "kind": "tool",
+                "state": "started",
+                "tool": "Edit",
+                "path": "src/service.rs"
+            }),
+            Some(&graphs),
+            &pid,
+            &root,
+        );
+        std::fs::write(
+            root.join("src/service.rs"),
+            "pub fn initial_fn() -> i32 {\n    1\n}\npub fn newly_added_fn() -> i32 {\n    2\n}\n",
+        )
+        .unwrap();
+        let delta = observe_tool_event_with_graphs(
+            &mut tracker,
+            &json!({
+                "kind": "tool",
+                "state": "completed",
+                "ok": true,
+                "tool": "Edit",
+                "path": "src/service.rs"
+            }),
+            Some(&graphs),
+            &pid,
+            &root,
+        )
+        .expect("live focus delta");
+        assert_eq!(delta["created_entities"][0]["name"], "newly_added_fn");
+
+        let found = graphs.find(&pid, None, "newly_added_fn", false).unwrap();
+        assert_eq!(found["rows"][0]["file"], "src/service.rs", "{found}");
+        graphs.close();
     }
 
     #[tokio::test]

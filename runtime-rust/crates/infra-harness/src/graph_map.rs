@@ -457,6 +457,7 @@ struct Builder<'a> {
     /// Links met before the node list; the node-link format puts nodes first.
     early: Vec<Link>,
     listed: bool,
+    backend: Option<String>,
 }
 impl Builder<'_> {
     fn path(&self, raw: &str) -> Option<String> {
@@ -643,6 +644,13 @@ impl<'de> Visitor<'de> for Whole<'_, '_> {
             match key.as_str() {
                 "nodes" => map.next_value_seed(Nodes(&mut *self.0))?,
                 "links" | "edges" => map.next_value_seed(Links(&mut *self.0))?,
+                "backend" => {
+                    self.0.backend = map
+                        .next_value::<Loose>()?
+                        .0
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty());
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -752,6 +760,7 @@ pub struct Index {
     nodes: u64,
     links: u64,
     unplaced: u64,
+    backend: Option<String>,
 }
 /// The part of `path` that stands for it when `scope` is open: the child of
 /// the scope that holds it, or, outside the scope, the first folder where the
@@ -909,6 +918,7 @@ impl Index {
             unplaced: 0,
             early: Vec::new(),
             listed: false,
+            backend: None,
         };
         let mut reader = serde_json::Deserializer::from_reader(std::io::BufReader::new(source));
         Whole(&mut builder)
@@ -1011,6 +1021,7 @@ impl Index {
             nodes: builder.nodes,
             links: builder.links,
             unplaced: builder.unplaced,
+            backend: builder.backend,
         })
     }
     fn folder(&self, scope: &str) -> bool {
@@ -1145,6 +1156,10 @@ pub(crate) fn check_layer_rule(
 impl Index {
     pub(crate) fn files(&self) -> &[String] {
         &self.files
+    }
+
+    pub(crate) fn backend(&self) -> Option<&str> {
+        self.backend.as_deref()
     }
 
     pub(crate) fn pairs(&self) -> &[(u32, u32, Pair)] {
@@ -1552,7 +1567,7 @@ impl Index {
                 "kinds": self.kinds_json(&kinds),
             })
         });
-        json!({
+        let mut out = json!({
             "scope": scope,
             "crumbs": Self::crumbs(project, scope),
             "certain": certain,
@@ -1584,7 +1599,11 @@ impl Index {
                 self.edge_json(source, target, edge)
             }).collect::<Vec<_>>(),
             "focus": focus,
-        })
+        });
+        if let Some(ref backend) = self.backend {
+            out["backend"] = json!(backend);
+        }
+        out
     }
     /// What a place stands for: a file or a folder by its path, or a symbol
     /// by the name the picture of its file selects it by.
@@ -2589,6 +2608,7 @@ impl Index {
             uses,
             kinds: self.kinds.clone(),
             unplaced: self.unplaced,
+            backend: self.backend.clone(),
         }
     }
 }
@@ -7018,6 +7038,35 @@ impl Maps {
             };
             cache.kept.retain(|(name, ..)| !matches(name));
             cache.inflight.retain(|name, _| !matches(name));
+        }
+    }
+
+    /// Reads the optional native SQLite IR summary counters for `project` when present on disk.
+    pub(crate) fn ir_summary(
+        &self,
+        state: &Path,
+        project: &str,
+    ) -> Option<crate::graph_ir::IrSummary> {
+        crate::graph_ir::GraphIrStore::read_summary_if_exists(state, project)
+            .ok()
+            .flatten()
+    }
+}
+
+/// Attaches non-breaking `"backend"` and `"ir_summary"` metadata onto a `graph.map` view.
+pub(crate) fn attach_ir_metadata(
+    view: &mut Value,
+    backend: Option<&str>,
+    ir_summary: Option<&crate::graph_ir::IrSummary>,
+) {
+    if let Value::Object(map) = view {
+        if let Some(backend) = backend.filter(|s| !s.is_empty()) {
+            map.insert("backend".into(), json!(backend));
+        }
+        if let Some(summary) = ir_summary
+            && let Ok(val) = serde_json::to_value(summary)
+        {
+            map.insert("ir_summary".into(), val);
         }
     }
 }
@@ -14110,5 +14159,38 @@ where
                 "truncated": false
             })
         );
+    }
+
+    #[test]
+    fn maps_and_index_expose_native_ir_backend_and_summary_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(project_dir.join("src")).unwrap();
+        std::fs::write(
+            project_dir.join("src/lib.rs"),
+            "pub fn greet() -> i32 {\n    42\n}\n",
+        )
+        .unwrap();
+
+        let maps = Maps::default();
+        assert_eq!(maps.ir_summary(&state, "p1"), None);
+
+        let ir = crate::graph_ir::GraphIrStore::open(&state, "p1").unwrap();
+        ir.sync_workspace(&project_dir).unwrap();
+        let live_graph = state.join("graphs/p1/live/graph.json");
+        ir.write_live_graph_atomic(&live_graph).unwrap();
+
+        let idx = maps.index("p1", &live_graph, &project_dir).unwrap();
+        assert_eq!(idx.backend(), Some(crate::graph_ir::NATIVE_IR_TOOL));
+
+        let mut view = idx.view("p1", "", None, false, "");
+        assert_eq!(view["backend"], crate::graph_ir::NATIVE_IR_TOOL);
+
+        let summary = maps.ir_summary(&state, "p1").expect("ir summary");
+        assert_eq!(summary.files, 1);
+        attach_ir_metadata(&mut view, idx.backend(), Some(&summary));
+        assert_eq!(view["ir_summary"]["files"], 1);
+        assert!(view["ir_summary"]["symbols"].as_u64().unwrap_or(0) >= 1);
     }
 }

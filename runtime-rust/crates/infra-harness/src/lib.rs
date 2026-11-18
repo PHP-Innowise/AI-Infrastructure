@@ -21,6 +21,7 @@ pub mod graph_changes;
 pub mod graph_crates;
 pub(crate) mod graph_deps;
 pub(crate) mod graph_impact;
+pub(crate) mod graph_ir;
 pub mod graph_live;
 pub(crate) mod graph_manifests;
 pub mod graph_map;

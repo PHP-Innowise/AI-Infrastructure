@@ -44,6 +44,11 @@ const PULLS_AGE: Duration = Duration::from_secs(60);
 const REVISIONS: usize = 3;
 /// Maximum preserved source bytes kept per commit/PR revision tree for Access and Crates checks.
 const MAX_THIN_TREE_BYTES: u64 = 64 * 1024 * 1024;
+const WATCHER_DEBOUNCE: Duration = Duration::from_millis(150);
+const WATCHER_MAX_DELAY: Duration = Duration::from_millis(600);
+const MAX_WATCHER_BATCH: usize = 512;
+const NATIVE_READY_MESSAGE: &str =
+    "Code graph & dependency map ready (native tree-sitter SQLite IR).";
 /// What a build is doing before the tool runs.
 const WAITING: u8 = 1;
 const EXPORTING: u8 = 2;
@@ -1295,13 +1300,28 @@ fn end(child: &mut Child) {
     let _ = child.wait();
 }
 fn status_message(state: &str, build: Option<&Value>, failure: Option<&str>) -> String {
+    status_message_for_tool(state, build, failure, None)
+}
+
+fn status_message_for_tool(
+    state: &str,
+    build: Option<&Value>,
+    failure: Option<&str>,
+    tool: Option<&str>,
+) -> String {
     match state {
         "building" => build
             .and_then(|value| value["message"].as_str())
             .filter(|text| !text.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| "Building code graph…".to_owned()),
-        "ready" => "Code graph & dependency map ready.".to_owned(),
+        "ready" => {
+            if tool == Some(crate::graph_ir::NATIVE_IR_TOOL) {
+                NATIVE_READY_MESSAGE.to_owned()
+            } else {
+                "Code graph & dependency map ready.".to_owned()
+            }
+        }
         "stale" => "Code graph is outdated; changes detected in project.".to_owned(),
         "failed" => match failure.filter(|text| !text.is_empty()) {
             Some(reason) => format!("Code graph build failed: {reason}"),
@@ -1470,10 +1490,56 @@ impl Followed {
         }))
     }
 }
+#[derive(Clone, Debug)]
+enum BuildBackend {
+    Graphify(Tool),
+    NativeIr,
+}
+
+impl BuildBackend {
+    fn tool_version(&self) -> Option<String> {
+        match self {
+            Self::Graphify(tool) => tool.version.clone(),
+            Self::NativeIr => Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+        }
+    }
+}
+
+enum WatcherMsg {
+    Paths(Vec<PathBuf>),
+    Stop,
+}
+
+struct ProjectWatcher {
+    root: PathBuf,
+    stop: Arc<AtomicBool>,
+    tx: std::sync::mpsc::Sender<WatcherMsg>,
+    watcher: Option<notify::RecommendedWatcher>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ProjectWatcher {
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.watcher.take();
+        let _ = self.tx.send(WatcherMsg::Stop);
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ProjectWatcher {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 pub struct Graphs {
     me: Weak<Graphs>,
     store: SessionStore,
     program: Option<PathBuf>,
+    force_native: bool,
     gap: Duration,
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -1481,9 +1547,12 @@ pub struct Graphs {
     prints: Mutex<BTreeMap<String, (Instant, Option<Print>)>>,
     finished: Mutex<BTreeMap<String, Instant>>,
     writing: Mutex<()>,
+    ir_write: Mutex<()>,
     stopping: AtomicBool,
     autostarting: AtomicBool,
     maps: crate::graph_map::Maps,
+    ir_stores: Mutex<BTreeMap<String, Arc<crate::graph_ir::GraphIrStore>>>,
+    watchers: Mutex<BTreeMap<String, ProjectWatcher>>,
     history: Mutex<BTreeMap<String, HistoryEntry>>,
     /// Open pull requests of each project as last listed, or why not.
     pulls: Mutex<BTreeMap<String, Listing>>,
@@ -1497,6 +1566,13 @@ pub struct Graphs {
     refused: Mutex<BTreeMap<(String, String), String>>,
     /// Synthetic system service graph targets (`sys-<hash>` -> `(root, name)`).
     targets: Mutex<BTreeMap<String, (PathBuf, String)>>,
+}
+
+impl Drop for Graphs {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        self.shutdown_watchers();
+    }
 }
 type Listing = (Instant, Vec<Pull>, Option<String>);
 struct HistoryEntry {
@@ -1513,10 +1589,23 @@ impl Graphs {
         Self::with(store, program, AUTOMATIC_GAP)
     }
     pub fn with(store: SessionStore, program: Option<PathBuf>, gap: Duration) -> Arc<Self> {
+        Self::with_options(store, program, Self::force_native_backend(), gap)
+    }
+    /// Constructs a `Graphs` service pinned to the native tree-sitter SQLite IR backend.
+    pub fn with_native_backend(store: SessionStore, gap: Duration) -> Arc<Self> {
+        Self::with_options(store, None, true, gap)
+    }
+    fn with_options(
+        store: SessionStore,
+        program: Option<PathBuf>,
+        force_native: bool,
+        gap: Duration,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             store,
             program,
+            force_native,
             gap,
             jobs: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(Vec::new()),
@@ -1524,9 +1613,12 @@ impl Graphs {
             prints: Mutex::new(BTreeMap::new()),
             finished: Mutex::new(BTreeMap::new()),
             writing: Mutex::new(()),
+            ir_write: Mutex::new(()),
             stopping: AtomicBool::new(false),
             autostarting: AtomicBool::new(false),
             maps: crate::graph_map::Maps::default(),
+            ir_stores: Mutex::new(BTreeMap::new()),
+            watchers: Mutex::new(BTreeMap::new()),
             history: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(BTreeMap::new()),
             searches: Mutex::new(BTreeMap::new()),
@@ -1608,7 +1700,7 @@ impl Graphs {
             return Ok(());
         }
         if setting["enabled"] != true {
-            let _ = self.tool(true);
+            let _ = self.resolve_backend(true);
             self.edit(project, |setting| {
                 setting["enabled"] = json!(true);
                 if let Some(fields) = setting.as_object_mut() {
@@ -1928,8 +2020,24 @@ impl Graphs {
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
-            view["built"] = json!({"commit": built["commit"], "at": built["at"]});
-            view["message"] = json!("Code graph & dependency map ready.");
+            let native_backend = built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL)
+                || index.backend() == Some(crate::graph_ir::NATIVE_IR_TOOL);
+            if native_backend {
+                view["built"] = json!({
+                    "commit": built["commit"],
+                    "at": built["at"],
+                    "tool": crate::graph_ir::NATIVE_IR_TOOL,
+                });
+                view["message"] = json!(NATIVE_READY_MESSAGE);
+            } else {
+                view["built"] = json!({"commit": built["commit"], "at": built["at"]});
+                view["message"] = json!("Code graph & dependency map ready.");
+            }
+            let backend_label = native_backend
+                .then_some(crate::graph_ir::NATIVE_IR_TOOL)
+                .or_else(|| index.backend());
+            let ir_summary = self.maps.ir_summary(&self.store.state, project);
+            crate::graph_map::attach_ir_metadata(&mut view, backend_label, ir_summary.as_ref());
             apply_graph_focus(
                 &self.store,
                 project,
@@ -2201,11 +2309,28 @@ impl Graphs {
         view["state"] = json!(found.state);
         view["build"] = found.build;
         view["failure"] = json!(found.failure);
-        view["message"] = json!(revision_message(
-            found.state,
-            &view["build"],
-            found.failure.as_deref(),
-        ));
+        let native_backend = (own
+            && built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL))
+            || active_index.as_ref().and_then(|idx| idx.backend())
+                == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        let revision_tool =
+            (found.state == "ready" && native_backend).then_some(crate::graph_ir::NATIVE_IR_TOOL);
+        view["message"] = json!(match (found.state, revision_tool) {
+            ("missing", _) => "Code graph for this revision is not built yet.".to_owned(),
+            _ => status_message_for_tool(
+                found.state,
+                Some(&view["build"]),
+                found.failure.as_deref(),
+                revision_tool,
+            ),
+        });
+        let backend_label = native_backend
+            .then_some(crate::graph_ir::NATIVE_IR_TOOL)
+            .or_else(|| active_index.as_ref().and_then(|idx| idx.backend()));
+        let ir_summary = own
+            .then(|| self.maps.ir_summary(&self.store.state, project))
+            .flatten();
+        crate::graph_map::attach_ir_metadata(&mut view, backend_label, ir_summary.as_ref());
         let sysrun_focus_id;
         let focus_sid = match target {
             Target::Run(session) => Some(session.as_str()),
@@ -2226,7 +2351,15 @@ impl Graphs {
         if own {
             view["stale"] = json!(stale);
             view["rebuilding"] = json!(lock(&self.jobs)?.contains_key(project));
-            view["built"] = json!({"commit": built["commit"], "at": built["at"]});
+            view["built"] = if built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL) {
+                json!({
+                    "commit": built["commit"],
+                    "at": built["at"],
+                    "tool": crate::graph_ir::NATIVE_IR_TOOL,
+                })
+            } else {
+                json!({"commit": built["commit"], "at": built["at"]})
+            };
         }
         told(&mut view);
         Ok((view, cache_hit))
@@ -2662,6 +2795,283 @@ impl Graphs {
         *cached = Some((Instant::now(), found.clone()));
         found
     }
+    fn force_native_backend() -> bool {
+        std::env::var_os("HARNESS_GRAPH_BACKEND").is_some_and(|value| {
+            value
+                .to_string_lossy()
+                .trim()
+                .eq_ignore_ascii_case("native")
+        })
+    }
+    fn resolve_backend(&self, fresh: bool) -> Option<BuildBackend> {
+        if self.force_native || Self::force_native_backend() {
+            return Some(BuildBackend::NativeIr);
+        }
+        if self.program.is_some() {
+            return self.tool(fresh).map(BuildBackend::Graphify);
+        }
+        Some(match self.tool(fresh) {
+            Some(tool) => BuildBackend::Graphify(tool),
+            None => BuildBackend::NativeIr,
+        })
+    }
+    fn ir_store(&self, project: &str) -> Result<Arc<crate::graph_ir::GraphIrStore>> {
+        if let Some(existing) = lock(&self.ir_stores)?.get(project).cloned() {
+            return Ok(existing);
+        }
+        let opened = Arc::new(crate::graph_ir::GraphIrStore::open(
+            &self.store.state,
+            project,
+        )?);
+        let mut stores = lock(&self.ir_stores)?;
+        Ok(stores
+            .entry(project.to_owned())
+            .or_insert_with(|| opened)
+            .clone())
+    }
+    fn evict_ir_store(&self, project: &str) {
+        if let Ok(mut stores) = self.ir_stores.lock() {
+            stores.remove(project);
+        }
+    }
+    fn stop_watcher(&self, project: &str) {
+        let removed = self
+            .watchers
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(project));
+        if let Some(mut watcher) = removed {
+            watcher.shutdown();
+        }
+    }
+    fn ensure_watcher(&self, project: &str, root: &Path) {
+        if self.stopping.load(Ordering::Acquire) || !root.is_dir() {
+            return;
+        }
+        {
+            let Ok(watchers) = self.watchers.lock() else {
+                return;
+            };
+            if watchers
+                .get(project)
+                .is_some_and(|existing| existing.root == root)
+            {
+                return;
+            }
+        }
+        self.stop_watcher(project);
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<WatcherMsg>();
+        let tx_watch = tx.clone();
+        let Ok(mut watcher) = crate::graph_ast::create_code_watcher(move |paths| {
+            let _ = tx_watch.send(WatcherMsg::Paths(paths));
+        }) else {
+            return;
+        };
+        // Degrade gracefully when inotify watch limits are exhausted on constrained containers.
+        if crate::graph_ast::watch_root_recursive(&mut watcher, root).is_err() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let project_name = project.to_owned();
+        let watched_root = root.to_path_buf();
+        let weak_me = Arc::downgrade(&me);
+        let Ok(thread) = std::thread::Builder::new()
+            .name("harness-graph-watch".into())
+            .spawn(move || {
+                loop {
+                    if stop_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let first = match rx.recv() {
+                        Ok(WatcherMsg::Paths(paths)) => paths,
+                        Ok(WatcherMsg::Stop) | Err(_) => break,
+                    };
+                    let mut pending = BTreeSet::new();
+                    for path in first {
+                        if let Some(rel) = crate::graph_ir::normalize_rel_path(
+                            &watched_root,
+                            &path.to_string_lossy(),
+                        ) {
+                            pending.insert(rel);
+                        }
+                    }
+                    let batch_start = Instant::now();
+                    let mut deadline = batch_start + WATCHER_DEBOUNCE;
+                    while !stop_thread.load(Ordering::Acquire) {
+                        let max_deadline = batch_start + WATCHER_MAX_DELAY;
+                        let target_deadline = deadline.min(max_deadline);
+                        let wait = target_deadline.saturating_duration_since(Instant::now());
+                        if wait.is_zero() {
+                            break;
+                        }
+                        match rx.recv_timeout(wait) {
+                            Ok(WatcherMsg::Paths(more)) => {
+                                for path in more {
+                                    if pending.len() >= MAX_WATCHER_BATCH {
+                                        break;
+                                    }
+                                    if let Some(rel) = crate::graph_ir::normalize_rel_path(
+                                        &watched_root,
+                                        &path.to_string_lossy(),
+                                    ) {
+                                        pending.insert(rel);
+                                    }
+                                }
+                                deadline = Instant::now() + WATCHER_DEBOUNCE;
+                            }
+                            Ok(WatcherMsg::Stop)
+                            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        }
+                    }
+                    if stop_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if pending.is_empty() {
+                        continue;
+                    }
+                    let Some(graphs) = weak_me.upgrade() else {
+                        break;
+                    };
+                    if graphs.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let batch: Vec<String> = pending.into_iter().collect();
+                    let _ = graphs.apply_ir_path_updates(&project_name, &watched_root, &batch);
+                }
+            })
+        else {
+            return;
+        };
+        let mut pw = ProjectWatcher {
+            root: root.to_path_buf(),
+            stop,
+            tx,
+            watcher: Some(watcher),
+            thread: Some(thread),
+        };
+        if self.stopping.load(Ordering::Acquire) {
+            pw.shutdown();
+            return;
+        }
+        if let Ok(mut watchers) = self.watchers.lock() {
+            if let Some(mut old) = watchers.insert(project.to_owned(), pw) {
+                drop(watchers);
+                old.shutdown();
+            }
+        } else {
+            pw.shutdown();
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            self.stop_watcher(project);
+        }
+    }
+    /// Triggers incremental SQLite IR updates (and refreshes `live/graph.json` when using native IR)
+    /// for modified/deleted workspace relative paths.
+    pub fn record_live_paths(&self, project: &str, rel_paths: &[String]) {
+        if self.stopping.load(Ordering::Acquire) || project.is_empty() || rel_paths.is_empty() {
+            return;
+        }
+        let Ok(root) = self.root(project) else {
+            return;
+        };
+        if !root.is_dir() {
+            return;
+        }
+        let Ok(setting) = self.setting(project) else {
+            return;
+        };
+        if setting["enabled"] != true {
+            return;
+        }
+        let mut unique = BTreeSet::new();
+        for raw in rel_paths {
+            if let Some(rel) = crate::graph_ir::normalize_rel_path(&root, raw) {
+                unique.insert(rel);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = unique.into_iter().collect();
+        let _ = self.apply_ir_path_updates(project, &root, &paths);
+    }
+    fn apply_ir_path_updates(
+        &self,
+        project: &str,
+        root: &Path,
+        rel_paths: &[String],
+    ) -> Result<()> {
+        if self.stopping.load(Ordering::Acquire) || rel_paths.is_empty() || !root.is_dir() {
+            return Ok(());
+        }
+        let _guard = lock(&self.ir_write)?;
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let setting = self.setting(project)?;
+        if setting["enabled"] != true {
+            return Ok(());
+        }
+        if let Some(job) = lock(&self.jobs)?.get(project) {
+            job.again.store(true, Ordering::Release);
+            return Ok(());
+        }
+        let started = Instant::now();
+        let ir = self.ir_store(project)?;
+        if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
+            let _ = ir.sync_workspace(root)?;
+        } else {
+            let _ = ir.update_paths(root, rel_paths)?;
+        }
+        let backend = self.resolve_backend(false);
+        let using_native = matches!(backend, Some(BuildBackend::NativeIr))
+            || setting["built"]["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        if !using_native {
+            return Ok(());
+        }
+        if self.stopping.load(Ordering::Acquire) || self.setting(project)?["enabled"] != true {
+            return Ok(());
+        }
+        let home = folder(&self.store.state, project);
+        let live_graph = live(&self.store.state, project);
+        let (nodes, edges) = ir.write_live_graph_atomic(&live_graph)?;
+        let fresh_print = self.print(project, root, true);
+        let commit = fresh_print.as_ref().and_then(|p| p.commit.as_deref());
+        write_live_summary(&live_graph, commit, Some((nodes, edges)));
+        self.maps.forget(project);
+        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
+        let elapsed = tenth(started.elapsed().as_secs_f64());
+        let hash = fresh_print.as_ref().map(|p| p.hash.clone());
+        let commit_owned = fresh_print.and_then(|p| p.commit);
+        let disk = size(&home);
+        self.edit(project, |setting| {
+            if setting["enabled"] != true || self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            setting["built"] = json!({
+                "at": store::now(),
+                "seconds": elapsed,
+                "tail": 0.0,
+                "nodes": nodes,
+                "edges": edges,
+                "bytes": bytes,
+                "disk": disk,
+                "print": hash,
+                "commit": commit_owned,
+                "tool": crate::graph_ir::NATIVE_IR_TOOL,
+                "program": Value::Null,
+            });
+            if let Some(fields) = setting.as_object_mut() {
+                fields.remove("failure");
+            }
+        })?;
+        Ok(())
+    }
     fn print(&self, project: &str, root: &Path, fresh: bool) -> Option<Print> {
         let mut prints = self.prints.lock().ok()?;
         if !fresh
@@ -2706,16 +3116,24 @@ impl Graphs {
         if !asked && lock(&self.revisions)?.contains_key(project) {
             return Ok(());
         }
-        let Some(tool) = self.tool(asked) else {
+        let Some(backend) = self.resolve_backend(asked) else {
             return Ok(());
         };
         let root = self.root(project)?;
+        if matches!(backend, BuildBackend::NativeIr) {
+            self.ensure_watcher(project, &root);
+        }
         let print = self.print(project, &root, trigger != Trigger::Visit);
         if trigger != Trigger::Manual {
             let now = print.as_ref().map(|print| print.hash.as_str());
             let published =
                 setting["built"].is_object() && live(&self.store.state, project).is_file();
-            if published && (now.is_none() || setting["built"]["print"].as_str() == now) {
+            let ir_missing = matches!(backend, BuildBackend::NativeIr)
+                && !crate::graph_ir::GraphIrStore::exists(&self.store.state, project);
+            if published
+                && !ir_missing
+                && (now.is_none() || setting["built"]["print"].as_str() == now)
+            {
                 return Ok(());
             }
             if setting["failure"].is_object() && setting["failure"]["print"].as_str() == now {
@@ -2734,9 +3152,15 @@ impl Graphs {
                 return Ok(());
             }
         }
-        self.begin(project, root, tool, print)
+        self.begin(project, root, backend, print)
     }
-    fn begin(&self, project: &str, root: PathBuf, tool: Tool, print: Option<Print>) -> Result<()> {
+    fn begin(
+        &self,
+        project: &str,
+        root: PathBuf,
+        backend: BuildBackend,
+        print: Option<Print>,
+    ) -> Result<()> {
         if self.stopping.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -2756,8 +3180,15 @@ impl Graphs {
             .name("harness-graph".into())
             .spawn(move || {
                 let commit = print.as_ref().and_then(|p| p.commit.clone());
-                let outcome = me.build(&name, &root, &tool, &job, commit.as_deref());
-                me.settle(&name, &job, outcome, print, &tool);
+                let outcome = match &backend {
+                    BuildBackend::Graphify(tool) => {
+                        me.build(&name, &root, tool, &job, commit.as_deref())
+                    }
+                    BuildBackend::NativeIr => {
+                        me.build_native(&name, &root, &job, commit.as_deref())
+                    }
+                };
+                me.settle(&name, &job, outcome, print, &backend);
             });
         match worker {
             Ok(handle) => {
@@ -2926,7 +3357,67 @@ impl Graphs {
             return Outcome::Failed("The new graph could not be published.".into());
         }
         write_live_summary(&live_graph, commit, ran.built);
+        self.maps.forget(project);
         Outcome::Built(ran.record(size(&home)))
+    }
+    fn build_native(
+        &self,
+        project: &str,
+        root: &Path,
+        job: &Arc<Job>,
+        commit: Option<&str>,
+    ) -> Outcome {
+        let stopped =
+            || job.cancel.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire);
+        if stopped() {
+            return Outcome::Cancelled;
+        }
+        let home = folder(&self.store.state, project);
+        let live_dir = home.join("live");
+        if std::fs::create_dir_all(&live_dir).is_err()
+            || infra_host::util::private_directory(&home).is_err()
+        {
+            return Outcome::Failed("The graph folder could not be prepared.".into());
+        }
+        let ir = match self.ir_store(project) {
+            Ok(ir) => ir,
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        let stats = match ir.sync_workspace(root) {
+            Ok(stats) => stats,
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        if stopped() {
+            return Outcome::Cancelled;
+        }
+        job.observe(
+            &format!(
+                "  AST extraction: {}/{} uncached files (100%)",
+                stats.files_scanned, stats.files_scanned
+            ),
+            false,
+        );
+        let live_graph = live_dir.join("graph.json");
+        let (nodes, edges) = match ir.write_live_graph_atomic(&live_graph) {
+            Ok(counts) => counts,
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        if stopped() {
+            return Outcome::Cancelled;
+        }
+        write_live_summary(&live_graph, commit, Some((nodes, edges)));
+        self.maps.forget(project);
+        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
+        let elapsed = job.started().elapsed().as_secs_f64();
+        Outcome::Built(json!({
+            "at": store::now(),
+            "seconds": tenth(elapsed),
+            "tail": 0.0,
+            "nodes": nodes,
+            "edges": edges,
+            "bytes": bytes,
+            "disk": size(&home),
+        }))
     }
     fn settle(
         &self,
@@ -2934,10 +3425,12 @@ impl Graphs {
         job: &Job,
         outcome: Outcome,
         print: Option<Print>,
-        tool: &Tool,
+        backend: &BuildBackend,
     ) {
         let purge = job.purge.load(Ordering::Acquire);
         if purge {
+            self.stop_watcher(project);
+            self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
         let hash = print.as_ref().map(|print| print.hash.clone());
@@ -2958,8 +3451,16 @@ impl Graphs {
                 Outcome::Built(mut built) => {
                     built["print"] = json!(hash);
                     built["commit"] = json!(print.as_ref().and_then(|print| print.commit.clone()));
-                    built["tool"] = json!(tool.version);
-                    built["program"] = json!(tool.path.to_string_lossy());
+                    match backend {
+                        BuildBackend::Graphify(tool) => {
+                            built["tool"] = json!(tool.version);
+                            built["program"] = json!(tool.path.to_string_lossy());
+                        }
+                        BuildBackend::NativeIr => {
+                            built["tool"] = json!(crate::graph_ir::NATIVE_IR_TOOL);
+                            built["program"] = Value::Null;
+                        }
+                    }
                     setting["built"] = built;
                     if let Some(fields) = setting.as_object_mut() {
                         fields.remove("failure");
@@ -3076,7 +3577,7 @@ impl Graphs {
     /// graph: the last such build, else the project's own, which runs the
     /// same passes over nearly the same files.
     fn pace(&self, setting: &Value) -> Option<History> {
-        let version = json!(self.tool(false).and_then(|tool| tool.version));
+        let version = json!(self.resolve_backend(false).and_then(|b| b.tool_version()));
         [&setting["revision"], &setting["built"]]
             .into_iter()
             .find(|built| built["tool"] == version && built["seconds"].is_number())
@@ -3538,7 +4039,7 @@ impl Graphs {
         {
             return Ok(());
         }
-        let tool = self.tool(true).ok_or_else(|| {
+        let backend = self.resolve_backend(true).ok_or_else(|| {
             HarnessError::unavailable(
                 "Graphify is not installed. Install it to build the graph of that commit.",
             )
@@ -3583,8 +4084,15 @@ impl Graphs {
                     .revision_gate
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let outcome = me.grow(&name, &root, &tool, &commit, &prefix, &running);
-                me.finish(&name, &commit, &running, outcome, &tool, paired.as_deref());
+                let outcome = me.grow(&name, &root, &backend, &commit, &prefix, &running);
+                me.finish(
+                    &name,
+                    &commit,
+                    &running,
+                    outcome,
+                    &backend,
+                    paired.as_deref(),
+                );
             });
         match worker {
             Ok(handle) => {
@@ -3607,6 +4115,50 @@ impl Graphs {
             }
         }
     }
+    fn run_native_revision(
+        &self,
+        source: &Path,
+        out: &Path,
+        job: &Arc<Job>,
+    ) -> std::result::Result<Ran, Outcome> {
+        let stopped =
+            || job.cancel.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire);
+        if stopped() {
+            return Err(Outcome::Cancelled);
+        }
+        let db_path = out.join("graph_ir.sqlite3");
+        let ir = crate::graph_ir::GraphIrStore::open_at(&db_path)
+            .map_err(|err| Outcome::Failed(err.message))?;
+        let stats = ir
+            .sync_workspace(source)
+            .map_err(|err| Outcome::Failed(err.message))?;
+        if stopped() {
+            return Err(Outcome::Cancelled);
+        }
+        job.observe(
+            &format!(
+                "  AST extraction: {}/{} uncached files (100%)",
+                stats.files_scanned, stats.files_scanned
+            ),
+            false,
+        );
+        let fresh = out.join("graph.json");
+        let (nodes, edges) = ir
+            .write_live_graph_atomic(&fresh)
+            .map_err(|err| Outcome::Failed(err.message))?;
+        drop(ir);
+        let bytes = std::fs::metadata(&fresh).map_or(0, |m| m.len());
+        if stopped() {
+            return Err(Outcome::Cancelled);
+        }
+        Ok(Ran {
+            fresh,
+            elapsed: job.started().elapsed().as_secs_f64(),
+            read: None,
+            built: Some((nodes, edges)),
+            bytes,
+        })
+    }
     /// Builds the graph of one commit: its files are written out beside the
     /// project's graph, the tool reads them as it reads the project, and of
     /// them only what the graph is read with is kept: see `thin`.
@@ -3614,7 +4166,7 @@ impl Graphs {
         &self,
         project: &str,
         root: &Path,
-        tool: &Tool,
+        backend: &BuildBackend,
         commit: &str,
         prefix: &str,
         job: &Arc<Job>,
@@ -3662,7 +4214,10 @@ impl Graphs {
             }
             job.restart();
             job.stage.store(0, Ordering::Release);
-            let ran = match self.run(tool, &source, &out, job) {
+            let ran = match match backend {
+                BuildBackend::Graphify(tool) => self.run(tool, &source, &out, job),
+                BuildBackend::NativeIr => self.run_native_revision(&source, &out, job),
+            } {
                 Ok(ran) => ran,
                 Err(outcome) => return outcome,
             };
@@ -3705,11 +4260,13 @@ impl Graphs {
         commit: &str,
         job: &Arc<Job>,
         outcome: Outcome,
-        tool: &Tool,
+        backend: &BuildBackend,
         paired: Option<&str>,
     ) {
         let purge = job.purge.load(Ordering::Acquire);
         if purge {
+            self.stop_watcher(project);
+            self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
         match outcome {
@@ -3718,7 +4275,7 @@ impl Graphs {
                     setting["revision"] = json!({
                         "seconds": built["seconds"],
                         "tail": built["tail"],
-                        "tool": tool.version,
+                        "tool": backend.tool_version(),
                     });
                 });
                 self.prune(project, commit, paired);
@@ -3740,6 +4297,8 @@ impl Graphs {
         // The graph was deleted while this build was ending: the folder
         // that was left to it goes now.
         if !purge && job.purge.load(Ordering::Acquire) {
+            self.stop_watcher(project);
+            self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
     }
@@ -3773,16 +4332,18 @@ impl Graphs {
         }
         let setting = self.setting(project)?;
         let enabled = setting["enabled"] == true;
-        let tool = self.tool(false);
+        let backend = self.resolve_backend(false);
+        let tool = match &backend {
+            Some(BuildBackend::Graphify(tool)) => Some(tool.clone()),
+            _ => None,
+        };
         let job = lock(&self.jobs)?.get(project).cloned();
         let built = &setting["built"];
         let published = built.is_object() && live(&self.store.state, project).is_file();
+        let expected_version = backend.as_ref().and_then(BuildBackend::tool_version);
         let history = built["seconds"]
             .as_f64()
-            .filter(|_| {
-                published
-                    && built["tool"] == json!(tool.as_ref().and_then(|tool| tool.version.clone()))
-            })
+            .filter(|_| published && built["tool"] == json!(expected_version))
             .map(|seconds| History {
                 seconds,
                 tail: built["tail"].as_f64(),
@@ -3797,7 +4358,7 @@ impl Graphs {
             "off"
         } else if job.is_some() {
             "building"
-        } else if tool.is_none() {
+        } else if backend.is_none() {
             "missing"
         } else if setting["failure"].is_object() {
             "failed"
@@ -3814,39 +4375,72 @@ impl Graphs {
         } else {
             None
         };
-        let message = status_message(
+        let published_native =
+            published && built["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        let message = status_message_for_tool(
             state,
             build.as_ref(),
             failure.as_ref().and_then(|value| value["message"].as_str()),
+            published_native.then_some(crate::graph_ir::NATIVE_IR_TOOL),
         );
-        Ok(json!({
+        let tool_json = match &backend {
+            Some(BuildBackend::Graphify(tool)) => json!({
+                "available": true,
+                "version": tool.version,
+                "path": tool.path.to_string_lossy().into_owned(),
+            }),
+            Some(BuildBackend::NativeIr) => json!({
+                "available": true,
+                "backend": crate::graph_ir::NATIVE_IR_TOOL,
+                "version": crate::graph_ir::NATIVE_IR_TOOL,
+                "path": Value::Null,
+            }),
+            None => json!({
+                "available": false,
+                "version": Value::Null,
+                "path": Value::Null,
+            }),
+        };
+        let ir_summary = published_native
+            .then(|| self.maps.ir_summary(&self.store.state, project))
+            .flatten();
+        let graph_json = if published {
+            let mut g = json!({
+                "commit": built["commit"],
+                "built_at": built["at"],
+                "nodes": built["nodes"],
+                "edges": built["edges"],
+                "bytes": built["bytes"],
+                "disk": built["disk"],
+                "seconds": built["seconds"],
+            });
+            if published_native {
+                g["backend"] = json!(crate::graph_ir::NATIVE_IR_TOOL);
+                if let Some(summary) = &ir_summary {
+                    g["ir_summary"] = serde_json::to_value(summary).unwrap_or(Value::Null);
+                }
+            }
+            g
+        } else {
+            Value::Null
+        };
+        let mut response = json!({
             "project_id": project,
             "enabled": enabled,
             // Whether launches are told about the graph: a choice of its own.
             "agents": setting["agents"] == true,
             "state": state,
             "message": message,
-            "tool": {
-                "available": tool.is_some(),
-                "version": tool.as_ref().and_then(|tool| tool.version.clone()),
-                "path": tool.as_ref().map(|tool| tool.path.to_string_lossy().into_owned()),
-            },
-            "graph": if published {
-                json!({
-                    "commit": built["commit"],
-                    "built_at": built["at"],
-                    "nodes": built["nodes"],
-                    "edges": built["edges"],
-                    "bytes": built["bytes"],
-                    "disk": built["disk"],
-                    "seconds": built["seconds"],
-                })
-            } else {
-                Value::Null
-            },
+            "tool": tool_json,
+            "graph": graph_json,
             "build": build,
             "failure": failure,
-        }))
+        });
+        if published_native {
+            response["backend"] = json!(crate::graph_ir::NATIVE_IR_TOOL);
+        }
+        let _ = tool;
+        Ok(response)
     }
     pub fn act(&self, project: &str, action: &str) -> Result<Value> {
         self.root(project)?;
@@ -3861,6 +4455,7 @@ impl Graphs {
                 self.refresh(project, Trigger::Enabled)?;
             }
             "disable" => {
+                self.stop_watcher(project);
                 self.edit(project, |setting| {
                     setting["enabled"] = json!(false);
                     setting["disabled_by_user"] = json!(true);
@@ -3888,7 +4483,7 @@ impl Graphs {
                         "Turn the code graph on before rebuilding it.",
                     ));
                 }
-                if self.tool(true).is_none() {
+                if self.resolve_backend(true).is_none() {
                     return Err(HarnessError::unavailable(
                         "Graphify is not installed. Install it, then rebuild.",
                     ));
@@ -3901,6 +4496,8 @@ impl Graphs {
                 self.refresh(project, Trigger::Manual)?;
             }
             "delete" => {
+                self.stop_watcher(project);
+                self.evict_ir_store(project);
                 self.edit(project, |setting| {
                     let target_root = setting.get("target_root").cloned();
                     let target_name = setting.get("target_name").cloned();
@@ -3955,9 +4552,22 @@ impl Graphs {
         }
         self.status(project, false)
     }
+    fn shutdown_watchers(&self) {
+        if let Ok(mut watchers) = self.watchers.lock() {
+            let owned = std::mem::take(&mut *watchers);
+            drop(watchers);
+            for mut watcher in owned.into_values() {
+                watcher.shutdown();
+            }
+        }
+    }
     /// Ends every build; the tool and its workers do not outlive the Harness.
     pub fn close(&self) {
         self.stopping.store(true, Ordering::Release);
+        self.shutdown_watchers();
+        if let Ok(mut stores) = self.ir_stores.lock() {
+            stores.clear();
+        }
         let workers = match self.workers.lock() {
             Ok(mut workers) => std::mem::take(&mut *workers),
             Err(_) => return,
