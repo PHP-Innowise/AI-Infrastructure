@@ -21,9 +21,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Component, Path},
+    time::Duration,
 };
 
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -31,6 +33,11 @@ const GIT_TIMEOUT_SECS: u64 = 15;
 const MAX_WALK_FILES: usize = 5000;
 const MAX_WALK_DEPTH: usize = 12;
 const MAX_CALLER_SCAN: usize = 300;
+const MAX_INDEX_SCAN_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RETAINED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_TOKENS_PER_FILE: usize = 4096;
+const MAX_EXTENDS_HOPS: usize = 8;
+const MAX_EXTENDS_VISITS: usize = 32;
 const MAX_CYCLE_DEPTH: usize = 6;
 const MAX_CYCLES_REPORTED: usize = 24;
 const MAX_CYCLE_VISITS: usize = 20_000;
@@ -196,9 +203,7 @@ pub(crate) fn changed_catalog(
             break;
         }
     }
-    let candidate_callers =
-        collect_workspace_scan_candidates(&ctx, index, &merged, live_focus, &known_callers);
-    let caller_cache = build_caller_dep_cache(&ctx, &candidate_callers);
+    let scan_index = CallerScanIndex::build(&ctx, index, &merged, live_focus, &known_callers);
     let index_incoming = build_index_incoming(index);
 
     let mut existing_files = 0usize;
@@ -291,7 +296,7 @@ pub(crate) fn changed_catalog(
             resolved,
             false,
             &index_incoming,
-            &caller_cache,
+            &scan_index,
         );
         for caller in &callers {
             if caller.path != *path
@@ -551,9 +556,7 @@ pub(crate) fn file_impact(
         certain,
         MAX_CALLER_SCAN,
     );
-    let candidates =
-        collect_workspace_scan_candidates(&ctx, index, &scan_scope, live_focus, &known_callers);
-    let caller_cache = build_caller_dep_cache(&ctx, &candidates);
+    let scan_index = CallerScanIndex::build(&ctx, index, &scan_scope, live_focus, &known_callers);
     let index_incoming = build_index_incoming(index);
 
     let used_by = evaluate_callers_for_file(
@@ -569,9 +572,10 @@ pub(crate) fn file_impact(
         resolved,
         certain,
         &index_incoming,
-        &caller_cache,
+        &scan_index,
     );
 
+    let arch_caller_cache = scan_index.dep_cache.borrow();
     let (new_cycles, resolved_cycles, new_violations, resolved_violations) =
         compute_architecture_impact(
             &rel_path,
@@ -582,7 +586,7 @@ pub(crate) fn file_impact(
             &ctx,
             index,
             certain,
-            &caller_cache,
+            &arch_caller_cache,
         );
 
     let callers_at_risk = used_by.iter().filter(|c| c.impact == "broken_risk").count();
@@ -761,6 +765,10 @@ impl<'a> TargetContext<'a> {
             Some(base) => git_read_text(self.root, base, rel_path),
             None => BlobRead::Missing,
         }
+    }
+
+    fn manifest_root(&self) -> Option<&Path> {
+        self.revision.is_none().then_some(self.root)
     }
 }
 
@@ -1289,138 +1297,642 @@ fn find_matching_declared_member_index(
         .map(|(_, idx)| idx)
 }
 
-fn line_has_word(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let n_bytes = needle.as_bytes();
-    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let abs = start + pos;
-        let left_ok = abs == 0 || !is_ident(bytes[abs - 1]);
-        let right = abs + n_bytes.len();
-        let right_ok = right >= bytes.len() || !is_ident(bytes[right]);
-        if left_ok && right_ok {
-            return true;
-        }
-        start = abs + n_bytes.len();
-    }
-    false
+const PACKAGE_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "composer.json",
+    "package.json",
+    "pyproject.toml",
+];
+const MONOREPO_CONTAINERS: &[&str] = &[
+    "crates", "packages", "services", "apps", "modules", "plugins", "libs",
+];
+
+#[derive(Clone, Debug, Default)]
+struct InheritanceClause {
+    class_name: Option<String>,
+    parents: Vec<String>,
+    traits: Vec<String>,
 }
 
-/// Returns `true` when `caller_source` explicitly extends/subclasses or uses a trait declared in `target_path`.
-pub(crate) fn caller_extends_target(
-    caller_source: Option<&str>,
-    target_path: &str,
-    target_members: &[DeclaredMember],
-) -> bool {
-    let Some(src) = caller_source else {
-        return false;
-    };
-    let mut target_types: Vec<String> = Vec::new();
+fn strip_angle_generics(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut depth = 0usize;
+    for ch in raw.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn leaf_type_ident(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .trim_start_matches(['\\', ':'])
+        .split(['{', ';', '(', '=', ' '])
+        .next()?
+        .trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    let leaf = cleaned
+        .rsplit(['\\', '.', ':'])
+        .next()
+        .unwrap_or(cleaned)
+        .trim();
+    if leaf.is_empty()
+        || !leaf
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'$')
+    {
+        return None;
+    }
+    let end = leaf
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .unwrap_or(leaf.len());
+    let ident = &leaf[..end];
+    (!ident.is_empty()).then(|| ident.to_owned())
+}
+
+fn find_word_boundary(haystack: &str, word: &str) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let w_bytes = word.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut start = 0usize;
+    while let Some(pos) = haystack[start..].find(word) {
+        let abs = start + pos;
+        let left_ok = abs == 0 || !is_ident(bytes[abs - 1]);
+        let right = abs + w_bytes.len();
+        let right_ok = right >= bytes.len() || !is_ident(bytes[right]);
+        if left_ok && right_ok {
+            return Some(abs);
+        }
+        start = abs + w_bytes.len();
+    }
+    None
+}
+
+fn extract_parents_from_header_fragment(frag: &str, out: &mut Vec<String>) {
+    let before_brace = frag.split(['{', ';']).next().unwrap_or(frag);
+    if let Some(ext_pos) = find_word_boundary(before_brace, "extends") {
+        let after = &before_brace[ext_pos + "extends".len()..];
+        let stop = find_word_boundary(after, "implements")
+            .into_iter()
+            .chain(find_word_boundary(after, "where"))
+            .min()
+            .unwrap_or(after.len());
+        let no_gen = strip_angle_generics(&after[..stop]);
+        for part in no_gen.split(',') {
+            if let Some(id) = leaf_type_ident(part)
+                && !out.contains(&id)
+            {
+                out.push(id);
+            }
+        }
+        return;
+    }
+    if let Some(open) = before_brace.find('(') {
+        let rest = &before_brace[open + 1..];
+        let close = rest.find(')').unwrap_or(rest.len());
+        for part in rest[..close].split(',') {
+            let trimmed = part.trim();
+            if trimmed.contains('=') {
+                continue;
+            }
+            if let Some(id) = leaf_type_ident(trimmed)
+                && !out.contains(&id)
+            {
+                out.push(id);
+            }
+        }
+        return;
+    }
+    if let Some(colon) = before_brace.find(" : ") {
+        let after = &before_brace[colon + 3..];
+        let stop = find_word_boundary(after, "where").unwrap_or(after.len());
+        let no_gen = strip_angle_generics(&after[..stop]);
+        for part in no_gen.split(',') {
+            let cleaned = part
+                .trim()
+                .trim_start_matches("public ")
+                .trim_start_matches("protected ")
+                .trim_start_matches("private ");
+            if let Some(id) = leaf_type_ident(cleaned)
+                && !out.contains(&id)
+            {
+                out.push(id);
+            }
+        }
+        return;
+    }
+    if let Some(lt) = before_brace.find(" < ") {
+        let after = &before_brace[lt + 3..];
+        if let Some(id) = leaf_type_ident(after)
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    }
+}
+
+fn extract_use_traits_from_body_fragment(fragment: &str, traits: &mut Vec<String>) {
+    for raw_stmt in fragment.split(';') {
+        let stmt = raw_stmt.trim().trim_start_matches('{').trim();
+        if let Some(rest) = stmt.strip_prefix("use ") {
+            let head = rest.split('{').next().unwrap_or(rest);
+            for part in head.split(',') {
+                if let Some(id) = leaf_type_ident(part)
+                    && !traits.contains(&id)
+                {
+                    traits.push(id);
+                }
+            }
+        }
+    }
+}
+
+fn extract_inheritance_clauses(src: &str) -> Vec<InheritanceClause> {
+    let mut clauses: Vec<InheritanceClause> = Vec::new();
+    let mut current: Option<InheritanceClause> = None;
+    let mut in_header = false;
+    let mut class_body_depth: Option<i32> = None;
+    let mut brace_depth: i32 = 0;
+    let mut in_block_comment = false;
+
+    for raw_line in src.lines() {
+        let mut line = raw_line.trim();
+        if in_block_comment {
+            if let Some(end) = line.find("*/") {
+                in_block_comment = false;
+                line = line[end + 2..].trim();
+            } else {
+                continue;
+            }
+        }
+        if line.starts_with("/*") {
+            if let Some(end) = line[2..].find("*/") {
+                line = line[2 + end + 2..].trim();
+            } else {
+                in_block_comment = true;
+                continue;
+            }
+        }
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with('#')
+            || line.starts_with('*')
+        {
+            continue;
+        }
+        let code = line.split("//").next().unwrap_or(line).trim();
+        if code.is_empty() {
+            continue;
+        }
+
+        let kw_pos = ["class", "interface", "trait"]
+            .into_iter()
+            .filter_map(|kw| find_word_boundary(code, kw).map(|pos| (pos, kw)))
+            .min_by_key(|(pos, _)| *pos);
+
+        let starts_type_decl = kw_pos.is_some_and(|(pos, _)| {
+            let prefix = code[..pos].trim();
+            prefix.is_empty()
+                || prefix.split_whitespace().all(|tok| {
+                    matches!(
+                        tok,
+                        "abstract"
+                            | "final"
+                            | "readonly"
+                            | "export"
+                            | "default"
+                            | "public"
+                            | "private"
+                            | "protected"
+                            | "internal"
+                            | "open"
+                            | "sealed"
+                            | "data"
+                            | "declare"
+                    )
+                })
+        });
+
+        if starts_type_decl && let Some((pos, kw)) = kw_pos {
+            if let Some(prev) = current.take() {
+                clauses.push(prev);
+            }
+            let after_kw = code[pos + kw.len()..].trim_start();
+            let class_name = leaf_type_ident(after_kw);
+            let mut clause = InheritanceClause {
+                class_name,
+                parents: Vec::new(),
+                traits: Vec::new(),
+            };
+            extract_parents_from_header_fragment(after_kw, &mut clause.parents);
+            if let Some((_, body_after_brace)) = code.split_once('{') {
+                extract_use_traits_from_body_fragment(body_after_brace, &mut clause.traits);
+            }
+            current = Some(clause);
+            in_header = !code.contains('{') && !code.ends_with(':') && !code.ends_with(';');
+            if code.contains('{') {
+                class_body_depth = Some(brace_depth + 1);
+            } else if code.ends_with(':') {
+                class_body_depth = None;
+                if let Some(done) = current.take() {
+                    clauses.push(done);
+                }
+            }
+        } else if in_header {
+            if let Some(clause) = current.as_mut() {
+                extract_parents_from_header_fragment(code, &mut clause.parents);
+                if let Some((_, body_after_brace)) = code.split_once('{') {
+                    extract_use_traits_from_body_fragment(body_after_brace, &mut clause.traits);
+                }
+            }
+            if code.contains('{') {
+                in_header = false;
+                class_body_depth = Some(brace_depth + 1);
+            } else if code.ends_with(':') || code.ends_with(';') {
+                in_header = false;
+                if let Some(done) = current.take() {
+                    clauses.push(done);
+                }
+            }
+        } else if class_body_depth.is_some_and(|d| brace_depth == d)
+            && code.contains("use ")
+            && let Some(clause) = current.as_mut()
+        {
+            extract_use_traits_from_body_fragment(code, &mut clause.traits);
+        }
+
+        let mut in_sq = false;
+        let mut in_dq = false;
+        let mut escaped = false;
+        for b in code.bytes() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match b {
+                b'\\' if in_sq || in_dq => escaped = true,
+                b'\'' if !in_dq => in_sq = !in_sq,
+                b'"' if !in_sq => in_dq = !in_dq,
+                b'{' if !in_sq && !in_dq => brace_depth += 1,
+                b'}' if !in_sq && !in_dq => {
+                    brace_depth -= 1;
+                    if class_body_depth.is_some_and(|d| brace_depth < d) {
+                        class_body_depth = None;
+                        if let Some(done) = current.take() {
+                            clauses.push(done);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(rem) = current {
+        clauses.push(rem);
+    }
+    clauses
+}
+
+fn target_type_names(target_path: &str, target_members: &[DeclaredMember]) -> HashSet<String> {
+    let mut target_types = HashSet::new();
     for m in target_members {
         if matches!(
             m.kind.as_str(),
             "class" | "abstract_class" | "trait" | "interface" | "struct"
         ) && !m.name.is_empty()
-            && !target_types.contains(&m.name)
         {
-            target_types.push(m.name.clone());
+            target_types.insert(m.name.clone());
         }
         if let Some(p) = &m.parent
             && !p.is_empty()
-            && !target_types.contains(p)
         {
-            target_types.push(p.clone());
+            target_types.insert(p.clone());
         }
     }
-    if let Some(stem) = file_stem_name(target_path)
-        && !target_types.contains(&stem)
-    {
-        target_types.push(stem);
+    if let Some(stem) = file_stem_name(target_path) {
+        target_types.insert(stem);
     }
-    if target_types.is_empty() {
-        return false;
-    }
+    target_types
+}
 
-    let mut inside_class = false;
-    for raw_line in src.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("//")
-            || trimmed.starts_with('#')
-            || trimmed.starts_with("/*")
-            || trimmed.starts_with('*')
-        {
+fn intra_file_extends(clauses: &[InheritanceClause], target_types: &HashSet<String>) -> bool {
+    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut seeds: Vec<&str> = Vec::new();
+    for c in clauses {
+        for p in c.parents.iter().chain(&c.traits) {
+            if target_types.contains(p) {
+                return true;
+            }
+            seeds.push(p.as_str());
+        }
+        if let Some(name) = c.class_name.as_deref() {
+            let entry = by_name.entry(name).or_default();
+            for p in c.parents.iter().chain(&c.traits) {
+                entry.push(p.as_str());
+            }
+        }
+    }
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<(&str, usize)> = seeds.into_iter().map(|s| (s, 1)).collect();
+    while let Some((name, hop)) = queue.pop_front() {
+        if target_types.contains(name) {
+            return true;
+        }
+        if hop >= MAX_EXTENDS_HOPS || !visited.insert(name) {
             continue;
         }
-        let is_class_header = trimmed.starts_with("class ")
-            || trimmed.contains(" class ")
-            || trimmed.starts_with("abstract class ")
-            || trimmed.starts_with("final class ")
-            || trimmed.starts_with("export class ");
-        if is_class_header {
-            inside_class = true;
-            for ty in &target_types {
-                if (trimmed.contains(" extends ") && line_has_word(trimmed, ty))
-                    || (trimmed.contains('(') && line_has_word(trimmed, ty))
-                    || (trimmed.contains(" : ") && line_has_word(trimmed, ty))
-                    || (trimmed.contains(" < ") && line_has_word(trimmed, ty))
-                {
-                    return true;
-                }
-            }
-        } else if trimmed.contains(" extends ")
-            || (inside_class && trimmed.starts_with("use ") && trimmed.ends_with(';'))
-        {
-            for ty in &target_types {
-                if line_has_word(trimmed, ty) {
-                    return true;
-                }
+        if let Some(next_parents) = by_name.get(name) {
+            for p in next_parents {
+                queue.push_back((p, hop + 1));
             }
         }
     }
     false
 }
 
-fn rust_crate_root(rel_path: &str) -> (String, bool) {
-    let rel = rel_path.trim_start_matches("./");
+/// Bounded multi-hop inheritance / trait traversal across files and intra-file class hierarchies
+/// with cycle detection.
+pub(crate) fn caller_extends_target_in(
+    caller_path: &str,
+    caller_source: Option<&str>,
+    target_path: &str,
+    target_members: &[DeclaredMember],
+    known_files: &BTreeSet<String>,
+    read_source: &mut dyn FnMut(&str) -> Option<String>,
+) -> bool {
+    let Some(src) = caller_source else {
+        return false;
+    };
+    let target_types = target_type_names(target_path, target_members);
+    if target_types.is_empty() {
+        return false;
+    }
+    let caller_key = clean_rel_key(caller_path);
+    let target_key = clean_rel_key(target_path);
+    let mut source_cache: HashMap<String, Option<String>> = HashMap::new();
+    source_cache.insert(caller_key.clone(), Some(src.to_owned()));
+
+    let mut queue: VecDeque<(String, Option<String>, usize)> = VecDeque::new();
+    let mut visited: HashSet<(String, String)> = HashSet::new();
+
+    let enqueue_file_parents = |file: &str,
+                                file_src: &str,
+                                wanted: Option<&str>,
+                                hop: usize,
+                                queue: &mut VecDeque<(String, Option<String>, usize)>|
+     -> bool {
+        let clauses = extract_inheritance_clauses(file_src);
+        let matching_clauses: Vec<&InheritanceClause> = match wanted {
+            Some(w) => {
+                let matched: Vec<&InheritanceClause> = clauses
+                    .iter()
+                    .filter(|c| c.class_name.as_deref() == Some(w))
+                    .collect();
+                if matched.is_empty() {
+                    clauses.iter().collect()
+                } else {
+                    matched
+                }
+            }
+            None => clauses.iter().collect(),
+        };
+        if wanted.is_none() && intra_file_extends(&clauses, &target_types) {
+            return true;
+        }
+        let mut local_types: HashMap<&str, &InheritanceClause> = HashMap::new();
+        for c in &clauses {
+            if let Some(name) = c.class_name.as_deref() {
+                local_types.insert(name, c);
+            }
+        }
+        let mut parent_names: Vec<String> = Vec::new();
+        let mut trait_names: HashSet<String> = HashSet::new();
+        for c in &matching_clauses {
+            for p in &c.parents {
+                if target_types.contains(p) {
+                    return true;
+                }
+                if !parent_names.contains(p) {
+                    parent_names.push(p.clone());
+                }
+            }
+            for t in &c.traits {
+                if target_types.contains(t) {
+                    return true;
+                }
+                if !parent_names.contains(t) {
+                    parent_names.push(t.clone());
+                }
+                trait_names.insert(t.clone());
+            }
+        }
+        if parent_names.is_empty() || hop >= MAX_EXTENDS_HOPS {
+            return false;
+        }
+
+        let deps = extract_file_deps(file, file_src, known_files);
+        for dep in &deps {
+            if dep.resolved
+                && clean_rel_key(&dep.target) == target_key
+                && (dep.kind == "extends"
+                    || (dep.kind == "uses"
+                        && dep.symbols.iter().any(|s| trait_names.contains(s.as_str()))))
+            {
+                return true;
+            }
+        }
+
+        for pname in parent_names {
+            if local_types.contains_key(pname.as_str()) {
+                queue.push_back((file.to_owned(), Some(pname.clone()), hop + 1));
+            }
+            let mut matched_dep = false;
+            for dep in &deps {
+                if !dep.resolved {
+                    continue;
+                }
+                let is_inherit =
+                    dep.kind == "extends" || (dep.kind == "uses" && trait_names.contains(&pname));
+                if !is_inherit {
+                    continue;
+                }
+                let dep_matches =
+                    dep.symbols.iter().any(|s| {
+                        leaf_type_ident(s).as_deref() == Some(pname.as_str()) || s == &pname
+                    }) || file_stem_name(&dep.target).as_deref() == Some(pname.as_str());
+                if dep_matches {
+                    matched_dep = true;
+                    queue.push_back((clean_rel_key(&dep.target), Some(pname.clone()), hop + 1));
+                }
+            }
+            if !matched_dep {
+                let dir = folder_of(file);
+                for cand in known_files {
+                    if folder_of(cand) == dir
+                        && file_stem_name(cand).as_deref() == Some(pname.as_str())
+                    {
+                        let key = clean_rel_key(cand);
+                        if key == target_key {
+                            return true;
+                        }
+                        queue.push_back((key, Some(pname.clone()), hop + 1));
+                    }
+                }
+            }
+        }
+        false
+    };
+
+    visited.insert((caller_key.clone(), String::new()));
+    if enqueue_file_parents(&caller_key, src, None, 0, &mut queue) {
+        return true;
+    }
+
+    while let Some((file, wanted, hop)) = queue.pop_front() {
+        if file == target_key {
+            return true;
+        }
+        if hop >= MAX_EXTENDS_HOPS || visited.len() >= MAX_EXTENDS_VISITS {
+            continue;
+        }
+        let visit_key = (file.clone(), wanted.clone().unwrap_or_default());
+        if !visited.insert(visit_key) {
+            continue;
+        }
+        let next_src = source_cache
+            .entry(file.clone())
+            .or_insert_with(|| read_source(&file))
+            .clone();
+        let Some(file_src) = next_src else {
+            continue;
+        };
+        if enqueue_file_parents(&file, &file_src, wanted.as_deref(), hop, &mut queue) {
+            return true;
+        }
+    }
+    false
+}
+
+fn manifest_root_of(
+    rel_path: &str,
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
+) -> Option<String> {
+    if root.is_none() && known_files.is_none() {
+        return None;
+    }
+    let rel = clean_rel_key(rel_path);
+    let mut folder = folder_of(&rel);
+    loop {
+        for manifest in PACKAGE_MANIFESTS {
+            let candidate = if folder.is_empty() {
+                (*manifest).to_owned()
+            } else {
+                format!("{folder}/{manifest}")
+            };
+            let in_known = known_files.is_some_and(|files| files.contains(&candidate));
+            let on_disk = root.is_some_and(|r| r.join(&candidate).is_file());
+            if in_known || on_disk {
+                return Some(folder);
+            }
+        }
+        if folder.is_empty() {
+            break;
+        }
+        folder = folder_of(&folder);
+    }
+    None
+}
+
+fn package_scope_root(
+    rel_path: &str,
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
+) -> (String, bool) {
+    let rel = clean_rel_key(rel_path);
+    let is_rust = rel.ends_with(".rs");
+    if let Some(pkg_root) = manifest_root_of(&rel, root, known_files) {
+        if is_rust {
+            let inside = if pkg_root.is_empty() {
+                rel.as_str()
+            } else {
+                rel.strip_prefix(&pkg_root)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .unwrap_or("")
+            };
+            if inside.starts_with("tests/") {
+                return (pkg_root, false);
+            }
+        }
+        return (pkg_root, true);
+    }
     if let Some(idx) = rel.find("/src/") {
         return (rel[..idx].to_owned(), true);
     }
     if rel.starts_with("src/") {
         return (String::new(), true);
     }
-    if let Some(idx) = rel.find("/tests/") {
-        return (rel[..idx].to_owned(), false);
+    if is_rust {
+        if let Some(idx) = rel.find("/tests/") {
+            return (rel[..idx].to_owned(), false);
+        }
+        if rel.starts_with("tests/") {
+            return (String::new(), false);
+        }
     }
-    if rel.starts_with("tests/") {
-        return (String::new(), false);
+    let segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() <= 1 {
+        return (String::new(), true);
     }
-    (folder_of(rel), true)
+    if segs.len() >= 3 && MONOREPO_CONTAINERS.contains(&segs[0]) {
+        return (format!("{}/{}", segs[0], segs[1]), true);
+    }
+    (segs[0].to_owned(), true)
 }
 
+#[cfg(test)]
 fn same_scope_crate_or_package(caller_path: &str, target_path: &str) -> bool {
+    same_scope_crate_or_package_in(None, None, caller_path, target_path)
+}
+
+fn same_scope_crate_or_package_in(
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
+    caller_path: &str,
+    target_path: &str,
+) -> bool {
     let caller = clean_rel_key(caller_path);
     let target = clean_rel_key(target_path);
-    let (c_root, c_in_src) = rust_crate_root(&caller);
-    let (t_root, t_in_src) = rust_crate_root(&target);
+    let (c_root, c_in_src) = package_scope_root(&caller, root, known_files);
+    let (t_root, t_in_src) = package_scope_root(&target, root, known_files);
     if !c_in_src || !t_in_src {
         return false;
     }
     c_root == t_root
 }
 
-fn rust_crate_src_dir(rel_path: &str) -> String {
-    let rel = rel_path.trim_start_matches("./");
+fn rust_crate_src_dir_in(
+    rel_path: &str,
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
+) -> String {
+    let rel = clean_rel_key(rel_path);
     if let Some(idx) = rel.find("/src/") {
         rel[..idx + 4].to_owned()
     } else if rel.starts_with("src/") {
         "src".to_owned()
+    } else if let Some(pkg_root) = manifest_root_of(&rel, root, known_files) {
+        pkg_root
     } else {
-        folder_of(rel)
+        folder_of(&rel)
     }
 }
 
@@ -1450,16 +1962,32 @@ fn path_in_rust_module_dir(caller_path: &str, mod_dir: &str) -> bool {
         || caller.strip_suffix(".rs") == Some(mod_dir)
 }
 
-fn within_rust_super_mod(caller_path: &str, target_path: &str) -> bool {
-    if !same_scope_crate_or_package(caller_path, target_path) {
+fn within_rust_super_mod_in(
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
+    caller_path: &str,
+    target_path: &str,
+) -> bool {
+    if !same_scope_crate_or_package_in(root, known_files, caller_path, target_path) {
         return false;
     }
     let super_dir = rust_super_dir(target_path);
     path_in_rust_module_dir(caller_path, &super_dir)
 }
 
+#[cfg(test)]
 fn within_rust_pub_in(vis_lower: &str, caller_path: &str, target_path: &str) -> bool {
-    if !same_scope_crate_or_package(caller_path, target_path) {
+    within_rust_pub_in_in(None, None, vis_lower, caller_path, target_path)
+}
+
+fn within_rust_pub_in_in(
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
+    vis_lower: &str,
+    caller_path: &str,
+    target_path: &str,
+) -> bool {
+    if !same_scope_crate_or_package_in(root, known_files, caller_path, target_path) {
         return false;
     }
     let Some(inner) = vis_lower
@@ -1467,24 +1995,51 @@ fn within_rust_pub_in(vis_lower: &str, caller_path: &str, target_path: &str) -> 
         .and_then(|rest| rest.strip_suffix(')'))
         .map(str::trim)
     else {
-        return true;
+        return false;
     };
-    let segs: Vec<&str> = inner
-        .split("::")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if segs.is_empty() {
-        return true;
+    if inner.is_empty() {
+        return false;
     }
-    if segs[0] == "self" && segs.len() == 1 {
-        return clean_rel_key(caller_path) == clean_rel_key(target_path);
+    let raw_segs: Vec<&str> = inner.split("::").map(str::trim).collect();
+    if raw_segs.iter().any(|s| s.is_empty()) {
+        return false;
     }
+    let target = clean_rel_key(target_path);
+    let src_dir = rust_crate_src_dir_in(&target, root, known_files);
+    let segs = raw_segs;
+
+    if segs[0] == "self" {
+        if segs.len() == 1 {
+            return clean_rel_key(caller_path) == target;
+        }
+        if segs[1..]
+            .iter()
+            .any(|s| matches!(*s, "self" | "super" | "crate"))
+        {
+            return false;
+        }
+        let target_mod_dir = target
+            .strip_suffix("/mod.rs")
+            .or_else(|| target.strip_suffix(".rs"))
+            .unwrap_or("");
+        let full_dir = if target_mod_dir.is_empty() {
+            segs[1..].join("/")
+        } else {
+            format!("{target_mod_dir}/{}", segs[1..].join("/"))
+        };
+        return path_in_rust_module_dir(&target, &full_dir)
+            && path_in_rust_module_dir(caller_path, &full_dir);
+    }
+
     if segs[0] == "crate" {
-        let target = clean_rel_key(target_path);
-        let src_dir = rust_crate_src_dir(&target);
         if segs.len() == 1 {
             return true;
+        }
+        if segs[1..]
+            .iter()
+            .any(|s| matches!(*s, "self" | "super" | "crate"))
+        {
+            return false;
         }
         let mod_sub = segs[1..].join("/");
         let full_dir = if src_dir.is_empty() {
@@ -1492,17 +2047,29 @@ fn within_rust_pub_in(vis_lower: &str, caller_path: &str, target_path: &str) -> 
         } else {
             format!("{src_dir}/{mod_sub}")
         };
-        return path_in_rust_module_dir(caller_path, &full_dir);
+        return path_in_rust_module_dir(&target, &full_dir)
+            && path_in_rust_module_dir(caller_path, &full_dir);
     }
+
     if segs[0] == "super" {
         let mut dir = rust_super_dir(target_path);
+        let in_crate_src =
+            |d: &str| src_dir.is_empty() || d == src_dir || d.starts_with(&format!("{src_dir}/"));
+        if !in_crate_src(&dir) {
+            return false;
+        }
         for seg in segs.iter().skip(1) {
             if *seg == "super" {
-                let p = folder_of(&dir);
-                if !p.is_empty() {
-                    dir = p.to_owned();
+                if dir == src_dir || dir.is_empty() {
+                    return false;
                 }
-            } else if !seg.is_empty() {
+                dir = folder_of(&dir);
+                if !in_crate_src(&dir) {
+                    return false;
+                }
+            } else if matches!(*seg, "self" | "crate") {
+                return false;
+            } else {
                 dir = if dir.is_empty() {
                     (*seg).to_owned()
                 } else {
@@ -1510,13 +2077,50 @@ fn within_rust_pub_in(vis_lower: &str, caller_path: &str, target_path: &str) -> 
                 };
             }
         }
-        return path_in_rust_module_dir(caller_path, &dir);
+        return path_in_rust_module_dir(&target, &dir)
+            && path_in_rust_module_dir(caller_path, &dir);
     }
-    true
+
+    // Bare path scopes (e.g. Rust 2015 `pub(in app::internal)`): match only if the
+    // visibility module prefix resolves to an enclosing module of `target` under `src_dir`.
+    if segs
+        .iter()
+        .any(|s| matches!(*s, "self" | "super" | "crate"))
+    {
+        return false;
+    }
+    let joined = segs.join("/");
+    let cand1 = if src_dir.is_empty() {
+        joined
+    } else {
+        format!("{src_dir}/{joined}")
+    };
+    if path_in_rust_module_dir(&target, &cand1) {
+        return path_in_rust_module_dir(caller_path, &cand1);
+    }
+    if segs.len() > 1 {
+        let crate_root = package_scope_root(&target, root, known_files).0;
+        let crate_name = crate_root.rsplit('/').next().unwrap_or("");
+        if !crate_name.is_empty() && segs[0] == crate_name {
+            let sub = segs[1..].join("/");
+            let cand2 = if src_dir.is_empty() {
+                sub
+            } else {
+                format!("{src_dir}/{sub}")
+            };
+            if path_in_rust_module_dir(&target, &cand2) {
+                return path_in_rust_module_dir(caller_path, &cand2);
+            }
+        }
+    }
+    false
 }
 
 /// Evaluates accessibility, risk classification, and visibility warnings for `tm` from `caller_path`.
-pub(crate) fn assess_member_access(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assess_member_access_in(
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
     tm: &DeclaredMember,
     caller_path: &str,
     target_path: &str,
@@ -1591,7 +2195,7 @@ pub(crate) fn assess_member_access(
                     ));
                 }
             } else if matches!(lower.as_str(), "pub(crate)" | "crate" | "internal") {
-                if !same_scope_crate_or_package(caller_path, target_path) {
+                if !same_scope_crate_or_package_in(root, known_files, caller_path, target_path) {
                     inaccessible_reason = Some(format!(
                         "Accesses {} {} '{}' in {} across crate boundary from {}",
                         vis_raw.trim(),
@@ -1602,14 +2206,14 @@ pub(crate) fn assess_member_access(
                     ));
                 }
             } else if lower == "pub(super)" {
-                if !within_rust_super_mod(caller_path, target_path) {
+                if !within_rust_super_mod_in(root, known_files, caller_path, target_path) {
                     inaccessible_reason = Some(format!(
                         "Accesses pub(super) {} '{}' in {} outside parent module from {}",
                         tm.kind, tm.name, target_path, caller_path
                     ));
                 }
             } else if lower.starts_with("pub(in ") {
-                if !within_rust_pub_in(&lower, caller_path, target_path) {
+                if !within_rust_pub_in_in(root, known_files, &lower, caller_path, target_path) {
                     inaccessible_reason = Some(format!(
                         "Accesses {} {} '{}' in {} outside restricted path from {}",
                         vis_raw.trim(),
@@ -1711,7 +2315,9 @@ fn normalize_raw_access_risk(risk: Option<&str>) -> Option<String> {
 }
 
 /// Enriches a [`DepMemberRef`] using `target_members` and evaluates accessibility for `caller_path`.
-pub(crate) fn enrich_member_ref(
+pub(crate) fn enrich_member_ref_in(
+    root: Option<&Path>,
+    known_files: Option<&BTreeSet<String>>,
     mref: &mut DepMemberRef,
     target_members: &[DeclaredMember],
     caller_path: &str,
@@ -1733,7 +2339,9 @@ pub(crate) fn enrich_member_ref(
         mref.previous_visibility = tm.previous_visibility.clone();
         mref.change = Some(tm.change.clone());
         mref.modifiers = tm.modifiers.clone();
-        let assess = assess_member_access(
+        let assess = assess_member_access_in(
+            root,
+            known_files,
             tm,
             caller_path,
             target_path,
@@ -1928,7 +2536,14 @@ fn enrich_dep_bucket(
                 .clone();
         dep.target_members = target_members;
 
-        let caller_extends = caller_extends_target(caller_src, &dep.target, &dep.target_members);
+        let caller_extends = caller_extends_target_in(
+            caller_path,
+            caller_src,
+            &dep.target,
+            &dep.target_members,
+            &ctx.resolution_files,
+            &mut |p| ctx.read_after(p).into_opt(),
+        );
         let should_supplement = dep.kind != "imports" || !non_import_targets.contains(&target_key);
         if should_supplement && let Some(src) = caller_src {
             let matched = find_matching_member_references(
@@ -1942,7 +2557,9 @@ fn enrich_dep_bucket(
         }
 
         for mref in &mut dep.member_refs {
-            enrich_member_ref(
+            enrich_member_ref_in(
+                ctx.manifest_root(),
+                Some(&ctx.resolution_files),
                 mref,
                 &dep.target_members,
                 caller_path,
@@ -2439,68 +3056,522 @@ fn index_callers(
         .collect()
 }
 
-/// The files read to find who uses a changed file, at most
-/// `MAX_CALLER_SCAN`: the changed files, what the run is working on, the
-/// callers the graph knows (`known_callers`, strongest first), and only
-/// then the rest of the project in the order of its paths.
-fn collect_workspace_scan_candidates(
-    ctx: &TargetContext<'_>,
-    index: Option<&Index>,
-    changed: &BTreeMap<String, MergedChange>,
-    live_focus: Option<&GraphFocus>,
-    known_callers: &[String],
-) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    let mut push = |p: &str| {
-        if out.len() < MAX_CALLER_SCAN && is_scannable_code(p) && seen.insert(p.to_owned()) {
-            out.push(p.to_owned());
-        }
-    };
+fn is_scan_stop_word(tok: &str) -> bool {
+    matches!(
+        tok,
+        "php"
+            | "use"
+            | "class"
+            | "struct"
+            | "enum"
+            | "trait"
+            | "interface"
+            | "impl"
+            | "function"
+            | "fn"
+            | "pub"
+            | "crate"
+            | "super"
+            | "self"
+            | "let"
+            | "const"
+            | "var"
+            | "mut"
+            | "static"
+            | "return"
+            | "true"
+            | "false"
+            | "null"
+            | "none"
+            | "some"
+            | "void"
+            | "int"
+            | "bool"
+            | "string"
+            | "str"
+            | "array"
+            | "public"
+            | "protected"
+            | "private"
+            | "readonly"
+            | "this"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "match"
+            | "import"
+            | "from"
+            | "export"
+            | "default"
+            | "require"
+            | "include"
+            | "def"
+            | "async"
+            | "await"
+            | "new"
+            | "namespace"
+            | "mod"
+    )
+}
 
-    for (path, entry) in changed {
-        if entry.status != "deleted" {
-            push(path);
+fn extract_ident_tokens(src: &str) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut tokens: Vec<String> = Vec::new();
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'$' {
+            let start = i;
+            i += 1;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
+                i += 1;
+            }
+            let raw = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let trimmed = raw.trim_start_matches('$');
+            if trimmed.len() >= 2 && trimmed.len() <= 96 {
+                let lower = trimmed.to_ascii_lowercase();
+                if !is_scan_stop_word(&lower) && seen.insert(lower.clone()) {
+                    tokens.push(lower);
+                    if tokens.len() >= MAX_TOKENS_PER_FILE {
+                        break;
+                    }
+                }
+            }
+        } else {
+            i += 1;
         }
     }
-    if let Some(lf) = live_focus {
-        for raw in &lf.target_paths {
-            if let Some(p) = normalize_rel_opt(raw) {
-                push(&p);
+    tokens
+}
+
+fn push_query_tokens_from_path(path: &str, out: &mut BTreeSet<String>) {
+    if let Some(stem) = file_stem_name(path) {
+        for tok in extract_ident_tokens(&stem) {
+            out.insert(tok);
+        }
+        let lower_stem = stem.to_ascii_lowercase();
+        if lower_stem.len() >= 2 && !is_scan_stop_word(&lower_stem) {
+            out.insert(lower_stem.clone());
+        }
+        if matches!(
+            lower_stem.as_str(),
+            "mod" | "index" | "__init__" | "lib" | "main"
+        ) {
+            let folder = folder_of(&clean_rel_key(path));
+            if let Some(seg) = folder.rsplit('/').next()
+                && !seg.is_empty()
+                && !matches!(seg, "src" | "app" | "lib" | "tests" | "test")
+            {
+                for tok in extract_ident_tokens(seg) {
+                    out.insert(tok);
+                }
             }
         }
-        for entity in &lf.created_entities {
-            if let Some(p) = normalize_rel_opt(&entity.path) {
-                push(&p);
+    }
+    let cleaned = clean_rel_key(path);
+    for seg in cleaned.split('/') {
+        if !seg.is_empty() && !matches!(seg, "src" | "app" | "lib" | "tests" | "test") {
+            let no_ext = Path::new(seg)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(seg);
+            for tok in extract_ident_tokens(no_ext) {
+                out.insert(tok);
             }
         }
     }
-    for caller in known_callers {
-        push(caller);
-    }
-    if let Some(idx) = index {
-        for path in idx.files() {
-            push(path);
+}
+
+fn parse_batch_blob_payloads(
+    stdout: &[u8],
+    chunk: &[(&str, &str)],
+    out: &mut HashMap<String, String>,
+) -> bool {
+    let mut pos = 0usize;
+    for &(path, _) in chunk {
+        let Some(nl_rel) = stdout[pos..].iter().position(|&b| b == b'\n') else {
+            return false;
+        };
+        let header = std::str::from_utf8(&stdout[pos..pos + nl_rel]).unwrap_or("");
+        pos += nl_rel + 1;
+        let parts: Vec<&str> = header.split_ascii_whitespace().collect();
+        if parts.len() == 3 && parts[1] == "blob" {
+            let Ok(sz) = parts[2].parse::<usize>() else {
+                return false;
+            };
+            if pos + sz > stdout.len() {
+                return false;
+            }
+            if let BlobRead::Ok(text) = bytes_to_blob(stdout[pos..pos + sz].to_vec(), "File") {
+                out.insert(path.to_owned(), text);
+            }
+            pos += sz;
+            if stdout.get(pos) == Some(&b'\n') {
+                pos += 1;
+            }
         }
     }
-    for path in ctx.existing_files() {
-        push(path);
+    true
+}
+
+fn read_revision_blobs_batched(
+    root: &Path,
+    rev: &str,
+    paths: &[String],
+    max_total_bytes: usize,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let safe_paths: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !p.contains('\n') && !p.contains('\r'))
+        .collect();
+    if safe_paths.is_empty() {
+        return out;
+    }
+
+    let mut check_input = Vec::with_capacity(safe_paths.len() * 48);
+    for path in &safe_paths {
+        check_input.extend_from_slice(rev.as_bytes());
+        check_input.extend_from_slice(b":./");
+        check_input.extend_from_slice(path.as_bytes());
+        check_input.push(b'\n');
+    }
+    let Ok(check_out) = infra_core::git::run(
+        root,
+        &infra_core::git::strings(&["cat-file", "--batch-check"]),
+        Some(check_input),
+        Duration::from_secs(GIT_TIMEOUT_SECS),
+        8 * 1024 * 1024,
+    ) else {
+        return out;
+    };
+    if check_out.code != 0 {
+        return out;
+    }
+
+    let check_text = String::from_utf8_lossy(&check_out.stdout);
+    let mut selected: Vec<(&str, &str, usize)> = Vec::new();
+    let mut total_bytes = 0usize;
+    for (path, line) in safe_paths.iter().zip(check_text.lines()) {
+        let parts: Vec<&str> = line.split_ascii_whitespace().collect();
+        if parts.len() == 3
+            && parts[1] == "blob"
+            && let Ok(sz) = parts[2].parse::<usize>()
+            && sz <= MAX_SOURCE_BYTES
+        {
+            if total_bytes.saturating_add(sz) > max_total_bytes {
+                break;
+            }
+            total_bytes += sz;
+            selected.push((path, parts[0], sz));
+        }
+    }
+
+    const BATCH_MAX_BYTES: usize = 16 * 1024 * 1024;
+    let mut idx = 0;
+    while idx < selected.len() {
+        let mut chunk: Vec<(&str, &str)> = Vec::new();
+        let mut chunk_bytes = 0usize;
+        let mut batch_input = Vec::new();
+        while idx < selected.len() {
+            let (path, oid, sz) = selected[idx];
+            if !chunk.is_empty() && chunk_bytes + sz + oid.len() + 64 > BATCH_MAX_BYTES {
+                break;
+            }
+            chunk_bytes += sz + oid.len() + 64;
+            batch_input.extend_from_slice(oid.as_bytes());
+            batch_input.push(b'\n');
+            chunk.push((path, oid));
+            idx += 1;
+        }
+        if let Ok(batch_out) = infra_core::git::run(
+            root,
+            &infra_core::git::strings(&["cat-file", "--batch"]),
+            Some(batch_input),
+            Duration::from_secs(GIT_TIMEOUT_SECS),
+            BATCH_MAX_BYTES + 4 * 1024 * 1024,
+        ) && batch_out.code == 0
+        {
+            let _ = parse_batch_blob_payloads(&batch_out.stdout, &chunk, &mut out);
+        }
     }
     out
 }
 
-fn build_caller_dep_cache(
-    ctx: &TargetContext<'_>,
-    candidates: &[String],
-) -> HashMap<String, (String, Vec<DepRef>)> {
-    let mut cache = HashMap::new();
-    for path in candidates {
-        if let BlobRead::Ok(src) = ctx.read_after(path) {
-            let deps = extract_file_deps(path, &src, &ctx.resolution_files);
-            cache.insert(path.clone(), (src, deps));
+/// Inverted reference/token index over scanned workspace files so callers beyond
+/// `MAX_CALLER_SCAN` are ranked and discovered without linear-prefix truncation.
+struct CallerScanIndex {
+    postings: HashMap<String, Vec<usize>>,
+    scanned_files: Vec<String>,
+    priority_paths: Vec<String>,
+    retained_sources: HashMap<String, String>,
+    dep_cache: RefCell<HashMap<String, (String, Vec<DepRef>)>>,
+}
+
+impl CallerScanIndex {
+    fn build(
+        ctx: &TargetContext<'_>,
+        index: Option<&Index>,
+        changed: &BTreeMap<String, MergedChange>,
+        live_focus: Option<&GraphFocus>,
+        known_callers: &[String],
+    ) -> Self {
+        let mut seen = HashSet::new();
+        let mut all_paths: Vec<String> = Vec::new();
+        let mut priority_paths: Vec<String> = Vec::new();
+        {
+            let mut push_path = |p: &str, is_priority: bool| {
+                if all_paths.len() < MAX_WALK_FILES
+                    && is_scannable_code(p)
+                    && seen.insert(p.to_owned())
+                {
+                    let owned = p.to_owned();
+                    if is_priority {
+                        priority_paths.push(owned.clone());
+                    }
+                    all_paths.push(owned);
+                }
+            };
+
+            for (path, entry) in changed {
+                if entry.status != "deleted" {
+                    push_path(path, true);
+                }
+            }
+            if let Some(lf) = live_focus {
+                for raw in &lf.target_paths {
+                    if let Some(p) = normalize_rel_opt(raw) {
+                        push_path(&p, true);
+                    }
+                }
+                for entity in &lf.created_entities {
+                    if let Some(p) = normalize_rel_opt(&entity.path) {
+                        push_path(&p, true);
+                    }
+                }
+            }
+            for caller in known_callers {
+                push_path(caller, false);
+            }
+            if let Some(idx) = index {
+                for path in idx.files() {
+                    push_path(path, false);
+                }
+            }
+            for path in ctx.existing_files() {
+                push_path(path, false);
+            }
+        }
+
+        let mut initial_seen: HashSet<String> = priority_paths.iter().cloned().collect();
+        let mut initial_count = initial_seen.len();
+        for caller in known_callers {
+            if initial_count >= MAX_CALLER_SCAN {
+                break;
+            }
+            if is_scannable_code(caller) && initial_seen.insert(caller.clone()) {
+                initial_count += 1;
+            }
+        }
+
+        let mut batched_rev_blobs = match ctx.revision.as_deref() {
+            Some(rev) => {
+                read_revision_blobs_batched(ctx.root, rev, &all_paths, MAX_INDEX_SCAN_BYTES)
+            }
+            None => HashMap::new(),
+        };
+
+        let mut postings: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut scanned_files: Vec<String> = Vec::with_capacity(all_paths.len());
+        let mut retained_sources: HashMap<String, String> = HashMap::new();
+        let mut dep_cache: HashMap<String, (String, Vec<DepRef>)> = HashMap::new();
+        let mut scanned_bytes = 0usize;
+        let mut retained_bytes = 0usize;
+        let small_project = all_paths.len() <= MAX_CALLER_SCAN;
+
+        for path in &all_paths {
+            let src_opt = if ctx.revision.is_some() {
+                batched_rev_blobs.remove(path).or_else(|| {
+                    if initial_seen.contains(path) || small_project {
+                        ctx.read_after(path).into_opt()
+                    } else {
+                        None
+                    }
+                })
+            } else if scanned_bytes < MAX_INDEX_SCAN_BYTES || initial_seen.contains(path) {
+                disk_read_text(ctx.root, path).into_opt()
+            } else {
+                None
+            };
+            let Some(src) = src_opt else {
+                continue;
+            };
+            scanned_bytes = scanned_bytes.saturating_add(src.len());
+            let file_idx = scanned_files.len();
+            scanned_files.push(path.clone());
+            for tok in extract_ident_tokens(&src) {
+                postings.entry(tok).or_default().push(file_idx);
+            }
+
+            if initial_seen.contains(path) || (small_project && dep_cache.len() < MAX_CALLER_SCAN) {
+                let deps = extract_file_deps(path, &src, &ctx.resolution_files);
+                dep_cache.insert(path.clone(), (src, deps));
+            } else if retained_bytes.saturating_add(src.len()) <= MAX_RETAINED_SOURCE_BYTES {
+                retained_bytes += src.len();
+                retained_sources.insert(path.clone(), src);
+            }
+        }
+
+        Self {
+            postings,
+            scanned_files,
+            priority_paths,
+            retained_sources,
+            dep_cache: RefCell::new(dep_cache),
         }
     }
-    cache
+
+    #[allow(clippy::too_many_arguments)]
+    fn candidates_for(
+        &self,
+        rel_path: &str,
+        previous_path: Option<&str>,
+        target_symbols: &[String],
+        declared_members: &[DeclaredMember],
+        index: Option<&Index>,
+        index_incoming: &HashMap<u32, Vec<(u32, String, bool)>>,
+        certain: bool,
+    ) -> Vec<String> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        let push_unique = |path: &str, seen: &mut HashSet<String>, out: &mut Vec<String>| -> bool {
+            if path != rel_path && seen.insert(path.to_owned()) {
+                out.push(path.to_owned());
+                true
+            } else {
+                false
+            }
+        };
+
+        for p in &self.priority_paths {
+            push_unique(p, &mut seen, &mut out);
+        }
+        if let Some(idx) = index {
+            let mut idx_added = 0usize;
+            for fid in [
+                idx.file_id(rel_path),
+                previous_path.and_then(|old| idx.file_id(old)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(rows) = index_incoming.get(&fid) {
+                    for (from_fid, _, guessed) in rows {
+                        if certain && *guessed {
+                            continue;
+                        }
+                        if idx_added >= MAX_CALLER_SCAN {
+                            break;
+                        }
+                        let caller_path = &idx.files()[*from_fid as usize];
+                        if push_unique(caller_path, &mut seen, &mut out) {
+                            idx_added += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.scanned_files.len() <= MAX_CALLER_SCAN {
+            for p in &self.scanned_files {
+                push_unique(p, &mut seen, &mut out);
+            }
+            return out;
+        }
+
+        let mut query_tokens: BTreeSet<String> = BTreeSet::new();
+        push_query_tokens_from_path(rel_path, &mut query_tokens);
+        if let Some(prev) = previous_path {
+            push_query_tokens_from_path(prev, &mut query_tokens);
+        }
+        for sym in target_symbols {
+            for tok in extract_ident_tokens(sym) {
+                query_tokens.insert(tok);
+            }
+        }
+        for member in declared_members {
+            for tok in extract_ident_tokens(&member.name) {
+                query_tokens.insert(tok);
+            }
+            if let Some(parent) = &member.parent {
+                for tok in extract_ident_tokens(parent) {
+                    query_tokens.insert(tok);
+                }
+            }
+        }
+
+        let mut scores: HashMap<usize, usize> = HashMap::new();
+        for tok in &query_tokens {
+            if let Some(files) = self.postings.get(tok) {
+                let idf_weight = 1000usize / files.len().max(1);
+                let weight = idf_weight.max(1);
+                for &file_idx in files {
+                    *scores.entry(file_idx).or_insert(0) += weight;
+                }
+            }
+        }
+
+        let mut ranked: Vec<(usize, usize)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(self.scanned_files[a.0].cmp(&self.scanned_files[b.0]))
+        });
+        let mut added = 0usize;
+        for (file_idx, _) in ranked {
+            if added >= MAX_CALLER_SCAN {
+                break;
+            }
+            let path = &self.scanned_files[file_idx];
+            if path != rel_path && seen.insert(path.clone()) {
+                out.push(path.clone());
+                added += 1;
+            }
+        }
+        out
+    }
+
+    fn ensure_all_cached(&self, ctx: &TargetContext<'_>, candidates: &[String]) {
+        let mut cache = self.dep_cache.borrow_mut();
+        for path in candidates {
+            if cache.contains_key(path) {
+                continue;
+            }
+            let src_opt = self
+                .retained_sources
+                .get(path)
+                .cloned()
+                .or_else(|| ctx.read_after(path).into_opt());
+            if let Some(src) = src_opt {
+                let deps = extract_file_deps(path, &src, &ctx.resolution_files);
+                cache.insert(path.clone(), (src, deps));
+            }
+        }
+    }
+
+    fn read_source_for(&self, ctx: &TargetContext<'_>, path: &str) -> Option<String> {
+        if let Some((src, _)) = self.dep_cache.borrow().get(path) {
+            return Some(src.clone());
+        }
+        if let Some(src) = self.retained_sources.get(path) {
+            return Some(src.clone());
+        }
+        ctx.read_after(path).into_opt()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2517,7 +3588,7 @@ fn evaluate_callers_for_file(
     resolved: Option<&Resolved>,
     certain: bool,
     index_incoming: &HashMap<u32, Vec<(u32, String, bool)>>,
-    caller_cache: &HashMap<String, (String, Vec<DepRef>)>,
+    scan_index: &CallerScanIndex,
 ) -> Vec<CallerReport> {
     let mut callers: BTreeMap<String, CallerAccum> = BTreeMap::new();
 
@@ -2552,79 +3623,99 @@ fn evaluate_callers_for_file(
         }
     }
 
-    for (caller_path, (caller_src, caller_deps)) in caller_cache {
-        if caller_path == rel_path {
-            continue;
-        }
-        let matching_deps: Vec<&DepRef> = caller_deps
-            .iter()
-            .filter(|d| {
-                d.resolved
-                    && (d.target == rel_path || previous_path.is_some_and(|old| d.target == old))
-            })
-            .collect();
-        let matched_refs = find_matching_references(
-            caller_path,
-            caller_src,
-            rel_path,
-            target_symbols,
-            &ctx.resolution_files,
-        );
-        let has_live_edge = !matching_deps.is_empty() || !matched_refs.is_empty();
-
-        if let Some(acc) = callers.get_mut(caller_path) {
-            acc.source_after = Some(caller_src.clone());
-            if has_live_edge {
-                for dep in matching_deps {
-                    acc.symbols.extend(dep.symbols.iter().cloned());
-                }
-                acc.symbols.extend(matched_refs);
-            } else if is_caller_modified_in_resolved(caller_path, resolved) {
-                // Caller was modified and dropped its dependency on this file.
-                let dropped = ctx
-                    .read_before(caller_path)
-                    .into_opt()
-                    .is_some_and(|before_src| {
-                        let before_deps =
-                            extract_file_deps(caller_path, &before_src, &ctx.resolution_files);
-                        before_deps.iter().any(|d| {
-                            d.resolved
-                                && (d.target == rel_path
-                                    || previous_path.is_some_and(|old| d.target == old))
-                        }) || !find_matching_references(
-                            caller_path,
-                            &before_src,
-                            rel_path,
-                            target_symbols,
-                            &ctx.resolution_files,
-                        )
-                        .is_empty()
-                    });
-                if dropped {
-                    callers.remove(caller_path);
-                }
+    let candidates = scan_index.candidates_for(
+        rel_path,
+        previous_path,
+        target_symbols,
+        declared_members,
+        index,
+        index_incoming,
+        certain,
+    );
+    scan_index.ensure_all_cached(ctx, &candidates);
+    {
+        let dep_cache = scan_index.dep_cache.borrow();
+        for caller_path in &candidates {
+            if caller_path == rel_path {
+                continue;
             }
-        } else if has_live_edge {
-            let mut syms = BTreeSet::new();
-            let mut link_count = 0u64;
-            for dep in &matching_deps {
-                syms.extend(dep.symbols.iter().cloned());
-                link_count += dep.symbols.len().max(1) as u64;
-            }
-            for r in &matched_refs {
-                syms.insert(r.clone());
-            }
-            link_count = link_count.max(matched_refs.len().max(1) as u64);
-            callers.insert(
-                caller_path.clone(),
-                CallerAccum {
-                    symbols: syms,
-                    links: link_count,
-                    guessed: 0,
-                    from_index: false,
-                    source_after: Some(caller_src.clone()),
-                },
+            let Some((caller_src, caller_deps)) = dep_cache.get(caller_path) else {
+                continue;
+            };
+            let matching_deps: Vec<&DepRef> = caller_deps
+                .iter()
+                .filter(|d| {
+                    d.resolved
+                        && (d.target == rel_path
+                            || previous_path.is_some_and(|old| d.target == old))
+                })
+                .collect();
+            let matched_refs = find_matching_references(
+                caller_path,
+                caller_src,
+                rel_path,
+                target_symbols,
+                &ctx.resolution_files,
             );
+            let has_live_edge = !matching_deps.is_empty() || !matched_refs.is_empty();
+
+            if let Some(acc) = callers.get_mut(caller_path) {
+                acc.source_after = Some(caller_src.clone());
+                if has_live_edge {
+                    for dep in matching_deps {
+                        acc.symbols.extend(dep.symbols.iter().cloned());
+                    }
+                    acc.symbols.extend(matched_refs);
+                } else if is_caller_modified_in_resolved(caller_path, resolved) {
+                    // Caller was modified and dropped its dependency on this file.
+                    let dropped =
+                        ctx.read_before(caller_path)
+                            .into_opt()
+                            .is_some_and(|before_src| {
+                                let before_deps = extract_file_deps(
+                                    caller_path,
+                                    &before_src,
+                                    &ctx.resolution_files,
+                                );
+                                before_deps.iter().any(|d| {
+                                    d.resolved
+                                        && (d.target == rel_path
+                                            || previous_path.is_some_and(|old| d.target == old))
+                                }) || !find_matching_references(
+                                    caller_path,
+                                    &before_src,
+                                    rel_path,
+                                    target_symbols,
+                                    &ctx.resolution_files,
+                                )
+                                .is_empty()
+                            });
+                    if dropped {
+                        callers.remove(caller_path);
+                    }
+                }
+            } else if has_live_edge {
+                let mut syms = BTreeSet::new();
+                let mut link_count = 0u64;
+                for dep in &matching_deps {
+                    syms.extend(dep.symbols.iter().cloned());
+                    link_count += dep.symbols.len().max(1) as u64;
+                }
+                for r in &matched_refs {
+                    syms.insert(r.clone());
+                }
+                link_count = link_count.max(matched_refs.len().max(1) as u64);
+                callers.insert(
+                    caller_path.clone(),
+                    CallerAccum {
+                        symbols: syms,
+                        links: link_count,
+                        guessed: 0,
+                        from_index: false,
+                        source_after: Some(caller_src.clone()),
+                    },
+                );
+            }
         }
     }
 
@@ -2668,8 +3759,15 @@ fn evaluate_callers_for_file(
             resolved,
         );
 
-        let caller_extends =
-            caller_extends_target(acc.source_after.as_deref(), rel_path, declared_members);
+        let mut read_ext_src = |p: &str| scan_index.read_source_for(ctx, p);
+        let caller_extends = caller_extends_target_in(
+            &caller_path,
+            acc.source_after.as_deref(),
+            rel_path,
+            declared_members,
+            &ctx.resolution_files,
+            &mut read_ext_src,
+        );
         let mut used_members = match acc.source_after.as_deref() {
             Some(src) => find_matching_member_references(
                 &caller_path,
@@ -2741,7 +3839,9 @@ fn evaluate_callers_for_file(
 
         for mref in &mut used_members {
             acc.symbols.insert(mref.name.clone());
-            let assess = enrich_member_ref(
+            let assess = enrich_member_ref_in(
+                ctx.manifest_root(),
+                Some(&ctx.resolution_files),
                 mref,
                 declared_members,
                 &caller_path,
@@ -2810,7 +3910,9 @@ fn evaluate_callers_for_file(
                     visibility_narrowed: entity.visibility_narrowed,
                     used_by_caller: true,
                 };
-                let assess = assess_member_access(
+                let assess = assess_member_access_in(
+                    ctx.manifest_root(),
+                    Some(&ctx.resolution_files),
                     &synth_tm,
                     &caller_path,
                     rel_path,
@@ -4759,6 +5861,295 @@ mod tests {
                     && r["impact"] == "broken_risk"
             }),
             "{edge_diffs}"
+        );
+    }
+
+    #[test]
+    fn same_scope_crate_or_package_walks_to_enclosing_manifest_and_source_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("composer.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("packages/billing")).unwrap();
+        std::fs::write(root.join("packages/billing/composer.json"), "{}").unwrap();
+
+        assert!(same_scope_crate_or_package_in(
+            Some(root),
+            None,
+            "app/A.php",
+            "app/B/C.php"
+        ));
+        assert!(!same_scope_crate_or_package_in(
+            Some(root),
+            None,
+            "app/A.php",
+            "packages/billing/Invoice.php"
+        ));
+        assert!(same_scope_crate_or_package_in(
+            Some(root),
+            None,
+            "packages/billing/src/Model.php",
+            "packages/billing/src/Nested/Repo.php"
+        ));
+
+        // Without manifests on disk, nested paths under the same source root match while
+        // different packages / monorepo containers remain isolated.
+        assert!(same_scope_crate_or_package("app/A.php", "app/B/C.php"));
+        assert!(!same_scope_crate_or_package("app/A.php", "other/D.php"));
+        assert!(!same_scope_crate_or_package(
+            "packages/auth/User.php",
+            "packages/billing/Invoice.php"
+        ));
+    }
+
+    #[test]
+    fn within_rust_pub_in_rejects_unknown_or_unmatched_scopes() {
+        assert!(!within_rust_pub_in(
+            "pub(in unknown::scope)",
+            "crates/core/src/a.rs",
+            "crates/core/src/b.rs"
+        ));
+        assert!(!within_rust_pub_in(
+            "pub(in )",
+            "crates/core/src/a.rs",
+            "crates/core/src/b.rs"
+        ));
+        assert!(!within_rust_pub_in(
+            "pub(in crate::other)",
+            "crates/core/src/api/handler.rs",
+            "crates/core/src/api/model.rs"
+        ));
+        assert!(within_rust_pub_in(
+            "pub(in crate::api)",
+            "crates/core/src/api/handler.rs",
+            "crates/core/src/api/model.rs"
+        ));
+        assert!(!within_rust_pub_in(
+            "pub(in crate::api)",
+            "crates/core/src/other/handler.rs",
+            "crates/core/src/api/model.rs"
+        ));
+    }
+
+    #[test]
+    fn caller_extends_target_supports_multihop_and_detects_cycles() {
+        let mut known = BTreeSet::new();
+        for f in [
+            "src/Base.php",
+            "src/Mid.php",
+            "src/Child.php",
+            "src/TraitUser.php",
+            "src/TargetTrait.php",
+            "src/CycleA.php",
+            "src/CycleB.php",
+        ] {
+            known.insert(f.to_owned());
+        }
+        let sources: HashMap<&str, &str> = HashMap::from([
+            (
+                "src/Base.php",
+                "<?php\nclass Base {\n    protected function secret(): void {}\n}\n",
+            ),
+            ("src/Mid.php", "<?php\nclass Mid extends Base {}\n"),
+            (
+                "src/Child.php",
+                "<?php\nclass Child extends Mid {\n    public function run() { $this->secret(); }\n}\n",
+            ),
+            (
+                "src/TargetTrait.php",
+                "<?php\ntrait TargetTrait {\n    protected function helper(): void {}\n}\n",
+            ),
+            (
+                "src/TraitUser.php",
+                "<?php\nclass TraitMid { use TargetTrait; }\nclass TraitUser extends TraitMid {}\n",
+            ),
+            ("src/CycleA.php", "<?php\nclass CycleA extends CycleB {}\n"),
+            ("src/CycleB.php", "<?php\nclass CycleB extends CycleA {}\n"),
+        ]);
+        let mut reader = |p: &str| sources.get(p).map(|s| (*s).to_owned());
+        let base_members = vec![DeclaredMember {
+            name: "secret".into(),
+            kind: "method".into(),
+            parent: Some("Base".into()),
+            line: Some(3),
+            signature: None,
+            visibility: Some("protected".into()),
+            previous_visibility: Some("public".into()),
+            modifiers: Vec::new(),
+            change: "visibility_changed".into(),
+            signature_changed: false,
+            visibility_narrowed: true,
+            used_by_caller: false,
+        }];
+        assert!(caller_extends_target_in(
+            "src/Child.php",
+            sources.get("src/Child.php").copied(),
+            "src/Base.php",
+            &base_members,
+            &known,
+            &mut reader,
+        ));
+        assert!(!caller_extends_target_in(
+            "src/CycleA.php",
+            sources.get("src/CycleA.php").copied(),
+            "src/Base.php",
+            &base_members,
+            &known,
+            &mut reader,
+        ));
+        let trait_members = vec![DeclaredMember {
+            name: "TargetTrait".into(),
+            kind: "trait".into(),
+            parent: None,
+            line: Some(2),
+            signature: None,
+            visibility: Some("public".into()),
+            previous_visibility: None,
+            modifiers: Vec::new(),
+            change: "unchanged".into(),
+            signature_changed: false,
+            visibility_narrowed: false,
+            used_by_caller: false,
+        }];
+        assert!(caller_extends_target_in(
+            "src/TraitUser.php",
+            sources.get("src/TraitUser.php").copied(),
+            "src/TargetTrait.php",
+            &trait_members,
+            &known,
+            &mut reader,
+        ));
+
+        // End-to-end verification in `file_impact`: a 2-hop protected narrowing stays non-breaking
+        // for `Child extends Mid` (where `Mid extends Base`), while an unrelated `Outsider` breaks.
+        let repo = TempRepo::new_git();
+        repo.write(
+            "src/Base.php",
+            "<?php\nnamespace App;\nclass Base {\n    public static function secret(): void {}\n}\n",
+        );
+        repo.write(
+            "src/Mid.php",
+            "<?php\nnamespace App;\nclass Mid extends Base {}\n",
+        );
+        repo.write(
+            "src/Child.php",
+            "<?php\nnamespace App;\nclass Child extends Mid {\n    public function run(): void {\n        Base::secret();\n    }\n}\n",
+        );
+        repo.write(
+            "src/Outsider.php",
+            "<?php\nnamespace App;\nclass Outsider {\n    public function run(): void {\n        Base::secret();\n    }\n}\n",
+        );
+        let head = repo.commit("base");
+        repo.write(
+            "src/Base.php",
+            "<?php\nnamespace App;\nclass Base {\n    protected static function secret(): void {}\n}\n",
+        );
+        let resolved = resolved_work(
+            &head,
+            vec![Change {
+                path: "src/Base.php".into(),
+                status: 'M',
+                from: None,
+            }],
+        );
+        let impact = file_impact(
+            &repo.root,
+            None,
+            Some(&resolved),
+            None,
+            "src/Base.php",
+            false,
+        )
+        .unwrap();
+        let used_by = impact["used_by"].as_array().unwrap();
+        let child = used_by
+            .iter()
+            .find(|c| c["path"] == "src/Child.php")
+            .expect("Child caller");
+        assert_ne!(child["impact"], "broken_risk", "{child}");
+        let outsider = used_by
+            .iter()
+            .find(|c| c["path"] == "src/Outsider.php")
+            .expect("Outsider caller");
+        assert_eq!(outsider["impact"], "broken_risk", "{outsider}");
+    }
+
+    #[test]
+    fn inverted_caller_scan_finds_unindexed_caller_past_scan_limit() {
+        let repo = TempRepo::new_git();
+        repo.write(
+            "src/BillingTarget.php",
+            "<?php\nnamespace App\\Billing;\nclass BillingTarget {\n    public function settleInvoice(): void {}\n}\n",
+        );
+        for i in 0..(MAX_CALLER_SCAN + 40) {
+            repo.write(
+                &format!("aa/Filler{i:04}.php"),
+                &format!("<?php\nnamespace App\\Fill;\nclass Filler{i:04} {{}}\n"),
+            );
+        }
+        repo.write(
+            "zz/LateCaller.php",
+            "<?php\nnamespace App\\Zz;\nuse App\\Billing\\BillingTarget;\nclass LateCaller {\n    public function run(): void {\n        $b = new BillingTarget();\n        $b->settleInvoice();\n    }\n}\n",
+        );
+        let head = repo.commit("many-files");
+        repo.write(
+            "src/BillingTarget.php",
+            "<?php\nnamespace App\\Billing;\nclass BillingTarget {\n    public function settleInvoice(int $cents): void {}\n}\n",
+        );
+        let resolved = resolved_work(
+            &head,
+            vec![Change {
+                path: "src/BillingTarget.php".into(),
+                status: 'M',
+                from: None,
+            }],
+        );
+
+        let impact = file_impact(
+            &repo.root,
+            None,
+            Some(&resolved),
+            None,
+            "src/BillingTarget.php",
+            false,
+        )
+        .unwrap();
+        let used_by = impact["used_by"].as_array().unwrap();
+        let late = used_by
+            .iter()
+            .find(|c| c["path"] == "zz/LateCaller.php")
+            .expect("unindexed caller past MAX_CALLER_SCAN should be found");
+        assert_eq!(late["impact"], "broken_risk", "{late}");
+
+        // Also check when an incomplete Index exists that lacks the edge to zz/LateCaller.php.
+        let partial_index = Index::read(
+            json!({
+                "nodes": [
+                    {"id": "bt", "label": "BillingTarget", "source_file": "src/BillingTarget.php"},
+                    {"id": "f0", "label": "Filler0000", "source_file": "aa/Filler0000.php"}
+                ],
+                "links": []
+            })
+            .to_string()
+            .as_bytes(),
+            &repo.root,
+        )
+        .unwrap();
+        let impact_with_idx = file_impact(
+            &repo.root,
+            Some(&partial_index),
+            Some(&resolved),
+            None,
+            "src/BillingTarget.php",
+            false,
+        )
+        .unwrap();
+        assert!(
+            impact_with_idx["used_by"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["path"] == "zz/LateCaller.php" && c["impact"] == "broken_risk"),
+            "{impact_with_idx}"
         );
     }
 }

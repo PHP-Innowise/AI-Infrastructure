@@ -76,14 +76,9 @@ impl Rules {
                 ));
             }
             for path in &layer.paths {
-                if path.len() > 1024
-                    || path.contains(['\\', ':', '*', '?'])
-                    || path.chars().any(char::is_control)
-                    || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-                    || !paths.insert(path.as_str())
-                {
+                if !is_valid_pattern(path) || !paths.insert(path.as_str()) {
                     return Err(format!(
-                        "Layer {} needs unique project-relative paths without wildcards.",
+                        "Layer {} needs unique project-relative paths or safe glob patterns.",
                         layer.id
                     ));
                 }
@@ -98,23 +93,136 @@ impl Rules {
     }
 
     pub(super) fn layer(&self, path: &str) -> Option<usize> {
+        let clean = path.trim_matches('/');
+        if clean.is_empty() || clean.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            return None;
+        }
         self.layers
             .iter()
             .enumerate()
-            .flat_map(|(id, layer)| layer.paths.iter().map(move |prefix| (id, prefix.as_str())))
-            .filter(|(_, prefix)| {
-                path == *prefix
-                    || path
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.starts_with('/'))
+            .flat_map(|(id, layer)| {
+                layer.paths.iter().filter_map(move |pattern| {
+                    match_specificity(pattern, clean).map(|spec| (id, spec))
+                })
             })
-            .max_by_key(|(_, prefix)| prefix.len())
+            .max_by(|(id_a, spec_a), (id_b, spec_b)| {
+                spec_a.cmp(spec_b).then_with(|| id_b.cmp(id_a))
+            })
             .map(|(id, _)| id)
     }
 
     pub(super) fn forbidden(&self, from: usize, to: usize) -> bool {
         from != to && !self.layers[from].allows.contains(&self.layers[to].id)
     }
+}
+
+fn is_valid_pattern(pattern: &str) -> bool {
+    if pattern.is_empty()
+        || pattern.len() > 1024
+        || pattern.contains(['\\', ':'])
+        || pattern.chars().any(char::is_control)
+    {
+        return false;
+    }
+    for part in pattern.split('/') {
+        if matches!(part, "" | "." | "..") {
+            return false;
+        }
+        if part.contains("**") && part != "**" {
+            // Restrict `**` to full path segments so ambiguous intra-segment `**` forms are refused.
+            return false;
+        }
+    }
+    true
+}
+
+fn match_segment(pat: &str, text: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let s: Vec<char> = text.chars().collect();
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star_pi, mut star_si) = (None, 0usize);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn match_glob(pattern: &str, path: &str) -> bool {
+    let mut p_segs = Vec::new();
+    for seg in pattern.split('/') {
+        if seg == "**" && p_segs.last().copied() == Some("**") {
+            continue;
+        }
+        p_segs.push(seg);
+    }
+    if p_segs.last().copied() == Some("**") {
+        // A trailing `/**` matches files beneath that directory (at least one path segment).
+        p_segs.push("*");
+    }
+    let s_segs: Vec<&str> = path.split('/').collect();
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star_pi, mut star_si) = (None, 0usize);
+    while si < s_segs.len() {
+        if pi < p_segs.len() && p_segs[pi] == "**" {
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if pi < p_segs.len() && match_segment(p_segs[pi], s_segs[si]) {
+            pi += 1;
+            si += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while pi < p_segs.len() && p_segs[pi] == "**" {
+        pi += 1;
+    }
+    pi == p_segs.len()
+}
+
+fn match_specificity(pattern: &str, path: &str) -> Option<(bool, usize, bool, bool, usize)> {
+    let has_glob = pattern.contains(['*', '?']);
+    if !has_glob {
+        let exact = path == pattern;
+        let matches = exact
+            || path
+                .strip_prefix(pattern)
+                .is_some_and(|rest| rest.starts_with('/'));
+        if !matches {
+            return None;
+        }
+        let literal = pattern.bytes().filter(|b| *b != b'/').count();
+        return Some((exact, literal, true, true, pattern.len()));
+    }
+    if !match_glob(pattern, path) {
+        return None;
+    }
+    let has_double_star = pattern.split('/').any(|seg| seg == "**");
+    let literal = pattern
+        .bytes()
+        .filter(|b| !matches!(*b, b'/' | b'*' | b'?'))
+        .count();
+    Some((false, literal, !has_double_star, false, pattern.len()))
 }
 
 #[cfg(test)]
@@ -144,5 +252,53 @@ mod tests {
         wrong["layers"][1]["paths"] = json!(["other"]);
         wrong["layers"][1]["allows"] = json!(["missing"]);
         assert!(parse(&wrong).is_err());
+    }
+
+    #[test]
+    fn rules_support_safe_globs_and_reject_unsafe_patterns() {
+        let parse = |value: &Value| Rules::parse(value.to_string().as_bytes());
+        let input = json!({"version":1, "layers":[
+            {"id":"domain","name":"Domain","paths":["src/**","**/Domain/*.php"],"allows":[]},
+            {"id":"controllers","name":"Controllers","paths":["src/**/*Controller.php","src/V?/Api.php"],"allows":["domain"]},
+            {"id":"direct","name":"Direct","paths":["src/*/Helper.php"],"allows":["domain"]},
+            {"id":"health","name":"Health","paths":["src/HealthController.php"],"allows":[]}
+        ]});
+        let rules = parse(&input).unwrap();
+
+        // `**` matches 0+ segments, while trailing `/**` matches files under `src/`.
+        assert_eq!(rules.layer("src/Order.php"), Some(0));
+        assert_eq!(rules.layer("src/Billing/Entity/Invoice.php"), Some(0));
+        assert_eq!(rules.layer("modules/Domain/User.php"), Some(0));
+        assert_eq!(rules.layer("src"), None);
+
+        // `*` matches within one segment only; `?` matches one character.
+        assert_eq!(rules.layer("src/Orders/Helper.php"), Some(2));
+        assert_eq!(rules.layer("src/Orders/Sub/Helper.php"), Some(0));
+        assert_eq!(rules.layer("src/V1/Api.php"), Some(1));
+        assert_eq!(rules.layer("src/V10/Api.php"), Some(0));
+
+        // Specificity: exact path > more specific glob > broader glob.
+        assert_eq!(rules.layer("src/OrderController.php"), Some(1));
+        assert_eq!(rules.layer("src/Nested/OrderController.php"), Some(1));
+        assert_eq!(rules.layer("src/HealthController.php"), Some(3));
+
+        // Unsafe patterns must be rejected.
+        for bad in [
+            "/src/*.php",
+            "../src/*.php",
+            "src/../secret/*.php",
+            "src/**/../secret.php",
+            "./src/*.php",
+            "src/",
+            "src//a.php",
+            "src\\*.php",
+            "C:src/*.php",
+            "src/**foo.php",
+            "",
+        ] {
+            let mut invalid = input.clone();
+            invalid["layers"][0]["paths"] = json!([bad]);
+            assert!(parse(&invalid).is_err(), "pattern `{bad}` must be rejected");
+        }
     }
 }

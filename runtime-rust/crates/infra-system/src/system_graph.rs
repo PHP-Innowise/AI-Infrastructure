@@ -3637,34 +3637,293 @@ pub fn enrich_summaries_from_graph_store(
         }
 
         if let Ok(meta) = std::fs::metadata(&path)
-            && meta.len() <= 64 * 1024 * 1024
-            && let Ok(bytes) = std::fs::read(&path)
-            && let Ok(doc) = serde_json::from_slice::<Value>(&bytes)
+            && meta.is_file()
         {
-            let n_count = doc["nodes"].as_array().map_or(0, Vec::len);
-            let e_count = doc["links"]
-                .as_array()
-                .or_else(|| doc["edges"].as_array())
-                .map_or(0, Vec::len);
-            let g_commit = doc["commit"]
-                .as_str()
-                .or_else(|| doc["meta"]["commit"].as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            let stale = summary.dirty || (g_commit.is_some() && head.is_some() && g_commit != head);
-            summary.nodes = n_count;
-            summary.edges = e_count;
-            if let Some(c) = g_commit {
-                summary.commit = Some(c);
+            let parsed = read_matching_live_summary(&path, &meta).or_else(|| {
+                (meta.len() <= 64 * 1024 * 1024)
+                    .then(|| stream_graph_summary(&path))
+                    .flatten()
+            });
+            if let Some((n_count, e_count, g_commit)) = parsed {
+                let stale =
+                    summary.dirty || (g_commit.is_some() && head.is_some() && g_commit != head);
+                summary.nodes = n_count;
+                summary.edges = e_count;
+                if let Some(c) = g_commit {
+                    summary.commit = Some(c);
+                }
+                summary.stale = stale;
+                summary.state = if stale {
+                    "stale".into()
+                } else {
+                    "ready".into()
+                };
             }
-            summary.stale = stale;
-            summary.state = if stale {
-                "stale".into()
-            } else {
-                "ready".into()
-            };
         }
     }
+}
+
+#[derive(Deserialize)]
+struct LiveGraphSummary {
+    nodes: usize,
+    edges: usize,
+    #[serde(default)]
+    commit: Option<String>,
+    graph_len: u64,
+    #[serde(default)]
+    graph_mtime_secs: Option<u64>,
+    #[serde(default)]
+    graph_mtime_nanos: Option<u32>,
+}
+
+fn read_matching_live_summary(
+    graph_path: &Path,
+    graph_meta: &std::fs::Metadata,
+) -> Option<(usize, usize, Option<String>)> {
+    let summary_path = graph_path.with_file_name("summary.json");
+    let sum_meta = std::fs::symlink_metadata(&summary_path).ok()?;
+    if !sum_meta.is_file() || sum_meta.len() > 64 * 1024 {
+        return None;
+    }
+    let file = std::fs::File::open(&summary_path).ok()?;
+    let summary: LiveGraphSummary = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
+    if summary.graph_len != graph_meta.len() {
+        return None;
+    }
+    let modified = graph_meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    if summary.graph_mtime_secs != Some(modified.as_secs())
+        || summary.graph_mtime_nanos != Some(modified.subsec_nanos())
+    {
+        return None;
+    }
+    Some((
+        summary.nodes,
+        summary.edges,
+        summary.commit.filter(|s| !s.is_empty()),
+    ))
+}
+
+fn stream_graph_summary(path: &Path) -> Option<(usize, usize, Option<String>)> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct OptArrayLen(Option<usize>);
+    impl<'de> Deserialize<'de> for OptArrayLen {
+        fn deserialize<D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct LenVisitor;
+            impl<'de> Visitor<'de> for LenVisitor {
+                type Value = OptArrayLen;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("an optional JSON array")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> std::result::Result<OptArrayLen, A::Error> {
+                    let mut count = 0usize;
+                    while seq.next_element::<IgnoredAny>()?.is_some() {
+                        count += 1;
+                    }
+                    Ok(OptArrayLen(Some(count)))
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> std::result::Result<OptArrayLen, A::Error> {
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    Ok(OptArrayLen(None))
+                }
+                fn visit_unit<E>(self) -> std::result::Result<OptArrayLen, E> {
+                    Ok(OptArrayLen(None))
+                }
+                fn visit_bool<E>(self, _: bool) -> std::result::Result<OptArrayLen, E> {
+                    Ok(OptArrayLen(None))
+                }
+                fn visit_i64<E>(self, _: i64) -> std::result::Result<OptArrayLen, E> {
+                    Ok(OptArrayLen(None))
+                }
+                fn visit_u64<E>(self, _: u64) -> std::result::Result<OptArrayLen, E> {
+                    Ok(OptArrayLen(None))
+                }
+                fn visit_f64<E>(self, _: f64) -> std::result::Result<OptArrayLen, E> {
+                    Ok(OptArrayLen(None))
+                }
+                fn visit_str<E>(self, _: &str) -> std::result::Result<OptArrayLen, E> {
+                    Ok(OptArrayLen(None))
+                }
+            }
+            deserializer.deserialize_any(LenVisitor)
+        }
+    }
+
+    struct OptStr(Option<String>);
+    impl<'de> Deserialize<'de> for OptStr {
+        fn deserialize<D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct StrVisitor;
+            impl<'de> Visitor<'de> for StrVisitor {
+                type Value = OptStr;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("an optional JSON string")
+                }
+                fn visit_str<E>(self, v: &str) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(Some(v.to_owned())))
+                }
+                fn visit_string<E>(self, v: String) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(Some(v)))
+                }
+                fn visit_unit<E>(self) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(None))
+                }
+                fn visit_bool<E>(self, _: bool) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(None))
+                }
+                fn visit_i64<E>(self, _: i64) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(None))
+                }
+                fn visit_u64<E>(self, _: u64) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(None))
+                }
+                fn visit_f64<E>(self, _: f64) -> std::result::Result<OptStr, E> {
+                    Ok(OptStr(None))
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> std::result::Result<OptStr, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(OptStr(None))
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> std::result::Result<OptStr, A::Error> {
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    Ok(OptStr(None))
+                }
+            }
+            deserializer.deserialize_any(StrVisitor)
+        }
+    }
+
+    struct MetaCommit(Option<String>);
+    impl<'de> Deserialize<'de> for MetaCommit {
+        fn deserialize<D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct MetaVisitor;
+            impl<'de> Visitor<'de> for MetaVisitor {
+                type Value = MetaCommit;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("an optional meta object")
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> std::result::Result<MetaCommit, A::Error> {
+                    let mut commit = None;
+                    while let Some(key) = map.next_key::<String>()? {
+                        if key == "commit" {
+                            commit = map.next_value::<OptStr>()?.0;
+                        } else {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(MetaCommit(commit))
+                }
+                fn visit_unit<E>(self) -> std::result::Result<MetaCommit, E> {
+                    Ok(MetaCommit(None))
+                }
+                fn visit_bool<E>(self, _: bool) -> std::result::Result<MetaCommit, E> {
+                    Ok(MetaCommit(None))
+                }
+                fn visit_i64<E>(self, _: i64) -> std::result::Result<MetaCommit, E> {
+                    Ok(MetaCommit(None))
+                }
+                fn visit_u64<E>(self, _: u64) -> std::result::Result<MetaCommit, E> {
+                    Ok(MetaCommit(None))
+                }
+                fn visit_f64<E>(self, _: f64) -> std::result::Result<MetaCommit, E> {
+                    Ok(MetaCommit(None))
+                }
+                fn visit_str<E>(self, _: &str) -> std::result::Result<MetaCommit, E> {
+                    Ok(MetaCommit(None))
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> std::result::Result<MetaCommit, A::Error> {
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(MetaCommit(None))
+                }
+            }
+            deserializer.deserialize_any(MetaVisitor)
+        }
+    }
+
+    struct GraphStreamSummary {
+        nodes: usize,
+        edges: usize,
+        commit: Option<String>,
+    }
+    impl<'de> Deserialize<'de> for GraphStreamSummary {
+        fn deserialize<D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct GraphVisitor;
+            impl<'de> Visitor<'de> for GraphVisitor {
+                type Value = GraphStreamSummary;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a graph summary object")
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> std::result::Result<GraphStreamSummary, A::Error> {
+                    let mut nodes = None;
+                    let mut links = None;
+                    let mut edges = None;
+                    let mut commit = None;
+                    let mut meta_commit = None;
+                    while let Some(key) = map.next_key::<String>()? {
+                        match key.as_str() {
+                            "nodes" => nodes = map.next_value::<OptArrayLen>()?.0,
+                            "links" => links = map.next_value::<OptArrayLen>()?.0,
+                            "edges" => edges = map.next_value::<OptArrayLen>()?.0,
+                            "commit" => commit = map.next_value::<OptStr>()?.0,
+                            "meta" => meta_commit = map.next_value::<MetaCommit>()?.0,
+                            _ => {
+                                map.next_value::<IgnoredAny>()?;
+                            }
+                        }
+                    }
+                    let final_commit = commit
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| meta_commit.filter(|s| !s.is_empty()));
+                    Ok(GraphStreamSummary {
+                        nodes: nodes.unwrap_or(0),
+                        edges: links.or(edges).unwrap_or(0),
+                        commit: final_commit,
+                    })
+                }
+            }
+            deserializer.deserialize_map(GraphVisitor)
+        }
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    let summary = GraphStreamSummary::deserialize(&mut de).ok()?;
+    de.end().ok()?;
+    Some((summary.nodes, summary.edges, summary.commit))
 }
 
 /// Builds a comprehensive cross-service graph status report for `infra-engine system graph status`.

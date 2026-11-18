@@ -42,6 +42,8 @@ const LINE_LIMIT: usize = 300;
 const PULLS_AGE: Duration = Duration::from_secs(60);
 /// Graphs of other commits kept for a project; each is as large as its own.
 const REVISIONS: usize = 3;
+/// Maximum preserved source bytes kept per commit/PR revision tree for Access and Crates checks.
+const MAX_THIN_TREE_BYTES: u64 = 64 * 1024 * 1024;
 /// What a build is doing before the tool runs.
 const WAITING: u8 = 1;
 const EXPORTING: u8 = 2;
@@ -418,39 +420,66 @@ fn revision(state: &Path, project: &str, commit: &str) -> PathBuf {
         .join(commit)
         .join("graph.json")
 }
-/// Removes the written-out files of a commit but for what says which links
-/// of its graph cannot be: Cargo manifests, Rust module declarations and
-/// Rust test spans. A link is removed and never followed.
+/// Preserves source files in a checked-out commit/PR tree up to per-file and
+/// per-tree byte bounds so `Access` and crate checks work accurately, falling
+/// back to `.rs.modules` when Rust files exceed bounds and stripping non-source clutter.
+fn is_preserved_source_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if name.ends_with(".min.js") || name.ends_with(".min.mjs") || name.ends_with(".min.cjs") {
+        return false;
+    }
+    if matches!(name, "composer.json" | "package.json" | "pyproject.toml") {
+        return true;
+    }
+    crate::graph_live::detect_language(name).is_some()
+}
+
 fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
+    thin_with_limits(tree, crate::graph_map::SOURCE_LIMIT, MAX_THIN_TREE_BYTES)
+}
+
+fn thin_with_limits(
+    tree: &Path,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+) -> Option<crate::graph_map::TestSpans> {
     let mut folders = vec![tree.to_path_buf()];
     let mut at = 0;
     let mut complete = true;
     let mut tests = BTreeMap::new();
+    let mut total_kept_bytes = 0u64;
     while at < folders.len() {
         // The folder is listed before anything is written into it.
-        let entries = std::fs::read_dir(&folders[at])
-            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>());
-        at += 1;
-        let Ok(entries) = entries else {
-            complete = false;
-            continue;
+        let mut entries = match std::fs::read_dir(&folders[at])
+            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
+        {
+            Ok(entries) => entries,
+            Err(_) => {
+                at += 1;
+                complete = false;
+                continue;
+            }
         };
+        entries.sort_by_key(|entry| entry.file_name());
+        at += 1;
         let mut kept = Vec::new();
         for entry in entries {
             let path = entry.path();
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
             match entry.file_type() {
                 Ok(kind) if kind.is_dir() => {
-                    folders.push(path);
+                    if WORKSPACE_PRINT_IGNORED.contains(&name_str.as_ref()) {
+                        let _ = std::fs::remove_dir_all(&path);
+                    } else {
+                        folders.push(path);
+                    }
                     continue;
                 }
-                Ok(kind) if kind.is_file() && entry.file_name() == "Cargo.toml" => continue,
+                Ok(kind) if kind.is_file() && name_str == "Cargo.toml" => continue,
                 Ok(kind) if kind.is_file() && path.extension().is_some_and(|end| end == "rs") => {
-                    if let Some(modules) = crate::graph_crates::kept(&path) {
-                        let mut name = path.clone().into_os_string();
-                        name.push(".");
-                        name.push(crate::graph_crates::MODULES);
-                        kept.push((PathBuf::from(name), modules));
-                    }
                     match crate::graph_map::kept_tests(&path) {
                         Ok(spans) if !spans.is_empty() => {
                             let relative = path.strip_prefix(tree).ok()?;
@@ -458,6 +487,30 @@ fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
                         }
                         Ok(_) => {}
                         Err(_) => complete = false,
+                    }
+                    let len = std::fs::symlink_metadata(&path).ok().map(|m| m.len());
+                    if let Some(len) = len
+                        && len <= max_file_bytes
+                        && total_kept_bytes.saturating_add(len) <= max_total_bytes
+                    {
+                        total_kept_bytes += len;
+                        continue;
+                    }
+                    if let Some(modules) = crate::graph_crates::kept(&path) {
+                        let mut name = path.clone().into_os_string();
+                        name.push(".");
+                        name.push(crate::graph_crates::MODULES);
+                        kept.push((PathBuf::from(name), modules));
+                    }
+                }
+                Ok(kind) if kind.is_file() && is_preserved_source_path(&path) => {
+                    let len = std::fs::symlink_metadata(&path).ok().map(|m| m.len());
+                    if let Some(len) = len
+                        && len <= max_file_bytes
+                        && total_kept_bytes.saturating_add(len) <= max_total_bytes
+                    {
+                        total_kept_bytes += len;
+                        continue;
                     }
                 }
                 Err(_) => complete = false,
@@ -477,6 +530,108 @@ fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
         let _ = std::fs::remove_dir(folder);
     }
     complete.then_some(tests)
+}
+
+fn stream_graph_summary_fields(path: &Path) -> Option<(usize, usize, Option<String>)> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct CountSeq;
+    impl<'de> Visitor<'de> for CountSeq {
+        type Value = usize;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON array")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<usize, A::Error> {
+            let mut count = 0usize;
+            while seq.next_element::<IgnoredAny>()?.is_some() {
+                count += 1;
+            }
+            Ok(count)
+        }
+    }
+    struct ArrayCount(usize);
+    impl<'de> serde::Deserialize<'de> for ArrayCount {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            Ok(Self(d.deserialize_seq(CountSeq)?))
+        }
+    }
+
+    struct SummaryVisitor;
+    impl<'de> Visitor<'de> for SummaryVisitor {
+        type Value = (usize, usize, Option<String>);
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a graph object")
+        }
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut nodes = 0usize;
+            let mut edges = 0usize;
+            let mut commit: Option<String> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "nodes" => nodes = map.next_value::<ArrayCount>()?.0,
+                    "links" | "edges" => edges = map.next_value::<ArrayCount>()?.0,
+                    "commit" => {
+                        let val: Option<String> = map.next_value()?;
+                        commit = val.filter(|s| !s.is_empty());
+                    }
+                    _ => {
+                        let _ = map.next_value::<IgnoredAny>()?;
+                    }
+                }
+            }
+            Ok((nodes, edges, commit))
+        }
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    de.deserialize_map(SummaryVisitor).ok()
+}
+
+fn write_live_summary(live_graph: &Path, commit: Option<&str>, fallback: Option<(u64, u64)>) {
+    let Ok(meta) = std::fs::metadata(live_graph) else {
+        return;
+    };
+    let streamed = stream_graph_summary_fields(live_graph);
+    let Some((nodes, edges)) = streamed
+        .as_ref()
+        .map(|(n, e, _)| (*n, *e))
+        .or_else(|| fallback.map(|(n, e)| (n as usize, e as usize)))
+    else {
+        return;
+    };
+    let resolved_commit = commit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| streamed.and_then(|(_, _, c)| c));
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    let summary = json!({
+        "nodes": nodes,
+        "edges": edges,
+        "commit": resolved_commit,
+        "graph_len": meta.len(),
+        "graph_mtime_secs": modified.map(|d| d.as_secs()),
+        "graph_mtime_nanos": modified.map(|d| d.subsec_nanos()),
+    });
+    let Ok(bytes) = serde_json::to_vec(&summary) else {
+        return;
+    };
+    let summary_path = live_graph.with_file_name("summary.json");
+    let tmp_path = live_graph.with_file_name("summary.json.tmp");
+    if std::fs::write(&tmp_path, bytes).is_err()
+        || std::fs::rename(&tmp_path, &summary_path).is_err()
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 }
 /// What was chosen, for the interface: the two sides and how many files.
 fn chosen(resolved: &Resolved) -> Value {
@@ -1542,6 +1697,19 @@ impl Graphs {
     /// as it is without them. Reading a graph of a large project takes
     /// seconds, so callers keep this off the runtime.
     pub fn map(&self, project: &str, target: Option<&Target>, shown: &Shown) -> Result<Value> {
+        let started = Instant::now();
+        let (mut view, cache_hit) = self.map_inner(project, target, shown)?;
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        crate::graph_map::finalize_telemetry(&mut view, elapsed_ms, cache_hit);
+        Ok(view)
+    }
+
+    fn map_inner(
+        &self,
+        project: &str,
+        target: Option<&Target>,
+        shown: &Shown,
+    ) -> Result<(Value, bool)> {
         let (root, owned_name) = self.target_info(project)?;
         let name = owned_name.as_str();
         let built = &self.setting(project)?["built"];
@@ -1734,11 +1902,12 @@ impl Graphs {
             }
         };
         let Some(target) = target else {
-            let index = asked(self.maps.index(
+            let (raw_index, cache_hit) = self.maps.index_with_cache_hit(
                 project,
                 &live(&self.store.state, project),
                 &root,
-            )?);
+            )?;
+            let index = asked(raw_index);
             let rules = if reads_rules {
                 Rules::read(&root)
             } else {
@@ -1770,7 +1939,7 @@ impl Graphs {
                 false,
             )?;
             told(&mut view);
-            return Ok(view);
+            return Ok((view, cache_hit));
         };
         // A run is read from its session every time: it may still be going.
         let (ran, comparison) = match target {
@@ -1817,7 +1986,7 @@ impl Graphs {
             let (key, graph, tree) = found.graph.ok_or_else(|| {
                 HarnessError::unavailable("The PR base graph is no longer cached. Return to the PR cycle to prepare it again.")
             })?;
-            let index = self.maps.index(&key, &graph, &tree)?;
+            let (index, cache_hit) = self.maps.index_with_cache_hit(&key, &graph, &tree)?;
             if notests && index.has_rust_sources() && !index.has_test_spans() {
                 return Err(HarnessError::unavailable(
                     "This cached base graph cannot be shown with Without tests.",
@@ -1832,7 +2001,7 @@ impl Graphs {
             view["chosen"] = chosen;
             view["state"] = json!("ready");
             told(&mut view);
-            return Ok(view);
+            return Ok((view, cache_hit));
         }
         let rules = if reads_rules {
             match &resolved.revision {
@@ -1859,9 +2028,9 @@ impl Graphs {
             let now = self.print(project, &root, false);
             stale = now.is_some_and(|now| built["print"].as_str() != Some(now.hash.as_str()));
         }
-        let (mut view, active_index) = match &found.graph {
+        let (mut view, active_index, cache_hit) = match &found.graph {
             Some((kept, graph, base)) => {
-                let raw = self.maps.index(kept, graph, base)?;
+                let (raw, cache_hit) = self.maps.index_with_cache_hit(kept, graph, base)?;
                 let index = asked(raw.clone());
                 // The symbols a change touched are told by line, and the
                 // lines of a graph older than the files are not the files'
@@ -1933,11 +2102,17 @@ impl Graphs {
                     }
                 };
                 marked(&index, &mut view, &rules);
-                // Reads and writes are told from the sources, by line: on
-                // the checkout's own graph while it is of the same lines.
-                // The files kept beside the graph of a commit are no
-                // sources to read.
-                if own && !stale {
+                // Reads and writes are told from the preserved sources on disk:
+                // either the fresh checkout tree or the thinned commit/PR tree.
+                let access_sources_fresh = if own {
+                    !stale
+                } else if kept.contains('@') {
+                    true
+                } else {
+                    self.print(project, &root, false)
+                        .is_some_and(|now| built["print"].as_str() == Some(now.hash.as_str()))
+                };
+                if access_sources_fresh {
                     index.mark_access(&mut view);
                 }
                 index.mark_circles(&mut view);
@@ -1978,13 +2153,15 @@ impl Graphs {
                             .map(|(run, edited)| ((&run.opened, &run.shell_reads), edited)),
                     );
                 }
-                (view, Some(index))
+                (view, Some(index), cache_hit)
             }
             // Until the commit's own graph is there, the project's graph
             // gives a first picture: the files changed are the commit's, the
             // links are those the checkout's files have.
             None if published.is_file() => {
-                let index = asked(self.maps.index(project, &published, &root)?);
+                let (raw_index, cache_hit) =
+                    self.maps.index_with_cache_hit(project, &published, &root)?;
+                let index = asked(raw_index);
                 let mut view = follow(&index, &changed, &|_| None, &rules).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
@@ -2004,9 +2181,9 @@ impl Graphs {
                         json!({"state": "waiting_head"})
                     };
                 }
-                (view, Some(index))
+                (view, Some(index), cache_hit)
             }
-            None => (json!({"mode": "changes"}), None),
+            None => (json!({"mode": "changes"}), None, false),
         };
         let keep_run = view["run"].is_object();
         view["project_id"] = json!(project);
@@ -2052,7 +2229,7 @@ impl Graphs {
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
         }
         told(&mut view);
-        Ok(view)
+        Ok((view, cache_hit))
     }
     fn git_history(
         &self,
@@ -2578,7 +2755,8 @@ impl Graphs {
         let worker = std::thread::Builder::new()
             .name("harness-graph".into())
             .spawn(move || {
-                let outcome = me.build(&name, &root, &tool, &job);
+                let commit = print.as_ref().and_then(|p| p.commit.clone());
+                let outcome = me.build(&name, &root, &tool, &job, commit.as_deref());
                 me.settle(&name, &job, outcome, print, &tool);
             });
         match worker {
@@ -2721,7 +2899,14 @@ impl Graphs {
             bytes,
         })
     }
-    fn build(&self, project: &str, root: &Path, tool: &Tool, job: &Arc<Job>) -> Outcome {
+    fn build(
+        &self,
+        project: &str,
+        root: &Path,
+        tool: &Tool,
+        job: &Arc<Job>,
+        commit: Option<&str>,
+    ) -> Outcome {
         let home = folder(&self.store.state, project);
         let work = home.join("work");
         let live = home.join("live");
@@ -2736,9 +2921,11 @@ impl Graphs {
             Ok(ran) => ran,
             Err(outcome) => return outcome,
         };
-        if std::fs::rename(&ran.fresh, live.join("graph.json")).is_err() {
+        let live_graph = live.join("graph.json");
+        if std::fs::rename(&ran.fresh, &live_graph).is_err() {
             return Outcome::Failed("The new graph could not be published.".into());
         }
+        write_live_summary(&live_graph, commit, ran.built);
         Outcome::Built(ran.record(size(&home)))
     }
     fn settle(
@@ -6005,7 +6192,16 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
             kept.sort();
-            assert_eq!(kept, ["graph.json", "test-spans.json"]);
+            assert_eq!(kept, ["graph.json", "test-spans.json", "tree"]);
+            assert_eq!(
+                held(
+                    &folder(&fixture.store.state, &fixture.project)
+                        .join("revisions")
+                        .join(&feature)
+                        .join("tree")
+                ),
+                ["cart.php", "order.php", "price.php"]
+            );
             assert_eq!(fixture.said(&["status", "--porcelain=v1"]), before);
             assert_eq!(fixture.said(&["rev-parse", "HEAD"]), main);
             assert_eq!(fixture.said(&["symbolic-ref", "--short", "HEAD"]), "main");
@@ -6172,7 +6368,8 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .unwrap();
             assert_eq!(plain["tests"]["inside"], 1);
             assert!(arrows(&plain).is_empty());
-            // Of the files of the commit that much is kept, and no source.
+            // Of the files of the commit, Cargo manifests and preserved sources are kept,
+            // while non-source fixtures are stripped.
             let home = folder(&fixture.store.state, &fixture.project)
                 .join("revisions")
                 .join(&feature);
@@ -6183,13 +6380,11 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     "test-spans.json",
                     "tree/Cargo.toml",
                     "tree/app/Cargo.toml",
+                    "tree/app/src/main.rs",
+                    "tree/app/src/shared/util.rs",
                     "tree/core/Cargo.toml",
-                    "tree/core/src/lib.rs.modules"
+                    "tree/core/src/lib.rs",
                 ]
-            );
-            assert_eq!(
-                std::fs::read_to_string(home.join("tree/core/src/lib.rs.modules")).unwrap(),
-                "#[path = \"../../app/src/shared/util.rs\"\nmod util;"
             );
         }
         #[test]
@@ -7550,6 +7745,165 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     .any(|caller| caller["path"] == "src/caller.rs"),
                 "{service_impact}"
             );
+        }
+
+        #[test]
+        fn live_summary_written_on_build_matches_graph_metadata_and_counts() {
+            let fixture = Fixture::new();
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            fixture.write("a.php", "<?php class A {}\n");
+            fixture.write("b.php", "<?php class B {}\n");
+            fixture.write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"a","source_file":"a.php"},{"id":"b","source_file":"b.php"}],"links":[{"source":"a","target":"b","relation":"calls","source_file":"a.php"}]}"#,
+            );
+            let head = fixture.commit("init");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+
+            let live_dir = folder(&fixture.store.state, &fixture.project).join("live");
+            let graph_meta = std::fs::metadata(live_dir.join("graph.json")).unwrap();
+            let modified = graph_meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            let summary: Value =
+                serde_json::from_slice(&std::fs::read(live_dir.join("summary.json")).unwrap())
+                    .unwrap();
+            assert_eq!(summary["nodes"], 2, "{summary}");
+            assert_eq!(summary["edges"], 1, "{summary}");
+            assert_eq!(summary["commit"], &head[..12], "{summary}");
+            assert_eq!(summary["graph_len"], graph_meta.len(), "{summary}");
+            assert_eq!(summary["graph_mtime_secs"], modified.as_secs(), "{summary}");
+            assert_eq!(
+                summary["graph_mtime_nanos"],
+                modified.subsec_nanos(),
+                "{summary}"
+            );
+        }
+
+        #[test]
+        fn thin_with_limits_preserves_sources_respects_bounds_and_cleans_garbage() {
+            let dir = tempfile::tempdir().unwrap();
+            let tree = dir.path();
+            std::fs::create_dir_all(tree.join("node_modules/pkg")).unwrap();
+            std::fs::create_dir_all(tree.join(".git/objects")).unwrap();
+            std::fs::create_dir_all(tree.join("src")).unwrap();
+            std::fs::write(tree.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
+            std::fs::write(
+                tree.join("node_modules/pkg/index.js"),
+                "export const x = 1;",
+            )
+            .unwrap();
+            std::fs::write(tree.join(".git/objects/abc"), "raw").unwrap();
+            std::fs::write(tree.join("src/app.php"), "<?php\nclass App {}\n").unwrap();
+            std::fs::write(tree.join("src/bundle.min.js"), "function a(){}").unwrap();
+            std::fs::write(tree.join("src/image.png"), [0u8, 1, 2]).unwrap();
+            std::fs::write(
+                tree.join("src/big.rs"),
+                "#[path = \"other.rs\"]\nmod other;\n#[test]\nfn oversized_test() {}\n",
+            )
+            .unwrap();
+
+            // `src/big.rs` (69 bytes) exceeds max_file_bytes=40 so it falls back to `.rs.modules`
+            // while still capturing its #[test] spans; `src/app.php` (17 bytes) is preserved.
+            let spans = thin_with_limits(tree, 40, 200).unwrap();
+            assert!(spans.contains_key("src/big.rs"), "{spans:?}");
+            assert_eq!(
+                held(tree),
+                ["Cargo.toml", "src/app.php", "src/big.rs.modules",]
+            );
+            assert_eq!(
+                std::fs::read_to_string(tree.join("src/big.rs.modules")).unwrap(),
+                "#[path = \"other.rs\"\nmod other;"
+            );
+        }
+
+        #[test]
+        fn commit_graph_map_runs_access_analysis_and_emits_telemetry() {
+            let fixture = Fixture::new();
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            fixture.write(
+                "user.php",
+                "<?php\nclass User {\n    public int $count = 0;\n    public string $name = '';\n}\n",
+            );
+            fixture.write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"u","source_file":"user.php"}],"links":[]}"#,
+            );
+            let _main = fixture.commit("main");
+            fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+            fixture.git(&["switch", "-q", "-c", "feat-access"]);
+            fixture.write(
+                "ctrl.php",
+                "<?php\nrequire_once 'user.php';\nclass Ctrl {\n    public function run(): int {\n        $u = new User();\n        $u->name = 'ok';\n        return $u->count;\n    }\n}\n",
+            );
+            fixture.write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"u","label":"User","source_file":"user.php"},{"id":"u_cnt","label":"$count","source_file":"user.php","source_location":"L3"},{"id":"u_name","label":"$name","source_file":"user.php","source_location":"L4"},{"id":"c","label":"Ctrl","source_file":"ctrl.php"},{"id":"c_run","label":"run","source_file":"ctrl.php","source_location":"L4"}],"links":[{"source":"c_run","target":"u_name","relation":"uses","confidence":"EXTRACTED","source_file":"ctrl.php"},{"source":"c_run","target":"u_cnt","relation":"uses","confidence":"EXTRACTED","source_file":"ctrl.php"}]}"#,
+            );
+            let _feat = fixture.commit("feat");
+            fixture.git(&["switch", "-q", "main"]);
+
+            // Commit/PR graph map preserves sources in `revisions/<commit>/tree`, runs `Access`,
+            // and attaches non-breaking `"telemetry"`.
+            let target = Target::Named("feat-access".into());
+            fixture.graphs.choose(&fixture.project, &target).unwrap();
+            let first = fixture.mapped(&target);
+            assert_eq!(first["state"], "ready", "{first}");
+            assert!(first["access"].is_object(), "{first}");
+            assert!(
+                first["access"]["sources"].as_u64().unwrap_or(0) >= 1,
+                "{first}"
+            );
+            let edge_kinds = first["edges"][0]["kinds"].as_array().unwrap();
+            assert!(
+                edge_kinds
+                    .iter()
+                    .any(|k| k["kind"] == "writes" && k["by"] == "source"),
+                "{first}"
+            );
+            assert!(
+                edge_kinds
+                    .iter()
+                    .any(|k| k["kind"] == "reads" && k["by"] == "source"),
+                "{first}"
+            );
+            assert!(
+                first["telemetry"]["elapsed_ms"].as_u64().is_some(),
+                "{first}"
+            );
+            assert!(
+                first["telemetry"]["shown"].as_u64().unwrap_or(0) >= 2,
+                "{first}"
+            );
+            assert!(
+                first["telemetry"]["drawn"].as_u64().unwrap_or(0) >= 1,
+                "{first}"
+            );
+            assert_eq!(first["telemetry"]["truncated"], false, "{first}");
+
+            let second = fixture
+                .graphs
+                .map(&fixture.project, Some(&target), &Shown::default())
+                .unwrap();
+            assert_eq!(second["telemetry"]["cache_hit"], true, "{second}");
+
+            // Verify live graph map transitions cache_hit from false -> true.
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let live_first = fixture
+                .graphs
+                .map(&fixture.project, None, &Shown::default())
+                .unwrap();
+            assert_eq!(live_first["telemetry"]["cache_hit"], false, "{live_first}");
+            let live_second = fixture
+                .graphs
+                .map(&fixture.project, None, &Shown::default())
+                .unwrap();
+            assert_eq!(live_second["telemetry"]["cache_hit"], true, "{live_second}");
         }
     }
 }

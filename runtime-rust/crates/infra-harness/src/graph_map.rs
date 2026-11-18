@@ -20,8 +20,8 @@ use crate::{
         DeclaredMember, DepMemberRef, extract_declared_members, find_matching_member_references,
     },
     graph_impact::{
-        VisibilityWarning, caller_extends_target, enrich_member_ref, find_matching_declared_member,
-        norm_member_name,
+        VisibilityWarning, caller_extends_target_in, enrich_member_ref_in,
+        find_matching_declared_member, norm_member_name,
     },
 };
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -1893,9 +1893,20 @@ impl Index {
                     let u_path = self.files[u_fid as usize].as_str();
                     let t_path = self.files[t_fid as usize].as_str();
                     let t_decls = member_cache.declared(t_path).to_vec();
-                    let caller_ext =
-                        caller_extends_target(member_cache.source(u_path), t_path, &t_decls);
-                    access_risk = crate::graph_impact::assess_member_access(
+                    let u_src = member_cache.source(u_path).map(str::to_owned);
+                    let root = &self.root;
+                    let known = &member_cache.known_files;
+                    let caller_ext = caller_extends_target_in(
+                        u_path,
+                        u_src.as_deref(),
+                        t_path,
+                        &t_decls,
+                        known,
+                        &mut |p| text_at(root, p),
+                    );
+                    access_risk = crate::graph_impact::assess_member_access_in(
+                        Some(root),
+                        Some(known),
                         &tm,
                         u_path,
                         t_path,
@@ -2014,10 +2025,21 @@ impl<'a> FileMemberCache<'a> {
             &target_members,
             &self.known_files,
         );
-        let caller_extends = caller_extends_target(Some(&caller_src), target_path, &target_members);
+        let root = &self.index.root;
+        let known = &self.known_files;
+        let caller_extends = caller_extends_target_in(
+            caller_path,
+            Some(&caller_src),
+            target_path,
+            &target_members,
+            known,
+            &mut |p| text_at(root, p),
+        );
         let mut warnings = Vec::new();
         for mref in &mut refs {
-            let assess = enrich_member_ref(
+            let assess = enrich_member_ref_in(
+                Some(root),
+                Some(known),
                 mref,
                 &target_members,
                 caller_path,
@@ -6865,7 +6887,19 @@ impl Maps {
     /// mutex during parsing, deduplicating concurrent reads of the same key
     /// and evicting entries in LRU order.
     pub fn index(&self, project: &str, graph: &Path, root: &Path) -> Result<Arc<Index>> {
-        self.load_with(project, graph, |path| {
+        self.index_with_cache_hit(project, graph, root)
+            .map(|(index, _)| index)
+    }
+
+    /// Reads and caches a project's graph index, also reporting whether the
+    /// index came from an in-memory cache hit (`true`) or had to be loaded (`false`).
+    pub fn index_with_cache_hit(
+        &self,
+        project: &str,
+        graph: &Path,
+        root: &Path,
+    ) -> Result<(Arc<Index>, bool)> {
+        self.load_with_hit(project, graph, |path| {
             let mut index = Index::read(std::fs::File::open(path)?, root)?;
             if project.contains('@')
                 && let Ok(spans) = std::fs::File::open(path.with_file_name(TEST_SPANS))
@@ -6876,7 +6910,16 @@ impl Maps {
         })
     }
 
+    #[cfg(test)]
     fn load_with<F>(&self, project: &str, graph: &Path, reader: F) -> Result<Arc<Index>>
+    where
+        F: FnOnce(&Path) -> Result<Index>,
+    {
+        self.load_with_hit(project, graph, reader)
+            .map(|(index, _)| index)
+    }
+
+    fn load_with_hit<F>(&self, project: &str, graph: &Path, reader: F) -> Result<(Arc<Index>, bool)>
     where
         F: FnOnce(&Path) -> Result<Index>,
     {
@@ -6926,7 +6969,7 @@ impl Maps {
                 }
             };
             match action {
-                Action::Hit(index) => return Ok(index),
+                Action::Hit(index) => return Ok((index, true)),
                 Action::Wait(slot) => {
                     let outcome = {
                         let mut guard = slot.state.lock().map_err(|_| {
@@ -6943,7 +6986,7 @@ impl Maps {
                         }
                     };
                     if slot.len == len && slot.changed == changed {
-                        return outcome;
+                        return outcome.map(|index| (index, false));
                     }
                 }
                 Action::Lead(slot) => {
@@ -6955,7 +6998,9 @@ impl Maps {
                     };
                     let parsed = reader.take().expect("single-flight reader called once")(graph)
                         .map(Arc::new);
-                    return guard.complete(len, changed, parsed);
+                    return guard
+                        .complete(len, changed, parsed)
+                        .map(|index| (index, false));
                 }
             }
         }
@@ -6974,6 +7019,174 @@ impl Maps {
             cache.kept.retain(|(name, ..)| !matches(name));
             cache.inflight.retain(|name, _| !matches(name));
         }
+    }
+}
+
+/// Computes `truncated`, `limited`, `shown`, `drawn`, `cache_hit`, and `elapsed_ms`
+/// and attaches them as non-breaking `"telemetry"` metadata on a `graph.map` response.
+pub(crate) fn finalize_telemetry(view: &mut Value, elapsed_ms: u64, cache_hit: bool) {
+    let u64_at = |obj: &Value, key: &str| obj.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let bool_at = |obj: &Value, key: &str| obj.get(key).and_then(Value::as_bool);
+
+    let shown = view
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let drawn = view
+        .get("edges")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+
+    let mut truncated = u64_at(view, "between") > drawn as u64;
+    let mode = view.get("mode").and_then(Value::as_str);
+    match mode {
+        None => {
+            if u64_at(view, "matching") > shown as u64 {
+                truncated = true;
+            }
+            if let Some(frames) = view.get("frames").and_then(Value::as_array)
+                && frames.iter().any(|f| u64_at(f, "places") > drawn as u64)
+            {
+                truncated = true;
+            }
+        }
+        Some("file") => {
+            let around_shown = view.get("around").map_or(0, |a| u64_at(a, "shown"));
+            let around_files = view.get("around").map_or(0, |a| u64_at(a, "files"));
+            let file_shown = (shown as u64).saturating_sub(around_shown);
+            if u64_at(view, "matching") > file_shown || around_files > around_shown {
+                truncated = true;
+            }
+        }
+        Some("changes") => {
+            if view.get("change").is_some_and(|c| u64_at(c, "hidden") > 0) {
+                truncated = true;
+            }
+            let non_changed_shown = view
+                .get("nodes")
+                .and_then(Value::as_array)
+                .map_or(0, |nodes| {
+                    nodes.iter().filter(|n| u64_at(n, "changed") == 0).count() as u64
+                });
+            if u64_at(view, "matching") > non_changed_shown {
+                truncated = true;
+            }
+        }
+        Some("follow") => {
+            if let Some(followed) = view.get("followed")
+                && (bool_at(followed, "full") == Some(false) || u64_at(followed, "aside") > 0)
+            {
+                truncated = true;
+            }
+        }
+        Some("path") => {
+            if let Some(path) = view.get("path")
+                && (u64_at(path, "shown") < u64_at(path, "places")
+                    || u64_at(path, "aside") > 0
+                    || u64_at(path, "detours_more") > 0)
+            {
+                truncated = true;
+            }
+        }
+        Some("shared") => {
+            if let Some(shared) = view.get("shared")
+                && u64_at(shared, "shown") < u64_at(shared, "matching")
+            {
+                truncated = true;
+            }
+        }
+        Some("cycle") => {
+            if let Some(cycle) = view.get("cycle")
+                && cycle.get("places").is_some_and(Value::is_array)
+                && shown == 0
+            {
+                truncated = true;
+            }
+        }
+        Some("link") => {
+            if u64_at(view, "links") > drawn as u64 {
+                truncated = true;
+            }
+            for dir_key in ["users", "used"] {
+                if let Some(dir) = view.get(dir_key) {
+                    let total_names = u64_at(dir, "names");
+                    let shown_names: u64 =
+                        dir.get("groups")
+                            .and_then(Value::as_array)
+                            .map_or(0, |groups| {
+                                groups
+                                    .iter()
+                                    .map(|g| {
+                                        g.get("names").and_then(Value::as_array).map_or(0, Vec::len)
+                                            as u64
+                                    })
+                                    .sum()
+                            });
+                    if total_names > shown_names {
+                        truncated = true;
+                    }
+                }
+            }
+        }
+        Some("modules") => {
+            if u64_at(view, "matching") > shown as u64 {
+                truncated = true;
+            }
+        }
+        Some("scenario") => {
+            if let Some(scenario) = view.get("scenario")
+                && u64_at(scenario, "reachable") + 1 > shown as u64
+            {
+                truncated = true;
+            }
+        }
+        Some("pattern") => {
+            if let Some(parts) = view
+                .get("pattern")
+                .and_then(|p| p.get("parts"))
+                .and_then(Value::as_array)
+                && parts.iter().any(|p| u64_at(p, "found") > drawn as u64)
+            {
+                truncated = true;
+            }
+            if let Some(frames) = view.get("frames").and_then(Value::as_array)
+                && frames.iter().any(|f| u64_at(f, "places") > drawn as u64)
+            {
+                truncated = true;
+            }
+        }
+        Some(_) => {}
+    }
+
+    let limited = truncated
+        || bool_at(view, "backbone") == Some(true)
+        || view.get("run").and_then(|r| bool_at(r, "limited")) == Some(true)
+        || view.get("access").is_some_and(|a| u64_at(a, "left") > 0)
+        || view
+            .get("architecture")
+            .and_then(|a| a.get("violations"))
+            .is_some_and(|v| u64_at(v, "more") > 0)
+        || view
+            .get("pattern")
+            .and_then(|p| p.get("against"))
+            .is_some_and(|a| u64_at(a, "more") > 0)
+        || view.get("git_history").and_then(|h| bool_at(h, "skipped")) == Some(true)
+        || view
+            .get("focus")
+            .is_some_and(|f| u64_at(f, "uses_more") > 0 || u64_at(f, "used_by_more") > 0);
+
+    if let Value::Object(map) = view {
+        map.insert(
+            "telemetry".into(),
+            json!({
+                "elapsed_ms": elapsed_ms,
+                "cache_hit": cache_hit,
+                "shown": shown,
+                "drawn": drawn,
+                "limited": limited,
+                "truncated": truncated,
+            }),
+        );
     }
 }
 #[cfg(test)]
@@ -13823,6 +14036,79 @@ where
         assert_eq!(
             edge(&scenario_view, ctrl_file, svc_file)["kinds"],
             expected_file_all
+        );
+    }
+
+    #[test]
+    fn maps_index_reports_cache_hit_and_telemetry_tracks_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph_path = dir.path().join("graph.json");
+        std::fs::write(
+            &graph_path,
+            json!({
+                "nodes": [
+                    {"id": "a", "label": "A", "source_file": "src/A.php"},
+                    {"id": "b", "label": "B", "source_file": "src/B.php"}
+                ],
+                "links": [
+                    {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let maps = Maps::default();
+        let (_idx1, hit1) = maps
+            .index_with_cache_hit("proj", &graph_path, dir.path())
+            .unwrap();
+        assert!(!hit1);
+        let (_idx2, hit2) = maps
+            .index_with_cache_hit("proj", &graph_path, dir.path())
+            .unwrap();
+        assert!(hit2);
+
+        let mut view = json!({
+            "matching": 10,
+            "between": 5,
+            "nodes": [{"name": "a"}, {"name": "b"}],
+            "edges": [{"from": "a", "to": "b"}],
+            "access": {"left": 2},
+            "backbone": false
+        });
+        finalize_telemetry(&mut view, 17, true);
+        assert_eq!(
+            view["telemetry"],
+            json!({
+                "elapsed_ms": 17,
+                "cache_hit": true,
+                "shown": 2,
+                "drawn": 1,
+                "limited": true,
+                "truncated": true
+            })
+        );
+
+        let mut untruncated = json!({
+            "mode": "changes",
+            "matching": 0,
+            "between": 1,
+            "nodes": [{"name": "a", "changed": 1}],
+            "edges": [{"from": "a", "to": "b"}],
+            "change": {"hidden": 0},
+            "backbone": true
+        });
+        finalize_telemetry(&mut untruncated, 5, false);
+        assert_eq!(
+            untruncated["telemetry"],
+            json!({
+                "elapsed_ms": 5,
+                "cache_hit": false,
+                "shown": 1,
+                "drawn": 1,
+                "limited": true,
+                "truncated": false
+            })
         );
     }
 }
