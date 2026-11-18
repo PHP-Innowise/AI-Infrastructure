@@ -1296,15 +1296,36 @@ impl Sessions {
     }
     /// A person's answer to a request a running session waits on.
     pub fn decide_permission(&self, sid: &str, request: &str, body: &Value) -> Result<Value> {
-        if !store::exact(body, &["decision"], &[]) {
-            return Err(HarnessError::invalid("Send only the decision."));
+        const MAX_PERMISSION_ANSWERS_BYTES: usize = 32 * 1024;
+        if !store::exact(body, &["decision"], &["answers"]) {
+            return Err(HarnessError::invalid(
+                "Send only the decision and optional answers.",
+            ));
         }
         let decision = body["decision"]
             .as_str()
             .and_then(infra_host::permission::Decision::parse)
             .ok_or_else(|| HarnessError::invalid("Choose allow, allow_session or deny."))?;
+        let answers = match body.get("answers") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(_)) => {
+                if body["answers"].to_string().len() > MAX_PERMISSION_ANSWERS_BYTES {
+                    return Err(HarnessError::invalid(
+                        "Question answers exceed the maximum payload size.",
+                    ));
+                }
+                Some(body["answers"].clone())
+            }
+            Some(_) => {
+                return Err(HarnessError::invalid("Question answers must be an object."));
+            }
+        };
         self.store.get(sid)?;
-        self.permissions.decide(sid, request, decision)
+        self.permissions.decide_answer(
+            sid,
+            request,
+            infra_host::permission::Answer { decision, answers },
+        )
     }
     /// The requests a session's run waits on now.
     pub fn waiting_permissions(&self, sid: &str) -> Vec<Value> {
@@ -3876,6 +3897,107 @@ pub(crate) mod generation_completion_tests {
         assert!(!events.iter().any(|event| event["kind"] == "error"));
         assert!(fixture.sessions.active.lock().unwrap().is_empty());
         assert!(!fixture.sessions.stopping.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn decide_permission_validates_optional_answers_object_and_size() {
+        let fixture = Fixture::new();
+        let sid = fixture.session("running");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let approvals = fixture.sessions.permissions.approvals(
+            &sid,
+            Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+                Ok(())
+            }),
+        );
+        let ask = infra_host::permission::PermissionAsk {
+            id: "q-1".into(),
+            provider: "claude".into(),
+            tool: "AskUserQuestion".into(),
+            summary: "Pick".into(),
+            kind: "question".into(),
+            ..Default::default()
+        };
+        let rx = approvals.ask_answer(&ask).unwrap();
+        let req_id = events.lock().unwrap()[0]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // Non-object, oversized, and extra keys are rejected with 400.
+        assert_eq!(
+            fixture
+                .sessions
+                .decide_permission(&sid, &req_id, &json!({"decision":"allow","answers":"text"}))
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(
+            fixture
+                .sessions
+                .decide_permission(
+                    &sid,
+                    &req_id,
+                    &json!({"decision":"allow","answers":{"k":"x".repeat(40_000)}})
+                )
+                .unwrap_err()
+                .status,
+            400
+        );
+        assert_eq!(
+            fixture
+                .sessions
+                .decide_permission(
+                    &sid,
+                    &req_id,
+                    &json!({"decision":"allow","answers":{},"extra":1})
+                )
+                .unwrap_err()
+                .status,
+            400
+        );
+
+        // Null answers behaves identically to omitted answers (backwards-compatible).
+        let rx_null = approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "q-null".into(),
+                ..ask.clone()
+            })
+            .unwrap();
+        let req_null = events.lock().unwrap()[1]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ok_null = fixture
+            .sessions
+            .decide_permission(&sid, &req_null, &json!({"decision":"allow","answers":null}))
+            .unwrap();
+        assert_eq!(ok_null["state"], "allowed");
+        assert_eq!(
+            rx_null.await.unwrap(),
+            infra_host::permission::Answer::from_decision(infra_host::permission::Decision::Allow)
+        );
+
+        // Object answers flows through to Answer.
+        let ok_obj = fixture
+            .sessions
+            .decide_permission(
+                &sid,
+                &req_id,
+                &json!({"decision":"allow","answers":{"q1":"PostgreSQL"}}),
+            )
+            .unwrap();
+        assert_eq!(ok_obj["state"], "allowed");
+        assert_eq!(
+            rx.await.unwrap(),
+            infra_host::permission::Answer {
+                decision: infra_host::permission::Decision::Allow,
+                answers: Some(json!({"q1": "PostgreSQL"})),
+            }
+        );
     }
 
     pub(super) fn git_fixture(fixture: &Fixture) -> (String, Job, Lease) {
