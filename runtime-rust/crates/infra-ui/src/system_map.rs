@@ -9,7 +9,7 @@
 //! cycles, paths, shared dependencies, and architectural tiers work smoothly
 //! both before and after member code graphs finish indexing.
 
-use crate::{api, dom, model as m, systems};
+use crate::{api, dom, graph_viewport, model as m, systems};
 use serde_json::{json, Value as V};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -29,12 +29,17 @@ const MARGIN: f64 = 24.0;
 const FRAME_HEAD: f64 = 28.0;
 const FRAME_PAD: f64 = 12.0;
 
-const CAMERA_MIN: f64 = 0.25;
+const CAMERA_MIN: f64 = graph_viewport::DEFAULT_MIN_SCALE;
 const CAMERA_MAX: f64 = 2.4;
 const ZOOM_STEP: f64 = 1.25;
-const DRAG_THRESHOLD_PX: f64 = 4.0;
 const LOD_FAR: f64 = 0.55;
 const LOD_NEAR: f64 = 1.25;
+const SYSTEM_MAP_LOD: graph_viewport::LodThresholds = graph_viewport::LodThresholds {
+    far_below: LOD_FAR,
+    near_at: LOD_NEAR,
+    near_inclusive: true,
+    invalid_fallback: "far",
+};
 const RADAR_WIDTH: f64 = 176.0;
 const RADAR_HEIGHT: f64 = 112.0;
 const RADAR_DRAG_KEY: &str = "system-map-radar-drag";
@@ -484,6 +489,19 @@ impl Default for Camera {
     }
 }
 
+impl Camera {
+    fn viewport_cam(&self) -> graph_viewport::Camera {
+        graph_viewport::Camera::new(self.pan_x, self.pan_y, self.scale)
+    }
+
+    fn apply_viewport_cam(&mut self, cam: graph_viewport::Camera) {
+        self.scale = cam.scale;
+        self.pan_x = cam.tx;
+        self.pan_y = cam.ty;
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn zoom_at(
     scale: f64,
     pan_x: f64,
@@ -491,24 +509,24 @@ pub fn zoom_at(
     anchor: (f64, f64),
     target_scale: f64,
 ) -> (f64, f64, f64) {
-    let cur = scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let next = target_scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let world_x = (anchor.0 - pan_x) / cur;
-    let world_y = (anchor.1 - pan_y) / cur;
-    let next_pan_x = (anchor.0 - world_x * next).round();
-    let next_pan_y = (anchor.1 - world_y * next).round();
-    (next, next_pan_x, next_pan_y)
+    let next = graph_viewport::zoom_at(
+        graph_viewport::Camera::new(pan_x, pan_y, scale),
+        anchor,
+        target_scale,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    (next.scale, next.tx, next.ty)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn camera_for_fit(plane: (f64, f64), viewport: (f64, f64)) -> (f64, f64, f64) {
-    let pw = plane.0.max(1.0);
-    let ph = plane.1.max(1.0);
-    let vw = (viewport.0 - 24.0).max(120.0);
-    let vh = (viewport.1 - 24.0).max(120.0);
-    let scale = (vw / pw).min(vh / ph).clamp(CAMERA_MIN, 1.15);
-    let pan_x = ((viewport.0 - pw * scale) / 2.0).max(12.0).round();
-    let pan_y = ((viewport.1 - ph * scale) / 2.0).max(12.0).round();
-    (scale, pan_x, pan_y)
+    let cam = graph_viewport::fit(
+        plane,
+        viewport,
+        graph_viewport::FitOptions::for_system_map(),
+    );
+    (cam.scale, cam.tx, cam.ty)
 }
 
 fn load_camera(surface: SysMapSurface) -> Camera {
@@ -546,28 +564,13 @@ fn save_camera(surface: SysMapSurface, cam: &Camera) {
 }
 
 fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
-    let Some(el) = dom::get(canvas_id).and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return (760.0, 380.0, false);
-    };
-    let w = el.client_width() as f64;
-    let h = el.client_height() as f64;
-    if w > 40.0 && h > 40.0 {
-        (w, h, true)
-    } else {
-        (760.0, 380.0, false)
-    }
+    graph_viewport::viewport_size(canvas_id, 40.0, (760.0, 380.0))
 }
 
 /// Returns the zoom LOD bucket (`"far"`, `"mid"`, or `"near"`) for CSS decluttering.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn lod(scale: f64) -> &'static str {
-    if !scale.is_finite() || scale < LOD_FAR {
-        "far"
-    } else if scale >= LOD_NEAR {
-        "near"
-    } else {
-        "mid"
-    }
+    graph_viewport::lod_with(scale, SYSTEM_MAP_LOD)
 }
 
 fn radar_size(picture: (f64, f64)) -> (f64, f64) {
@@ -590,27 +593,18 @@ pub fn radar_window_rect(
     room: (f64, f64),
     picture: (f64, f64),
 ) -> Option<(f64, f64, f64, f64)> {
-    if !(scale.is_finite() && scale > 0.0 && picture.0 > 0.0 && picture.1 > 0.0) {
-        return None;
-    }
-    let side = |c: f64, r: f64, p: f64| {
-        let from = -c / scale;
-        let to = from + r / scale;
-        let all = from <= 0.5 / scale && to >= p - 0.5 / scale;
-        let (from, to) = (from.clamp(0.0, p), to.clamp(0.0, p));
-        (from, (to - from).max(0.0), all)
-    };
-    let (x, w, wide) = side(corner.0, room.0, picture.0);
-    let (y, h, tall) = side(corner.1, room.1, picture.1);
-    (!(wide && tall)).then_some((x, y, w, h))
+    graph_viewport::radar_window_rect(
+        graph_viewport::Camera::new(corner.0, corner.1, scale),
+        room,
+        picture,
+    )
 }
 
 /// Returns camera pan `(pan_x, pan_y)` that centers world `point` in `room` at `scale`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn centred(point: (f64, f64), scale: f64, room: (f64, f64)) -> (f64, f64) {
-    (
-        (room.0 / 2.0 - point.0 * scale).round(),
-        (room.1 / 2.0 - point.1 * scale).round(),
-    )
+    let cam = graph_viewport::center_camera_on(point, room, scale);
+    (cam.tx, cam.ty)
 }
 
 fn sync_system_radar(surface: SysMapSurface, cam: &Camera) {
@@ -646,37 +640,22 @@ fn sync_system_radar(surface: SysMapSurface, cam: &Camera) {
 }
 
 fn apply_camera(surface: SysMapSurface, cam: &Camera) {
-    let pct = format!("{}%", (cam.scale * 100.0).round() as i64);
-    dom::text(&format!("{}-zoom-level", surface.id_prefix), &pct);
-    let Some(canvas) = dom::get(surface.canvas_id) else {
-        return;
-    };
-    let lod_val = lod(cam.scale);
-    let scale_text = format!("{:.4}", cam.scale);
-    let _ = canvas.set_attribute("data-lod", lod_val);
-    let _ = canvas.set_attribute("data-scale", &scale_text);
-    let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
-        sync_system_radar(surface, cam);
-        return;
-    };
-    let Some(plane_el) = plane.dyn_into::<web_sys::HtmlElement>().ok() else {
-        sync_system_radar(surface, cam);
-        return;
-    };
-    let _ = plane_el.set_attribute("data-lod", lod_val);
-    let _ = plane_el.set_attribute("data-scale", &scale_text);
-    let style = format!(
-        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
-        cam.plane_w.max(320.0),
-        cam.plane_h.max(220.0),
-        cam.scale,
-        cam.pan_x,
-        cam.pan_y,
-        cam.pan_x,
-        cam.pan_y,
-        cam.scale,
+    let zoom_id = format!("{}-zoom-level", surface.id_prefix);
+    let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(220.0));
+    let _ = graph_viewport::apply_transform_3d_by_id(
+        surface.canvas_id,
+        Some(&zoom_id),
+        cam.viewport_cam(),
+        plane_size,
+        SYSTEM_MAP_LOD,
     );
-    let _ = plane_el.set_attribute("style", &style);
+    if let Some(canvas) = dom::get(surface.canvas_id) {
+        let scale_text = format!("{:.4}", cam.scale);
+        let _ = canvas.set_attribute("data-scale", &scale_text);
+        if let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") {
+            let _ = plane.set_attribute("data-scale", &scale_text);
+        }
+    }
     sync_system_radar(surface, cam);
 }
 
@@ -686,10 +665,11 @@ fn fit_surface_camera(surface: SysMapSurface) {
     cam.needs_measure = !measured;
     cam.fit_mode = true;
     if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
-        let (s, px, py) = camera_for_fit((cam.plane_w, cam.plane_h), (vw, vh));
-        cam.scale = s;
-        cam.pan_x = px;
-        cam.pan_y = py;
+        cam.apply_viewport_cam(graph_viewport::fit(
+            (cam.plane_w, cam.plane_h),
+            (vw, vh),
+            graph_viewport::FitOptions::for_system_map(),
+        ));
     }
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
@@ -699,17 +679,11 @@ fn reset_surface_camera_100(surface: SysMapSurface) {
     let mut cam = load_camera(surface);
     let (vw, vh, measured) = viewport_size(surface.canvas_id);
     cam.needs_measure = !measured;
-    cam.scale = 1.0;
-    cam.pan_x = if cam.plane_w > 0.0 && cam.plane_w < vw {
-        ((vw - cam.plane_w) / 2.0).round()
-    } else {
-        16.0
-    };
-    cam.pan_y = if cam.plane_h > 0.0 && cam.plane_h < vh {
-        ((vh - cam.plane_h) / 2.0).round()
-    } else {
-        16.0
-    };
+    cam.apply_viewport_cam(graph_viewport::reset_100(
+        (cam.plane_w, cam.plane_h),
+        (vw, vh),
+        16.0,
+    ));
     cam.fit_mode = false;
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
@@ -732,10 +706,14 @@ fn zoom_surface_at(surface: SysMapSurface, factor: f64, client_anchor: Option<(f
     } else {
         (vw / 2.0, vh / 2.0)
     };
-    let (s, px, py) = zoom_at(cam.scale, cam.pan_x, cam.pan_y, anchor, cam.scale * factor);
-    cam.scale = s;
-    cam.pan_x = px;
-    cam.pan_y = py;
+    let next = graph_viewport::zoom_at(
+        cam.viewport_cam(),
+        anchor,
+        cam.scale * factor,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    cam.apply_viewport_cam(next);
     cam.fit_mode = false;
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
@@ -4381,10 +4359,11 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
         let (vw, vh, measured) = viewport_size(surface.canvas_id);
         cam.needs_measure = !measured;
         if pw > 0.0 && ph > 0.0 {
-            let (s, px, py) = camera_for_fit((pw, ph), (vw, vh));
-            cam.scale = s;
-            cam.pan_x = px;
-            cam.pan_y = py;
+            cam.apply_viewport_cam(graph_viewport::fit(
+                (pw, ph),
+                (vw, vh),
+                graph_viewport::FitOptions::for_system_map(),
+            ));
         }
     }
     save_camera(surface, &cam);
@@ -4764,50 +4743,12 @@ pub fn current_context_brief() -> String {
 }
 
 fn attach_canvas_wheel(canvas_id: &'static str) {
-    let Some(canvas) = dom::get(canvas_id) else {
-        return;
-    };
-    if canvas.get_attribute("data-wheel-bound").as_deref() == Some("true") {
-        return;
-    }
-    let _ = canvas.set_attribute("data-wheel-bound", "true");
-    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
-        let Ok(wheel) = event.dyn_into::<web_sys::WheelEvent>() else {
-            return;
-        };
-        let Some(surface) = surface_for_canvas(canvas_id) else {
-            return;
-        };
-        wheel.prevent_default();
-        wheel.stop_propagation();
-        let dy = wheel.delta_y();
-        if dy.abs() < f64::EPSILON {
-            return;
+    let timer_key = format!("{canvas_id}-wheel-end");
+    graph_viewport::attach_wheel_zoom(canvas_id, &timer_key, move |factor, anchor| {
+        if let Some(surface) = surface_for_canvas(canvas_id) {
+            zoom_surface_at(surface, factor, Some(anchor));
         }
-        let factor = if dy < 0.0 { 1.14 } else { 1.0 / 1.14 };
-        dom::attr(canvas_id, "data-wheeling", "true");
-        zoom_surface_at(
-            surface,
-            factor,
-            Some((wheel.client_x() as f64, wheel.client_y() as f64)),
-        );
-        let clear_key = format!("{canvas_id}-wheel-end");
-        dom::later(&clear_key, 140, move || {
-            dom::attr(canvas_id, "data-wheeling", "false");
-        });
     });
-    let options = web_sys::AddEventListenerOptions::new();
-    options.set_passive(false);
-    if canvas
-        .add_event_listener_with_callback_and_add_event_listener_options(
-            "wheel",
-            callback.as_ref().unchecked_ref(),
-            &options,
-        )
-        .is_ok()
-    {
-        callback.forget();
-    }
 }
 
 pub fn attach_wheel_listeners() {
@@ -4979,41 +4920,33 @@ fn apply_hover_lighting(
     });
 }
 
-fn radar_world_point(radar: &web_sys::Element, client: (f64, f64)) -> Option<(f64, f64)> {
-    let picture = radar
-        .query_selector(".graph-radar-picture")
-        .ok()
-        .flatten()?;
-    let attr = |k: &str| {
-        picture
-            .get_attribute(k)
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| *v > 0.0)
-    };
-    let (pw, ph) = (attr("data-w")?, attr("data-h")?);
-    let drawn = picture.get_bounding_client_rect();
-    if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
-        return None;
-    }
-    Some((
-        ((client.0 - drawn.left()) / drawn.width()).clamp(0.0, 1.0) * pw,
-        ((client.1 - drawn.top()) / drawn.height()).clamp(0.0, 1.0) * ph,
-    ))
-}
-
 fn look_at_system_point(surface: SysMapSurface, point: (f64, f64)) {
     let (vw, vh, measured) = viewport_size(surface.canvas_id);
     if !measured {
         return;
     }
     let mut cam = load_camera(surface);
-    let (px, py) = centred(point, cam.scale, (vw, vh));
-    cam.pan_x = px;
-    cam.pan_y = py;
+    let next = graph_viewport::center_camera_on(point, (vw, vh), cam.scale);
+    cam.apply_viewport_cam(next);
     cam.fit_mode = false;
     cam.needs_measure = false;
     save_camera(surface, &cam);
     apply_camera(surface, &cam);
+}
+
+fn radar_target_element(radar: &web_sys::Element) -> web_sys::Element {
+    radar
+        .query_selector(".graph-radar-picture")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| radar.clone())
+}
+
+fn save_radar_drag(surface_id: &str, radar_id: &str, drag: graph_viewport::RadarDrag) {
+    let mut raw = drag.to_json();
+    raw["surface"] = json!(surface_id);
+    raw["radar_id"] = json!(radar_id);
+    m::set(RADAR_DRAG_KEY, raw);
 }
 
 fn radar_pointer_event(
@@ -5022,7 +4955,7 @@ fn radar_pointer_event(
     target_el: Option<&web_sys::Element>,
 ) -> bool {
     let held = m::data(RADAR_DRAG_KEY);
-    let pointer = event.dyn_ref::<web_sys::PointerEvent>();
+    let mut drag = graph_viewport::RadarDrag::from_json(&held);
     match kind {
         "pointerdown" => {
             let Some(radar) =
@@ -5030,59 +4963,66 @@ fn radar_pointer_event(
             else {
                 return false;
             };
-            let Some(pe) = pointer.filter(|p| p.button() == 0) else {
-                return true;
-            };
             let surf_id = radar.get_attribute("data-surface").unwrap_or_default();
             let surface = surface_by_id(&surf_id);
-            event.prevent_default();
-            let _ = radar.set_pointer_capture(pe.pointer_id());
-            m::set(
-                RADAR_DRAG_KEY,
-                json!({
-                    "active": true,
-                    "surface": surface.id,
-                    "radar_id": radar.id(),
-                    "pointer_id": pe.pointer_id(),
-                }),
-            );
-            if let Some(pt) =
-                radar_world_point(&radar, (pe.client_x() as f64, pe.client_y() as f64))
-            {
-                look_at_system_point(surface, pt);
+            let cam = load_camera(surface);
+            let target = radar_target_element(&radar);
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &target,
+                Some(surface.canvas_id),
+                (cam.plane_w, cam.plane_h),
+                &mut drag,
+            ) {
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    save_radar_drag(surface.id, &radar.id(), drag);
+                    look_at_system_point(surface, world_point);
+                }
+                graph_viewport::RadarAction::Ignored => {
+                    if drag.active {
+                        save_radar_drag(surface.id, &radar.id(), drag);
+                    }
+                }
+                graph_viewport::RadarAction::Released => {
+                    m::set(RADAR_DRAG_KEY, json!({"active": false}));
+                }
             }
             true
         }
-        "pointermove" => {
-            if !m::yes(&held["active"]) {
+        "pointermove" | "pointerup" | "pointercancel" => {
+            if !drag.active {
                 return false;
             }
-            let Some(pe) = pointer else {
+            let surf_id = m::text(&held, "surface");
+            let surface = surface_by_id(&surf_id);
+            let radar_id = m::text(&held, "radar_id");
+            let Some(radar) = dom::get(&radar_id) else {
+                dom::attr(surface.canvas_id, "data-panning", "false");
+                m::set(RADAR_DRAG_KEY, json!({"active": false}));
                 return true;
             };
-            if pe.pointer_id() as i64 != held["pointer_id"].as_i64().unwrap_or(-1) {
-                return true;
-            }
-            let surface = surface_by_id(&m::text(&held, "surface"));
-            if let Some(radar) = dom::get(&m::text(&held, "radar_id")) {
-                if let Some(pt) =
-                    radar_world_point(&radar, (pe.client_x() as f64, pe.client_y() as f64))
-                {
-                    look_at_system_point(surface, pt);
+            let cam = load_camera(surface);
+            let target = radar_target_element(&radar);
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &target,
+                Some(surface.canvas_id),
+                (cam.plane_w, cam.plane_h),
+                &mut drag,
+            ) {
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    save_radar_drag(surface.id, &radar_id, drag);
+                    look_at_system_point(surface, world_point);
+                }
+                graph_viewport::RadarAction::Released => {
+                    m::set(RADAR_DRAG_KEY, json!({"active": false}));
+                }
+                graph_viewport::RadarAction::Ignored => {
+                    save_radar_drag(surface.id, &radar_id, drag);
                 }
             }
-            true
-        }
-        "pointerup" | "pointercancel" => {
-            if !m::yes(&held["active"]) {
-                return false;
-            }
-            if let Some(pe) = pointer {
-                if let Some(radar) = dom::get(&m::text(&held, "radar_id")) {
-                    let _ = radar.release_pointer_capture(pe.pointer_id());
-                }
-            }
-            m::set(RADAR_DRAG_KEY, json!({"active": false}));
             true
         }
         _ => false,
@@ -5090,12 +5030,11 @@ fn radar_pointer_event(
 }
 
 fn ensure_resize_watch() {
-    if m::yes(&m::data("system-map-resize-watched")) {
-        return;
-    }
-    m::set("system-map-resize-watched", json!(true));
-    let resized = Closure::<dyn FnMut()>::new(|| {
-        dom::later("system-map-resize", 60, || {
+    graph_viewport::ensure_resize_observer(
+        "system-map-resize-watched",
+        Some("system-map-resize"),
+        60,
+        || {
             for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
                 let visible = dom::get(surface.canvas_id)
                     .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none());
@@ -5105,22 +5044,31 @@ fn ensure_resize_watch() {
                 if !(visible && has_plane) {
                     continue;
                 }
-                let cam = load_camera(surface);
-                if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
-                    continue;
-                }
-                if cam.fit_mode || cam.needs_measure {
-                    fit_surface_camera(surface);
-                } else {
-                    apply_camera(surface, &cam);
+                let mut cam = load_camera(surface);
+                let (vw, vh, measured) = viewport_size(surface.canvas_id);
+                match graph_viewport::resize_refit_decision(
+                    cam.viewport_cam(),
+                    cam.fit_mode || cam.needs_measure,
+                    (cam.plane_w, cam.plane_h),
+                    (vw, vh),
+                    measured,
+                    graph_viewport::FitOptions::for_system_map(),
+                ) {
+                    graph_viewport::ResizeAction::Skip => {}
+                    graph_viewport::ResizeAction::Refit(next) => {
+                        cam.apply_viewport_cam(next);
+                        cam.fit_mode = true;
+                        cam.needs_measure = false;
+                        save_camera(surface, &cam);
+                        apply_camera(surface, &cam);
+                    }
+                    graph_viewport::ResizeAction::SyncRadar(_) => {
+                        apply_camera(surface, &cam);
+                    }
                 }
             }
-        });
-    });
-    if let Some(win) = web_sys::window() {
-        let _ = win.add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
-    }
-    resized.forget();
+        },
+    );
 }
 
 fn ensure_legend_hover_watch(surface: SysMapSurface) {
@@ -5246,121 +5194,78 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             .as_ref()
             .and_then(|el| el.closest(".system-map-radar").ok().flatten())
             .is_some();
-        let drag = m::data(surface.drag_key);
-        let drag_active = m::yes(&drag["active"]);
+        let mut drag = graph_viewport::DragPan::from_json(&m::data(surface.drag_key));
+        let drag_active = drag.active;
 
-        match kind {
-            "pointerdown" if in_canvas && !in_radar => {
-                let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                    return false;
-                };
-                if pe.button() != 0 {
-                    return false;
-                }
-                let cam = load_camera(surface);
-                m::set(
-                    surface.drag_key,
-                    json!({
-                        "active": true,
-                        "pointer_id": pe.pointer_id(),
-                        "start_x": pe.client_x() as f64,
-                        "start_y": pe.client_y() as f64,
-                        "orig_pan_x": cam.pan_x,
-                        "orig_pan_y": cam.pan_y,
-                        "moved": false,
-                        "suppress_click": false,
-                    }),
-                );
-                return true;
-            }
-            "pointermove" if drag_active => {
-                let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                    return true;
-                };
-                if pe.pointer_id() as i64 != drag["pointer_id"].as_i64().unwrap_or(-1) {
+        if kind == "dblclick" && in_canvas && !in_radar {
+            if let Some(node_el) = target_el
+                .as_ref()
+                .and_then(|el| el.closest("[data-n]").ok().flatten())
+            {
+                let svc = node_el
+                    .get_attribute("data-explain-services")
+                    .unwrap_or_default();
+                let sid = svc.split(',').next().unwrap_or("").trim().to_owned();
+                if !sid.is_empty() {
+                    systems::drill_down_service_map(surface.id, &sid, None);
                     return true;
                 }
-                let dx = pe.client_x() as f64 - drag["start_x"].as_f64().unwrap_or(0.0);
-                let dy = pe.client_y() as f64 - drag["start_y"].as_f64().unwrap_or(0.0);
-                let mut moved = m::yes(&drag["moved"]);
-                if !moved {
-                    if (dx * dx + dy * dy).sqrt() <= DRAG_THRESHOLD_PX {
-                        return true;
-                    }
-                    moved = true;
-                    dom::attr(surface.canvas_id, "data-panning", "true");
-                    if let Some(c) = dom::get(surface.canvas_id) {
-                        let _ = c.set_pointer_capture(pe.pointer_id());
-                    }
-                }
-                let orig_x = drag["orig_pan_x"].as_f64().unwrap_or(0.0);
-                let orig_y = drag["orig_pan_y"].as_f64().unwrap_or(0.0);
-                let mut next_drag = drag;
-                next_drag["moved"] = json!(moved);
-                m::set(surface.drag_key, next_drag);
-                let mut cam = load_camera(surface);
-                cam.pan_x = (orig_x + dx).round();
-                cam.pan_y = (orig_y + dy).round();
-                cam.fit_mode = false;
-                save_camera(surface, &cam);
-                apply_camera(surface, &cam);
-                return true;
             }
-            "pointerup" | "pointercancel" if drag_active => {
-                dom::attr(surface.canvas_id, "data-panning", "false");
-                if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
-                    if m::yes(&drag["moved"]) {
-                        if let Some(c) = dom::get(surface.canvas_id) {
-                            let _ = c.release_pointer_capture(pe.pointer_id());
-                        }
-                    }
-                }
-                let suppress = kind == "pointerup" && m::yes(&drag["moved"]);
-                m::set(
-                    surface.drag_key,
-                    json!({
-                        "active": false,
-                        "moved": false,
-                        "suppress_click": suppress,
-                    }),
+            if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
+                zoom_surface_at(
+                    surface,
+                    ZOOM_STEP,
+                    Some((me.client_x() as f64, me.client_y() as f64)),
                 );
-                if suppress {
-                    let dk = surface.drag_key;
-                    let tk = format!("{dk}-clear");
-                    dom::later(&tk, 70, move || {
-                        let mut d = m::data(dk);
-                        if d.is_object() {
-                            d["suppress_click"] = json!(false);
-                            m::set(dk, d);
-                        }
-                    });
-                }
-                return true;
             }
-            "dblclick" if in_canvas && !in_radar => {
-                if let Some(node_el) = target_el
-                    .as_ref()
-                    .and_then(|el| el.closest("[data-n]").ok().flatten())
-                {
-                    let svc = node_el
-                        .get_attribute("data-explain-services")
-                        .unwrap_or_default();
-                    let sid = svc.split(',').next().unwrap_or("").trim().to_owned();
-                    if !sid.is_empty() {
-                        systems::drill_down_service_map(surface.id, &sid, None);
+            return true;
+        }
+
+        if (kind == "pointerdown" && in_canvas && !in_radar)
+            || (drag_active && matches!(kind, "pointermove" | "pointerup" | "pointercancel"))
+        {
+            let mut cam = load_camera(surface);
+            match graph_viewport::handle_canvas_drag(
+                kind,
+                event,
+                surface.canvas_id,
+                cam.viewport_cam(),
+                graph_viewport::DEFAULT_DRAG_THRESHOLD_PX,
+                &mut drag,
+            ) {
+                graph_viewport::CanvasDragOutcome::Down => {
+                    m::set(surface.drag_key, drag.to_json());
+                    return true;
+                }
+                graph_viewport::CanvasDragOutcome::Panned { tx, ty } => {
+                    m::set(surface.drag_key, drag.to_json());
+                    cam.pan_x = tx;
+                    cam.pan_y = ty;
+                    cam.fit_mode = false;
+                    save_camera(surface, &cam);
+                    apply_camera(surface, &cam);
+                    return true;
+                }
+                graph_viewport::CanvasDragOutcome::Ended { suppress_click } => {
+                    m::set(surface.drag_key, drag.to_json());
+                    if suppress_click {
+                        let dk = surface.drag_key;
+                        let tk = format!("{dk}-clear");
+                        dom::later(&tk, 70, move || {
+                            let mut d = graph_viewport::DragPan::from_json(&m::data(dk));
+                            d.clear_suppress();
+                            m::set(dk, d.to_json());
+                        });
+                    }
+                    return true;
+                }
+                graph_viewport::CanvasDragOutcome::Ignored => {
+                    if drag.active {
+                        m::set(surface.drag_key, drag.to_json());
                         return true;
                     }
                 }
-                if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
-                    zoom_surface_at(
-                        surface,
-                        ZOOM_STEP,
-                        Some((me.client_x() as f64, me.client_y() as f64)),
-                    );
-                }
-                return true;
             }
-            _ => {}
         }
     }
     false
@@ -6567,5 +6472,45 @@ mod tests {
         assert!(partial.2 > 0.0 && partial.3 > 0.0);
         let centered = centred((200.0, 120.0), 1.5, (600.0, 400.0));
         assert_eq!(centered, (0.0, 20.0));
+    }
+
+    #[test]
+    fn system_map_delegates_camera_resize_and_radar_to_graph_viewport() {
+        let fit_cam = graph_viewport::fit(
+            (1200.0, 600.0),
+            (800.0, 400.0),
+            graph_viewport::FitOptions::for_system_map(),
+        );
+        assert_eq!(
+            camera_for_fit((1200.0, 600.0), (800.0, 400.0)),
+            (fit_cam.scale, fit_cam.tx, fit_cam.ty)
+        );
+
+        let mut cam = Camera::default();
+        cam.apply_viewport_cam(fit_cam);
+        assert_eq!(cam.viewport_cam(), fit_cam);
+
+        assert!(matches!(
+            graph_viewport::resize_refit_decision(
+                cam.viewport_cam(),
+                true,
+                (1200.0, 600.0),
+                (900.0, 500.0),
+                true,
+                graph_viewport::FitOptions::for_system_map(),
+            ),
+            graph_viewport::ResizeAction::Refit(_)
+        ));
+        assert_eq!(
+            graph_viewport::resize_refit_decision(
+                cam.viewport_cam(),
+                false,
+                (1200.0, 600.0),
+                (900.0, 500.0),
+                true,
+                graph_viewport::FitOptions::for_system_map(),
+            ),
+            graph_viewport::ResizeAction::SyncRadar(fit_cam)
+        );
     }
 }

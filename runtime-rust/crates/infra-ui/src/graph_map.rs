@@ -2,7 +2,7 @@
 //! uses what. Whatever depends on something stands to its left, so entry
 //! points gather on the left edge and foundations on the right. A file opens
 //! in turn to its classes, methods and functions and the files around them.
-use crate::{api, dom, graph::GraphTargetScope, model as m};
+use crate::{api, dom, graph::GraphTargetScope, graph_viewport, model as m};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as V};
 use std::cell::RefCell;
@@ -40,12 +40,12 @@ const LINK_ROW: f64 = 6.0;
 const LINK_BETWEEN: f64 = 10.0;
 /// How small a picture is made to fit its room. Smaller than this its boxes
 /// cannot be told apart, and the rest of it is scrolled to.
+#[cfg_attr(not(test), allow(dead_code))]
 const SMALLEST: f64 = 0.25;
-const CAMERA_MIN: f64 = 0.25;
+const CAMERA_MIN: f64 = graph_viewport::DEFAULT_MIN_SCALE;
 const CAMERA_MAX: f64 = 2.4;
 const FOCUS_CAMERA_MAX: f64 = 1.75;
 const ZOOM_STEP: f64 = 1.25;
-const DRAG_THRESHOLD_PX: f64 = 4.0;
 const ENTITY_WIDTH: f64 = 156.0;
 const ENTITY_HEIGHT: f64 = 24.0;
 #[derive(Clone, Debug, PartialEq)]
@@ -587,51 +587,31 @@ pub fn resolve_focus(view: &V, plan: &Plan, focus: &LiveFocus) -> FocusOverlay {
     overlay
 }
 /// Computes camera `(scale, pan_x, pan_y)` to fit the entire plane inside `viewport`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn camera_for_fit(plane: (f64, f64), viewport: (f64, f64)) -> (f64, f64, f64) {
-    if plane.0 <= 0.0 || plane.1 <= 0.0 || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
-        return (1.0, 0.0, 0.0);
-    }
-    let scale = ((viewport.0 * 0.94) / plane.0)
-        .min((viewport.1 * 0.94) / plane.1)
-        .clamp(CAMERA_MIN, 1.0);
-    let scaled_w = plane.0 * scale;
-    let scaled_h = plane.1 * scale;
-    let pan_x = if scaled_w <= viewport.0 {
-        ((viewport.0 - scaled_w) / 2.0).round()
-    } else {
-        12.0
-    };
-    let pan_y = if scaled_h <= viewport.1 {
-        ((viewport.1 - scaled_h) / 2.0).round()
-    } else {
-        12.0
-    };
-    (scale, pan_x, pan_y)
+    let cam = graph_viewport::fit_proportional(plane, viewport, 0.94, CAMERA_MIN, 1.0, 12.0);
+    (cam.scale, cam.tx, cam.ty)
 }
 /// Computes camera `(scale, pan_x, pan_y)` focusing and centering `bbox` inside `viewport`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn camera_for_bbox(
     bbox: (f64, f64, f64, f64),
     viewport: (f64, f64),
     focus_max: f64,
 ) -> (f64, f64, f64) {
-    if viewport.0 <= 0.0 || viewport.1 <= 0.0 {
-        return (1.0, 0.0, 0.0);
-    }
-    let bw = ((bbox.2 - bbox.0).abs() + 112.0).max(BOX_WIDTH + 96.0);
-    let bh = ((bbox.3 - bbox.1).abs() + 88.0).max(BOX_HEIGHT + 80.0);
-    let cap = focus_max.clamp(CAMERA_MIN, CAMERA_MAX);
-    let scale = ((viewport.0 * 0.90) / bw)
-        .min((viewport.1 * 0.90) / bh)
-        .clamp(CAMERA_MIN, cap);
-    let cx = (bbox.0 + bbox.2) / 2.0;
-    let cy = (bbox.1 + bbox.3) / 2.0;
-    (
-        scale,
-        (viewport.0 / 2.0 - cx * scale).round(),
-        (viewport.1 / 2.0 - cy * scale).round(),
-    )
+    let cam = graph_viewport::fit_bbox(
+        bbox,
+        viewport,
+        (112.0, 88.0),
+        (BOX_WIDTH + 96.0, BOX_HEIGHT + 80.0),
+        0.90,
+        CAMERA_MIN,
+        focus_max.clamp(CAMERA_MIN, CAMERA_MAX),
+    );
+    (cam.scale, cam.tx, cam.ty)
 }
 /// Zooms around a viewport-relative anchor `(ax, ay)` while keeping that logical point fixed.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn zoom_at(
     scale0: f64,
     pan_x0: f64,
@@ -639,15 +619,14 @@ pub fn zoom_at(
     anchor: (f64, f64),
     next_scale: f64,
 ) -> (f64, f64, f64) {
-    let s0 = scale0.clamp(CAMERA_MIN, CAMERA_MAX);
-    let s1 = next_scale.clamp(CAMERA_MIN, CAMERA_MAX);
-    let lx = (anchor.0 - pan_x0) / s0;
-    let ly = (anchor.1 - pan_y0) / s0;
-    (
-        s1,
-        (anchor.0 - lx * s1).round(),
-        (anchor.1 - ly * s1).round(),
-    )
+    let cam = graph_viewport::zoom_at(
+        graph_viewport::Camera::new(pan_x0, pan_y0, scale0),
+        anchor,
+        next_scale,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    );
+    (cam.scale, cam.tx, cam.ty)
 }
 fn prompt_tokens(prompt: &str) -> Vec<String> {
     const STOP: &[&str] = &[
@@ -10460,6 +10439,7 @@ pub fn sought(mut state: V, row: &V, drawn: bool) -> V {
 /// The scale at which a picture lies wholly in the room it has: never
 /// larger than it is drawn, and no smaller than `SMALLEST`. A picture or a
 /// room without a size is left as it is.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn scale(picture: (f64, f64), room: (f64, f64)) -> f64 {
     if picture.0 <= 0.0 || picture.1 <= 0.0 || room.0 <= 0.0 || room.1 <= 0.0 {
         return 1.0;
@@ -10483,24 +10463,12 @@ pub fn scaled(size: (f64, f64), scale: f64) -> String {
         "{plain};transform:scale({scale:.4});transform-origin:0 0;margin:0 {dx:.0}px {dy:.0}px 0"
     )
 }
-/// Below this scale a picture is an overview: names are drawn larger and the
-/// small marks are left out.
-const LOD_FAR: f64 = 0.5;
-/// Above this scale a box has room for a second line.
-const LOD_NEAR: f64 = 1.4;
+const GRAPH_MAP_LOD: graph_viewport::LodThresholds = graph_viewport::DEFAULT_LOD;
 /// How much a picture tells at a scale: `far` is an overview of names,
 /// `near` adds to each box where it lies and how many links it has, and
 /// `mid` is the picture as it is laid out.
 pub fn lod(scale: f64) -> &'static str {
-    if !scale.is_finite() || scale <= 0.0 {
-        "mid"
-    } else if scale < LOD_FAR {
-        "far"
-    } else if scale > LOD_NEAR {
-        "near"
-    } else {
-        "mid"
-    }
+    graph_viewport::lod_with(scale, GRAPH_MAP_LOD)
 }
 /// The room the small picture of a map may take, and its least side.
 const RADAR_ROOM: (f64, f64) = (176.0, 176.0);
@@ -10528,28 +10496,18 @@ pub fn in_window(
     room: (f64, f64),
     picture: (f64, f64),
 ) -> Option<(f64, f64, f64, f64)> {
-    if !(scale.is_finite() && scale > 0.0 && picture.0 > 0.0 && picture.1 > 0.0) {
-        return None;
-    }
-    let side = |corner: f64, room: f64, picture: f64| {
-        let from = -corner / scale;
-        let to = from + room / scale;
-        // Half a point of the screen is no part of the picture left out.
-        let all = from <= 0.5 / scale && to >= picture - 0.5 / scale;
-        let (from, to) = (from.clamp(0.0, picture), to.clamp(0.0, picture));
-        (from, (to - from).max(0.0), all)
-    };
-    let (x, width, wide) = side(corner.0, room.0, picture.0);
-    let (y, height, tall) = side(corner.1, room.1, picture.1);
-    (!(wide && tall)).then_some((x, y, width, height))
+    graph_viewport::radar_window_rect(
+        graph_viewport::Camera::new(corner.0, corner.1, scale),
+        room,
+        picture,
+    )
 }
 /// Where the corner of a picture lies from the corner of its window once
 /// `point` of the picture is in the middle of the window.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn centred(point: (f64, f64), scale: f64, room: (f64, f64)) -> (f64, f64) {
-    (
-        room.0 / 2.0 - point.0 * scale,
-        room.1 / 2.0 - point.1 * scale,
-    )
+    let cam = graph_viewport::center_camera_on(point, room, scale);
+    (cam.tx, cam.ty)
 }
 /// The small picture of a map: its frames and its boxes, each box told by
 /// what it is to the picture, and a frame around what the window shows,
@@ -10587,17 +10545,9 @@ fn radar(picture: (f64, f64), frames: &[Framed], boxes: &[(f64, f64, &'static st
 /// Computes the multiplicative zoom factor for a single DOM `wheel` event.
 /// Returns `None` for zero or non-finite vertical deltas so pure horizontal
 /// trackpad swipes pass through unintercepted.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn wheel_zoom_factor(delta_y: f64, delta_mode: u32) -> Option<f64> {
-    if !delta_y.is_finite() || delta_y == 0.0 {
-        return None;
-    }
-    let normalized = match delta_mode {
-        1 => delta_y * 24.0,
-        2 => delta_y * 160.0,
-        _ => delta_y,
-    };
-    let clamped = normalized.clamp(-240.0, 240.0);
-    Some((-clamped * 0.0022).exp())
+    graph_viewport::wheel_zoom_factor(delta_y, delta_mode)
 }
 /// Computes the new `(scroll_left, scroll_top)` for an overflow-scroll canvas
 /// so the logical map point under `anchor` stays pinned after scaling from
@@ -10626,11 +10576,7 @@ pub fn scroll_after_zoom(
     )
 }
 fn scroll_canvas_label_id(canvas_id: &str) -> Option<&'static str> {
-    match canvas_id {
-        "graph-map-canvas" => Some("graph-map-zoom-level"),
-        "graph-link-canvas" => Some("graph-link-zoom-level"),
-        _ => None,
-    }
+    (canvas_id == "graph-link-canvas").then_some("graph-link-zoom-level")
 }
 fn apply_scroll_canvas_scale(
     canvas: &web_sys::Element,
@@ -10641,8 +10587,6 @@ fn apply_scroll_canvas_scale(
     let scale_value = scale_value.clamp(CAMERA_MIN, CAMERA_MAX);
     let size = (plane.offset_width() as f64, plane.offset_height() as f64);
     let scale_text = format!("{scale_value:.4}");
-    // The scale is told to the stylesheet too: the heads of the arrows are
-    // kept large enough to read in a picture made small.
     let _ = plane.set_attribute(
         "style",
         &format!("{};--graph-scale:{scale_text}", scaled(size, scale_value)),
@@ -10669,7 +10613,6 @@ fn apply_scroll_canvas_scale(
             &format!("{}%", (scale_value * 100.0).round() as i64),
         );
     }
-    sync_scroll_radar(canvas_id);
     scale_value
 }
 /// Draws, in the small picture of a map, around what the window of the map
@@ -10695,43 +10638,7 @@ fn sync_radar(canvas_id: &str, seen: Option<(f64, f64, f64, f64)>) {
     }
     dom::hide(&radar, false);
 }
-/// Where the corner of a scrolled picture lies from the corner of its
-/// window, the scale it is drawn at, the room of the window and the size
-/// of the picture.
-#[allow(clippy::type_complexity)]
-fn scroll_window(canvas_id: &str) -> Option<((f64, f64), f64, (f64, f64), (f64, f64))> {
-    let canvas = dom::get(canvas_id)?;
-    let plane = canvas
-        .query_selector(".graph-map-plane")
-        .ok()
-        .flatten()
-        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())?;
-    let picture = (plane.offset_width() as f64, plane.offset_height() as f64);
-    let (window, drawn) = (
-        canvas.get_bounding_client_rect(),
-        plane.get_bounding_client_rect(),
-    );
-    Some((
-        (
-            drawn.left() - window.left() - canvas.client_left() as f64,
-            drawn.top() - window.top() - canvas.client_top() as f64,
-        ),
-        current_scroll_canvas_scale(&plane, canvas_id),
-        (canvas.client_width() as f64, canvas.client_height() as f64),
-        picture,
-    ))
-}
-/// The small picture of a map that is scrolled, drawn again for where the
-/// map is scrolled to.
-fn sync_scroll_radar(canvas_id: &str) {
-    if dom::get(&format!("{canvas_id}-radar")).is_none() {
-        return;
-    }
-    let seen = scroll_window(canvas_id)
-        .and_then(|(corner, scale, room, picture)| in_window(corner, scale, room, picture));
-    sync_radar(canvas_id, seen);
-}
-/// The small picture of an embedded map, drawn again for where its camera
+/// The small picture of a camera surface, drawn again for where its camera
 /// looks.
 fn sync_surface_radar(surface: MapSurface, cam: &Camera) {
     let (width, height, measured) = viewport_size(surface.canvas);
@@ -10747,62 +10654,58 @@ fn sync_surface_radar(surface: MapSurface, cam: &Camera) {
         .flatten();
     sync_radar(surface.canvas, seen);
 }
-/// The point of a picture under a point of its small picture.
-fn radar_point(radar: &web_sys::Element, client: (f64, f64)) -> Option<(f64, f64)> {
-    let picture = radar
+fn radar_target_element(radar: &web_sys::Element) -> web_sys::Element {
+    radar
         .query_selector(".graph-radar-picture")
         .ok()
-        .flatten()?;
+        .flatten()
+        .unwrap_or_else(|| radar.clone())
+}
+fn radar_plane_size(canvas_id: &str, picture: &web_sys::Element) -> (f64, f64) {
+    if let Some(surface) = pan_surface_for_canvas(canvas_id) {
+        let cam = load_surface_camera(surface);
+        if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
+            return (cam.plane_w, cam.plane_h);
+        }
+    }
     let size = |key: &str| {
         picture
             .get_attribute(key)
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| *value > 0.0)
+            .unwrap_or(0.0)
     };
-    let (width, height) = (size("data-w")?, size("data-h")?);
-    let drawn = picture.get_bounding_client_rect();
-    if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
-        return None;
-    }
-    Some((
-        ((client.0 - drawn.left()) / drawn.width()).clamp(0.0, 1.0) * width,
-        ((client.1 - drawn.top()) / drawn.height()).clamp(0.0, 1.0) * height,
-    ))
+    (size("data-w"), size("data-h"))
 }
 /// Brings a point of a picture to the middle of its window.
 fn look_at(canvas_id: &str, point: (f64, f64)) {
-    if let Some(surface) = embedded_surface_for_canvas(canvas_id) {
-        let mut cam = load_surface_camera(surface);
-        let (width, height, measured) = viewport_size(surface.canvas);
-        if !measured {
-            return;
-        }
-        let (x, y) = centred(point, cam.scale, (width, height));
-        cam.pan_x = x.round();
-        cam.pan_y = y.round();
-        cam.fit_mode = false;
-        cam.needs_measure = false;
-        save_surface_camera(surface, &cam);
-        apply_surface_camera(surface, &cam);
-        return;
-    }
-    let (Some(canvas), Some((corner, scale, room, _))) =
-        (dom::get(canvas_id), scroll_window(canvas_id))
-    else {
+    let Some(surface) = pan_surface_for_canvas(canvas_id) else {
         return;
     };
-    let wanted = centred(point, scale, room);
-    canvas.set_scroll_left((canvas.scroll_left() as f64 + corner.0 - wanted.0).round() as i32);
-    canvas.set_scroll_top((canvas.scroll_top() as f64 + corner.1 - wanted.1).round() as i32);
-    sync_scroll_radar(canvas_id);
+    let mut cam = load_surface_camera(surface);
+    let (width, height, measured) = viewport_size(surface.canvas);
+    if !measured {
+        return;
+    }
+    let next = graph_viewport::center_camera_on(point, (width, height), cam.scale);
+    cam.apply_viewport_cam(next);
+    cam.fit_mode = false;
+    cam.needs_measure = false;
+    save_surface_camera(surface, &cam);
+    apply_surface_camera(surface, &cam);
 }
 /// The small picture the pointer is held down on, by the window it is of.
 const RADAR_DRAG: &str = "graph-radar-drag";
+fn save_radar_drag(canvas_id: &str, drag: graph_viewport::RadarDrag) {
+    let mut raw = drag.to_json();
+    raw["canvas"] = json!(canvas_id);
+    m::set(RADAR_DRAG, raw);
+}
 /// A press on the small picture of a map looks at what is pressed, and the
 /// window follows the pointer while it is held down.
 fn radar_pointer(kind: &str, event: &web_sys::Event, target: Option<&web_sys::Element>) -> bool {
     let held = m::data(RADAR_DRAG);
-    let pointer = event.dyn_ref::<web_sys::PointerEvent>();
+    let mut drag = graph_viewport::RadarDrag::from_json(&held);
     match kind {
         "pointerdown" => {
             let Some(radar) =
@@ -10810,89 +10713,75 @@ fn radar_pointer(kind: &str, event: &web_sys::Event, target: Option<&web_sys::El
             else {
                 return false;
             };
-            let Some(pointer) = pointer.filter(|pointer| pointer.button() == 0) else {
-                return true;
-            };
             let id = radar.id();
             let Some(canvas_id) = id.strip_suffix("-radar") else {
                 return true;
             };
-            event.prevent_default();
-            let _ = radar.set_pointer_capture(pointer.pointer_id());
-            m::set(
-                RADAR_DRAG,
-                json!({"canvas": canvas_id, "pointer_id": pointer.pointer_id(), "moved": false}),
-            );
-            if let Some(point) = radar_point(
-                &radar,
-                (pointer.client_x() as f64, pointer.client_y() as f64),
+            let picture = radar_target_element(&radar);
+            let plane = radar_plane_size(canvas_id, &picture);
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &picture,
+                Some(canvas_id),
+                plane,
+                &mut drag,
             ) {
-                look_at(canvas_id, point);
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    save_radar_drag(canvas_id, drag);
+                    look_at(canvas_id, world_point);
+                }
+                graph_viewport::RadarAction::Ignored => {
+                    if drag.active {
+                        save_radar_drag(canvas_id, drag);
+                    }
+                }
+                graph_viewport::RadarAction::Released => {
+                    m::take(RADAR_DRAG);
+                }
             }
             true
         }
-        "pointermove" => {
-            let Some(canvas_id) = held["canvas"].as_str() else {
+        "pointermove" | "pointerup" | "pointercancel" => {
+            if !drag.active {
                 return false;
-            };
-            let Some(pointer) = pointer
-                .filter(|pointer| Some(pointer.pointer_id() as i64) == held["pointer_id"].as_i64())
-            else {
-                return true;
+            }
+            let Some(canvas_id) = held["canvas"].as_str() else {
+                m::take(RADAR_DRAG);
+                return false;
             };
             let Some(radar) = dom::get(&format!("{canvas_id}-radar")) else {
+                dom::attr(canvas_id, "data-panning", "false");
+                m::take(RADAR_DRAG);
                 return true;
             };
-            if !m::yes(&held["moved"]) {
-                // While the pointer leads, the picture follows it at once.
-                dom::attr(canvas_id, "data-panning", "true");
-                let mut held = held.clone();
-                held["moved"] = json!(true);
-                m::set(RADAR_DRAG, held);
-            }
-            if let Some(point) = radar_point(
-                &radar,
-                (pointer.client_x() as f64, pointer.client_y() as f64),
+            let picture = radar_target_element(&radar);
+            let plane = radar_plane_size(canvas_id, &picture);
+            match graph_viewport::handle_radar_pointer(
+                kind,
+                event,
+                &picture,
+                Some(canvas_id),
+                plane,
+                &mut drag,
             ) {
-                look_at(canvas_id, point);
+                graph_viewport::RadarAction::MoveTo { world_point } => {
+                    save_radar_drag(canvas_id, drag);
+                    look_at(canvas_id, world_point);
+                }
+                graph_viewport::RadarAction::Released => {
+                    m::take(RADAR_DRAG);
+                }
+                graph_viewport::RadarAction::Ignored => {
+                    save_radar_drag(canvas_id, drag);
+                }
             }
-            true
-        }
-        "pointerup" | "pointercancel" => {
-            let Some(canvas_id) = held["canvas"].as_str() else {
-                return false;
-            };
-            if m::yes(&held["moved"]) {
-                dom::attr(canvas_id, "data-panning", "false");
-            }
-            if let (Some(radar), Some(pointer)) = (dom::get(&format!("{canvas_id}-radar")), pointer)
-            {
-                let _ = radar.release_pointer_capture(pointer.pointer_id());
-            }
-            m::take(RADAR_DRAG);
             true
         }
         _ => false,
     }
 }
-/// Draws the small picture of a scrolled map again as the map is scrolled.
-fn attach_canvas_scroll(canvas_id: &'static str) {
-    let Some(canvas) = dom::get(canvas_id) else {
-        return;
-    };
-    if canvas.get_attribute("data-scroll-bound").as_deref() == Some("true") {
-        return;
-    }
-    let _ = canvas.set_attribute("data-scroll-bound", "true");
-    let scrolled = Closure::<dyn FnMut()>::new(move || sync_scroll_radar(canvas_id));
-    if canvas
-        .add_event_listener_with_callback("scroll", scrolled.as_ref().unchecked_ref())
-        .is_ok()
-    {
-        scrolled.forget();
-    }
-}
-fn current_scroll_canvas_scale(plane: &web_sys::HtmlElement, canvas_id: &str) -> f64 {
+fn current_scroll_canvas_scale(plane: &web_sys::HtmlElement) -> f64 {
     if let Some(scale_value) = plane
         .get_attribute("data-scale")
         .and_then(|v| v.parse::<f64>().ok())
@@ -10900,41 +10789,17 @@ fn current_scroll_canvas_scale(plane: &web_sys::HtmlElement, canvas_id: &str) ->
     {
         return scale_value.clamp(CAMERA_MIN, CAMERA_MAX);
     }
-    match canvas_id {
-        "graph-map-canvas" => state()["zoom"]
-            .as_f64()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(1.0)
-            .clamp(CAMERA_MIN, CAMERA_MAX),
-        "graph-link-canvas" => looked()["zoom"]
-            .as_f64()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(1.0)
-            .clamp(CAMERA_MIN, CAMERA_MAX),
-        _ => 1.0,
-    }
+    looked()["zoom"]
+        .as_f64()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1.0)
+        .clamp(CAMERA_MIN, CAMERA_MAX)
 }
-fn persist_scroll_canvas_zoom(canvas_id: &str, scale_value: Option<f64>) {
-    match canvas_id {
-        "graph-map-canvas" => {
-            let mut st = state();
-            if let Some(z) = scale_value {
-                st["zoom"] = json!(z);
-                st["fit"] = json!(false);
-                dom::set_checked("graph-map-fit", false);
-            } else {
-                st["zoom"] = V::Null;
-            }
-            m::set("graph-map", st);
-        }
-        "graph-link-canvas" => {
-            let mut link = looked();
-            if link.is_object() {
-                link["zoom"] = scale_value.map(|z| json!(z)).unwrap_or(V::Null);
-                m::set("graph-link", link);
-            }
-        }
-        _ => {}
+fn persist_scroll_canvas_zoom(scale_value: Option<f64>) {
+    let mut link = looked();
+    if link.is_object() {
+        link["zoom"] = scale_value.map(|z| json!(z)).unwrap_or(V::Null);
+        m::set("graph-link", link);
     }
 }
 fn zoom_scroll_canvas(canvas_id: &str, factor: f64, client_anchor: Option<(f64, f64)>) -> bool {
@@ -10953,9 +10818,9 @@ fn zoom_scroll_canvas(canvas_id: &str, factor: f64, client_anchor: Option<(f64, 
     if size.0 <= 0.0 || size.1 <= 0.0 {
         return false;
     }
-    let scale0 = current_scroll_canvas_scale(&plane, canvas_id);
+    let scale0 = current_scroll_canvas_scale(&plane);
     let scale1 = (scale0 * factor).clamp(CAMERA_MIN, CAMERA_MAX);
-    persist_scroll_canvas_zoom(canvas_id, Some(scale1));
+    persist_scroll_canvas_zoom(Some(scale1));
     if (scale1 - scale0).abs() < 1e-6 {
         let _ = apply_scroll_canvas_scale(&canvas, &plane, canvas_id, scale1);
         return true;
@@ -10994,51 +10859,50 @@ fn reset_scroll_canvas_zoom(canvas_id: &str) {
     else {
         return;
     };
-    if canvas_id == "graph-map-canvas" {
-        let mut st = state();
-        st["zoom"] = V::Null;
-        st["fit"] = json!(false);
-        dom::set_checked("graph-map-fit", false);
-        m::set("graph-map", st);
-    } else {
-        persist_scroll_canvas_zoom(canvas_id, None);
-    }
+    persist_scroll_canvas_zoom(None);
     let _ = apply_scroll_canvas_scale(&canvas, &plane, canvas_id, 1.0);
 }
-/// Draws the picture of the map at the scale the viewer asked for: explicit
-/// manual/wheel zoom when set, fitted to the room it has, or as it is.
+/// Draws the modal map at the scale the viewer asked for: explicit
+/// manual/wheel zoom when set, fitted to the viewport when Fit is enabled, or 100%.
 fn fit() {
-    let Some(canvas) = dom::get("graph-map-canvas") else {
+    let mut cam = load_surface_camera(MODAL_SURFACE);
+    if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+        if let Some(plane) = dom::get(MODAL_SURFACE.canvas)
+            .and_then(|canvas| canvas.query_selector(".graph-map-plane").ok().flatten())
+            .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            cam.plane_w = plane.offset_width() as f64;
+            cam.plane_h = plane.offset_height() as f64;
+        }
+    }
+    if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
         return;
-    };
-    let Some(plane) = canvas
-        .query_selector(".graph-map-plane")
-        .ok()
-        .flatten()
-        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return;
-    };
-    // A box is as large as it is laid out, whatever scale it is drawn at.
-    let size = (plane.offset_width() as f64, plane.offset_height() as f64);
+    }
     let st = state();
-    let scale_value =
-        if let Some(manual) = st["zoom"].as_f64().filter(|v| v.is_finite() && *v > 0.0) {
-            manual.clamp(CAMERA_MIN, CAMERA_MAX)
-        } else if m::yes(&st["fit"]) {
-            // A little less than the room, so that no rounding brings up a
-            // scroll bar.
-            scale(
-                size,
-                (
-                    canvas.client_width() as f64 - 2.0,
-                    canvas.client_height() as f64 - 2.0,
-                ),
-            )
-        } else {
-            1.0
-        };
-    let _ = apply_scroll_canvas_scale(&canvas, &plane, "graph-map-canvas", scale_value);
+    let (vw, vh, measured) = viewport_size(MODAL_SURFACE.canvas);
+    cam.needs_measure = !measured;
+    if let Some(manual) = st["zoom"].as_f64().filter(|v| v.is_finite() && *v > 0.0) {
+        cam.scale = manual.clamp(CAMERA_MIN, CAMERA_MAX);
+        cam.fit_mode = false;
+        cam.apply_viewport_cam(graph_viewport::center_camera_on(
+            (cam.plane_w / 2.0, cam.plane_h / 2.0),
+            (vw, vh),
+            cam.scale,
+        ));
+        save_surface_camera(MODAL_SURFACE, &cam);
+        apply_surface_camera(MODAL_SURFACE, &cam);
+    } else if m::yes(&st["fit"]) {
+        fit_surface_camera(MODAL_SURFACE, &mut cam);
+    } else {
+        cam.fit_mode = false;
+        cam.apply_viewport_cam(graph_viewport::reset_100(
+            (cam.plane_w, cam.plane_h),
+            (vw, vh),
+            12.0,
+        ));
+        save_surface_camera(MODAL_SURFACE, &cam);
+        apply_surface_camera(MODAL_SURFACE, &cam);
+    }
 }
 /// What the pointer rests on in a picture: a box, by its number there, or a
 /// link, by the numbers of its two ends.
@@ -11263,112 +11127,73 @@ fn attach_side_hover(side_id: &'static str, canvas_id: &'static str) {
     }
 }
 fn ensure_resize_watch() {
-    if m::yes(&m::data("graph-map-resize-watched")) {
-        return;
-    }
-    m::set("graph-map-resize-watched", json!(true));
-    let resized = Closure::<dyn FnMut()>::new(|| {
-        if open() {
-            fit();
-        }
-        for surface in [
-            SESSION_SURFACE,
-            SYSTEM_EMBEDDED_SURFACE,
-            SYSTEM_CHANGE_SURFACE,
-        ] {
-            refit_surface_if_visible(surface);
-            // A window of another size shows another part of its picture,
-            // also where the picture is left as it was.
-            let (_, _, measured) = viewport_size(surface.canvas);
-            if measured {
-                sync_surface_radar(surface, &load_surface_camera(surface));
+    graph_viewport::ensure_resize_observer(
+        "graph-map-resize-watched",
+        Some("graph-map-resize"),
+        60,
+        || {
+            if open() {
+                let cam = load_surface_camera(MODAL_SURFACE);
+                let (vw, vh, measured) = viewport_size(MODAL_SURFACE.canvas);
+                match graph_viewport::resize_refit_decision(
+                    cam.viewport_cam(),
+                    cam.fit_mode || cam.needs_measure,
+                    (cam.plane_w, cam.plane_h),
+                    (vw, vh),
+                    measured,
+                    graph_viewport::FitOptions::default(),
+                ) {
+                    graph_viewport::ResizeAction::Skip => {}
+                    graph_viewport::ResizeAction::Refit(_) => fit(),
+                    graph_viewport::ResizeAction::SyncRadar(_) => {
+                        sync_surface_radar(MODAL_SURFACE, &cam);
+                    }
+                }
             }
-        }
-    });
-    let _ =
-        dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
-    resized.forget();
+            for surface in [
+                SESSION_SURFACE,
+                SYSTEM_EMBEDDED_SURFACE,
+                SYSTEM_CHANGE_SURFACE,
+            ] {
+                refit_surface_if_visible(surface);
+                // A window of another size shows another part of its picture,
+                // also where the picture is left as it was.
+                let (_, _, measured) = viewport_size(surface.canvas);
+                if measured {
+                    sync_surface_radar(surface, &load_surface_camera(surface));
+                }
+            }
+        },
+    );
 }
-fn embedded_surface_for_canvas(canvas_id: &str) -> Option<MapSurface> {
+fn pan_surface_for_canvas(canvas_id: &str) -> Option<MapSurface> {
     match canvas_id {
+        "graph-map-canvas" => Some(MODAL_SURFACE),
         "session-graph-canvas" => Some(SESSION_SURFACE),
         "system-member-graph-canvas" => Some(SYSTEM_EMBEDDED_SURFACE),
         "system-change-graph-canvas" => Some(SYSTEM_CHANGE_SURFACE),
         _ => None,
     }
 }
-fn wheel_event(canvas_id: &str, event: &web_sys::WheelEvent) -> bool {
-    let Some(factor) = wheel_zoom_factor(event.delta_y(), event.delta_mode()) else {
-        return false;
-    };
-    let Some(canvas) = dom::get(canvas_id) else {
-        return false;
-    };
-    let Some(plane) = canvas
-        .query_selector(".graph-map-plane")
-        .ok()
-        .flatten()
-        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return false;
-    };
-    if let Some(surface) = embedded_surface_for_canvas(canvas_id) {
-        let cam = load_surface_camera(surface);
-        if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
-            return false;
-        }
-        event.prevent_default();
-        event.stop_propagation();
-        let rect = canvas.get_bounding_client_rect();
-        let anchor = (
-            event.client_x() as f64 - rect.left(),
-            event.client_y() as f64 - rect.top(),
-        );
-        let canvas_static = surface.canvas;
-        let wheel_timer = surface.wheel_timer_key;
-        dom::attr(canvas_static, "data-wheeling", "true");
-        dom::later(wheel_timer, 140, move || {
-            dom::attr(canvas_static, "data-wheeling", "false");
-        });
-        zoom_surface_camera_at(surface, factor, Some(anchor));
-        return true;
-    }
-    if plane.offset_width() <= 0 || plane.offset_height() <= 0 {
-        return false;
-    }
-    event.prevent_default();
-    event.stop_propagation();
-    zoom_scroll_canvas(
-        canvas_id,
-        factor,
-        Some((event.client_x() as f64, event.client_y() as f64)),
-    )
-}
 fn attach_canvas_wheel(canvas_id: &'static str) {
-    let Some(canvas) = dom::get(canvas_id) else {
-        return;
-    };
-    if canvas.get_attribute("data-wheel-bound").as_deref() == Some("true") {
-        return;
-    }
-    let _ = canvas.set_attribute("data-wheel-bound", "true");
-    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
-        if let Ok(wheel) = event.dyn_into::<web_sys::WheelEvent>() {
-            wheel_event(canvas_id, &wheel);
+    let timer_key = pan_surface_for_canvas(canvas_id)
+        .map(|s| s.wheel_timer_key.to_owned())
+        .unwrap_or_else(|| format!("{canvas_id}-wheel"));
+    graph_viewport::attach_wheel_zoom(canvas_id, &timer_key, move |factor, client| {
+        if let Some(surface) = pan_surface_for_canvas(canvas_id) {
+            let cam = load_surface_camera(surface);
+            if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+                return;
+            }
+            let anchor = dom::get(surface.canvas).map(|canvas| {
+                let rect = canvas.get_bounding_client_rect();
+                (client.0 - rect.left(), client.1 - rect.top())
+            });
+            zoom_surface_camera_at(surface, factor, anchor);
+        } else {
+            let _ = zoom_scroll_canvas(canvas_id, factor, Some(client));
         }
     });
-    let options = web_sys::AddEventListenerOptions::new();
-    options.set_passive(false);
-    if canvas
-        .add_event_listener_with_callback_and_add_event_listener_options(
-            "wheel",
-            callback.as_ref().unchecked_ref(),
-            &options,
-        )
-        .is_ok()
-    {
-        callback.forget();
-    }
 }
 pub fn attach_wheel_listeners() {
     attach_canvas_wheel("session-graph-canvas");
@@ -11418,7 +11243,6 @@ fn watch() {
     }
     m::set("graph-map-watched", json!(true));
     ensure_resize_watch();
-    attach_canvas_scroll("graph-map-canvas");
     attach_canvas_hover("graph-map-canvas");
     attach_canvas_hover("graph-link-canvas");
     attach_side_hover("graph-map-side", "graph-map-canvas");
@@ -12230,6 +12054,18 @@ async fn seek() {
     m::set("graph-find", finder);
     show_found();
 }
+fn parse_style_px(style: &str, prop: &str) -> Option<f64> {
+    let prefix = format!("{prop}:");
+    style.split(';').find_map(|part| {
+        let rest = part.trim().strip_prefix(&prefix)?.trim();
+        rest.strip_suffix("px")
+            .unwrap_or(rest)
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+    })
+}
 /// Brings the selected box of the map into the middle of what is seen of
 /// the picture, where it is not wholly seen, and puts the keyboard on it.
 fn reveal() {
@@ -12253,14 +12089,25 @@ fn reveal() {
         || at.top() < room.top() + edge
         || at.bottom() > room.bottom() - edge
     {
-        let left = f64::from(canvas.scroll_left()) + at.left()
-            - room.left()
-            - (room.width() - at.width()) / 2.0;
-        let top = f64::from(canvas.scroll_top()) + at.top()
-            - room.top()
-            - (room.height() - at.height()) / 2.0;
-        canvas.set_scroll_left(left.max(0.0) as i32);
-        canvas.set_scroll_top(top.max(0.0) as i32);
+        let mut cam = load_surface_camera(MODAL_SURFACE);
+        let style = node.get_attribute("style").unwrap_or_default();
+        let scale = cam.scale.max(0.01);
+        let wx = parse_style_px(&style, "left")
+            .map(|x| x + BOX_WIDTH / 2.0)
+            .unwrap_or_else(|| (at.left() + at.width() / 2.0 - room.left() - cam.pan_x) / scale);
+        let wy = parse_style_px(&style, "top")
+            .map(|y| y + BOX_HEIGHT / 2.0)
+            .unwrap_or_else(|| (at.top() + at.height() / 2.0 - room.top() - cam.pan_y) / scale);
+        let (vw, vh, _) = viewport_size(MODAL_SURFACE.canvas);
+        cam.apply_viewport_cam(graph_viewport::center_camera_on(
+            (wx, wy),
+            (vw, vh),
+            cam.scale,
+        ));
+        cam.fit_mode = false;
+        cam.needs_measure = false;
+        save_surface_camera(MODAL_SURFACE, &cam);
+        apply_surface_camera(MODAL_SURFACE, &cam);
     }
     if let Ok(node) = node.dyn_into::<web_sys::HtmlElement>() {
         let _ = node.focus();
@@ -12858,6 +12705,19 @@ fn blank() {
     invalidate_surface_plan_cache("graph-map-canvas");
     html("graph-map-crumbs", "");
     html("graph-map-canvas", "");
+    html("graph-map-canvas-radar", "");
+    sync_radar("graph-map-canvas", None);
+    let cam = Camera {
+        fit_mode: m::yes(&state()["fit"]),
+        follow: false,
+        needs_measure: true,
+        ..Camera::default()
+    };
+    save_surface_camera(MODAL_SURFACE, &cam);
+    m::set(
+        MODAL_SURFACE.drag_key,
+        graph_viewport::DragPan::default().to_json(),
+    );
     html("graph-map-side", "");
     html("graph-map-arrow-legend", "");
     html("graph-commit-banner", "");
@@ -13322,16 +13182,23 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
                 return true;
             }
             if !in_input && bare {
-                match e.key().as_str() {
-                    "+" | "=" => return zoom_scroll_canvas("graph-map-canvas", ZOOM_STEP, None),
-                    "-" => return zoom_scroll_canvas("graph-map-canvas", 1.0 / ZOOM_STEP, None),
-                    "0" => {
-                        reset_scroll_canvas_zoom("graph-map-canvas");
-                        return dom::get("graph-map-canvas")
-                            .and_then(|c| c.query_selector(".graph-map-plane").ok().flatten())
-                            .is_some();
+                let cam = load_surface_camera(MODAL_SURFACE);
+                if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
+                    match e.key().as_str() {
+                        "+" | "=" => {
+                            zoom_surface_camera_at(MODAL_SURFACE, ZOOM_STEP, None);
+                            return true;
+                        }
+                        "-" => {
+                            zoom_surface_camera_at(MODAL_SURFACE, 1.0 / ZOOM_STEP, None);
+                            return true;
+                        }
+                        "0" => {
+                            reset_surface_camera_100(MODAL_SURFACE);
+                            return true;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             return false;
@@ -14395,9 +14262,9 @@ const MODAL_SURFACE: MapSurface = MapSurface {
     attachment_key: "graph-map-attachment",
     scope_model_key: "graph-map-scope",
     state_model_key: "graph-map",
-    camera_key: "",
+    camera_key: "graph-map-camera",
     focus_key: "",
-    drag_key: "",
+    drag_key: "graph-map-drag",
     pan_target_key: "",
     view_key: "graph-map-view",
     map_epoch: "graph-map",
@@ -16828,12 +16695,27 @@ fn render(view: &V) {
         hide_transitive: modal_key.hide_transitive,
         cone: modal_key.cone,
     };
-    if try_patch_canvas_dom_in_place("graph-map-canvas", view, &modal_overlay).is_none() {
+    if let Some(patched) = try_patch_canvas_dom_in_place("graph-map-canvas", view, &modal_overlay) {
+        let mut cam = load_surface_camera(MODAL_SURFACE);
+        cam.plane_w = patched.width;
+        cam.plane_h = patched.height;
+        save_surface_camera(MODAL_SURFACE, &cam);
+        apply_surface_camera(MODAL_SURFACE, &cam);
+    } else {
         let rendered = canvas_with_overlays(view, MODAL_SURFACE.id_prefix, modal_overlay.clone());
         store_surface_plan_cache("graph-map-canvas", view, &rendered, Some(&modal_overlay));
         html("graph-map-canvas", &rendered.html);
         html("graph-map-canvas-radar", &rendered.radar);
-        fit();
+        let mut cam = load_surface_camera(MODAL_SURFACE);
+        let fresh = cam.needs_measure || cam.plane_w <= 0.0 || cam.plane_h <= 0.0;
+        cam.plane_w = rendered.width;
+        cam.plane_h = rendered.height;
+        save_surface_camera(MODAL_SURFACE, &cam);
+        if fresh || (m::yes(&state()["fit"]) && cam.fit_mode) {
+            fit();
+        } else {
+            apply_surface_camera(MODAL_SURFACE, &cam);
+        }
     }
     html(
         "graph-map-arrow-legend",
@@ -17218,6 +17100,8 @@ async fn load(quiet: bool) {
                 // cycle. The old drawing might be of another revision.
                 html("graph-map-crumbs", "");
                 html("graph-map-canvas", "");
+                html("graph-map-canvas-radar", "");
+                sync_radar("graph-map-canvas", None);
                 let mut actions = base_cycle_button(&V::Null, true);
                 if state["cycle_return"].is_object() {
                     actions.push_str(CYCLE_BACK);
@@ -17851,6 +17735,17 @@ pub async fn event(
     let map_failed =
         || dom::get("graph-map-error").is_some_and(|error| !error.has_attribute("hidden"));
     if kind == "click"
+        && open()
+        && matches!(
+            action,
+            "graph-map-node" | "graph-map-go" | "graph-map-link" | "graph-map-spread"
+        )
+        && m::yes(&surface_drag_data(MODAL_SURFACE)["suppress_click"])
+    {
+        clear_surface_drag_suppress(MODAL_SURFACE);
+        return true;
+    }
+    if kind == "click"
         && state["cycle"].is_string()
         && (matches!(action, "graph-map-node" | "graph-map-go" | "graph-map-link")
             && (busy() || map_failed())
@@ -18361,19 +18256,22 @@ pub async fn event(
             state["zoom"] = V::Null;
             dom::save(FIT, checked.then_some("1"));
             m::set("graph-map", state);
+            let mut cam = load_surface_camera(MODAL_SURFACE);
+            cam.fit_mode = checked;
+            save_surface_camera(MODAL_SURFACE, &cam);
             fit();
             return true;
         }
         ("click", "graph-map-zoom-in", _) => {
-            zoom_scroll_canvas("graph-map-canvas", ZOOM_STEP, None);
+            zoom_surface_camera_at(MODAL_SURFACE, ZOOM_STEP, None);
             return true;
         }
         ("click", "graph-map-zoom-out", _) => {
-            zoom_scroll_canvas("graph-map-canvas", 1.0 / ZOOM_STEP, None);
+            zoom_surface_camera_at(MODAL_SURFACE, 1.0 / ZOOM_STEP, None);
             return true;
         }
         ("click", "graph-map-zoom-level", _) => {
-            reset_scroll_canvas_zoom("graph-map-canvas");
+            reset_surface_camera_100(MODAL_SURFACE);
             return true;
         }
         ("click", "graph-link-zoom-in", _) => {
@@ -18509,6 +18407,16 @@ struct Camera {
     needs_measure: bool,
     bbox: Option<(f64, f64, f64, f64)>,
 }
+impl Camera {
+    fn viewport_cam(&self) -> graph_viewport::Camera {
+        graph_viewport::Camera::new(self.pan_x, self.pan_y, self.scale)
+    }
+    fn apply_viewport_cam(&mut self, cam: graph_viewport::Camera) {
+        self.scale = cam.scale;
+        self.pan_x = cam.tx;
+        self.pan_y = cam.ty;
+    }
+}
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -18595,15 +18503,7 @@ fn current_surface_live_focus(surface: MapSurface) -> Option<LiveFocus> {
     parse_live_focus(&m::data(surface.focus_key))
 }
 fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
-    let Some(el) = dom::get(canvas_id) else {
-        return (640.0, 420.0, false);
-    };
-    let (w, h) = (el.client_width() as f64, el.client_height() as f64);
-    if w >= 24.0 && h >= 24.0 {
-        (w, h, true)
-    } else {
-        (640.0, 420.0, false)
-    }
+    graph_viewport::viewport_size(canvas_id, 23.5, (640.0, 420.0))
 }
 fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
     dom::text(
@@ -18621,12 +18521,16 @@ fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
     if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
         return;
     }
-    let _ = canvas.set_attribute("data-lod", lod(cam.scale));
-    let style = format!(
-        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate3d({:.1}px,{:.1}px,0) scale({:.4});transform-origin:0 0",
-        cam.plane_w, cam.plane_h, cam.scale, cam.pan_x, cam.pan_y, cam.pan_x, cam.pan_y, cam.scale
+    let _ = graph_viewport::apply_transform_3d(
+        &canvas,
+        &plane,
+        cam.viewport_cam(),
+        (cam.plane_w, cam.plane_h),
+        GRAPH_MAP_LOD,
     );
-    let _ = plane.set_attribute("style", &style);
+    let scale_text = format!("{:.4}", cam.scale);
+    let _ = canvas.set_attribute("data-scale", &scale_text);
+    let _ = plane.set_attribute("data-scale", &scale_text);
     if plane.has_attribute("data-scale-tier") {
         let (rw, rh, measured) = viewport_size(surface.canvas);
         let bounds = measured
@@ -18644,6 +18548,10 @@ fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
 }
 fn apply_surface_camera(surface: MapSurface, cam: &Camera) {
     apply_surface_plane_transform(surface, cam);
+    if !surface.embedded {
+        dom::set_checked("graph-map-fit", cam.fit_mode);
+        return;
+    }
     let prefix = surface.id_prefix;
     let ws_id = format!("{prefix}-workspace");
     dom::attr(
@@ -18702,10 +18610,14 @@ fn fit_surface_camera(surface: MapSurface, cam: &mut Camera) {
     cam.needs_measure = !measured;
     cam.fit_mode = true;
     if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
-        let (s, px, py) = camera_for_fit((cam.plane_w, cam.plane_h), (vw, vh));
-        cam.scale = s;
-        cam.pan_x = px;
-        cam.pan_y = py;
+        cam.apply_viewport_cam(graph_viewport::fit_proportional(
+            (cam.plane_w, cam.plane_h),
+            (vw, vh),
+            0.94,
+            CAMERA_MIN,
+            1.0,
+            12.0,
+        ));
     }
     save_surface_camera(surface, cam);
     apply_surface_camera(surface, cam);
@@ -18713,10 +18625,15 @@ fn fit_surface_camera(surface: MapSurface, cam: &mut Camera) {
 fn zoom_surface_camera_to_bbox(surface: MapSurface, cam: &mut Camera, bbox: (f64, f64, f64, f64)) {
     let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
-    let (s, px, py) = camera_for_bbox(bbox, (vw, vh), FOCUS_CAMERA_MAX);
-    cam.scale = s;
-    cam.pan_x = px;
-    cam.pan_y = py;
+    cam.apply_viewport_cam(graph_viewport::fit_bbox(
+        bbox,
+        (vw, vh),
+        (112.0, 88.0),
+        (BOX_WIDTH + 96.0, BOX_HEIGHT + 80.0),
+        0.90,
+        CAMERA_MIN,
+        FOCUS_CAMERA_MAX.clamp(CAMERA_MIN, CAMERA_MAX),
+    ));
     cam.fit_mode = false;
     save_surface_camera(surface, cam);
     apply_surface_camera(surface, cam);
@@ -18726,11 +18643,20 @@ fn zoom_surface_camera_at(surface: MapSurface, factor: f64, anchor: Option<(f64,
     let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
     let anchor = anchor.unwrap_or((vw / 2.0, vh / 2.0));
-    let (s, px, py) = zoom_at(cam.scale, cam.pan_x, cam.pan_y, anchor, cam.scale * factor);
-    cam.scale = s;
-    cam.pan_x = px;
-    cam.pan_y = py;
+    cam.apply_viewport_cam(graph_viewport::zoom_at(
+        cam.viewport_cam(),
+        anchor,
+        cam.scale * factor,
+        CAMERA_MIN,
+        CAMERA_MAX,
+    ));
     cam.fit_mode = false;
+    if !surface.embedded {
+        let mut st = state();
+        st["zoom"] = json!(cam.scale);
+        st["fit"] = json!(false);
+        m::set("graph-map", st);
+    }
     save_surface_camera(surface, &cam);
     apply_surface_camera(surface, &cam);
 }
@@ -18738,18 +18664,18 @@ fn reset_surface_camera_100(surface: MapSurface) {
     let mut cam = load_surface_camera(surface);
     let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
-    cam.scale = 1.0;
-    cam.pan_x = if cam.plane_w > 0.0 && cam.plane_w < vw {
-        ((vw - cam.plane_w) / 2.0).round()
-    } else {
-        12.0
-    };
-    cam.pan_y = if cam.plane_h > 0.0 && cam.plane_h < vh {
-        ((vh - cam.plane_h) / 2.0).round()
-    } else {
-        12.0
-    };
+    cam.apply_viewport_cam(graph_viewport::reset_100(
+        (cam.plane_w, cam.plane_h),
+        (vw, vh),
+        12.0,
+    ));
     cam.fit_mode = false;
+    if !surface.embedded {
+        let mut st = state();
+        st["zoom"] = V::Null;
+        st["fit"] = json!(false);
+        m::set("graph-map", st);
+    }
     save_surface_camera(surface, &cam);
     apply_surface_camera(surface, &cam);
 }
@@ -20669,28 +20595,29 @@ pub(crate) fn handle_system_click(id: &str, action: &str, payload: &V) -> bool {
     };
     handle_surface_click(surface, id, action, payload)
 }
-fn target_embedded_surface(target_el: Option<&web_sys::Element>) -> Option<MapSurface> {
+fn target_pan_surface(target_el: Option<&web_sys::Element>) -> Option<MapSurface> {
     let canvas = target_el?
-        .closest("#session-graph-canvas, #system-member-graph-canvas, #system-change-graph-canvas")
+        .closest("#graph-map-canvas, #session-graph-canvas, #system-member-graph-canvas, #system-change-graph-canvas")
         .ok()
         .flatten()?;
-    embedded_surface_for_canvas(&canvas.id())
+    pan_surface_for_canvas(&canvas.id())
 }
-fn active_drag_surface() -> Option<(MapSurface, V)> {
+fn active_drag_surface() -> Option<(MapSurface, graph_viewport::DragPan)> {
     for surface in [
+        MODAL_SURFACE,
         SESSION_SURFACE,
         SYSTEM_EMBEDDED_SURFACE,
         SYSTEM_CHANGE_SURFACE,
     ] {
-        let drag = surface_drag_data(surface);
-        if m::yes(&drag["active"]) {
+        let drag = graph_viewport::DragPan::from_json(&surface_drag_data(surface));
+        if drag.active {
             return Some((surface, drag));
         }
     }
     None
 }
 /// Handles pointer pan (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`) and `dblclick` zoom
-/// across `#session-graph-canvas`, `#system-member-graph-canvas`, and `#system-change-graph-canvas`.
+/// across `#graph-map-canvas`, `#session-graph-canvas`, `#system-member-graph-canvas`, and `#system-change-graph-canvas`.
 pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     let target_el = event
         .target()
@@ -20700,98 +20627,70 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     }
     match kind {
         "pointerdown" => {
-            let Some(surface) = target_embedded_surface(target_el.as_ref()) else {
+            let Some(surface) = target_pan_surface(target_el.as_ref()) else {
                 return false;
             };
-            let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                return false;
-            };
-            if pe.button() != 0 {
-                return true;
-            }
             let cam = load_surface_camera(surface);
-            m::set(
-                surface.drag_key,
-                json!({
-                    "active": true,
-                    "pointer_id": pe.pointer_id(),
-                    "start_x": pe.client_x() as f64,
-                    "start_y": pe.client_y() as f64,
-                    "orig_pan_x": cam.pan_x,
-                    "orig_pan_y": cam.pan_y,
-                    "moved": false,
-                    "suppress_click": false,
-                }),
-            );
-            true
+            if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+                return false;
+            }
+            let mut drag = graph_viewport::DragPan::default();
+            match graph_viewport::handle_canvas_drag(
+                kind,
+                event,
+                surface.canvas,
+                cam.viewport_cam(),
+                graph_viewport::DEFAULT_DRAG_THRESHOLD_PX,
+                &mut drag,
+            ) {
+                graph_viewport::CanvasDragOutcome::Down => {
+                    m::set(surface.drag_key, drag.to_json());
+                    true
+                }
+                _ => true,
+            }
         }
-        "pointermove" => {
-            let Some((surface, drag)) = active_drag_surface() else {
+        "pointermove" | "pointerup" | "pointercancel" => {
+            let Some((surface, mut drag)) = active_drag_surface() else {
                 return false;
             };
-            let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
-                return true;
-            };
-            if pe.pointer_id() as i64 != drag["pointer_id"].as_i64().unwrap_or(-1) {
-                return true;
-            }
-            let dx = pe.client_x() as f64 - drag["start_x"].as_f64().unwrap_or(0.0);
-            let dy = pe.client_y() as f64 - drag["start_y"].as_f64().unwrap_or(0.0);
-            let mut moved = m::yes(&drag["moved"]);
-            if !moved {
-                if (dx * dx + dy * dy).sqrt() <= DRAG_THRESHOLD_PX {
-                    return true;
-                }
-                moved = true;
-                dom::attr(surface.canvas, "data-panning", "true");
-                if let Some(canvas) = dom::get(surface.canvas) {
-                    let _ = canvas.set_pointer_capture(pe.pointer_id());
-                }
-            }
-            let orig_pan_x = drag["orig_pan_x"].as_f64().unwrap_or(0.0);
-            let orig_pan_y = drag["orig_pan_y"].as_f64().unwrap_or(0.0);
-            let mut next_drag = drag;
-            next_drag["moved"] = json!(moved);
-            m::set(surface.drag_key, next_drag);
             let mut cam = load_surface_camera(surface);
-            cam.pan_x = (orig_pan_x + dx).round();
-            cam.pan_y = (orig_pan_y + dy).round();
-            cam.fit_mode = false;
-            cam.needs_measure = false;
-            save_surface_camera(surface, &cam);
-            apply_surface_camera(surface, &cam);
-            true
-        }
-        "pointerup" | "pointercancel" => {
-            let Some((surface, drag)) = active_drag_surface() else {
-                return false;
-            };
-            dom::attr(surface.canvas, "data-panning", "false");
-            if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
-                if m::yes(&drag["moved"]) {
-                    if let Some(canvas) = dom::get(surface.canvas) {
-                        let _ = canvas.release_pointer_capture(pe.pointer_id());
+            match graph_viewport::handle_canvas_drag(
+                kind,
+                event,
+                surface.canvas,
+                cam.viewport_cam(),
+                graph_viewport::DEFAULT_DRAG_THRESHOLD_PX,
+                &mut drag,
+            ) {
+                graph_viewport::CanvasDragOutcome::Panned { tx, ty } => {
+                    m::set(surface.drag_key, drag.to_json());
+                    cam.pan_x = tx;
+                    cam.pan_y = ty;
+                    cam.fit_mode = false;
+                    cam.needs_measure = false;
+                    save_surface_camera(surface, &cam);
+                    apply_surface_camera(surface, &cam);
+                    true
+                }
+                graph_viewport::CanvasDragOutcome::Ended { suppress_click } => {
+                    m::set(surface.drag_key, drag.to_json());
+                    if suppress_click {
+                        dom::later(surface.drag_timer_key, 60, move || {
+                            clear_surface_drag_suppress(surface);
+                        });
                     }
+                    true
+                }
+                graph_viewport::CanvasDragOutcome::Ignored
+                | graph_viewport::CanvasDragOutcome::Down => {
+                    m::set(surface.drag_key, drag.to_json());
+                    true
                 }
             }
-            let suppress = kind == "pointerup" && m::yes(&drag["moved"]);
-            m::set(
-                surface.drag_key,
-                json!({
-                    "active": false,
-                    "moved": false,
-                    "suppress_click": suppress,
-                }),
-            );
-            if suppress {
-                dom::later(surface.drag_timer_key, 60, move || {
-                    clear_surface_drag_suppress(surface);
-                });
-            }
-            true
         }
         "dblclick" => {
-            let Some(surface) = target_embedded_surface(target_el.as_ref()) else {
+            let Some(surface) = target_pan_surface(target_el.as_ref()) else {
                 return false;
             };
             if target_el
@@ -20811,6 +20710,9 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 return false;
             };
             let cam = load_surface_camera(surface);
+            if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+                return false;
+            }
             if cam.scale < 1.35 {
                 let anchor = dom::get(surface.canvas).map(|canvas| {
                     let rect = canvas.get_bounding_client_rect();
@@ -30456,5 +30358,58 @@ mod memory_bridge_tests {
         let bounds = visible_viewport_bounds((0.0, 0.0), 1.0, (400.0, 300.0), 20.0).unwrap();
         let visible = count_nodes_in_viewport(&rendered.plan_nodes, bounds);
         assert!(visible < rendered.plan_nodes.len());
+    }
+
+    #[test]
+    fn modal_and_embedded_surfaces_share_graph_viewport_camera_math() {
+        assert_eq!(
+            pan_surface_for_canvas("graph-map-canvas").map(|s| s.name),
+            Some("modal")
+        );
+        assert_eq!(MODAL_SURFACE.camera_key, "graph-map-camera");
+        assert_eq!(MODAL_SURFACE.drag_key, "graph-map-drag");
+
+        assert_eq!(
+            parse_style_px("left:340px;top:120px;width:164px", "left"),
+            Some(340.0)
+        );
+        assert_eq!(
+            parse_style_px("left: 340px; top: 120.5px", "top"),
+            Some(120.5)
+        );
+        assert_eq!(parse_style_px("width:164px", "left"), None);
+
+        let fit_cam = graph_viewport::fit_proportional(
+            (1200.0, 800.0),
+            (800.0, 600.0),
+            0.94,
+            CAMERA_MIN,
+            1.0,
+            12.0,
+        );
+        assert_eq!(
+            camera_for_fit((1200.0, 800.0), (800.0, 600.0)),
+            (fit_cam.scale, fit_cam.tx, fit_cam.ty)
+        );
+
+        let mut modal_cam = Camera::default();
+        modal_cam.apply_viewport_cam(fit_cam);
+        let mut drag = graph_viewport::DragPan::default();
+        drag.begin(7, (100.0, 100.0), modal_cam.viewport_cam());
+        assert_eq!(
+            drag.advance(7, (102.0, 102.0), graph_viewport::DEFAULT_DRAG_THRESHOLD_PX),
+            graph_viewport::DragMove::BelowThreshold
+        );
+        match drag.advance(7, (140.0, 125.0), graph_viewport::DEFAULT_DRAG_THRESHOLD_PX) {
+            graph_viewport::DragMove::StartedPan { tx, ty } => {
+                assert_eq!(
+                    (tx, ty),
+                    ((fit_cam.tx + 40.0).round(), (fit_cam.ty + 25.0).round())
+                );
+            }
+            other => panic!("expected pan start, got {other:?}"),
+        }
+        let end = drag.end(Some(7), false).expect("drag end");
+        assert!(end.suppress_click);
     }
 }
