@@ -2668,8 +2668,14 @@ Put `.harness-architecture.json` in the Harness project root. For example:
 }
 ```
 
-Each path is an exact file path or a directory prefix relative to the project
-root, with forward slashes. The longest matching path wins. Identical paths
+Each entry in `paths` is an exact file path, a directory prefix, or a safe relative
+glob pattern relative to the project root, using forward slashes: `*` matches
+within a single path segment, `?` matches a single non-`/` character, and `**`
+as a full segment matches zero or more directories (`a/**/b` or trailing `/**`).
+Leading `/`, empty segments, `.` / `..` traversal segments, `\`, `:`, control
+characters, and partial `**` inside a segment are rejected. Exact file paths
+win first, followed by the highest literal character count (breaking ties in
+favor of patterns without `**` and non-glob prefixes). Identical patterns
 cannot be declared twice. Dependencies within a layer are allowed. Each
 cross-layer dependency needs an entry in the source layer's `allows` list.
 The map checks calls, inheritance and type dependencies it finds in the graph.
@@ -2710,7 +2716,7 @@ All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in
 
 - `GET /api/omnigraph/status?project_id=...` — connection state, operating mode, MCP URL, and graph stats.
 - `POST /api/omnigraph/setup` — configure/start/stop/install/connect/disconnect (`local_sidecar`, `docker`, `external`, `off`).
-- `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...` — constellation nodes/edges, branches, and commits.
+- `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...&limit=...&offset=...&cursor=...` — constellation nodes/edges, branches, and commits. Optional `limit` (default `250`, clamped `1..=1000`), `offset` (default `0`), and `cursor` (offset token matching `next_cursor`) paginate `atoms`, returning `symbols` (`SymbolRef` declarations), `symbol_edges` (`MentionsSymbol` links), `total_atoms`, `limit`, `offset`, `has_more`, `truncated`, `next_cursor`, and `telemetry` (`elapsed_ms`, `atom_count`, `total_atoms`, `session_count`, `file_count`, `symbol_count`, `edge_count`, `symbol_edge_count`, `commit_count`, `truncated`, `has_more`).
 - `GET /api/omnigraph/search?project_id=...&q=...&branch=...&kind=...&limit=...` — BM25/lexical hybrid search across atoms and neighbor context.
 - `GET /api/omnigraph/branches/diff?project_id=...&source=...&target=...` — 3-way branch diff (`added_atoms`, `updated_atoms`, `deleted_atoms`, `added_edges`, `deleted_edges`, dry-run conflict preview).
 - `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts) or `delete` branches, or `keep` one atom of a conflict. Omnigraph's own 409 conflicts name an atom without its values, so the diff and a conflicting merge add to each `ContextAtom` `divergent_update` the whole atom as the source and the target branch hold it, null columns included (`source_value`, `target_value`): one read of each branch whatever the number of conflicts (the branch's export only when an atom is past its 100 most recent), nothing without a `project_id` or for an atom of another project, and every other conflict as Omnigraph returned it. Omnigraph v0.15.0 compares whole rows: two branches that both changed an atom conflict while any property differs, `updated_at` and `source_branch` included, and converge only on identical rows, so an atom update, which stamps its branch and time, cannot settle one. `keep` (`project_id`, `atom_id`, `from`, `to`, optional `expected_updated_at` and `replaced_updated_at`) copies the atom onto `to` exactly as `from` stores it, every property included, and refuses with `409` when `from` holds another version than `expected_updated_at` or `to` another than `replaced_updated_at`. In the merge preview such a conflict offers **Keep source**, which keeps the source's atom on the target branch, and **Keep target**, which keeps the target's on the source; each names the two versions the preview showed, so a version a session published since is neither copied nor overwritten unseen, and the preview runs again. A `delete_vs_update`, an edge conflict, or a conflict without both values shows the buttons disabled with the reason.
