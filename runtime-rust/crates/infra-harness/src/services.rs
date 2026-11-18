@@ -162,6 +162,43 @@ impl NativeServices {
             )
             .await;
     }
+    async fn attach_waiting_permission_counts(&self, sessions: &mut [Value]) {
+        let counts = self.waiting_permission_counts().await;
+        for summary in sessions {
+            let count = summary["id"]
+                .as_str()
+                .and_then(|id| counts.get(id))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            summary["waiting_permissions"] = json!(count);
+        }
+    }
+    async fn handle_bootstrap(&self) -> Result<Payload> {
+        let mut data = (self.bootstrap)()?;
+        if let Some(graph) = self.domains.get("graph") {
+            let _ = graph
+                .execute(
+                    "graph.auto_start_all",
+                    json!({"params":{},"body":{},"query":{}}),
+                )
+                .await;
+        }
+        if let Some(omnigraph) = self.domains.get("omnigraph")
+            && let Ok(Payload::Json(status)) = omnigraph
+                .execute(
+                    "omnigraph.status",
+                    json!({"params":{},"body":{},"query":{}}),
+                )
+                .await
+            && status.get("state").is_some()
+        {
+            data["omnigraph"] = status;
+        }
+        if let Some(sessions) = data["sessions"].as_array_mut() {
+            self.attach_waiting_permission_counts(sessions).await;
+        }
+        Ok(Payload::Json(data))
+    }
     async fn handle_sessions_list(&self, params: &Value, query: &Value) -> Result<Payload> {
         if let Some(project_id) = query["project_id"]
             .as_str()
@@ -171,15 +208,7 @@ impl NativeServices {
             self.auto_start_graph(project_id).await;
         }
         let mut summaries = self.store.summaries()?;
-        let counts = self.waiting_permission_counts().await;
-        for summary in &mut summaries {
-            let count = summary["id"]
-                .as_str()
-                .and_then(|id| counts.get(id))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            summary["waiting_permissions"] = json!(count);
-        }
+        self.attach_waiting_permission_counts(&mut summaries).await;
         Ok(Payload::Json(json!({"sessions": summaries})))
     }
     async fn handle_sessions_get(&self, sid: &str, query: &Value) -> Result<Payload> {
@@ -346,29 +375,7 @@ impl Services for NativeServices {
                 domain.execute(operation, request.clone()).await?
             } else {
                 match operation {
-                    "bootstrap" => {
-                        let mut data = (self.bootstrap)()?;
-                        if let Some(graph) = self.domains.get("graph") {
-                            let _ = graph
-                                .execute(
-                                    "graph.auto_start_all",
-                                    json!({"params":{},"body":{},"query":{}}),
-                                )
-                                .await;
-                        }
-                        if let Some(omnigraph) = self.domains.get("omnigraph")
-                            && let Ok(Payload::Json(status)) = omnigraph
-                                .execute(
-                                    "omnigraph.status",
-                                    json!({"params":{},"body":{},"query":{}}),
-                                )
-                                .await
-                            && status.get("state").is_some()
-                        {
-                            data["omnigraph"] = status;
-                        }
-                        Payload::Json(data)
-                    }
+                    "bootstrap" => Box::pin(self.handle_bootstrap()).await?,
                     "sessions.list" => Box::pin(self.handle_sessions_list(params, query)).await?,
                     "sessions.get" => Box::pin(self.handle_sessions_get(sid, query)).await?,
                     "sessions.merge_archive" => Payload::Json(self.store.merge_archive(sid)?),
@@ -1537,14 +1544,28 @@ mod tests {
         domains.insert("sessions".into(), Arc::clone(&domain));
         domains.insert("knowledge".into(), Arc::clone(&domain));
         domains.insert("omnigraph".into(), Arc::clone(&domain));
+        let boot_store = store.clone();
         let services = NativeServices::new(
             store.clone(),
             domains,
-            Arc::new(|| Ok(json!({}))),
+            Arc::new(move || Ok(json!({"sessions": boot_store.summaries()?}))),
             BTreeMap::new(),
             Arc::new(|| Box::pin(async { Ok(()) })),
         )
         .unwrap();
+
+        let Payload::Json(bootstrapped) = services
+            .request("bootstrap", json!({"params":{},"query":{},"body":{}}))
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        let boot_sessions = bootstrapped["sessions"].as_array().unwrap();
+        let boot_s1 = boot_sessions.iter().find(|s| s["id"] == "s1").unwrap();
+        let boot_s2 = boot_sessions.iter().find(|s| s["id"] == "s2").unwrap();
+        assert_eq!(boot_s1["waiting_permissions"], 2);
+        assert_eq!(boot_s2["waiting_permissions"], 0);
 
         let Payload::Json(listed) = services
             .request("sessions.list", json!({"params":{},"query":{},"body":{}}))

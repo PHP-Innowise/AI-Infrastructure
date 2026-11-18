@@ -24,6 +24,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Permissions runtime stabilization and UI fixes on top of PR #102:
+  - Exposed live `sessions.waiting_permissions` / `sessions.waiting_counts` and attached `waiting_permissions` counts on `bootstrap` and `GET /api/sessions` summaries plus pending request lists on `GET /api/sessions/{session_id}`; expired dangling `pending` permission events on startup in `SessionStore::open` so reloads never leave phantom approval prompts.
+  - Paused absolute run `deadline` checks during human permission waits (`io.waiting`) on Unix and Windows and excluded paused wait duration from reported `Output.seconds`; persisted `permissions` in `launches.settings` (`Results::start_launch`).
+  - Froze `permissions` in `inbox::FROZEN` and blocked unattended live Omnigraph inbox auto-prompts when a running session uses `permissions == "manual"`.
+  - Fixed Harness permissions UI (`session.rs`, `run.rs`, `index.html`, `app.css`): wired `#permissions` change persistence and hints, kept `#permissions-hint` out of bypass error styling while planning, preserved unsubmitted form edits across 1s polls, surfaced waiting prompts in `#waiting-text`, sidebar approval badges, and desktop notifications, patched `.conversation-permission` cards in place with `role="alert"` / `aria-busy` / `forced-colors` support, and revived `#session-summary` collapsing.
+- Harness UI accessibility and live-polling DOM preservation (`session.rs`, `commands.rs`, `eval_viewer.rs`, `systems.rs`, `activity.rs`, `knowledge.rs`):
+  - Fixed mobile `#scrim` / `#menu-toggle` dismissal, non-intrusive `#view-heading` focus, `#output-resizer` `aria-valuenow`, `#prompt` combobox / in-place `#skill-hints` navigation, and eval-viewer delete button / CSS error token usage.
+  - Replaced destructive full-container poll rebuilds across Systems, Activity, and Knowledge with keyed DOM updates that keep focus, input selection, and open `<details>` intact across live polls, decoupled `#context-turns` radio navigation from detail updates, deduplicated `#system-agents-launch`, and added inline draft discard on `#system-editor-lock`.
+- Dependency Graph Map, Graph Backend & Batched Memory-Links (`http.rs`, `knowledge.rs`, `services.rs`, `graph_map.rs`, `graph/shell_reads.rs`, `infra-ui` graph modules):
+  - Added `POST /api/projects/{project_id}/graph/memory-links/batch` (`knowledge.memory_links_batch`, up to 24 files per request, enriched identically via `omnigraph.file_context` in `services.rs`) and batched commit-banner memory link loading in `graph_map.rs`.
+  - Released the `Maps::index` cache lock during `Index::read` with per-project single-flight initialization and LRU eviction, and broadened `graph/shell_reads.rs` read attribution beyond `sed -n` to safe `rg`, `grep`, `cat`, `head`, `tail`, and `git show` invocations.
+  - Improved graph UI rendering and interaction: CSS `[data-lod]` edge labels, shared `EDGE_SPECS` gradients, and radar pointer capture in Omnigraph Canvas; CSS radar positioning, `translate3d`, hover dedup, cached `Plan` bboxes, and `+`/`-`/`0`/`Escape` shortcuts in Dependency Graph Map; indexed hover adjacency and shortcuts in System Map; uniform rail width, `HashMap` parent lookup, and keyboard navigation in Git Commit Graph.
 - Sessions have a **Permissions** setting — Auto, Manual or Bypass
   Permissions — that says what an editing turn of Claude Code, Codex or Cursor
   may do without asking. Auto uses each host's own automatic review (Claude
