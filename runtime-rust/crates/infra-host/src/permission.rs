@@ -34,6 +34,34 @@ impl PermissionMode {
     }
 }
 
+/// Maximum character length for [`PermissionAsk::diff_preview`].
+pub const DIFF_PREVIEW_LIMIT: usize = 6144;
+
+/// Sanitizes and bounds a multiline diff preview to at most [`DIFF_PREVIEW_LIMIT`] chars.
+pub fn bound_diff_preview(raw: &str) -> Option<String> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let clean: String = normalized
+        .chars()
+        .map(|c| {
+            if c == '\n' || c == '\t' || !c.is_control() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let clean = clean.trim_matches('\n').trim_end();
+    if clean.trim().is_empty() {
+        return None;
+    }
+    if clean.chars().count() <= DIFF_PREVIEW_LIMIT {
+        return Some(clean.to_owned());
+    }
+    let mut out: String = clean.chars().take(DIFF_PREVIEW_LIMIT - 1).collect();
+    out.push('…');
+    Some(out)
+}
+
 /// A person's answer to one request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -68,6 +96,26 @@ impl Decision {
     }
 }
 
+/// A person's answer to a permission request or native agent question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub decision: Decision,
+    pub answers: Option<Value>,
+}
+impl Answer {
+    pub fn from_decision(decision: Decision) -> Self {
+        Self {
+            decision,
+            answers: None,
+        }
+    }
+}
+impl From<Decision> for Answer {
+    fn from(decision: Decision) -> Self {
+        Self::from_decision(decision)
+    }
+}
+
 /// One request a host makes while it runs, as a person sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PermissionAsk {
@@ -82,12 +130,58 @@ pub struct PermissionAsk {
     pub detail: Option<String>,
     /// Whether the host can remember an approval for the rest of its session.
     pub session_option: bool,
+    /// Semantic category: "command", "file_change", "permissions", "question", "tool".
+    pub kind: String,
+    /// Bounded unified patch or file-write preview (<= 6144 chars).
+    pub diff_preview: Option<String>,
+    /// Human-readable description of what "Allow for this session" remembers.
+    pub rule_summary: Option<String>,
+    /// Canonical Harness-local session rule key when Harness caches the rule itself.
+    pub session_rule_key: Option<String>,
+    /// Structured questions when `kind == "question"`.
+    pub questions: Option<Vec<Value>>,
+}
+impl Default for PermissionAsk {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            provider: String::new(),
+            tool: String::new(),
+            summary: String::new(),
+            detail: None,
+            session_option: false,
+            kind: "tool".to_owned(),
+            diff_preview: None,
+            rule_summary: None,
+            session_rule_key: None,
+            questions: None,
+        }
+    }
 }
 impl PermissionAsk {
+    fn ask_kind(&self) -> &str {
+        if self.kind.trim().is_empty() {
+            "tool"
+        } else {
+            self.kind.as_str()
+        }
+    }
     /// The session event that shows the request until it is answered. A
     /// stored event's `id` is its place in the session, so the request goes
     /// by `request_id`.
     pub fn pending_event(&self) -> Value {
+        let ask_kind = self.ask_kind();
+        let diff_preview = self.diff_preview.as_deref().and_then(bound_diff_preview);
+        let text = if ask_kind == "question" {
+            format!("{} asks: {}", self.provider_name(), self.summary)
+        } else {
+            format!(
+                "{} asks to run {}: {}",
+                self.provider_name(),
+                self.tool,
+                self.summary
+            )
+        };
         json!({
             "kind": "permission",
             "state": "pending",
@@ -97,11 +191,18 @@ impl PermissionAsk {
             "summary": self.summary,
             "detail": self.detail,
             "session_option": self.session_option,
-            "text": format!("{} asks to run {}: {}", self.provider_name(), self.tool, self.summary),
+            "ask_kind": ask_kind,
+            "diff_preview": diff_preview,
+            "rule_summary": self.rule_summary,
+            "has_session_rule": self.session_rule_key.is_some(),
+            "questions": self.questions,
+            "text": text,
         })
     }
     /// The session event for a request the launch answered on its own.
     pub fn resolved_event(&self, state: &str, by: &str) -> Value {
+        let ask_kind = self.ask_kind();
+        let diff_preview = self.diff_preview.as_deref().and_then(bound_diff_preview);
         json!({
             "kind": "permission",
             "state": state,
@@ -110,6 +211,11 @@ impl PermissionAsk {
             "tool": self.tool,
             "summary": self.summary,
             "detail": self.detail,
+            "ask_kind": ask_kind,
+            "diff_preview": diff_preview,
+            "rule_summary": self.rule_summary,
+            "has_session_rule": self.session_rule_key.is_some(),
+            "questions": self.questions,
             "by": by,
             "text": format!("{} {}: {}", self.tool, state_label(state), self.summary),
         })
@@ -140,6 +246,39 @@ pub trait Approvals: Send + Sync {
     /// Records the request where the person sees it. The receiver yields
     /// their decision; it closes without one when the request is withdrawn.
     fn ask(&self, ask: &PermissionAsk) -> Result<tokio::sync::oneshot::Receiver<Decision>>;
+    /// Records the request where the person sees it and yields both their
+    /// decision and any structured question answers.
+    fn ask_answer(&self, ask: &PermissionAsk) -> Result<tokio::sync::oneshot::Receiver<Answer>> {
+        let mut rx = self.ask(ask)?;
+        let (mut tx, answer_rx) = tokio::sync::oneshot::channel();
+        match rx.try_recv() {
+            Ok(decision) => {
+                let _ = tx.send(Answer::from_decision(decision));
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {}
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        tokio::select! {
+                            res = &mut rx => {
+                                if let Ok(decision) = res {
+                                    let _ = tx.send(Answer::from_decision(decision));
+                                }
+                            }
+                            _ = tx.closed() => {}
+                        }
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        if let Ok(decision) = rx.blocking_recv() {
+                            let _ = tx.send(Answer::from_decision(decision));
+                        }
+                    });
+                }
+            }
+        }
+        Ok(answer_rx)
+    }
     /// The host stopped waiting for this request.
     fn withdraw(&self, id: &str) -> Result<()>;
 }
@@ -171,21 +310,137 @@ mod tests {
             summary: "git push origin main".into(),
             detail: Some("Push the branch".into()),
             session_option: true,
+            kind: "command".into(),
+            diff_preview: None,
+            rule_summary: Some("Session rule: Bash(git push *)".into()),
+            session_rule_key: None,
+            questions: None,
         };
         let event = ask.pending_event();
         assert_eq!(event["kind"], "permission");
         assert_eq!(event["state"], "pending");
         assert_eq!(event["request_id"], "claude-7");
         assert_eq!(event["session_option"], true);
+        assert_eq!(event["ask_kind"], "command");
+        assert_eq!(event["diff_preview"], Value::Null);
+        assert_eq!(event["rule_summary"], "Session rule: Bash(git push *)");
+        assert_eq!(event["has_session_rule"], false);
+        assert_eq!(event["questions"], Value::Null);
         assert_eq!(
             event["text"],
             "Claude Code asks to run Bash: git push origin main"
         );
         let declined = ask.resolved_event("declined", "auto");
         assert_eq!(declined["by"], "auto");
+        assert_eq!(declined["ask_kind"], "command");
+        assert_eq!(declined["rule_summary"], "Session rule: Bash(git push *)");
+        assert_eq!(declined["has_session_rule"], false);
         assert_eq!(
             declined["text"],
             "Bash declined automatically: git push origin main"
         );
+    }
+
+    #[test]
+    fn enriched_ask_fields_emit_cleanly_and_bound_diff_preview() {
+        let oversized = format!("--- a/src/lib.rs\n+++ b/src/lib.rs\n{}", "+x".repeat(4000));
+        let questions = vec![json!({
+            "id": "q1",
+            "header": "Mode",
+            "question": "Which mode?",
+            "multi_select": false,
+            "options": [{"label": "Fast", "description": "Quick pass"}],
+        })];
+        let ask = PermissionAsk {
+            id: "cursor-1".into(),
+            provider: "cursor".into(),
+            tool: "Edit".into(),
+            summary: "src/lib.rs".into(),
+            detail: None,
+            session_option: true,
+            kind: "question".into(),
+            diff_preview: bound_diff_preview(&oversized),
+            rule_summary: Some("Remember exact command/path in Harness for this session".into()),
+            session_rule_key: Some("cursor:edit:src/lib.rs".into()),
+            questions: Some(questions.clone()),
+        };
+        let preview = ask.diff_preview.as_ref().unwrap();
+        assert_eq!(preview.chars().count(), DIFF_PREVIEW_LIMIT);
+        assert!(preview.contains('\n'));
+        assert!(preview.ends_with('…'));
+
+        let pending = ask.pending_event();
+        assert_eq!(pending["ask_kind"], "question");
+        assert_eq!(pending["has_session_rule"], true);
+        assert_eq!(pending["questions"], Value::Array(questions.clone()));
+        assert_eq!(pending["text"], "Cursor asks: src/lib.rs");
+        assert_eq!(
+            pending["diff_preview"].as_str().unwrap().chars().count(),
+            DIFF_PREVIEW_LIMIT
+        );
+
+        let resolved = ask.resolved_event("allowed", "person");
+        assert_eq!(resolved["ask_kind"], "question");
+        assert_eq!(resolved["has_session_rule"], true);
+        assert_eq!(resolved["questions"], Value::Array(questions));
+        assert_eq!(
+            resolved["diff_preview"].as_str().unwrap().chars().count(),
+            DIFF_PREVIEW_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn approvals_ask_answer_defaults_to_mapping_ask_decision() {
+        struct LegacyApprovals {
+            decision: Decision,
+        }
+        impl Approvals for LegacyApprovals {
+            fn ask(
+                &self,
+                _ask: &PermissionAsk,
+            ) -> Result<tokio::sync::oneshot::Receiver<Decision>> {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let d = self.decision;
+                tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    let _ = tx.send(d);
+                });
+                Ok(rx)
+            }
+            fn withdraw(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let approvals = LegacyApprovals {
+            decision: Decision::AllowSession,
+        };
+        let rx = approvals.ask_answer(&PermissionAsk::default()).unwrap();
+        assert_eq!(
+            rx.await.unwrap(),
+            Answer::from_decision(Decision::AllowSession)
+        );
+        let answer_from: Answer = Decision::Deny.into();
+        assert_eq!(answer_from, Answer::from_decision(Decision::Deny));
+
+        // Withdrawn / closed sender closes the mapped Answer receiver cleanly.
+        struct WithdrawnApprovals;
+        impl Approvals for WithdrawnApprovals {
+            fn ask(
+                &self,
+                _ask: &PermissionAsk,
+            ) -> Result<tokio::sync::oneshot::Receiver<Decision>> {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                drop(tx);
+                Ok(rx)
+            }
+            fn withdraw(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        let closed_rx = WithdrawnApprovals
+            .ask_answer(&PermissionAsk::default())
+            .unwrap();
+        assert!(closed_rx.await.is_err());
     }
 }

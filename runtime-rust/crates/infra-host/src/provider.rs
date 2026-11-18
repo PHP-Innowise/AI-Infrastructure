@@ -761,14 +761,14 @@ async fn converse_with_host(
             let Some(sender) = writer.clone() else {
                 continue;
             };
-            let decided = match approvals.ask(&ask.public) {
+            let decided = match approvals.ask_answer(&ask.public) {
                 Ok(decided) => decided,
                 Err(error) => {
                     // Nobody can see the request: the host hears no.
                     if let Ok(mut answers) = answers.lock() {
                         answers.push((ask.public.id.clone(), false));
                     }
-                    let _ = sender.send(line(&ask.deny)?);
+                    let _ = sender.send(line(&ask.deny_reply())?);
                     emit(
                         json!({"kind":"error","text":format!("A permission request could not be shown: {}", error.message)}),
                     )?;
@@ -780,9 +780,11 @@ async fn converse_with_host(
             let task = tokio::spawn(async move {
                 let _pending = pending;
                 let (reply, allowed) = match decided.await {
-                    Ok(Decision::Allow) => (ask.allow, true),
-                    Ok(Decision::AllowSession) => (ask.allow_session.unwrap_or(ask.allow), true),
-                    Ok(Decision::Deny) | Err(_) => (ask.deny, false),
+                    Ok(answer) => {
+                        let allowed = answer.decision != Decision::Deny;
+                        (ask.reply_for(&answer), allowed)
+                    }
+                    Err(_) => (ask.deny_reply(), false),
                 };
                 // Recorded before the host hears it, so the driver knows the
                 // answer before anything the host says about it.

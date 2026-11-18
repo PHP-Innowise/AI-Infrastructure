@@ -7,20 +7,66 @@
 //! Each driver here speaks one host's protocol and turns what the host says
 //! into the events that host prints in a one-shot launch, so the rest of a
 //! run reads them unchanged, and turns a permission request into a question.
-use crate::permission::{PermissionAsk, PermissionMode};
+use crate::permission::{Answer, Decision, PermissionAsk, PermissionMode, bound_diff_preview};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Component, Path, PathBuf},
+};
 
 /// The longest summary or detail a request shows.
 const SUMMARY_LIMIT: usize = 400;
 const DETAIL_LIMIT: usize = 800;
+const CURSOR_SESSION_RULE_SUMMARY: &str =
+    "Remember exact command/path in Harness for this session (never writes ~/.cursor)";
+
+/// How a host request's reply is built from a person's [`Answer`].
+pub(crate) enum AskReply {
+    Static {
+        allow: Value,
+        allow_session: Option<Value>,
+        deny: Value,
+    },
+    Dynamic(Box<dyn Fn(&Answer) -> Value + Send + Sync>),
+}
 
 /// A host's request as a person sees it, with the line that answers it each way.
 pub(crate) struct Ask {
     pub public: PermissionAsk,
-    pub allow: Value,
-    pub allow_session: Option<Value>,
-    pub deny: Value,
+    pub reply: AskReply,
+}
+impl Ask {
+    pub fn reply_for(&self, answer: &Answer) -> Value {
+        match &self.reply {
+            AskReply::Static {
+                allow,
+                allow_session,
+                deny,
+            } => match answer.decision {
+                Decision::Allow => allow.clone(),
+                Decision::AllowSession => allow_session.clone().unwrap_or_else(|| allow.clone()),
+                Decision::Deny => deny.clone(),
+            },
+            AskReply::Dynamic(format) => format(answer),
+        }
+    }
+    pub fn deny_reply(&self) -> Value {
+        self.reply_for(&Answer::from_decision(Decision::Deny))
+    }
+    #[cfg(test)]
+    pub fn allow_reply(&self) -> Value {
+        self.reply_for(&Answer::from_decision(Decision::Allow))
+    }
+    #[cfg(test)]
+    pub fn allow_session_reply(&self) -> Option<Value> {
+        match &self.reply {
+            AskReply::Static { allow_session, .. } => allow_session.clone(),
+            AskReply::Dynamic(_) => self
+                .public
+                .session_option
+                .then(|| self.reply_for(&Answer::from_decision(Decision::AllowSession))),
+        }
+    }
 }
 
 /// What one host message asks of a run.
@@ -90,6 +136,7 @@ pub(crate) fn cursor(setup: Setup) -> Box<dyn Driver> {
         text: String::new(),
         said: String::new(),
         calls: BTreeMap::new(),
+        diffs: BTreeMap::new(),
         asked: BTreeMap::new(),
         rejected: BTreeSet::new(),
         started: std::time::Instant::now(),
@@ -125,6 +172,348 @@ fn request_id(value: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+fn format_hunk_lines(old: &str, new: &str) -> Option<String> {
+    let old = old.replace("\r\n", "\n").replace('\r', "\n");
+    let new = new.replace("\r\n", "\n").replace('\r', "\n");
+    if old == new {
+        return None;
+    }
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let mut prefix = 0;
+    while prefix < a.len().min(b.len()) && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix
+        < a.len()
+            .saturating_sub(prefix)
+            .min(b.len().saturating_sub(prefix))
+        && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let start = prefix.saturating_sub(3);
+    let end_a = (a.len() - suffix + 3).min(a.len());
+    let end_b = (b.len() - suffix + 3).min(b.len());
+    let old_len = end_a - start;
+    let new_len = end_b - start;
+    let old_start = if old_len == 0 { 0 } else { start + 1 };
+    let new_start = if new_len == 0 { 0 } else { start + 1 };
+    let mut out = format!("@@ -{old_start},{old_len} +{new_start},{new_len} @@\n");
+    for line in &a[start..prefix] {
+        out.push(' ');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in &a[prefix..a.len() - suffix] {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in &b[prefix..b.len() - suffix] {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in &a[a.len() - suffix..end_a] {
+        out.push(' ');
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn display_diff_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "file".into();
+    }
+    if let Some(norm) = normalize_lexical(Path::new(trimmed))
+        && let Some(s) = norm.to_str()
+        && !s.is_empty()
+    {
+        return s.to_owned();
+    }
+    trimmed.to_owned()
+}
+
+fn format_replacement_diff(path: &str, old: &str, new: &str) -> Option<String> {
+    let hunk = format_hunk_lines(old, new)?;
+    let display = display_diff_path(path);
+    bound_diff_preview(&format!("--- a/{display}\n+++ b/{display}\n{hunk}"))
+}
+
+fn format_write_diff(path: &str, content: &str) -> Option<String> {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let display = display_diff_path(path);
+    let lines: Vec<&str> = normalized.lines().collect();
+    if lines.is_empty() {
+        return bound_diff_preview(&format!("--- /dev/null\n+++ b/{display}\n@@ -0,0 +0,0 @@"));
+    }
+    let mut out = format!(
+        "--- /dev/null\n+++ b/{display}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+        if out.chars().count() > crate::permission::DIFF_PREVIEW_LIMIT + 64 {
+            break;
+        }
+    }
+    bound_diff_preview(&out)
+}
+
+fn format_patch_for_path(path: &str, patch: &str) -> Option<String> {
+    let normalized = patch.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim_matches('\n').trim_end();
+    if trimmed.trim().is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("--- ")
+        || trimmed.starts_with("diff --git ")
+        || trimmed.starts_with("*** ")
+    {
+        return Some(trimmed.to_owned());
+    }
+    let display = display_diff_path(path);
+    Some(format!("--- a/{display}\n+++ b/{display}\n{trimmed}"))
+}
+
+#[derive(Clone)]
+struct ParsedOption {
+    id: Option<String>,
+    label: String,
+}
+
+#[derive(Clone)]
+struct ParsedQuestion {
+    id: String,
+    header: String,
+    question: String,
+    options: Vec<ParsedOption>,
+    public: Value,
+}
+
+fn parse_questions(raw: &Value, default_is_other: bool) -> Vec<ParsedQuestion> {
+    let Some(items) = raw.as_array() else {
+        return vec![];
+    };
+    let mut parsed = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !item.is_object() {
+            continue;
+        }
+        let question = item["question"]
+            .as_str()
+            .or_else(|| item["prompt"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let header = item["header"]
+            .as_str()
+            .or_else(|| item["title"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let mut opts = Vec::new();
+        let mut public_opts = Vec::new();
+        for opt in item["options"].as_array().into_iter().flatten() {
+            match opt {
+                Value::String(s) => {
+                    let label = s.trim();
+                    if !label.is_empty() {
+                        opts.push(ParsedOption {
+                            id: None,
+                            label: label.to_owned(),
+                        });
+                        public_opts.push(json!({"label": label, "description": ""}));
+                    }
+                }
+                Value::Object(_) => {
+                    let opt_id = opt["id"]
+                        .as_str()
+                        .or_else(|| opt["optionId"].as_str())
+                        .or_else(|| opt["value"].as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    let label = opt["label"]
+                        .as_str()
+                        .or_else(|| opt["name"].as_str())
+                        .or_else(|| opt["text"].as_str())
+                        .or_else(|| opt["title"].as_str())
+                        .or(opt_id.as_deref())
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned();
+                    let description = opt["description"].as_str().unwrap_or("").trim().to_owned();
+                    if label.is_empty() && opt_id.is_none() {
+                        continue;
+                    }
+                    let shown = if label.is_empty() {
+                        opt_id.clone().unwrap_or_default()
+                    } else {
+                        label
+                    };
+                    opts.push(ParsedOption {
+                        id: opt_id,
+                        label: shown.clone(),
+                    });
+                    public_opts.push(json!({"label": shown, "description": description}));
+                }
+                _ => {}
+            }
+        }
+        if question.is_empty() && header.is_empty() && opts.is_empty() {
+            continue;
+        }
+        let id = item["id"]
+            .as_str()
+            .or_else(|| item["questionId"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if !question.is_empty() {
+                    question.clone()
+                } else {
+                    format!("q-{}", idx + 1)
+                }
+            });
+        let multi_select = item["multi_select"]
+            .as_bool()
+            .or_else(|| item["multiSelect"].as_bool())
+            .or_else(|| item["allowMultiple"].as_bool())
+            .unwrap_or(false);
+        let is_other = item["is_other"]
+            .as_bool()
+            .or_else(|| item["isOther"].as_bool())
+            .or_else(|| item["allowFreeform"].as_bool())
+            .unwrap_or(default_is_other || opts.is_empty());
+        let public = json!({
+            "id": id,
+            "header": header,
+            "question": question,
+            "multi_select": multi_select,
+            "is_other": is_other,
+            "options": public_opts,
+        });
+        parsed.push(ParsedQuestion {
+            id,
+            header,
+            question,
+            options: opts,
+            public,
+        });
+    }
+    parsed
+}
+
+fn question_summary(questions: &[ParsedQuestion]) -> String {
+    let first = questions
+        .first()
+        .map(|q| {
+            if !q.question.is_empty() {
+                q.question.as_str()
+            } else if !q.header.is_empty() {
+                q.header.as_str()
+            } else {
+                q.id.as_str()
+            }
+        })
+        .unwrap_or("Answer questions");
+    if questions.len() > 1 {
+        bounded(
+            &format!("{first} (+{} more)", questions.len() - 1),
+            SUMMARY_LIMIT,
+        )
+    } else {
+        bounded(first, SUMMARY_LIMIT)
+    }
+}
+
+fn collect_answer_strings(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |raw: &str| {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !out.iter().any(|item| item == trimmed) {
+            out.push(trimmed.to_owned());
+        }
+    };
+    match value {
+        Value::String(s) => push(s),
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::String(s) => push(s),
+                    Value::Object(obj) => {
+                        if let Some(s) = obj
+                            .get("label")
+                            .or_else(|| obj.get("id"))
+                            .or_else(|| obj.get("value"))
+                            .and_then(Value::as_str)
+                        {
+                            push(s);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Value::Object(obj) => {
+            if let Some(inner) = obj.get("answers") {
+                for item in collect_answer_strings(inner) {
+                    push(&item);
+                }
+            }
+            if let Some(selected) = obj.get("selectedOptionIds") {
+                for item in collect_answer_strings(selected) {
+                    push(&item);
+                }
+            }
+            for key in ["freeform", "other", "value", "label"] {
+                if let Some(s) = obj.get(key).and_then(Value::as_str) {
+                    push(s);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn find_question_answer<'a>(
+    source: &'a serde_json::Map<String, Value>,
+    q: &ParsedQuestion,
+) -> Option<&'a Value> {
+    source
+        .get(&q.id)
+        .or_else(|| {
+            (!q.question.is_empty())
+                .then(|| source.get(&q.question))
+                .flatten()
+        })
+        .or_else(|| {
+            (!q.header.is_empty())
+                .then(|| source.get(&q.header))
+                .flatten()
+        })
+}
+
+fn extract_selected_for_question(answers: Option<&Value>, q: &ParsedQuestion) -> Vec<String> {
+    let Some(map) = answers.and_then(Value::as_object) else {
+        return vec![];
+    };
+    let nested = map.get("answers").and_then(Value::as_object);
+    find_question_answer(map, q)
+        .or_else(|| nested.and_then(|inner| find_question_answer(inner, q)))
+        .map(collect_answer_strings)
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- Claude Code
@@ -254,7 +643,7 @@ impl Driver for Claude {
                     } else {
                         step.notices
                             .push(ask.public.resolved_event("declined", "auto"));
-                        step.replies.push(ask.deny);
+                        step.replies.push(ask.deny_reply());
                     }
                 } else {
                     step.replies.push(json!({
@@ -294,6 +683,120 @@ impl Driver for Claude {
         step
     }
 }
+fn claude_kind(name: &str) -> &'static str {
+    match name {
+        "AskUserQuestion" => "question",
+        "Bash" | "PowerShell" => "command",
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => "file_change",
+        _ => "tool",
+    }
+}
+fn claude_diff_preview(name: &str, input: &Value) -> Option<String> {
+    let path = input["file_path"]
+        .as_str()
+        .or_else(|| input["notebook_path"].as_str())
+        .or_else(|| input["path"].as_str())
+        .unwrap_or("");
+    match name {
+        "Edit" => {
+            if let (Some(old), Some(new)) =
+                (input["old_string"].as_str(), input["new_string"].as_str())
+            {
+                return format_replacement_diff(path, old, new);
+            }
+            input["diff"]
+                .as_str()
+                .or_else(|| input["patch"].as_str())
+                .and_then(|patch| format_patch_for_path(path, patch))
+                .and_then(|patch| bound_diff_preview(&patch))
+        }
+        "MultiEdit" => {
+            let edits = input["edits"].as_array()?;
+            let mut hunks = Vec::new();
+            for edit in edits {
+                let old = edit["old_string"]
+                    .as_str()
+                    .or_else(|| edit["old_text"].as_str())
+                    .unwrap_or("");
+                let new = edit["new_string"]
+                    .as_str()
+                    .or_else(|| edit["new_text"].as_str())
+                    .unwrap_or("");
+                if let Some(hunk) = format_hunk_lines(old, new) {
+                    hunks.push(hunk);
+                }
+            }
+            if hunks.is_empty() {
+                return None;
+            }
+            let display = display_diff_path(path);
+            let mut raw = format!("--- a/{display}\n+++ b/{display}\n");
+            for hunk in hunks {
+                raw.push_str(&hunk);
+            }
+            bound_diff_preview(&raw)
+        }
+        "Write" => input["content"]
+            .as_str()
+            .and_then(|content| format_write_diff(path, content)),
+        "NotebookEdit" => input["new_source"].as_str().and_then(|new| {
+            if let Some(old) = input["old_source"].as_str() {
+                format_replacement_diff(path, old, new)
+            } else {
+                format_write_diff(path, new)
+            }
+        }),
+        _ => None,
+    }
+}
+fn claude_rule_summary(remembered: &[Value]) -> Option<String> {
+    if remembered.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for suggestion in remembered {
+        if let Some(rules) = suggestion["rules"].as_array() {
+            for rule in rules {
+                let Some(tool_name) = rule["toolName"].as_str().map(str::trim) else {
+                    continue;
+                };
+                if tool_name.is_empty() {
+                    continue;
+                }
+                let content = rule["ruleContent"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                match content {
+                    Some(content) => parts.push(format!("{tool_name}({content})")),
+                    None => parts.push(tool_name.to_owned()),
+                }
+            }
+        }
+        if let Some(dirs) = suggestion["directories"].as_array() {
+            for dir in dirs.iter().filter_map(Value::as_str).map(str::trim) {
+                if !dir.is_empty() {
+                    parts.push(format!("dir({dir})"));
+                }
+            }
+        }
+        if let Some(mode) = suggestion["mode"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(format!("mode({mode})"));
+        }
+    }
+    if parts.is_empty() {
+        Some("Session rule: remember for this Claude Code session".into())
+    } else {
+        Some(bounded(
+            &format!("Session rule: {}", parts.join(", ")),
+            SUMMARY_LIMIT,
+        ))
+    }
+}
 fn claude_summary(tool: &str, input: &Value, request: &Value) -> String {
     let field = |keys: &[&str]| {
         keys.iter()
@@ -325,10 +828,115 @@ fn claude_ask(id: &Value, request: &Value, mode: PermissionMode) -> Ask {
     } else {
         json!({})
     };
+    let reply_id = id.clone();
+    let reply = move |response: Value| {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": reply_id,
+                "response": response,
+            }
+        })
+    };
+    let deny_message = if mode == PermissionMode::Manual {
+        DECLINED_BY_PERSON
+    } else {
+        DECLINED_AUTOMATICALLY
+    };
+    let deny_reply = reply(json!({"behavior": "deny", "message": deny_message}));
+
+    if name == "AskUserQuestion" {
+        let parsed = parse_questions(&input["questions"], true);
+        let summary = if parsed.is_empty() {
+            claude_summary(name, &input, request)
+        } else {
+            question_summary(&parsed)
+        };
+        let detail = ["decision_reason", "description", "blocked_path"]
+            .iter()
+            .find_map(|key| some_text(&request[*key], DETAIL_LIMIT))
+            .filter(|detail| detail != &summary);
+        let questions =
+            (!parsed.is_empty()).then(|| parsed.iter().map(|q| q.public.clone()).collect());
+        let original_input = input.clone();
+        let parsed_for_reply = parsed;
+        let reply_id = id.clone();
+        return Ask {
+            public: PermissionAsk {
+                id: format!("claude-{}", request_id(id)),
+                provider: "claude".into(),
+                tool,
+                summary,
+                detail,
+                session_option: false,
+                kind: "question".into(),
+                diff_preview: None,
+                rule_summary: None,
+                session_rule_key: None,
+                questions,
+            },
+            reply: AskReply::Dynamic(Box::new(move |answer: &Answer| {
+                if answer.decision == Decision::Deny {
+                    return json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": reply_id,
+                            "response": {
+                                "behavior": "deny",
+                                "message": deny_message,
+                            }
+                        }
+                    });
+                }
+                let mut answers_map = serde_json::Map::new();
+                for q in &parsed_for_reply {
+                    let selected = extract_selected_for_question(answer.answers.as_ref(), q);
+                    if !selected.is_empty() {
+                        let key = if !q.question.is_empty() {
+                            q.question.clone()
+                        } else {
+                            q.id.clone()
+                        };
+                        answers_map.insert(key, Value::String(selected.join(", ")));
+                    }
+                }
+                if parsed_for_reply.is_empty()
+                    && let Some(raw_map) = answer.answers.as_ref().and_then(Value::as_object)
+                {
+                    for (k, v) in raw_map {
+                        let selected = collect_answer_strings(v);
+                        if !selected.is_empty() {
+                            answers_map.insert(k.clone(), Value::String(selected.join(", ")));
+                        }
+                    }
+                }
+                let mut updated_input = original_input.clone();
+                if !updated_input["questions"].is_array() {
+                    updated_input["questions"] = json!([]);
+                }
+                updated_input["answers"] = Value::Object(answers_map);
+                json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": reply_id,
+                        "response": {
+                            "behavior": "allow",
+                            "updatedInput": updated_input,
+                        }
+                    }
+                })
+            })),
+        };
+    }
+
+    let summary = claude_summary(name, &input, request);
     let detail = ["decision_reason", "description", "blocked_path"]
         .iter()
         .find_map(|key| some_text(&request[*key], DETAIL_LIMIT))
-        .filter(|detail| detail != &claude_summary(name, &input, request));
+        .filter(|detail| detail != &summary);
     // Claude Code proposes rules for its local settings file; the Harness
     // keeps an approval in the running session and writes nothing to the
     // project.
@@ -343,24 +951,29 @@ fn claude_ask(id: &Value, request: &Value, mode: PermissionMode) -> Ask {
             suggestion
         })
         .collect();
-    let reply = |response: Value| json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}});
+    let rule_summary = claude_rule_summary(&remembered);
+    let diff_preview = claude_diff_preview(name, &input);
     Ask {
         public: PermissionAsk {
             id: format!("claude-{}", request_id(id)),
             provider: "claude".into(),
             tool,
-            summary: claude_summary(name, &input, request),
+            summary,
             detail,
             session_option: !remembered.is_empty(),
+            kind: claude_kind(name).into(),
+            diff_preview,
+            rule_summary,
+            session_rule_key: None,
+            questions: None,
         },
-        allow: reply(json!({"behavior":"allow","updatedInput":input})),
-        allow_session: (!remembered.is_empty()).then(|| {
-            reply(json!({"behavior":"allow","updatedInput":input,"updatedPermissions":remembered}))
-        }),
-        deny: reply(json!({
-            "behavior": "deny",
-            "message": if mode == PermissionMode::Manual { DECLINED_BY_PERSON } else { DECLINED_AUTOMATICALLY },
-        })),
+        reply: AskReply::Static {
+            allow: reply(json!({"behavior":"allow","updatedInput":input})),
+            allow_session: (!remembered.is_empty()).then(|| {
+                reply(json!({"behavior":"allow","updatedInput":input,"updatedPermissions":remembered}))
+            }),
+            deny: deny_reply,
+        },
     }
 }
 
@@ -452,7 +1065,10 @@ fn codex_item(item: &Value) -> Option<Value> {
         "fileChange" => json!({
             "id": id,
             "type": "file_change",
-            "changes": codex_changes(item),
+            "changes": codex_changes(item)
+                .into_iter()
+                .map(|c| json!({"path": c["path"], "kind": c["kind"]}))
+                .collect::<Vec<_>>(),
             "status": codex_status(&item["status"]),
         }),
         "mcpToolCall" => json!({
@@ -483,9 +1099,49 @@ fn codex_changes(item: &Value) -> Vec<Value> {
                 .as_str()
                 .or_else(|| change["kind"].as_str())
                 .unwrap_or("update");
-            Some(json!({"path":path,"kind":kind}))
+            let mut entry = json!({"path": path, "kind": kind});
+            if let Some(diff) = change["diff"]
+                .as_str()
+                .filter(|diff| !diff.trim().is_empty())
+            {
+                entry["diff"] = json!(diff);
+            }
+            Some(entry)
         })
         .collect()
+}
+fn codex_diff_preview(params: &Value, files: &BTreeMap<String, Vec<Value>>) -> Option<String> {
+    let from_state = params["itemId"].as_str().and_then(|item| files.get(item));
+    let from_params: Vec<Value> = params["changes"]
+        .as_array()
+        .map(|_| codex_changes(params))
+        .unwrap_or_default();
+    let changes = from_state
+        .map(Vec::as_slice)
+        .filter(|c| !c.is_empty())
+        .unwrap_or(&from_params);
+    let mut patches = Vec::new();
+    for change in changes {
+        let path = change["path"].as_str().unwrap_or("");
+        if let Some(patch) = change["diff"]
+            .as_str()
+            .and_then(|diff| format_patch_for_path(path, diff))
+        {
+            patches.push(patch);
+        }
+    }
+    if patches.is_empty()
+        && let Some(raw_diff) = params["diff"]
+            .as_str()
+            .and_then(|diff| format_patch_for_path("", diff))
+    {
+        patches.push(raw_diff);
+    }
+    if patches.is_empty() {
+        None
+    } else {
+        bound_diff_preview(&patches.join("\n"))
+    }
 }
 fn codex_ask(
     id: &Value,
@@ -495,13 +1151,23 @@ fn codex_ask(
 ) -> Ask {
     let reason = some_text(&params["reason"], DETAIL_LIMIT);
     let reply = |result: Value| json!({"id": id, "result": result});
-    let public = |tool: &str, summary: String, detail: Option<String>| PermissionAsk {
+    let rule_summary = Some("Remember approval for this Codex thread".to_owned());
+    let public = |tool: &str,
+                  kind: &str,
+                  summary: String,
+                  detail: Option<String>,
+                  diff_preview: Option<String>| PermissionAsk {
         id: format!("codex-{}", request_id(id)),
         provider: "codex".into(),
         tool: tool.into(),
         summary,
         detail,
         session_option: true,
+        kind: kind.into(),
+        diff_preview,
+        rule_summary: rule_summary.clone(),
+        session_rule_key: None,
+        questions: None,
     };
     match method {
         "item/commandExecution/requestApproval" => {
@@ -517,10 +1183,12 @@ fn codex_ask(
                 (reason, cwd) => reason.or(cwd),
             };
             Ask {
-                public: public("Shell", summary, detail),
-                allow: reply(json!({"decision":"accept"})),
-                allow_session: Some(reply(json!({"decision":"acceptForSession"}))),
-                deny: reply(json!({"decision":"decline"})),
+                public: public("Shell", "command", summary, detail, None),
+                reply: AskReply::Static {
+                    allow: reply(json!({"decision":"accept"})),
+                    allow_session: Some(reply(json!({"decision":"acceptForSession"}))),
+                    deny: reply(json!({"decision":"decline"})),
+                },
             }
         }
         "item/fileChange/requestApproval" => {
@@ -543,9 +1211,11 @@ fn codex_ask(
                 .filter(|summary| !summary.is_empty());
             let root = some_text(&params["grantRoot"], 300)
                 .map(|root| format!("write access under {root}"));
+            let diff_preview = codex_diff_preview(params, files);
             Ask {
                 public: public(
                     "File change",
+                    "file_change",
                     bounded(
                         &changes
                             .or(root)
@@ -553,10 +1223,13 @@ fn codex_ask(
                         SUMMARY_LIMIT,
                     ),
                     reason,
+                    diff_preview,
                 ),
-                allow: reply(json!({"decision":"accept"})),
-                allow_session: Some(reply(json!({"decision":"acceptForSession"}))),
-                deny: reply(json!({"decision":"decline"})),
+                reply: AskReply::Static {
+                    allow: reply(json!({"decision":"accept"})),
+                    allow_session: Some(reply(json!({"decision":"acceptForSession"}))),
+                    deny: reply(json!({"decision":"decline"})),
+                },
             }
         }
         _ => {
@@ -588,13 +1261,53 @@ fn codex_ask(
                 json!({})
             };
             Ask {
-                public: public("Permissions", summary, reason),
-                allow: reply(json!({"permissions":granted,"scope":"turn"})),
-                allow_session: Some(reply(json!({"permissions":granted,"scope":"session"}))),
-                deny: reply(json!({"permissions":{}})),
+                public: public("Permissions", "permissions", summary, reason, None),
+                reply: AskReply::Static {
+                    allow: reply(json!({"permissions":granted,"scope":"turn"})),
+                    allow_session: Some(reply(json!({"permissions":granted,"scope":"session"}))),
+                    deny: reply(json!({"permissions":{}})),
+                },
             }
         }
     }
+}
+fn codex_question_ask(id: &Value, params: &Value) -> Option<Ask> {
+    let parsed = parse_questions(&params["questions"], false);
+    if parsed.is_empty() {
+        return None;
+    }
+    let summary = question_summary(&parsed);
+    let detail = some_text(&params["reason"], DETAIL_LIMIT).filter(|d| d != &summary);
+    let questions = Some(parsed.iter().map(|q| q.public.clone()).collect());
+    let reply_id = id.clone();
+    Some(Ask {
+        public: PermissionAsk {
+            id: format!("codex-{}", request_id(id)),
+            provider: "codex".into(),
+            tool: "Question".into(),
+            summary,
+            detail,
+            session_option: false,
+            kind: "question".into(),
+            diff_preview: None,
+            rule_summary: None,
+            session_rule_key: None,
+            questions,
+        },
+        reply: AskReply::Dynamic(Box::new(move |answer: &Answer| {
+            if answer.decision == Decision::Deny {
+                return json!({"id": reply_id, "result": {"answers": {}}});
+            }
+            let mut answers_map = serde_json::Map::new();
+            for q in &parsed {
+                let selected = extract_selected_for_question(answer.answers.as_ref(), q);
+                if !selected.is_empty() {
+                    answers_map.insert(q.id.clone(), json!({"answers": selected}));
+                }
+            }
+            json!({"id": reply_id, "result": {"answers": answers_map}})
+        })),
+    })
 }
 impl Driver for Codex {
     fn opening(&mut self) -> Step {
@@ -692,7 +1405,13 @@ impl Driver for Codex {
                         .push(json!({"id":id,"result":{"decision":"denied"}}));
                 }
                 "item/tool/requestUserInput" => {
-                    step.replies.push(json!({"id":id,"result":{"answers":{}}}));
+                    if self.setup.mode == PermissionMode::Manual
+                        && let Some(ask) = codex_question_ask(id, &message["params"])
+                    {
+                        step.asks.push(ask);
+                    } else {
+                        step.replies.push(json!({"id":id,"result":{"answers":{}}}));
+                    }
                 }
                 "mcpServer/elicitation/request" => {
                     step.replies
@@ -826,6 +1545,8 @@ struct Cursor {
     /// The turn's text, for its result.
     said: String,
     calls: BTreeMap<String, (String, Value)>,
+    /// Bounded diff previews captured from tool_call updates, by toolCallId.
+    diffs: BTreeMap<String, String>,
     /// The tool call each unanswered ask is about.
     asked: BTreeMap<String, String>,
     /// Calls the person declined. Cursor still reports them completed.
@@ -899,22 +1620,53 @@ impl Cursor {
                 self.flush(step);
                 let id = request_id(&update["toolCallId"]);
                 let (name, args) = cursor_tool(update);
+                if name == "editToolCall" {
+                    let path = args["path"].as_str().unwrap_or("");
+                    if let Some(diff) =
+                        cursor_diff_preview(path, &args, &update["rawInput"], &update["content"])
+                    {
+                        self.diffs.insert(id.clone(), diff);
+                    }
+                }
                 step.events
                     .push(cursor_call(&id, "started", &name, &args, None));
                 self.calls.insert(id.clone(), (name, args));
                 if let Some(outcome) = self.outcome(&id, update) {
                     let (name, args) = self.calls.remove(&id).unwrap_or_default();
+                    self.diffs.remove(&id);
                     step.events
                         .push(cursor_call(&id, "completed", &name, &args, Some(outcome)));
                 }
             }
             "tool_call_update" => {
                 let id = request_id(&update["toolCallId"]);
+                let existing_path = self
+                    .calls
+                    .get(&id)
+                    .and_then(|(_, args)| args["path"].as_str())
+                    .or_else(|| update["locations"][0]["path"].as_str())
+                    .or_else(|| update["rawInput"]["path"].as_str())
+                    .unwrap_or("");
+                if (self
+                    .calls
+                    .get(&id)
+                    .is_some_and(|(name, _)| name == "editToolCall")
+                    || update["kind"].as_str() == Some("edit"))
+                    && let Some(diff) = cursor_diff_preview(
+                        existing_path,
+                        &Value::Null,
+                        &update["rawInput"],
+                        &update["content"],
+                    )
+                {
+                    self.diffs.insert(id.clone(), diff);
+                }
                 if let Some(outcome) = self.outcome(&id, update) {
                     let (name, args) = self
                         .calls
                         .remove(&id)
                         .unwrap_or_else(|| cursor_tool(update));
+                    self.diffs.remove(&id);
                     step.events
                         .push(cursor_call(&id, "completed", &name, &args, Some(outcome)));
                 }
@@ -1012,21 +1764,265 @@ fn cursor_call(id: &str, phase: &str, name: &str, args: &Value, outcome: Option<
     tool_call.insert(name.to_owned(), call);
     json!({"type": "tool_call", "subtype": phase, "call_id": id, "tool_call": tool_call})
 }
+fn cursor_diff_from_obj(path: &str, obj: &Value) -> Option<String> {
+    if !obj.is_object() {
+        return None;
+    }
+    let item_path = obj["path"]
+        .as_str()
+        .or_else(|| obj["file_path"].as_str())
+        .or_else(|| obj["filePath"].as_str())
+        .unwrap_or(path);
+    for key in ["diff", "patch", "unifiedDiff"] {
+        if let Some(diff) = obj[key].as_str()
+            && let Some(patch) = format_patch_for_path(item_path, diff)
+            && let Some(bounded) = bound_diff_preview(&patch)
+        {
+            return Some(bounded);
+        }
+    }
+    for (old_key, new_key) in [
+        ("oldText", "newText"),
+        ("old_text", "new_text"),
+        ("oldString", "newString"),
+        ("old_string", "new_string"),
+        ("oldContent", "newContent"),
+        ("old_content", "new_content"),
+    ] {
+        if let (Some(old), Some(new)) = (obj[old_key].as_str(), obj[new_key].as_str()) {
+            return format_replacement_diff(item_path, old, new);
+        }
+    }
+    if let Some(edits) = obj["edits"].as_array() {
+        let mut hunks = Vec::new();
+        for edit in edits {
+            let old = edit["oldText"]
+                .as_str()
+                .or_else(|| edit["old_text"].as_str())
+                .or_else(|| edit["old_string"].as_str())
+                .or_else(|| edit["oldString"].as_str())
+                .unwrap_or("");
+            let new = edit["newText"]
+                .as_str()
+                .or_else(|| edit["new_text"].as_str())
+                .or_else(|| edit["new_string"].as_str())
+                .or_else(|| edit["newString"].as_str())
+                .unwrap_or("");
+            if let Some(hunk) = format_hunk_lines(old, new) {
+                hunks.push(hunk);
+            }
+        }
+        if !hunks.is_empty() {
+            let display = display_diff_path(item_path);
+            let mut raw = format!("--- a/{display}\n+++ b/{display}\n");
+            for hunk in hunks {
+                raw.push_str(&hunk);
+            }
+            return bound_diff_preview(&raw);
+        }
+    }
+    for key in [
+        "newText",
+        "new_text",
+        "newContent",
+        "new_content",
+        "content",
+        "fileContent",
+        "fileText",
+        "text",
+    ] {
+        if let Some(content) = obj[key].as_str() {
+            return format_write_diff(item_path, content);
+        }
+    }
+    None
+}
+fn cursor_diff_preview(
+    path: &str,
+    args: &Value,
+    raw_input: &Value,
+    content: &Value,
+) -> Option<String> {
+    if let Some(diff) = cursor_diff_from_obj(path, args) {
+        return Some(diff);
+    }
+    if let Some(diff) = cursor_diff_from_obj(path, raw_input) {
+        return Some(diff);
+    }
+    if let Some(items) = content.as_array() {
+        let mut parts = Vec::new();
+        for item in items {
+            let is_diff_block = item["type"].as_str() == Some("diff")
+                || [
+                    "diff",
+                    "patch",
+                    "unifiedDiff",
+                    "oldText",
+                    "newText",
+                    "old_text",
+                    "new_text",
+                    "old_string",
+                    "new_string",
+                ]
+                .iter()
+                .any(|key| item.get(*key).is_some_and(Value::is_string));
+            if is_diff_block && let Some(diff) = cursor_diff_from_obj(path, item) {
+                parts.push(diff);
+            }
+        }
+        if !parts.is_empty() {
+            return bound_diff_preview(&parts.join("\n"));
+        }
+    } else if content.is_object() {
+        return cursor_diff_from_obj(path, content);
+    }
+    None
+}
+fn normalize_lexical(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                out.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => return None,
+        }
+    }
+    Some(out)
+}
+fn clean_workspace_relative_path(raw: &str, cwd: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.chars().any(char::is_control)
+        || raw == "~"
+        || raw.starts_with("~/")
+        || raw.starts_with("~\\")
+        || (raw.contains('\\') && !cfg!(windows))
+    {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    let has_parent = candidate
+        .components()
+        .any(|c| matches!(c, Component::ParentDir));
+    if has_parent {
+        return None;
+    }
+    let rel_buf: PathBuf = if candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+    {
+        let cwd_path = Path::new(cwd.trim());
+        if cwd.trim().is_empty() || !cwd_path.is_absolute() {
+            return None;
+        }
+        let norm_cwd = normalize_lexical(cwd_path)?;
+        let norm_candidate = normalize_lexical(candidate)?;
+        norm_candidate.strip_prefix(&norm_cwd).ok()?.to_path_buf()
+    } else {
+        normalize_lexical(candidate)?
+    };
+    let mut parts = Vec::new();
+    for component in rel_buf.components() {
+        match component {
+            Component::Normal(seg) => {
+                let s = seg.to_str()?;
+                if !s.is_empty() {
+                    parts.push(s);
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+fn clean_exact_shell_command(raw: &str) -> Option<&str> {
+    let cmd = raw.trim();
+    if cmd.is_empty()
+        || cmd.chars().any(|c| {
+            c.is_control()
+                || matches!(
+                    c,
+                    ';' | '|' | '&' | '`' | '$' | '>' | '<' | '\n' | '\r' | '\0'
+                )
+        })
+    {
+        return None;
+    }
+    Some(cmd)
+}
+fn cursor_session_rule_key(name: &str, args: &Value, call: &Value, cwd: &str) -> Option<String> {
+    let raw_input = &call["rawInput"];
+    match name {
+        "editToolCall" | "readToolCall" | "deleteToolCall" => {
+            let op = match name {
+                "editToolCall" => "edit",
+                "readToolCall" => "read",
+                _ => "delete",
+            };
+            let raw_path = args["path"]
+                .as_str()
+                .or_else(|| call["locations"][0]["path"].as_str())
+                .or_else(|| raw_input["path"].as_str())
+                .or_else(|| raw_input["file_path"].as_str())
+                .or_else(|| raw_input["filePath"].as_str())?;
+            let clean = clean_workspace_relative_path(raw_path, cwd)?;
+            Some(format!("cursor:{op}:{clean}"))
+        }
+        "shellToolCall" => {
+            let raw_cmd = args["command"]
+                .as_str()
+                .or_else(|| raw_input["command"].as_str())
+                .or_else(|| raw_input["cmd"].as_str())?;
+            let clean = clean_exact_shell_command(raw_cmd)?;
+            Some(format!("cursor:shell:{clean}"))
+        }
+        _ => None,
+    }
+}
 /// `known` is the call as its `tool_call` update started it: Cursor's request
 /// names the call by its title alone, without its input.
-fn cursor_ask(id: &Value, params: &Value, known: Option<(String, Value)>) -> Ask {
+fn cursor_ask(
+    id: &Value,
+    params: &Value,
+    known: Option<(String, Value)>,
+    known_diff: Option<String>,
+    cwd: &str,
+) -> Ask {
     let call = &params["toolCall"];
-    let (name, args) = known.unwrap_or_else(|| cursor_tool(call));
-    let tool = match name.as_str() {
-        "shellToolCall" => "Shell".to_owned(),
-        "editToolCall" => "Edit".to_owned(),
-        "deleteToolCall" => "Delete".to_owned(),
-        "readToolCall" => "Read".to_owned(),
-        "grepToolCall" => "Search".to_owned(),
-        "webFetchToolCall" => "Fetch".to_owned(),
-        _ => some_text(&call["kind"], 40)
-            .filter(|kind| kind != "other")
-            .unwrap_or_else(|| "Tool".into()),
+    let (name, mut args) = known.unwrap_or_else(|| cursor_tool(call));
+    if args.is_object() {
+        let (fallback_name, fallback_args) = cursor_tool(call);
+        if fallback_name == name
+            && let Some(obj) = args.as_object_mut()
+            && let Some(fb) = fallback_args.as_object()
+        {
+            for (k, v) in fb {
+                if obj.get(k).is_none_or(Value::is_null) && !v.is_null() {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    let (tool, kind) = match name.as_str() {
+        "shellToolCall" => ("Shell".to_owned(), "command"),
+        "editToolCall" => ("Edit".to_owned(), "file_change"),
+        "deleteToolCall" => ("Delete".to_owned(), "file_change"),
+        "readToolCall" => ("Read".to_owned(), "tool"),
+        "grepToolCall" => ("Search".to_owned(), "tool"),
+        "webFetchToolCall" => ("Fetch".to_owned(), "tool"),
+        _ => (
+            some_text(&call["kind"], 40)
+                .filter(|kind| kind != "other")
+                .unwrap_or_else(|| "Tool".into()),
+            "tool",
+        ),
     };
     let title = some_text(&json!(cursor_title(call)), SUMMARY_LIMIT);
     let summary = ["command", "path", "pattern", "url"]
@@ -1041,8 +2037,18 @@ fn cursor_ask(id: &Value, params: &Value, known: Option<(String, Value)>) -> Ask
         .flatten()
         .find_map(|item| some_text(&item["content"]["text"], DETAIL_LIMIT));
     let detail = reason.or_else(|| title.filter(|title| title != &summary));
+    let diff_preview = if name == "editToolCall" {
+        let path = args["path"].as_str().unwrap_or("");
+        cursor_diff_preview(path, &args, &call["rawInput"], &call["content"]).or(known_diff)
+    } else {
+        None
+    };
+    let session_rule_key = cursor_session_rule_key(&name, &args, call, cwd);
+    let session_option = session_rule_key.is_some();
+    let rule_summary = session_option.then(|| CURSOR_SESSION_RULE_SUMMARY.to_owned());
     // Cursor offers allow-once, allow-always and reject-once. Allow-always is
-    // kept by Cursor beyond this session, so the Harness offers only once.
+    // persisted to ~/.cursor/cli-config.json by Cursor CLI, so Harness ALWAYS
+    // maps AllowSession back to allow_once and caches the rule locally instead.
     let option = |kind: &str, fallback: &str| {
         params["options"]
             .as_array()
@@ -1054,6 +2060,7 @@ fn cursor_ask(id: &Value, params: &Value, known: Option<(String, Value)>) -> Ask
             .to_owned()
     };
     let select = |option: String| json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"selected","optionId":option}}});
+    let allow_once_reply = select(option("allow_once", "allow-once"));
     Ask {
         public: PermissionAsk {
             id: format!("cursor-{}", request_id(id)),
@@ -1061,12 +2068,113 @@ fn cursor_ask(id: &Value, params: &Value, known: Option<(String, Value)>) -> Ask
             tool,
             summary,
             detail,
-            session_option: false,
+            session_option,
+            kind: kind.into(),
+            diff_preview,
+            rule_summary,
+            session_rule_key,
+            questions: None,
         },
-        allow: select(option("allow_once", "allow-once")),
-        allow_session: None,
-        deny: select(option("reject_once", "reject-once")),
+        reply: AskReply::Static {
+            allow: allow_once_reply.clone(),
+            allow_session: session_option.then_some(allow_once_reply),
+            deny: select(option("reject_once", "reject-once")),
+        },
     }
+}
+fn cursor_question_ask(id: &Value, params: &Value) -> Option<Ask> {
+    let mut parsed = parse_questions(&params["questions"], false);
+    if parsed.is_empty() {
+        let has_single = params["prompt"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+            || params["question"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+            || params["options"].as_array().is_some_and(|a| !a.is_empty());
+        if has_single {
+            parsed = parse_questions(&Value::Array(vec![params.clone()]), false);
+        }
+    }
+    if parsed.is_empty() {
+        return None;
+    }
+    let summary = question_summary(&parsed);
+    let detail = some_text(&params["title"], DETAIL_LIMIT).filter(|d| d != &summary);
+    let questions = Some(parsed.iter().map(|q| q.public.clone()).collect());
+    let reply_id = id.clone();
+    Some(Ask {
+        public: PermissionAsk {
+            id: format!("cursor-{}", request_id(id)),
+            provider: "cursor".into(),
+            tool: "Question".into(),
+            summary,
+            detail,
+            session_option: false,
+            kind: "question".into(),
+            diff_preview: None,
+            rule_summary: None,
+            session_rule_key: None,
+            questions,
+        },
+        reply: AskReply::Dynamic(Box::new(move |answer: &Answer| {
+            if answer.decision == Decision::Deny {
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": reply_id,
+                    "result": {
+                        "outcome": {
+                            "outcome": "cancelled"
+                        }
+                    }
+                });
+            }
+            let mut entries = Vec::new();
+            for q in &parsed {
+                let selected = extract_selected_for_question(answer.answers.as_ref(), q);
+                if selected.is_empty() {
+                    continue;
+                }
+                let mut selected_option_ids = Vec::new();
+                let mut freeform_parts = Vec::new();
+                for val in selected {
+                    if let Some(matched) = q
+                        .options
+                        .iter()
+                        .find(|opt| opt.id.as_deref() == Some(val.as_str()) || opt.label == val)
+                    {
+                        let opt_id = matched.id.as_ref().unwrap_or(&matched.label);
+                        if !selected_option_ids
+                            .iter()
+                            .any(|existing| existing == opt_id)
+                        {
+                            selected_option_ids.push(opt_id.clone());
+                        }
+                    } else {
+                        freeform_parts.push(val);
+                    }
+                }
+                let mut entry = json!({
+                    "questionId": q.id,
+                    "selectedOptionIds": selected_option_ids,
+                });
+                if !freeform_parts.is_empty() {
+                    entry["freeform"] = json!(freeform_parts.join(", "));
+                }
+                entries.push(entry);
+            }
+            json!({
+                "jsonrpc": "2.0",
+                "id": reply_id,
+                "result": {
+                    "outcome": {
+                        "outcome": "answered",
+                        "answers": entries,
+                    }
+                }
+            })
+        })),
+    })
 }
 impl Driver for Cursor {
     fn answered(&mut self, ask: &str, allowed: bool) {
@@ -1204,9 +2312,22 @@ impl Driver for Cursor {
                     self.flush(&mut step);
                     let call = request_id(&message["params"]["toolCall"]["toolCallId"]);
                     let known = self.calls.get(&call).cloned();
-                    let ask = cursor_ask(id, &message["params"], known);
+                    let known_diff = self.diffs.get(&call).cloned();
+                    let ask =
+                        cursor_ask(id, &message["params"], known, known_diff, &self.setup.cwd);
                     self.asked.insert(ask.public.id.clone(), call);
                     step.asks.push(ask);
+                } else if method == "cursor/ask_question"
+                    && let Some(ask) = cursor_question_ask(id, &message["params"])
+                {
+                    if self.setup.mode == PermissionMode::Manual {
+                        self.flush(&mut step);
+                        step.asks.push(ask);
+                    } else {
+                        step.notices
+                            .push(ask.public.resolved_event("declined", "auto"));
+                        step.replies.push(ask.deny_reply());
+                    }
                 } else {
                     step.replies.push(json!({
                         "jsonrpc": "2.0",
@@ -1336,22 +2457,30 @@ mod tests {
         let ask = &step.asks[0];
         assert_eq!(ask.public.id, "claude-req-1");
         assert_eq!(ask.public.tool, "Bash");
+        assert_eq!(ask.public.kind, "command");
         assert_eq!(ask.public.summary, "touch probe.txt");
         assert_eq!(ask.public.detail.as_deref(), Some("Create a file"));
-        assert!(ask.public.session_option);
-        assert_eq!(ask.allow["response"]["request_id"], "req-1");
-        assert_eq!(ask.allow["response"]["response"]["behavior"], "allow");
         assert_eq!(
-            ask.allow["response"]["response"]["updatedInput"]["command"],
+            ask.public.rule_summary.as_deref(),
+            Some("Session rule: Bash(touch probe.txt)")
+        );
+        assert!(ask.public.session_option);
+        assert_eq!(ask.allow_reply()["response"]["request_id"], "req-1");
+        assert_eq!(
+            ask.allow_reply()["response"]["response"]["behavior"],
+            "allow"
+        );
+        assert_eq!(
+            ask.allow_reply()["response"]["response"]["updatedInput"]["command"],
             "touch probe.txt"
         );
-        let session = ask.allow_session.as_ref().unwrap();
+        let session = ask.allow_session_reply().unwrap();
         // The approval stays in the session; nothing is written to the project.
         assert_eq!(
             session["response"]["response"]["updatedPermissions"][0]["destination"],
             "session"
         );
-        assert_eq!(ask.deny["response"]["response"]["behavior"], "deny");
+        assert_eq!(ask.deny_reply()["response"]["response"]["behavior"], "deny");
 
         let mut auto = claude(setup(PermissionMode::Auto, None));
         let step = auto.receive(request);
@@ -1359,6 +2488,171 @@ mod tests {
         assert_eq!(step.replies[0]["response"]["response"]["behavior"], "deny");
         assert_eq!(step.notices[0]["state"], "declined");
         assert_eq!(step.notices[0]["by"], "auto");
+    }
+
+    #[test]
+    fn claude_edit_multiedit_write_and_rule_summaries_enrich_permission_asks() {
+        let mut driver = claude(setup(PermissionMode::Manual, None));
+
+        // Edit
+        let step = driver.receive(json!({
+            "type": "control_request",
+            "request_id": "edit-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Edit",
+                "input": {
+                    "file_path": "src/lib.rs",
+                    "old_string": "fn one() -> i32 {\n    1\n}",
+                    "new_string": "fn one() -> i32 {\n    2\n}"
+                },
+                "permission_suggestions": [
+                    {"type": "addDirectories", "directories": ["src"], "destination": "localSettings"},
+                    {"type": "setMode", "mode": "acceptEdits", "destination": "localSettings"}
+                ]
+            }
+        }));
+        let edit_ask = &step.asks[0];
+        assert_eq!(edit_ask.public.kind, "file_change");
+        let diff = edit_ask.public.diff_preview.as_deref().unwrap();
+        assert!(diff.contains("--- a/src/lib.rs"), "{diff}");
+        assert!(diff.contains("-    1\n+    2"), "{diff}");
+        assert_eq!(
+            edit_ask.public.rule_summary.as_deref(),
+            Some("Session rule: dir(src), mode(acceptEdits)")
+        );
+
+        // MultiEdit
+        let step = driver.receive(json!({
+            "type": "control_request",
+            "request_id": "edit-2",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "MultiEdit",
+                "input": {
+                    "file_path": "src/main.rs",
+                    "edits": [
+                        {"old_string": "let a = 1;", "new_string": "let a = 2;"},
+                        {"old_string": "let b = 3;", "new_string": "let b = 4;"}
+                    ]
+                }
+            }
+        }));
+        let multi_ask = &step.asks[0];
+        assert_eq!(multi_ask.public.kind, "file_change");
+        let multi_diff = multi_ask.public.diff_preview.as_deref().unwrap();
+        assert!(
+            multi_diff.contains("-let a = 1;\n+let a = 2;"),
+            "{multi_diff}"
+        );
+        assert!(
+            multi_diff.contains("-let b = 3;\n+let b = 4;"),
+            "{multi_diff}"
+        );
+
+        // Write (oversized content bounded <= 6144)
+        let huge = "line\n".repeat(3000);
+        let step = driver.receive(json!({
+            "type": "control_request",
+            "request_id": "write-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Write",
+                "input": {
+                    "file_path": "big.txt",
+                    "content": huge
+                }
+            }
+        }));
+        let write_ask = &step.asks[0];
+        assert_eq!(write_ask.public.kind, "file_change");
+        let write_diff = write_ask.public.diff_preview.as_deref().unwrap();
+        assert!(write_diff.starts_with("--- /dev/null\n+++ b/big.txt\n"));
+        assert!(write_diff.contains("+line"));
+        assert_eq!(
+            write_diff.chars().count(),
+            crate::permission::DIFF_PREVIEW_LIMIT
+        );
+
+        // WebFetch -> kind "tool"
+        let step = driver.receive(json!({
+            "type": "control_request",
+            "request_id": "fetch-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "WebFetch",
+                "input": {"url": "https://example.com"}
+            }
+        }));
+        assert_eq!(step.asks[0].public.kind, "tool");
+        assert_eq!(step.asks[0].public.diff_preview, None);
+    }
+
+    #[test]
+    fn claude_ask_user_question_routes_questions_and_formats_updated_input() {
+        let request = json!({
+            "type": "control_request",
+            "request_id": "ask-q-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {
+                    "questions": [
+                        {
+                            "header": "Database",
+                            "question": "Which database should we use?",
+                            "multiSelect": false,
+                            "options": [
+                                {"label": "PostgreSQL", "description": "Relational DB"},
+                                {"label": "SQLite", "description": "Embedded DB"}
+                            ]
+                        },
+                        {
+                            "header": "Features",
+                            "question": "Which features?",
+                            "multiSelect": true,
+                            "options": [
+                                {"label": "Auth", "description": "JWT auth"},
+                                {"label": "Audit", "description": "Audit log"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let mut manual = claude(setup(PermissionMode::Manual, None));
+        let step = manual.receive(request.clone());
+        let ask = &step.asks[0];
+        assert_eq!(ask.public.kind, "question");
+        assert!(!ask.public.session_option);
+        assert_eq!(ask.public.rule_summary, None);
+        let qs = ask.public.questions.as_ref().unwrap();
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0]["header"], "Database");
+        assert_eq!(qs[0]["multi_select"], false);
+        assert_eq!(qs[0]["options"][0]["label"], "PostgreSQL");
+        assert_eq!(qs[1]["multi_select"], true);
+
+        let reply = ask.reply_for(&Answer {
+            decision: Decision::Allow,
+            answers: Some(json!({
+                "Which database should we use?": "PostgreSQL",
+                "Which features?": ["Auth", "Audit"]
+            })),
+        });
+        let updated = &reply["response"]["response"]["updatedInput"];
+        assert_eq!(updated["questions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            updated["answers"]["Which database should we use?"],
+            "PostgreSQL"
+        );
+        assert_eq!(updated["answers"]["Which features?"], "Auth, Audit");
+        assert_eq!(ask.deny_reply()["response"]["response"]["behavior"], "deny");
+
+        let mut auto = claude(setup(PermissionMode::Auto, None));
+        let step = auto.receive(request);
+        assert!(step.asks.is_empty());
+        assert_eq!(step.replies[0]["response"]["response"]["behavior"], "deny");
     }
 
     #[test]
@@ -1414,18 +2708,35 @@ mod tests {
         let step = driver.receive(json!({"id":7,"method":"item/fileChange/requestApproval","params":{"threadId":"0199-thread","turnId":"turn-1","itemId":"item-3","startedAtMs":1}}));
         let ask = &step.asks[0];
         assert_eq!(ask.public.id, "codex-7");
+        assert_eq!(ask.public.kind, "file_change");
         assert_eq!(ask.public.summary, "update src/a.rs");
-        assert_eq!(ask.allow, json!({"id":7,"result":{"decision":"accept"}}));
         assert_eq!(
-            ask.allow_session.as_ref().unwrap()["result"]["decision"],
+            ask.public.diff_preview.as_deref(),
+            Some("--- a/src/a.rs\n+++ b/src/a.rs\n@@")
+        );
+        assert_eq!(
+            ask.public.rule_summary.as_deref(),
+            Some("Remember approval for this Codex thread")
+        );
+        assert_eq!(
+            ask.allow_reply(),
+            json!({"id":7,"result":{"decision":"accept"}})
+        );
+        assert_eq!(
+            ask.allow_session_reply().unwrap()["result"]["decision"],
             "acceptForSession"
         );
-        assert_eq!(ask.deny["result"]["decision"], "decline");
+        assert_eq!(ask.deny_reply()["result"]["decision"], "decline");
         let step = driver.receive(json!({"id":8,"method":"item/commandExecution/requestApproval","params":{"threadId":"0199-thread","turnId":"turn-1","itemId":"item-4","command":"cargo test","cwd":"/work/project","reason":"Run the tests","startedAtMs":2}}));
+        assert_eq!(step.asks[0].public.kind, "command");
         assert_eq!(step.asks[0].public.summary, "cargo test");
         assert_eq!(
             step.asks[0].public.detail.as_deref(),
             Some("Run the tests · in /work/project")
+        );
+        assert_eq!(
+            step.asks[0].public.rule_summary.as_deref(),
+            Some("Remember approval for this Codex thread")
         );
 
         driver.receive(json!({"method":"thread/tokenUsage/updated","params":{"threadId":"0199-thread","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":150,"cachedInputTokens":20,"outputTokens":30,"reasoningOutputTokens":5,"totalTokens":180},"last":{"inputTokens":50,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":5,"totalTokens":60}}}}));
@@ -1471,6 +2782,130 @@ mod tests {
         let step = driver
             .receive(json!({"id": 4, "method": "mcpServer/elicitation/request", "params": {}}));
         assert_eq!(step.replies[0]["result"]["action"], "decline");
+    }
+
+    #[test]
+    fn codex_permissions_and_request_user_input_route_rich_asks() {
+        let mut driver = codex(setup(PermissionMode::Manual, None));
+        let step = driver.receive(json!({
+            "id": 10,
+            "method": "item/permissions/requestApproval",
+            "params": {
+                "permissions": {
+                    "fileSystem": {"write": ["/tmp/out"]},
+                    "network": {"enabled": true}
+                }
+            }
+        }));
+        assert_eq!(step.asks[0].public.kind, "permissions");
+        assert_eq!(
+            step.asks[0].public.rule_summary.as_deref(),
+            Some("Remember approval for this Codex thread")
+        );
+
+        // Multi-file oversized diff is bounded <= 6144 chars.
+        let big_patch = format!("@@ -1,1 +1,1 @@\n{}", "+z".repeat(4000));
+        driver.receive(json!({
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "id": "item-big",
+                    "status": "inProgress",
+                    "changes": [
+                        {"path": "src/one.rs", "kind": {"type": "update"}, "diff": big_patch},
+                        {"path": "src/two.rs", "kind": {"type": "add"}, "diff": "@@ -0,0 +1,1 @@\n+hi"}
+                    ]
+                }
+            }
+        }));
+        let big_step = driver.receive(json!({
+            "id": 12,
+            "method": "item/fileChange/requestApproval",
+            "params": {"itemId": "item-big"}
+        }));
+        let big_diff = big_step.asks[0].public.diff_preview.as_deref().unwrap();
+        assert!(big_diff.starts_with("--- a/src/one.rs\n+++ b/src/one.rs\n"));
+        assert_eq!(
+            big_diff.chars().count(),
+            crate::permission::DIFF_PREVIEW_LIMIT
+        );
+
+        let user_input = json!({
+            "id": 11,
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "questions": [
+                    {
+                        "id": "db",
+                        "header": "Database",
+                        "question": "Which database?",
+                        "isOther": true,
+                        "options": [
+                            {"label": "PostgreSQL", "description": "Full SQL"},
+                            {"label": "SQLite", "description": "File DB"}
+                        ]
+                    },
+                    {
+                        "id": "flags",
+                        "header": "Flags",
+                        "question": "Select flags",
+                        "multiSelect": true,
+                        "isOther": false,
+                        "options": [
+                            {"label": "Verbose", "description": "More logs"},
+                            {"label": "Strict", "description": "Fail fast"}
+                        ]
+                    }
+                ]
+            }
+        });
+        let step = driver.receive(user_input.clone());
+        let ask = &step.asks[0];
+        assert_eq!(ask.public.kind, "question");
+        assert!(!ask.public.session_option);
+        let qs = ask.public.questions.as_ref().unwrap();
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0]["id"], "db");
+        assert_eq!(qs[0]["is_other"], true);
+        assert_eq!(qs[1]["multi_select"], true);
+        assert_eq!(qs[1]["is_other"], false);
+
+        let reply = ask.reply_for(&Answer {
+            decision: Decision::Allow,
+            answers: Some(json!({
+                "db": "PostgreSQL",
+                "flags": ["Verbose", "Strict"]
+            })),
+        });
+        assert_eq!(
+            reply,
+            json!({
+                "id": 11,
+                "result": {
+                    "answers": {
+                        "db": {"answers": ["PostgreSQL"]},
+                        "flags": {"answers": ["Verbose", "Strict"]}
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            ask.deny_reply(),
+            json!({"id": 11, "result": {"answers": {}}})
+        );
+        assert_eq!(
+            ask.reply_for(&Answer::from_decision(Decision::Allow)),
+            json!({"id": 11, "result": {"answers": {}}})
+        );
+
+        let mut auto = codex(setup(PermissionMode::Auto, None));
+        let step = auto.receive(user_input);
+        assert!(step.asks.is_empty());
+        assert_eq!(
+            step.replies[0],
+            json!({"id": 11, "result": {"answers": {}}})
+        );
     }
 
     #[test]
@@ -1521,14 +2956,33 @@ mod tests {
         let ask = &step.asks[0];
         assert_eq!(ask.public.id, "cursor-0");
         assert_eq!(ask.public.tool, "Shell");
+        assert_eq!(ask.public.kind, "command");
         assert_eq!(ask.public.summary, "cargo test");
         assert_eq!(
             ask.public.detail.as_deref(),
             Some("Not in allowlist: cargo")
         );
-        assert!(!ask.public.session_option);
-        assert_eq!(ask.allow["result"]["outcome"]["optionId"], "allow-once");
-        assert_eq!(ask.deny["result"]["outcome"]["optionId"], "reject-once");
+        assert!(ask.public.session_option);
+        assert_eq!(
+            ask.public.session_rule_key.as_deref(),
+            Some("cursor:shell:cargo test")
+        );
+        assert_eq!(
+            ask.public.rule_summary.as_deref(),
+            Some(CURSOR_SESSION_RULE_SUMMARY)
+        );
+        assert_eq!(
+            ask.allow_reply()["result"]["outcome"]["optionId"],
+            "allow-once"
+        );
+        assert_eq!(
+            ask.allow_session_reply().unwrap()["result"]["outcome"]["optionId"],
+            "allow-once"
+        );
+        assert_eq!(
+            ask.deny_reply()["result"]["outcome"]["optionId"],
+            "reject-once"
+        );
         // A request for a call Cursor never announced reads its title.
         let step = driver.receive(json!({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"chat-1","toolCall":{"toolCallId":"call-9","title":"`rm -r build`","kind":"execute"},"options":[]}}));
         assert_eq!(step.asks[0].public.summary, "rm -r build");
@@ -1586,5 +3040,270 @@ mod tests {
         let step = driver
             .receive(json!({"jsonrpc":"2.0","id":5,"method":"cursor/ask_question","params":{}}));
         assert_eq!(step.replies[0]["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn cursor_edit_diff_preview_and_strict_session_rule_keys() {
+        let mut driver = cursor(setup(PermissionMode::Manual, None));
+        let init = driver.opening().replies[0].clone();
+        respond(&mut driver, &init, json!({"protocolVersion": 1}));
+        let new_req = json!({"id": 2});
+        respond(&mut driver, &new_req, json!({"sessionId": "chat-2"}));
+
+        // 1. Diff preview captured from session/update tool_call rawInput and surfaced in request_permission
+        driver.receive(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "chat-2",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "edit-1",
+                    "title": "Edit src/lib.rs",
+                    "kind": "edit",
+                    "status": "pending",
+                    "rawInput": {
+                        "path": "./src/./lib.rs",
+                        "oldText": "pub fn x() -> i32 {\n    1\n}",
+                        "newText": "pub fn x() -> i32 {\n    2\n}"
+                    }
+                }
+            }
+        }));
+        let step = driver.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "chat-2",
+                "toolCall": {"toolCallId": "edit-1", "title": "Edit src/lib.rs", "kind": "edit"},
+                "options": [
+                    {"optionId": "allow-once", "kind": "allow_once"},
+                    {"optionId": "allow-always", "kind": "allow_always"},
+                    {"optionId": "reject-once", "kind": "reject_once"}
+                ]
+            }
+        }));
+        let edit_ask = &step.asks[0];
+        assert_eq!(edit_ask.public.kind, "file_change");
+        let diff = edit_ask.public.diff_preview.as_deref().unwrap();
+        assert!(diff.contains("--- a/src/lib.rs"), "{diff}");
+        assert!(diff.contains("-    1\n+    2"), "{diff}");
+        assert!(edit_ask.public.session_option);
+        assert_eq!(
+            edit_ask.public.session_rule_key.as_deref(),
+            Some("cursor:edit:src/lib.rs")
+        );
+        assert_eq!(
+            edit_ask.public.rule_summary.as_deref(),
+            Some(CURSOR_SESSION_RULE_SUMMARY)
+        );
+        // Never sends allow-always to Cursor CLI!
+        assert_eq!(
+            edit_ask.allow_session_reply().unwrap()["result"]["outcome"]["optionId"],
+            "allow-once"
+        );
+
+        // 2. Workspace-contained absolute path normalizes to canonical relative key;
+        //    content diff block is also extracted.
+        let step = driver.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "chat-2",
+                "toolCall": {
+                    "toolCallId": "edit-2",
+                    "kind": "edit",
+                    "locations": [{"path": "/work/project/src/b.rs"}],
+                    "content": [{"type": "diff", "path": "src/b.rs", "diff": "@@ -1 +1 @@\n-old\n+new"}]
+                }
+            }
+        }));
+        assert_eq!(
+            step.asks[0].public.session_rule_key.as_deref(),
+            Some("cursor:edit:src/b.rs")
+        );
+        assert!(
+            step.asks[0]
+                .public
+                .diff_preview
+                .as_deref()
+                .unwrap()
+                .contains("-old\n+new")
+        );
+
+        // 3. Unsafe paths & non-path tools must NOT get session_rule_key or session_option.
+        for bad_path in [
+            "../secret.txt",
+            "src/../../secret.txt",
+            "/etc/passwd",
+            "/work/project-other/src/a.rs",
+            "/work/project",
+            ".",
+            "~/notes.md",
+        ] {
+            let step = driver.receive(json!({
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {
+                        "toolCallId": "bad-path",
+                        "kind": "edit",
+                        "rawInput": {"path": bad_path}
+                    }
+                }
+            }));
+            let ask = &step.asks[0];
+            assert_eq!(ask.public.session_rule_key, None, "{bad_path}");
+            assert!(!ask.public.session_option, "{bad_path}");
+            assert_eq!(ask.public.rule_summary, None, "{bad_path}");
+            assert_eq!(ask.allow_session_reply(), None, "{bad_path}");
+        }
+
+        // 4. Chained/unsafe shell commands must NOT get session_rule_key or session_option.
+        for bad_cmd in [
+            "cargo test; rm -rf /",
+            "cargo test | cat",
+            "cargo test &",
+            "cargo test && ls",
+            "cargo test || ls",
+            "echo `whoami`",
+            "echo $HOME",
+            "echo x > out.txt",
+            "cat < in.txt",
+            "echo a\nb",
+            "echo a\rb",
+        ] {
+            let step = driver.receive(json!({
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {
+                        "toolCallId": "bad-cmd",
+                        "kind": "execute",
+                        "rawInput": {"command": bad_cmd}
+                    }
+                }
+            }));
+            let ask = &step.asks[0];
+            assert_eq!(ask.public.session_rule_key, None, "{bad_cmd:?}");
+            assert!(!ask.public.session_option, "{bad_cmd:?}");
+            assert_eq!(ask.allow_session_reply(), None, "{bad_cmd:?}");
+        }
+
+        // 5. readToolCall & deleteToolCall work on clean workspace-relative paths; grep/fetch do not.
+        for (kind, path, expected) in [
+            ("read", "README.md", Some("cursor:read:README.md")),
+            ("delete", "tmp/old.txt", Some("cursor:delete:tmp/old.txt")),
+            ("search", "src", None),
+        ] {
+            let step = driver.receive(json!({
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {
+                        "toolCallId": "t-14",
+                        "kind": kind,
+                        "rawInput": {"path": path, "pattern": "foo"}
+                    }
+                }
+            }));
+            assert_eq!(
+                step.asks[0].public.session_rule_key.as_deref(),
+                expected,
+                "{kind}"
+            );
+            assert_eq!(step.asks[0].public.session_option, expected.is_some());
+        }
+    }
+
+    #[test]
+    fn cursor_ask_question_routes_questions_and_formats_acp_reply() {
+        let mut driver = cursor(setup(PermissionMode::Manual, None));
+        let step = driver.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "cursor/ask_question",
+            "params": {
+                "toolCallId": "call-q",
+                "title": "Configuration",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "prompt": "Pick runtime",
+                        "allowMultiple": false,
+                        "options": [
+                            {"id": "opt_tokio", "label": "Tokio"},
+                            {"id": "opt_async", "label": "Async-std"}
+                        ]
+                    },
+                    {
+                        "id": "q2",
+                        "prompt": "Extra flags?",
+                        "allowMultiple": true,
+                        "options": [
+                            {"id": "opt_a", "label": "Flag A"}
+                        ]
+                    }
+                ]
+            }
+        }));
+        let ask = &step.asks[0];
+        assert_eq!(ask.public.kind, "question");
+        assert!(!ask.public.session_option);
+        assert_eq!(ask.public.questions.as_ref().unwrap().len(), 2);
+
+        let reply = ask.reply_for(&Answer {
+            decision: Decision::Allow,
+            answers: Some(json!({
+                "q1": "Tokio",
+                "q2": ["opt_a", "custom-flag"]
+            })),
+        });
+        assert_eq!(
+            reply,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "result": {
+                    "outcome": {
+                        "outcome": "answered",
+                        "answers": [
+                            {"questionId": "q1", "selectedOptionIds": ["opt_tokio"]},
+                            {"questionId": "q2", "selectedOptionIds": ["opt_a"], "freeform": "custom-flag"}
+                        ]
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            ask.deny_reply(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "result": {
+                    "outcome": {
+                        "outcome": "cancelled"
+                    }
+                }
+            })
+        );
+
+        // Single-question params form (prompt + options) also works.
+        let step = driver.receive(json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "cursor/ask_question",
+            "params": {
+                "prompt": "Proceed?",
+                "options": ["Yes", "No"]
+            }
+        }));
+        assert_eq!(step.asks[0].public.kind, "question");
+        assert_eq!(step.asks[0].public.summary, "Proceed?");
     }
 }
