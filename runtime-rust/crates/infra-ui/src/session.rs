@@ -3874,6 +3874,65 @@ fn sanitize_memory_text(value: &str, max_chars: usize) -> String {
     trimmed.chars().take(max_chars).collect()
 }
 
+fn is_canonical_learning_source(value: &str) -> bool {
+    let head = value.split('#').next().unwrap_or(value).trim();
+    if head.is_empty() || head.starts_with('/') || head.contains('\\') || head.contains(':') {
+        return false;
+    }
+    let parts: Vec<&str> = head.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        return false;
+    }
+    if ["memory-bank/", "project-brain/"]
+        .iter()
+        .any(|prefix| head.starts_with(prefix))
+        || parts.windows(2).any(|pair| {
+            matches!(
+                (pair[0], pair[1]),
+                ("memory-bank", "local" | "chunks" | "indexes")
+                    | (
+                        "project-brain",
+                        "local" | "dynamic" | "archive" | "control" | "indexes"
+                    )
+            )
+        })
+    {
+        return false;
+    }
+    let name = parts.last().copied().unwrap_or("").to_ascii_lowercase();
+    let suffix = name.rsplit_once('.').map(|(_, s)| s).unwrap_or("");
+    if name == ".env"
+        || (name.starts_with(".env.") && name.len() > 5)
+        || matches!(name.as_str(), "secret" | "secrets" | "credentials.json")
+        || (name.starts_with("id_")
+            && name.len() > 3
+            && name[3..].chars().all(|c| c.is_ascii_alphanumeric()))
+        || matches!(
+            suffix,
+            "pem" | "key" | "p12" | "pfx" | "jks" | "keystore" | "sqlite" | "db"
+        )
+    {
+        return false;
+    }
+    !parts.iter().any(|part| {
+        let folded = part.to_ascii_lowercase();
+        matches!(
+            folded.as_str(),
+            ".git"
+                | ".ssh"
+                | ".aws"
+                | ".kube"
+                | "node_modules"
+                | "vendor"
+                | ".venv"
+                | "__pycache__"
+                | "secrets"
+                | ".secrets"
+                | "credentials"
+        ) || folded.starts_with(".env")
+    })
+}
+
 pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V, preview: &V) -> V {
     let snapshot_files = m::array(&results["snapshot"]["files"]);
     let mut active_files = Vec::new();
@@ -3892,6 +3951,16 @@ pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V,
             active_files.push(path);
         }
     }
+    let canonical_active: Vec<String> = active_files
+        .iter()
+        .filter(|path| is_canonical_learning_source(path))
+        .cloned()
+        .collect();
+    let canonical_deleted: Vec<String> = deleted_files
+        .iter()
+        .filter(|path| is_canonical_learning_source(path))
+        .cloned()
+        .collect();
 
     let mut passed_checks = Vec::new();
     let mut failed_checks = Vec::new();
@@ -3937,11 +4006,21 @@ pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V,
         .or_else(|| session["brain"]["task_id"].as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let total_changed = active_files.len() + deleted_files.len();
+    let progress_active = if canonical_active.is_empty() && canonical_deleted.is_empty() {
+        &active_files
+    } else {
+        &canonical_active
+    };
+    let progress_deleted = if canonical_active.is_empty() && canonical_deleted.is_empty() {
+        &deleted_files
+    } else {
+        &canonical_deleted
+    };
+    let total_changed = progress_active.len() + progress_deleted.len();
     if total_changed > 0 {
-        let listed: Vec<String> = active_files
+        let listed: Vec<String> = progress_active
             .iter()
-            .chain(deleted_files.iter())
+            .chain(progress_deleted.iter())
             .take(5)
             .cloned()
             .collect();
@@ -4024,7 +4103,8 @@ pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V,
             break;
         }
         let file = m::text(item, "file").trim().to_owned();
-        if file.is_empty() || deleted_files.contains(&file) {
+        if file.is_empty() || deleted_files.contains(&file) || !is_canonical_learning_source(&file)
+        {
             continue;
         }
         let claim = sanitize_memory_text(&m::text(item, "claim"), 200);
@@ -4054,10 +4134,10 @@ pub(crate) fn build_memory_draft_prefill(session: &V, results: &V, delivery: &V,
         }));
     }
     if learnings.is_empty()
-        && !active_files.is_empty()
+        && !canonical_active.is_empty()
         && (!passed_checks.is_empty() || session["brain"].is_object())
     {
-        let sources: Vec<String> = active_files.iter().take(3).cloned().collect();
+        let sources: Vec<String> = canonical_active.iter().take(3).cloned().collect();
         let title =
             sanitize_memory_text(&format!("Verified behavior in {}", sources.join(", ")), 200);
         let consequence = if !passed_checks.is_empty() {
@@ -7055,5 +7135,45 @@ mod update_tests {
         }));
         crate::test_support::assert_no_inline_hex_colors(&err_html);
         assert!(err_html.contains("Prepare the linked task before saving memory."));
+    }
+
+    #[test]
+    fn memory_draft_prefill_excludes_non_canonical_brain_and_memory_paths() {
+        let session = json!({
+            "brain": {"bank": "memory-bank", "task_id": "TASK-202"},
+            "clash_result": {
+                "items": [{
+                    "kind": "finding",
+                    "status": "disputed",
+                    "file": "project-brain/control/handoffs/h1.md",
+                    "claim": "Internal handoff note"
+                }]
+            }
+        });
+        let results_v = json!({
+            "snapshot": {
+                "files": [
+                    {"path": "project-brain/indexes/active.json", "status": "M"},
+                    {"path": "project-brain/control/handoffs/8966be82.md", "status": "A"},
+                    {"path": "services/billing/project-brain/control/handoffs/eae40ef8.md", "status": "A"},
+                    {"path": "services/billing/project-brain/indexes/active.json", "status": "M"},
+                    {"path": "memory-bank/chunks/MEM-20261118-deadbeef-tax.md", "status": "M"},
+                    {"path": ".env.local", "status": "M"},
+                    {"path": "services/orders/src/OrderService.php", "status": "M"}
+                ]
+            },
+            "checks": []
+        });
+        let draft = build_memory_draft_prefill(&session, &results_v, &json!({}), &json!({}));
+        assert!(draft["progress"]
+            .as_str()
+            .unwrap()
+            .contains("Updated 1 file(s): services/orders/src/OrderService.php"));
+        let learnings = draft["learnings"].as_array().unwrap();
+        assert_eq!(learnings.len(), 1);
+        assert_eq!(
+            learnings[0]["sources"],
+            json!(["services/orders/src/OrderService.php"])
+        );
     }
 }
