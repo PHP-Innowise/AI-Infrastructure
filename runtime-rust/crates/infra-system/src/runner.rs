@@ -1,4 +1,5 @@
 use crate::{
+    boundary::{BoundaryScope, SystemBoundaryApprovals, check_step_boundary_writes_with_extra},
     catalog::{System, git_head},
     common::*,
     execution::{
@@ -11,6 +12,7 @@ use crate::{
     },
 };
 use infra_core::{ErrorKind, Result, RuntimeError};
+use infra_host::permission::{Approvals, PermissionMode};
 use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,12 +24,13 @@ use std::{
     time::Instant,
 };
 
-/// Optional code-graph bridge and launch identity hooks threaded through a system run.
+/// Optional code-graph bridge, launch identity, and approval hooks threaded through a system run.
 #[derive(Clone, Default)]
 pub struct RunnerGraphHooks {
     pub bridge: Option<Arc<dyn CodeGraphBridge>>,
     pub system_run_id: Option<String>,
     pub launch_id: Option<String>,
+    pub approvals: Option<Arc<dyn Approvals>>,
 }
 
 /// Opt-in dispatch context policy. The default runner has no extension.
@@ -516,6 +519,177 @@ fn collect_step_git_changes(
     out.into_values().collect()
 }
 
+struct SystemLaunchAdapter {
+    inner: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
+    schema: Value,
+    schema_path: PathBuf,
+    extra: Vec<PathBuf>,
+    read: Vec<PathBuf>,
+    offers: Vec<crate::system_graph::ServiceGraphOffer>,
+}
+
+impl infra_host::provider::LaunchAdapter for SystemLaunchAdapter {
+    fn adapt(
+        &self,
+        input: &infra_host::provider::Launch,
+        mut command: infra_host::provider::PreparedCommand,
+    ) -> infra_host::Result<infra_host::provider::PreparedCommand> {
+        let active_transport = infra_host::provider::transport(input);
+        if input.provider == "cursor"
+            && active_transport == infra_host::provider::Transport::Text
+            && input.prompt.len() > native::CURSOR_PROMPT_BYTES
+        {
+            return Err(infra_host::HarnessError::invalid(
+                "Cursor prompt exceeds argument byte limit; narrow plan",
+            ));
+        }
+        native::apply_system_launch_flags(
+            &input.provider,
+            active_transport,
+            &input.mode,
+            &self.schema,
+            &self.schema_path,
+            &self.extra,
+            &self.read,
+            &mut command.argv,
+        )?;
+        if let Some(inner) = &self.inner {
+            command = inner.adapt(input, command)?;
+        }
+        Ok(crate::workers::prepare_worker_for_transport(
+            &input.provider,
+            &input.mode,
+            active_transport,
+            command,
+            &self.offers,
+        )?)
+    }
+}
+
+struct SystemRunEvents {
+    observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    collector: Mutex<NativeEvidenceCollector>,
+    raw_lines: Mutex<Vec<u8>>,
+    bridge: Option<Arc<dyn CodeGraphBridge>>,
+    graph_ctx: DispatchGraphContext,
+    provider: String,
+    root: PathBuf,
+    phase: String,
+    attempt: u64,
+    tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
+}
+
+impl SystemRunEvents {
+    fn close(&self) {
+        if let Ok(mut tx) = self.tx.lock() {
+            tx.take();
+        }
+    }
+    fn take_collector(&self) -> NativeEvidenceCollector {
+        self.collector
+            .lock()
+            .map(|mut c| std::mem::take(&mut *c))
+            .unwrap_or_default()
+    }
+    fn take_raw_bytes(&self) -> Vec<u8> {
+        self.raw_lines
+            .lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default()
+    }
+}
+
+impl infra_host::process::RunObserver for SystemRunEvents {
+    fn boundary(&self, signal: &str, details: &Value) -> infra_host::Result<()> {
+        if let Some(observer) = &self.observer {
+            observer.boundary(signal, details)?;
+        }
+        Ok(())
+    }
+}
+
+impl infra_host::provider::RunEvents for SystemRunEvents {
+    fn observe(&self, raw: Option<&Value>, _normalized: Option<&Value>) -> infra_host::Result<()> {
+        if let Some(raw) = raw
+            && let Ok(bytes) = serde_json::to_vec(raw)
+        {
+            if let Ok(mut collector) = self.collector.lock() {
+                collector.observe_line(&bytes, &self.provider, &self.root);
+            }
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.on_dispatch_signal(&self.graph_ctx, &bytes);
+            }
+            if let Ok(mut buf) = self.raw_lines.lock()
+                && buf.len().saturating_add(bytes.len()).saturating_add(1) <= 8 * MAX_BYTES
+            {
+                buf.extend_from_slice(&bytes);
+                buf.push(b'\n');
+            }
+            let line = String::from_utf8_lossy(&bytes).to_string();
+            if let Ok(tx) = self.tx.lock()
+                && let Some(tx) = tx.as_ref()
+            {
+                let _ = tx.send(object!({
+                    "type": "output",
+                    "phase": self.phase,
+                    "attempt": self.attempt,
+                    "line": line,
+                }));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn finalize_worker_report(
+    raw_bytes: &[u8],
+    provider: &str,
+    preview: &Value,
+    state: &Value,
+    untrusted_context: bool,
+    receipt: &mut Value,
+) {
+    match native::worker_result(raw_bytes, provider).and_then(|report| {
+        if untrusted_context && infra_core::domain::secret_label(&encoded(&report)?)?.is_some() {
+            return Err(fail("Sensitive experimental worker result"));
+        }
+        execution::validate_report(
+            &report,
+            preview,
+            &texts(&state["selected"]),
+            access_scope(state),
+        )?;
+        Ok(report)
+    }) {
+        Ok(report) => {
+            receipt["report"] = report;
+            receipt["ok"] = object!(execution::success(
+                receipt,
+                preview,
+                state["mode"] == "read-only"
+            ));
+            if receipt["ok"] != true {
+                receipt["error"] = if preview["mode"] == "read-only"
+                    && !texts(&receipt["report"]["changed_files"]).is_empty()
+                {
+                    "read_only_worker_reported_writes"
+                } else {
+                    "worker_blocked_or_verification_incomplete"
+                }
+                .into();
+            }
+        }
+        Err(error) => {
+            receipt["error"] = "invalid_or_sensitive_worker_result".into();
+            receipt["rejection"] = if untrusted_context {
+                "Invalid experimental worker report".into()
+            } else {
+                error.message.chars().take(500).collect::<String>().into()
+            };
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Compatibility API keeps explicit per-call custody and process controls."
@@ -605,9 +779,88 @@ async fn execute_run_context(
  let raw_offers=match &hooks.bridge{Some(bridge)=>bridge.offers_for_dispatch(&graph_ctx)?,None=>vec![]};
  let step_offers=crate::workers::offers_for_step(&state,&preview,&raw_offers);
  let prompt=match &dispatch_context {Some(context)=>context.lock().map_err(|_|fail("Dispatch context lock poisoned"))?.prompt(&state,&plan,&preview,&prior,scratch.as_deref())?,None=>native::prompt_for_with_graphs(&state,&plan,&preview,&prior,scratch.as_deref(),&step_offers)?};
- let prepared=native::prepare_launch(&provider,&executable,&root,&prompt,&schema,&directory.join("result-schema.json"),string(&step["mode"]),&execution::extra_directories(&state,&step,&directory),&execution::read_directories(&state,&step,&directory),adapter.as_deref())?;
- let prepared=match &scratch{Some(scratch)=>native::use_scratch(prepared,scratch)?,None=>prepared};
- let prepared=crate::workers::prepare_worker(&provider,string(&step["mode"]),prepared,&step_offers)?;
+ let step_permissions = if step["mode"] == "edit" {
+     state.get("permissions").and_then(Value::as_str).and_then(PermissionMode::parse)
+ } else {
+     None
+ };
+ let use_host_permissions = provider != "command" && step_permissions.is_some();
+ let extra_dirs = execution::extra_directories(&state, &step, &directory);
+ let read_dirs = execution::read_directories(&state, &step, &directory);
+ let schema_path = directory.join("result-schema.json");
+ let boundary_scope = if step["mode"] == "edit" {
+     Some(BoundaryScope::from_run(&current, &state, &plan, &preview)?)
+ } else {
+     None
+ };
+ let mut prepared_opt = None;
+ let mut host_launch_opt = None;
+ let mut active_transport = infra_host::provider::Transport::Text;
+ if use_host_permissions {
+     let perm_mode = step_permissions.unwrap();
+     let mut launch = infra_host::provider::Launch {
+         provider: provider.clone(),
+         executable: executable.clone(),
+         project: root.clone(),
+         prompt: prompt.clone(),
+         mode: "edit".into(),
+         model: None,
+         session: None,
+         agents: false,
+         count: 1,
+         effort: None,
+         usd: None,
+         hook_events: false,
+         permissions: Some(perm_mode),
+         approvals: None,
+     };
+     active_transport = infra_host::provider::transport(&launch);
+     if let Some(scope) = boundary_scope.as_ref() {
+         let wrap = (perm_mode == PermissionMode::Manual && hooks.approvals.is_some())
+             || (perm_mode == PermissionMode::Auto && provider == "claude");
+         if wrap {
+             launch.approvals = Some(Arc::new(SystemBoundaryApprovals::new(
+                 hooks.approvals.clone(),
+                 Some(perm_mode),
+                 scope.clone(),
+             )));
+         }
+     }
+     host_launch_opt = Some(launch);
+ } else {
+     let prepared = native::prepare_launch(&provider,&executable,&root,&prompt,&schema,&schema_path,string(&step["mode"]),&extra_dirs,&read_dirs,adapter.as_deref())?;
+     let prepared = match &scratch{Some(scratch)=>native::use_scratch(prepared,scratch)?,None=>prepared};
+     let prepared = crate::workers::prepare_worker(&provider,string(&step["mode"]),prepared,&step_offers)?;
+     prepared_opt = Some(prepared);
+ }
+ let check_non_interactive_boundary = step["mode"] == "edit"
+     && step_permissions.is_some()
+     && active_transport == infra_host::provider::Transport::Text;
+ let (system_base_head, pre_existing_system_dirty, foreign_pre_existing) = if check_non_interactive_boundary {
+     let sys_head = git_head(&current.root);
+     let sys_dirty: BTreeSet<String> = git_worktree_changes(&current.root)
+         .into_iter()
+         .map(|c| c.path)
+         .collect();
+     let mut foreign = BTreeMap::new();
+     if access_scope(&state) == "service" {
+         for s in texts(&state["selected"]) {
+             if s == sid {
+                 continue;
+             }
+             let sr = PathBuf::from(string(&state["roots"][&s]));
+             let f_head = git_head(&sr);
+             let f_dirty: BTreeSet<String> = git_worktree_changes(&sr)
+                 .into_iter()
+                 .map(|c| c.path)
+                 .collect();
+             foreign.insert(s, (sr, f_head, f_dirty));
+         }
+     }
+     (sys_head, sys_dirty, foreign)
+ } else {
+     (None, BTreeSet::new(), BTreeMap::new())
+ };
  preview["input_sha256"]=digest(prompt.as_bytes()).into();let index=step_index(&state,string(&step["id"]))?;state["steps"][index]=preview.clone();graph_ctx.state=state.clone();save(&directory,"run.json",&state,false)?;
  // The exact input this agent receives, next to its receipt: what every agent of the run shared can be read back.
  save(&directory,&input_name(&preview),&object!({"schema_version":1,"kind":"ai-system-dispatch-input","dispatch_id":preview["dispatch_id"],"phase":preview["id"],"attempt":attempt,"input_sha256":preview["input_sha256"],"prompt":prompt}),false)?;
@@ -616,15 +869,142 @@ async fn execute_run_context(
  notify(event,object!({"type":"dispatch_started","phase":preview["id"],"service":sid,"attempt":attempt,"dispatch_id":preview["dispatch_id"],"mode":preview["mode"],"provider":provider,"root":root,"readable":access["readable"],"writable":access["writable"]}));
  let started=Instant::now();let timeout=state["timeout"].as_u64().ok_or_else(||fail("Worker timeout missing"))?;let phase=string(&preview["id"]).to_string();
  let mut native_collector=NativeEvidenceCollector::default();
- let bridge_for_lines=hooks.bridge.clone();let ctx_for_lines=graph_ctx.clone();let provider_for_lines=provider.clone();let root_for_lines=root.clone();
- let output=Box::pin(native::run_raw_monitored(&prepared.argv,&root,&prepared.environment,&prepared.remove,&prepared.input,timeout,cancel.clone(),runner_lock.clone(),observer.clone(),|line|{native_collector.observe_line(line,&provider_for_lines,&root_for_lines);if let Some(bridge)=&bridge_for_lines{let _=bridge.on_dispatch_signal(&ctx_for_lines,line);}let line=String::from_utf8_lossy(line).to_string();notify(event,object!({"type":"output","phase":phase,"attempt":attempt,"line":line}));Ok(())})).await;
- let elapsed=started.elapsed().as_secs_f64();let mut receipt=object!({"dispatch_id":preview["dispatch_id"],"phase":preview["id"],"input_sha256":preview["input_sha256"],"mode":preview["mode"],"returncode":null,"error":null,"duration_seconds":elapsed,"ok":false,"report":null});
- match output{Ok(output)=>{receipt["returncode"]=object!(output.code);if output.code==0{match native::worker_result(&output.bytes,&provider).and_then(|report|{if untrusted_context&&infra_core::domain::secret_label(&encoded(&report)?)?.is_some(){return Err(fail("Sensitive experimental worker result"));}execution::validate_report(&report,&preview,&texts(&state["selected"]),access_scope(&state))?;Ok(report)}){Ok(report)=>{receipt["report"]=report;receipt["ok"]=object!(execution::success(&receipt,&preview,state["mode"]=="read-only"));if receipt["ok"]!=true{receipt["error"]=if preview["mode"]=="read-only"&&!texts(&receipt["report"]["changed_files"]).is_empty(){"read_only_worker_reported_writes"}else{"worker_blocked_or_verification_incomplete"}.into();}},Err(error)=>{receipt["error"]="invalid_or_sensitive_worker_result".into();receipt["rejection"]=if untrusted_context{"Invalid experimental worker report".into()}else{error.message.chars().take(500).collect::<String>().into()};}}}else{receipt["error"]="worker_exit_failure".into();if let Some(failure)=native::worker_failure(&output.bytes,&provider){receipt["failure"]=failure.into();}}},
- // A CLI that could not start or be supervised says why: a real verification stopped as only "unavailable" after the engine binary was replaced under a running Harness.
- Err(error)=>{let interrupted=cancel.load(Ordering::SeqCst);receipt["error"]=if interrupted{"interrupted"}else{error.code.as_deref().unwrap_or("worker_process_failure")}.into();if !interrupted&&!error.message.trim().is_empty(){receipt["failure"]=native::shown_failure(&error.message).into();}}}
- save(&directory,&receipt_name(&preview),&receipt,true)?;
+ let mut receipt=object!({"dispatch_id":preview["dispatch_id"],"phase":preview["id"],"input_sha256":preview["input_sha256"],"mode":preview["mode"],"returncode":null,"error":null,"duration_seconds":0.0,"ok":false,"report":null});
+ if let Some(launch) = host_launch_opt {
+     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+     let launch_adapter = SystemLaunchAdapter {
+         inner: adapter.clone(),
+         schema: schema.clone(),
+         schema_path: schema_path.clone(),
+         extra: extra_dirs,
+         read: read_dirs,
+         offers: step_offers.clone(),
+     };
+     let run_events = Arc::new(SystemRunEvents {
+         observer: observer.clone(),
+         collector: Mutex::new(NativeEvidenceCollector::default()),
+         raw_lines: Mutex::new(Vec::new()),
+         bridge: hooks.bridge.clone(),
+         graph_ctx: graph_ctx.clone(),
+         provider: provider.clone(),
+         root: root.clone(),
+         phase: phase.clone(),
+         attempt,
+         tx: Mutex::new(Some(tx.clone())),
+     });
+     let limits = infra_host::process::Limits {
+         seconds: Some(timeout),
+         output: 2 * MAX_BYTES,
+         line: 2 * MAX_BYTES,
+     };
+     let empty_env = BTreeMap::new();
+     let run_events_ref = run_events.clone();
+     let cancel_run = cancel.clone();
+     let runner_lock_run = runner_lock.clone();
+     let phase_emit = phase.clone();
+     let run_fut = async move {
+         let res = infra_host::provider::run_monitored_locked(
+             &launch,
+             limits,
+             cancel_run,
+             None,
+             runner_lock_run,
+             Some(&launch_adapter),
+             &empty_env,
+             Some(run_events_ref.clone()),
+             move |norm| {
+                 if matches!(norm["kind"].as_str(), Some("permission" | "status")) {
+                     let _ = tx.send(object!({
+                         "type": norm["kind"],
+                         "phase": phase_emit,
+                         "attempt": attempt,
+                         "event": norm,
+                     }));
+                 }
+                 Ok(())
+             },
+         )
+         .await;
+         run_events_ref.close();
+         res
+     };
+     let drain_fut = async {
+         while let Some(ev) = rx.recv().await {
+             notify(event, ev);
+         }
+     };
+     let (output, ()) = tokio::join!(run_fut, drain_fut);
+     let elapsed = started.elapsed().as_secs_f64();
+     receipt["duration_seconds"] = object!(elapsed);
+     native_collector = run_events.take_collector();
+     let raw_bytes = run_events.take_raw_bytes();
+     match output {
+         Ok(worker_res) => {
+             if worker_res.ok {
+                 receipt["returncode"] = object!(0);
+                 finalize_worker_report(&raw_bytes, &provider, &preview, &state, untrusted_context, &mut receipt);
+             } else {
+                 receipt["error"] = "worker_exit_failure".into();
+                 if let Some(failure) = native::worker_failure(&raw_bytes, &provider)
+                     .or_else(|| worker_res.error.map(|e| native::shown_failure(&e)))
+                 {
+                     receipt["failure"] = failure.into();
+                 }
+             }
+         }
+         Err(error) => {
+             let interrupted = cancel.load(Ordering::SeqCst) || error.code == "native-cancelled";
+             receipt["error"] = if interrupted { "interrupted" } else { error.code }.into();
+             if !interrupted && !error.message.trim().is_empty() {
+                 receipt["failure"] = native::shown_failure(&error.message).into();
+             }
+         }
+     }
+ } else {
+     let prepared = prepared_opt.expect("raw launch must prepare command");
+     let bridge_for_lines=hooks.bridge.clone();let ctx_for_lines=graph_ctx.clone();let provider_for_lines=provider.clone();let root_for_lines=root.clone();
+     let output=Box::pin(native::run_raw_monitored(&prepared.argv,&root,&prepared.environment,&prepared.remove,&prepared.input,timeout,cancel.clone(),runner_lock.clone(),observer.clone(),|line|{native_collector.observe_line(line,&provider_for_lines,&root_for_lines);if let Some(bridge)=&bridge_for_lines{let _=bridge.on_dispatch_signal(&ctx_for_lines,line);}let line=String::from_utf8_lossy(line).to_string();notify(event,object!({"type":"output","phase":phase,"attempt":attempt,"line":line}));Ok(())})).await;
+     let elapsed=started.elapsed().as_secs_f64();
+     receipt["duration_seconds"]=object!(elapsed);
+     match output{
+         Ok(output)=>{
+             receipt["returncode"]=object!(output.code);
+             if output.code==0{
+                 finalize_worker_report(&output.bytes, &provider, &preview, &state, untrusted_context, &mut receipt);
+             }else{
+                 receipt["error"]="worker_exit_failure".into();
+                 if let Some(failure)=native::worker_failure(&output.bytes,&provider){receipt["failure"]=failure.into();}
+             }
+         },
+         // A CLI that could not start or be supervised says why: a real verification stopped as only "unavailable" after the engine binary was replaced under a running Harness.
+         Err(error)=>{let interrupted=cancel.load(Ordering::SeqCst);receipt["error"]=if interrupted{"interrupted"}else{error.code.as_deref().unwrap_or("worker_process_failure")}.into();if !interrupted&&!error.message.trim().is_empty(){receipt["failure"]=native::shown_failure(&error.message).into();}}
+     }
+ }
+ let elapsed = receipt["duration_seconds"].as_f64().unwrap_or(0.0);
  let head_after=git_head(&root);graph_ctx.head_after=head_after.clone();
  let git_changed=collect_step_git_changes(&state,&preview,&root,base_head.as_deref(),&pre_existing_dirty,receipt.get("report").filter(|v|v.is_object()));
+ if check_non_interactive_boundary && receipt["ok"] == true && let Some(scope) = boundary_scope.as_ref() {
+     let mut extra_written = Vec::new();
+     for ch in git_changes_since(&current.root, system_base_head.as_deref()) {
+         if !pre_existing_system_dirty.contains(&ch.path) {
+             extra_written.push(current.root.join(&ch.path));
+         }
+     }
+     for (_foreign_sid, (sr, f_head, f_dirty)) in foreign_pre_existing {
+         for ch in git_changes_since(&sr, f_head.as_deref()) {
+             if !f_dirty.contains(&ch.path) {
+                 extra_written.push(sr.join(&ch.path));
+             }
+         }
+     }
+     let reported_files = texts(&receipt["report"]["changed_files"]);
+     if let Err(boundary_err) = check_step_boundary_writes_with_extra(scope, &git_changed, &reported_files, &extra_written) {
+         receipt["ok"] = object!(false);
+         receipt["error"] = "boundary_violation".into();
+         receipt["rejection"] = boundary_err.message.chars().take(500).collect::<String>().into();
+     }
+ }
+ save(&directory,&receipt_name(&preview),&receipt,true)?;
  let bridge_evidence=match &hooks.bridge{Some(bridge)=>bridge.on_dispatch_finish(&graph_ctx,&receipt)?,None=>None};
  let evidence=match bridge_evidence{
   Some(mut ev)=>{
@@ -650,7 +1030,7 @@ async fn execute_run_context(
  };
  save(&directory,&evidence_name(&preview),&serde_json::to_value(&evidence)?,false)?;
  let finished=object!({"type":"dispatch_finished","phase":preview["id"],"service":sid,"attempt":attempt,"ok":receipt["ok"],"error":if receipt["rejection"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["rejection"])))}else if receipt["failure"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["failure"])))}else{receipt["error"].clone()},"duration_seconds":elapsed,"report":receipt["report"]});
- if receipt["ok"]!=true{let interrupted=cancel.load(Ordering::SeqCst)||receipt["error"]=="interrupted";state["steps"][index]["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["error"]=if receipt["failure"].is_string(){object!(match receipt["returncode"].as_i64(){Some(code)=>format!("The {provider} CLI exited with code {code}: {}",string(&receipt["failure"])),None=>format!("The {provider} CLI could not run: {}",string(&receipt["failure"]))})}else{receipt["error"].clone()};save(&directory,"run.json",&state,false)?;notify(event,finished);return Ok(state.clone());}
+ if receipt["ok"]!=true{let interrupted=cancel.load(Ordering::SeqCst)||receipt["error"]=="interrupted";state["steps"][index]["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["error"]=if receipt["failure"].is_string(){object!(match receipt["returncode"].as_i64(){Some(code)=>format!("The {provider} CLI exited with code {code}: {}",string(&receipt["failure"])),None=>format!("The {provider} CLI could not run: {}",string(&receipt["failure"]))})}else if receipt["error"]=="boundary_violation"&&receipt["rejection"].is_string(){receipt["rejection"].clone()}else{receipt["error"].clone()};save(&directory,"run.json",&state,false)?;notify(event,finished);return Ok(state.clone());}
  current=System::new(&system.config,&system.allow_roots)?;plan=check_changes(&mut current,&plan,Some(&preview),Some(&receipt["report"]),&state,false)?;save(&directory,"checkpoint.json",&plan,false)?;finish(&directory,&mut state,&preview,&receipt,&brains)?;context_completed(&dispatch_context,&state,&preview,&receipt)?;notify(event,finished);
  if preview["id"]=="contracts"{break;}}
  if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Ok(state.clone());}
@@ -876,6 +1256,7 @@ pub async fn drive_run_with_bridge(
             bridge: Some(bridge),
             system_run_id: None,
             launch_id,
+            approvals: None,
         },
         event,
     )
@@ -969,4 +1350,280 @@ pub async fn drive_run_with_context(
         event,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system_graph::ServiceGraphOffer;
+    use infra_host::{
+        process::RunObserver,
+        provider::{Launch, LaunchAdapter, PreparedCommand, RunEvents, command_with_adapter},
+    };
+
+    #[test]
+    fn system_launch_adapter_applies_transport_appropriate_flags_and_worker_offers() {
+        let project = std::env::temp_dir();
+        let schema_path = project.join("result-schema.json");
+        let schema = execution::result_schema(&["orders".into()]);
+        let offer = ServiceGraphOffer {
+            service: "orders".into(),
+            command: "graphify".into(),
+            graph_path: project.join("orders-graph/graph.json"),
+            nodes: 3,
+            edges: 2,
+            commit: None,
+            readable_paths: vec![project.join("orders-graph/graph.json")],
+            claude_allow_rules: vec![],
+            env: BTreeMap::from([("EXTRA_GRAPH_ENV".into(), "ok".into())]),
+            prompt_instructions: None,
+        };
+
+        struct RecordingInner;
+        impl LaunchAdapter for RecordingInner {
+            fn adapt(
+                &self,
+                _input: &Launch,
+                mut command: PreparedCommand,
+            ) -> infra_host::Result<PreparedCommand> {
+                command
+                    .environment
+                    .insert("INNER_ADAPTED".into(), "yes".into());
+                Ok(command)
+            }
+        }
+
+        let adapter = SystemLaunchAdapter {
+            inner: Some(Arc::new(RecordingInner)),
+            schema,
+            schema_path: schema_path.clone(),
+            extra: vec![project.join("billing")],
+            read: vec![project.join("sys")],
+            offers: vec![offer],
+        };
+
+        // Codex Manual (`CodexServer`): skips `exec`-only flags (`--skip-git-repo-check`, `--add-dir`, `--output-schema`, `-`).
+        let codex_manual = Launch {
+            provider: "codex".into(),
+            executable: PathBuf::from("codex"),
+            project: project.clone(),
+            prompt: "Run service step".into(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions: Some(PermissionMode::Manual),
+            approvals: None,
+        };
+        let prepared = command_with_adapter(&codex_manual, &adapter).unwrap();
+        assert_eq!(prepared.argv.last().map(String::as_str), Some("app-server"));
+        assert!(!prepared.argv.iter().any(|a| a == "--skip-git-repo-check"));
+        assert!(!prepared.argv.iter().any(|a| a == "--add-dir"));
+        assert!(!prepared.argv.iter().any(|a| a == "--output-schema"));
+        assert!(!prepared.argv.iter().any(|a| a == "-"));
+        assert_eq!(
+            prepared.environment.get("GRAPHIFY_NO_AUTO_REFRESH"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            prepared.environment.get("INNER_ADAPTED"),
+            Some(&"yes".to_string())
+        );
+        assert!(
+            prepared
+                .readable
+                .contains(&project.join("orders-graph/graph.json"))
+        );
+
+        // Codex Auto (`Text`): keeps `--skip-git-repo-check`, `--add-dir`, `--output-schema`, `-`.
+        let codex_auto = Launch {
+            permissions: Some(PermissionMode::Auto),
+            ..codex_manual
+        };
+        let prepared_auto = command_with_adapter(&codex_auto, &adapter).unwrap();
+        assert!(
+            prepared_auto
+                .argv
+                .iter()
+                .any(|a| a == "--skip-git-repo-check")
+        );
+        assert!(prepared_auto.argv.iter().any(|a| a == "--add-dir"));
+        assert!(prepared_auto.argv.iter().any(|a| a == "--output-schema"));
+        assert_eq!(prepared_auto.argv.last().map(String::as_str), Some("-"));
+
+        // Cursor Manual (`CursorAcp`): skips Cursor CLI prompt byte limit; Cursor Auto (`Text`) enforces it.
+        let oversized_prompt = "x".repeat(native::CURSOR_PROMPT_BYTES + 200);
+        let cursor_adapter = SystemLaunchAdapter {
+            extra: vec![],
+            ..adapter
+        };
+        let cursor_manual = Launch {
+            provider: "cursor".into(),
+            executable: PathBuf::from("cursor-agent"),
+            project: project.clone(),
+            prompt: oversized_prompt.clone(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions: Some(PermissionMode::Manual),
+            approvals: None,
+        };
+        let cursor_prepared = command_with_adapter(&cursor_manual, &cursor_adapter).unwrap();
+        assert_eq!(cursor_prepared.argv.last().map(String::as_str), Some("acp"));
+
+        let cursor_auto = Launch {
+            permissions: Some(PermissionMode::Auto),
+            ..cursor_manual
+        };
+        assert!(command_with_adapter(&cursor_auto, &cursor_adapter).is_err());
+    }
+
+    #[test]
+    fn system_run_events_collects_raw_lines_for_worker_result_evidence_and_bridge() {
+        #[derive(Default)]
+        struct SignalBridge {
+            signals: Mutex<Vec<String>>,
+        }
+        impl CodeGraphBridge for SignalBridge {
+            fn on_dispatch_signal(
+                &self,
+                _ctx: &DispatchGraphContext,
+                raw_line: &[u8],
+            ) -> Result<()> {
+                self.signals
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(raw_line).to_string());
+                Ok(())
+            }
+        }
+        struct RecordingObserver(Mutex<Vec<String>>);
+        impl RunObserver for RecordingObserver {
+            fn boundary(&self, signal: &str, _details: &Value) -> infra_host::Result<()> {
+                self.0.lock().unwrap().push(signal.to_string());
+                Ok(())
+            }
+        }
+
+        let report = object!({
+            "status": "completed",
+            "summary": "Implemented",
+            "checks": [{"name": "unit", "status": "passed", "detail": "ok"}],
+            "changed_files": ["src/a.php"],
+            "service_order": []
+        });
+        let report_str = encoded(&report).unwrap();
+
+        for (provider, events) in [
+            (
+                "claude",
+                vec![object!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "structured_output": report.clone()
+                })],
+            ),
+            (
+                "codex",
+                vec![
+                    object!({
+                        "type": "item.completed",
+                        "item": {"id": "1", "type": "command_execution", "command": "cat src/a.php", "status": "completed"}
+                    }),
+                    object!({
+                        "type": "item.completed",
+                        "item": {"id": "2", "type": "agent_message", "text": report_str.clone()}
+                    }),
+                    object!({
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 10, "output_tokens": 5}
+                    }),
+                ],
+            ),
+            (
+                "cursor",
+                vec![object!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "result": report_str
+                })],
+            ),
+        ] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let bridge = Arc::new(SignalBridge::default());
+            let observer = Arc::new(RecordingObserver(Mutex::new(Vec::new())));
+            let run_events = SystemRunEvents {
+                observer: Some(observer.clone()),
+                collector: Mutex::new(NativeEvidenceCollector::default()),
+                raw_lines: Mutex::new(Vec::new()),
+                bridge: Some(bridge.clone()),
+                graph_ctx: DispatchGraphContext {
+                    run_id: "r1".into(),
+                    journal_run_id: "r1".into(),
+                    launch_id: None,
+                    execution_dir: PathBuf::from("/tmp/run"),
+                    system_file: PathBuf::from("/tmp/sys/system.json"),
+                    provider: provider.into(),
+                    mode: "edit".into(),
+                    access: "service".into(),
+                    tell_agents_graph: Some(true),
+                    phase: "service-orders".into(),
+                    dispatch_id: "d1".into(),
+                    attempt: 1,
+                    service: "orders".into(),
+                    root: PathBuf::from("/tmp/orders"),
+                    roots: BTreeMap::new(),
+                    selected: vec!["orders".into()],
+                    readable: vec![],
+                    writable: vec![],
+                    base_head: None,
+                    head_after: None,
+                    plan: object!({}),
+                    state: object!({}),
+                },
+                provider: provider.into(),
+                root: PathBuf::from("/tmp/orders"),
+                phase: "service-orders".into(),
+                attempt: 1,
+                tx: Mutex::new(Some(tx)),
+            };
+            run_events
+                .boundary("guardian_spawned", &object!({}))
+                .unwrap();
+            for raw in &events {
+                run_events.observe(Some(raw), None).unwrap();
+            }
+            run_events.close();
+
+            let raw_bytes = run_events.take_raw_bytes();
+            let parsed = native::worker_result(&raw_bytes, provider).unwrap();
+            assert_eq!(parsed, report, "{provider}");
+            assert_eq!(bridge.signals.lock().unwrap().len(), events.len());
+            assert_eq!(
+                observer.0.lock().unwrap().as_slice(),
+                &["guardian_spawned".to_string()]
+            );
+            let mut emitted = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                emitted.push(ev);
+            }
+            assert_eq!(emitted.len(), events.len());
+            assert!(emitted.iter().all(|e| e["type"] == "output"));
+            if provider == "codex" {
+                let collector = run_events.take_collector();
+                assert_eq!(collector.commands, 1);
+            }
+        }
+    }
 }

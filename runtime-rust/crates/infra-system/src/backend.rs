@@ -31,6 +31,9 @@ pub trait SessionBridge: Send + Sync {
     fn cancel(&self, id: &str) -> Result<Value>;
     fn events(&self, id: &str, kinds: &[&str]) -> Result<Vec<Value>>;
     fn find_launch(&self, run_id: &str, nonce: &str) -> Result<Option<Value>>;
+    fn waiting_permissions(&self, _id: &str) -> Result<Vec<Value>> {
+        Ok(vec![])
+    }
 }
 pub struct Database {
     connection: Mutex<rusqlite::Connection>,

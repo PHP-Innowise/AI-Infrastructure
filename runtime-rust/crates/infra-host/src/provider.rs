@@ -710,6 +710,7 @@ async fn converse_with_host(
         cwd: input.project.to_string_lossy().into_owned(),
         model: input.model.clone(),
         resume: input.session.clone(),
+        auto_asks: input.approvals.is_some(),
     };
     let mut driver = match transport {
         Transport::ClaudeControl => conversation::claude(setup),
@@ -1165,4 +1166,75 @@ pub async fn run_observed(
     emit: impl FnMut(Value) -> Result<()> + Send,
 ) -> Result<WorkerResult> {
     run_observed_locked(input, limits, cancel, previous, None, emit).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permission::{PermissionAsk, bound_diff_preview};
+
+    struct StubApprovals;
+    impl Approvals for StubApprovals {
+        fn ask(&self, _ask: &PermissionAsk) -> Result<tokio::sync::oneshot::Receiver<Decision>> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(Decision::Allow);
+            Ok(rx)
+        }
+        fn withdraw(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn base_launch(provider: &str, mode: &str, permissions: Option<PermissionMode>) -> Launch {
+        Launch {
+            provider: provider.into(),
+            executable: PathBuf::from(provider),
+            project: std::env::temp_dir(),
+            prompt: "Verify permissions".into(),
+            mode: mode.into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions,
+            approvals: None,
+        }
+    }
+
+    #[test]
+    fn transport_and_command_respect_mode_and_permissions() {
+        let mut launch = base_launch("claude", "edit", Some(PermissionMode::Auto));
+        assert_eq!(transport(&launch), Transport::ClaudeControl);
+        let (argv, _, _) = command(&launch).unwrap();
+        assert!(argv.windows(2).any(|w| w == ["--permission-mode", "auto"]));
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--permission-prompt-tool", "stdio"])
+        );
+
+        launch.mode = "plan".into();
+        assert_eq!(transport(&launch), Transport::Text);
+        let (argv, _, _) = command(&launch).unwrap();
+        assert!(argv.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+
+        let codex_manual = base_launch("codex", "edit", Some(PermissionMode::Manual));
+        assert_eq!(transport(&codex_manual), Transport::CodexServer);
+        let (argv, _, _) = command(&codex_manual).unwrap();
+        assert_eq!(argv.last().map(String::as_str), Some("app-server"));
+
+        let cursor_manual = base_launch("cursor", "edit", Some(PermissionMode::Manual));
+        assert_eq!(transport(&cursor_manual), Transport::CursorAcp);
+        let (argv, _, _) = command(&cursor_manual).unwrap();
+        assert_eq!(argv.last().map(String::as_str), Some("acp"));
+
+        let _ = bound_diff_preview("a");
+        let with_approvals = Launch {
+            approvals: Some(Arc::new(StubApprovals)),
+            ..base_launch("claude", "edit", Some(PermissionMode::Auto))
+        };
+        assert!(with_approvals.approvals.is_some());
+    }
 }

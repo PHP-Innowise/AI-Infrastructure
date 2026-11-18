@@ -1,5 +1,6 @@
 //! Native system passports, bounded discovery, reviewed plans and sequential execution.
 pub mod backend;
+pub mod boundary;
 pub mod catalog;
 pub mod common;
 pub mod discovery;
@@ -26,6 +27,8 @@ pub use system_graph::{
 };
 pub use workers::{
     AgentSignal, bwrap_ro_bind_args, macos_seatbelt_read_rules, offers_for_step, prepare_worker,
-    run_discovery_request, run_discovery_request_with_adapter, run_system_request,
-    run_system_request_with_adapter, run_system_request_with_bridge,
+    prepare_worker_for_transport, run_discovery_request, run_discovery_request_with_adapter,
+    run_system_request, run_system_request_with_adapter,
+    run_system_request_with_adapter_and_approvals, run_system_request_with_bridge,
+    run_system_request_with_bridge_and_approvals,
 };

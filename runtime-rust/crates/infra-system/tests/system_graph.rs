@@ -1406,6 +1406,8 @@ fn code_graph_bridge_and_dispatch_evidence_persist_and_enrich_system_manager_vie
         )
         .unwrap();
     assert_eq!(launched["tell_agents_graph"], true);
+    assert_eq!(launched["permissions"], Value::Null);
+    assert_eq!(launched["waiting_permissions"], json!([]));
     assert!(launched["evidence"].is_object());
     assert_eq!(launched["launches"][0]["launch_number"], 1);
 }

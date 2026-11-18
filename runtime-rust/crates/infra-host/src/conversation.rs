@@ -102,11 +102,13 @@ pub(crate) struct Setup {
     pub cwd: String,
     pub model: Option<String>,
     pub resume: Option<String>,
+    pub auto_asks: bool,
 }
 
 pub(crate) fn claude(setup: Setup) -> Box<dyn Driver> {
     Box::new(Claude {
         mode: setup.mode,
+        auto_asks: setup.auto_asks,
         prompt: setup.prompt,
         sent: false,
         fallen_back: false,
@@ -526,6 +528,7 @@ const DECLINED_AUTOMATICALLY: &str = "Declined automatically: this session runs 
 
 struct Claude {
     mode: PermissionMode,
+    auto_asks: bool,
     prompt: String,
     sent: bool,
     /// Claude Code was told to accept edits because auto mode is unavailable.
@@ -638,7 +641,9 @@ impl Driver for Claude {
                 let request = &message["request"];
                 if request["subtype"] == "can_use_tool" {
                     let ask = claude_ask(&message["request_id"], request, self.mode);
-                    if self.mode == PermissionMode::Manual {
+                    if self.mode == PermissionMode::Manual
+                        || (self.mode == PermissionMode::Auto && self.auto_asks)
+                    {
                         step.asks.push(ask);
                     } else {
                         step.notices
@@ -2378,6 +2383,7 @@ mod tests {
             cwd: "/work/project".into(),
             model: None,
             resume: resume.map(String::from),
+            auto_asks: false,
         }
     }
 
@@ -2483,11 +2489,28 @@ mod tests {
         assert_eq!(ask.deny_reply()["response"]["response"]["behavior"], "deny");
 
         let mut auto = claude(setup(PermissionMode::Auto, None));
-        let step = auto.receive(request);
+        let step = auto.receive(request.clone());
         assert!(step.asks.is_empty());
         assert_eq!(step.replies[0]["response"]["response"]["behavior"], "deny");
         assert_eq!(step.notices[0]["state"], "declined");
         assert_eq!(step.notices[0]["by"], "auto");
+
+        // When `auto_asks` is enabled (e.g. SystemBoundaryApprovals), Claude forwards
+        // `can_use_tool` to `step.asks` instead of declining on its own.
+        let mut auto_with_asks = claude(Setup {
+            auto_asks: true,
+            ..setup(PermissionMode::Auto, None)
+        });
+        let step = auto_with_asks.receive(request);
+        assert!(step.replies.is_empty());
+        assert!(step.notices.is_empty());
+        assert_eq!(step.asks.len(), 1);
+        assert_eq!(step.asks[0].public.id, "claude-req-1");
+        assert_eq!(step.asks[0].public.summary, "touch probe.txt");
+        assert_eq!(
+            step.asks[0].allow_reply()["response"]["response"]["behavior"],
+            "allow"
+        );
     }
 
     #[test]

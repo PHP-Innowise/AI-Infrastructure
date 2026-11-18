@@ -152,7 +152,24 @@ pub fn macos_seatbelt_read_rules(offers: &[ServiceGraphOffer]) -> Result<String>
 /// and Claude `--settings` `permissions.allow` rules to a worker [`infra_host::provider::PreparedCommand`].
 pub fn prepare_worker(
     provider: &str,
+    mode: &str,
+    command: infra_host::provider::PreparedCommand,
+    offers: &[ServiceGraphOffer],
+) -> Result<infra_host::provider::PreparedCommand> {
+    prepare_worker_for_transport(
+        provider,
+        mode,
+        infra_host::provider::Transport::Text,
+        command,
+        offers,
+    )
+}
+
+/// Applies [`ServiceGraphOffer`] configuration appropriate for the active provider [`infra_host::provider::Transport`].
+pub fn prepare_worker_for_transport(
+    provider: &str,
     _mode: &str,
+    transport: infra_host::provider::Transport,
     mut command: infra_host::provider::PreparedCommand,
     offers: &[ServiceGraphOffer],
 ) -> Result<infra_host::provider::PreparedCommand> {
@@ -198,7 +215,7 @@ pub fn prepare_worker(
         dirs
     };
 
-    if provider == "codex" {
+    if provider == "codex" && transport == infra_host::provider::Transport::Text {
         let mut existing_dirs = BTreeSet::new();
         for pair in command.argv.windows(2) {
             if (pair[0] == "--add-dir" || pair[0] == "-C") && !pair[1].is_empty() {
@@ -298,7 +315,7 @@ fn merge_claude_settings_allow(argv: &mut Vec<String>, rules: &[String]) -> Resu
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Internal request runner threads custody, observer, and optional graph bridge."
+    reason = "Internal request runner threads custody, observer, approvals, and optional graph bridge."
 )]
 async fn run_system_context(
     path: &Path,
@@ -308,6 +325,7 @@ async fn run_system_context(
     observer: Option<Arc<dyn infra_host::process::RunObserver>>,
     bridge: Option<Arc<dyn CodeGraphBridge>>,
     launch_id: Option<String>,
+    approvals: Option<Arc<dyn infra_host::permission::Approvals>>,
     mut event: impl FnMut(Value) -> Result<()> + Send,
     mut agent: impl FnMut(AgentSignal) -> Result<()> + Send,
 ) -> Result<Value> {
@@ -335,7 +353,12 @@ async fn run_system_context(
             "retry_step",
             "accept_source_changes",
         ],
-        &["accept_unrun_checks", "tell_agents_graph", "launch_id"],
+        &[
+            "accept_unrun_checks",
+            "tell_agents_graph",
+            "launch_id",
+            "permissions",
+        ],
     )?;
     if request
         .get("tell_agents_graph")
@@ -343,6 +366,16 @@ async fn run_system_context(
     {
         return Err(fail("tell_agents_graph must be boolean"));
     }
+    let request_permissions = match request.get("permissions") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(raw)) => {
+            let mode = infra_host::permission::PermissionMode::parse(raw)
+                .ok_or_else(|| fail("Choose Auto, Manual or Bypass permissions."))?;
+            Some(Some(mode.as_str().to_string()))
+        }
+        Some(_) => return Err(fail("Choose Auto, Manual or Bypass permissions.")),
+    };
     let resolved_launch_id = launch_id.or_else(|| {
         request
             .get("launch_id")
@@ -370,16 +403,37 @@ async fn run_system_context(
         if state["provider"] != provider || Path::new(string(&state["executable"])) != selected {
             return Err(fail("Configured provider changed; prepare a new plan"));
         }
+        let mut updated = false;
         if let Some(tell) = request.get("tell_agents_graph").and_then(Value::as_bool)
             && state.get("tell_agents_graph").and_then(Value::as_bool) != Some(tell)
         {
             state["tell_agents_graph"] = object!(tell);
+            updated = true;
+        }
+        if let Some(requested_perm) = &request_permissions {
+            let next = match requested_perm {
+                Some(p) => Value::String(p.clone()),
+                None => Value::Null,
+            };
+            let current = state.get("permissions").cloned().unwrap_or(Value::Null);
+            if current != next {
+                if next.is_null() {
+                    if let Some(obj) = state.as_object_mut() {
+                        obj.remove("permissions");
+                    }
+                } else {
+                    state["permissions"] = next;
+                }
+                updated = true;
+            }
+        }
+        if updated {
             save(&journal, "run.json", &state, false)?;
         }
         state
     } else {
         let plan = read_json(&directory, "approved-plan.json", execution::MAX_STATE)?;
-        native::create_run_context_with_options(
+        native::create_run_context_with_permissions(
             &mut system,
             &plan,
             &journal,
@@ -389,6 +443,7 @@ async fn run_system_context(
             crate::manager::integer(request.get("timeout"), 900, 1, 86400)?,
             string(&request["access"]),
             request.get("tell_agents_graph").and_then(Value::as_bool),
+            request_permissions.flatten().as_deref(),
             adapter.as_deref(),
         )
         .await?
@@ -422,12 +477,14 @@ async fn run_system_context(
         bridge,
         system_run_id,
         launch_id: resolved_launch_id,
+        approvals,
     };
     let result=Box::pin(runner::drive_run_context_with_hooks(&mut system,&journal,request["retry_step"].as_str(),runner::Acceptance{source_changes:request["accept_source_changes"]==true,unrun_checks:request["accept_unrun_checks"]==true},cancel.clone(),runner_lock,adapter.clone(),observer.clone(),None,hooks,&mut|value:Value|{
  let kind=string(&value["type"]);match kind{
  "output"=>{if let Some(line)=value["line"].as_str(){signal(&mut agent,AgentSignal::Output{bytes:line.as_bytes().to_vec()});}},
  "dispatch_started"=>signal(&mut agent,AgentSignal::Started{agent:string(&value["phase"]).into(),attempt:value["attempt"].as_u64().unwrap_or(0),cwd:PathBuf::from(string(&value["root"])),details:object!({"service":value["service"],"label":match string(&value["phase"]){"contracts"=>"Contract agent".to_string(),"verify"=>"Verification agent".to_string(),_=>format!("{} agent",string(&value["service"]))},"mode":value["mode"],"provider":provider,"root":value["root"],"dispatch":value["dispatch_id"],"readable":value["readable"],"writable":value["writable"]})}),
  "dispatch_finished"=>{let report=&value["report"];let checks=report["checks"].as_array().cloned().unwrap_or_default();signal(&mut agent,AgentSignal::Finished{status:if value["interrupted"]==true{"interrupted"}else if value["ok"]==true{"completed"}else{"blocked"}.into(),details:object!({"ok":value["ok"],"error":value["error"],"duration_seconds":value["duration_seconds"],"summary":report["summary"],"changed_files":report["changed_files"].as_array().into_iter().flatten().take(100).cloned().collect::<Vec<_>>(),"checks":(["passed","failed","not_run"].iter().map(|status|((*status).to_string(),checks.iter().filter(|check|check["status"]==*status).count())).collect::<BTreeMap<_,_>>())})});},
+ "permission"|"status" if value.get("event").is_some_and(Value::is_object)=>{display(&mut event,value["event"].clone());},
  _=>{}}Ok(())})).await;
     match result {
         Ok(state) => {
@@ -836,6 +893,7 @@ pub async fn run_system_request(
         None,
         None,
         None,
+        None,
         event,
         |_: AgentSignal| Ok(()),
     ))
@@ -850,6 +908,32 @@ pub async fn run_system_request_with_adapter(
     event: impl FnMut(Value) -> Result<()> + Send,
     agent: impl FnMut(AgentSignal) -> Result<()> + Send,
 ) -> Result<Value> {
+    run_system_request_with_adapter_and_approvals(
+        path,
+        cancel,
+        runner_lock,
+        adapter,
+        observer,
+        None,
+        event,
+        agent,
+    )
+    .await
+}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Adapter entry point carries explicit custody, observer, approvals, and callbacks."
+)]
+pub async fn run_system_request_with_adapter_and_approvals(
+    path: &Path,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<File>>,
+    adapter: Arc<dyn infra_host::provider::LaunchAdapter>,
+    observer: Arc<dyn infra_host::process::RunObserver>,
+    approvals: Option<Arc<dyn infra_host::permission::Approvals>>,
+    event: impl FnMut(Value) -> Result<()> + Send,
+    agent: impl FnMut(AgentSignal) -> Result<()> + Send,
+) -> Result<Value> {
     Box::pin(run_system_context(
         path,
         cancel,
@@ -858,6 +942,7 @@ pub async fn run_system_request_with_adapter(
         Some(observer),
         None,
         None,
+        approvals,
         event,
         agent,
     ))
@@ -878,6 +963,36 @@ pub async fn run_system_request_with_bridge(
     event: impl FnMut(Value) -> Result<()> + Send,
     agent: impl FnMut(AgentSignal) -> Result<()> + Send,
 ) -> Result<Value> {
+    run_system_request_with_bridge_and_approvals(
+        path,
+        cancel,
+        runner_lock,
+        adapter,
+        observer,
+        bridge,
+        launch_id,
+        None,
+        event,
+        agent,
+    )
+    .await
+}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bridge entry point carries explicit custody, observer, launch identity, approvals, and graph callbacks."
+)]
+pub async fn run_system_request_with_bridge_and_approvals(
+    path: &Path,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<File>>,
+    adapter: Arc<dyn infra_host::provider::LaunchAdapter>,
+    observer: Arc<dyn infra_host::process::RunObserver>,
+    bridge: Arc<dyn CodeGraphBridge>,
+    session_id: Option<String>,
+    approvals: Option<Arc<dyn infra_host::permission::Approvals>>,
+    event: impl FnMut(Value) -> Result<()> + Send,
+    agent: impl FnMut(AgentSignal) -> Result<()> + Send,
+) -> Result<Value> {
     Box::pin(run_system_context(
         path,
         cancel,
@@ -885,7 +1000,8 @@ pub async fn run_system_request_with_bridge(
         Some(adapter),
         Some(observer),
         Some(bridge),
-        launch_id,
+        session_id,
+        approvals,
         event,
         agent,
     ))
