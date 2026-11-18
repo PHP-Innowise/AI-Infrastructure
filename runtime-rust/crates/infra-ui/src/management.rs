@@ -1,4 +1,4 @@
-use crate::{api, dom, model as m, session, systems};
+use crate::{api, dom, model as m, run, session, systems};
 use serde_json::{json, Value as V};
 use wasm_bindgen_futures::spawn_local;
 pub fn initialize() {
@@ -35,6 +35,7 @@ pub fn creator_models() {
         "creator-model-detail",
         metadata["detail"].as_str().unwrap_or(""),
     );
+    creator_permissions_hint();
 }
 
 pub fn registered(projects: V) {
@@ -1282,6 +1283,117 @@ async fn apply_change() {
     }
     installed_skills().await;
 }
+fn normalized_creator_permission(value: Option<&str>) -> &'static str {
+    match value {
+        Some("manual") => "manual",
+        Some("bypass") => "bypass",
+        _ => "auto",
+    }
+}
+
+fn creator_restored_permissions(run: &V) -> &'static str {
+    session::restored_value(
+        "permissions",
+        normalized_creator_permission(run["permissions"].as_str()),
+    )
+}
+
+fn creator_permissions_hint_text(provider: &str, permission: &str) -> &'static str {
+    session::permissions_hint(provider, "edit", permission)
+}
+
+fn creator_permissions_hint() {
+    let provider = dom::value("creator-provider");
+    let permission = dom::value("creator-permissions");
+    dom::text(
+        "creator-permissions-hint",
+        creator_permissions_hint_text(&provider, &permission),
+    );
+    dom::attr(
+        "creator-permissions-hint",
+        "data-mode",
+        session::permissions_hint_mode(false, "edit", &permission),
+    );
+}
+
+fn creator_target_summary(run: &V) -> String {
+    let perm = match normalized_creator_permission(run["permissions"].as_str()) {
+        "manual" => "Manual",
+        "bypass" => "Bypass",
+        _ => "Auto",
+    };
+    format!(
+        "{} · {} · {} / {} · Permissions: {perm}",
+        m::text(run, "target"),
+        m::text(run, "workspace"),
+        m::text(run, "provider"),
+        m::text(run, "model")
+    )
+}
+
+fn creator_status_text(run: &V, waiting: &[V]) -> String {
+    let base = m::label(run["status"].as_str().unwrap_or(""));
+    if creator_busy(run) && !waiting.is_empty() {
+        format!("{base} · Waiting for your answer to a permission request…")
+    } else {
+        base
+    }
+}
+
+fn creator_permissions_panel_state(v: &V) -> (bool, String) {
+    let waiting = m::array(&v["waiting_permissions"]);
+    (!waiting.is_empty(), run::permission_panel_lead(&waiting))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn creator_start_body(
+    budgets: V,
+    project: &str,
+    provider: &str,
+    model: V,
+    thinking_effort: V,
+    permissions: &str,
+    operation: &str,
+    workspace: &str,
+    worktree_branch: String,
+    agents_enabled: bool,
+    agent_count: V,
+    goal: &str,
+    tools: Vec<String>,
+) -> V {
+    json!({
+        "budgets": budgets,
+        "project_id": project,
+        "provider": provider,
+        "model": model,
+        "thinking_effort": thinking_effort,
+        "permissions": normalized_creator_permission(Some(permissions)),
+        "operation": operation,
+        "workspace": workspace,
+        "worktree_branch": worktree_branch,
+        "agents_enabled": agents_enabled,
+        "agent_count": agent_count,
+        "goal": goal,
+        "tools": tools,
+    })
+}
+
+fn creator_routing_payload(
+    model: V,
+    thinking_effort: V,
+    permissions: &str,
+    agents_enabled: bool,
+    agent_count: V,
+) -> V {
+    json!({
+        "model": model,
+        "thinking_effort": thinking_effort,
+        "permissions": normalized_creator_permission(Some(permissions)),
+        "agents_enabled": agents_enabled,
+        "agent_count": agent_count,
+    })
+}
+
 fn creator_current(project: &str, id: &str, generation: u64) -> bool {
     dom::value("creator-project") == project
         && m::scope_current("creator-scope", generation, project, id)
@@ -1304,6 +1416,9 @@ fn creator_mutation_controls(locked: bool) {
             let _ = input.remove_attribute("disabled");
         }
     }
+    let busy = creator_busy(&m::data("creator-detail")["run"]);
+    dom::disabled("creator-permissions", locked || busy);
+    creator_permissions_hint();
     if locked {
         for action in dom::all("#creator-actions button") {
             let _ = action.set_attribute("disabled", "");
@@ -1314,8 +1429,12 @@ fn creator_mutation_controls(locked: bool) {
 fn creator_reset_detail() {
     m::take("creator-detail");
     dom::hidden("creator-detail", true);
+    dom::hidden("creator-permissions-panel", true);
+    dom::text("creator-permissions-lead", "");
+    run::sync_waiting_permissions("creator-permissions-list", &[], false);
     dom::clear("creator-actions");
     dom::options("creator-runs", &[], m::summary, None);
+    creator_permissions_hint();
     crate::session::sync_working_indicator();
 }
 pub fn reset_creator_project() {
@@ -1323,7 +1442,9 @@ pub fn reset_creator_project() {
     m::next("creator-read");
     dom::cancel_timer("creator-poll");
     m::take("creator-list");
+    dom::set_value("creator-permissions", "auto");
     creator_reset_detail();
+    creator_mutation_controls(false);
 }
 pub async fn creator_list() {
     dom::cancel_timer("creator-poll");
@@ -1367,6 +1488,7 @@ pub async fn creator_list() {
             let id = dom::value("creator-runs");
             if id.is_empty() {
                 creator_reset_detail();
+                creator_mutation_controls(false);
             } else {
                 creator_read(&id).await;
             }
@@ -1414,7 +1536,9 @@ async fn creator_read_scoped(id: &str, project: &str, generation: u64) {
                 ] {
                     dom::set_value(target, &m::string(&run[key]));
                 }
+                dom::set_value("creator-permissions", creator_restored_permissions(run));
                 dom::set_checked("creator-agents", m::yes(&run["agents_enabled"]));
+                creator_permissions_hint();
             }
             if prior["run"]["revision"] != value["run"]["revision"] {
                 dom::set_value("creator-answers", "");
@@ -1452,22 +1576,16 @@ fn render_creator() {
         return;
     }
     dom::hidden("creator-detail", false);
-    dom::text(
-        "creator-status",
-        &m::label(run["status"].as_str().unwrap_or("")),
-    );
-    dom::text(
-        "creator-target",
-        &format!(
-            "{} · {} · {} / {}",
-            m::text(run, "target"),
-            m::text(run, "workspace"),
-            m::text(run, "provider"),
-            m::text(run, "model")
-        ),
-    );
+    let waiting = m::array(&v["waiting_permissions"]);
+    dom::text("creator-status", &creator_status_text(run, &waiting));
+    dom::text("creator-target", &creator_target_summary(run));
     dom::text("creator-message", &m::text(run, "message"));
     session::restore_budgets("creator-run-budgets", &run["budgets"]);
+    let active = creator_busy(run) || m::active(&v["session"]);
+    let (show_waiting, lead) = creator_permissions_panel_state(&v);
+    run::sync_waiting_permissions("creator-permissions-list", &waiting, active);
+    dom::hidden("creator-permissions-panel", !show_waiting);
+    dom::text("creator-permissions-lead", &lead);
     let reports = m::array(&v["reports"])
         .into_iter()
         .enumerate()
@@ -1583,7 +1701,28 @@ async fn creator_start() {
     if project.is_empty() {
         return;
     }
-    let body = json!({"budgets":session::budgets("creator-budgets"),"project_id":project,"provider":dom::value("creator-provider"),"model":session::nullable(dom::value("creator-model").trim().into()),"thinking_effort":session::nullable(dom::value("creator-effort")),"operation":dom::value("creator-operation"),"workspace":dom::value("creator-workspace"),"worktree_branch":if dom::value("creator-workspace")=="worktree"{dom::value("creator-branch").trim().to_owned()}else{String::new()},"agents_enabled":dom::checked("creator-agents"),"agent_count":dom::num("creator-count"),"goal":dom::value("creator-goal"),"tools":dom::all("[name=creator-tool]:checked").iter().map(dom::value_of).collect::<Vec<_>>()});
+    let body = creator_start_body(
+        session::budgets("creator-budgets"),
+        &project,
+        &dom::value("creator-provider"),
+        session::nullable(dom::value("creator-model").trim().into()),
+        session::nullable(dom::value("creator-effort")),
+        &dom::value("creator-permissions"),
+        &dom::value("creator-operation"),
+        &dom::value("creator-workspace"),
+        if dom::value("creator-workspace") == "worktree" {
+            dom::value("creator-branch").trim().to_owned()
+        } else {
+            String::new()
+        },
+        dom::checked("creator-agents"),
+        dom::num("creator-count"),
+        &dom::value("creator-goal"),
+        dom::all("[name=creator-tool]:checked")
+            .iter()
+            .map(dom::value_of)
+            .collect::<Vec<_>>(),
+    );
     let generation = m::bind_scope("creator-scope", &project, "");
     dom::cancel_timer("creator-poll");
     m::next("creator-read");
@@ -1647,7 +1786,13 @@ async fn creator_action(action: &str) {
             );
             return;
         }
-        body["routing"] = json!({"model":session::nullable(dom::value("creator-model").trim().into()),"thinking_effort":session::nullable(dom::value("creator-effort")),"agents_enabled":dom::checked("creator-agents"),"agent_count":dom::num("creator-count")});
+        body["routing"] = creator_routing_payload(
+            session::nullable(dom::value("creator-model").trim().into()),
+            session::nullable(dom::value("creator-effort")),
+            &dom::value("creator-permissions"),
+            dom::checked("creator-agents"),
+            dom::num("creator-count"),
+        );
     }
     if action == "apply" {
         let approved = dom::selected_checks("creator-files");
@@ -1795,6 +1940,10 @@ pub async fn event(
             creator_models();
             return true;
         }
+        if id == "creator-permissions" {
+            creator_permissions_hint();
+            return true;
+        }
     }
     if kind == "input" && id == "creator-model" {
         creator_models();
@@ -1883,7 +2032,30 @@ pub async fn event(
         "creator-refresh" => creator_list().await,
         "creator-new-run" => {
             dom::hidden("creator-form", false);
+            dom::set_value(
+                "creator-permissions",
+                session::restored_value("permissions", &dom::value("creator-permissions")),
+            );
+            creator_permissions_hint();
             dom::focus("creator-goal");
+        }
+        "permission-decide" => {
+            if run::permission_event_container(payload) != "creator-permissions-list" {
+                return false;
+            }
+            let detail = m::data("creator-detail");
+            let sid = detail["session"]["id"]
+                .as_str()
+                .or_else(|| detail["run"]["session_id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let run_id = m::text(&detail["run"], "id");
+            if !sid.is_empty()
+                && run::decide_permission_for("creator-permissions-list", &sid, payload).await
+                && !run_id.is_empty()
+            {
+                creator_read(&run_id).await;
+            }
         }
         "creator-action" => creator_action(payload.as_str().unwrap_or("")).await,
         "creator-run-budgets-save" => creator_action("budgets").await,
@@ -1968,5 +2140,102 @@ mod tests {
             .summary
             .contains("infra-scan-project-profile.md (15 chars · truncated · #abcdef12)"));
         assert_eq!(view.text, "# Scan\nAll good");
+    }
+
+    #[test]
+    fn creator_permissions_hints_payloads_restoration_and_inline_cards_preserve_contracts() {
+        assert!(super::creator_permissions_hint_text("claude", "auto").contains("auto mode"));
+        assert!(super::creator_permissions_hint_text("codex", "manual").contains("Allow and Deny"));
+        assert!(super::creator_permissions_hint_text("cursor", "bypass")
+            .contains("without the sandbox"));
+
+        assert_eq!(
+            super::creator_restored_permissions(&json!({"permissions": "bypass"})),
+            "auto"
+        );
+        assert_eq!(
+            super::creator_restored_permissions(&json!({"permissions": "manual"})),
+            "manual"
+        );
+        assert_eq!(super::creator_restored_permissions(&json!({})), "auto");
+
+        let run = json!({
+            "target": "/srv/app",
+            "workspace": "project",
+            "provider": "claude",
+            "model": "sonnet",
+            "permissions": "manual",
+            "status": "scanning"
+        });
+        assert_eq!(
+            super::creator_target_summary(&run),
+            "/srv/app · project · claude / sonnet · Permissions: Manual"
+        );
+        assert!(super::creator_busy(&run));
+
+        let waiting = vec![json!({
+            "request_id": "cr-1",
+            "provider": "claude",
+            "tool": "Bash",
+            "summary": "composer test",
+            "detail": "Manual approval requested",
+            "session_option": true,
+            "rule_summary": "Allow Bash(composer test)",
+        })];
+        assert_eq!(
+            super::creator_status_text(&run, &waiting),
+            "scanning · Waiting for your answer to a permission request…"
+        );
+        assert_eq!(super::creator_status_text(&run, &[]), "scanning");
+
+        let detail = json!({"run": run, "waiting_permissions": waiting});
+        assert_eq!(
+            super::creator_permissions_panel_state(&detail),
+            (
+                true,
+                "Waiting for your answer to a permission request…".to_owned()
+            )
+        );
+        assert_eq!(
+            super::creator_permissions_panel_state(&json!({"waiting_permissions": []})),
+            (false, String::new())
+        );
+
+        let start = super::creator_start_body(
+            json!({"usd": 5}),
+            "proj-1",
+            "claude",
+            json!(null),
+            json!("high"),
+            "manual",
+            "generate",
+            "project",
+            String::new(),
+            true,
+            json!(3),
+            "Build PHP kit",
+            vec!["claude".to_owned()],
+        );
+        assert_eq!(start["permissions"], "manual");
+        assert_eq!(start["project_id"], "proj-1");
+
+        let routing =
+            super::creator_routing_payload(json!("opus"), json!(null), "bypass", false, json!(3));
+        assert_eq!(routing["permissions"], "bypass");
+        assert_eq!(routing["model"], "opus");
+
+        let html = crate::run::render_permission_card_html(
+            "creator-permissions-list",
+            &detail["waiting_permissions"][0],
+            true,
+        );
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("data-permission-id=\"cr-1\""));
+        assert!(html.contains("Allow for this session: Allow Bash(composer test)"));
+        let payloads = crate::test_support::payloads(&html, "permission-decide");
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0]["container"], "creator-permissions-list");
+        assert_eq!(payloads[0]["request_id"], "cr-1");
+        assert_eq!(payloads[1]["decision"], "allow_session");
     }
 }

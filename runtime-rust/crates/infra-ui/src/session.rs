@@ -1864,7 +1864,7 @@ fn restore_preferences() {
 }
 /// A remembered field as a new draft starts with it. Bypass Permissions is
 /// chosen for each session on purpose, so a draft starts with Auto instead.
-fn restored_value<'a>(id: &str, value: &'a str) -> &'a str {
+pub(crate) fn restored_value<'a>(id: &str, value: &'a str) -> &'a str {
     if id == "permissions" && value == "bypass" {
         "auto"
     } else {

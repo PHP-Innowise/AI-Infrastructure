@@ -1667,6 +1667,26 @@ pub(crate) fn question_allows_other(question: &V) -> bool {
         .unwrap_or(true)
 }
 
+pub(crate) fn permission_decide_payload(container_id: &str, request_id: &str, decision: &str) -> V {
+    if container_id == "events" {
+        json!({"request_id": request_id, "decision": decision})
+    } else {
+        json!({"request_id": request_id, "decision": decision, "container": container_id})
+    }
+}
+
+pub(crate) fn permission_question_other_payload(
+    container_id: &str,
+    request_id: &str,
+    index: usize,
+) -> V {
+    if container_id == "events" {
+        json!({"request_id": request_id, "index": index})
+    } else {
+        json!({"request_id": request_id, "index": index, "container": container_id})
+    }
+}
+
 pub(crate) fn question_radio_group_name(request_id: &str, idx: usize) -> String {
     let safe_id: String = request_id
         .chars()
@@ -1681,7 +1701,34 @@ pub(crate) fn question_radio_group_name(request_id: &str, idx: usize) -> String 
     format!("pq-{safe_id}-{idx}")
 }
 
-pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> String {
+pub(crate) fn question_radio_group_name_in(
+    container_id: &str,
+    request_id: &str,
+    idx: usize,
+) -> String {
+    if container_id == "events" {
+        return question_radio_group_name(request_id, idx);
+    }
+    let safe_container: String = container_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let base = question_radio_group_name(request_id, idx);
+    let suffix = base.strip_prefix("pq-").unwrap_or(&base);
+    format!("pq-{safe_container}-{suffix}")
+}
+
+pub(crate) fn render_question_card_html_in(
+    container_id: &str,
+    request_id: &str,
+    questions: &[V],
+) -> String {
     let mut out = String::new();
     for (idx, q) in questions.iter().enumerate() {
         let key = question_answer_key(q, idx);
@@ -1690,7 +1737,7 @@ pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> St
         let multi = question_is_multi_select(q);
         let options = m::array(&q["options"]);
         let allows_other = question_allows_other(q) || options.is_empty();
-        let group_name = question_radio_group_name(request_id, idx);
+        let group_name = question_radio_group_name_in(container_id, request_id, idx);
         let input_type = if multi { "checkbox" } else { "radio" };
         out.push_str(&format!(
             "<fieldset class=\"permission-question\" data-question-index=\"{idx}\" data-question-key=\"{}\" data-multi-select=\"{multi}\">",
@@ -1745,7 +1792,8 @@ pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> St
                 ));
                 out.push_str("<span class=\"permission-question-option-body\"><span class=\"permission-question-option-label\">Other</span></span></label>");
             }
-            let payload = json!({"request_id": request_id, "index": idx}).to_string();
+            let payload =
+                permission_question_other_payload(container_id, request_id, idx).to_string();
             let placeholder = if options.is_empty() {
                 "Type your answer…"
             } else {
@@ -1772,6 +1820,11 @@ pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> St
         out.push_str("</div></fieldset>");
     }
     out
+}
+
+#[cfg(test)]
+pub(crate) fn render_question_card_html(request_id: &str, questions: &[V]) -> String {
+    render_question_card_html_in("events", request_id, questions)
 }
 
 fn format_answer_value(val: &V) -> String {
@@ -1985,71 +2038,333 @@ fn notify_permission(event: &V) {
     fire_browser_notification(&title, &body, &tag, false, Some(request));
 }
 
-/// A request the agent's host asked permission for, and what became of it. Every
-/// event of one request patches the existing block in place without dropping focus.
-fn permission(event: &V) {
-    let request = m::text(event, "request_id");
-    if request.is_empty() {
-        return;
+pub(crate) struct PermissionButtonSpec {
+    pub(crate) decision: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) class_name: &'static str,
+    pub(crate) payload: V,
+    pub(crate) aria_label: String,
+    pub(crate) is_question_submit: bool,
+}
+
+pub(crate) struct PermissionCardSpec {
+    pub(crate) request_id: String,
+    pub(crate) event_id: String,
+    pub(crate) provider: String,
+    pub(crate) tool: String,
+    pub(crate) state: String,
+    pub(crate) heading: String,
+    pub(crate) summary: String,
+    pub(crate) detail: String,
+    pub(crate) raw_rule: String,
+    pub(crate) rule_hint: String,
+    pub(crate) ask_kind: String,
+    pub(crate) diff_preview: String,
+    pub(crate) is_question: bool,
+    pub(crate) questions: Vec<V>,
+    pub(crate) questions_sig: String,
+    pub(crate) actions_key: String,
+    pub(crate) buttons: Vec<PermissionButtonSpec>,
+}
+
+pub(crate) fn permission_panel_lead(waiting: &[V]) -> String {
+    match waiting.len() {
+        0 => String::new(),
+        1 => "Waiting for your answer to a permission request…".to_owned(),
+        n => format!("Waiting for your answers to {n} permission requests…"),
     }
-    let state = m::text(event, "state");
-    let mut pending = m::data("permission-pending")
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    if state == "pending" {
-        pending.insert(request.clone(), json!(true));
+}
+
+pub(crate) fn build_permission_card_spec(
+    container_id: &str,
+    event: &V,
+) -> Option<PermissionCardSpec> {
+    let request_id = m::text(event, "request_id");
+    if request_id.is_empty() {
+        return None;
+    }
+    let tool = permission_tool(event);
+    let is_question = is_question_permission(event);
+    let questions = if is_question {
+        m::array(&event["questions"])
     } else {
-        pending.remove(&request);
-    }
-    m::set("permission-pending", V::Object(pending));
-    let found = dom::all("#events [data-permission-id]")
+        Vec::new()
+    };
+    let questions_sig = if is_question {
+        serde_json::to_string(&questions).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let session_option = m::yes(&event["session_option"]);
+    let actions_key = if is_question {
+        format!("question:{request_id}")
+    } else {
+        format!("{session_option}:{tool}")
+    };
+    let choices: Vec<(&'static str, &'static str)> = if is_question {
+        vec![("allow", "Submit answers"), ("deny", "Decline")]
+    } else {
+        permission_choices(session_option).to_vec()
+    };
+    let buttons = choices
         .into_iter()
-        .find(|block| {
-            block.get_attribute("data-permission-id").as_deref() == Some(request.as_str())
-        });
+        .map(|(decision, label)| {
+            let aria_label = if is_question {
+                if decision == "allow" {
+                    format!("Submit answers for {tool}")
+                } else {
+                    format!("Decline {tool}")
+                }
+            } else {
+                permission_button_aria_label(decision, label, &tool)
+            };
+            PermissionButtonSpec {
+                decision,
+                label,
+                class_name: if decision == "allow" {
+                    "button primary compact"
+                } else {
+                    "button compact"
+                },
+                payload: permission_decide_payload(container_id, &request_id, decision),
+                aria_label,
+                is_question_submit: is_question && decision == "allow",
+            }
+        })
+        .collect();
+    Some(PermissionCardSpec {
+        request_id,
+        event_id: m::string(&event["id"]),
+        provider: event["provider"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .unwrap_or("")
+            .to_owned(),
+        tool,
+        state: m::text(event, "state"),
+        heading: permission_heading(event),
+        summary: clean(&m::text(event, "summary")),
+        detail: clean(&m::text(event, "detail")),
+        raw_rule: clean(&m::text(event, "rule_summary")),
+        rule_hint: permission_rule_hint_text(event),
+        ask_kind: event["ask_kind"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_owned(),
+        diff_preview: event["diff_preview"].as_str().unwrap_or("").to_owned(),
+        is_question,
+        questions,
+        questions_sig,
+        actions_key,
+        buttons,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn render_permission_card_html(
+    container_id: &str,
+    event: &V,
+    run_active: bool,
+) -> String {
+    let mut normalized = event.clone();
+    if normalized["state"]
+        .as_str()
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        normalized["state"] = json!("pending");
+    }
+    let Some(spec) = build_permission_card_spec(container_id, &normalized) else {
+        return String::new();
+    };
+    let mut attrs = format!(
+        "class=\"conversation-permission\" data-permission-id=\"{}\" role=\"group\" data-tool=\"{}\" data-state=\"{}\" aria-label=\"{}\"",
+        files_map::escape_html(&spec.request_id),
+        files_map::escape_html(&spec.tool),
+        files_map::escape_html(&spec.state),
+        files_map::escape_html(&spec.heading),
+    );
+    if !spec.provider.is_empty() {
+        attrs.push_str(&format!(
+            " data-provider=\"{}\"",
+            files_map::escape_html(&spec.provider)
+        ));
+    }
+    if !spec.raw_rule.is_empty() {
+        attrs.push_str(&format!(
+            " data-rule-summary=\"{}\"",
+            files_map::escape_html(&spec.raw_rule)
+        ));
+    }
+    if !spec.ask_kind.is_empty() {
+        attrs.push_str(&format!(
+            " data-ask-kind=\"{}\"",
+            files_map::escape_html(&spec.ask_kind)
+        ));
+    }
+    let mut body = format!(
+        "<p class=\"permission-heading\">{}</p>",
+        files_map::escape_html(&spec.heading)
+    );
+    if !spec.summary.is_empty() {
+        body.push_str(&format!(
+            "<code class=\"permission-summary\">{}</code>",
+            files_map::escape_html(&spec.summary)
+        ));
+    }
+    if !spec.detail.is_empty() {
+        body.push_str(&format!(
+            "<p class=\"permission-detail\" data-role=\"detail\">{}</p>",
+            files_map::escape_html(&spec.detail)
+        ));
+    }
+    if !spec.rule_hint.is_empty() {
+        body.push_str(&format!(
+            "<p class=\"permission-rule-hint\">{}</p>",
+            files_map::escape_html(&spec.rule_hint)
+        ));
+    }
+    if !spec.diff_preview.trim().is_empty() {
+        body.push_str(&format!(
+            "<details class=\"permission-diff-wrap\" data-diff-raw=\"{}\"><summary>View proposed changes</summary><pre class=\"permission-diff\">{}</pre></details>",
+            files_map::escape_html(&spec.diff_preview),
+            render_diff_preview_lines_html(&spec.diff_preview),
+        ));
+    }
+    if spec.state == "pending" {
+        if !run_active {
+            body.push_str(
+                "<p class=\"permission-detail\" data-role=\"ended\">The run that asked has ended.</p>",
+            );
+        } else {
+            if spec.is_question {
+                body.push_str(&format!(
+                    "<div class=\"permission-question-card\" data-questions-sig=\"{}\">{}</div>",
+                    files_map::escape_html(&spec.questions_sig),
+                    render_question_card_html_in(container_id, &spec.request_id, &spec.questions),
+                ));
+            }
+            body.push_str(&format!(
+                "<div class=\"permission-actions\" data-actions-key=\"{}\">",
+                files_map::escape_html(&spec.actions_key)
+            ));
+            for button in &spec.buttons {
+                let extra = if button.is_question_submit {
+                    " data-question-submit=\"true\""
+                } else {
+                    ""
+                };
+                body.push_str(&format!(
+                    "<button type=\"button\" class=\"{}\" data-action=\"permission-decide\" data-payload=\"{}\" data-decision=\"{}\" data-label=\"{}\"{extra} aria-label=\"{}\">{}</button>",
+                    button.class_name,
+                    files_map::escape_html(&button.payload.to_string()),
+                    button.decision,
+                    files_map::escape_html(button.label),
+                    files_map::escape_html(&button.aria_label),
+                    files_map::escape_html(button.label),
+                ));
+            }
+            body.push_str("</div><p class=\"permission-error error-text\" role=\"alert\"></p>");
+        }
+    }
+    format!("<div {attrs}>{body}</div>")
+}
+
+pub(crate) fn waiting_permission_reconcile_plan(
+    existing_ids: &[String],
+    waiting: &[V],
+) -> (Vec<String>, Vec<(String, V)>) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut live = Vec::new();
+    for ask in waiting {
+        let id = m::text(ask, "request_id");
+        if id.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        let mut pending_ask = ask.clone();
+        if pending_ask["state"]
+            .as_str()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            pending_ask["state"] = json!("pending");
+        }
+        live.push((id, pending_ask));
+    }
+    let remove = existing_ids
+        .iter()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect();
+    (remove, live)
+}
+
+fn permission_container_blocks(container: &web_sys::Element) -> Vec<web_sys::Element> {
+    dom::children(container)
+        .into_iter()
+        .filter(|el| el.has_attribute("data-permission-id"))
+        .collect()
+}
+
+fn find_permission_block(
+    container: &web_sys::Element,
+    request_id: &str,
+) -> Option<web_sys::Element> {
+    permission_container_blocks(container)
+        .into_iter()
+        .find(|block| block.get_attribute("data-permission-id").as_deref() == Some(request_id))
+}
+
+fn upsert_permission_card_in(
+    container: &web_sys::Element,
+    container_id: &str,
+    event: &V,
+    run_active: bool,
+    cache_questions: bool,
+) -> Option<(web_sys::Element, bool)> {
+    let spec = build_permission_card_spec(container_id, event)?;
+    let request = &spec.request_id;
+    let found = find_permission_block(container, request);
     let is_new = found.is_none();
     let block = match found {
         Some(block) => block,
         None => {
             let block = dom::el("div", "conversation-permission", "");
-            let _ = block.set_attribute("data-permission-id", &request);
+            let _ = block.set_attribute("data-permission-id", request);
             let _ = block.set_attribute("role", "group");
-            dom::append("events", &block);
+            dom::add(container, &block);
             block
         }
     };
-    let event_id = m::string(&event["id"]);
-    if !event_id.is_empty() && block.get_attribute("data-event-id").as_deref() != Some(&event_id) {
-        let _ = block.set_attribute("data-event-id", &event_id);
+    if !spec.event_id.is_empty()
+        && block.get_attribute("data-event-id").as_deref() != Some(spec.event_id.as_str())
+    {
+        let _ = block.set_attribute("data-event-id", &spec.event_id);
     }
-    if let Some(provider) = event["provider"].as_str().filter(|p| !p.is_empty()) {
-        if block.get_attribute("data-provider").as_deref() != Some(provider) {
-            let _ = block.set_attribute("data-provider", provider);
-        }
+    if !spec.provider.is_empty()
+        && block.get_attribute("data-provider").as_deref() != Some(spec.provider.as_str())
+    {
+        let _ = block.set_attribute("data-provider", &spec.provider);
     }
-    let tool = permission_tool(event);
-    if block.get_attribute("data-tool").as_deref() != Some(tool.as_str()) {
-        let _ = block.set_attribute("data-tool", &tool);
+    if block.get_attribute("data-tool").as_deref() != Some(spec.tool.as_str()) {
+        let _ = block.set_attribute("data-tool", &spec.tool);
     }
-    if block.get_attribute("data-state").as_deref() != Some(state.as_str()) {
-        let _ = block.set_attribute("data-state", &state);
+    if block.get_attribute("data-state").as_deref() != Some(spec.state.as_str()) {
+        let _ = block.set_attribute("data-state", &spec.state);
     }
-    let heading = permission_heading(event);
-    if block.get_attribute("aria-label").as_deref() != Some(heading.as_str()) {
-        let _ = block.set_attribute("aria-label", &heading);
+    if block.get_attribute("aria-label").as_deref() != Some(spec.heading.as_str()) {
+        let _ = block.set_attribute("aria-label", &spec.heading);
     }
     match permission_child(&block, "permission-heading", None) {
-        Some(existing) if existing.text_content().as_deref() == Some(heading.as_str()) => {}
+        Some(existing) if existing.text_content().as_deref() == Some(spec.heading.as_str()) => {}
         Some(existing) => {
             // #events uses aria-relevant="additions", so replacing only the changed heading
             // announces state transitions without rebuilding buttons or stealing focus.
-            let fresh = dom::el("p", "permission-heading", &heading);
+            let fresh = dom::el("p", "permission-heading", &spec.heading);
             let _ = block.replace_child(&fresh, &existing);
         }
         None => {
             let first = dom::children(&block).into_iter().next();
-            let fresh = dom::el("p", "permission-heading", &heading);
+            let fresh = dom::el("p", "permission-heading", &spec.heading);
             let _ = block.insert_before(&fresh, first.as_ref().map(|e| e.as_ref()));
         }
     }
@@ -2060,8 +2375,6 @@ fn permission(event: &V) {
     let existing_answers = permission_child(&block, "permission-answers-summary", None);
     let existing_diff = permission_child(&block, "permission-diff-wrap", None);
     let existing_rule = permission_child(&block, "permission-rule-hint", None);
-    let summary = clean(&m::text(event, "summary"));
-    let detail = clean(&m::text(event, "detail"));
     let existing_detail = permission_child(&block, "permission-detail", Some("detail"));
     let before_summary = existing_detail
         .as_ref()
@@ -2077,7 +2390,7 @@ fn permission(event: &V) {
         "code",
         "permission-summary",
         None,
-        &summary,
+        &spec.summary,
         before_summary,
     );
     let before_detail = existing_rule
@@ -2093,18 +2406,16 @@ fn permission(event: &V) {
         "p",
         "permission-detail",
         Some("detail"),
-        &detail,
+        &spec.detail,
         before_detail,
     );
-    let rule_hint = permission_rule_hint_text(event);
-    let raw_rule = clean(&m::text(event, "rule_summary"));
-    if raw_rule.is_empty() {
+    if spec.raw_rule.is_empty() {
         let _ = block.remove_attribute("data-rule-summary");
     } else {
-        let _ = block.set_attribute("data-rule-summary", &raw_rule);
+        let _ = block.set_attribute("data-rule-summary", &spec.raw_rule);
     }
-    if let Some(ask_kind) = event["ask_kind"].as_str().filter(|s| !s.is_empty()) {
-        let _ = block.set_attribute("data-ask-kind", ask_kind);
+    if !spec.ask_kind.is_empty() {
+        let _ = block.set_attribute("data-ask-kind", &spec.ask_kind);
     }
     let before_rule = existing_diff
         .as_ref()
@@ -2118,27 +2429,26 @@ fn permission(event: &V) {
         "p",
         "permission-rule-hint",
         None,
-        &rule_hint,
+        &spec.rule_hint,
         before_rule,
     );
-    let diff_preview = event["diff_preview"].as_str().unwrap_or("");
     let before_diff = existing_question
         .as_ref()
         .or(existing_answers.as_ref())
         .or(existing_ended.as_ref())
         .or(existing_actions.as_ref())
         .or(existing_error.as_ref());
-    if diff_preview.trim().is_empty() {
+    if spec.diff_preview.trim().is_empty() {
         if let Some(el) = existing_diff {
             el.remove();
         }
     } else {
-        let keep_diff = existing_diff
-            .as_ref()
-            .is_some_and(|el| el.get_attribute("data-diff-raw").as_deref() == Some(diff_preview));
+        let keep_diff = existing_diff.as_ref().is_some_and(|el| {
+            el.get_attribute("data-diff-raw").as_deref() == Some(spec.diff_preview.as_str())
+        });
         if !keep_diff {
             let wrap = dom::el("details", "permission-diff-wrap", "");
-            let _ = wrap.set_attribute("data-diff-raw", diff_preview);
+            let _ = wrap.set_attribute("data-diff-raw", &spec.diff_preview);
             if existing_diff
                 .as_ref()
                 .is_some_and(|old| old.has_attribute("open"))
@@ -2147,7 +2457,7 @@ fn permission(event: &V) {
             }
             let sum = dom::el("summary", "", "View proposed changes");
             let pre = dom::el("pre", "permission-diff", "");
-            pre.set_inner_html(&render_diff_preview_lines_html(diff_preview));
+            pre.set_inner_html(&render_diff_preview_lines_html(&spec.diff_preview));
             dom::add(&wrap, &sum);
             dom::add(&wrap, &pre);
             if let Some(old_diff) = existing_diff {
@@ -2157,7 +2467,7 @@ fn permission(event: &V) {
             }
         }
     }
-    if state != "pending" {
+    if spec.state != "pending" {
         if let Some(el) = existing_question {
             el.remove();
         }
@@ -2175,13 +2485,13 @@ fn permission(event: &V) {
         } else if event["resolved_answers"].is_object() {
             event["resolved_answers"].clone()
         } else {
-            m::data("permission-submitted-answers")[&request].clone()
+            m::data("permission-submitted-answers")[request].clone()
         };
         let event_questions = m::array(&event["questions"]);
         let questions = if !event_questions.is_empty() {
             event_questions
         } else {
-            m::array(&m::data("permission-questions-cache")[&request])
+            m::array(&m::data("permission-questions-cache")[request])
         };
         let summary_html = render_answers_summary_html(&questions, &resolved_answers);
         if summary_html.is_empty() {
@@ -2204,12 +2514,12 @@ fn permission(event: &V) {
                 }
             }
         }
-        return;
+        return Some((block, is_new));
     }
     if let Some(el) = existing_answers {
         el.remove();
     }
-    if !m::active(&m::read(|s| s.selected.clone())) {
+    if !run_active {
         if let Some(el) = existing_question {
             el.remove();
         }
@@ -2227,31 +2537,34 @@ fn permission(event: &V) {
         if let Some(el) = existing_error {
             el.remove();
         }
-        return;
+        return Some((block, is_new));
     }
     if let Some(el) = existing_ended {
         el.remove();
     }
-    let is_question = is_question_permission(event);
-    if is_question {
-        let questions = m::array(&event["questions"]);
-        let mut cache = m::data("permission-questions-cache")
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        if cache.len() >= 200 {
-            cache.clear();
+    if spec.is_question {
+        if cache_questions {
+            let mut cache = m::data("permission-questions-cache")
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            if cache.len() >= 200 {
+                cache.clear();
+            }
+            cache.insert(request.clone(), V::Array(spec.questions.clone()));
+            m::set("permission-questions-cache", V::Object(cache));
         }
-        cache.insert(request.clone(), V::Array(questions.clone()));
-        m::set("permission-questions-cache", V::Object(cache));
-        let questions_sig = serde_json::to_string(&questions).unwrap_or_default();
         let keep_question = existing_question.as_ref().is_some_and(|el| {
-            el.get_attribute("data-questions-sig").as_deref() == Some(questions_sig.as_str())
+            el.get_attribute("data-questions-sig").as_deref() == Some(spec.questions_sig.as_str())
         });
         if !keep_question {
             let card = dom::el("div", "permission-question-card", "");
-            let _ = card.set_attribute("data-questions-sig", &questions_sig);
-            card.set_inner_html(&render_question_card_html(&request, &questions));
+            let _ = card.set_attribute("data-questions-sig", &spec.questions_sig);
+            card.set_inner_html(&render_question_card_html_in(
+                container_id,
+                request,
+                &spec.questions,
+            ));
             if let Some(old_card) = existing_question {
                 let _ = block.replace_child(&card, &old_card);
             } else {
@@ -2267,52 +2580,25 @@ fn permission(event: &V) {
     } else if let Some(el) = existing_question {
         el.remove();
     }
-    let session_option = m::yes(&event["session_option"]);
-    let actions_key = if is_question {
-        format!("question:{request}")
-    } else {
-        format!("{session_option}:{tool}")
-    };
-    let keep_actions = existing_actions
-        .as_ref()
-        .is_some_and(|el| el.get_attribute("data-actions-key").as_deref() == Some(&actions_key));
+    let keep_actions = existing_actions.as_ref().is_some_and(|el| {
+        el.get_attribute("data-actions-key").as_deref() == Some(spec.actions_key.as_str())
+    });
     if !keep_actions {
         let actions = dom::el("div", "permission-actions", "");
-        let _ = actions.set_attribute("data-actions-key", &actions_key);
-        let choices: Vec<(&'static str, &'static str)> = if is_question {
-            vec![("allow", "Submit answers"), ("deny", "Decline")]
-        } else {
-            permission_choices(session_option).to_vec()
-        };
-        for (decision, label) in choices {
+        let _ = actions.set_attribute("data-actions-key", &spec.actions_key);
+        for spec_button in &spec.buttons {
             let button = dom::button(
-                label,
+                spec_button.label,
                 "permission-decide",
-                json!({"request_id": request, "decision": decision}),
+                spec_button.payload.clone(),
             );
-            let _ = button.set_attribute(
-                "class",
-                if decision == "allow" {
-                    "button primary compact"
-                } else {
-                    "button compact"
-                },
-            );
-            let _ = button.set_attribute("data-decision", decision);
-            let _ = button.set_attribute("data-label", label);
-            if is_question && decision == "allow" {
+            let _ = button.set_attribute("class", spec_button.class_name);
+            let _ = button.set_attribute("data-decision", spec_button.decision);
+            let _ = button.set_attribute("data-label", spec_button.label);
+            if spec_button.is_question_submit {
                 let _ = button.set_attribute("data-question-submit", "true");
             }
-            let aria = if is_question {
-                if decision == "allow" {
-                    format!("Submit answers for {tool}")
-                } else {
-                    format!("Decline {tool}")
-                }
-            } else {
-                permission_button_aria_label(decision, label, &tool)
-            };
-            let _ = button.set_attribute("aria-label", &aria);
+            let _ = button.set_attribute("aria-label", &spec_button.aria_label);
             dom::add(&actions, &button);
         }
         if let Some(old_actions) = existing_actions {
@@ -2333,8 +2619,71 @@ fn permission(event: &V) {
             dom::add(&block, &err);
         }
     }
-    if is_new {
-        notify_permission(event);
+    Some((block, is_new))
+}
+
+/// A request the agent's host asked permission for, and what became of it. Every
+/// event of one request patches the existing block in place without dropping focus.
+fn permission(event: &V) {
+    let request = m::text(event, "request_id");
+    if request.is_empty() {
+        return;
+    }
+    let state = m::text(event, "state");
+    let mut pending = m::data("permission-pending")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if state == "pending" {
+        pending.insert(request.clone(), json!(true));
+    } else {
+        pending.remove(&request);
+    }
+    m::set("permission-pending", V::Object(pending));
+    let Some(container) = dom::get("events") else {
+        return;
+    };
+    let run_active = m::active(&m::read(|s| s.selected.clone()));
+    if let Some((_, is_new)) =
+        upsert_permission_card_in(&container, "events", event, run_active, true)
+    {
+        if is_new {
+            notify_permission(event);
+        }
+    }
+}
+
+/// Renders waiting permission ask events into a dedicated container without
+/// disturbing unsent question inputs or focus on polls.
+pub(crate) fn sync_waiting_permissions(container_id: &str, waiting: &[V], run_active: bool) {
+    let Some(container) = dom::get(container_id) else {
+        return;
+    };
+    let existing_blocks = permission_container_blocks(&container);
+    let existing_ids: Vec<String> = existing_blocks
+        .iter()
+        .filter_map(|block| block.get_attribute("data-permission-id"))
+        .collect();
+    let (to_remove, live) = waiting_permission_reconcile_plan(&existing_ids, waiting);
+    let remove_set: std::collections::BTreeSet<&str> =
+        to_remove.iter().map(String::as_str).collect();
+    for block in existing_blocks {
+        if block
+            .get_attribute("data-permission-id")
+            .is_some_and(|id| remove_set.contains(id.as_str()))
+        {
+            block.remove();
+        }
+    }
+    for (idx, (_, pending_ask)) in live.iter().enumerate() {
+        if let Some((block, _)) =
+            upsert_permission_card_in(&container, container_id, pending_ask, run_active, false)
+        {
+            let current = container.children().item(idx as u32);
+            if current.as_ref() != Some(&block) {
+                let _ = container.insert_before(&block, current.as_ref().map(|e| e.as_ref()));
+            }
+        }
     }
 }
 
@@ -2381,11 +2730,7 @@ pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
         return;
     }
     for id in stale_ids {
-        let card = dom::all("#events [data-permission-id]")
-            .into_iter()
-            .find(|block| {
-                block.get_attribute("data-permission-id").as_deref() == Some(id.as_str())
-            });
+        let card = dom::get("events").and_then(|c| find_permission_block(&c, &id));
         let provider = card
             .as_ref()
             .and_then(|block| block.get_attribute("data-provider"))
@@ -2503,19 +2848,14 @@ fn collect_question_answers(question_card: &web_sys::Element) -> Result<V, &'sta
     Ok(V::Object(answers))
 }
 
-/// Sends the person's answer to a waiting request.
-async fn decide_permission(payload: &V) {
-    let sid = m::read(|s| s.sid.clone());
+/// Sends the person's answer to a waiting request inside `container_id` for `sid`.
+pub(crate) async fn decide_permission_for(container_id: &str, sid: &str, payload: &V) -> bool {
     let request = m::text(payload, "request_id");
     let decision = m::text(payload, "decision");
-    if sid.is_empty() || request.is_empty() || m::read(|s| s.auth_failed) {
-        return;
+    if sid.is_empty() || request.is_empty() || decision.is_empty() || m::read(|s| s.auth_failed) {
+        return false;
     }
-    let block = dom::all("#events [data-permission-id]")
-        .into_iter()
-        .find(|block| {
-            block.get_attribute("data-permission-id").as_deref() == Some(request.as_str())
-        });
+    let block = dom::get(container_id).and_then(|c| find_permission_block(&c, &request));
     let buttons: Vec<web_sys::Element> = block
         .iter()
         .flat_map(dom::children)
@@ -2526,7 +2866,7 @@ async fn decide_permission(payload: &V) {
         button.has_attribute("disabled")
             || button.get_attribute("aria-busy").as_deref() == Some("true")
     }) {
-        return;
+        return false;
     }
     let error_el = block
         .iter()
@@ -2549,7 +2889,7 @@ async fn decide_permission(payload: &V) {
                     if let Some(note) = &error_el {
                         note.set_text_content(Some(msg));
                     }
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -2590,7 +2930,7 @@ async fn decide_permission(payload: &V) {
     let answered = crate::api::post(
         &format!(
             "/api/sessions/{}/permissions/{}",
-            dom::enc(&sid),
+            dom::enc(sid),
             dom::enc(&request)
         ),
         body,
@@ -2609,6 +2949,7 @@ async fn decide_permission(payload: &V) {
                 cache.insert(request.clone(), ans);
                 m::set("permission-submitted-answers", V::Object(cache));
             }
+            true
         }
         Err(error) => {
             for (button, label) in &saved_labels {
@@ -2622,11 +2963,62 @@ async fn decide_permission(payload: &V) {
             if let Some(note) = &error_el {
                 note.set_text_content(Some(&error.message));
             }
+            false
         }
     }
-    // The answer comes back as the request's next event.
-    let epoch = m::read(|s| s.epoch);
-    session::poll(epoch).await;
+}
+
+/// Sends the person's answer to a waiting request in the active session feed.
+async fn decide_permission(payload: &V) {
+    let sid = m::read(|s| s.sid.clone());
+    if decide_permission_for("events", &sid, payload).await {
+        // The answer comes back as the request's next event.
+        let epoch = m::read(|s| s.epoch);
+        session::poll(epoch).await;
+    }
+}
+
+pub(crate) fn permission_target_container(
+    payload: &V,
+    view: &str,
+    active_container: Option<&str>,
+) -> &'static str {
+    match payload["container"].as_str() {
+        Some("system-permissions-list") => return "system-permissions-list",
+        Some("creator-permissions-list") => return "creator-permissions-list",
+        Some("events") => return "events",
+        _ => {}
+    }
+    match active_container {
+        Some("system-permissions-list") => return "system-permissions-list",
+        Some("creator-permissions-list") => return "creator-permissions-list",
+        Some("events") => return "events",
+        _ => {}
+    }
+    match view {
+        "system-changes" | "systems" => "system-permissions-list",
+        "creator" => "creator-permissions-list",
+        _ => "events",
+    }
+}
+
+fn active_permission_container() -> Option<&'static str> {
+    let active = dom::document().active_element()?;
+    let container = active
+        .closest("#system-permissions-list, #creator-permissions-list, #events")
+        .ok()
+        .flatten()?;
+    match container.id().as_str() {
+        "system-permissions-list" => Some("system-permissions-list"),
+        "creator-permissions-list" => Some("creator-permissions-list"),
+        "events" => Some("events"),
+        _ => None,
+    }
+}
+
+pub(crate) fn permission_event_container(payload: &V) -> &'static str {
+    let view = m::read(|s| s.view.clone());
+    permission_target_container(payload, &view, active_permission_container())
 }
 
 fn native_run(run: &V) -> bool {
@@ -4410,14 +4802,11 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
     if kind == "input" && action == "permission-question-other" {
         let req = m::text(payload, "request_id");
         let idx = payload["index"].as_u64();
+        let container_id = permission_event_container(payload);
         if !req.is_empty() && !value.trim().is_empty() {
             if let Some(idx) = idx {
                 if let Some(block) =
-                    dom::all("#events [data-permission-id]")
-                        .into_iter()
-                        .find(|el| {
-                            el.get_attribute("data-permission-id").as_deref() == Some(req.as_str())
-                        })
+                    dom::get(container_id).and_then(|c| find_permission_block(&c, &req))
                 {
                     let selector = format!(
                         "fieldset.permission-question[data-question-index=\"{idx}\"] input.permission-question-other-radio"
@@ -4513,7 +4902,12 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
                 let _ = wasm_bindgen_futures::JsFuture::from(p).await;
             }
         }
-        "permission-decide" => decide_permission(payload).await,
+        "permission-decide" => {
+            if permission_event_container(payload) != "events" {
+                return false;
+            }
+            decide_permission(payload).await;
+        }
         _ => {
             if id.starts_with("run-filter-") {
                 m::set(
@@ -6055,5 +6449,106 @@ mod permission_tests {
         assert!(summary_html.contains("Submitted answers"));
         assert!(summary_html.contains("<dt>Auth</dt><dd>JWT</dd>"));
         assert!(summary_html.contains("<dt>Targets</dt><dd>API, CLI</dd>"));
+    }
+
+    #[test]
+    fn shared_waiting_permission_cards_scope_containers_preserve_order_and_avoid_hex() {
+        assert_eq!(
+            super::permission_target_container(
+                &json!({"request_id": "r1", "container": "system-permissions-list"}),
+                "sessions",
+                Some("events"),
+            ),
+            "system-permissions-list"
+        );
+        assert_eq!(
+            super::permission_target_container(&json!({"request_id": "r1"}), "creator", None,),
+            "creator-permissions-list"
+        );
+        assert_eq!(
+            super::permission_target_container(
+                &json!({"request_id": "r1"}),
+                "system-changes",
+                None,
+            ),
+            "system-permissions-list"
+        );
+        assert_eq!(
+            super::permission_target_container(&json!({"request_id": "r1"}), "sessions", None,),
+            "events"
+        );
+
+        assert_eq!(super::permission_panel_lead(&[]), "");
+        assert_eq!(
+            super::permission_panel_lead(&[json!({"request_id": "r1"})]),
+            "Waiting for your answer to a permission request…"
+        );
+        assert_eq!(
+            super::permission_panel_lead(&[
+                json!({"request_id": "r1"}),
+                json!({"request_id": "r2"}),
+            ]),
+            "Waiting for your answers to 2 permission requests…"
+        );
+
+        let existing = vec!["r-stale".to_owned(), "r-keep".to_owned()];
+        let waiting = vec![
+            json!({"request_id": "r-keep", "tool": "Edit"}),
+            json!({"request_id": "r-keep", "tool": "Edit"}),
+            json!({"request_id": ""}),
+            json!({"request_id": "r-new", "tool": "Bash"}),
+        ];
+        let (remove, live) = super::waiting_permission_reconcile_plan(&existing, &waiting);
+        assert_eq!(remove, vec!["r-stale".to_owned()]);
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[0].0, "r-keep");
+        assert_eq!(live[0].1["state"], "pending");
+        assert_eq!(live[1].0, "r-new");
+        assert_eq!(live[1].1["state"], "pending");
+
+        let edit_ask = json!({
+            "request_id": "sys-1",
+            "provider": "claude",
+            "tool": "Edit",
+            "summary": "services/billing/src/Invoice.php",
+            "detail": "[Auto -> Manual boundary escalation: touches billing]",
+            "session_option": false,
+            "rule_summary": "Cross-service boundary requires one-off approval",
+            "diff_preview": "--- a/Invoice.php\n+++ b/Invoice.php\n@@ -1 +1 @@\n-old\n+new\n",
+        });
+        let edit_html =
+            super::render_permission_card_html("system-permissions-list", &edit_ask, true);
+        crate::test_support::assert_no_inline_hex_colors(&edit_html);
+        assert!(edit_html.contains("data-permission-id=\"sys-1\""));
+        assert!(edit_html.contains("role=\"group\""));
+        assert!(edit_html.contains("role=\"alert\""));
+        assert!(edit_html.contains("Cross-service boundary requires one-off approval"));
+        assert!(edit_html.contains("permission-diff-wrap"));
+        let edit_payloads = crate::test_support::payloads(&edit_html, "permission-decide");
+        assert_eq!(edit_payloads.len(), 2);
+        assert_eq!(edit_payloads[0]["container"], "system-permissions-list");
+        assert_eq!(edit_payloads[0]["decision"], "allow");
+        assert_eq!(edit_payloads[1]["decision"], "deny");
+
+        let question_ask = json!({
+            "request_id": "q-1",
+            "provider": "codex",
+            "tool": "AskUserQuestion",
+            "ask_kind": "question",
+            "questions": [{
+                "id": "scope",
+                "header": "Scope",
+                "question": "Pick target",
+                "options": [{"label": "PHP", "description": "PHP stack"}]
+            }]
+        });
+        let q_html =
+            super::render_permission_card_html("creator-permissions-list", &question_ask, true);
+        crate::test_support::assert_no_inline_hex_colors(&q_html);
+        assert!(q_html.contains("name=\"pq-creator-permissions-list-q-1-0\""));
+        let other_payloads = crate::test_support::payloads(&q_html, "permission-question-other");
+        assert_eq!(other_payloads[0]["container"], "creator-permissions-list");
+        let q_decide = crate::test_support::payloads(&q_html, "permission-decide");
+        assert_eq!(q_decide[0]["container"], "creator-permissions-list");
     }
 }

@@ -1,4 +1,4 @@
-use crate::{api, dom, management, model as m, session, system_map};
+use crate::{api, dom, management, model as m, run, session, system_map};
 use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasm_bindgen::JsCast;
@@ -83,6 +83,7 @@ fn reset_system_target(project: &str, config: &str) {
         "editor",
         "editor-generation",
         "system-run",
+        "system-permissions-owner",
         "system-catalog",
         "system-graph-status",
         "system-graph-monotonic",
@@ -94,12 +95,17 @@ fn reset_system_target(project: &str, config: &str) {
     ] {
         m::take(key);
     }
+    dom::set_value("system-permissions", "auto");
+    dom::set_value("system-recovery-permissions", "auto");
+    run::sync_waiting_permissions("system-permissions-list", &[], false);
+    dom::text("system-permissions-lead", "");
     for key in ["editor-dirty", "editor-pending", "discovery-active"] {
         m::set(key, json!(false));
     }
     for id in [
         "system-editor",
         "system-run",
+        "system-permissions-panel",
         "system-catalog",
         "system-change-map-workspace",
         "system-discovery-agents",
@@ -810,6 +816,7 @@ pub async fn load() {
                 read(&id).await;
             } else {
                 sync_changes_map_workspace();
+                controls();
             }
         }
         Err(error) if !error.aborted && system_current(&project, "", generation) => {
@@ -818,10 +825,91 @@ pub async fn load() {
         _ => {}
     }
 }
+
+fn normalized_system_permission(value: Option<&str>) -> &'static str {
+    match value {
+        Some("manual") => "manual",
+        Some("bypass") => "bypass",
+        _ => "auto",
+    }
+}
+
+fn restored_system_launch_permission(v: &V) -> &'static str {
+    session::restored_value(
+        "permissions",
+        normalized_system_permission(v["permissions"].as_str()),
+    )
+}
+
+fn restored_system_recovery_permission(v: &V) -> &'static str {
+    normalized_system_permission(v["permissions"].as_str())
+}
+
+pub(crate) fn system_permissions_hint(provider: &str, mode: &str, permission: &str) -> String {
+    let editing = if mode == "edit" { "edit" } else { "plan" };
+    let base = session::permissions_hint(provider, editing, permission);
+    if editing == "edit" && normalized_system_permission(Some(permission)) == "auto" {
+        format!(
+            "{base} Under Auto, cross-service or contract-boundary writes escalate to Manual confirmation."
+        )
+    } else {
+        base.to_owned()
+    }
+}
+
+fn system_permissions_panel_state(v: &V) -> (bool, String) {
+    let waiting = m::array(&v["waiting_permissions"]);
+    (!waiting.is_empty(), run::permission_panel_lead(&waiting))
+}
+
+fn system_execute_payload(
+    provider: &str,
+    mode: &str,
+    access: &str,
+    permissions: &str,
+    timeout: V,
+    tell_agents_graph: bool,
+) -> V {
+    json!({
+        "provider": provider,
+        "mode": mode,
+        "access": access,
+        "permissions": normalized_system_permission(Some(permissions)),
+        "timeout": timeout,
+        "tell_agents_graph": tell_agents_graph,
+    })
+}
+
+fn system_resume_payload(
+    accept_source_changes: bool,
+    tell_agents_graph: bool,
+    permissions: &str,
+    accept_unrun_checks: bool,
+    retry_step: &str,
+) -> V {
+    let mut extra = json!({
+        "accept_source_changes": accept_source_changes,
+        "tell_agents_graph": tell_agents_graph,
+        "permissions": normalized_system_permission(Some(permissions)),
+    });
+    if accept_unrun_checks {
+        extra["accept_unrun_checks"] = json!(true);
+    } else if !retry_step.is_empty() {
+        extra["retry_step"] = json!(retry_step);
+    }
+    extra
+}
+
 /// The run's status and what stopped it: the stopped dispatch's receipt says
 /// that best (the agent's own reason, failed checks, the CLI's message); the
 /// journal's error is the fallback, a code read as words.
 fn run_status(v: &V) -> String {
+    if m::yes(&v["active"])
+        && v["status"] != "queued"
+        && !m::array(&v["waiting_permissions"]).is_empty()
+    {
+        return "Waiting for your answer to a permission request…".into();
+    }
     let status = m::label(v["status"].as_str().unwrap_or(""));
     // Launches share the Harness runner; one waits while another holds it.
     if v["status"] == "queued" {
@@ -1230,6 +1318,51 @@ fn controls() {
     let (lock_state, notice, show_discard) = editor_lock_state(scanning, dirty);
     sync_editor_lock(lock_state, notice, show_discard, locked);
     dom::disabled("system-prepare", pending || held);
+    let system_mode = dom::value("system-mode");
+    let system_provider = dom::value("system-provider");
+    let system_perm = dom::value("system-permissions");
+    dom::disabled(
+        "system-permissions",
+        pending || held || active || v["session_id"].is_string() || system_mode == "read-only",
+    );
+    let launch_editing = if system_mode == "edit" {
+        "edit"
+    } else {
+        "plan"
+    };
+    dom::text(
+        "system-permissions-hint",
+        &system_permissions_hint(&system_provider, &system_mode, &system_perm),
+    );
+    dom::attr(
+        "system-permissions-hint",
+        "data-mode",
+        session::permissions_hint_mode(system_mode != "edit", launch_editing, &system_perm),
+    );
+    let saved_mode = v["mode"]
+        .as_str()
+        .or_else(|| v["execution"]["mode"].as_str())
+        .unwrap_or("read-only");
+    let saved_provider = v["provider"].as_str().unwrap_or("");
+    let recovery_perm = dom::value("system-recovery-permissions");
+    dom::disabled(
+        "system-recovery-permissions",
+        pending
+            || active
+            || !v["session_id"].is_string()
+            || v["status"] == "completed"
+            || saved_mode != "edit",
+    );
+    let recovery_editing = if saved_mode == "edit" { "edit" } else { "plan" };
+    dom::text(
+        "system-recovery-permissions-hint",
+        &system_permissions_hint(saved_provider, saved_mode, &recovery_perm),
+    );
+    dom::attr(
+        "system-recovery-permissions-hint",
+        "data-mode",
+        session::permissions_hint_mode(saved_mode != "edit", recovery_editing, &recovery_perm),
+    );
     dom::disabled(
         "system-execute",
         pending
@@ -2230,11 +2363,24 @@ fn build_receipt_card_element(item: &V) -> web_sys::Element {
 fn render_run() {
     let v = m::data("system-run");
     if !v.is_object() {
+        run::sync_waiting_permissions("system-permissions-list", &[], false);
+        dom::hidden("system-permissions-panel", true);
+        dom::text("system-permissions-lead", "");
+        m::take("system-permissions-owner");
         dom::hidden("system-run", true);
         sync_changes_map_workspace();
         return;
     }
     dom::hidden("system-run", false);
+    let perm_owner = json!([v["id"], v["session_id"], v["permissions"]]);
+    if m::data("system-permissions-owner") != perm_owner {
+        m::set("system-permissions-owner", perm_owner);
+        dom::set_value("system-permissions", restored_system_launch_permission(&v));
+        dom::set_value(
+            "system-recovery-permissions",
+            restored_system_recovery_permission(&v),
+        );
+    }
     ingest_run_graph_focus(&v);
     crate::activity::set_run_evidence(&m::text(&v, "id"), &v);
     stepper(&v);
@@ -2433,6 +2579,11 @@ fn render_run() {
     dom::text("system-events", &events_text);
     dom::hidden("system-events-log", events_text.trim().is_empty());
     dom::hidden("system-open-session", !v["session_id"].is_string());
+    let waiting = m::array(&v["waiting_permissions"]);
+    let (show_waiting, lead) = system_permissions_panel_state(&v);
+    run::sync_waiting_permissions("system-permissions-list", &waiting, running);
+    dom::hidden("system-permissions-panel", !show_waiting);
+    dom::text("system-permissions-lead", &lead);
     sync_changes_map_workspace();
     controls();
 }
@@ -3898,6 +4049,8 @@ pub async fn event(
             "system-provider",
             "system-access",
             "system-mode",
+            "system-permissions",
+            "system-recovery-permissions",
             "system-reviewed",
             "system-discovery-provider",
         ]
@@ -4128,13 +4281,14 @@ pub async fn event(
             if dom::checked("system-reviewed") {
                 mutate(
                     "execute",
-                    json!({
-                        "provider": dom::value("system-provider"),
-                        "mode": dom::value("system-mode"),
-                        "access": dom::value("system-access"),
-                        "timeout": dom::num("system-timeout"),
-                        "tell_agents_graph": dom::checked("system-graph-prompt"),
-                    }),
+                    system_execute_payload(
+                        &dom::value("system-provider"),
+                        &dom::value("system-mode"),
+                        &dom::value("system-access"),
+                        &dom::value("system-permissions"),
+                        dom::num("system-timeout"),
+                        dom::checked("system-graph-prompt"),
+                    ),
                 )
                 .await;
             }
@@ -4147,17 +4301,33 @@ pub async fn event(
             }
         }
         "system-resume" => {
-            let mut extra = json!({
-                "accept_source_changes": dom::checked("system-accept-changes"),
-                "tell_agents_graph": dom::checked("system-graph-prompt"),
-            });
-            // Accepting the unrun checks completes verification; it is not retried.
-            if dom::checked("system-accept-unrun") {
-                extra["accept_unrun_checks"] = json!(true);
-            } else if !dom::value("system-retry").is_empty() {
-                extra["retry_step"] = json!(dom::value("system-retry"));
-            }
+            let extra = system_resume_payload(
+                dom::checked("system-accept-changes"),
+                dom::checked("system-graph-prompt"),
+                &dom::value("system-recovery-permissions"),
+                dom::checked("system-accept-unrun"),
+                &dom::value("system-retry"),
+            );
             mutate("resume", extra).await;
+        }
+        "permission-decide" => {
+            if run::permission_event_container(payload) != "system-permissions-list" {
+                return false;
+            }
+            let v = m::data("system-run");
+            let backing_sid = v["session_id"]
+                .as_str()
+                .or_else(|| v["session"]["id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let run_id = m::text(&v, "id");
+            if !backing_sid.is_empty()
+                && run::decide_permission_for("system-permissions-list", &backing_sid, payload)
+                    .await
+                && !run_id.is_empty()
+            {
+                read(&run_id).await;
+            }
         }
         "system-open-session" => {
             let sid = m::text(&m::data("system-run"), "session_id");
@@ -5067,5 +5237,109 @@ mod display_tests {
             reported.status_label,
             "reported complete; resume to record it"
         );
+    }
+
+    #[test]
+    fn system_permissions_hints_payloads_restoration_and_inline_cards_preserve_contracts() {
+        let ro_hint = super::system_permissions_hint("claude", "read-only", "bypass");
+        assert!(ro_hint.starts_with("Planning is read-only"));
+
+        let auto_hint = super::system_permissions_hint("claude", "edit", "auto");
+        assert!(auto_hint.contains("auto mode"));
+        assert!(auto_hint.contains("cross-service or contract-boundary writes escalate to Manual"));
+
+        let manual_hint = super::system_permissions_hint("codex", "edit", "manual");
+        assert!(manual_hint.contains("Allow and Deny"));
+        assert!(!manual_hint.contains("cross-service or contract-boundary writes escalate"));
+
+        let bypass_hint = super::system_permissions_hint("cursor", "edit", "bypass");
+        assert!(bypass_hint.contains("without the sandbox"));
+
+        // Fresh launch restoration avoids sticky bypass while recovery restores saved permission mode.
+        assert_eq!(
+            super::restored_system_launch_permission(&json!({"permissions": "bypass"})),
+            "auto"
+        );
+        assert_eq!(
+            super::restored_system_launch_permission(&json!({"permissions": "manual"})),
+            "manual"
+        );
+        assert_eq!(
+            super::restored_system_launch_permission(&json!({"permissions": null})),
+            "auto"
+        );
+        assert_eq!(
+            super::restored_system_recovery_permission(&json!({"permissions": "bypass"})),
+            "bypass"
+        );
+        assert_eq!(
+            super::restored_system_recovery_permission(&json!({})),
+            "auto"
+        );
+
+        let exec =
+            super::system_execute_payload("claude", "edit", "service", "manual", json!(900), true);
+        assert_eq!(exec["permissions"], "manual");
+        assert_eq!(exec["mode"], "edit");
+        assert_eq!(exec["access"], "service");
+
+        let resume = super::system_resume_payload(true, true, "bypass", false, "service-billing");
+        assert_eq!(resume["permissions"], "bypass");
+        assert_eq!(resume["retry_step"], "service-billing");
+
+        let waiting_run = json!({
+            "active": true,
+            "status": "running",
+            "waiting_permissions": [
+                {
+                    "request_id": "sys-ask-1",
+                    "provider": "claude",
+                    "tool": "Edit",
+                    "summary": "services/billing/src/Invoice.php",
+                    "detail": "[Auto -> Manual boundary escalation: service orders touched billing]",
+                    "session_option": false,
+                    "rule_summary": "Boundary escalation requires confirmation",
+                    "diff_preview": "--- a/Invoice.php\n+++ b/Invoice.php\n@@ -1 +1 @@\n-a\n+b\n"
+                }
+            ]
+        });
+        assert_eq!(
+            super::run_status(&waiting_run),
+            "Waiting for your answer to a permission request…"
+        );
+        assert_eq!(
+            super::system_permissions_panel_state(&waiting_run),
+            (
+                true,
+                "Waiting for your answer to a permission request…".to_owned()
+            )
+        );
+        assert_eq!(
+            super::system_permissions_panel_state(
+                &json!({"active": true, "waiting_permissions": []})
+            ),
+            (false, String::new())
+        );
+
+        let (remove, live) = crate::run::waiting_permission_reconcile_plan(
+            &["sys-ask-0".to_owned(), "sys-ask-1".to_owned()],
+            waiting_run["waiting_permissions"].as_array().unwrap(),
+        );
+        assert_eq!(remove, vec!["sys-ask-0".to_owned()]);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, "sys-ask-1");
+
+        let html = crate::run::render_permission_card_html(
+            "system-permissions-list",
+            &waiting_run["waiting_permissions"][0],
+            true,
+        );
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("data-permission-id=\"sys-ask-1\""));
+        assert!(html.contains("Boundary escalation requires confirmation"));
+        let payloads = crate::test_support::payloads(&html, "permission-decide");
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0]["container"], "system-permissions-list");
+        assert_eq!(payloads[0]["request_id"], "sys-ask-1");
     }
 }
