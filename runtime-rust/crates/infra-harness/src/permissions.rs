@@ -56,6 +56,7 @@ impl PermissionDesk {
         Arc::new(SessionApprovals {
             desk: self.clone(),
             session: session.into(),
+            run: crate::store::hexid()[..8].to_owned(),
             emit,
         })
     }
@@ -124,11 +125,24 @@ impl PermissionDesk {
 struct SessionApprovals {
     desk: Arc<PermissionDesk>,
     session: String,
+    /// Codex and Cursor number their requests afresh in every process, so a
+    /// session's next run would reuse the ids of the last; the page keeps one
+    /// block per id. Each run tags its requests.
+    run: String,
     emit: Event,
+}
+impl SessionApprovals {
+    fn public(&self, id: &str) -> String {
+        format!("{id}-{}", self.run)
+    }
 }
 impl Approvals for SessionApprovals {
     fn ask(&self, ask: &PermissionAsk) -> Result<tokio::sync::oneshot::Receiver<Decision>> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let ask = PermissionAsk {
+            id: self.public(&ask.id),
+            ..ask.clone()
+        };
         let mut pending = lock(&self.desk.pending)?;
         let key = (self.session.clone(), ask.id.clone());
         if pending.contains_key(&key) {
@@ -143,13 +157,13 @@ impl Approvals for SessionApprovals {
             Pending {
                 sender,
                 emit: self.emit.clone(),
-                ask: ask.clone(),
+                ask,
             },
         );
         Ok(receiver)
     }
     fn withdraw(&self, id: &str) -> Result<()> {
-        let request = lock(&self.desk.pending)?.remove(&(self.session.clone(), id.to_owned()));
+        let request = lock(&self.desk.pending)?.remove(&(self.session.clone(), self.public(id)));
         if let Some(request) = request {
             (request.emit)(request.ask.resolved_event("withdrawn", "host"))?;
         }
@@ -171,6 +185,13 @@ mod tests {
             }),
             events,
         )
+    }
+    /// The id the page saw for the `at`-th recorded event's request.
+    fn seen(events: &Arc<Mutex<Vec<Value>>>, at: usize) -> String {
+        events.lock().unwrap()[at]["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
     fn ask(id: &str, session_option: bool) -> PermissionAsk {
         PermissionAsk {
@@ -211,17 +232,19 @@ mod tests {
         let approvals = desk.approvals("session-1", emit);
         let receiver = approvals.ask(&ask("codex-7", true)).unwrap();
         assert_eq!(events.lock().unwrap()[0]["state"], "pending");
-        assert_eq!(desk.waiting("session-1").len(), 1);
+        let id = seen(&events, 0);
+        assert!(id.starts_with("codex-7-"), "{id}");
+        assert_eq!(desk.waiting("session-1")[0]["request_id"], id.as_str());
         assert!(desk.waiting("session-2").is_empty());
         // Another session cannot answer it.
         assert_eq!(
-            desk.decide("session-2", "codex-7", Decision::Allow)
+            desk.decide("session-2", &id, Decision::Allow)
                 .unwrap_err()
                 .status,
             409
         );
         let answer = desk
-            .decide("session-1", "codex-7", Decision::AllowSession)
+            .decide("session-1", &id, Decision::AllowSession)
             .unwrap();
         assert_eq!(answer["state"], "allowed_session");
         assert_eq!(answer["delivered"], true);
@@ -231,7 +254,7 @@ mod tests {
         assert_eq!(recorded[1]["by"], "person");
         // A second answer finds nothing waiting.
         assert_eq!(
-            desk.decide("session-1", "codex-7", Decision::Deny)
+            desk.decide("session-1", &id, Decision::Deny)
                 .unwrap_err()
                 .status,
             409
@@ -241,17 +264,18 @@ mod tests {
     #[tokio::test]
     async fn a_session_approval_needs_a_host_that_remembers_it() {
         let desk = Arc::new(PermissionDesk::default());
-        let (emit, _) = recorder();
+        let (emit, events) = recorder();
         let approvals = desk.approvals("s", emit);
         let receiver = approvals.ask(&ask("cursor-1", false)).unwrap();
+        let id = seen(&events, 0);
         assert_eq!(
-            desk.decide("s", "cursor-1", Decision::AllowSession)
+            desk.decide("s", &id, Decision::AllowSession)
                 .unwrap_err()
                 .status,
             400
         );
         // The refused answer left the request waiting.
-        desk.decide("s", "cursor-1", Decision::Deny).unwrap();
+        desk.decide("s", &id, Decision::Deny).unwrap();
         assert_eq!(receiver.await.unwrap(), Decision::Deny);
     }
 
@@ -275,5 +299,34 @@ mod tests {
             .map(|event| event["state"].as_str().unwrap().to_owned())
             .collect();
         assert_eq!(states, ["pending", "pending", "withdrawn", "expired"]);
+    }
+
+    #[tokio::test]
+    async fn each_run_tags_its_requests_so_reused_host_ids_stay_apart() {
+        let desk = Arc::new(PermissionDesk::default());
+        let (emit, events) = recorder();
+        // Codex and Cursor number their requests from 0 in every process.
+        let first = desk
+            .approvals("s", emit.clone())
+            .ask(&ask("cursor-0", false))
+            .unwrap();
+        let earlier = seen(&events, 0);
+        desk.decide("s", &earlier, Decision::Allow).unwrap();
+        assert_eq!(first.await.unwrap(), Decision::Allow);
+        let second = desk
+            .approvals("s", emit)
+            .ask(&ask("cursor-0", false))
+            .unwrap();
+        let later = seen(&events, 2);
+        assert!(earlier.starts_with("cursor-0-") && later.starts_with("cursor-0-"));
+        assert_ne!(earlier, later);
+        assert_eq!(
+            desk.decide("s", &earlier, Decision::Deny)
+                .unwrap_err()
+                .status,
+            409
+        );
+        desk.decide("s", &later, Decision::Deny).unwrap();
+        assert_eq!(second.await.unwrap(), Decision::Deny);
     }
 }

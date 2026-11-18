@@ -187,8 +187,9 @@ while IFS= read -r line; do
       echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"chat-fake-1","update":{{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"touch probe.txt","kind":"execute","status":"pending","rawInput":{{"command":"touch probe.txt"}}}}}}}}'
       echo '{{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{{"sessionId":"chat-fake-1","toolCall":{{"toolCallId":"call-1","title":"touch probe.txt","kind":"execute","rawInput":{{"command":"touch probe.txt"}}}},"options":[{{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}},{{"optionId":"allow-always","name":"Always allow","kind":"allow_always"}},{{"optionId":"reject-once","name":"Reject","kind":"reject_once"}}]}}}}';;
     *'"optionId":"allow-once"'*|*'"optionId":"reject-once"'*)
-      case "$line" in *allow-once*) status=completed; said="The person allowed it.";; *) status=failed; said="The request was declined.";; esac
-      echo "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"chat-fake-1\",\"update\":{{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"call-1\",\"status\":\"$status\"}}}}}}"
+      # Cursor reports a declined call completed too.
+      case "$line" in *allow-once*) said="The person allowed it.";; *) said="The request was declined.";; esac
+      echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"chat-fake-1","update":{{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}}}}}}'
       echo "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"chat-fake-1\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"$said\"}}}}}}}}"
       echo "{{\"jsonrpc\":\"2.0\",\"id\":$prompt,\"result\":{{\"stopReason\":\"end_turn\"}}}}";;
   esac
@@ -538,6 +539,17 @@ impl Fixture {
         .await;
         assert!(completed(&self.store.get(sid).unwrap()));
     }
+    /// Sends the session's next turn without waiting for it.
+    async fn send(&self, sid: &str, permissions: &str, prompt: &str) {
+        let (status, sent) = self
+            .http(
+                Method::POST,
+                &format!("/api/sessions/{sid}/messages"),
+                Some(json!({"prompt": prompt, "permissions": permissions})),
+            )
+            .await;
+        assert_eq!(status, 200, "{sent}");
+    }
     async fn close(self) {
         let _ = self.shutdown.send(true);
         let _ = self.services.close().await;
@@ -581,7 +593,9 @@ async fn a_manual_session_waits_for_the_persons_answer() {
         })
         .await;
     let pending = permission_events(&events, "pending")[0].clone();
-    assert_eq!(pending["request_id"], "claude-req-1");
+    // Each run tags the host's id, which hosts reuse from run to run.
+    let request = pending["request_id"].as_str().unwrap().to_owned();
+    assert!(request.starts_with("claude-req-1-"), "{request}");
     assert_eq!(pending["tool"], "Bash");
     assert_eq!(pending["summary"], "touch probe.txt");
     assert_eq!(pending["detail"], "Create the probe file");
@@ -604,7 +618,7 @@ async fn a_manual_session_waits_for_the_persons_answer() {
     );
 
     // A request that does not exist, or a decision that is not one, is refused.
-    let path = format!("/api/sessions/{sid}/permissions/claude-req-1");
+    let path = format!("/api/sessions/{sid}/permissions/{request}");
     let (status, _) = fx
         .http(
             Method::POST,
@@ -785,7 +799,8 @@ async fn codex_asks_through_its_app_server_and_is_stopped_after_the_turn() {
         })
         .await;
     let pending = permission_events(&events, "pending")[0].clone();
-    assert_eq!(pending["request_id"], "codex-7");
+    let request = pending["request_id"].as_str().unwrap().to_owned();
+    assert!(request.starts_with("codex-7-"), "{request}");
     assert_eq!(pending["tool"], "Shell");
     assert_eq!(pending["summary"], "touch probe.txt");
     assert_eq!(pending["session_option"], true);
@@ -801,7 +816,7 @@ async fn codex_asks_through_its_app_server_and_is_stopped_after_the_turn() {
     assert_eq!(thread["params"]["approvalPolicy"], "on-request");
     assert_eq!(thread["params"]["approvalsReviewer"], "user");
     let answered = Instant::now();
-    let (status, answer) = fx.answer(&sid, "codex-7", "allow").await;
+    let (status, answer) = fx.answer(&sid, &request, "allow").await;
     assert_eq!(status, 200, "{answer}");
     let events = fx
         .until(&sid, "the Codex turn", |session, _| finished(session))
@@ -850,7 +865,8 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
         })
         .await;
     let pending = permission_events(&events, "pending")[0].clone();
-    assert_eq!(pending["request_id"], "cursor-0");
+    let request = pending["request_id"].as_str().unwrap().to_owned();
+    assert!(request.starts_with("cursor-0-"), "{request}");
     assert_eq!(pending["tool"], "Shell");
     assert_eq!(pending["summary"], "touch probe.txt");
     assert_eq!(pending["session_option"], false);
@@ -858,9 +874,9 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     assert_eq!(arguments.last().map(String::as_str), Some("acp"));
     assert!(!arguments.contains(&"--print".to_owned()));
     // Cursor keeps an always-allow beyond the session, so the Harness offers once only.
-    let (status, _) = fx.answer(&sid, "cursor-0", "allow_session").await;
+    let (status, _) = fx.answer(&sid, &request, "allow_session").await;
     assert_eq!(status, 400);
-    let (status, answer) = fx.answer(&sid, "cursor-0", "deny").await;
+    let (status, answer) = fx.answer(&sid, &request, "deny").await;
     assert_eq!(status, 200, "{answer}");
     let events = fx
         .until(&sid, "the Cursor turn", |session, _| finished(session))
@@ -873,10 +889,55 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
                 .as_str()
                 .is_some_and(|text| text.contains("The request was declined."))
     }));
+    // The declined call did not run, though Cursor calls it completed.
+    let shell: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["kind"] == "tool" && event["state"] == "completed")
+        .collect();
+    assert!(
+        !shell.is_empty() && shell.iter().all(|event| event["ok"] == false),
+        "{events:#?}"
+    );
     assert_eq!(
         fx.store.get(&sid).unwrap()["native_session_id"],
         "chat-fake-1"
     );
+    // The next Manual turn's process numbers its request 0 again; the page
+    // still gets a request of its own.
+    fx.send(&sid, "manual", "Once more").await;
+    let events = fx
+        .until(&sid, "the next Cursor request", |_, events| {
+            permission_events(events, "pending").len() == 2
+        })
+        .await;
+    let next = permission_events(&events, "pending")[1]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(next.starts_with("cursor-0-") && next != request, "{next}");
+    assert_eq!(fx.answer(&sid, &request, "allow").await.0, 409);
+    let (status, answer) = fx.answer(&sid, &next, "allow").await;
+    assert_eq!(status, 200, "{answer}");
+    let events = fx
+        .until(&sid, "the next Cursor turn", |session, events| {
+            finished(session)
+                && events
+                    .iter()
+                    .filter(|event| event["kind"] == "result")
+                    .count()
+                    >= 2
+        })
+        .await;
+    assert!(completed(&fx.store.get(&sid).unwrap()), "{events:#?}");
+    assert_eq!(permission_events(&events, "allowed").len(), 1);
+    assert!(
+        events
+            .iter()
+            .filter(|event| event["kind"] == "tool" && event["state"] == "completed")
+            .any(|event| event["ok"] == true),
+        "{events:#?}"
+    );
+    assert!(lines(&fx.cursor_arguments).ends_with(&["acp".to_owned()]));
 
     fx.follow(&sid, "bypass").await;
     let arguments = lines(&fx.cursor_arguments);
@@ -889,23 +950,32 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     fx.close().await;
 }
 
-/// Live checks against the real Claude Code and Codex on PATH, through the
-/// same routes. They make paid model calls, so they run only when asked:
+/// Live checks against the real Claude Code, Codex and Cursor on PATH, through
+/// the same routes. They make paid model calls, so they run only when asked:
 /// `HARNESS_LIVE=1 cargo test -p infra-harness --test permission_modes -- --ignored`.
-fn live() -> Option<(tempfile::TempDir, [PathBuf; 2])> {
+/// Only the hosts a check names must be installed.
+fn live(wanted: &[&str]) -> Option<(tempfile::TempDir, [PathBuf; 3])> {
     if std::env::var("HARNESS_LIVE").as_deref() != Ok("1") {
         eprintln!("Set HARNESS_LIVE=1 to run the live permission checks.");
         return None;
     }
-    let found = |name: &str| {
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let host = |provider: &str, name: &str| {
+        if !wanted.contains(&provider) {
+            return root.join(format!("no-{provider}"));
+        }
         infra_host::provider::find_executable(name)
             .map(|path| infra_core::fs::canonicalize(path).unwrap())
             .unwrap_or_else(|| panic!("{name} is not on PATH"))
     };
-    Some((
-        tempfile::tempdir().unwrap(),
-        [found("claude"), found("codex")],
-    ))
+    // The Harness looks for cursor-agent before agent, a name other tools use too.
+    let hosts = [
+        host("claude", "claude"),
+        host("codex", "codex"),
+        host("cursor", "cursor-agent"),
+    ];
+    Some((dir, hosts))
 }
 /// A debug build's session run needs more than Tokio's default worker stack.
 fn runtime() -> tokio::runtime::Runtime {
@@ -916,12 +986,12 @@ fn runtime() -> tokio::runtime::Runtime {
         .build()
         .unwrap()
 }
-async fn live_fixture(dir: tempfile::TempDir, [claude, codex]: [PathBuf; 2]) -> Fixture {
+async fn live_fixture(dir: tempfile::TempDir, hosts: [PathBuf; 3]) -> Fixture {
     let root = infra_core::fs::canonicalize(dir.path()).unwrap();
     let unused = root.join("unused");
     let fx = Fixture::with_hosts(
         dir,
-        [claude, codex, root.join("no-cursor")],
+        hosts,
         [unused.clone(), unused.clone(), unused],
         Duration::from_secs(300),
     )
@@ -937,16 +1007,32 @@ async fn live_fixture(dir: tempfile::TempDir, [claude, codex]: [PathBuf; 2]) -> 
 }
 /// Answers every request the session asks until its run ends.
 async fn answer_all(fx: &Fixture, sid: &str, decision: &str) -> Vec<Value> {
+    answer_turns(fx, sid, decision, 1).await
+}
+/// Answers every request until the session's `turns`-th turn has ended.
+async fn answer_turns(fx: &Fixture, sid: &str, decision: &str, turns: usize) -> Vec<Value> {
     let deadline = Instant::now() + fx.patience;
     let mut answered = std::collections::BTreeSet::new();
     loop {
         let session = fx.store.get(sid).unwrap();
         let events = fx.events(sid);
-        if finished(&session) {
+        let results = events
+            .iter()
+            .filter(|event| event["kind"] == "result")
+            .count();
+        if finished(&session) && (results >= turns || !completed(&session)) {
             return events;
         }
+        let resolved: std::collections::BTreeSet<&str> = events
+            .iter()
+            .filter(|event| event["kind"] == "permission" && event["state"] != "pending")
+            .filter_map(|event| event["request_id"].as_str())
+            .collect();
         for request in permission_events(&events, "pending") {
             let id = request["request_id"].as_str().unwrap().to_owned();
+            if resolved.contains(id.as_str()) {
+                continue;
+            }
             if answered.insert(id.clone()) {
                 eprintln!(
                     "{sid}: {} {} → {decision}",
@@ -975,7 +1061,9 @@ fn said(events: &[Value]) -> String {
 #[test]
 #[ignore = "makes paid model calls; set HARNESS_LIVE=1"]
 fn live_claude_code_asks_declines_and_bypasses() {
-    let Some((dir, hosts)) = live() else { return };
+    let Some((dir, hosts)) = live(&["claude"]) else {
+        return;
+    };
     runtime().block_on(async move {
         let fx = live_fixture(dir, hosts).await;
         let probe = |name: &str| fx.project().join(name);
@@ -1034,7 +1122,9 @@ fn live_claude_code_asks_declines_and_bypasses() {
 #[test]
 #[ignore = "makes paid model calls; set HARNESS_LIVE=1"]
 fn live_codex_asks_reviews_and_bypasses() {
-    let Some((dir, hosts)) = live() else { return };
+    let Some((dir, hosts)) = live(&["codex"]) else {
+        return;
+    };
     runtime().block_on(async move {
         let fx = live_fixture(dir, hosts).await;
         let probe = |name: &str| fx.project().join(name);
@@ -1063,6 +1153,79 @@ fn live_codex_asks_reviews_and_bypasses() {
         let events = answer_all(&fx, &sid, "deny").await;
         assert!(events.iter().all(|event| event["kind"] != "permission"), "{events:#?}");
         assert!(probe("probe-codex-bypass.txt").exists(), "{}", said(&events));
+        fx.close().await;
+    });
+}
+
+#[test]
+#[ignore = "makes paid model calls; set HARNESS_LIVE=1"]
+fn live_cursor_asks_over_acp_resumes_and_bypasses() {
+    let Some((dir, hosts)) = live(&["cursor"]) else {
+        return;
+    };
+    runtime().block_on(async move {
+        let fx = live_fixture(dir, hosts).await;
+        let probe = |name: &str| fx.project().join(name);
+        let task = |file: &str| {
+            format!("Use your shell tool to run exactly this command and nothing else: touch {file}\nThen reply with the single word done.")
+        };
+        // Manual: Cursor asks over ACP, the person allows, and the command runs.
+        let sid = fx
+            .start_task("cursor", "manual", None, &task("probe-cursor-manual.txt"))
+            .await;
+        let events = answer_all(&fx, &sid, "allow").await;
+        assert!(completed(&fx.store.get(&sid).unwrap()), "{events:#?}");
+        let asked = permission_events(&events, "allowed");
+        assert!(asked.iter().any(|event| event["tool"] == "Shell"
+            && event["summary"].as_str().unwrap().contains("probe-cursor-manual.txt")), "{events:#?}");
+        assert!(probe("probe-cursor-manual.txt").exists(), "{}", said(&events));
+        let shell = |events: &[Value], ok: bool| {
+            events.iter().any(|event| {
+                event["kind"] == "tool"
+                    && event["tool"] == "Shell"
+                    && event["state"] == "completed"
+                    && event["ok"] == ok
+            })
+        };
+        assert!(shell(&events, true) && !shell(&events, false), "{events:#?}");
+        let chat = fx.store.get(&sid).unwrap()["native_session_id"].clone();
+        assert!(chat.is_string(), "{events:#?}");
+        // The next turn loads the same chat over ACP; the person denies.
+        let before = events.len();
+        fx.send(&sid, "manual", &task("probe-cursor-denied.txt")).await;
+        let events = answer_turns(&fx, &sid, "deny", 2).await;
+        assert!(completed(&fx.store.get(&sid).unwrap()), "{events:#?}");
+        let turn = &events[before..];
+        assert!(!permission_events(turn, "denied").is_empty(), "{turn:#?}");
+        assert!(permission_events(turn, "denied").iter().all(|denied| {
+            asked.iter().all(|allowed| allowed["request_id"] != denied["request_id"])
+        }));
+        assert!(!probe("probe-cursor-denied.txt").exists(), "{}", said(turn));
+        // Cursor calls the declined command completed; it did not run.
+        assert!(shell(turn, false) && !shell(turn, true), "{turn:#?}");
+        assert_eq!(fx.store.get(&sid).unwrap()["native_session_id"], chat);
+        // The loaded chat's replayed history is not shown again: what the
+        // agent said and ran this turn is this turn's alone.
+        assert!(
+            turn.iter()
+                .filter(|event| ["text", "tool", "permission"].contains(&event["kind"].as_str().unwrap_or("")))
+                .all(|event| !event.to_string().contains("probe-cursor-manual.txt")),
+            "{turn:#?}"
+        );
+        assert_eq!(
+            turn.iter()
+                .filter(|event| event["kind"] == "tool" && event["state"] == "started")
+                .count(),
+            1,
+            "{turn:#?}"
+        );
+        // Bypass: print mode runs it without asking anyone.
+        let sid = fx
+            .start_task("cursor", "bypass", None, &task("probe-cursor-bypass.txt"))
+            .await;
+        let events = answer_all(&fx, &sid, "deny").await;
+        assert!(events.iter().all(|event| event["kind"] != "permission"), "{events:#?}");
+        assert!(probe("probe-cursor-bypass.txt").exists(), "{}", said(&events));
         fx.close().await;
     });
 }

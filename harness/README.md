@@ -341,7 +341,7 @@ with the session and can change between turns in **Next-turn settings**.
 | Setting | Claude Code | Codex | Cursor |
 | --- | --- | --- | --- |
 | **Auto** (default) | `--permission-mode auto`: Claude Code's classifier reviews each action. Where a model has no auto mode (Haiku, for one), Claude Code starts in its default mode; the Harness switches it to `acceptEdits` and says so in the chat | `--approve-for-me`: the workspace-write sandbox, with Codex's automatic reviewer answering what needs approval | Print mode with `--sandbox enabled`: workspace edits and sandboxed commands run |
-| **Manual** | `--permission-mode default` with `--permission-prompt-tool stdio`: Claude Code asks before edits and commands | `codex app-server`, a read-only thread with `approvalPolicy: on-request` and the person as reviewer: Codex asks before each edit and each command that writes | `agent acp`: Cursor asks before actions outside its allowlist |
+| **Manual** | `--permission-mode default` with `--permission-prompt-tool stdio`: Claude Code asks before edits and commands | `codex app-server`, a read-only thread with `approvalPolicy: on-request` and the person as reviewer: Codex asks before each edit and each command that writes | `cursor-agent acp`: Cursor asks before actions outside its allowlist (`permissions.allow` in `~/.cursor/cli-config.json`) |
 | **Bypass Permissions** | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--force --sandbox disabled` |
 
 In Auto nothing waits for a person: a request the host's own review would put to
@@ -363,7 +363,12 @@ Claude Code reads stream-json, and Codex and Cursor run their protocol servers,
 which the Harness stops after the turn when they keep serving. Their events are
 read exactly as in a one-shot launch. Cursor's ACP mode has known gaps of its
 own (plugins may not load), so an attached project's Cursor policy arrives as
-the prompt preamble. A session created through the API without `permissions`
+the prompt preamble. The Harness runs `cursor-agent` rather than `agent`, a name
+other tools install too; the ACP server needs a CLI signed in with
+`cursor-agent login`. Cursor reports a command the person denied as completed;
+the Harness records it as not run, not as a success. Cursor CLI 2026.11 also
+keeps a model a launch names with `--model` as its default for later launches,
+in the Harness or not. A session created through the API without `permissions`
 keeps the behaviour from before the setting: workspace edits only, everything
 else declined.
 
@@ -375,7 +380,9 @@ else declined.
 A request is the session event `{"kind":"permission","state":"pending","request_id",…}`
 with `provider`, `tool`, `summary`, `detail` and `session_option`; later events of
 the same `request_id` carry `allowed`, `allowed_session`, `denied`, `declined`,
-`withdrawn` or `expired`.
+`withdrawn` or `expired`. Codex and Cursor number their requests afresh in every
+process, so `request_id` is the host's id followed by a tag of the run
+(`cursor-0-1c029d06`): each turn's requests stay apart.
 
 ### Starting the server
 

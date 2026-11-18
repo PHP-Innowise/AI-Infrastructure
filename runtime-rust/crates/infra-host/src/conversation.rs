@@ -9,7 +9,7 @@
 //! run reads them unchanged, and turns a permission request into a question.
 use crate::permission::{PermissionAsk, PermissionMode};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The longest summary or detail a request shows.
 const SUMMARY_LIMIT: usize = 400;
@@ -45,6 +45,9 @@ pub(crate) struct Step {
 pub(crate) trait Driver: Send {
     fn opening(&mut self) -> Step;
     fn receive(&mut self, message: Value) -> Step;
+    /// The person's answer to one of the driver's asks, by its id, heard
+    /// before the host can act on it.
+    fn answered(&mut self, _ask: &str, _allowed: bool) {}
 }
 
 pub(crate) struct Setup {
@@ -87,6 +90,8 @@ pub(crate) fn cursor(setup: Setup) -> Box<dyn Driver> {
         text: String::new(),
         said: String::new(),
         calls: BTreeMap::new(),
+        asked: BTreeMap::new(),
+        rejected: BTreeSet::new(),
         started: std::time::Instant::now(),
         plans: 0,
         done: false,
@@ -821,11 +826,24 @@ struct Cursor {
     /// The turn's text, for its result.
     said: String,
     calls: BTreeMap<String, (String, Value)>,
+    /// The tool call each unanswered ask is about.
+    asked: BTreeMap<String, String>,
+    /// Calls the person declined. Cursor still reports them completed.
+    rejected: BTreeSet<String>,
     started: std::time::Instant,
     plans: u64,
     done: bool,
 }
 impl Cursor {
+    /// What a finished call came to; a call the person declined did not run.
+    fn outcome(&mut self, id: &str, update: &Value) -> Option<Value> {
+        let outcome = cursor_outcome(update)?;
+        Some(if self.rejected.remove(id) {
+            json!({"rejected": {"reason": DECLINED_BY_PERSON}})
+        } else {
+            outcome
+        })
+    }
     fn request(&mut self, method: &'static str, params: Value) -> Value {
         self.next += 1;
         self.pending.insert(self.next, method);
@@ -884,7 +902,7 @@ impl Cursor {
                 step.events
                     .push(cursor_call(&id, "started", &name, &args, None));
                 self.calls.insert(id.clone(), (name, args));
-                if let Some(outcome) = cursor_outcome(update) {
+                if let Some(outcome) = self.outcome(&id, update) {
                     let (name, args) = self.calls.remove(&id).unwrap_or_default();
                     step.events
                         .push(cursor_call(&id, "completed", &name, &args, Some(outcome)));
@@ -892,7 +910,7 @@ impl Cursor {
             }
             "tool_call_update" => {
                 let id = request_id(&update["toolCallId"]);
-                if let Some(outcome) = cursor_outcome(update) {
+                if let Some(outcome) = self.outcome(&id, update) {
                     let (name, args) = self
                         .calls
                         .remove(&id)
@@ -929,7 +947,8 @@ impl Cursor {
 /// A tool call's name and arguments as Cursor's print mode names them.
 fn cursor_tool(update: &Value) -> (String, Value) {
     let raw = &update["rawInput"];
-    let title = update["title"].as_str().unwrap_or("");
+    let title = cursor_title(update);
+    let title = title.as_str();
     let path = update["locations"][0]["path"]
         .as_str()
         .or_else(|| raw["path"].as_str())
@@ -960,6 +979,16 @@ fn cursor_tool(update: &Value) -> (String, Value) {
         ),
     }
 }
+/// A tool call's title without the backticks Cursor writes a command in.
+fn cursor_title(call: &Value) -> String {
+    call["title"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('`')
+        .trim()
+        .to_owned()
+}
 /// The result a finished tool call carries, or none while it runs.
 fn cursor_outcome(update: &Value) -> Option<Value> {
     match update["status"].as_str()? {
@@ -983,9 +1012,11 @@ fn cursor_call(id: &str, phase: &str, name: &str, args: &Value, outcome: Option<
     tool_call.insert(name.to_owned(), call);
     json!({"type": "tool_call", "subtype": phase, "call_id": id, "tool_call": tool_call})
 }
-fn cursor_ask(id: &Value, params: &Value) -> Ask {
+/// `known` is the call as its `tool_call` update started it: Cursor's request
+/// names the call by its title alone, without its input.
+fn cursor_ask(id: &Value, params: &Value, known: Option<(String, Value)>) -> Ask {
     let call = &params["toolCall"];
-    let (name, args) = cursor_tool(call);
+    let (name, args) = known.unwrap_or_else(|| cursor_tool(call));
     let tool = match name.as_str() {
         "shellToolCall" => "Shell".to_owned(),
         "editToolCall" => "Edit".to_owned(),
@@ -997,12 +1028,19 @@ fn cursor_ask(id: &Value, params: &Value) -> Ask {
             .filter(|kind| kind != "other")
             .unwrap_or_else(|| "Tool".into()),
     };
+    let title = some_text(&json!(cursor_title(call)), SUMMARY_LIMIT);
     let summary = ["command", "path", "pattern", "url"]
         .iter()
         .find_map(|key| some_text(&args[*key], SUMMARY_LIMIT))
-        .or_else(|| some_text(&call["title"], SUMMARY_LIMIT))
+        .or_else(|| title.clone())
         .unwrap_or_else(|| compact(&call["rawInput"], SUMMARY_LIMIT));
-    let detail = some_text(&call["title"], DETAIL_LIMIT).filter(|title| title != &summary);
+    // Why Cursor asks, such as "Not in allowlist: touch".
+    let reason = call["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|item| some_text(&item["content"]["text"], DETAIL_LIMIT));
+    let detail = reason.or_else(|| title.filter(|title| title != &summary));
     // Cursor offers allow-once, allow-always and reject-once. Allow-always is
     // kept by Cursor beyond this session, so the Harness offers only once.
     let option = |kind: &str, fallback: &str| {
@@ -1031,6 +1069,13 @@ fn cursor_ask(id: &Value, params: &Value) -> Ask {
     }
 }
 impl Driver for Cursor {
+    fn answered(&mut self, ask: &str, allowed: bool) {
+        if let Some(call) = self.asked.remove(ask)
+            && !allowed
+        {
+            self.rejected.insert(call);
+        }
+    }
     fn opening(&mut self) -> Step {
         let initialize = self.request(
             "initialize",
@@ -1068,7 +1113,7 @@ impl Driver for Cursor {
                             || asked == "session/new"
                             || asked == "session/load"
                         {
-                            " If Cursor is not signed in, run `agent login` once."
+                            " If Cursor is not signed in, run `cursor-agent login` once."
                         } else {
                             ""
                         };
@@ -1106,11 +1151,22 @@ impl Driver for Cursor {
                         };
                         self.session = Some(session.clone());
                         self.ready = true;
+                        // Model ids carry their settings, such as
+                        // `gpt-5.5[context=272k,reasoning=medium]`; the name is `gpt-5.5`.
+                        let current = &result["models"]["currentModelId"];
+                        let model = result["models"]["availableModels"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|option| option["modelId"] == *current)
+                            .map(|option| option["name"].clone())
+                            .filter(Value::is_string)
+                            .unwrap_or_else(|| current.clone());
                         step.events.push(json!({
                             "type": "system",
                             "subtype": "init",
                             "session_id": session,
-                            "model": result["models"]["currentModelId"],
+                            "model": model,
                         }));
                         let wanted = self.setup.model.clone().filter(|model| {
                             result["models"]["currentModelId"] != model.as_str()
@@ -1146,7 +1202,11 @@ impl Driver for Cursor {
             (Some(method), Some(id)) => {
                 if method == "session/request_permission" {
                     self.flush(&mut step);
-                    step.asks.push(cursor_ask(id, &message["params"]));
+                    let call = request_id(&message["params"]["toolCall"]["toolCallId"]);
+                    let known = self.calls.get(&call).cloned();
+                    let ask = cursor_ask(id, &message["params"], known);
+                    self.asked.insert(ask.public.id.clone(), call);
+                    step.asks.push(ask);
                 } else {
                     step.replies.push(json!({
                         "jsonrpc": "2.0",
@@ -1427,16 +1487,22 @@ mod tests {
         let new = &step.replies[0];
         assert_eq!(new["method"], "session/new");
         assert_eq!(new["params"]["cwd"], "/work/project");
-        let step = respond(&mut driver, new, json!({"sessionId":"chat-1"}));
+        // As Cursor 2026.11 answers: model ids carry their settings.
+        let step = respond(
+            &mut driver,
+            new,
+            json!({"sessionId":"chat-1","models":{"currentModelId":"gpt-5.5[context=272k,reasoning=medium]","availableModels":[{"modelId":"default[]","name":"Auto"},{"modelId":"gpt-5.5[context=272k,reasoning=medium]","name":"gpt-5.5"}]}}),
+        );
         assert_eq!(step.events[0]["type"], "system");
         assert_eq!(step.events[0]["session_id"], "chat-1");
+        assert_eq!(step.events[0]["model"], "gpt-5.5");
         let prompt = step.replies[0].clone();
         assert_eq!(prompt["method"], "session/prompt");
         assert_eq!(prompt["params"]["prompt"][0]["text"], "Fix the bug");
 
         driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Running "}}}}));
         driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"the tests."}}}}));
-        let step = driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"cargo test","kind":"execute","status":"pending","rawInput":{"command":"cargo test"}}}}));
+        let step = driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"`cargo test`","kind":"execute","status":"pending","rawInput":{"command":"cargo test"}}}}));
         assert_eq!(step.events[0]["type"], "assistant");
         assert_eq!(
             step.events[0]["message"]["content"][0]["text"],
@@ -1448,20 +1514,40 @@ mod tests {
             step.events[1]["tool_call"]["shellToolCall"]["args"]["command"],
             "cargo test"
         );
-        let step = driver.receive(json!({"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"chat-1","toolCall":{"toolCallId":"call-1","title":"cargo test","kind":"execute","rawInput":{"command":"cargo test"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}));
+        driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"in_progress"}}}));
+        // The request names the call by its title and says why it asks; the
+        // input came with the call's start.
+        let step = driver.receive(json!({"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"chat-1","toolCall":{"toolCallId":"call-1","title":"`cargo test`","kind":"execute","status":"pending","content":[{"type":"content","content":{"type":"text","text":"Not in allowlist: cargo"}}]},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Allow always","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}));
         let ask = &step.asks[0];
         assert_eq!(ask.public.id, "cursor-0");
         assert_eq!(ask.public.tool, "Shell");
         assert_eq!(ask.public.summary, "cargo test");
+        assert_eq!(
+            ask.public.detail.as_deref(),
+            Some("Not in allowlist: cargo")
+        );
         assert!(!ask.public.session_option);
         assert_eq!(ask.allow["result"]["outcome"]["optionId"], "allow-once");
         assert_eq!(ask.deny["result"]["outcome"]["optionId"], "reject-once");
-        let step = driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}}}));
+        // A request for a call Cursor never announced reads its title.
+        let step = driver.receive(json!({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"chat-1","toolCall":{"toolCallId":"call-9","title":"`rm -r build`","kind":"execute"},"options":[]}}));
+        assert_eq!(step.asks[0].public.summary, "rm -r build");
+        assert_eq!(step.asks[0].public.detail, None);
+        driver.answered("cursor-0", true);
+        driver.answered("cursor-1", false);
+        let step = driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","rawOutput":{"exitCode":0,"stdout":"","stderr":""}}}}));
         assert_eq!(step.events[0]["subtype"], "completed");
         assert_eq!(
             step.events[0]["tool_call"]["shellToolCall"]["result"],
             json!({"success":{}})
         );
+        // Cursor reports a declined call completed; it never ran.
+        let step = driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-9","status":"completed"}}}));
+        let declined = step.events[0]["tool_call"]
+            .as_object()
+            .and_then(|call| call.values().next())
+            .unwrap();
+        assert_eq!(declined["result"]["rejected"]["reason"], DECLINED_BY_PERSON);
         driver.receive(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"All green."}}}}));
         let step = respond(&mut driver, &prompt, json!({"stopReason":"end_turn"}));
         let result = step

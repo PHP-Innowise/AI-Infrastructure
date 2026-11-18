@@ -725,6 +725,8 @@ async fn converse_with_host(
     let finished = Arc::new(AtomicBool::new(false));
     let waiting = Arc::new(AtomicUsize::new(0));
     let decisions: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+    // Answers the driver has not heard yet, by ask id: allowed or not.
+    let answers: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
     // The host hears the opening before it says anything: Codex and Cursor
     // answer only what they are asked.
     for reply in driver.opening().replies {
@@ -763,6 +765,9 @@ async fn converse_with_host(
                 Ok(decided) => decided,
                 Err(error) => {
                     // Nobody can see the request: the host hears no.
+                    if let Ok(mut answers) = answers.lock() {
+                        answers.push((ask.public.id.clone(), false));
+                    }
                     let _ = sender.send(line(&ask.deny)?);
                     emit(
                         json!({"kind":"error","text":format!("A permission request could not be shown: {}", error.message)}),
@@ -771,13 +776,19 @@ async fn converse_with_host(
                 }
             };
             let pending = Waiting::start(&waiting);
+            let answers = answers.clone();
             let task = tokio::spawn(async move {
                 let _pending = pending;
-                let reply = match decided.await {
-                    Ok(Decision::Allow) => ask.allow,
-                    Ok(Decision::AllowSession) => ask.allow_session.unwrap_or(ask.allow),
-                    Ok(Decision::Deny) | Err(_) => ask.deny,
+                let (reply, allowed) = match decided.await {
+                    Ok(Decision::Allow) => (ask.allow, true),
+                    Ok(Decision::AllowSession) => (ask.allow_session.unwrap_or(ask.allow), true),
+                    Ok(Decision::Deny) | Err(_) => (ask.deny, false),
                 };
+                // Recorded before the host hears it, so the driver knows the
+                // answer before anything the host says about it.
+                if let Ok(mut answers) = answers.lock() {
+                    answers.push((ask.public.id.clone(), allowed));
+                }
                 if let Ok(bytes) = line(&reply) {
                     let _ = sender.send(bytes);
                 }
@@ -801,6 +812,13 @@ async fn converse_with_host(
         };
         if !message.is_object() {
             return Ok(());
+        }
+        let heard = answers
+            .lock()
+            .map(|mut answers| std::mem::take(&mut *answers))
+            .unwrap_or_default();
+        for (ask, allowed) in heard {
+            driver.answered(&ask, allowed);
         }
         let step = driver.receive(message);
         take(step, &mut writer, reading)
