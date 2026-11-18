@@ -152,11 +152,18 @@ pub fn render_commit_graph_rows(
             CommitGraphSurface::Dock => {
                 // A count of memory to review is drawn only where one was
                 // supplied: rows are never asked for one each.
-                let badges = match commit["memory_review"].as_u64().filter(|count| *count > 0) {
-                    Some(count) => format!(
+                let badges = if let Some(count) =
+                    commit["memory_review"].as_u64().filter(|count| *count > 0)
+                {
+                    format!(
                         "{badges}<span class=\"graph-pick-badge\" data-kind=\"memory\" title=\"Memory citing a file this commit renamed\">{count} to review</span>"
-                    ),
-                    None => badges,
+                    )
+                } else if commit["memory_review_error"] == true {
+                    format!(
+                        "{badges}<span class=\"graph-pick-badge\" data-kind=\"memory-error\" title=\"Could not check memory citing files this commit renamed\">check failed</span>"
+                    )
+                } else {
+                    badges
                 };
                 let badges_html = if badges.is_empty() {
                     String::new()
@@ -1441,6 +1448,10 @@ mod tests {
             CommitGraphSurface::Picker,
         );
         assert!(!picker.contains("to review"), "{picker}");
+
+        let errored = row(json!({"memory_review_error": true}));
+        assert!(errored.contains("data-kind=\"memory-error\""), "{errored}");
+        assert!(errored.contains(">check failed</span>"), "{errored}");
     }
 
     #[test]

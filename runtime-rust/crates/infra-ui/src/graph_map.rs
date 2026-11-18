@@ -11880,11 +11880,16 @@ fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String 
     // A row shows how much memory to review only once its commit's banner
     // has the answers; rows are never asked for a count each.
     let counts = m::data(COMMIT_MEMORY_COUNTS);
+    let errors = m::data(COMMIT_MEMORY_ERRORS);
     let rows = m::array(&dock["rows"])
         .into_iter()
         .map(|mut row| {
-            if let Some(count) = row["commit"].as_str().and_then(|sha| counts[sha].as_u64()) {
-                row["memory_review"] = json!(count);
+            if let Some(sha) = row["commit"].as_str() {
+                if let Some(count) = counts[sha].as_u64() {
+                    row["memory_review"] = json!(count);
+                } else if errors[sha] == true {
+                    row["memory_review_error"] = json!(true);
+                }
             }
             row
         })
@@ -11940,6 +11945,9 @@ fn render_commit_banner_for_view(view: &V, changes: Option<&V>) -> String {
 /// The commit-dock counts of memory to review, by commit, from the answers
 /// its banner received.
 const COMMIT_MEMORY_COUNTS: &str = "graph-commit-memory-counts";
+/// Commits whose batched renamed-file memory check failed, so the dock can
+/// surface the failure instead of falsely caching `0`.
+const COMMIT_MEMORY_ERRORS: &str = "graph-commit-memory-errors";
 /// At most this many renamed files of one commit are asked about.
 const COMMIT_MEMORY_FILES: usize = 12;
 fn rename_memory_key(project: &str, path: &str, previous: &str) -> String {
@@ -12070,14 +12078,38 @@ fn commit_memory_section(project: &str, commit: &str, changes: Option<&V>) -> St
             .iter()
             .all(|answer| answer.is_object() && answer["pending"] != true)
     {
-        let count = crate::git_commit_graph::rename_review_count(&answers);
+        let any_error = answers
+            .iter()
+            .any(|answer| answer["error"].as_str().is_some());
         let mut counts = m::data(COMMIT_MEMORY_COUNTS);
-        if !counts.is_object() {
-            counts = json!({});
-        }
-        if counts[commit] != count {
-            counts[commit] = json!(count);
-            m::set(COMMIT_MEMORY_COUNTS, counts);
+        let mut errors = m::data(COMMIT_MEMORY_ERRORS);
+        if any_error {
+            if let Some(obj) = counts.as_object_mut() {
+                if obj.remove(commit).is_some() {
+                    m::set(COMMIT_MEMORY_COUNTS, counts);
+                }
+            }
+            if !errors.is_object() {
+                errors = json!({});
+            }
+            if errors[commit] != true {
+                errors[commit] = json!(true);
+                m::set(COMMIT_MEMORY_ERRORS, errors);
+            }
+        } else {
+            if let Some(obj) = errors.as_object_mut() {
+                if obj.remove(commit).is_some() {
+                    m::set(COMMIT_MEMORY_ERRORS, errors);
+                }
+            }
+            let count = crate::git_commit_graph::rename_review_count(&answers);
+            if !counts.is_object() {
+                counts = json!({});
+            }
+            if counts[commit] != count {
+                counts[commit] = json!(count);
+                m::set(COMMIT_MEMORY_COUNTS, counts);
+            }
         }
     }
     let total = changes
@@ -29179,11 +29211,43 @@ mod memory_bridge_tests {
         ]});
         let rows = render_commit_dock_list(&dock, "", 0);
         assert_eq!(rows.matches("1 to review").count(), 1, "{rows}");
+        assert!(m::data(COMMIT_MEMORY_ERRORS)["aaaa1111bbbb2222"].is_null());
+
+        // When the batch memory check fails, clear any cached count and mark the
+        // dock row + banner with an error indicator instead of caching 0.
+        m::set(
+            MEMORY_LINKS,
+            json!({"proj-1\u{1f}src/Auth/Guard.php\u{1f}src/Auth/TokenGuard.php": {
+                "error": "network down"
+            }}),
+        );
+        let failed_banner = render_commit_banner_for_view(&view, Some(&changes));
+        assert!(
+            failed_banner.contains(
+                "Could not check the memory citing src/Auth/TokenGuard.php: network down"
+            ),
+            "{failed_banner}"
+        );
+        assert!(m::data(COMMIT_MEMORY_COUNTS)["aaaa1111bbbb2222"].is_null());
+        assert_eq!(m::data(COMMIT_MEMORY_ERRORS)["aaaa1111bbbb2222"], true);
+        let failed_rows = render_commit_dock_list(&dock, "", 0);
+        assert_eq!(
+            failed_rows.matches("check failed").count(),
+            1,
+            "{failed_rows}"
+        );
+        assert!(
+            failed_rows.contains("data-kind=\"memory-error\""),
+            "{failed_rows}"
+        );
+        assert!(!failed_rows.contains("to review"), "{failed_rows}");
+
         // A commit that renamed nothing asks nothing and adds nothing.
         let plain = render_commit_banner_for_view(&view, Some(&json!({"modified_files": 1})));
         assert!(!plain.contains("graph-commit-memory"), "{plain}");
         m::take(MEMORY_LINKS);
         m::take(COMMIT_MEMORY_COUNTS);
+        m::take(COMMIT_MEMORY_ERRORS);
     }
 
     #[test]

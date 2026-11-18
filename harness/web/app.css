@@ -224,7 +224,7 @@ svg { flex:none; }
 .graph-pick-badge[data-kind="merge"] { border-color:var(--purple-line); color:var(--purple); }
 .graph-pick-badge[data-kind="tag"],.graph-pick-badge[data-kind="draft"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
 .graph-pick-badge[data-kind="merged"],.graph-pick-badge[data-kind="open"] { border-color:var(--success-line); background:var(--success-soft); color:var(--success); }
-.graph-pick-badge[data-kind="closed"] { border-color:var(--error-line); background:var(--error-soft); color:var(--error); }
+.graph-pick-badge[data-kind="closed"],.graph-pick-badge[data-kind="memory-error"] { border-color:var(--error-line); background:var(--error-soft); color:var(--error); }
 .graph-pick-badge[data-kind="memory"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
 .graph-pick-detail { flex:0 1 240px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
 .graph-pick-who { flex:0 0 132px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-2); }
