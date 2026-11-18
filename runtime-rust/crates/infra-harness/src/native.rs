@@ -154,6 +154,7 @@ impl ServicesFactory for NativeFactory {
                     store: store.clone(),
                     source: config.source.clone(),
                     gates,
+                    links: Some(links.clone()),
                 }),
             );
             special.insert(

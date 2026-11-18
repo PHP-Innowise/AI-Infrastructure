@@ -1294,6 +1294,37 @@ impl Sessions {
         (crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Manual))
             .then(|| self.permissions.approvals(sid, emit.clone()))
     }
+    /// Where a Creator launch puts permission requests when running in Manual mode.
+    pub(crate) fn creator_approvals(
+        &self,
+        sid: &str,
+        session: &Value,
+        emit: &Event,
+    ) -> Option<Arc<dyn infra_host::permission::Approvals>> {
+        self.approvals(sid, session, emit)
+    }
+    /// Where a System Orchestration run puts requests that require human confirmation
+    /// (Manual mode, or Auto mode when cross-service boundary escalation triggers).
+    #[allow(dead_code)]
+    pub(crate) fn system_approvals(
+        &self,
+        sid: &str,
+        session: &Value,
+        emit: &Event,
+    ) -> Option<Arc<dyn infra_host::permission::Approvals>> {
+        matches!(
+            crate::permissions::mode(session),
+            Some(
+                infra_host::permission::PermissionMode::Auto
+                    | infra_host::permission::PermissionMode::Manual
+            )
+        )
+        .then(|| self.permissions.approvals(sid, emit.clone()))
+    }
+    /// Expires any unanswered permission requests left waiting for `sid`.
+    pub(crate) fn expire_permissions(&self, sid: &str) {
+        self.permissions.expire(sid);
+    }
     /// A person's answer to a request a running session waits on.
     pub fn decide_permission(&self, sid: &str, request: &str, body: &Value) -> Result<Value> {
         const MAX_PERMISSION_ANSWERS_BYTES: usize = 32 * 1024;
@@ -1673,7 +1704,7 @@ impl Sessions {
         });
         for name in ["creator", "system_run", "system_discovery"] {
             if !session[name].is_null() {
-                return self
+                let result = self
                     .special
                     .get(name)
                     .ok_or_else(|| HarnessError::unavailable("Native workflow is unavailable."))?
@@ -1685,6 +1716,8 @@ impl Sessions {
                         emit,
                     )
                     .await;
+                self.permissions.expire(&job.sid);
+                return result;
             }
         }
         let mut graph_binding = None;
@@ -5239,5 +5272,87 @@ mod carried_authority_tests {
                 "{capsule}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod phase3c_approvals_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creator_and_system_approvals_gate_by_permission_mode_and_expire() {
+        let fixture = generation_completion_tests::Fixture::new();
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let recorded = events.clone();
+        let emit: Event = Arc::new(move |ev| {
+            recorded.lock().unwrap().push(ev);
+            Ok(())
+        });
+
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-null", &json!({"permissions": null}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-auto", &json!({"permissions": "auto"}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-bypass", &json!({"permissions": "bypass"}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .creator_approvals("s-manual", &json!({"permissions": "manual"}), &emit)
+                .is_some()
+        );
+
+        assert!(
+            fixture
+                .sessions
+                .system_approvals("s-null", &json!({"permissions": null}), &emit)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .sessions
+                .system_approvals("s-bypass", &json!({"permissions": "bypass"}), &emit)
+                .is_none()
+        );
+        let auto_approvals = fixture
+            .sessions
+            .system_approvals("s-auto", &json!({"permissions": "auto"}), &emit)
+            .expect("Auto system runs need an approvals handle for boundary escalation");
+        assert!(
+            fixture
+                .sessions
+                .system_approvals("s-manual", &json!({"permissions": "manual"}), &emit)
+                .is_some()
+        );
+
+        let rx = auto_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "sys-1".into(),
+                provider: "claude".into(),
+                tool: "Edit".into(),
+                summary: "Edit foreign service".into(),
+                kind: "file_change".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(fixture.sessions.waiting_permissions("s-auto").len(), 1);
+        fixture.sessions.expire_permissions("s-auto");
+        assert!(fixture.sessions.waiting_permissions("s-auto").is_empty());
+        assert!(rx.await.is_err());
+        let logged = events.lock().unwrap();
+        assert_eq!(logged[0]["state"], "pending");
+        assert_eq!(logged[1]["state"], "expired");
     }
 }

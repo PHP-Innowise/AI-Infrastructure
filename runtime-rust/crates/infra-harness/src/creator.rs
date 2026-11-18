@@ -64,7 +64,13 @@ fn routing(run: &mut Value, data: &Value) -> Result<()> {
     if !store::exact(
         r,
         &[],
-        &["model", "thinking_effort", "agents_enabled", "agent_count"],
+        &[
+            "model",
+            "thinking_effort",
+            "agents_enabled",
+            "agent_count",
+            "permissions",
+        ],
     ) {
         return Err(HarnessError::invalid("Invalid Creator routing."));
     }
@@ -87,6 +93,9 @@ fn routing(run: &mut Value, data: &Value) -> Result<()> {
             return Err(HarnessError::invalid("Invalid additional-agent settings."));
         }
         run["agent_count"] = v.clone();
+    }
+    if let Some(v) = r.get("permissions") {
+        run["permissions"] = crate::permissions::validate(v)?;
     }
     Ok(())
 }
@@ -199,7 +208,20 @@ impl CreatorManager {
             .map(|id| self.store.events(id, 0))
             .transpose()?
             .unwrap_or_default();
-        let mut value = json!({"run":run,"reports":reports,"session":session,"events":events});
+        let waiting_permissions = sid
+            .map(|id| {
+                self.sessions()
+                    .map(|s| s.waiting_permissions(id))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let mut value = json!({
+            "run": run,
+            "reports": reports,
+            "session": session,
+            "events": events,
+            "waiting_permissions": waiting_permissions,
+        });
         if value["run"]["status"] == "preview" {
             value["preview"] = files::preview(&value["run"], &self.root.join(&id))?;
         }
@@ -293,7 +315,34 @@ impl CreatorManager {
                 serde_json::to_value(sessions.providers.get("codex")?.executable)?;
         }
         files::write(&directory, &format!("request-{nonce}.json"), &request)?;
-        let session=sessions.launch_internal(&json!({"project_id":run["project_id"],"provider":run["provider"],"prompt":format!("Creator {phase}: {}",Path::new(run["target"].as_str().unwrap_or("")).file_name().unwrap_or_default().to_string_lossy()),"mode":"edit","workflow":"native","model":run["model"],"thinking_effort":run["thinking_effort"],"agents_enabled":run["agents_enabled"],"agent_count":run["agent_count"],"budgets":if ["scan","generate"].contains(&phase){run["budgets"].clone()}else{json!({})}}),Some(&json!({"run_id":id,"nonce":nonce,"phase":phase})),None,None)?;
+        let session = sessions.launch_internal(
+            &json!({
+                "project_id": run["project_id"],
+                "provider": run["provider"],
+                "prompt": format!(
+                    "Creator {phase}: {}",
+                    Path::new(run["target"].as_str().unwrap_or(""))
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
+                "mode": "edit",
+                "workflow": "native",
+                "model": run["model"],
+                "thinking_effort": run["thinking_effort"],
+                "agents_enabled": run["agents_enabled"],
+                "agent_count": run["agent_count"],
+                "permissions": run["permissions"],
+                "budgets": if ["scan", "generate"].contains(&phase) {
+                    run["budgets"].clone()
+                } else {
+                    json!({})
+                }
+            }),
+            Some(&json!({"run_id": id, "nonce": nonce, "phase": phase})),
+            None,
+            None,
+        )?;
         run["session_id"] = session["id"].clone();
         self.save(&run)?;
         self.view(run)
@@ -312,10 +361,12 @@ impl CreatorManager {
                 "worktree_branch",
                 "goal",
                 "budgets",
+                "permissions",
             ],
         ) {
             return Err(HarnessError::invalid("Invalid Creator options."));
         }
+        let permissions = crate::permissions::validate(&data["permissions"])?;
         let sessions = self.sessions()?;
         let project = self
             .store
@@ -410,8 +461,38 @@ impl CreatorManager {
                 "version".into(),
             ],
         )?;
-        let mut run = json!({"id":id,"project_id":project["id"],"target":target,"identity":identity,"workspace":data["workspace"].as_str().unwrap_or("project"),"branch":branch,"operation":operation,"tools":tools,"provider":provider,"model":data["model"],"thinking_effort":data["thinking_effort"],"agents_enabled":enabled,"agent_count":count,"budgets":budgets(data.get("budgets").unwrap_or(&json!({})),provider,false)?,"goal":goal,"created_at":store::now(),"revision":1,"status":"new","answers":"","phase":"scan"});
-        let next_routing = json!({"routing":{"model":run["model"],"thinking_effort":run["thinking_effort"],"agents_enabled":enabled,"agent_count":count}});
+        let mut run = json!({
+            "id": id,
+            "project_id": project["id"],
+            "target": target,
+            "identity": identity,
+            "workspace": data["workspace"].as_str().unwrap_or("project"),
+            "branch": branch,
+            "operation": operation,
+            "tools": tools,
+            "provider": provider,
+            "model": data["model"],
+            "thinking_effort": data["thinking_effort"],
+            "agents_enabled": enabled,
+            "agent_count": count,
+            "permissions": permissions,
+            "budgets": budgets(data.get("budgets").unwrap_or(&json!({})), provider, false)?,
+            "goal": goal,
+            "created_at": store::now(),
+            "revision": 1,
+            "status": "new",
+            "answers": "",
+            "phase": "scan"
+        });
+        let next_routing = json!({
+            "routing": {
+                "model": run["model"],
+                "thinking_effort": run["thinking_effort"],
+                "agents_enabled": enabled,
+                "agent_count": count,
+                "permissions": run["permissions"]
+            }
+        });
         routing(&mut run, &next_routing)?;
         self.launch(run, "scan")
     }
@@ -576,5 +657,309 @@ impl Domain for CreatorManager {
             };
             Ok(Payload::Json(result))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        accelerators::Accelerators,
+        bindings::{ResultsBridge, SessionLinks},
+        commands::CommandCatalog,
+        knowledge::KnowledgeDomain,
+        provider::{Provider, ProviderDomain},
+        results::Results,
+        sessions::{BlackboardFactory, SessionLimits, SpecialWorkflow},
+    };
+    use std::{
+        collections::BTreeMap,
+        sync::{RwLock, atomic::AtomicBool},
+    };
+
+    struct Unused;
+    impl SpecialWorkflow for Unused {
+        fn run<'a>(
+            &'a self,
+            _session: Value,
+            _prompt: String,
+            _generation: String,
+            _cancel: Arc<AtomicBool>,
+            _emit: crate::sessions::Event,
+        ) -> crate::sessions::RunReply<'a> {
+            Box::pin(async { Ok(json!({})) })
+        }
+    }
+    impl BlackboardFactory for Unused {
+        fn for_session(&self, _: &Value) -> Result<Arc<dyn crate::fleet::Blackboard>> {
+            unreachable!()
+        }
+    }
+
+    async fn test_harness() -> (tempfile::TempDir, Arc<Sessions>, CreatorManager, String) {
+        static CATALOG: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        CATALOG
+            .get_or_init(|| async {
+                for id in ["claude", "codex", "cursor"] {
+                    infra_host::model_catalog::model_options(id, None, None)
+                        .await
+                        .unwrap();
+                }
+            })
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let target = root.join("target-php");
+        let source = root.join("source");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(target.join("composer.json"), "{}").unwrap();
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&target).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::from([(
+                "claude".into(),
+                Provider {
+                    id: "claude".into(),
+                    name: "Fake Claude".into(),
+                    available: true,
+                    executable: Some(PathBuf::from("/bin/echo")),
+                    detail: "test".into(),
+                },
+            )]))),
+        });
+        let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
+        let special = ["creator", "system_run", "system_discovery"]
+            .into_iter()
+            .map(|name| (name.into(), Arc::new(Unused) as Arc<dyn SpecialWorkflow>))
+            .collect();
+        let sessions = Sessions::new(
+            store.clone(),
+            source.clone(),
+            providers.clone(),
+            knowledge.clone(),
+            Arc::new(Unused),
+            special,
+            SessionLimits {
+                seconds: 30,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        let links = Arc::new(SessionLinks::new());
+        links.bind(Arc::downgrade(&sessions)).unwrap();
+        let results = Arc::new(
+            Results::new(
+                store.clone(),
+                Arc::new(ResultsBridge {
+                    links,
+                    knowledge,
+                    operation: sessions.operation_lock(),
+                    cancel: sessions.shutdown_cancel(),
+                }),
+            )
+            .unwrap(),
+        );
+        sessions.install_results(results).unwrap();
+        sessions
+            .install_commands(Arc::new(CommandCatalog::new(
+                store.clone(),
+                source.clone(),
+                providers.providers.clone(),
+            )))
+            .unwrap();
+        sessions
+            .install_accelerators(Arc::new(
+                Accelerators::new(
+                    store.clone(),
+                    source.clone(),
+                    providers,
+                    Arc::downgrade(&sessions),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        sessions.activate().unwrap();
+        let manager = CreatorManager::new(store, source, Arc::downgrade(&sessions)).unwrap();
+        (dir, sessions, manager, project_id)
+    }
+
+    #[test]
+    fn routing_validates_and_updates_permissions() {
+        let mut run = json!({"permissions": "auto"});
+        routing(&mut run, &json!({"routing": {"permissions": "manual"}})).unwrap();
+        assert_eq!(run["permissions"], "manual");
+
+        routing(&mut run, &json!({"routing": {"permissions": "bypass"}})).unwrap();
+        assert_eq!(run["permissions"], "bypass");
+
+        routing(&mut run, &json!({"routing": {"permissions": null}})).unwrap();
+        assert_eq!(run["permissions"], Value::Null);
+
+        let err = routing(&mut run, &json!({"routing": {"permissions": "invalid"}})).unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(
+            err.message.contains("Auto, Manual or Bypass"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn start_rejects_invalid_permissions_and_launch_act_view_preserve_permissions() {
+        let (_dir, sessions, manager, project_id) = test_harness().await;
+        let err = manager
+            .start(&json!({
+                "project_id": project_id,
+                "provider": "claude",
+                "tools": ["claude"],
+                "permissions": "bogus"
+            }))
+            .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(
+            err.message.contains("Auto, Manual or Bypass"),
+            "{}",
+            err.message
+        );
+
+        let target = manager.store.project(&project_id).unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let id = store::hexid();
+        let run_dir = manager.root.join(&id);
+        std::fs::create_dir_all(run_dir.join("agent").join(files::TASK)).unwrap();
+        let identity = files::identity(Path::new(&target)).unwrap();
+        let run = json!({
+            "id": id,
+            "project_id": project_id,
+            "target": target,
+            "identity": identity,
+            "workspace": "project",
+            "branch": Value::Null,
+            "operation": "generate",
+            "tools": ["claude"],
+            "provider": "claude",
+            "model": Value::Null,
+            "thinking_effort": Value::Null,
+            "agents_enabled": false,
+            "agent_count": 3,
+            "permissions": "auto",
+            "budgets": {"usd": Value::Null, "tokens": Value::Null, "seconds": 120},
+            "goal": "goal",
+            "created_at": store::now(),
+            "revision": 1,
+            "status": "new",
+            "answers": "",
+            "phase": "scan"
+        });
+        let launched = manager.launch(run, "scan").unwrap();
+        assert_eq!(launched["run"]["permissions"], "auto");
+        assert_eq!(launched["session"]["permissions"], "auto");
+        assert_eq!(launched["waiting_permissions"], json!([]));
+
+        let nonce = launched["session"]["creator"]["nonce"].as_str().unwrap();
+        let req = files::object(&run_dir, &format!("request-{nonce}.json"), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req["permissions"], "auto");
+
+        // While a permission request is pending on the backing session, view exposes waiting_permissions.
+        let sid = launched["session"]["id"].as_str().unwrap().to_owned();
+        let emit: crate::sessions::Event = Arc::new(|_| Ok(()));
+        let approvals = sessions
+            .creator_approvals(&sid, &json!({"permissions": "manual"}), &emit)
+            .unwrap();
+        let rx = approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "creator-1".into(),
+                provider: "claude".into(),
+                tool: "Bash".into(),
+                summary: "Run php -v".into(),
+                kind: "command".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let viewed = manager.get(&id).unwrap();
+        assert_eq!(viewed["waiting_permissions"].as_array().unwrap().len(), 1);
+        assert_eq!(viewed["waiting_permissions"][0]["tool"], "Bash");
+        sessions.expire_permissions(&sid);
+        assert!(rx.await.is_err());
+
+        // Move run to review and test rescan/revise/generate with routing.permissions.
+        let mut stored = manager.load(&id).unwrap();
+        stored["status"] = json!("review");
+        stored["revision"] = json!(2);
+        manager.save(&stored).unwrap();
+        let rescanned = manager
+            .act(
+                &id,
+                &json!({
+                    "action": "rescan",
+                    "revision": 2,
+                    "answers": "",
+                    "routing": {"permissions": "manual"}
+                }),
+            )
+            .unwrap();
+        assert_eq!(rescanned["run"]["permissions"], "manual");
+        assert_eq!(rescanned["session"]["permissions"], "manual");
+        let nonce2 = rescanned["session"]["creator"]["nonce"].as_str().unwrap();
+        let req2 = files::object(&run_dir, &format!("request-{nonce2}.json"), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req2["permissions"], "manual");
+
+        let mut stored = manager.load(&id).unwrap();
+        stored["status"] = json!("needs_input");
+        stored["revision"] = json!(4);
+        manager.save(&stored).unwrap();
+        let revised = manager
+            .act(
+                &id,
+                &json!({
+                    "action": "revise",
+                    "revision": 4,
+                    "answers": "Use bypass",
+                    "routing": {"permissions": "bypass"}
+                }),
+            )
+            .unwrap();
+        assert_eq!(revised["run"]["permissions"], "bypass");
+        assert_eq!(revised["session"]["permissions"], "bypass");
+
+        // Write required report files to satisfy hashes() for generate.
+        let task_dir = run_dir.join("agent").join(files::TASK);
+        for name in &files::REPORTS[..3] {
+            std::fs::write(task_dir.join(name), "{}").unwrap();
+        }
+        let mut stored = manager.load(&id).unwrap();
+        stored["status"] = json!("review");
+        stored["revision"] = json!(6);
+        manager.save(&stored).unwrap();
+        let generated = manager
+            .act(
+                &id,
+                &json!({
+                    "action": "generate",
+                    "revision": 6,
+                    "routing": {"permissions": "manual"}
+                }),
+            )
+            .unwrap();
+        assert_eq!(generated["run"]["permissions"], "manual");
+        assert_eq!(generated["session"]["permissions"], "manual");
+        let nonce3 = generated["session"]["creator"]["nonce"].as_str().unwrap();
+        let req3 = files::object(&run_dir, &format!("request-{nonce3}.json"), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req3["permissions"], "manual");
+
+        let _ = sessions.close();
+        let _ = sessions.wait_closed().await;
     }
 }

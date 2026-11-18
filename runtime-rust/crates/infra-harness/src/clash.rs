@@ -7,7 +7,11 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 const MAX: usize = 60;
 fn clean(v: &Value, n: usize) -> String {
@@ -101,7 +105,7 @@ pub fn new_state(session: &Value, stage: &str, previous: Option<&Value>) -> Valu
         .filter(|p| p["challenger"]["provider"] == settings["challenger"])
         .map(|p| p["challenger_session_id"].clone())
         .unwrap_or(Value::Null);
-    json!({"kind":"clash_state","stage":stage,"status":"running","outcome":null,"cycle":previous.and_then(|p|p["cycle"].as_u64()).unwrap_or(0)+1,"round":0,"rounds":settings["rounds"],"protagonist":{"provider":session["provider"],"role":if stage=="implement"{"implementer"}else{"reviewer"},"model":session["model"],"thinking_effort":session["thinking_effort"]},"challenger":{"provider":settings["challenger"],"role":"challenger","model":settings["challenger_model"],"thinking_effort":settings["challenger_thinking_effort"]},"challenger_session_id":challenger,"task":if same{previous.map(|p|p["task"].clone()).unwrap_or(json!(""))}else{json!("")},"followup":"","items":old_items,"turns":old_turns,"summary":"","verdict":null,"verdict_note":"","message":"","report":""})
+    json!({"kind":"clash_state","stage":stage,"status":"running","outcome":null,"cycle":previous.and_then(|p|p["cycle"].as_u64()).unwrap_or(0)+1,"round":0,"rounds":settings["rounds"],"protagonist":{"provider":session["provider"],"role":if stage=="implement"{"implementer"}else{"reviewer"},"model":session["model"],"thinking_effort":session["thinking_effort"]},"challenger":{"provider":settings["challenger"],"role":"challenger","model":settings["challenger_model"],"thinking_effort":settings["challenger_thinking_effort"]},"challenger_session_id":challenger,"task":if same{previous.map(|p|p["task"].clone()).unwrap_or(json!(""))}else{json!("")},"followup":"","items":old_items,"turns":old_turns,"tokens":0,"cost_usd":0.0,"summary":"","verdict":null,"verdict_note":"","message":"","report":""})
 }
 pub fn unresolved(state: &Value) -> Vec<Value> {
     items(state)
@@ -445,6 +449,103 @@ pub fn render(state: &Value) -> String {
     }
     out
 }
+fn round_usd(value: f64) -> f64 {
+    ((value * 1_000_000_000.0).round()) / 1_000_000_000.0
+}
+struct CancelRelay(tokio::task::JoinHandle<()>);
+impl Drop for CancelRelay {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+struct CycleBudget {
+    max_seconds: Option<u64>,
+    deadline: Option<Instant>,
+    max_tokens: Option<u64>,
+    tokens: Arc<AtomicU64>,
+    max_usd: Option<f64>,
+    usd: f64,
+}
+impl CycleBudget {
+    fn new(session: &Value) -> Self {
+        let max_seconds = session["budgets"]["seconds"].as_u64();
+        let deadline = max_seconds.map(|s| Instant::now() + Duration::from_secs(s));
+        Self {
+            max_seconds,
+            deadline,
+            max_tokens: session["budgets"]["tokens"].as_u64(),
+            tokens: Arc::new(AtomicU64::new(0)),
+            max_usd: session["budgets"]["usd"].as_f64(),
+            usd: 0.0,
+        }
+    }
+    fn pre_turn_violation(&self, provider: &str) -> Option<&'static str> {
+        if let Some(deadline) = self.deadline
+            && deadline.saturating_duration_since(Instant::now()).is_zero()
+        {
+            return Some("Clash reached its time budget; cycle incomplete.");
+        }
+        if self
+            .max_tokens
+            .is_some_and(|limit| self.tokens.load(Ordering::Acquire) >= limit)
+        {
+            return Some("Clash reached its token budget; cycle incomplete.");
+        }
+        if let Some(limit) = self.max_usd
+            && (self.usd >= limit || (provider == "claude" && round_usd(limit - self.usd) < 0.01))
+        {
+            return Some("Clash reached its USD budget; cycle incomplete.");
+        }
+        None
+    }
+    fn turn_limits(&self) -> Option<(Limits, Option<Instant>)> {
+        let Some(deadline) = self.deadline else {
+            return Some((
+                Limits {
+                    seconds: None,
+                    ..Limits::default()
+                },
+                None,
+            ));
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let max = self.max_seconds.unwrap_or(u64::MAX).max(1);
+        let secs = (remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)).clamp(1, max);
+        Some((
+            Limits {
+                seconds: Some(secs),
+                ..Limits::default()
+            },
+            Some(deadline),
+        ))
+    }
+    fn remaining_usd_for(&self, provider: &str) -> Option<f64> {
+        if provider != "claude" {
+            return None;
+        }
+        self.max_usd
+            .map(|limit| round_usd((limit - self.usd).max(0.0)))
+    }
+    fn record_cost(&mut self, cost: Option<f64>) {
+        if let Some(cost) = cost.filter(|c| c.is_finite() && *c >= 0.0) {
+            self.usd = round_usd(self.usd + cost);
+        }
+    }
+    fn post_turn_violation(&self, output: &provider::WorkerResult) -> Option<&'static str> {
+        match output.limit_reached.as_deref() {
+            Some("time") => Some("Clash reached its time budget; cycle incomplete."),
+            Some("token") => Some("Clash reached its token budget; cycle incomplete."),
+            Some("USD") => Some("Clash reached its USD budget; cycle incomplete."),
+            _ if self.max_usd.is_some_and(|limit| self.usd > limit) => {
+                Some("Clash reached its USD budget; cycle incomplete.")
+            }
+            _ => None,
+        }
+    }
+}
 pub struct Cycle {
     pub store: SessionStore,
     pub session: Value,
@@ -463,12 +564,28 @@ impl Cycle {
             .event(self.session["id"].as_str().unwrap_or(""), state)?;
         Ok(())
     }
+    fn turn_provider(&self, state: &Value, role: &str) -> Result<String> {
+        let key = if role == "challenger" {
+            "challenger"
+        } else {
+            "protagonist"
+        };
+        state[key]["provider"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| HarnessError::invalid("Missing Clash provider."))
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Turn execution carries shared cycle budget state, cancellation, and event emitter."
+    )]
     async fn turn(
         &mut self,
         state: &mut Value,
         role: &str,
         round: u64,
         prompt: String,
+        budget: &mut CycleBudget,
         cancel: Arc<AtomicBool>,
         emit: Arc<dyn Fn(Value) -> Result<()> + Send + Sync>,
     ) -> Result<provider::WorkerResult> {
@@ -482,6 +599,17 @@ impl Cycle {
         let provider = participant["provider"]
             .as_str()
             .ok_or_else(|| HarnessError::invalid("Missing Clash provider."))?;
+        let Some((limits, deadline)) = budget.turn_limits() else {
+            return Ok(provider::WorkerResult {
+                text: String::new(),
+                ok: false,
+                cost_usd: None,
+                session_id: None,
+                duration_seconds: 0.0,
+                error: Some("Clash reached its time budget; cycle incomplete.".into()),
+                limit_reached: Some("time".into()),
+            });
+        };
         let mut launch = self.launch.clone();
         launch.provider = provider.into();
         launch.executable = self
@@ -497,32 +625,180 @@ impl Cycle {
             "plan"
         }
         .into();
+        if launch.mode != "edit" {
+            launch.approvals = None;
+        }
         launch.model = participant["model"].as_str().map(String::from);
         launch.effort = participant["thinking_effort"].as_str().map(String::from);
+        launch.usd = budget.remaining_usd_for(provider);
         launch.session = if challenger {
             state["challenger_session_id"].as_str().map(String::from)
         } else {
             self.session["native_session_id"].as_str().map(String::from)
         };
         launch.prompt = format!("{prompt}\n\n{}", self.context);
-        let output = provider::run_monitored_locked(
+        let previous = launch
+            .session
+            .as_deref()
+            .and_then(|id| self.session["cost_totals"][id].as_f64());
+        let turn_tokens = Arc::new(AtomicU64::new(0));
+        let token_limit_hit = Arc::new(AtomicBool::new(false));
+        let turn_cancel = Arc::new(AtomicBool::new(cancel.load(Ordering::Acquire)));
+        let forwarding = tokio::runtime::Handle::try_current().ok().map(|handle| {
+            let human = cancel.clone();
+            let turn_control = turn_cancel.clone();
+            CancelRelay(handle.spawn(async move {
+                loop {
+                    if human.load(Ordering::Acquire) {
+                        turn_control.store(true, Ordering::Release);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }))
+        });
+        let session_id = self.session["id"].as_str().unwrap_or("").to_owned();
+        let initial_totals = if self.session["cost_totals"].is_object() {
+            self.session["cost_totals"].clone()
+        } else {
+            json!({})
+        };
+        let cost_totals = Arc::new(Mutex::new(initial_totals));
+        let active_native = Arc::new(Mutex::new(launch.session.clone()));
+        let last_turn_cost = Arc::new(Mutex::new(None::<f64>));
+        let store = self.store.clone();
+        let max_tokens = budget.max_tokens;
+        let cycle_tokens = budget.tokens.clone();
+        let stream_turn_tokens = turn_tokens.clone();
+        let stream_token_hit = token_limit_hit.clone();
+        let stream_cancel = turn_cancel.clone();
+        let stream_totals = cost_totals.clone();
+        let stream_native = active_native.clone();
+        let stream_cost = last_turn_cost.clone();
+        let stream_sid = session_id.clone();
+        let turn_started = Instant::now();
+        let outcome = provider::run_monitored_until(
             &launch,
-            Limits {
-                seconds: self.session["budgets"]["seconds"].as_u64(),
-                ..Limits::default()
-            },
-            cancel,
-            launch
-                .session
-                .as_deref()
-                .and_then(|id| self.session["cost_totals"][id].as_f64()),
+            limits,
+            turn_cancel,
+            previous,
             Some(self.store.runner_lock()),
             Some(self.adapter.as_ref()),
             &BTreeMap::new(),
             None,
-            move |event| emit(event),
+            deadline,
+            move |event| {
+                if event["kind"] == "session"
+                    && let Some(native) = event["native_session_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                {
+                    let mut current = stream_native
+                        .lock()
+                        .map_err(|_| HarnessError::unavailable("Clash session lock failed."))?;
+                    if current.as_deref().is_some_and(|old| old != native) {
+                        return Err(HarnessError::conflict(
+                            "The participant changed native session identity.",
+                        ));
+                    }
+                    *current = Some(native.to_owned());
+                }
+                if event["kind"] == "usage" {
+                    if let Some(n) = provider::total_tokens(&event) {
+                        stream_turn_tokens.fetch_add(n, Ordering::AcqRel);
+                        let used = cycle_tokens
+                            .fetch_add(n, Ordering::AcqRel)
+                            .saturating_add(n);
+                        if max_tokens.is_some_and(|limit| used >= limit) {
+                            stream_token_hit.store(true, Ordering::Release);
+                            stream_cancel.store(true, Ordering::Release);
+                        }
+                    }
+                    if let Some(cost) = event["cost_usd"]
+                        .as_f64()
+                        .filter(|c| c.is_finite() && *c >= 0.0)
+                        && let Ok(mut slot) = stream_cost.lock()
+                    {
+                        *slot = Some(cost);
+                    }
+                    if let Some(total) = event["cost_session_total"]
+                        .as_f64()
+                        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+                    {
+                        let native_id = stream_native
+                            .lock()
+                            .ok()
+                            .and_then(|guard| guard.clone())
+                            .or_else(|| {
+                                event["native_session_id"]
+                                    .as_str()
+                                    .filter(|id| !id.is_empty())
+                                    .map(str::to_owned)
+                            });
+                        if let Some(native_id) = native_id
+                            && let Ok(mut totals) = stream_totals.lock()
+                        {
+                            if !totals.is_object() {
+                                *totals = json!({});
+                            }
+                            totals[&native_id] = json!(total);
+                            if !stream_sid.is_empty() {
+                                store
+                                    .patch(&stream_sid, &json!({"cost_totals": totals.clone()}))?;
+                            }
+                        }
+                    }
+                }
+                emit(event)
+            },
         )
-        .await?;
+        .await;
+        drop(forwarding);
+        if let Ok(totals) = cost_totals.lock() {
+            self.session["cost_totals"] = totals.clone();
+        }
+        let observed_sid = active_native.lock().ok().and_then(|guard| guard.clone());
+        let recorded_cost = last_turn_cost.lock().ok().and_then(|guard| *guard);
+        let mut output = match outcome {
+            Ok(mut output) => {
+                if token_limit_hit.load(Ordering::Acquire) && !cancel.load(Ordering::Acquire) {
+                    output.ok = false;
+                    output.limit_reached = Some("token".into());
+                    output.error = Some("Clash reached its token budget; cycle incomplete.".into());
+                }
+                output
+            }
+            Err(error) if ["native-timeout", "native-time-budget"].contains(&error.code) => {
+                provider::WorkerResult {
+                    text: String::new(),
+                    ok: false,
+                    cost_usd: recorded_cost,
+                    session_id: observed_sid,
+                    duration_seconds: turn_started.elapsed().as_secs_f64(),
+                    error: Some("Clash reached its time budget; cycle incomplete.".into()),
+                    limit_reached: Some("time".into()),
+                }
+            }
+            Err(error)
+                if error.code == "native-cancelled"
+                    && token_limit_hit.load(Ordering::Acquire)
+                    && !cancel.load(Ordering::Acquire) =>
+            {
+                provider::WorkerResult {
+                    text: String::new(),
+                    ok: false,
+                    cost_usd: recorded_cost,
+                    session_id: observed_sid,
+                    duration_seconds: turn_started.elapsed().as_secs_f64(),
+                    error: Some("Clash reached its token budget; cycle incomplete.".into()),
+                    limit_reached: Some("token".into()),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if output.cost_usd.is_none() {
+            output.cost_usd = recorded_cost;
+        }
         if let Some(sid) = &output.session_id {
             if launch.session.as_ref().is_some_and(|old| old != sid) {
                 return Err(HarnessError::conflict(
@@ -533,13 +809,28 @@ impl Cycle {
                 state["challenger_session_id"] = Value::String(sid.clone());
             } else {
                 self.session["native_session_id"] = Value::String(sid.clone());
-                self.store.patch(
-                    self.session["id"].as_str().unwrap_or(""),
-                    &json!({"native_session_id":sid}),
-                )?;
+                if !session_id.is_empty() {
+                    self.store
+                        .patch(&session_id, &json!({"native_session_id": sid}))?;
+                }
             }
         }
-        let turn = json!({"cycle":state["cycle"],"round":round,"role":role,"provider":provider,"ok":output.ok,"summary":clean(&json!(output.text),600),"cost_usd":output.cost_usd,"seconds":output.duration_seconds,"error":output.error});
+        let this_turn_tokens = turn_tokens.load(Ordering::Acquire);
+        budget.record_cost(output.cost_usd);
+        state["tokens"] = json!(budget.tokens.load(Ordering::Acquire));
+        state["cost_usd"] = json!(budget.usd);
+        let turn = json!({
+            "cycle": state["cycle"],
+            "round": round,
+            "role": role,
+            "provider": provider,
+            "ok": output.ok,
+            "summary": clean(&json!(output.text), 600),
+            "cost_usd": output.cost_usd,
+            "tokens": this_turn_tokens,
+            "seconds": output.duration_seconds,
+            "error": output.error
+        });
         state["turns"]
             .as_array_mut()
             .ok_or_else(|| HarnessError::invalid("Invalid Clash turns."))?
@@ -565,6 +856,7 @@ impl Cycle {
             None
         };
         let mut state = new_state(&self.session, stage, previous);
+        let mut budget = CycleBudget::new(&self.session);
         if state["task"].as_str().unwrap_or("").is_empty() {
             state["task"] = prompt.chars().take(8000).collect::<String>().into();
         } else {
@@ -576,6 +868,10 @@ impl Cycle {
         } else {
             "reviewer"
         };
+        let protagonist_provider = self.turn_provider(&state, role)?;
+        if let Some(message) = budget.pre_turn_violation(&protagonist_provider) {
+            return self.incomplete(state, message);
+        }
         let header = format!(
             "Two-provider Clash, cycle {}. No additional agents. One human-reviewed cycle only. Task: {}\nFollow-up: {}\n",
             state["cycle"],
@@ -597,8 +893,19 @@ impl Cycle {
             }
         );
         let result = self
-            .turn(&mut state, role, 0, opening, cancel.clone(), emit.clone())
+            .turn(
+                &mut state,
+                role,
+                0,
+                opening,
+                &mut budget,
+                cancel.clone(),
+                emit.clone(),
+            )
             .await?;
+        if let Some(message) = budget.post_turn_violation(&result) {
+            return self.incomplete(state, message);
+        }
         if !result.ok {
             return self.incomplete(state, "The opening participant turn did not complete.");
         }
@@ -609,7 +916,11 @@ impl Cycle {
             };
             apply_review(&mut state, "reviewer", &payload, 0);
         }
+        let challenger_provider = self.turn_provider(&state, "challenger")?;
         for round in 1..=state["rounds"].as_u64().unwrap_or(2) {
+            if let Some(message) = budget.pre_turn_violation(&challenger_provider) {
+                return self.incomplete(state, message);
+            }
             state["round"] = round.into();
             let challenge = format!(
                 "{header}Act as challenger. Independently inspect the workspace without editing. Verify every objection; no style preferences. Maintain prior IDs. Ledger: {}. Latest summary: {}. {}",
@@ -627,10 +938,14 @@ impl Cycle {
                     "challenger",
                     round,
                     challenge,
+                    &mut budget,
                     cancel.clone(),
                     emit.clone(),
                 )
                 .await?;
+            if let Some(message) = budget.post_turn_violation(&result) {
+                return self.incomplete(state, message);
+            }
             if !result.ok {
                 return self.incomplete(state, "The challenger turn did not complete.");
             }
@@ -648,6 +963,9 @@ impl Cycle {
             if converged(&state) || round == state["rounds"].as_u64().unwrap_or(2) {
                 break;
             }
+            if let Some(message) = budget.pre_turn_violation(&protagonist_provider) {
+                return self.incomplete(state, message);
+            }
             let response = format!(
                 "{header}Act as {role}. Respond to every open or disputed item; do not concede a wrong claim or dismiss a valid defect. Ledger: {}. {}",
                 state["items"],
@@ -663,10 +981,14 @@ impl Cycle {
                     role,
                     round,
                     response,
+                    &mut budget,
                     cancel.clone(),
                     emit.clone(),
                 )
                 .await?;
+            if let Some(message) = budget.post_turn_violation(&result) {
+                return self.incomplete(state, message);
+            }
             if !result.ok {
                 return self.incomplete(state, "The protagonist response turn did not complete.");
             }
@@ -707,5 +1029,54 @@ impl Cycle {
         state["report"] = render(&state).into();
         self.persist(&state)?;
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_usd_and_cycle_budget_enforce_time_tokens_and_usd() {
+        assert_eq!(round_usd(0.05 - 0.04), 0.01);
+        assert!(round_usd(0.05 - 0.045) < 0.01);
+
+        let mut budget = CycleBudget::new(&json!({
+            "budgets": {"seconds": 30, "tokens": 100, "usd": 0.05}
+        }));
+        assert_eq!(budget.pre_turn_violation("claude"), None);
+        assert_eq!(budget.remaining_usd_for("claude"), Some(0.05));
+        assert_eq!(budget.remaining_usd_for("codex"), None);
+
+        budget.record_cost(Some(0.04));
+        assert_eq!(budget.remaining_usd_for("claude"), Some(0.01));
+        assert_eq!(budget.pre_turn_violation("claude"), None);
+
+        // Below $0.01 remaining blocks subsequent Claude turns, while non-Claude stops only at >= limit.
+        budget.record_cost(Some(0.005));
+        assert_eq!(
+            budget.pre_turn_violation("claude"),
+            Some("Clash reached its USD budget; cycle incomplete.")
+        );
+        assert_eq!(budget.pre_turn_violation("codex"), None);
+
+        budget.record_cost(Some(0.005));
+        assert_eq!(
+            budget.pre_turn_violation("codex"),
+            Some("Clash reached its USD budget; cycle incomplete.")
+        );
+
+        let token_budget = CycleBudget::new(&json!({"budgets": {"tokens": 50}}));
+        token_budget.tokens.store(50, Ordering::Release);
+        assert_eq!(
+            token_budget.pre_turn_violation("codex"),
+            Some("Clash reached its token budget; cycle incomplete.")
+        );
+
+        let zero_time = CycleBudget::new(&json!({"budgets": {"seconds": 0}}));
+        assert_eq!(
+            zero_time.pre_turn_violation("claude"),
+            Some("Clash reached its time budget; cycle incomplete.")
+        );
     }
 }
