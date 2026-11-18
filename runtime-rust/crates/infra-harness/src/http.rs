@@ -386,6 +386,14 @@ pub const ROUTES: &[Route] = &[
         query: &["path", "previous_path"],
     },
     Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/graph/memory-links/batch",
+        operation: "knowledge.memory_links_batch",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
         method: "GET",
         pattern: "/api/omnigraph/file-context",
         operation: "omnigraph.file_context",
@@ -1790,6 +1798,26 @@ mod tests {
             // Reading links changes nothing.
             assert!(!found.token);
         }
+    }
+
+    #[test]
+    fn graph_memory_links_batch_route_registered_with_csrf_token() {
+        let found = ROUTES
+            .iter()
+            .find(|r| {
+                r.method == "POST"
+                    && r.pattern == "/api/projects/{project_id}/graph/memory-links/batch"
+            })
+            .expect("missing POST memory-links/batch route");
+        assert_eq!(found.operation, "knowledge.memory_links_batch");
+        assert_eq!(found.status, 200);
+        assert!(found.token, "batch memory-links must require CSRF token");
+        assert!(found.query.is_empty());
+
+        let (matched, params) =
+            route("POST", "/api/projects/demo/graph/memory-links/batch").expect("route matches");
+        assert_eq!(matched.operation, "knowledge.memory_links_batch");
+        assert_eq!(params["project_id"], "demo");
     }
 
     #[test]

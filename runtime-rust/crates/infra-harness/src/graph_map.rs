@@ -32,7 +32,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Condvar, Mutex, OnceLock},
     time::SystemTime,
 };
 mod access;
@@ -6759,16 +6759,127 @@ impl Index {
     }
 }
 type Kept = (String, u64, Option<SystemTime>, Arc<Index>);
+
+#[derive(Default)]
+struct MapsCache {
+    kept: Vec<Kept>,
+    inflight: HashMap<String, Arc<InFlight>>,
+}
+
+struct InFlight {
+    len: u64,
+    changed: Option<SystemTime>,
+    state: Mutex<Option<std::result::Result<Arc<Index>, HarnessError>>>,
+    ready: Condvar,
+}
+
+fn clone_error(err: &HarnessError) -> HarnessError {
+    HarnessError {
+        status: err.status,
+        code: err.code,
+        message: err.message.clone(),
+    }
+}
+
+struct InFlightGuard<'a> {
+    maps: &'a Maps,
+    project: &'a str,
+    slot: Arc<InFlight>,
+    finished: bool,
+}
+
+impl InFlightGuard<'_> {
+    fn complete(
+        mut self,
+        len: u64,
+        changed: Option<SystemTime>,
+        result: std::result::Result<Arc<Index>, HarnessError>,
+    ) -> Result<Arc<Index>> {
+        self.finished = true;
+        if let Ok(mut cache) = self.maps.cache.lock() {
+            let still_current = cache
+                .inflight
+                .get(self.project)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.slot));
+            if still_current {
+                cache.inflight.remove(self.project);
+                if let Ok(ref index) = result {
+                    if let Some(at) = cache
+                        .kept
+                        .iter()
+                        .position(|(name, ..)| name == self.project)
+                    {
+                        cache.kept.remove(at);
+                    }
+                    if cache.kept.len() >= KEPT {
+                        cache.kept.remove(0);
+                    }
+                    cache
+                        .kept
+                        .push((self.project.to_owned(), len, changed, index.clone()));
+                }
+            }
+        }
+        let shared = match &result {
+            Ok(index) => Ok(index.clone()),
+            Err(err) => Err(clone_error(err)),
+        };
+        if let Ok(mut state) = self.slot.state.lock() {
+            *state = Some(shared);
+            self.slot.ready.notify_all();
+        }
+        result
+    }
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Ok(mut cache) = self.maps.cache.lock()
+            && cache
+                .inflight
+                .get(self.project)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.slot))
+        {
+            cache.inflight.remove(self.project);
+        }
+        if let Ok(mut state) = self.slot.state.lock() {
+            *state = Some(Err(HarnessError::unavailable(
+                "The code graph map loader stopped.",
+            )));
+            self.slot.ready.notify_all();
+        }
+    }
+}
+
 /// Indexes of the graphs looked at most recently, each tied to the size and
 /// time of the file it was read from.
 #[derive(Default)]
 pub struct Maps {
-    kept: Mutex<Vec<Kept>>,
+    cache: Mutex<MapsCache>,
 }
 impl Maps {
-    /// The lock is held while a graph is read, so two requests for one graph
-    /// read it once.
+    /// Reads and caches a project's graph index without holding the cache
+    /// mutex during parsing, deduplicating concurrent reads of the same key
+    /// and evicting entries in LRU order.
     pub fn index(&self, project: &str, graph: &Path, root: &Path) -> Result<Arc<Index>> {
+        self.load_with(project, graph, |path| {
+            let mut index = Index::read(std::fs::File::open(path)?, root)?;
+            if project.contains('@')
+                && let Ok(spans) = std::fs::File::open(path.with_file_name(TEST_SPANS))
+            {
+                index.revision_tests = serde_json::from_reader(std::io::BufReader::new(spans)).ok();
+            }
+            Ok(index)
+        })
+    }
+
+    fn load_with<F>(&self, project: &str, graph: &Path, reader: F) -> Result<Arc<Index>>
+    where
+        F: FnOnce(&Path) -> Result<Index>,
+    {
         let meta = std::fs::metadata(graph)
             .map_err(|_| HarnessError::missing("This project has no published code graph."))?;
         if meta.len() > BYTE_LIMIT {
@@ -6776,42 +6887,92 @@ impl Maps {
                 "The code graph is larger than 2 GiB and cannot be mapped.",
             ));
         }
+        let len = meta.len();
         let changed = meta.modified().ok();
-        let mut kept = self
-            .kept
-            .lock()
-            .map_err(|_| HarnessError::unavailable("The code graph map is unavailable."))?;
-        if let Some(at) = kept.iter().position(|(name, ..)| name == project) {
-            let entry = kept.remove(at);
-            if entry.1 == meta.len() && entry.2 == changed {
-                let index = entry.3.clone();
-                kept.push(entry);
-                return Ok(index);
+        let mut reader = Some(reader);
+        loop {
+            enum Action {
+                Hit(Arc<Index>),
+                Wait(Arc<InFlight>),
+                Lead(Arc<InFlight>),
+            }
+            let action = {
+                let mut cache = self
+                    .cache
+                    .lock()
+                    .map_err(|_| HarnessError::unavailable("The code graph map is unavailable."))?;
+                if let Some(at) = cache
+                    .kept
+                    .iter()
+                    .position(|(name, kept_len, kept_changed, _)| {
+                        name == project && *kept_len == len && *kept_changed == changed
+                    })
+                {
+                    let entry = cache.kept.remove(at);
+                    let index = entry.3.clone();
+                    cache.kept.push(entry);
+                    Action::Hit(index)
+                } else if let Some(existing) = cache.inflight.get(project).cloned() {
+                    Action::Wait(existing)
+                } else {
+                    let slot = Arc::new(InFlight {
+                        len,
+                        changed,
+                        state: Mutex::new(None),
+                        ready: Condvar::new(),
+                    });
+                    cache.inflight.insert(project.to_owned(), slot.clone());
+                    Action::Lead(slot)
+                }
+            };
+            match action {
+                Action::Hit(index) => return Ok(index),
+                Action::Wait(slot) => {
+                    let outcome = {
+                        let mut guard = slot.state.lock().map_err(|_| {
+                            HarnessError::unavailable("The code graph map is unavailable.")
+                        })?;
+                        while guard.is_none() {
+                            guard = slot.ready.wait(guard).map_err(|_| {
+                                HarnessError::unavailable("The code graph map is unavailable.")
+                            })?;
+                        }
+                        match guard.as_ref().expect("ready state populated") {
+                            Ok(index) => Ok(index.clone()),
+                            Err(err) => Err(clone_error(err)),
+                        }
+                    };
+                    if slot.len == len && slot.changed == changed {
+                        return outcome;
+                    }
+                }
+                Action::Lead(slot) => {
+                    let guard = InFlightGuard {
+                        maps: self,
+                        project,
+                        slot,
+                        finished: false,
+                    };
+                    let parsed = reader.take().expect("single-flight reader called once")(graph)
+                        .map(Arc::new);
+                    return guard.complete(len, changed, parsed);
+                }
             }
         }
-        let mut index = Index::read(std::fs::File::open(graph)?, root)?;
-        if project.contains('@')
-            && let Ok(spans) = std::fs::File::open(graph.with_file_name(TEST_SPANS))
-        {
-            index.revision_tests = serde_json::from_reader(std::io::BufReader::new(spans)).ok();
-        }
-        let index = Arc::new(index);
-        if kept.len() >= KEPT {
-            kept.remove(0);
-        }
-        kept.push((project.to_owned(), meta.len(), changed, index.clone()));
-        Ok(index)
     }
+
     /// Drops what was read for a project: its own graph and, under
     /// `project@commit`, the graphs of its other commits.
     pub fn forget(&self, project: &str) {
-        if let Ok(mut kept) = self.kept.lock() {
-            kept.retain(|(name, ..)| {
-                name != project
-                    && name
+        if let Ok(mut cache) = self.cache.lock() {
+            let matches = |name: &str| {
+                name == project
+                    || name
                         .strip_prefix(project)
-                        .is_none_or(|rest| !rest.starts_with('@'))
-            });
+                        .is_some_and(|rest| rest.starts_with('@'))
+            };
+            cache.kept.retain(|(name, ..)| !matches(name));
+            cache.inflight.retain(|name, _| !matches(name));
         }
     }
 }
@@ -9626,6 +9787,156 @@ where
             &changed,
             &maps.index("p", &graph, folder.path()).unwrap()
         ));
+    }
+
+    #[test]
+    fn maps_index_releases_lock_during_read_deduplicates_same_key_and_evicts_lru() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let folder = tempfile::tempdir().unwrap();
+        let make_graph = |name: &str, file: &str| {
+            let path = folder.path().join(name);
+            std::fs::write(
+                &path,
+                json!({"nodes": [{"id": file, "source_file": file}], "links": []}).to_string(),
+            )
+            .unwrap();
+            path
+        };
+
+        let graph_a = make_graph("a.json", "a.py");
+        let graph_b = make_graph("b.json", "b.py");
+        let maps = Arc::new(Maps::default());
+
+        // 1. Parsing project A does not block project B, while a second caller for A
+        // joins the in-flight read without double-parsing.
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let a_reads = Arc::new(AtomicUsize::new(0));
+
+        let maps_a1 = maps.clone();
+        let path_a1 = graph_a.clone();
+        let root_a1 = folder.path().to_path_buf();
+        let reads_a1 = a_reads.clone();
+        let t_a1 = std::thread::spawn(move || {
+            maps_a1.load_with("proj-a", &path_a1, |path| {
+                reads_a1.fetch_add(1, Ordering::SeqCst);
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Index::read(std::fs::File::open(path)?, &root_a1)
+            })
+        });
+
+        entered_rx.recv().unwrap();
+
+        // While A is parked inside Index::read, B parses immediately without blocking.
+        let idx_b = maps.index("proj-b", &graph_b, folder.path()).unwrap();
+        assert_eq!(idx_b.files, vec!["b.py"]);
+
+        // Second concurrent caller for A waits on the single-flight slot and never runs its reader.
+        let maps_a2 = maps.clone();
+        let path_a2 = graph_a.clone();
+        let reads_a2 = a_reads.clone();
+        let t_a2 = std::thread::spawn(move || {
+            maps_a2.load_with("proj-a", &path_a2, |_| {
+                reads_a2.fetch_add(1, Ordering::SeqCst);
+                panic!("concurrent caller for same project must not double-parse");
+            })
+        });
+
+        // Give t_a2 a moment to attach to the in-flight slot before releasing A.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        release_tx.send(()).unwrap();
+
+        let idx_a1 = t_a1.join().unwrap().unwrap();
+        let idx_a2 = t_a2.join().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&idx_a1, &idx_a2));
+        assert_eq!(a_reads.load(Ordering::SeqCst), 1);
+
+        // 2. LRU eviction: fill KEPT (= 4) slots, touch the oldest ("p1") so "p2" becomes LRU,
+        // then insert a 5th entry and confirm "p2" is evicted while "p1", "p3", "p4", "p5" stay cached.
+        let lru_maps = Maps::default();
+        let mut paths = Vec::new();
+        for i in 1..=5 {
+            paths.push((
+                format!("p{i}"),
+                make_graph(&format!("p{i}.json"), &format!("p{i}.py")),
+            ));
+        }
+        let mut refs = Vec::new();
+        for (name, path) in &paths[0..4] {
+            refs.push(lru_maps.index(name, path, folder.path()).unwrap());
+        }
+        // Cache hit on p1 promotes it to MRU; p2 is now the LRU entry.
+        let p1_hit = lru_maps
+            .load_with(&paths[0].0, &paths[0].1, |_| {
+                panic!("p1 should still be cached")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&refs[0], &p1_hit));
+
+        // Adding p5 must evict p2 (LRU), not p1 (FIFO oldest).
+        let p5 = lru_maps
+            .index(&paths[4].0, &paths[4].1, folder.path())
+            .unwrap();
+        assert_eq!(p5.files, vec!["p5.py"]);
+
+        let p1_after = lru_maps
+            .load_with(&paths[0].0, &paths[0].1, |_| {
+                panic!("p1 was promoted and must remain cached")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&refs[0], &p1_after));
+
+        for idx in [2usize, 3] {
+            let cached = lru_maps
+                .load_with(&paths[idx].0, &paths[idx].1, |_| {
+                    panic!("p{} must remain cached", idx + 1)
+                })
+                .unwrap();
+            assert!(Arc::ptr_eq(&refs[idx], &cached));
+        }
+
+        let p2_reloaded = Arc::new(AtomicUsize::new(0));
+        let p2_flag = p2_reloaded.clone();
+        let p2_after = lru_maps
+            .load_with(&paths[1].0, &paths[1].1, |path| {
+                p2_flag.fetch_add(1, Ordering::SeqCst);
+                Index::read(std::fs::File::open(path)?, folder.path())
+            })
+            .unwrap();
+        assert_eq!(p2_reloaded.load(Ordering::SeqCst), 1);
+        assert!(!Arc::ptr_eq(&refs[1], &p2_after));
+
+        // 3. forget() while an in-flight read is running prevents stale caching.
+        let (f_enter_tx, f_enter_rx) = mpsc::channel();
+        let (f_rel_tx, f_rel_rx) = mpsc::channel();
+        let maps_f = Arc::new(Maps::default());
+        let maps_f_bg = maps_f.clone();
+        let g_forget = paths[0].1.clone();
+        let root_f = folder.path().to_path_buf();
+        let t_forget = std::thread::spawn(move || {
+            maps_f_bg.load_with("p-forget", &g_forget, |path| {
+                f_enter_tx.send(()).unwrap();
+                f_rel_rx.recv().unwrap();
+                Index::read(std::fs::File::open(path)?, &root_f)
+            })
+        });
+        f_enter_rx.recv().unwrap();
+        maps_f.forget("p-forget");
+        f_rel_tx.send(()).unwrap();
+        let stale = t_forget.join().unwrap().unwrap();
+        let fresh_reads = Arc::new(AtomicUsize::new(0));
+        let fresh_flag = fresh_reads.clone();
+        let fresh = maps_f
+            .load_with("p-forget", &paths[0].1, |path| {
+                fresh_flag.fetch_add(1, Ordering::SeqCst);
+                Index::read(std::fs::File::open(path)?, folder.path())
+            })
+            .unwrap();
+        assert_eq!(fresh_reads.load(Ordering::SeqCst), 1);
+        assert!(!Arc::ptr_eq(&stale, &fresh));
     }
     /// The links drawn among followed symbols, by the names of their ends.
     fn calls(view: &Value) -> Vec<String> {

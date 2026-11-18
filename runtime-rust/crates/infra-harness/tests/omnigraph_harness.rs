@@ -4442,3 +4442,141 @@ async fn real_omnigraph_binary_sync_and_promote_round_trip() {
 
     fx.shutdown().await;
 }
+
+#[tokio::test]
+async fn http_memory_links_batch_returns_items_in_order_and_enforces_token_and_limits() {
+    let fx = HarnessFixture::new(None).await;
+    let ctx = setup_governed_fixture_project(&fx.project_path);
+    fs::write(
+        fx.project_path.join("src/auth/legacy.rs"),
+        "pub fn legacy() {}\n",
+    )
+    .unwrap();
+
+    let finding = infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "batch-links-finding-1",
+                "title": "JWT audience verification",
+                "goal": "Reject cross-service replay.",
+                "files": ["src/auth/jwt.rs"],
+                "sources": ["src/auth/jwt.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    let old_finding = infra_core::MemoryService::new(ctx, None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "batch-links-finding-2",
+                "title": "Legacy session token helper",
+                "goal": "Update callers on rename.",
+                "files": ["src/auth/legacy.rs"],
+                "sources": ["src/auth/legacy.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+
+    let batch_path = format!("/api/projects/{}/graph/memory-links/batch", fx.project_id);
+
+    // Requires X-Harness-Token.
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({ "files": [{ "path": "src/auth/jwt.rs" }] })),
+            false,
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // Valid batch preserves input order and matches single-file GET memory-links structure.
+    let (status, batch) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({
+                "files": [
+                    { "path": "src/auth/session.rs", "previous_path": "src/auth/legacy.rs" },
+                    { "path": "./src/auth/jwt.rs" }
+                ]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{batch}");
+    assert_eq!(batch["project_id"], fx.project_id);
+    let items = batch["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{batch}");
+
+    assert_eq!(items[0]["project_id"], fx.project_id);
+    assert_eq!(items[0]["path"], "src/auth/session.rs");
+    assert_eq!(items[0]["previous_path"], "src/auth/legacy.rs");
+    assert_eq!(items[0]["brain_records"][0]["id"], old_finding["id"]);
+    assert_eq!(
+        items[0]["hygiene_warnings"][0]["kind"],
+        "cited-file-renamed"
+    );
+    assert!(items[0]["contradiction_warnings"].is_array());
+
+    assert_eq!(items[1]["project_id"], fx.project_id);
+    assert_eq!(items[1]["path"], "src/auth/jwt.rs");
+    assert!(items[1]["previous_path"].is_null());
+    assert_eq!(items[1]["brain_records"][0]["id"], finding["id"]);
+    assert!(items[1]["contradiction_warnings"].is_array());
+
+    // Single-file GET endpoint remains backwards-compatible.
+    let (status, single) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/graph/memory-links?path=src/auth/jwt.rs",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{single}");
+    assert_eq!(single["path"], "src/auth/jwt.rs");
+    assert_eq!(single["brain_records"][0]["id"], finding["id"]);
+
+    // Rejects traversal and batches larger than 24 files.
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({ "files": [{ "path": "../secret.rs" }] })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    let too_many: Vec<_> = (0..25)
+        .map(|i| json!({ "path": format!("src/f{i}.rs") }))
+        .collect();
+    let (status, _) = fx
+        .http(
+            Method::POST,
+            &batch_path,
+            Some(json!({ "files": too_many })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    fx.shutdown().await;
+}
