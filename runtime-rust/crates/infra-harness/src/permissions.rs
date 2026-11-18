@@ -120,6 +120,18 @@ impl PermissionDesk {
             })
             .unwrap_or_default()
     }
+    /// Number of waiting requests per session.
+    pub fn waiting_counts(&self) -> BTreeMap<String, usize> {
+        lock(&self.pending)
+            .map(|pending| {
+                let mut counts = BTreeMap::new();
+                for (owner, _) in pending.keys() {
+                    *counts.entry(owner.clone()).or_insert(0) += 1;
+                }
+                counts
+            })
+            .unwrap_or_default()
+    }
 }
 
 struct SessionApprovals {
@@ -328,5 +340,35 @@ mod tests {
         );
         desk.decide("s", &later, Decision::Deny).unwrap();
         assert_eq!(second.await.unwrap(), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn waiting_counts_tracks_pending_requests_per_session() {
+        let desk = Arc::new(PermissionDesk::default());
+        assert!(desk.waiting_counts().is_empty());
+        let (emit_a, events_a) = recorder();
+        let (emit_b, _) = recorder();
+        let a = desk.approvals("session-a", emit_a);
+        let b = desk.approvals("session-b", emit_b);
+        let _r1 = a.ask(&ask("claude-1", true)).unwrap();
+        let _r2 = a.ask(&ask("claude-2", true)).unwrap();
+        let _r3 = b.ask(&ask("codex-1", true)).unwrap();
+        assert_eq!(
+            desk.waiting_counts(),
+            BTreeMap::from([("session-a".into(), 2), ("session-b".into(), 1)])
+        );
+        let id1 = seen(&events_a, 0);
+        desk.decide("session-a", &id1, Decision::Allow).unwrap();
+        assert_eq!(
+            desk.waiting_counts(),
+            BTreeMap::from([("session-a".into(), 1), ("session-b".into(), 1)])
+        );
+        a.withdraw("claude-2").unwrap();
+        assert_eq!(
+            desk.waiting_counts(),
+            BTreeMap::from([("session-b".into(), 1)])
+        );
+        desk.expire("session-b");
+        assert!(desk.waiting_counts().is_empty());
     }
 }

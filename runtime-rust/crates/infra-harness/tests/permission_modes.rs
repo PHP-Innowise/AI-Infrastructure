@@ -950,6 +950,221 @@ async fn cursor_asks_over_acp_and_offers_no_session_approval() {
     fx.close().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waiting_permissions_surface_in_sessions_list_get_and_launch_history() {
+    let fx = Fixture::new(false).await;
+    let other_sid = fx.start("auto").await;
+    fx.until(&other_sid, "the auto session", |session, _| {
+        finished(session)
+    })
+    .await;
+
+    let sid = fx.start("manual").await;
+    let events = fx
+        .until(&sid, "the waiting permission request", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let request_id = permission_events(&events, "pending")[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Direct SessionsDomain::execute operations return live waiting requests and counts.
+    let Payload::Json(waiting) = fx
+        .services
+        .request(
+            "sessions.waiting_permissions",
+            json!({"params":{"session_id": sid},"query":{},"body":{}}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected json");
+    };
+    assert_eq!(waiting["items"].as_array().unwrap().len(), 1);
+    assert_eq!(waiting["items"][0]["request_id"], request_id);
+
+    let Payload::Json(counts) = fx
+        .services
+        .request(
+            "sessions.waiting_counts",
+            json!({"params":{},"query":{},"body":{}}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected json");
+    };
+    assert_eq!(counts["counts"][&sid], 1);
+
+    // HTTP GET /api/sessions and GET /api/sessions/{sid} expose waiting counts and items.
+    let (list_status, list_body) = fx.http(Method::GET, "/api/sessions", None).await;
+    assert_eq!(list_status, 200, "{list_body}");
+    let sessions = list_body["sessions"].as_array().unwrap();
+    let waiting_summary = sessions.iter().find(|s| s["id"] == sid).unwrap();
+    let idle_summary = sessions.iter().find(|s| s["id"] == other_sid).unwrap();
+    assert_eq!(waiting_summary["waiting_permissions"], 1);
+    assert_eq!(idle_summary["waiting_permissions"], 0);
+
+    let (get_status, get_body) = fx
+        .http(Method::GET, &format!("/api/sessions/{sid}"), None)
+        .await;
+    assert_eq!(get_status, 200, "{get_body}");
+    let get_waiting = get_body["waiting_permissions"].as_array().unwrap();
+    assert_eq!(get_waiting.len(), 1);
+    assert_eq!(get_waiting[0]["request_id"], request_id);
+
+    // Answering clears waiting permissions and launch history retains `"permissions": "manual"`.
+    let (answer_status, _) = fx.answer(&sid, &request_id, "allow").await;
+    assert_eq!(answer_status, 200);
+    fx.until(&sid, "answered manual run", |session, _| finished(session))
+        .await;
+
+    let (list_status, list_after) = fx.http(Method::GET, "/api/sessions", None).await;
+    assert_eq!(list_status, 200, "{list_after}");
+    let after_summary = list_after["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == sid)
+        .unwrap();
+    assert_eq!(after_summary["waiting_permissions"], 0);
+
+    let (get_status, get_after) = fx
+        .http(Method::GET, &format!("/api/sessions/{sid}"), None)
+        .await;
+    assert_eq!(get_status, 200, "{get_after}");
+    assert_eq!(get_after["waiting_permissions"], json!([]));
+
+    let (results_status, results_body) = fx
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/results?diff=none"),
+            None,
+        )
+        .await;
+    assert_eq!(results_status, 200, "{results_body}");
+    assert_eq!(
+        results_body["launches"][0]["settings"]["permissions"],
+        "manual"
+    );
+
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interactive_deadline_pauses_during_human_wait_and_excludes_wait_from_seconds() {
+    use infra_host::process::{Interactive, Limits, run_interactive, use_guardian};
+    use std::sync::atomic::AtomicUsize;
+
+    let _ = use_guardian(PathBuf::from(env!(
+        "CARGO_BIN_EXE_infra-harness-inbox-fixture"
+    )));
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let script = root.join("pause-check.sh");
+    fs::write(&script, "#!/bin/sh\necho ask\nIFS= read -r _\necho done\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 1. Waiting pauses the short deadline and is excluded from Output.seconds.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let finished = Arc::new(AtomicBool::new(false));
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let tx_holder = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(350);
+    let lines_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let lines_event = lines_seen.clone();
+    let waiting_event = waiting.clone();
+    let finished_event = finished.clone();
+    let tx_event = tx_holder.clone();
+    let output = run_interactive(
+        &[script.to_string_lossy().into_owned()],
+        &root,
+        &BTreeMap::new(),
+        &[],
+        &[],
+        Limits {
+            seconds: Some(1),
+            output: 65536,
+            line: 65536,
+        },
+        cancel.clone(),
+        None,
+        None,
+        Some(deadline),
+        Interactive {
+            input: rx,
+            finished,
+            waiting,
+        },
+        move |packet| {
+            let text = String::from_utf8_lossy(packet).trim().to_owned();
+            lines_event.lock().unwrap().push(text.clone());
+            if text == "ask" {
+                waiting_event.store(1, std::sync::atomic::Ordering::Release);
+                let w = waiting_event.clone();
+                let f = finished_event.clone();
+                let t = tx_event.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(650)).await;
+                    w.store(0, std::sync::atomic::Ordering::Release);
+                    if let Some(sender) = t.lock().unwrap().take() {
+                        let _ = sender.send(b"ok\n".to_vec());
+                    }
+                    f.store(true, std::sync::atomic::Ordering::Release);
+                });
+            }
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    let wall = started.elapsed();
+    assert_eq!(output.code, 0);
+    assert_eq!(
+        *lines_seen.lock().unwrap(),
+        vec!["ask".to_owned(), "done".to_owned()]
+    );
+    assert!(wall >= Duration::from_millis(650), "{wall:?}");
+    assert!(
+        output.seconds < 0.45,
+        "paused wait must not count toward Output.seconds: {} (wall={wall:?})",
+        output.seconds
+    );
+
+    // 2. Without waiting, an expired deadline still fails with native-timeout.
+    let (_tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+    let err = run_interactive(
+        &[script.to_string_lossy().into_owned()],
+        &root,
+        &BTreeMap::new(),
+        &[],
+        &[],
+        Limits {
+            seconds: Some(10),
+            output: 65536,
+            line: 65536,
+        },
+        Arc::new(AtomicBool::new(false)),
+        None,
+        None,
+        Some(Instant::now() + Duration::from_millis(250)),
+        Interactive {
+            input: rx2,
+            finished: Arc::new(AtomicBool::new(false)),
+            waiting: Arc::new(AtomicUsize::new(0)),
+        },
+        |_| Ok(()),
+    )
+    .await
+    .err()
+    .expect("unpaused deadline must time out");
+    assert_eq!(err.code, "native-timeout");
+}
+
 /// Live checks against the real Claude Code, Codex and Cursor on PATH, through
 /// the same routes. They make paid model calls, so they run only when asked:
 /// `HARNESS_LIVE=1 cargo test -p infra-harness --test permission_modes -- --ignored`.

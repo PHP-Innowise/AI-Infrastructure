@@ -421,6 +421,7 @@ impl Results {
             "mode",
             "model_routing",
             "clash",
+            "permissions",
         ] {
             settings[k] = s[k].clone();
         }
@@ -1971,8 +1972,12 @@ mod omnigraph_quality_gate_tests {
         fn operation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
             self.operation.clone()
         }
-        fn history_session_ids(&self, _: &Value) -> Result<Vec<String>> {
-            Ok(Vec::new())
+        fn history_session_ids(&self, session: &Value) -> Result<Vec<String>> {
+            Ok(session["id"]
+                .as_str()
+                .map(str::to_owned)
+                .into_iter()
+                .collect())
         }
         fn shutdown_cancel(&self) -> Arc<AtomicBool> {
             self.stop.clone()
@@ -2366,5 +2371,41 @@ mod omnigraph_quality_gate_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn start_launch_persists_permissions_setting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("project");
+        setup_governed_project(&proj);
+        let store = SessionStore::open(&tmp.path().join("state")).unwrap();
+        let reg = store.register(&proj).unwrap();
+        let session = store
+            .create(
+                &json!({
+                    "project_id": reg["id"],
+                    "provider": "codex",
+                    "workflow": "native",
+                    "mode": "edit",
+                    "permissions": "manual",
+                }),
+                "Track permission mode in launch history",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap();
+        let generation = store.generation(sid).unwrap();
+        let results = Results::new(
+            store,
+            Arc::new(TestBackend {
+                project: proj,
+                operation: Arc::new(tokio::sync::Mutex::new(())),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .unwrap();
+        results.start_launch(sid, &generation, None).unwrap();
+        let history = results.history(sid).unwrap();
+        assert_eq!(history["launches"][0]["settings"]["permissions"], "manual");
     }
 }

@@ -50,6 +50,30 @@ pub struct Interactive {
     /// Requests waiting for a person. The time limit does not run while one waits.
     pub waiting: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+/// Whether an absolute run deadline has elapsed after excluding time spent
+/// waiting for a person.
+pub(crate) fn deadline_elapsed(
+    now: std::time::Instant,
+    deadline: Option<std::time::Instant>,
+    paused: std::time::Duration,
+) -> bool {
+    deadline.is_some_and(|until| now >= until && now.saturating_duration_since(until) >= paused)
+}
+/// Bounded read poll timeout aligned to the paused-adjusted deadline.
+pub(crate) fn interactive_read_wait(
+    now: std::time::Instant,
+    deadline: Option<std::time::Instant>,
+    paused: std::time::Duration,
+) -> std::time::Duration {
+    deadline
+        .and_then(|until| until.checked_add(paused))
+        .map(|until| {
+            until
+                .saturating_duration_since(now)
+                .min(std::time::Duration::from_millis(100))
+        })
+        .unwrap_or(std::time::Duration::from_millis(100))
+}
 /// How long a finished exchange waits for the host to exit on its own.
 #[cfg(unix)]
 const FINISH_GRACE: Duration = Duration::from_secs(3);
@@ -409,18 +433,12 @@ async fn run_engine(
             if limits
                 .seconds
                 .is_some_and(|s| started.elapsed().saturating_sub(paused) > Duration::from_secs(s))
-                || deadline.is_some_and(|until| Instant::now() >= until)
+                || deadline_elapsed(now, deadline, paused)
             {
                 return Err(native_timeout());
             }
             let mut chunk = [0u8; 65536];
-            let wait = deadline
-                .map(|until| {
-                    until
-                        .saturating_duration_since(Instant::now())
-                        .min(Duration::from_millis(100))
-                })
-                .unwrap_or(Duration::from_millis(100));
+            let wait = interactive_read_wait(now, deadline, paused);
             let read = tokio::select! {
                 status = guardian.completed(), if guardian.status.is_none() => {
                     if status == GuardStatus::Unconfirmed {
@@ -498,6 +516,7 @@ async fn run_engine(
     if let Some(error) = fed {
         return Err(error);
     }
+    let seconds = started.elapsed().saturating_sub(paused).as_secs_f64();
     if stopped && status != GuardStatus::Protocol {
         // The host answered everything it was asked and was then stopped;
         // its signal status says nothing about the exchange.
@@ -505,7 +524,7 @@ async fn run_engine(
         return Ok(Output {
             code: 0,
             bytes: output,
-            seconds: started.elapsed().as_secs_f64(),
+            seconds,
         });
     }
     let GuardStatus::Native(code) = status else {
@@ -514,7 +533,7 @@ async fn run_engine(
     Ok(Output {
         code,
         bytes: output,
-        seconds: started.elapsed().as_secs_f64(),
+        seconds,
     })
 }
 #[cfg(unix)]
@@ -3241,5 +3260,48 @@ mod guardian_tests {
     fn a_relative_guardian_is_refused_and_this_executable_still_guards() {
         assert!(super::use_guardian("infra-engine".into()).is_err());
         assert_eq!(super::guardian().unwrap(), std::env::current_exe().unwrap());
+    }
+
+    #[test]
+    fn paused_human_wait_extends_deadline_and_read_timeout() {
+        use std::time::{Duration, Instant};
+
+        let base = Instant::now();
+        let deadline = Some(base + Duration::from_secs(2));
+        assert!(!super::deadline_elapsed(
+            base + Duration::from_secs(1),
+            deadline,
+            Duration::ZERO
+        ));
+        assert!(super::deadline_elapsed(
+            base + Duration::from_secs(2),
+            deadline,
+            Duration::ZERO
+        ));
+        // Five seconds spent waiting for a person keeps the 2s deadline open until +7s.
+        let paused = Duration::from_secs(5);
+        assert!(!super::deadline_elapsed(
+            base + Duration::from_secs(6),
+            deadline,
+            paused
+        ));
+        assert_eq!(
+            super::interactive_read_wait(base + Duration::from_millis(6950), deadline, paused,),
+            Duration::from_millis(50)
+        );
+        assert!(super::deadline_elapsed(
+            base + Duration::from_secs(7),
+            deadline,
+            paused
+        ));
+        assert!(!super::deadline_elapsed(
+            base + Duration::from_secs(100),
+            None,
+            paused
+        ));
+        assert_eq!(
+            super::interactive_read_wait(base, None, paused),
+            Duration::from_millis(100)
+        );
     }
 }

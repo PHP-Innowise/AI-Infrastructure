@@ -2274,6 +2274,16 @@ impl Domain for Sessions {
                         json!({"permission": answer, "session": self.store.get(sid)?}),
                     ));
                 }
+                "sessions.waiting_permissions" => {
+                    return Ok(Payload::Json(
+                        json!({"items": self.waiting_permissions(sid)}),
+                    ));
+                }
+                "sessions.waiting_counts" => {
+                    return Ok(Payload::Json(
+                        json!({"counts": self.permissions.waiting_counts()}),
+                    ));
+                }
                 "sessions.cancel" => {
                     if !store::exact(body, &[], &[]) {
                         return Err(HarnessError::invalid(
@@ -3301,6 +3311,14 @@ async fn notify_live_native_session_inbox(
     let refused = if let Err(reason) = crate::inbox::live_eligibility_reason(session) {
         outcome["reason"] = json!(reason);
         reason != "not_running"
+    } else if !sid.is_empty()
+        && store
+            .get(sid)
+            .ok()
+            .is_some_and(|fresh| fresh["permissions"] == "manual")
+    {
+        outcome["reason"] = json!("manual_permissions");
+        true
     } else if let Some(domain) = sessions_domain {
         let request_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
         match domain
@@ -5019,6 +5037,48 @@ mod inbox_notify_tests {
         .await;
         assert_eq!(idle["reason"], "not_running");
         assert!(events("idle").is_empty());
+
+        // A running session with Manual permissions must never accept unattended auto-prompts.
+        let mut manual = store.get("live").unwrap();
+        manual["permissions"] = json!("manual");
+        let skipped_manual =
+            notify_live_native_session_inbox(&store, Some(&Refusing), &manual, "omni", "Update")
+                .await;
+        assert_eq!(skipped_manual["notified"], false);
+        assert_eq!(skipped_manual["reason"], "manual_permissions");
+        assert_eq!(events("live").len(), 2);
+        assert_eq!(events("live")[1]["reason"], "manual_permissions");
+
+        // An idle Manual session still reports not_running without noisy events.
+        let mut idle_manual = store.get("idle").unwrap();
+        idle_manual["permissions"] = json!("manual");
+        let skipped_idle_manual = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &idle_manual,
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(skipped_idle_manual["reason"], "not_running");
+        assert!(events("idle").is_empty());
+
+        // Even if the passed snapshot is stale, updating DB permissions to manual blocks delivery.
+        let stale_snapshot = store.get("live").unwrap();
+        store
+            .patch("live", &json!({"permissions": "manual"}))
+            .unwrap();
+        let skipped_stale = notify_live_native_session_inbox(
+            &store,
+            Some(&Refusing),
+            &stale_snapshot,
+            "omni",
+            "Update",
+        )
+        .await;
+        assert_eq!(skipped_stale["notified"], false);
+        assert_eq!(skipped_stale["reason"], "manual_permissions");
+        assert_eq!(events("live").len(), 3);
     }
 }
 
