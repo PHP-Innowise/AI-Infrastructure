@@ -3438,9 +3438,11 @@ pub(super) fn render(view: &V) {
 pub(super) async fn choose(target: &str) -> bool {
     let scope = surface_scope(MODAL_SURFACE);
     if scope.is_empty() {
+        dom::attr("graph-map-canvas", "aria-busy", "false");
         return false;
     }
     let scope_key = scope.scope_key();
+    dom::attr("graph-map-canvas", "aria-busy", "true");
     dom::error("graph-map-error", "");
     dom::hidden("graph-map-progress", true);
     blank();
@@ -3452,13 +3454,17 @@ pub(super) async fn choose(target: &str) -> bool {
         scope.act_request("changes", Some(target))
     };
     let asked = api::post(&path, body).await;
-    if surface_scope(MODAL_SURFACE).scope_key() != scope_key || effective_target(&state()) != target
-    {
+    let current_scope = surface_scope(MODAL_SURFACE).scope_key();
+    if current_scope != scope_key || effective_target(&state()) != target {
+        if current_scope.is_empty() || !open() {
+            dom::attr("graph-map-canvas", "aria-busy", "false");
+        }
         return false;
     }
     match asked {
         Ok(_) => true,
         Err(error) => {
+            dom::attr("graph-map-canvas", "aria-busy", "false");
             dom::text("graph-map-note", "");
             dom::error("graph-map-error", &error.message);
             false
