@@ -31,14 +31,6 @@ fn root_source(args: &[String]) -> Result<PathBuf> {
     if let Some(path) = explicit {
         candidates.push(path);
     } else {
-        if let Ok(directory) = desktop::config_directory()
-            && let Some(value) = crate::creator_files::object(&directory, "app.json", false)
-                .ok()
-                .flatten()
-            && let Some(path) = value["clone"].as_str()
-        {
-            candidates.push(PathBuf::from(path));
-        }
         if let Some(path) = std::env::var_os("ACCELERATOR_HOME") {
             let path = PathBuf::from(path);
             candidates.extend(path.ancestors().map(Path::to_path_buf));
@@ -52,14 +44,18 @@ fn root_source(args: &[String]) -> Result<PathBuf> {
         {
             candidates.extend(path.ancestors().map(Path::to_path_buf));
         }
+        if let Ok(directory) = desktop::config_directory()
+            && let Some(value) = crate::creator_files::object(&directory, "app.json", false)
+                .ok()
+                .flatten()
+            && let Some(path) = value["clone"].as_str()
+        {
+            candidates.push(PathBuf::from(path));
+        }
     }
     for path in candidates {
-        if let Ok(path) = infra_core::fs::canonicalize(path)
-            && path.join("harness/web/index.html").is_file()
-            && path.join("Infrastructure-Creator/AGENTS.md").is_file()
-        {
-            infra_core::bank::publication::PublicationFiles::new(&path)?;
-            return Ok(path);
+        if let Some(root) = desktop::resolve_clone_root(&path)? {
+            return Ok(root);
         }
     }
     Err(HarnessError::missing(

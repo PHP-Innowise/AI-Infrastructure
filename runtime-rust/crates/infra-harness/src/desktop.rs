@@ -40,6 +40,7 @@ pub struct ServerConfig {
     pub session_concurrency: usize,
     pub projects: Vec<PathBuf>,
     pub providers: BTreeMap<String, String>,
+    pub path_env: Option<std::ffi::OsString>,
 }
 pub type FactoryFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn Services>>> + Send + 'a>>;
@@ -114,20 +115,40 @@ impl ServerControl {
         Ok(destination)
     }
 }
+fn installed_application_record() -> Result<Option<(PathBuf, Value)>> {
+    let directory = config_directory()?;
+    if !directory.is_dir() {
+        return Ok(None);
+    }
+    let Some(record) = crate::creator_files::object(&directory, "app.json", false)? else {
+        return Ok(None);
+    };
+    if record["installed"]
+        .as_array()
+        .is_none_or(|paths| paths.is_empty())
+    {
+        return Ok(None);
+    }
+    Ok(Some((directory, record)))
+}
+pub(crate) fn resolve_clone_root(path: &Path) -> Result<Option<PathBuf>> {
+    let Ok(path) = infra_core::fs::canonicalize(path) else {
+        return Ok(None);
+    };
+    if path.join("harness/web/index.html").is_file()
+        && path.join("Infrastructure-Creator/AGENTS.md").is_file()
+    {
+        infra_core::bank::publication::PublicationFiles::new(&path)?;
+        return Ok(Some(path));
+    }
+    Ok(None)
+}
 impl crate::updates::Restart for ServerControl {
     fn refresh_application(&self, engine: &Path, expected_sha256: &str) -> Result<Vec<String>> {
-        let directory = config_directory()?;
-        if !directory.is_dir() {
-            return Ok(vec![]);
-        }
-        let Some(record) = crate::creator_files::object(&directory, "app.json", false)? else {
+        let Some((_, record)) = installed_application_record()? else {
             return Ok(vec![]);
         };
-        if record["clone"] != serde_json::to_value(&self.config.source)?
-            || record["installed"]
-                .as_array()
-                .is_none_or(|paths| paths.is_empty())
-        {
+        if record["clone"] != serde_json::to_value(&self.config.source)? {
             return Ok(vec![]);
         }
         let pinned = self.pin_engine(engine, expected_sha256)?;
@@ -212,6 +233,7 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
         session_concurrency: 1,
         projects: vec![],
         providers: BTreeMap::new(),
+        path_env: None,
     };
     let mut i = 0;
     let command = if args.first().is_some_and(|v| !v.starts_with('-')) {
@@ -442,6 +464,9 @@ fn engine_command(
     for (provider, executable) in &config.providers {
         command.arg(format!("--{provider}-bin")).arg(executable);
     }
+    if let Some(path) = &config.path_env {
+        command.env("PATH", path);
+    }
     command
 }
 pub async fn server(
@@ -449,10 +474,17 @@ pub async fn server(
     source: &Path,
     factory: Arc<dyn ServicesFactory>,
 ) -> Result<i32> {
-    let (command, mut config) = options(args, source)?;
+    let (command, config) = options(args, source)?;
+    server_with_config(&command, config, factory).await
+}
+async fn server_with_config(
+    command: &str,
+    mut config: ServerConfig,
+    factory: Arc<dyn ServicesFactory>,
+) -> Result<i32> {
     infra_host::util::private_directory(&config.state)?;
     config.state = infra_core::fs::python_realpath(&config.state)?;
-    match command.as_str() {
+    match command {
         "serve" => {
             let lock = private_file(&config.state.join("server.lock"))?;
             lock.try_lock().map_err(|_| {
@@ -561,6 +593,13 @@ pub fn install(source: &Path) -> Result<Vec<PathBuf>> {
     install_engine(source, &std::env::current_exe()?)
 }
 pub fn install_engine(source: &Path, engine: &Path) -> Result<Vec<PathBuf>> {
+    install_engine_with_path(source, engine, None)
+}
+fn install_engine_with_path(
+    source: &Path,
+    engine: &Path,
+    path_override: Option<&str>,
+) -> Result<Vec<PathBuf>> {
     // A missing late icon, native helper or engine is refused before any
     // application config/desktop mkdir, chmod, write or registry operation.
     let source = infra_core::fs::canonicalize(source)?;
@@ -568,9 +607,12 @@ pub fn install_engine(source: &Path, engine: &Path) -> Result<Vec<PathBuf>> {
     let config = infra_core::fs::absolute(&config_directory()?)?;
     let publication_paths = publication::install_paths(&config)?;
     let executable = inputs.executable.clone();
-    let record = publication::installation_record(&source, &executable)?;
+    let record = publication::installation_record_with_path(&source, &executable, path_override)?;
     #[cfg(target_os = "linux")]
-    let desktop_command = publication::desktop_exec(&executable)?;
+    let (desktop_command, stop_command) = (
+        publication::desktop_exec(&executable)?,
+        publication::desktop_exec_with_args(&executable, "app stop")?,
+    );
     #[cfg(windows)]
     let staged_shortcut = publication::stage_shortcut(&source, &config, &mut inputs)?;
     inputs.check()?;
@@ -588,12 +630,12 @@ pub fn install_engine(source: &Path, engine: &Path) -> Result<Vec<PathBuf>> {
         let path = data.join("applications/ai-accelerator.desktop");
 
         let body = format!(
-            "[Desktop Entry]\nType=Application\nName=AI Accelerator\nName[ru]=AI Акселератор\nComment=Work with native coding agents in your browser\nExec={desktop_command}\nIcon=ai-accelerator\nTerminal=false\nCategories=Development;\nStartupNotify=true\n"
+            "[Desktop Entry]\nType=Application\nName=AI Accelerator\nName[ru]=AI Акселератор\nComment=Work with native coding agents in your browser\nExec={desktop_command}\nIcon=ai-accelerator\nTerminal=false\nCategories=Development;\nStartupNotify=true\nActions=Stop;\n\n[Desktop Action Stop]\nName=Stop the accelerator server\nName[ru]=Остановить сервер акселератора\nExec={stop_command}\n"
         );
         let svg = data.join("icons/hicolor/scalable/apps/ai-accelerator.svg");
         publisher.write(&svg, inputs.svg(), 0o644)?;
         paths.push(svg);
-        for size in [16, 22, 24, 32, 48, 64, 128, 256, 512] {
+        for &size in publication::PNG_SIZES {
             let target = data.join(format!(
                 "icons/hicolor/{size}x{size}/apps/ai-accelerator.png"
             ));
@@ -667,8 +709,9 @@ pub fn install_engine(source: &Path, engine: &Path) -> Result<Vec<PathBuf>> {
         )?;
         let shortcut = appdata.join("Microsoft/Windows/Start Menu/Programs/AI Accelerator.lnk");
         let icon_path = config.join("ai-accelerator.ico");
-        let icons = [16, 24, 32, 48, 64, 128, 256]
-            .into_iter()
+        let icons = publication::PNG_SIZES
+            .iter()
+            .copied()
             .map(|size| inputs.icon(size).map(|image| (size, image)))
             .collect::<Result<Vec<_>>>()?;
         let mut icon = vec![0, 0, 1, 0, icons.len() as u8, 0];
@@ -707,6 +750,315 @@ pub fn uninstall() -> Result<Vec<PathBuf>> {
         None => Ok(vec![]),
     }
 }
+const PATH_MARKER_BEGIN: &str = "__AI_ACCEL_PATH_BEGIN__";
+const PATH_MARKER_END: &str = "__AI_ACCEL_PATH_END__";
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn extract_marked_path(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let start = text.rfind(PATH_MARKER_BEGIN)?;
+    let tail = &text[start + PATH_MARKER_BEGIN.len()..];
+    let end = tail.find(PATH_MARKER_END)?;
+    let path = tail[..end].trim_matches(['\r', '\n']);
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    Some(path.to_owned())
+}
+
+#[cfg(unix)]
+async fn probe_login_shell_path() -> Option<String> {
+    let shell = std::env::var_os("SHELL").filter(|value| !value.is_empty())?;
+    let name = Path::new(&shell)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or("");
+    let probe = if name == "fish" {
+        format!(
+            "printf '%s' {PATH_MARKER_BEGIN}; string join : $PATH; printf '%s\\n' {PATH_MARKER_END}"
+        )
+    } else {
+        format!("printf '%s%s%s\\n' {PATH_MARKER_BEGIN} \"$PATH\" {PATH_MARKER_END}")
+    };
+    let mut command = tokio::process::Command::new(&shell);
+    command
+        .args(["-ilc", &probe])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let run = async move {
+        let mut buf = Vec::new();
+        stdout
+            .take(512 * 1024 + 1)
+            .read_to_end(&mut buf)
+            .await
+            .ok()?;
+        let status = child.wait().await.ok()?;
+        if !status.success() || buf.len() > 512 * 1024 {
+            return None;
+        }
+        extract_marked_path(&buf)
+    };
+    tokio::time::timeout(LOGIN_SHELL_TIMEOUT, run)
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(unix))]
+async fn probe_login_shell_path() -> Option<String> {
+    None
+}
+
+fn merge_search_paths(
+    preferred: Option<&str>,
+    current: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    let preferred = preferred.filter(|value| !value.is_empty())?;
+    let mut merged = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for segment in
+        std::env::split_paths(preferred).chain(current.iter().flat_map(std::env::split_paths))
+    {
+        if !segment.as_os_str().is_empty() && seen.insert(segment.clone()) {
+            merged.push(segment);
+        }
+    }
+    if merged.is_empty() {
+        return None;
+    }
+    std::env::join_paths(merged).ok()
+}
+
+fn read_cached_app_path() -> Option<String> {
+    let directory = config_directory().ok()?;
+    let record = crate::creator_files::object(&directory, "app.json", false)
+        .ok()
+        .flatten()?;
+    record["path"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn update_cached_app_path(probed: &str) -> Result<()> {
+    let directory = config_directory()?;
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let Some(mut record) = crate::creator_files::object(&directory, "app.json", false)? else {
+        return Ok(());
+    };
+    if record["path"].as_str() == Some(probed) {
+        return Ok(());
+    }
+    record["path"] = json!(probed);
+    let bytes = format!("{}\n", infra_core::domain::json::sorted_pretty(&record)?).into_bytes();
+    if bytes.len() > 65536 {
+        return Err(HarnessError::invalid(
+            "Desktop installation record exceeds its read boundary.",
+        ));
+    }
+    let mut files = infra_core::bank::publication::PublicationFiles::open_directory_root(
+        &directory,
+        infra_core::bank::publication::private::RootProtection::SelectedRoot,
+    )?;
+    let expected = files.read("app.json", 65536)?;
+    let expected_mode = files.read_mode("app.json")?;
+    files.write_expected_mode_checked(
+        "app.json",
+        &bytes,
+        expected.as_deref(),
+        expected_mode,
+        0o600,
+        65536,
+    )?;
+    files.check()?;
+    Ok(())
+}
+
+fn resolve_open_path(probed: Option<&str>, cached: Option<&str>) -> Option<std::ffi::OsString> {
+    if let Some(shell_path) = probed.filter(|value| !value.is_empty()) {
+        let _ = update_cached_app_path(shell_path);
+        return merge_search_paths(Some(shell_path), std::env::var_os("PATH"));
+    }
+    merge_search_paths(cached, std::env::var_os("PATH"))
+}
+
+fn rebind_moved_clone(source: &Path, path_override: Option<&str>) -> Result<Vec<PathBuf>> {
+    let Some((_, record)) = installed_application_record()? else {
+        return Ok(vec![]);
+    };
+    let current_source = infra_core::fs::canonicalize(source)?;
+    if record["clone"] == serde_json::to_value(&current_source)? {
+        return Ok(vec![]);
+    }
+    if let Some(old_clone) = record["clone"].as_str()
+        && resolve_clone_root(Path::new(old_clone))
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return Ok(vec![]);
+    }
+    install_engine_with_path(&current_source, &std::env::current_exe()?, path_override)
+}
+
+fn append_launcher_log(message: &str) -> Result<()> {
+    let directory = config_directory()?;
+    infra_host::util::private_directory(&directory)?;
+    let log_path = directory.join("launcher.log");
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&log_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(HarnessError::forbidden("Launcher log must be regular."));
+    }
+    if file.metadata()?.len() > 256 * 1024 {
+        file.set_len(0)?;
+    }
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0))?;
+    let line = format!(
+        "[{}] {}\n",
+        chrono::Utc::now().to_rfc3339(),
+        message.trim().replace('\n', " ")
+    );
+    std::io::Write::write_all(&mut file, line.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn encode_wide(value: &str) -> Vec<u16> {
+    value
+        .replace('\0', "")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+async fn notify_launch_failure(message: &str, path_env: Option<&std::ffi::OsStr>) {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = tokio::process::Command::new("notify-send");
+        command
+            .args([
+                "--urgency=critical",
+                "--icon=ai-accelerator",
+                "AI Accelerator",
+                message,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Some(path) = path_env {
+            command.env("PATH", path);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(3), command.status()).await;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"AI Accelerator\"",
+            message.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let mut command = tokio::process::Command::new("osascript");
+        command
+            .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Some(path) = path_env {
+            command.env("PATH", path);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), command.status()).await;
+    }
+    #[cfg(windows)]
+    {
+        let _ = path_env;
+        if std::env::var_os("HARNESS_NO_GUI").is_none() {
+            #[link(name = "user32")]
+            unsafe extern "system" {
+                fn MessageBoxW(
+                    hwnd: windows_sys::Win32::Foundation::HWND,
+                    text: *const u16,
+                    caption: *const u16,
+                    utype: u32,
+                ) -> i32;
+            }
+            let caption = encode_wide("AI Accelerator");
+            let text = encode_wide(message);
+            unsafe {
+                MessageBoxW(
+                    std::ptr::null_mut(),
+                    text.as_ptr(),
+                    caption.as_ptr(),
+                    0x0000_0010,
+                );
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    let _ = (message, path_env);
+}
+
+async fn open_server(
+    args: &[String],
+    source: &Path,
+    factory: Arc<dyn ServicesFactory>,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Result<(ServerConfig, Value)> {
+    let mut server_args = vec!["start".into()];
+    server_args.extend_from_slice(args.get(1..).unwrap_or(&[]));
+    let (command, mut selected) = options(&server_args, source)?;
+    selected.path_env = path_env.map(std::ffi::OsStr::to_os_string);
+    server_with_config(&command, selected.clone(), factory).await?;
+    let info = running(&selected.state)
+        .await?
+        .ok_or_else(|| HarnessError::unavailable("The application server did not start."))?;
+    Ok((selected, info))
+}
+
+async fn open_browser(url: &str, path_env: Option<&std::ffi::OsStr>) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = tokio::process::Command::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        command
+    };
+    if let Some(path) = path_env {
+        command.env("PATH", path);
+    }
+    let opened = command.status().await.is_ok_and(|status| status.success());
+    if !opened {
+        println!("Open {url} in your browser.");
+    }
+    Ok(())
+}
+
 pub async fn app(args: &[String], source: &Path, factory: Arc<dyn ServicesFactory>) -> Result<i32> {
     let command = args.first().map(String::as_str).unwrap_or("open");
     match command {
@@ -729,33 +1081,27 @@ pub async fn app(args: &[String], source: &Path, factory: Arc<dyn ServicesFactor
             server(&server_args, source, factory).await
         }
         "open" => {
-            let mut server_args = vec!["start".into()];
-            server_args.extend_from_slice(args.get(1..).unwrap_or(&[]));
-            let (_, selected) = options(&server_args, source)?;
-            server(&server_args, source, factory).await?;
-            let info = running(&selected.state).await?.ok_or_else(|| {
-                HarnessError::unavailable("The application server did not start.")
-            })?;
-            let url = format!("http://127.0.0.1:{}/", info["port"]);
-            #[cfg(target_os = "linux")]
-            let status = tokio::process::Command::new("xdg-open")
-                .arg(&url)
-                .status()
-                .await?;
-            #[cfg(target_os = "macos")]
-            let status = tokio::process::Command::new("open")
-                .arg(&url)
-                .status()
-                .await?;
-            #[cfg(windows)]
-            let status = tokio::process::Command::new("rundll32.exe")
-                .args(["url.dll,FileProtocolHandler", &url])
-                .status()
-                .await?;
-            if !status.success() {
-                println!("Open {url} in your browser.");
+            let cached = read_cached_app_path();
+            let probed = probe_login_shell_path().await;
+            let resolved_path = resolve_open_path(probed.as_deref(), cached.as_deref());
+            let record_path = probed.as_deref().or(cached.as_deref());
+            match open_server(args, source, factory, resolved_path.as_deref()).await {
+                Ok((selected, info)) => {
+                    if let Err(error) = rebind_moved_clone(&selected.source, record_path) {
+                        let _ = append_launcher_log(&error.message);
+                        notify_launch_failure(&error.message, resolved_path.as_deref()).await;
+                        return Err(error);
+                    }
+                    let url = format!("http://127.0.0.1:{}/", info["port"]);
+                    open_browser(&url, resolved_path.as_deref()).await?;
+                    Ok(0)
+                }
+                Err(error) => {
+                    let _ = append_launcher_log(&error.message);
+                    notify_launch_failure(&error.message, resolved_path.as_deref()).await;
+                    Err(error)
+                }
             }
-            Ok(0)
         }
         _ => Err(HarnessError::invalid("Unknown application command.")),
     }
@@ -805,5 +1151,36 @@ mod session_concurrency_tests {
             );
         }
         assert!(parsed(&root, &["--session-concurrency"]).is_err());
+    }
+    #[test]
+    fn extract_marked_path_and_merge_paths_handle_greetings_and_dedup() {
+        let output =
+            b"Welcome to zsh!\n\x1b[32mprompt\x1b[0m\n__AI_ACCEL_PATH_BEGIN__/home/u/.local/bin:/usr/bin__AI_ACCEL_PATH_END__\r\nbye\n";
+        assert_eq!(
+            extract_marked_path(output).as_deref(),
+            Some("/home/u/.local/bin:/usr/bin")
+        );
+        assert_eq!(extract_marked_path(b"no markers"), None);
+        assert_eq!(
+            extract_marked_path(b"__AI_ACCEL_PATH_BEGIN____AI_ACCEL_PATH_END__"),
+            None
+        );
+        assert_eq!(
+            extract_marked_path(b"__AI_ACCEL_PATH_BEGIN__/a\0/b__AI_ACCEL_PATH_END__"),
+            None
+        );
+        let merged = merge_search_paths(
+            Some("/home/u/.local/bin:/usr/bin"),
+            Some(std::ffi::OsString::from("/usr/bin:/bin")),
+        )
+        .unwrap();
+        let parts = std::env::split_paths(&merged)
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(parts, vec!["/home/u/.local/bin", "/usr/bin", "/bin"]);
+        assert_eq!(
+            merge_search_paths(Some(""), Some(std::ffi::OsString::from("/bin"))),
+            None
+        );
     }
 }

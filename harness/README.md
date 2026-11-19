@@ -693,8 +693,8 @@ applications:
 | macOS | Launchpad, Spotlight, `~/Applications` | `~/Applications/AI Accelerator.app` |
 | Windows | the Start menu, and **Settings › Apps › Installed apps** with **Uninstall** | a Start menu shortcut, `%APPDATA%\ai-infrastructure-harness\ai-accelerator.ico`, an Uninstall entry under `HKEY_CURRENT_USER` |
 
-A click runs `./accelerator-app open`. If the server is not running, it starts
-it from the clone, as `./harness-server start` does, so the browser asks for a
+A click runs `./infra-engine app open`. If the server is not running, it starts
+it from the clone, as `./infra-engine serve start` does, so the browser asks for a
 project folder. Then it opens the server in the default browser. The entry runs
 the clone itself, and nothing else is copied. On Linux, the icon's menu also has
 **Stop the accelerator server**.
@@ -724,7 +724,7 @@ A click runs five steps:
 Projects attached to the clone take their edition from it, so they update with
 it.
 
-`./accelerator-app update` does the same from a terminal.
+`./infra-engine app update` does the same from a terminal.
 
 Each engine names the sources it was compiled from, and the interface build
 records its own (see [`runtime-rust/README.md`](../runtime-rust/README.md)).
@@ -742,9 +742,9 @@ cargo build --release --locked --manifest-path runtime-rust/Cargo.toml --bin inf
 ./infra-engine repo artifacts --write --include-generator
 ```
 
-Then press **Update** again, or run `./accelerator-app update`, and the server
+Then press **Update** again, or run `./infra-engine app update`, and the server
 restarts on the rebuilt engine. Stopping the server with
-`./accelerator-app stop` and starting it with `./accelerator-app open` starts
+`./infra-engine app stop` and starting it with `./infra-engine app open` starts
 the rebuilt version too.
 
 Only a fast-forward is ever applied, and some states hold the update back:
@@ -785,7 +785,7 @@ CLIs usually live. Three things make up for it:
   `%APPDATA%\ai-infrastructure-harness\` on Windows.
 
 If you move the clone, start it once from its new folder
-(`./accelerator-app open`), and the installed application follows it. A second
+(`./infra-engine app open`), and the installed application follows it. A second
 clone leaves the application with the first one while the first still exists.
 
 When the server cannot start, the reason appears as a desktop notification (a
@@ -2750,19 +2750,29 @@ assertions described above. Live clients and providers require separate evidence
 Node 22 ESM smoke suite driven over Chrome DevTools Protocol (CDP). It verifies:
 1. WASM boot (`#connecting`/`#connection-banner`), pre-WASM `data-theme` & theme
    toggle, and `/assets/infra_ui_bg.wasm` HTTP 200 transport.
-2. Embedded Code Graph and `#graph-map` dense Canvas2D rendering
+2. Embedded `#session-graph-workspace` (zoom, pan, node selection, `Isolate`,
+   `Changes`/`Whole graph`) and `#graph-map` dense Canvas2D rendering
    (`canvas.graph-dense-canvas[data-dense-canvas="true"]` non-blank pixels,
-   `position: absolute` stage overlap), wheel zoom, pan, node selection,
-   `From -> To` path trace, `Isolate`, and `A..B` commit-range diff.
-3. All 5 `#graph-map` lenses (`role="tab"` + `aria-selected`, no `aria-pressed`)
-   and `#graph-map-freshness` visibility/tone.
-4. Live `/api/events/stream` SSE streaming into `#events`, `.conversation-*` /
-   `.md-body` / `.md-code-block` / `.tool-output` computed styling, and
-   code-block Copy button state (`Copy` -> `Copied` -> `Copy`).
-5. `#command-palette` (`Ctrl/Cmd+K`, focus, `ArrowDown`, `Escape` restore),
-   `#approvals-drawer` (`role="dialog"`, `aria-modal="true"`, `inert`, `Tab`
-   trap across `<details><summary>`, z-index hierarchy, `Escape` cleanup), and
-   `390x844` mobile `#menu-toggle` / `#sidebar.open` overflow check.
+   HiDPI `deviceScaleFactor: 2` backing store, hover lighting, right-click `Explain`
+   dialog, Shift+drag pin/unpin, Back/Forward history, `From -> To` path trace,
+   `A..B` commit-range diff, and `Ctrl/Cmd+K` palette stacked above `<dialog open>`).
+3. All 5 `#graph-map` lenses (`role="tab"` + `aria-selected`, no `aria-pressed`),
+   rendered Architecture layers/violations, Tests LCOV/test-reach, and Runs output,
+   plus `#graph-map-freshness` visibility/tone.
+4. Live `/api/events/stream` SSE streaming (`#sse-status[data-state="live"]`),
+   `#run-now` `#run-verb`/`#run-target` structure, `.conversation-*` / `.md-body` /
+   `.md-code-block` / `.tool-output` computed styling, and Copy button state.
+5. `#command-palette`, `#approvals-drawer` (`role="dialog"`, `aria-modal="true"`,
+   state preservation, `Allow` resolution over SSE), Light/Dark WCAG AA `>=4.5:1`
+   contrast checks on composer placeholder & selected skill hints, `761-920px`
+   responsive layout + `/resume` drawer `inert` & focus, and `390x844` mobile
+   drawer + `Workspace` tab overflow checks.
+6. Omnigraph Context Studio (constellation radar bottom-right pan clamping, search
+   & `Reset filters` on `main`, and pulse pause/resume).
+7. System Map (`kinds_off` legend toggle, unfold with unmatched risk, side-tab
+   keyboard navigation, and multi-wave play/pause without DOM teardown).
+8. Scoped negative network tests (`403` error surfacing, SSE disconnect &
+   `#reconnect` recovery).
 
 Build the `wasm-ui` bundle first (`infra-engine repo build-ui --root "$PWD"`),
 then run via Rust integration test (requires Chrome/Chromium and Node 22+):
@@ -2781,6 +2791,7 @@ node harness/tests/browser_e2e.mjs \
   --session-id <session-id> \
   [--other-session-id <other-session-id>] \
   [--commit-a <sha>] [--commit-b <sha>] \
+  [--system-run-id <run-id>] \
   [--chrome /opt/google/chrome/chrome] [--timeout-ms 120000]
 ```
 

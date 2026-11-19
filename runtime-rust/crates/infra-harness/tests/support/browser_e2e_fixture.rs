@@ -11,7 +11,10 @@ use infra_harness::{
     graph::{Graphs, Shown},
     http,
     knowledge::KnowledgeDomain,
-    omnigraph::{OmnigraphDomain, OmnigraphManager},
+    omnigraph::{
+        HARNESS_CONTEXT_PG, HARNESS_GRAPH_ID, OmnigraphDomain, OmnigraphManager,
+        session_branch_name,
+    },
     projects::ProjectDomain,
     provider::{Provider, ProviderDomain},
     results::{ResultService, Results},
@@ -613,6 +616,138 @@ fn create_fixture_project(project: &Path) -> Result<(String, String)> {
         .to_string(),
     )?;
 
+    fs::create_dir_all(project.join("coverage"))?;
+    fs::write(
+        project.join("coverage/lcov.info"),
+        concat!(
+            "TN:testCore\n",
+            "SF:pkg_00/mod_00.js\n",
+            "DA:1,1\n",
+            "DA:2,1\n",
+            "DA:4,1\n",
+            "DA:5,1\n",
+            "LF:4\n",
+            "LH:4\n",
+            "end_of_record\n",
+            "TN:testChain\n",
+            "SF:pkg_01/mod_00.js\n",
+            "DA:1,1\n",
+            "DA:4,1\n",
+            "LF:2\n",
+            "LH:2\n",
+            "end_of_record\n",
+            "TN:uncovered\n",
+            "SF:pkg_00/mod_02.js\n",
+            "DA:1,0\n",
+            "DA:2,0\n",
+            "LF:2\n",
+            "LH:0\n",
+            "end_of_record\n",
+        ),
+    )?;
+
+    // Seed multi-service System Orchestration workspace inside `project` (3 waves + unmatched risk).
+    fs::write(
+        project.join("ARCHITECTURE.md"),
+        "# Shared System Architecture\nContracts between billing, orders, and gateway.\n",
+    )?;
+    for (svc, rel_file, code, provides, consumes, cap_desc) in [
+        (
+            "billing",
+            "src/BillingLedger.js",
+            "export function emitBillingInvoice(id) {\n  return { id, event: 'billing-events-v1' };\n}\n",
+            json!([{
+                "id": "billing-events-v1",
+                "kind": "event",
+                "version": "1.0.0",
+                "sources": ["src/BillingLedger.js"]
+            }]),
+            json!([]),
+            "Core billing ledger event emitter",
+        ),
+        (
+            "orders",
+            "src/OrderProcessor.js",
+            "// Consumes billing-events-v1\nexport function processOrder() {\n  return 'orders-http-v1';\n}\n",
+            json!([{
+                "id": "orders-http-v1",
+                "kind": "http",
+                "version": "1.0.0",
+                "sources": ["src/OrderProcessor.js"]
+            }]),
+            json!([{
+                "service": "billing",
+                "contract": "billing-events-v1",
+                "version": "1.0.0"
+            }]),
+            "Core order processing HTTP service",
+        ),
+        (
+            "gateway",
+            "src/GatewayProxy.js",
+            "// Consumes orders-http-v1 and ghost-rpc-v1\nexport function routeGateway() {\n  return true;\n}\n",
+            json!([]),
+            json!([
+                {
+                    "service": "orders",
+                    "contract": "orders-http-v1",
+                    "version": "2.0.0"
+                },
+                {
+                    "service": "payments",
+                    "contract": "payments-rpc-v1",
+                    "version": "1.0.0"
+                }
+            ]),
+            "Core API gateway router",
+        ),
+    ] {
+        let svc_dir = project.join("services").join(svc);
+        fs::create_dir_all(svc_dir.join("src"))?;
+        fs::write(svc_dir.join(rel_file), code)?;
+        let passport = json!({
+            "schema_version": 1,
+            "id": svc,
+            "description": cap_desc,
+            "owner": "platform",
+            "relationships_complete": true,
+            "capabilities": [{
+                "id": format!("{svc}-core"),
+                "description": cap_desc,
+                "status": "implemented",
+                "sources": [rel_file]
+            }],
+            "provides": provides,
+            "consumes": consumes,
+            "sources": [{"path": rel_file, "kind": "code"}]
+        });
+        fs::write(
+            svc_dir.join("ai-service.json"),
+            serde_json::to_vec_pretty(&passport)?,
+        )?;
+    }
+    // Un-manifested 4th service so gateway->payments triggers unmatched contract risk on unfold.
+    let payments_dir = project.join("services/payments/src");
+    fs::create_dir_all(&payments_dir)?;
+    fs::write(
+        payments_dir.join("PaymentsStub.js"),
+        "export function pingPayments() { return true; }\n",
+    )?;
+    fs::write(
+        project.join("system.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "name": "e2e-system-platform",
+            "shared_sources": [{"path": "ARCHITECTURE.md", "kind": "spec"}],
+            "services": [
+                {"id": "billing", "root": "services/billing", "manifest": "ai-service.json"},
+                {"id": "orders", "root": "services/orders", "manifest": "ai-service.json"},
+                {"id": "gateway", "root": "services/gateway", "manifest": "ai-service.json"},
+                {"id": "payments", "root": "services/payments", "manifest": "ai-service.json"}
+            ]
+        }))?,
+    )?;
+
     run_git(project, &["add", "-A"])?;
     run_git(
         project,
@@ -742,18 +877,42 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         .to_owned();
 
     let providers = Arc::new(ProviderDomain {
-        providers: Arc::new(RwLock::new(BTreeMap::from([(
-            "claude".into(),
-            Provider {
-                id: "claude".into(),
-                name: "Offline E2E Claude".into(),
-                available: true,
-                executable: Some(std::env::current_exe()?),
-                detail: "Offline E2E fixture provider".into(),
-            },
-        )]))),
+        providers: Arc::new(RwLock::new(BTreeMap::from([
+            (
+                "claude".into(),
+                Provider {
+                    id: "claude".into(),
+                    name: "Offline E2E Claude".into(),
+                    available: true,
+                    executable: Some(std::env::current_exe()?),
+                    detail: "Offline E2E fixture provider".into(),
+                },
+            ),
+            (
+                "codex".into(),
+                Provider {
+                    id: "codex".into(),
+                    name: "Offline E2E Codex".into(),
+                    available: false,
+                    executable: None,
+                    detail: "Offline placeholder provider".into(),
+                },
+            ),
+            (
+                "cursor".into(),
+                Provider {
+                    id: "cursor".into(),
+                    name: "Offline E2E Cursor".into(),
+                    available: false,
+                    executable: None,
+                    detail: "Offline placeholder provider".into(),
+                },
+            ),
+        ]))),
     });
-    infra_host::model_catalog::model_options("claude", None, None).await?;
+    for id in ["claude", "codex", "cursor"] {
+        infra_host::model_catalog::model_options(id, None, None).await?;
+    }
 
     let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
     let graphs = Graphs::with_native_backend(store.clone(), Duration::from_secs(1));
@@ -1012,6 +1171,38 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     overrides.insert("context.project".into(), knowledge);
     overrides.insert("memory.save".into(), sessions.clone());
 
+    let closing_sessions = sessions.clone();
+    let closing_graphs = graphs.clone();
+    let closing_systems = systems.clone();
+    let closing_setup = setup;
+    let closing_omni = omnigraph.clone();
+
+    let system_prep = systems
+        .execute(
+            "systems.prepare",
+            json!({
+                "project_id": project_id,
+                "config_path": "system.json",
+                "change_id": "e2e-wave-change",
+                "task": "Evolve billing events and inspect downstream orders + gateway waves",
+                "services": ["billing"],
+                "depth": 32,
+                "budget": 8000,
+            }),
+        )
+        .await?;
+    let system_prep_val = json_payload(system_prep)?;
+    let system_run_id = system_prep_val["id"]
+        .as_str()
+        .or_else(|| system_prep_val["run"]["id"].as_str())
+        .map(str::to_owned);
+
+    let (omni_url, omni_shutdown, omni_task) =
+        offline_omnigraph::spawn(&project_id, &session_id, &other_session_id).await?;
+    omnigraph
+        .connect_external(&omni_url, Some("tok-e2e"), Some(HARNESS_GRAPH_ID))
+        .await?;
+
     let boot_store = store.clone();
     let boot_acc = accelerators.clone();
     let boot_providers = providers.clone();
@@ -1029,11 +1220,6 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
             || json!({"engine": "infra-engine", "version": source_version, "capabilities": []}),
         );
 
-    let closing_sessions = sessions.clone();
-    let closing_graphs = graphs.clone();
-    let closing_systems = systems;
-    let closing_setup = setup;
-    let closing_omni = omnigraph;
     let services = Arc::new(NativeServices::new(
         store,
         domains,
@@ -1091,6 +1277,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     let port = listener.local_addr()?.port();
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let app = http::App::new(services.clone(), port, ui_root, shutdown.clone())?;
+
     let receipt = json!({
         "url": format!("http://127.0.0.1:{port}"),
         "project_id": project_id,
@@ -1098,6 +1285,9 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         "other_session_id": other_session_id,
         "commit_a": commit_a,
         "commit_b": commit_b,
+        "system_config_path": "system.json",
+        "system_run_id": system_run_id,
+        "omnigraph_graph_id": HARNESS_GRAPH_ID,
         "root": root,
     });
     fs::write(root.join("browser-e2e.json"), receipt.to_string())?;
@@ -1110,8 +1300,10 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     let deadline = spawn_shutdown_watchers(shutdown.clone(), timeout_secs);
     let serve_result = http::serve_listener(listener, app).await;
     let _ = shutdown.send(true);
+    let _ = omni_shutdown.send(true);
     deadline.abort();
     let close_result = services.close().await;
+    let _ = omni_task.await;
     serve_result.and(close_result)
 }
 
@@ -1248,5 +1440,613 @@ fn main() {
     )) {
         eprintln!("{}", error.message);
         std::process::exit(2);
+    }
+}
+
+mod offline_omnigraph {
+    use super::*;
+    use axum::{
+        Router,
+        extract::{Path as AxumPath, Query as AxumQuery, State},
+        http::{HeaderMap, StatusCode},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
+    use std::net::SocketAddr;
+    use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
+
+    #[derive(Clone)]
+    struct Snapshot {
+        atoms: Vec<Value>,
+        sessions: Vec<Value>,
+        files: Vec<Value>,
+        symbols: Vec<Value>,
+        published_by: Vec<Value>,
+        consumed_by: Vec<Value>,
+        touches_file: Vec<Value>,
+        mentions_symbol: Vec<Value>,
+        relates_to: Vec<Value>,
+    }
+
+    #[derive(Clone)]
+    struct BranchState {
+        name: String,
+        head_commit: String,
+        from: Option<String>,
+        from_commit_id: Option<String>,
+        snapshot: Snapshot,
+    }
+
+    #[derive(Clone)]
+    struct OmniState {
+        branches: BTreeMap<String, BranchState>,
+    }
+
+    const TOKEN: &str = "tok-e2e";
+    const TS: &str = "2026-11-19T18:00:00Z";
+    const CREATED_US: i64 = 1_763_575_200_000_000;
+
+    fn err(status: StatusCode, code: &str, msg: &str) -> Response {
+        (status, axum::Json(json!({ "error": msg, "code": code }))).into_response()
+    }
+
+    fn auth_ok(headers: &HeaderMap) -> std::result::Result<(), Box<Response>> {
+        let ver = headers
+            .get("Omnigraph-Http-Api")
+            .and_then(|v| v.to_str().ok());
+        if ver != Some("0.14") {
+            return Err(Box::new(err(
+                StatusCode::BAD_REQUEST,
+                "api_contract_mismatch",
+                "Expected Omnigraph-Http-Api: 0.14.",
+            )));
+        }
+        let bearer = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        if bearer != Some(TOKEN) {
+            return Err(Box::new(err(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Unauthorized offline omnigraph token.",
+            )));
+        }
+        Ok(())
+    }
+
+    async fn healthz() -> Response {
+        axum::Json(json!({
+            "status": "ok",
+            "version": "0.15.0",
+            "internal_schema_version": 16,
+            "source_version": "e2e-fixture"
+        }))
+        .into_response()
+    }
+
+    async fn readyz() -> Response {
+        axum::Json(json!({
+            "ready": true,
+            "status": "serving",
+            "served_graph_count": 1,
+            "ready_graph_count": 1
+        }))
+        .into_response()
+    }
+
+    async fn graphs(headers: HeaderMap) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        axum::Json(json!({
+            "graphs": [{
+                "graph_id": HARNESS_GRAPH_ID,
+                "state": "ready",
+                "read_available": true,
+                "write_available": true
+            }]
+        }))
+        .into_response()
+    }
+
+    async fn schema_route(AxumPath(graph_id): AxumPath<String>, headers: HeaderMap) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        axum::Json(json!({
+            "schema_source": HARNESS_CONTEXT_PG,
+            "system_columns": { "id": "__id", "src": "__src", "dst": "__dst" }
+        }))
+        .into_response()
+    }
+
+    async fn branches(
+        State(st): State<Arc<OmniState>>,
+        AxumPath(graph_id): AxumPath<String>,
+        AxumQuery(q): AxumQuery<BTreeMap<String, String>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        let names: Vec<String> = st.branches.keys().cloned().collect();
+        if q.get("detailed").map(String::as_str) != Some("true") {
+            return axum::Json(json!({ "branches": names })).into_response();
+        }
+        let details: Vec<Value> = st
+            .branches
+            .values()
+            .map(|b| {
+                json!({
+                    "name": b.name,
+                    "head": {
+                        "graph_commit_id": b.head_commit,
+                        "graph_branch": b.name,
+                        "graph_manifest_version": 1,
+                        "parent_commit_id": "c-0001",
+                        "merged_parent_commit_id": Value::Null,
+                        "actor_id": "harness",
+                        "created_at": CREATED_US,
+                        "published": true,
+                        "kind": "published"
+                    },
+                    "from": b.from,
+                    "from_commit_id": b.from_commit_id,
+                    "created_at": CREATED_US,
+                    "updated_at": CREATED_US
+                })
+            })
+            .collect();
+        axum::Json(json!({ "branches": names, "details": details })).into_response()
+    }
+
+    async fn commits(
+        State(st): State<Arc<OmniState>>,
+        AxumPath(graph_id): AxumPath<String>,
+        AxumQuery(q): AxumQuery<BTreeMap<String, String>>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        let bname = q.get("branch").map(String::as_str).unwrap_or("main");
+        let Some(b) = st.branches.get(bname) else {
+            return err(StatusCode::NOT_FOUND, "not_found", "Branch not found.");
+        };
+        let list = vec![
+            json!({
+                "graph_commit_id": b.head_commit,
+                "graph_branch": b.name,
+                "graph_manifest_version": 1,
+                "parent_commit_id": "c-0001",
+                "merged_parent_commit_id": Value::Null,
+                "actor_id": "harness",
+                "created_at": CREATED_US + 1000,
+                "published": true,
+                "kind": "published"
+            }),
+            json!({
+                "graph_commit_id": "c-0001",
+                "graph_branch": "main",
+                "graph_manifest_version": 1,
+                "parent_commit_id": Value::Null,
+                "merged_parent_commit_id": Value::Null,
+                "actor_id": "harness",
+                "created_at": CREATED_US,
+                "published": true,
+                "kind": "published"
+            }),
+        ];
+        axum::Json(json!({ "commits": list, "head_commit_id": b.head_commit })).into_response()
+    }
+
+    async fn commit_changes(
+        AxumPath((graph_id, commit_id)): AxumPath<(String, String)>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        axum::Json(json!({
+            "cause": {
+                "graph_commit_id": commit_id,
+                "parent_commit_id": "c-0001",
+                "merged_parent_commit_id": Value::Null,
+                "authored_branch": "main",
+                "actor_id": "harness",
+                "authored_at": CREATED_US + 1000
+            },
+            "changes": []
+        }))
+        .into_response()
+    }
+
+    fn eval_query(
+        snap: &Snapshot,
+        qname: &str,
+        qtext: &str,
+        params: &Value,
+    ) -> (Vec<Value>, Option<Value>) {
+        let pid = params["project_id"].as_str().unwrap_or("");
+        let matches_pid = |v: &Value| pid.is_empty() || v["project_id"].as_str() == Some(pid);
+
+        if qname == "context_search" || qtext.contains("context_search") {
+            let needle = params["q"].as_str().unwrap_or("").to_ascii_lowercase();
+            let hits: Vec<Value> = snap
+                .atoms
+                .iter()
+                .filter(|a| matches_pid(a))
+                .filter(|a| {
+                    let hay = format!(
+                        "{} {} {} {}",
+                        a["atom_id"].as_str().unwrap_or(""),
+                        a["title"].as_str().unwrap_or(""),
+                        a["summary"].as_str().unwrap_or(""),
+                        a["body"].as_str().unwrap_or("")
+                    )
+                    .to_ascii_lowercase();
+                    needle.is_empty() || hay.contains(&needle)
+                })
+                .map(|a| {
+                    let mut row = a.clone();
+                    row["score"] = json!(0.92);
+                    row
+                })
+                .collect();
+            return (
+                hits,
+                Some(
+                    json!({ "by": "rrf", "order": "descending", "exhaustive": true, "score_columns": ["score"] }),
+                ),
+            );
+        }
+        if qname == "recent_atoms" || qtext.contains("recent_atoms") {
+            return (
+                snap.atoms
+                    .iter()
+                    .filter(|a| matches_pid(a))
+                    .cloned()
+                    .collect(),
+                None,
+            );
+        }
+        if qname == "list_sessions" || qtext.contains("list_sessions") {
+            return (
+                snap.sessions
+                    .iter()
+                    .filter(|s| matches_pid(s))
+                    .cloned()
+                    .collect(),
+                None,
+            );
+        }
+        if qname == "list_files" || qtext.contains("list_files") {
+            return (
+                snap.files
+                    .iter()
+                    .filter(|f| matches_pid(f))
+                    .cloned()
+                    .collect(),
+                None,
+            );
+        }
+        if qname == "list_symbols" || qtext.contains("list_symbols") {
+            return (
+                snap.symbols
+                    .iter()
+                    .filter(|s| matches_pid(s))
+                    .cloned()
+                    .collect(),
+                None,
+            );
+        }
+        if qname == "list_published_edges" || qtext.contains("list_published_edges") {
+            return (snap.published_by.clone(), None);
+        }
+        if qname == "list_consumed_edges" || qtext.contains("list_consumed_edges") {
+            return (snap.consumed_by.clone(), None);
+        }
+        if qname == "list_file_edges" || qtext.contains("list_file_edges") {
+            return (snap.touches_file.clone(), None);
+        }
+        if qname == "list_symbol_edges" || qtext.contains("list_symbol_edges") {
+            return (snap.mentions_symbol.clone(), None);
+        }
+        if qname == "list_atom_relations" || qtext.contains("list_atom_relations") {
+            return (snap.relates_to.clone(), None);
+        }
+        if qname == "contradictions" || qtext.contains("contradictions") {
+            return (vec![], None);
+        }
+        (vec![], None)
+    }
+
+    async fn query_inline(
+        State(st): State<Arc<OmniState>>,
+        AxumPath(graph_id): AxumPath<String>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> Response {
+        run_query(&st, &graph_id, None, &headers, &body)
+    }
+
+    async fn query_stored(
+        State(st): State<Arc<OmniState>>,
+        AxumPath((graph_id, name)): AxumPath<(String, String)>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> Response {
+        run_query(&st, &graph_id, Some(&name), &headers, &body)
+    }
+
+    fn run_query(
+        st: &OmniState,
+        graph_id: &str,
+        stored_name: Option<&str>,
+        headers: &HeaderMap,
+        body: &Value,
+    ) -> Response {
+        if let Err(r) = auth_ok(headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        let bname = body["branch"].as_str().unwrap_or("main");
+        let Some(b) = st.branches.get(bname) else {
+            return err(StatusCode::NOT_FOUND, "not_found", "Branch not found.");
+        };
+        let qname = stored_name
+            .or_else(|| body["name"].as_str())
+            .unwrap_or("inline_query");
+        let qtext = body["query"].as_str().unwrap_or("");
+        let (rows, ranking) = eval_query(&b.snapshot, qname, qtext, &body["params"]);
+        axum::Json(json!({
+            "query_name": qname,
+            "target": { "branch": bname, "snapshot": body["snapshot"] },
+            "row_count": rows.len(),
+            "columns": [],
+            "rows": rows,
+            "graph_commit_id": b.head_commit,
+            "ranking": ranking
+        }))
+        .into_response()
+    }
+
+    pub async fn spawn(
+        project_id: &str,
+        session_id: &str,
+        other_session_id: &str,
+    ) -> Result<(String, watch::Sender<bool>, JoinHandle<()>)> {
+        let sess_branch = session_branch_name(session_id);
+        let atom = |id: &str, kind: &str, title: &str, summary: &str, sid: &str, branch: &str| {
+            json!({
+                "atom_id": id,
+                "project_id": project_id,
+                "kind": kind,
+                "title": title,
+                "summary": summary,
+                "body": format!("{title}\n\n{summary}"),
+                "tags": ["e2e", kind],
+                "source_branch": branch,
+                "source_session_id": sid,
+                "confidence": 0.92,
+                "pin_priority": if kind == "decision" { 1 } else { 0 },
+                "verified": true,
+                "origin_layer": "brain",
+                "authority": "governed",
+                "created_at": TS,
+                "updated_at": TS,
+            })
+        };
+        let mut atoms = vec![
+            atom(
+                "atom-finding-backoff",
+                "finding",
+                "Retry backoff finding",
+                "Exponential backoff prevents upstream saturation.",
+                other_session_id,
+                "main",
+            ),
+            atom(
+                "atom-decision-schema",
+                "decision",
+                "Pin Graph IR schema v1",
+                "Frozen Graph IR node ID encoding.",
+                other_session_id,
+                "main",
+            ),
+            atom(
+                "atom-warning-cycle",
+                "warning",
+                "Infra-to-domain layer cycle",
+                "pkg_09/mod_19.js imports pkg_00/mod_19.js.",
+                session_id,
+                "main",
+            ),
+            atom(
+                "atom-contract-orders",
+                "contract",
+                "Orders HTTP v1 contract",
+                "Consumed by gateway and verified against billing.",
+                session_id,
+                "main",
+            ),
+            atom(
+                "atom-insight-lcov",
+                "insight",
+                "LCOV coverage reaches mod_00",
+                "Tests lens tracks core.test.js hits.",
+                other_session_id,
+                "main",
+            ),
+            atom(
+                "atom-php-ns\\Service::boot",
+                "artifact",
+                "Escaped namespace artifact",
+                "Verifies CSS attribute escaping on special node IDs.",
+                session_id,
+                "main",
+            ),
+            atom(
+                "atom-question-unmatched",
+                "question",
+                "Ghost RPC provider missing?",
+                "Unmatched contract risk ghost-rpc-v1 in gateway.",
+                session_id,
+                "main",
+            ),
+        ];
+        let sessions = vec![
+            json!({
+                "session_id": session_id,
+                "project_id": project_id,
+                "title": "Main active session",
+                "branch": sess_branch,
+                "provider": "claude",
+                "workflow": "native",
+                "status": "running",
+                "goal": "Inspect entry_00.js and propose edit.",
+                "created_at": TS,
+                "updated_at": TS,
+            }),
+            json!({
+                "session_id": other_session_id,
+                "project_id": project_id,
+                "title": "Baseline verification session",
+                "branch": "main",
+                "provider": "claude",
+                "workflow": "native",
+                "status": "completed",
+                "goal": "Baseline E2E inspection of entry_01.js.",
+                "created_at": TS,
+                "updated_at": TS,
+            }),
+        ];
+        let files = vec![
+            json!({ "path": "entry_00.js", "project_id": project_id, "language": "javascript", "last_touched_at": TS }),
+            json!({ "path": "pkg_00/mod_00.js", "project_id": project_id, "language": "javascript", "last_touched_at": TS }),
+        ];
+        let symbols = vec![
+            json!({ "symbol_id": "sym-runEntry", "project_id": project_id, "name": "runEntry_00", "kind": "function", "file_path": "entry_00.js" }),
+        ];
+        let published_by = vec![
+            json!({ "source_id": "atom-finding-backoff", "target_id": other_session_id, "role": "author", "published_at": TS }),
+            json!({ "source_id": "atom-warning-cycle", "target_id": session_id, "role": "author", "published_at": TS }),
+            json!({ "source_id": "atom-contract-orders", "target_id": session_id, "role": "author", "published_at": TS }),
+        ];
+        let consumed_by = vec![
+            json!({ "source_id": "atom-decision-schema", "target_id": session_id, "role": "reader", "consumed_at": TS }),
+        ];
+        let touches_file = vec![
+            json!({ "source_id": "atom-finding-backoff", "target_id": "entry_00.js", "relation": "mentions" }),
+            json!({ "source_id": "atom-insight-lcov", "target_id": "pkg_00/mod_00.js", "relation": "covers" }),
+        ];
+        let mentions_symbol = vec![
+            json!({ "source_id": "atom-finding-backoff", "target_id": "sym-runEntry", "name": "runEntry_00", "kind": "function", "file_path": "entry_00.js", "role": "references" }),
+        ];
+        let relates_to = vec![
+            json!({ "source_id": "atom-decision-schema", "target_id": "atom-finding-backoff", "relation": "supports", "confidence": 0.9, "note": "grounded", "created_at": TS }),
+            json!({ "source_id": "atom-contract-orders", "target_id": "atom-decision-schema", "relation": "depends_on", "confidence": 0.85, "note": "schema", "created_at": TS }),
+            json!({ "source_id": "atom-warning-cycle", "target_id": "atom-php-ns\\Service::boot", "relation": "refines", "confidence": 0.8, "note": "escaped", "created_at": TS }),
+        ];
+        let main_snap = Snapshot {
+            atoms: atoms.clone(),
+            sessions: sessions.clone(),
+            files: files.clone(),
+            symbols: symbols.clone(),
+            published_by: published_by.clone(),
+            consumed_by: consumed_by.clone(),
+            touches_file: touches_file.clone(),
+            mentions_symbol: mentions_symbol.clone(),
+            relates_to: relates_to.clone(),
+        };
+        atoms.push(atom(
+            "atom-session-draft",
+            "insight",
+            "Session branch draft insight",
+            "Scoped only to active session branch.",
+            session_id,
+            &sess_branch,
+        ));
+        let sess_snap = Snapshot {
+            atoms,
+            sessions,
+            files,
+            symbols,
+            published_by,
+            consumed_by,
+            touches_file,
+            mentions_symbol,
+            relates_to,
+        };
+        let state = Arc::new(OmniState {
+            branches: BTreeMap::from([
+                (
+                    "main".into(),
+                    BranchState {
+                        name: "main".into(),
+                        head_commit: "c-0002".into(),
+                        from: None,
+                        from_commit_id: None,
+                        snapshot: main_snap,
+                    },
+                ),
+                (
+                    sess_branch.clone(),
+                    BranchState {
+                        name: sess_branch,
+                        head_commit: "c-0003".into(),
+                        from: Some("main".into()),
+                        from_commit_id: Some("c-0001".into()),
+                        snapshot: sess_snap,
+                    },
+                ),
+            ]),
+        });
+
+        let app = Router::new()
+            .route("/healthz", get(healthz))
+            .route("/readyz", get(readyz))
+            .route("/graphs", get(graphs))
+            .route("/graphs/{graph_id}/schema", get(schema_route))
+            .route("/graphs/{graph_id}/branches", get(branches))
+            .route("/graphs/{graph_id}/commits", get(commits))
+            .route(
+                "/graphs/{graph_id}/commits/{commit_id}/changes",
+                get(commit_changes),
+            )
+            .route("/graphs/{graph_id}/query", post(query_inline))
+            .route("/graphs/{graph_id}/queries/{name}", post(query_stored))
+            .with_state(state);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let (tx, mut rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    while !*rx.borrow() {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+        });
+        Ok((format!("http://{addr}"), tx, task))
     }
 }
