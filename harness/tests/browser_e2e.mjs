@@ -241,7 +241,18 @@ async function launchChrome(chromeBin, timeoutMs) {
         });
       });
     }
-    fs.rmSync(userDataDir, { recursive: true, force: true });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+        break;
+      } catch (err) {
+        if (attempt === 19) {
+          console.error(`Warning: failed to remove Chrome temp profile ${userDataDir}: ${err.message}`);
+        } else {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+    }
   };
 
   return { browserWsUrl, pageWsUrl: pageTarget.webSocketDebuggerUrl, cleanup };
@@ -378,10 +389,32 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
   }
 
   async function elementBox(selector) {
-    const box = await callFn((sel) => {
+    const box = await callFn(async (sel) => {
       const el = document.querySelector(sel);
       if (!el) return null;
-      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const sameRect = (a, b) => a && b
+        && Math.abs(a.left - b.left) < 0.5
+        && Math.abs(a.top - b.top) < 0.5
+        && Math.abs(a.width - b.width) < 0.5
+        && Math.abs(a.height - b.height) < 0.5;
+      const deadline = performance.now() + 2500;
+      let prev = null;
+      while (performance.now() < deadline) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await new Promise((r) => requestAnimationFrame(r));
+        const cur = el.getBoundingClientRect();
+        if (cur.width > 0 && cur.height > 0 && sameRect(prev, cur)) {
+          return {
+            x: cur.left,
+            y: cur.top,
+            w: cur.width,
+            h: cur.height,
+            cx: cur.left + cur.width / 2,
+            cy: cur.top + cur.height / 2,
+          };
+        }
+        prev = cur;
+      }
       const r = el.getBoundingClientRect();
       return { x: r.left, y: r.top, w: r.width, h: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
     }, selector);
@@ -815,31 +848,59 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   }, opts.commitA, opts.commitB);
   assert(commitSelectors, 'Expected two commit rows for A..B range test');
 
+  const mapCountBeforeCommit = driver.responsesByUrl.length;
   await driver.click(commitSelectors.bId);
-  await driver.waitFor(() => {
-    return document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true';
+  await driver.waitUntil(async () => {
+    const settled = await driver.callFn(() => {
+      return document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true';
+    });
+    const hasCommitMap = driver.responsesByUrl.slice(mapCountBeforeCommit).some((r) => {
+      if (r.status !== 200) return false;
+      try {
+        return decodeURIComponent(r.url).includes('target=commit:');
+      } catch {
+        return r.url.includes('target=commit');
+      }
+    });
+    return settled && hasCommitMap;
   }, 'single commit selection settled');
-  await driver.click(commitSelectors.aId, { modifiers: 8 /* Shift */ });
-  await driver.waitFor(() => {
-    const banner = document.getElementById('graph-commit-banner');
-    const c = document.getElementById('graph-map-canvas');
-    return banner && !banner.hidden && banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true';
-  }, 'A..B commit range banner rendered');
-  const rangeApiOk = driver.responsesByUrl.some((r) => {
-    if (r.status !== 200) return false;
-    try {
-      return decodeURIComponent(r.url).includes('target=range:');
-    } catch {
-      return r.url.includes('target=range');
-    }
-  });
-  assert(rangeApiOk, 'Expected HTTP 200 graph/map or graph/changes request with target=range:A..B');
 
+  const mapCountBeforeRange = driver.responsesByUrl.length;
+  await driver.click(commitSelectors.aId, { modifiers: 8 /* Shift */ });
+  await driver.waitUntil(async () => {
+    const uiReady = await driver.callFn(() => {
+      const banner = document.getElementById('graph-commit-banner');
+      const c = document.getElementById('graph-map-canvas');
+      return Boolean(banner && !banner.hidden && banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true');
+    });
+    const rangeApiOk = driver.responsesByUrl.slice(mapCountBeforeRange).some((r) => {
+      if (r.status !== 200) return false;
+      try {
+        return decodeURIComponent(r.url).includes('target=range:');
+      } catch {
+        return r.url.includes('target=range');
+      }
+    });
+    return uiReady && rangeApiOk;
+  }, 'A..B commit range banner rendered and target=range: API completed');
+
+  const mapCountBeforeClear = driver.responsesByUrl.length;
   await driver.click('#graph-commit-banner [data-action="graph-commit-range-clear"]');
-  await driver.waitFor(() => {
-    const banner = document.getElementById('graph-commit-banner');
-    const c = document.getElementById('graph-map-canvas');
-    return banner && banner.hidden && c?.getAttribute('aria-busy') !== 'true';
+  await driver.waitUntil(async () => {
+    const uiCleared = await driver.callFn(() => {
+      const banner = document.getElementById('graph-commit-banner');
+      const c = document.getElementById('graph-map-canvas');
+      return Boolean(banner && !banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true');
+    });
+    const clearedMapOk = driver.responsesByUrl.slice(mapCountBeforeClear).some((r) => {
+      if (r.status !== 200 || !r.url.includes('/graph/map')) return false;
+      try {
+        return !decodeURIComponent(r.url).includes('target=range:');
+      } catch {
+        return !r.url.includes('target=range');
+      }
+    });
+    return uiCleared && clearedMapOk;
   }, 'A..B commit range cleared');
   await driver.click('#graph-commit-graph-close');
   driver.assertNoErrors('Suite 2');
@@ -1064,7 +1125,8 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     const view = document.getElementById('run-view');
     return Boolean(detailed && view?.getAttribute('data-open') === 'true');
   });
-  if (canOpenRunPanel) {
+  assert(canOpenRunPanel, 'Expected #run-view[data-open="true"] and #run-detailed for #run-file-card check');
+  {
     const wasDetailed = await driver.callFn(() => document.getElementById('run-card')?.getAttribute('data-detailed') === 'true');
     if (!wasDetailed) {
       await driver.click('#run-detailed');
@@ -1235,6 +1297,7 @@ async function main() {
       await pageCdp.send('Page.enable');
       await pageCdp.send('DOM.enable');
       await pageCdp.send('Network.enable');
+      await pageCdp.send('Page.bringToFront');
       await pageCdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1440,
         height: 900,
@@ -1244,6 +1307,7 @@ async function main() {
 
       const driver = createHarnessDriver(pageCdp, opts.url, opts.timeoutMs);
       await pageCdp.send('Page.navigate', { url: opts.url });
+      await pageCdp.send('Page.bringToFront');
 
       await suite1BootThemeTransport(driver, opts);
       await suite2Canvas2dAndMapLayout(driver, pageCdp, opts);
@@ -1258,6 +1322,13 @@ async function main() {
     await Promise.race([runSuites, timeoutPromise]);
   } finally {
     if (overallTimer) clearTimeout(overallTimer);
+    if (browserCdp) {
+      try {
+        await browserCdp.send('Browser.close', {}, 2000);
+      } catch {
+        // ignore if already closed
+      }
+    }
     if (pageCdp) pageCdp.close();
     if (browserCdp) browserCdp.close();
     await cleanup();
