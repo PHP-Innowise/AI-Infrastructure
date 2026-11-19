@@ -14,6 +14,35 @@ function assert(condition, message) {
   }
 }
 
+function parseRgb(cssColor) {
+  const m = String(cssColor || '').match(
+    /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/i,
+  );
+  if (!m) return null;
+  return {
+    r: Number(m[1]),
+    g: Number(m[2]),
+    b: Number(m[3]),
+    a: m[4] === undefined ? 1 : Number(m[4]),
+  };
+}
+
+function relativeLuminance({ r, g, b }) {
+  const channel = (v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+function contrastRatio(c1, c2) {
+  const l1 = relativeLuminance(c1);
+  const l2 = relativeLuminance(c2);
+  const hi = Math.max(l1, l2);
+  const lo = Math.min(l1, l2);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
 function parseArgs(argv) {
   const opts = {
     url: '',
@@ -1074,7 +1103,169 @@ async function suite4LiveSseAndStyling(driver, opts) {
   await driver.click(copySel);
   await driver.waitFor((sel) => document.querySelector(sel)?.textContent?.trim() === 'Copied', 'Copy button changes to "Copied"', 5_000, copySel);
   await driver.waitFor((sel) => document.querySelector(sel)?.textContent?.trim() === 'Copy', 'Copy button resets back to "Copy"', 4_000, copySel);
+
+  await assertInstantDarkConversationUserContrast(driver);
   driver.assertNoErrors('Suite 4');
+}
+
+async function assertInstantDarkConversationUserContrast(driver) {
+  const hasUserMsg = await driver.callFn(() => Boolean(document.querySelector('#events .conversation-user')));
+  assert(hasUserMsg, 'Expected at least one .conversation-user block inside #events');
+
+  const { initialTheme, darkAlreadyChecked } = await driver.callFn(() => ({
+    initialTheme: document.documentElement.getAttribute('data-theme') || 'light',
+    darkAlreadyChecked: Boolean(document.getElementById('theme-dark')?.checked),
+  }));
+  if (initialTheme !== 'light' || darkAlreadyChecked) {
+    await driver.click('#theme-light');
+    await driver.waitFor(
+      () => document.documentElement.getAttribute('data-theme') === 'light',
+      'switch to light theme before dark-mode instant contrast check',
+      5_000,
+    );
+  }
+
+  // Ensure light-mode background on .conversation-user is settled before toggling to dark
+  await driver.waitFor(() => {
+    const el = document.querySelector('#events .conversation-user');
+    if (!el) return false;
+    const m = getComputedStyle(el).backgroundColor.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+    return Boolean(m && Number(m[1]) > 180 && Number(m[2]) > 180 && Number(m[3]) > 180);
+  }, '.conversation-user settled in light mode before #theme-dark click', 5_000);
+
+  // Capture computed styles on the very next animation frame after #theme-dark change (no 500ms wait)
+  await driver.callFn(() => {
+    const input = document.getElementById('theme-dark');
+    if (!input) throw new Error('Missing #theme-dark input');
+    window.__e2eDarkThemeCapture = new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve({ fired: false });
+        }
+      }, 2000);
+      input.addEventListener('change', () => {
+        const clickTs = performance.now();
+        requestAnimationFrame(() => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          const el = document.querySelector('#events .conversation-user');
+          const cs = el ? getComputedStyle(el) : null;
+          resolve({
+            fired: true,
+            elapsedMs: performance.now() - clickTs,
+            theme: document.documentElement.getAttribute('data-theme'),
+            checked: Boolean(input.checked),
+            backgroundColor: cs?.backgroundColor || '',
+            color: cs?.color || '',
+          });
+        });
+      }, { once: true });
+    });
+  });
+
+  await driver.click('#theme-dark');
+  const snap = await driver.evalJs(
+    '(async () => { try { return await window.__e2eDarkThemeCapture; } finally { delete window.__e2eDarkThemeCapture; } })()',
+  );
+
+  assert(snap?.fired, '#theme-dark click did not trigger change event');
+  assert(
+    snap.theme === 'dark' && snap.checked,
+    `Expected data-theme="dark" immediately after #theme-dark click, got ${JSON.stringify(snap)}`,
+  );
+  // Single animation frame check (well under --motion-slow 400ms transition window)
+  assert(
+    snap.elapsedMs <= 64,
+    `Expected next-frame style inspection well before 400ms transition, got elapsedMs=${snap.elapsedMs}`,
+  );
+
+  const bg = parseRgb(snap.backgroundColor);
+  const fg = parseRgb(snap.color);
+  assert(bg && bg.a === 1, `Invalid .conversation-user dark backgroundColor: ${snap.backgroundColor}`);
+  assert(fg && fg.a === 1, `Invalid .conversation-user dark color: ${snap.color}`);
+  assert(
+    bg.r < 60 && bg.g < 60 && bg.b < 60,
+    `Expected .conversation-user background RGB < 60 immediately after #theme-dark (no 400ms gray flash), got ${snap.backgroundColor} at ${snap.elapsedMs.toFixed(1)}ms`,
+  );
+  assert(
+    fg.r > 180 && fg.g > 180 && fg.b > 180,
+    `Expected light .conversation-user text color in dark mode, got ${snap.color}`,
+  );
+  const ratio = contrastRatio(fg, bg);
+  assert(
+    ratio >= 4.5,
+    `Expected .conversation-user dark contrast ratio >= 4.5:1 immediately after toggle, got ${ratio.toFixed(2)}:1 (fg=${snap.color}, bg=${snap.backgroundColor}, elapsed=${snap.elapsedMs.toFixed(1)}ms)`,
+  );
+
+  if (initialTheme !== 'dark') {
+    await driver.click(`#theme-${initialTheme}`);
+    await driver.waitFor(
+      (expected) => document.documentElement.getAttribute('data-theme') === expected,
+      `restore data-theme to ${initialTheme}`,
+      5_000,
+      initialTheme,
+    );
+  }
+}
+
+async function waitForRunPanelDetailedSettled(driver) {
+  await driver.waitFor(async () => {
+    const card = document.getElementById('run-card');
+    const panel = document.getElementById('run-panel');
+    const wrap = card?.querySelector('.run-panel-wrap');
+    if (!card || card.getAttribute('data-detailed') !== 'true' || !panel || !wrap || panel.hasAttribute('inert')) {
+      return false;
+    }
+    const h1 = wrap.getBoundingClientRect().height;
+    const panelH1 = panel.getBoundingClientRect().height;
+    if (h1 <= 60 || panelH1 <= 60) return false;
+    if (typeof wrap.getAnimations === 'function' && wrap.getAnimations().some((a) => a.playState === 'running')) {
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 40));
+    const h2 = wrap.getBoundingClientRect().height;
+    return Math.abs(h2 - h1) < 0.5 && h2 >= panel.getBoundingClientRect().height - 1;
+  }, '#run-panel detailed view open and settled');
+}
+
+async function assertSessionSettingsToggleUnclipped(driver, label) {
+  const geom = await driver.callFn(() => {
+    const cfg = document.querySelector('#sessions-view .configuration');
+    const summary = document.getElementById('session-summary');
+    const toggle = document.getElementById('session-settings-toggle');
+    if (!cfg || !summary || !toggle) {
+      return { error: 'Missing .configuration, #session-summary, or #session-settings-toggle' };
+    }
+    const configRect = cfg.getBoundingClientRect();
+    const toggleRect = toggle.getBoundingClientRect();
+    return {
+      summaryHidden: summary.hasAttribute('hidden'),
+      configRect: {
+        top: configRect.top,
+        bottom: configRect.bottom,
+        height: configRect.height,
+      },
+      toggleRect: {
+        top: toggleRect.top,
+        bottom: toggleRect.bottom,
+        height: toggleRect.height,
+        width: toggleRect.width,
+      },
+    };
+  });
+  assert(!geom.error, `${label}: ${geom.error}`);
+  assert(!geom.summaryHidden, `${label}: expected #session-summary visible on active running session`);
+  assert(
+    geom.toggleRect.width > 0 && geom.toggleRect.height >= 24,
+    `${label}: expected #session-settings-toggle height >= 24, got ${JSON.stringify(geom)}`,
+  );
+  assert(
+    geom.toggleRect.top >= geom.configRect.top - 1 && geom.toggleRect.bottom <= geom.configRect.bottom + 1,
+    `${label}: #session-settings-toggle clipped outside .configuration (${JSON.stringify(geom)})`,
+  );
 }
 
 async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
@@ -1130,12 +1321,9 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     const wasDetailed = await driver.callFn(() => document.getElementById('run-card')?.getAttribute('data-detailed') === 'true');
     if (!wasDetailed) {
       await driver.click('#run-detailed');
-      await driver.waitFor(() => {
-        const card = document.getElementById('run-card');
-        const panel = document.getElementById('run-panel');
-        return card?.getAttribute('data-detailed') === 'true' && panel && !panel.hasAttribute('inert');
-      }, '#run-panel detailed view opens');
     }
+    await waitForRunPanelDetailedSettled(driver);
+    await assertSessionSettingsToggleUnclipped(driver, 'Suite 5 (1440x900) with #run-detailed open');
     const runFileSel = '#run-map-main button.run-file[data-action="run-file"], #run-map button.run-file[data-action="run-file"]';
     const hasRunFile = await driver.callFn((sel) => Boolean(document.querySelector(sel)), runFileSel);
     assert(hasRunFile, 'Expected clickable button.run-file inside #run-map');
@@ -1267,6 +1455,78 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     mobileDrawer.scrollWidth <= mobileDrawer.innerWidth + 1,
     `Horizontal overflow detected at 390x844: scrollWidth=${mobileDrawer.scrollWidth}, innerWidth=${mobileDrawer.innerWidth}`,
   );
+
+  // Close mobile #sidebar via exposed #scrim (to the right of the 265px drawer), then restore 1280x800 desktop viewport
+  const scrimPt = await driver.callFn(() => {
+    const scrim = document.getElementById('scrim');
+    if (!scrim) return null;
+    const r = scrim.getBoundingClientRect();
+    const x = Math.max(r.left + 8, r.right - 24);
+    const y = r.top + Math.min(160, Math.max(24, r.height * 0.35));
+    const hit = document.elementFromPoint(x, y);
+    return hit && (hit === scrim || scrim.contains(hit)) ? { x, y } : null;
+  });
+  assert(scrimPt, 'Expected clickable exposed #scrim outside mobile #sidebar');
+  await driver.clickAt(scrimPt.x, scrimPt.y);
+  await driver.waitFor(() => {
+    const sb = document.getElementById('sidebar');
+    const main = document.getElementById('main');
+    return sb && !sb.classList.contains('open') && sb.hasAttribute('inert') && main && !main.hasAttribute('inert');
+  }, 'mobile #sidebar closes on #scrim click and restores #main active');
+
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const desktopShell = await driver.waitFor(async () => {
+    const sb = document.getElementById('sidebar');
+    const main = document.getElementById('main');
+    const toggle = document.getElementById('menu-toggle');
+    if (!sb || !main || !toggle) return null;
+    if (window.innerWidth !== 1280 || getComputedStyle(toggle).display !== 'none') return null;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return {
+      sidebarOpen: sb.classList.contains('open'),
+      sidebarInert: sb.hasAttribute('inert'),
+      mainInert: main.hasAttribute('inert'),
+    };
+  }, 'desktop 1280x800 layout restoration after mobile drawer close');
+  assert(
+    !desktopShell.sidebarOpen && !desktopShell.sidebarInert && !desktopShell.mainInert,
+    `Expected #sidebar and #main not inert after restoring 1280x800 desktop viewport: ${JSON.stringify(desktopShell)}`,
+  );
+
+  // Verify clicking #theme-dark / #theme-light inside #sidebar succeeds cleanly (no element is inert)
+  const themeBeforeSidebarClick = await driver.callFn(() => document.documentElement.getAttribute('data-theme') || 'light');
+  const targetTheme = themeBeforeSidebarClick === 'dark' ? 'light' : 'dark';
+  await driver.click(`#theme-${targetTheme}`);
+  await driver.waitFor(
+    (expected) => document.documentElement.getAttribute('data-theme') === expected,
+    `#theme-${targetTheme} click inside #sidebar after mobile -> desktop restore`,
+    3_000,
+    targetTheme,
+  );
+  await driver.click(`#theme-${themeBeforeSidebarClick}`);
+  await driver.waitFor(
+    (expected) => document.documentElement.getAttribute('data-theme') === expected,
+    `restore data-theme to ${themeBeforeSidebarClick} after #sidebar click check`,
+    3_000,
+    themeBeforeSidebarClick,
+  );
+
+  // Verify #session-settings-toggle ("Next-turn settings") stays unclipped inside .configuration at 1280x800 with #run-detailed open
+  const wasDetailedBeforeDesktopCheck = await driver.callFn(() => document.getElementById('run-card')?.getAttribute('data-detailed') === 'true');
+  if (!wasDetailedBeforeDesktopCheck) {
+    await driver.click('#run-detailed');
+  }
+  await waitForRunPanelDetailedSettled(driver);
+  await assertSessionSettingsToggleUnclipped(driver, 'Suite 5 (1280x800) with #run-detailed open');
+  if (!wasDetailedBeforeDesktopCheck) {
+    await driver.click('#run-calm');
+  }
+
   driver.assertNoErrors('Suite 5');
 }
 
