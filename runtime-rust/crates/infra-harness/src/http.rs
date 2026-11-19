@@ -34,9 +34,11 @@ pub struct App {
 pub struct Asset {
     pub bytes: Arc<[u8]>,
     pub gzip_bytes: Option<Arc<[u8]>>,
+    pub br_bytes: Option<Arc<[u8]>>,
     pub content_type: String,
     pub etag: String,
     pub gzip_etag: Option<String>,
+    pub br_etag: Option<String>,
     pub version: String,
 }
 
@@ -50,9 +52,23 @@ fn compress_gzip(raw: &[u8]) -> Option<Arc<[u8]>> {
     Some(Arc::from(compressed))
 }
 
+fn compress_brotli(raw: &[u8]) -> Option<Arc<[u8]>> {
+    if raw.is_empty() {
+        return None;
+    }
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: 6,
+        lgwin: 22,
+        ..Default::default()
+    };
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut std::io::Cursor::new(raw), &mut compressed, &params).ok()?;
+    Some(Arc::from(compressed))
+}
+
 impl Asset {
     /// Builds an immutable static HTTP asset alongside its pre-compressed
-    /// `gzip` representation and distinct representation ETag.
+    /// `br` and `gzip` representations and distinct representation ETags.
     pub fn from_bytes(raw: Vec<u8>, content_type: impl Into<String>) -> Self {
         let digest = store::sha(&raw);
         let etag = format!("\"{}\"", &digest[..32]);
@@ -61,12 +77,18 @@ impl Asset {
         let gzip_etag = gzip_bytes
             .as_ref()
             .map(|_| format!("\"{}-gzip\"", &digest[..32]));
+        let br_bytes = compress_brotli(&raw);
+        let br_etag = br_bytes
+            .as_ref()
+            .map(|_| format!("\"{}-br\"", &digest[..32]));
         Self {
             bytes: Arc::from(raw),
             gzip_bytes,
+            br_bytes,
             content_type: content_type.into(),
             etag,
             gzip_etag,
+            br_etag,
             version,
         }
     }
@@ -75,8 +97,10 @@ impl Asset {
         let updated = Self::from_bytes(raw, self.content_type.clone());
         self.bytes = updated.bytes;
         self.gzip_bytes = updated.gzip_bytes;
+        self.br_bytes = updated.br_bytes;
         self.etag = updated.etag;
         self.gzip_etag = updated.gzip_etag;
+        self.br_etag = updated.br_etag;
         self.version = updated.version;
     }
 }
@@ -1643,7 +1667,15 @@ fn apply_security_headers(builder: axum::http::response::Builder) -> axum::http:
         )
 }
 
-fn accepts_gzip(headers: &HeaderMap) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssetEncoding {
+    Identity,
+    Gzip,
+    Brotli,
+}
+
+fn preferred_encoding(headers: &HeaderMap, has_br: bool, has_gzip: bool) -> AssetEncoding {
+    let mut br_q: Option<f32> = None;
     let mut gzip_q: Option<f32> = None;
     let mut wildcard_q: Option<f32> = None;
     for value in headers.get_all(header::ACCEPT_ENCODING) {
@@ -1662,23 +1694,37 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
                     .strip_prefix("q=")
                     .or_else(|| param.strip_prefix("Q="))
                     && let Ok(parsed) = rest.trim().parse::<f32>()
+                    && parsed.is_finite()
+                    && parsed >= 0.0
                 {
-                    q = parsed;
+                    q = parsed.min(1.0);
                 }
             }
-            if coding == "gzip" || coding == "x-gzip" {
+            if coding == "br" {
+                br_q = Some(q);
+            } else if coding == "gzip" || coding == "x-gzip" {
                 gzip_q = Some(q);
             } else if coding == "*" {
                 wildcard_q = Some(q);
             }
         }
     }
-    if let Some(q) = gzip_q {
-        q > 0.0
-    } else if let Some(q) = wildcard_q {
-        q > 0.0
+    let br_eff = if has_br {
+        br_q.or(wildcard_q).unwrap_or(0.0)
     } else {
-        false
+        0.0
+    };
+    let gzip_eff = if has_gzip {
+        gzip_q.or(wildcard_q).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    if br_eff > 0.0 && br_eff >= gzip_eff {
+        AssetEncoding::Brotli
+    } else if gzip_eff > 0.0 {
+        AssetEncoding::Gzip
+    } else {
+        AssetEncoding::Identity
     }
 }
 
@@ -1688,14 +1734,21 @@ fn asset_response(
     immutable: bool,
     head: bool,
 ) -> Result<Response<Body>> {
-    let use_gzip = asset.gzip_bytes.is_some() && accepts_gzip(request.headers());
-    let (selected_bytes, selected_etag): (&Arc<[u8]>, &str) = if use_gzip
-        && let Some(gz) = asset.gzip_bytes.as_ref()
-        && let Some(gz_etag) = asset.gzip_etag.as_deref()
-    {
-        (gz, gz_etag)
-    } else {
-        (&asset.bytes, &asset.etag)
+    let encoding = preferred_encoding(
+        request.headers(),
+        asset.br_bytes.is_some() && asset.br_etag.is_some(),
+        asset.gzip_bytes.is_some() && asset.gzip_etag.is_some(),
+    );
+    let (selected_bytes, selected_etag, content_encoding): (&Arc<[u8]>, &str, Option<&str>) = match (
+        encoding,
+        asset.br_bytes.as_ref(),
+        asset.br_etag.as_deref(),
+        asset.gzip_bytes.as_ref(),
+        asset.gzip_etag.as_deref(),
+    ) {
+        (AssetEncoding::Brotli, Some(br), Some(br_etag), _, _) => (br, br_etag, Some("br")),
+        (AssetEncoding::Gzip, _, _, Some(gz), Some(gz_etag)) => (gz, gz_etag, Some("gzip")),
+        _ => (&asset.bytes, &asset.etag, None),
     };
     let cache = if immutable {
         "private, max-age=31536000, immutable"
@@ -1731,8 +1784,8 @@ fn asset_response(
             .header(header::VARY, "Accept-Encoding")
             .header(header::CACHE_CONTROL, cache),
     );
-    if use_gzip {
-        out = out.header(header::CONTENT_ENCODING, "gzip");
+    if let Some(enc) = content_encoding {
+        out = out.header(header::CONTENT_ENCODING, enc);
     }
     out.body(if head {
         Body::empty()
@@ -2660,27 +2713,43 @@ mod tests {
     }
 
     #[test]
-    fn accept_encoding_negotiation_respects_q_values_and_asset_gzip_etags() {
+    fn accept_encoding_negotiation_prefers_br_respects_q_values_and_etags() {
         let mut h = HeaderMap::new();
-        assert!(!accepts_gzip(&h));
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Identity);
         h.insert(header::ACCEPT_ENCODING, "deflate, br".parse().unwrap());
-        assert!(!accepts_gzip(&h));
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Brotli);
+        assert_eq!(preferred_encoding(&h, false, true), AssetEncoding::Identity);
         h.insert(
             header::ACCEPT_ENCODING,
             "gzip, deflate, br".parse().unwrap(),
         );
-        assert!(accepts_gzip(&h));
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Brotli);
+        assert_eq!(preferred_encoding(&h, false, true), AssetEncoding::Gzip);
+        h.insert(header::ACCEPT_ENCODING, "br;q=0, gzip;q=1".parse().unwrap());
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Gzip);
         h.insert(header::ACCEPT_ENCODING, "gzip;q=0, br;q=1".parse().unwrap());
-        assert!(!accepts_gzip(&h));
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Brotli);
+        h.insert(
+            header::ACCEPT_ENCODING,
+            "br;q=0.5, gzip;q=1".parse().unwrap(),
+        );
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Gzip);
         h.insert(header::ACCEPT_ENCODING, "*;q=0.5".parse().unwrap());
-        assert!(accepts_gzip(&h));
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Brotli);
         h.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
-        assert!(!accepts_gzip(&h));
+        assert_eq!(preferred_encoding(&h, true, true), AssetEncoding::Identity);
 
         let payload = "hello wasm ".repeat(200).into_bytes();
         let asset = Asset::from_bytes(payload.clone(), "application/wasm");
         let gz = asset.gzip_bytes.as_ref().expect("gzip bytes compressed");
+        let br = asset.br_bytes.as_ref().expect("brotli bytes compressed");
         assert!(gz.len() < asset.bytes.len());
+        assert!(br.len() < asset.bytes.len());
         assert_ne!(asset.etag.as_str(), asset.gzip_etag.as_deref().unwrap());
+        assert_ne!(asset.etag.as_str(), asset.br_etag.as_deref().unwrap());
+        assert_ne!(
+            asset.gzip_etag.as_deref().unwrap(),
+            asset.br_etag.as_deref().unwrap()
+        );
     }
 }

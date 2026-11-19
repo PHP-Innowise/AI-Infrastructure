@@ -454,6 +454,77 @@ async fn static_assets_serve_precompressed_gzip_vary_and_304_etags() {
             .unwrap();
         assert_eq!(mismatch.status(), 200);
         assert_eq!(mismatch.headers()[header::CONTENT_ENCODING], "gzip");
+
+        // 4. Client accepting both gzip and br receives pre-compressed brotli (preferred over gzip).
+        let br_resp = srv
+            .client
+            .get(srv.url(path))
+            .header(header::ACCEPT_ENCODING, "gzip, deflate, br")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(br_resp.status(), 200);
+        assert_eq!(br_resp.headers()[header::CONTENT_TYPE], expected_mime);
+        assert_eq!(br_resp.headers()[header::CONTENT_ENCODING], "br");
+        assert_eq!(br_resp.headers()[header::VARY], "Accept-Encoding");
+        let br_etag = br_resp.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert!(br_etag.ends_with("-br\""), "expected br etag: {br_etag}");
+        assert_ne!(br_etag, gz_etag);
+        assert_ne!(br_etag, raw_etag);
+        let br_bytes = br_resp.bytes().await.unwrap();
+        assert!(br_bytes.len() < raw_bytes.len());
+
+        let mut br_decoded = Vec::new();
+        brotli::Decompressor::new(&br_bytes[..], 4096)
+            .read_to_end(&mut br_decoded)
+            .unwrap();
+        assert_eq!(br_decoded, raw_bytes.as_ref());
+
+        // 5. HEAD request negotiates br + reports compressed Content-Length with empty body.
+        let br_head = srv
+            .client
+            .head(srv.url(path))
+            .header(header::ACCEPT_ENCODING, "br, gzip")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(br_head.status(), 200);
+        assert_eq!(br_head.headers()[header::CONTENT_ENCODING], "br");
+        assert_eq!(br_head.headers()[header::ETAG], br_etag);
+        assert_eq!(br_head.headers()[header::VARY], "Accept-Encoding");
+        assert_eq!(
+            br_head.headers()[header::CONTENT_LENGTH]
+                .to_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            br_bytes.len()
+        );
+        assert!(br_head.bytes().await.unwrap().is_empty());
+
+        // 6. Conditional 304 matches br ETag, while gzip/raw ETags return 200 for br representation.
+        let not_mod_br = srv
+            .client
+            .get(srv.url(path))
+            .header(header::ACCEPT_ENCODING, "br, gzip")
+            .header(header::IF_NONE_MATCH, &br_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(not_mod_br.status(), 304);
+        assert_eq!(not_mod_br.headers()[header::VARY], "Accept-Encoding");
+        assert_eq!(not_mod_br.headers()[header::ETAG], br_etag);
+
+        let cross_etag = srv
+            .client
+            .get(srv.url(path))
+            .header(header::ACCEPT_ENCODING, "br, gzip")
+            .header(header::IF_NONE_MATCH, &gz_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_etag.status(), 200);
+        assert_eq!(cross_etag.headers()[header::CONTENT_ENCODING], "br");
     }
 
     srv.close().await;
