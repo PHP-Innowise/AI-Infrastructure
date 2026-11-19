@@ -1233,30 +1233,38 @@ async function suite3MapLenses(driver) {
   console.log('[Suite 3] 5 Map Lenses (role="tab" + aria-selected)');
   const lenses = ['changes', 'architecture', 'tests', 'runs', 'dependencies'];
   for (const lens of lenses) {
+    const mapCountBefore = driver.responsesByUrl.length;
     await driver.click(`#graph-map-lens-${lens}`);
-    const state = await driver.waitFor((activeLens, allLenses) => {
-      const c = document.getElementById('graph-map-canvas');
-      if (c?.getAttribute('aria-busy') === 'true') return null;
-      const activeBtn = document.getElementById(`graph-map-lens-${activeLens}`);
-      if (activeBtn?.getAttribute('aria-selected') !== 'true') return null;
+    const state = await driver.waitUntil(async () => {
+      const hasMapResponse = driver.responsesByUrl
+        .slice(mapCountBefore)
+        .some((r) => r.status === 200 && r.url.includes('/graph/map'));
+      if (!hasMapResponse) return null;
+      return driver.callFn((activeLens, allLenses) => {
+        const c = document.getElementById('graph-map-canvas');
+        if (!c || c.getAttribute('aria-busy') === 'true') return null;
+        const activeBtn = document.getElementById(`graph-map-lens-${activeLens}`);
+        if (activeBtn?.getAttribute('aria-selected') !== 'true') return null;
+        if (c.querySelectorAll('.graph-map-node').length === 0) return null;
 
-      const tabs = allLenses.map((name) => {
-        const el = document.getElementById(`graph-map-lens-${name}`);
+        const tabs = allLenses.map((name) => {
+          const el = document.getElementById(`graph-map-lens-${name}`);
+          return {
+            name,
+            role: el?.getAttribute('role'),
+            ariaSelected: el?.getAttribute('aria-selected'),
+            ariaPressed: el?.getAttribute('aria-pressed'),
+          };
+        });
+        const pill = document.getElementById('graph-map-freshness');
+        const pillRect = pill?.getBoundingClientRect();
         return {
-          name,
-          role: el?.getAttribute('role'),
-          ariaSelected: el?.getAttribute('aria-selected'),
-          ariaPressed: el?.getAttribute('aria-pressed'),
+          tabs,
+          pillVisible: Boolean(pill && !pill.hidden && getComputedStyle(pill).display !== 'none' && pillRect && pillRect.width > 0 && pillRect.height > 0),
+          pillTone: pill?.getAttribute('data-tone') || '',
         };
-      });
-      const pill = document.getElementById('graph-map-freshness');
-      const pillRect = pill?.getBoundingClientRect();
-      return {
-        tabs,
-        pillVisible: Boolean(pill && !pill.hidden && getComputedStyle(pill).display !== 'none' && pillRect && pillRect.width > 0 && pillRect.height > 0),
-        pillTone: pill?.getAttribute('data-tone') || '',
-      };
-    }, `lens ${lens} activation`, 20_000, lens, ['dependencies', 'changes', 'architecture', 'tests', 'runs']);
+      }, lens, ['dependencies', 'changes', 'architecture', 'tests', 'runs']);
+    }, `lens ${lens} activation`, 20_000);
 
     for (const tab of state.tabs) {
       assert(tab.role === 'tab', `Lens ${tab.name}: expected role="tab", got ${tab.role}`);
