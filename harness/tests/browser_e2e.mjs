@@ -463,18 +463,30 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
 
   async function elementBox(selector) {
     const box = await callFn(async (sel) => {
-      const el = document.querySelector(sel);
-      if (!el) return null;
       const sameRect = (a, b) => a && b
         && Math.abs(a.left - b.left) < 0.5
         && Math.abs(a.top - b.top) < 0.5
         && Math.abs(a.width - b.width) < 0.5
         && Math.abs(a.height - b.height) < 0.5;
       const deadline = performance.now() + 2500;
+      let el = document.querySelector(sel);
       let prev = null;
       while (performance.now() < deadline) {
+        if (!el || !el.isConnected) {
+          el = document.querySelector(sel);
+          prev = null;
+        }
+        if (!el || !el.isConnected) {
+          await new Promise((r) => requestAnimationFrame(r));
+          continue;
+        }
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         await new Promise((r) => requestAnimationFrame(r));
+        if (!el.isConnected) {
+          el = document.querySelector(sel);
+          prev = null;
+          continue;
+        }
         const cur = el.getBoundingClientRect();
         if (cur.width > 0 && cur.height > 0 && sameRect(prev, cur)) {
           return {
@@ -488,6 +500,10 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
         }
         prev = cur;
       }
+      if (!el || !el.isConnected) {
+        el = document.querySelector(sel);
+      }
+      if (!el) return { x: 0, y: 0, w: 0, h: 0, cx: 0, cy: 0 };
       const r = el.getBoundingClientRect();
       return { x: r.left, y: r.top, w: r.width, h: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
     }, selector);
