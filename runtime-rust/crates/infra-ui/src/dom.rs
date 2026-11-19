@@ -1397,6 +1397,23 @@ pub fn wire_a11y_widgets() {
     close_cb.forget();
 }
 
+/// Escapes a value for safe interpolation inside a CSS attribute selector (`[attr="..."]`).
+pub(crate) fn escape_css_attr_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            '\t' => out.push_str("\\9 "),
+            '\0' => out.push('\u{fffd}'),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

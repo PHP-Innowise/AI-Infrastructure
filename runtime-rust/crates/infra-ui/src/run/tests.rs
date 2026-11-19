@@ -1689,7 +1689,7 @@ new file mode 100644
         let setext = "Title\n\n===";
         assert_eq!(find_settled_markdown_boundary(setext, 0), 0);
 
-        assert_eq!(escape_css_attr_value(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(crate::dom::escape_css_attr_value(r#"a"b\c"#), r#"a\"b\\c"#);
         let long_out = (1..=300)
             .map(|n| format!("line-{n:03}-payload-abcdefghijklmnopqrstuvwxyz"))
             .collect::<Vec<_>>()

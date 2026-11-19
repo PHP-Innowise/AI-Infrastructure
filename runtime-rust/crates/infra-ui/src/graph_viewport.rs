@@ -1084,23 +1084,8 @@ pub fn remove_pin(storage_key: &str, node_key: &str) -> bool {
     removed
 }
 
-/// Escapes a value for safe interpolation inside a CSS attribute selector (`[attr="..."]`).
-#[allow(dead_code)]
-pub fn escape_css_attr_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\a "),
-            '\r' => out.push_str("\\d "),
-            '\t' => out.push_str("\\9 "),
-            '\0' => out.push('\u{fffd}'),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
+#[allow(unused_imports)]
+pub(crate) use crate::dom::escape_css_attr_value;
 
 /// Shifts `cam.tx`/`cam.ty` minimally (keeping `cam.scale`) so world `rect` `(x, y, w, h)`
 /// sits inside the `[margin .. viewport - margin]` safe region. Returns `None` when already visible.

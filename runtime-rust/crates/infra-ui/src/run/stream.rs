@@ -200,20 +200,6 @@ pub(crate) fn coalesce_chunk_text(existing: &str, incoming: &str) -> String {
     format!("{existing}{incoming}")
 }
 
-pub(crate) fn escape_css_attr_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\r' => {}
-            '\n' => out.push_str("\\A "),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 pub(crate) fn bounded_tool_output_preview(
     full: &str,
     max_chars: usize,
@@ -382,7 +368,7 @@ fn find_tool_block_by_call_id(
     }
     let selector = format!(
         "details.conversation-tool[data-call-id=\"{}\"]",
-        escape_css_attr_value(call_id)
+        crate::dom::escape_css_attr_value(call_id)
     );
     let found = container.query_selector(&selector).ok().flatten();
     if container.id() == "events" {
@@ -482,7 +468,7 @@ pub(crate) fn toggle_tool_output_expand(output_key: &str) {
     }
     let selector = format!(
         "details.conversation-tool[data-output-key=\"{}\"]",
-        escape_css_attr_value(output_key)
+        crate::dom::escape_css_attr_value(output_key)
     );
     let Ok(Some(block)) = dom::document().query_selector(&selector) else {
         return;

@@ -552,7 +552,7 @@ pub(crate) fn render_grouped_diff_html(diff: &str, scope_id: &str) -> String {
 
 pub(crate) fn filter_diff_files(scope_id: &str, query: &str) {
     let needle = query.trim().to_ascii_lowercase();
-    let scope_escaped = super::stream::escape_css_attr_value(scope_id);
+    let scope_escaped = crate::dom::escape_css_attr_value(scope_id);
     let viewer_sel = format!(".diff-viewer[data-diff-scope=\"{scope_escaped}\"]");
     let Ok(Some(viewer)) = dom::document().query_selector(&viewer_sel) else {
         return;
@@ -607,8 +607,8 @@ pub(crate) fn show_all_diff_lines(scope_id: &str, path: &str) {
     };
     let selector = format!(
         "details.diff-file-group[data-diff-scope=\"{}\"][data-diff-file=\"{}\"]",
-        super::stream::escape_css_attr_value(scope_id),
-        super::stream::escape_css_attr_value(path),
+        crate::dom::escape_css_attr_value(scope_id),
+        crate::dom::escape_css_attr_value(path),
     );
     let Ok(Some(group)) = dom::document().query_selector(&selector) else {
         return;

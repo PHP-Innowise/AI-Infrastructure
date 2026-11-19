@@ -641,22 +641,8 @@ fn sync_system_radar(surface: SysMapSurface, cam: &Camera) {
     dom::hide(&radar, false);
 }
 
-fn escape_css_attr_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\a "),
-            '\r' => out.push_str("\\d "),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 fn find_sys_node_el(canvas: &web_sys::Element, nid: &str) -> Option<web_sys::Element> {
-    let escaped = escape_css_attr_value(nid);
+    let escaped = crate::dom::escape_css_attr_value(nid);
     canvas
         .query_selector(&format!(".system-map-node[data-n=\"{escaped}\"]"))
         .ok()
@@ -664,7 +650,7 @@ fn find_sys_node_el(canvas: &web_sys::Element, nid: &str) -> Option<web_sys::Ele
 }
 
 fn find_sys_frame_el(canvas: &web_sys::Element, svc_id: &str) -> Option<web_sys::Element> {
-    let escaped = escape_css_attr_value(svc_id);
+    let escaped = crate::dom::escape_css_attr_value(svc_id);
     canvas
         .query_selector(&format!(".system-service-frame[data-of=\"{escaped}\"]"))
         .ok()
@@ -677,32 +663,18 @@ fn pan_to_keep_rect_in_view(
     viewport: (f64, f64),
     margin: f64,
 ) -> bool {
-    let scale = cam.scale.max(0.05);
-    let (rx, ry, rw, rh) = rect;
-    let (vw, vh) = viewport;
-    let sx0 = rx * scale + cam.pan_x;
-    let sy0 = ry * scale + cam.pan_y;
-    let sx1 = (rx + rw) * scale + cam.pan_x;
-    let sy1 = (ry + rh) * scale + cam.pan_y;
-    let mut next_x = cam.pan_x;
-    let mut next_y = cam.pan_y;
-    if sx0 < margin {
-        next_x += margin - sx0;
-    } else if sx1 > vw - margin {
-        next_x -= sx1 - (vw - margin);
-    }
-    if sy0 < margin {
-        next_y += margin - sy0;
-    } else if sy1 > vh - margin {
-        next_y -= sy1 - (vh - margin);
-    }
-    if (next_x - cam.pan_x).abs() > 0.5 || (next_y - cam.pan_y).abs() > 0.5 {
-        cam.pan_x = next_x;
-        cam.pan_y = next_y;
-        cam.fit_mode = false;
-        return true;
-    }
-    false
+    let cur = graph_viewport::Camera {
+        scale: cam.scale.max(0.05),
+        tx: cam.pan_x,
+        ty: cam.pan_y,
+    };
+    let Some(next) = graph_viewport::pan_to_keep_rect_in_view(cur, rect, viewport, margin) else {
+        return false;
+    };
+    cam.pan_x = next.tx;
+    cam.pan_y = next.ty;
+    cam.fit_mode = false;
+    true
 }
 
 #[derive(Clone, Debug, PartialEq)]
