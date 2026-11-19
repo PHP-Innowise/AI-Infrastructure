@@ -587,7 +587,7 @@ pub fn render_constellation(
     let (kept_nodes, kept_edges) =
         apply_constellation_filter(nodes, resolved_edges, filter, &active_branch);
     if kept_nodes.is_empty() {
-        let html = render_constellation_empty(filter, &vp);
+        let html = render_constellation_empty(filter);
         return RenderedCanvas {
             html,
             radar_html: String::new(),
@@ -3524,7 +3524,7 @@ fn render_constellation_radar(
     out
 }
 
-fn render_constellation_empty(filter: &ConstellationFilter, vp: &CanvasViewport) -> String {
+fn render_constellation_empty(filter: &ConstellationFilter) -> String {
     let branch = filter.branch.trim();
     let has_filter = !filter.query.trim().is_empty()
         || !filter.kind.trim().is_empty()
@@ -3550,8 +3550,7 @@ fn render_constellation_empty(filter: &ConstellationFilter, vp: &CanvasViewport)
     };
 
     format!(
-        "<div class=\"graph-map-plane omni-plane\" data-empty=\"true\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{MIN_PLANE_W:.0}px;height:400px\"><div class=\"omni-empty-state\" role=\"status\"><svg class=\"omni-empty-illustration\" viewBox=\"0 0 96 64\" width=\"96\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" aria-hidden=\"true\"><circle cx=\"22\" cy=\"36\" r=\"7\"/><circle cx=\"48\" cy=\"18\" r=\"8\"/><circle cx=\"74\" cy=\"42\" r=\"6\"/><path d=\"M28 33 L41 22 M55 22 L69 38\" stroke-dasharray=\"3 3\"/></svg><h3 class=\"omni-empty-title\">{heading}</h3><p class=\"omni-empty-body\">{detail}</p><button type=\"button\" class=\"button compact omni-empty-action\" data-action=\"{action}\">{action_label}</button></div></div>",
-        vp.pan_x, vp.pan_y, vp.scale
+        "<div class=\"graph-map-plane omni-plane\" data-empty=\"true\" style=\"--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;width:100%;height:100%;min-height:360px;transform:none;transition:none\"><div class=\"omni-empty-state\" role=\"status\"><svg class=\"omni-empty-illustration\" viewBox=\"0 0 96 64\" width=\"96\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" aria-hidden=\"true\"><circle cx=\"22\" cy=\"36\" r=\"7\"/><circle cx=\"48\" cy=\"18\" r=\"8\"/><circle cx=\"74\" cy=\"42\" r=\"6\"/><path d=\"M28 33 L41 22 M55 22 L69 38\" stroke-dasharray=\"3 3\"/></svg><h3 class=\"omni-empty-title\">{heading}</h3><p class=\"omni-empty-body\">{detail}</p><button type=\"button\" class=\"button compact omni-empty-action\" data-action=\"{action}\">{action_label}</button></div></div>"
     )
 }
 
@@ -5404,10 +5403,20 @@ mod tests {
                 show_sessions: true,
                 ..Default::default()
             },
-            &CanvasViewport::default(),
+            &CanvasViewport {
+                pan_x: -180.0,
+                pan_y: -300.0,
+                scale: 0.48,
+            },
         );
         assert!(empty_main.html.contains("omnigraph-open-publish"));
         assert!(!empty_main.html.contains("omnigraph-clear-filters"));
+        assert!(empty_main
+            .html
+            .contains("width:100%;height:100%;min-height:360px;transform:none;transition:none"));
+        assert!(empty_main
+            .html
+            .contains("--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;"));
 
         let hidden_toggles = render_constellation(
             &empty_graph,

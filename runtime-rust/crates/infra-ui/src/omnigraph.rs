@@ -2941,17 +2941,6 @@ fn viewport_size() -> (f64, f64) {
     (w, h)
 }
 
-fn empty_state_camera(viewport: (f64, f64), plane: (f64, f64)) -> OmnigraphCamera {
-    OmnigraphCamera {
-        scale: 1.0,
-        pan_x: (viewport.0 - plane.0) * 0.5,
-        pan_y: (viewport.1 - plane.1) * 0.5,
-        plane_w: plane.0,
-        plane_h: plane.1,
-        fit_mode: false,
-    }
-}
-
 fn apply_camera(cam: &OmnigraphCamera) {
     let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(240.0));
     graph_viewport::apply_transform_3d_by_id(
@@ -4995,8 +4984,8 @@ fn render_constellation() {
     m::set("omnigraph-nav-edges", V::Array(nav_edges));
 
     if rendered.node_count == 0 {
-        let empty_cam = empty_state_camera(viewport_size(), (rendered.width, rendered.height));
-        apply_camera(&empty_cam);
+        dom::attr("omnigraph-canvas", "data-lod", "near");
+        dom::text("omni-zoom-level", "100%");
     } else {
         cam.plane_w = rendered.width;
         cam.plane_h = rendered.height;
@@ -10074,11 +10063,5 @@ mod tests {
         });
         assert!(hist.can_back());
         assert!(!hist.can_forward());
-
-        let empty_cam = empty_state_camera((920.0, 520.0), (760.0, 400.0));
-        assert_eq!(empty_cam.scale, 1.0);
-        assert_eq!(empty_cam.pan_x, 80.0);
-        assert_eq!(empty_cam.pan_y, 60.0);
-        assert!(!empty_cam.fit_mode);
     }
 }
