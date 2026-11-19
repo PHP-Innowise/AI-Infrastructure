@@ -253,4 +253,46 @@ mod tests {
             }])
         );
     }
+
+    #[test]
+    fn native_ir_populates_communities_usable_in_modules_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("app");
+        std::fs::create_dir_all(root.join("src/Billing")).unwrap();
+        std::fs::create_dir_all(root.join("src/Orders")).unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/Billing/Tax.php"),
+            "<?php\nnamespace App\\Billing;\nclass Tax { public function calc(): int { return 1; } }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/Orders/Checkout.php"),
+            "<?php\nnamespace App\\Orders;\nuse App\\Billing\\Tax;\nclass Checkout { public function run(Tax $tax): int { return $tax->calc(); } }\n",
+        )
+        .unwrap();
+
+        let ir = crate::graph_ir::GraphIrStore::open(&state, "mod").unwrap();
+        ir.sync_workspace(&root).unwrap();
+        let (nodes, links, ..) = ir.export_ir_graph_elements().unwrap();
+        let idx = Index::from_ir_parts(
+            &root,
+            Some(ir.db_path().to_path_buf()),
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            nodes,
+            links,
+        )
+        .unwrap();
+        let view = idx.modules("mod", None, false, "");
+        assert_eq!(view["children"].as_u64(), Some(2));
+        assert!(
+            !view["edges"].as_array().unwrap().is_empty(),
+            "expected cross-module edges from native IR: {view}"
+        );
+    }
 }

@@ -9,12 +9,16 @@
 use crate::{
     HarnessError, Result,
     graph_changes::Resolved,
+    graph_crates::CratePackageMap,
     graph_deps::{
-        DeclaredMember, DepDiff, DepMemberRef, DepRef, EntityChange, access_kind, diff_entities,
-        diff_file_deps, extract_declared_members, extract_file_deps,
-        find_matching_member_references, find_matching_references,
+        DeclaredMember, DepDiff, DepMemberRef, DepRef, EntityChange, ReexportIndex, access_kind,
+        cached_manifests_for_root, diff_entities, diff_file_deps_with_context,
+        extract_declared_members, extract_file_deps_with_context,
+        find_matching_member_references_with_context, find_matching_references_with_context,
     },
+    graph_ir::GraphIrStore,
     graph_live::{GraphFocus, clean_rel_key, folder_of},
+    graph_manifests::ManifestIndex,
     graph_map::{Index, Kind, check_layer_rule, is_test_path, layer_rules::Rules},
     projects,
 };
@@ -25,6 +29,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Component, Path},
+    sync::Arc,
     time::Duration,
 };
 
@@ -67,6 +72,20 @@ enum BlobRead {
     Unreadable(&'static str),
 }
 
+enum IrStoreHandle<'a> {
+    Borrowed(&'a GraphIrStore),
+    Owned(GraphIrStore),
+}
+
+impl IrStoreHandle<'_> {
+    fn as_store(&self) -> &GraphIrStore {
+        match self {
+            Self::Borrowed(store) => store,
+            Self::Owned(store) => store,
+        }
+    }
+}
+
 struct TargetContext<'a> {
     root: &'a Path,
     revision: Option<String>,
@@ -76,6 +95,10 @@ struct TargetContext<'a> {
     disk_files: BTreeSet<String>,
     resolution_files: BTreeSet<String>,
     is_git: bool,
+    manifests: Arc<ManifestIndex>,
+    crate_map: Arc<CratePackageMap>,
+    reexports: ReexportIndex,
+    ir_store: Option<IrStoreHandle<'a>>,
 }
 
 #[derive(Clone)]
@@ -161,6 +184,7 @@ impl BaselineInfo {
 
 /// Lists all changed files across Git, active/historical run ledgers, and live
 /// session focus, enriched with entity-level and dependency-level impact counts.
+#[cfg(test)]
 pub(crate) fn changed_catalog(
     root: &Path,
     index: Option<&Index>,
@@ -170,7 +194,31 @@ pub(crate) fn changed_catalog(
     target_label: &str,
     notests: bool,
 ) -> Value {
-    let ctx = TargetContext::build(root, index, resolved, live_focus, run_edited);
+    changed_catalog_with_ir(
+        root,
+        index,
+        None,
+        resolved,
+        live_focus,
+        run_edited,
+        target_label,
+        notests,
+    )
+}
+
+/// Variant of `changed_catalog` reusing an already-open `GraphIrStore` for SQLite IR queries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn changed_catalog_with_ir(
+    root: &Path,
+    index: Option<&Index>,
+    ir_store: Option<&GraphIrStore>,
+    resolved: Option<&Resolved>,
+    live_focus: Option<&GraphFocus>,
+    run_edited: &[(String, char)],
+    target_label: &str,
+    notests: bool,
+) -> Value {
+    let ctx = TargetContext::build(root, index, ir_store, resolved, live_focus, run_edited);
     let mut merged = merge_changed_entries(&ctx, index, resolved, live_focus, run_edited);
     if notests {
         merged.retain(|path, _| !is_test_path(path));
@@ -182,13 +230,19 @@ pub(crate) fn changed_catalog(
     let per_file = merged
         .iter()
         .map(|(path, entry)| {
-            index_callers(
+            let mut list = index_callers(
                 index,
                 path,
                 entry.previous_path.as_deref(),
                 false,
                 MAX_CALLER_SCAN,
-            )
+            );
+            for ir_caller in ctx.ir_callers_for(path, entry.previous_path.as_deref()) {
+                if !list.contains(&ir_caller) && list.len() < MAX_CALLER_SCAN {
+                    list.push(ir_caller);
+                }
+            }
+            list
         })
         .collect::<Vec<_>>();
     let mut known_callers = Vec::new();
@@ -464,6 +518,7 @@ fn build_edge_diffs_json(
 
 /// Computes detailed dependency, reverse-dependent, entity, cycle, and layer
 /// violation impact for a single project-relative file path.
+#[cfg(test)]
 pub(crate) fn file_impact(
     root: &Path,
     index: Option<&Index>,
@@ -472,8 +527,21 @@ pub(crate) fn file_impact(
     path: &str,
     certain: bool,
 ) -> Result<Value> {
+    file_impact_with_ir(root, index, None, resolved, live_focus, path, certain)
+}
+
+/// Variant of `file_impact` reusing an already-open `GraphIrStore` for SQLite IR queries.
+pub(crate) fn file_impact_with_ir(
+    root: &Path,
+    index: Option<&Index>,
+    ir_store: Option<&GraphIrStore>,
+    resolved: Option<&Resolved>,
+    live_focus: Option<&GraphFocus>,
+    path: &str,
+    certain: bool,
+) -> Result<Value> {
     let rel_path = normalize_rel_path(path)?;
-    let ctx = TargetContext::build(root, index, resolved, live_focus, &[]);
+    let ctx = TargetContext::build(root, index, ir_store, resolved, live_focus, &[]);
     let merged = merge_changed_entries(&ctx, index, resolved, live_focus, &[]);
 
     let in_graph = index.is_some_and(|idx| idx.file_id(&rel_path).is_some());
@@ -549,13 +617,18 @@ pub(crate) fn file_impact(
     });
     // The files the graph knows to use this one are read before any file
     // that only might: a scan that stops at its limit keeps the callers.
-    let known_callers = index_callers(
+    let mut known_callers = index_callers(
         index,
         &rel_path,
         previous_path.as_deref(),
         certain,
         MAX_CALLER_SCAN,
     );
+    for ir_caller in ctx.ir_callers_for(&rel_path, previous_path.as_deref()) {
+        if !known_callers.contains(&ir_caller) && known_callers.len() < MAX_CALLER_SCAN {
+            known_callers.push(ir_caller);
+        }
+    }
     let scan_index = CallerScanIndex::build(&ctx, index, &scan_scope, live_focus, &known_callers);
     let index_incoming = build_index_incoming(index);
 
@@ -668,6 +741,7 @@ impl<'a> TargetContext<'a> {
     fn build(
         root: &'a Path,
         index: Option<&Index>,
+        explicit_ir: Option<&'a GraphIrStore>,
         resolved: Option<&Resolved>,
         live_focus: Option<&GraphFocus>,
         run_edited: &[(String, char)],
@@ -684,6 +758,19 @@ impl<'a> TargetContext<'a> {
             BTreeSet::new()
         };
 
+        let ir_store = if revision.is_none() {
+            if let Some(store) = explicit_ir {
+                Some(IrStoreHandle::Borrowed(store))
+            } else {
+                index
+                    .and_then(Index::ir_db_path)
+                    .and_then(|db_path| GraphIrStore::open_at(db_path).ok())
+                    .map(IrStoreHandle::Owned)
+            }
+        } else {
+            None
+        };
+
         let mut resolution_files = BTreeSet::new();
         if let Some(tree) = &rev_files {
             resolution_files.extend(tree.iter().cloned());
@@ -692,6 +779,11 @@ impl<'a> TargetContext<'a> {
         }
         if let Some(idx) = index {
             resolution_files.extend(idx.files().iter().cloned());
+        }
+        if let Some(handle) = &ir_store
+            && let Ok(ir_known) = handle.as_store().known_files()
+        {
+            resolution_files.extend(ir_known);
         }
         if let Some(res) = resolved {
             for change in &res.files {
@@ -721,6 +813,12 @@ impl<'a> TargetContext<'a> {
             }
         }
 
+        let (manifests, crate_map) = cached_manifests_for_root(root, &resolution_files);
+        let reexports = ir_store
+            .as_ref()
+            .and_then(|h| h.as_store().reexport_index().ok())
+            .unwrap_or_default();
+
         Self {
             root,
             revision,
@@ -730,7 +828,115 @@ impl<'a> TargetContext<'a> {
             disk_files,
             resolution_files,
             is_git,
+            manifests,
+            crate_map,
+            reexports,
+            ir_store,
         }
+    }
+
+    fn ir(&self) -> Option<&GraphIrStore> {
+        self.revision
+            .is_none()
+            .then(|| self.ir_store.as_ref().map(IrStoreHandle::as_store))
+            .flatten()
+    }
+
+    fn extract_deps(&self, rel_path: &str, src: &str) -> Vec<DepRef> {
+        extract_file_deps_with_context(
+            rel_path,
+            src,
+            &self.resolution_files,
+            Some(&self.manifests),
+            Some(&self.reexports),
+            Some(&self.crate_map),
+        )
+    }
+
+    fn diff_deps(&self, rel_path: &str, before: Option<&str>, after: Option<&str>) -> DepDiff {
+        diff_file_deps_with_context(
+            rel_path,
+            before,
+            after,
+            &self.resolution_files,
+            Some(&self.manifests),
+            Some(&self.reexports),
+            Some(&self.crate_map),
+        )
+    }
+
+    fn extract_live_deps_or_parse(&self, rel_path: &str, src: Option<&str>) -> Vec<DepRef> {
+        if let Some(ir) = self.ir()
+            && let Ok(Some((deps, _))) = ir.file_outgoing_deps_if_fresh(self.root, rel_path)
+        {
+            return deps;
+        }
+        if let Some(text) = src {
+            return self.extract_deps(rel_path, text);
+        }
+        match self.read_after(rel_path) {
+            BlobRead::Ok(text) => self.extract_deps(rel_path, &text),
+            _ => Vec::new(),
+        }
+    }
+
+    fn ir_callers_for(&self, rel_path: &str, previous_path: Option<&str>) -> Vec<String> {
+        let Some(ir) = self.ir() else {
+            return Vec::new();
+        };
+        let mut seen = BTreeSet::new();
+        if let Ok(rows) = ir.incoming_caller_files(rel_path) {
+            for (src, ..) in rows {
+                seen.insert(src);
+            }
+        }
+        if let Some(prev) = previous_path
+            && prev != rel_path
+            && let Ok(rows) = ir.incoming_caller_files(prev)
+        {
+            for (src, ..) in rows {
+                seen.insert(src);
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    fn matching_references(
+        &self,
+        caller_path: &str,
+        caller_src: &str,
+        target_path: &str,
+        target_symbols: &[String],
+    ) -> Vec<String> {
+        find_matching_references_with_context(
+            caller_path,
+            caller_src,
+            target_path,
+            target_symbols,
+            &self.resolution_files,
+            Some(&self.manifests),
+            Some(&self.reexports),
+            Some(&self.crate_map),
+        )
+    }
+
+    fn matching_member_references(
+        &self,
+        caller_path: &str,
+        caller_src: &str,
+        target_path: &str,
+        target_members: &[DeclaredMember],
+    ) -> Vec<DepMemberRef> {
+        find_matching_member_references_with_context(
+            caller_path,
+            caller_src,
+            target_path,
+            target_members,
+            &self.resolution_files,
+            Some(&self.manifests),
+            Some(&self.reexports),
+            Some(&self.crate_map),
+        )
     }
 
     fn exists_in_target(&self, rel_path: &str) -> bool {
@@ -1668,6 +1874,31 @@ pub(crate) fn caller_extends_target_in(
     known_files: &BTreeSet<String>,
     read_source: &mut dyn FnMut(&str) -> Option<String>,
 ) -> bool {
+    caller_extends_target_with_context(
+        caller_path,
+        caller_source,
+        target_path,
+        target_members,
+        known_files,
+        read_source,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn caller_extends_target_with_context(
+    caller_path: &str,
+    caller_source: Option<&str>,
+    target_path: &str,
+    target_members: &[DeclaredMember],
+    known_files: &BTreeSet<String>,
+    read_source: &mut dyn FnMut(&str) -> Option<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> bool {
     let Some(src) = caller_source else {
         return false;
     };
@@ -1738,7 +1969,14 @@ pub(crate) fn caller_extends_target_in(
             return false;
         }
 
-        let deps = extract_file_deps(file, file_src, known_files);
+        let deps = extract_file_deps_with_context(
+            file,
+            file_src,
+            known_files,
+            manifests_opt,
+            reexports_opt,
+            crate_map_opt,
+        );
         for dep in &deps {
             if dep.resolved
                 && clean_rel_key(&dep.target) == target_key
@@ -2536,23 +2774,21 @@ fn enrich_dep_bucket(
                 .clone();
         dep.target_members = target_members;
 
-        let caller_extends = caller_extends_target_in(
+        let caller_extends = caller_extends_target_with_context(
             caller_path,
             caller_src,
             &dep.target,
             &dep.target_members,
             &ctx.resolution_files,
             &mut |p| ctx.read_after(p).into_opt(),
+            Some(&ctx.manifests),
+            Some(&ctx.reexports),
+            Some(&ctx.crate_map),
         );
         let should_supplement = dep.kind != "imports" || !non_import_targets.contains(&target_key);
         if should_supplement && let Some(src) = caller_src {
-            let matched = find_matching_member_references(
-                caller_path,
-                src,
-                &dep.target,
-                &dep.target_members,
-                &ctx.resolution_files,
-            );
+            let matched =
+                ctx.matching_member_references(caller_path, src, &dep.target, &dep.target_members);
             dep.member_refs.extend(matched);
         }
 
@@ -2747,16 +2983,18 @@ fn compute_uses_diff(
 ) -> DepDiff {
     let mut diff = if status == "unchanged" {
         if before.is_some() {
-            diff_file_deps(rel_path, before, after, &ctx.resolution_files)
+            ctx.diff_deps(rel_path, before, after)
         } else {
-            diff_file_deps(rel_path, after, after, &ctx.resolution_files)
+            ctx.diff_deps(rel_path, after, after)
         }
     } else if status == "modified" && before.is_none() {
         // Non-Git modified file with no baseline: split against Index if available,
         // otherwise report current dependencies as unchanged rather than false added.
-        let current = after
-            .map(|src| extract_file_deps(rel_path, src, &ctx.resolution_files))
-            .unwrap_or_default();
+        let current = if after.is_some() {
+            ctx.extract_live_deps_or_parse(rel_path, after)
+        } else {
+            Vec::new()
+        };
         if let Some(idx) = index
             && let Some(fid) = idx.file_id(rel_path)
         {
@@ -2783,7 +3021,7 @@ fn compute_uses_diff(
             }
         }
     } else {
-        diff_file_deps(rel_path, before, after, &ctx.resolution_files)
+        ctx.diff_deps(rel_path, before, after)
     };
 
     for list in [&mut diff.added, &mut diff.removed, &mut diff.unchanged] {
@@ -3419,7 +3657,7 @@ impl CallerScanIndex {
             }
 
             if initial_seen.contains(path) || (small_project && dep_cache.len() < MAX_CALLER_SCAN) {
-                let deps = extract_file_deps(path, &src, &ctx.resolution_files);
+                let deps = ctx.extract_live_deps_or_parse(path, Some(&src));
                 dep_cache.insert(path.clone(), (src, deps));
             } else if retained_bytes.saturating_add(src.len()) <= MAX_RETAINED_SOURCE_BYTES {
                 retained_bytes += src.len();
@@ -3557,7 +3795,7 @@ impl CallerScanIndex {
                 .cloned()
                 .or_else(|| ctx.read_after(path).into_opt());
             if let Some(src) = src_opt {
-                let deps = extract_file_deps(path, &src, &ctx.resolution_files);
+                let deps = ctx.extract_live_deps_or_parse(path, Some(&src));
                 cache.insert(path.clone(), (src, deps));
             }
         }
@@ -3650,13 +3888,8 @@ fn evaluate_callers_for_file(
                             || previous_path.is_some_and(|old| d.target == old))
                 })
                 .collect();
-            let matched_refs = find_matching_references(
-                caller_path,
-                caller_src,
-                rel_path,
-                target_symbols,
-                &ctx.resolution_files,
-            );
+            let matched_refs =
+                ctx.matching_references(caller_path, caller_src, rel_path, target_symbols);
             let has_live_edge = !matching_deps.is_empty() || !matched_refs.is_empty();
 
             if let Some(acc) = callers.get_mut(caller_path) {
@@ -3672,23 +3905,19 @@ fn evaluate_callers_for_file(
                         ctx.read_before(caller_path)
                             .into_opt()
                             .is_some_and(|before_src| {
-                                let before_deps = extract_file_deps(
-                                    caller_path,
-                                    &before_src,
-                                    &ctx.resolution_files,
-                                );
+                                let before_deps = ctx.extract_deps(caller_path, &before_src);
                                 before_deps.iter().any(|d| {
                                     d.resolved
                                         && (d.target == rel_path
                                             || previous_path.is_some_and(|old| d.target == old))
-                                }) || !find_matching_references(
-                                    caller_path,
-                                    &before_src,
-                                    rel_path,
-                                    target_symbols,
-                                    &ctx.resolution_files,
-                                )
-                                .is_empty()
+                                }) || !ctx
+                                    .matching_references(
+                                        caller_path,
+                                        &before_src,
+                                        rel_path,
+                                        target_symbols,
+                                    )
+                                    .is_empty()
                             });
                     if dropped {
                         callers.remove(caller_path);
@@ -3738,13 +3967,8 @@ fn evaluate_callers_for_file(
         if let Some(src) = &acc.source_after
             && !changed_entity_names.is_empty()
         {
-            let matched_changed = find_matching_references(
-                &caller_path,
-                src,
-                rel_path,
-                &changed_entity_names,
-                &ctx.resolution_files,
-            );
+            let matched_changed =
+                ctx.matching_references(&caller_path, src, rel_path, &changed_entity_names);
             acc.symbols.extend(matched_changed);
         }
 
@@ -3760,22 +3984,21 @@ fn evaluate_callers_for_file(
         );
 
         let mut read_ext_src = |p: &str| scan_index.read_source_for(ctx, p);
-        let caller_extends = caller_extends_target_in(
+        let caller_extends = caller_extends_target_with_context(
             &caller_path,
             acc.source_after.as_deref(),
             rel_path,
             declared_members,
             &ctx.resolution_files,
             &mut read_ext_src,
+            Some(&ctx.manifests),
+            Some(&ctx.reexports),
+            Some(&ctx.crate_map),
         );
         let mut used_members = match acc.source_after.as_deref() {
-            Some(src) => find_matching_member_references(
-                &caller_path,
-                src,
-                rel_path,
-                declared_members,
-                &ctx.resolution_files,
-            ),
+            Some(src) => {
+                ctx.matching_member_references(&caller_path, src, rel_path, declared_members)
+            }
             None => Vec::new(),
         };
 
@@ -4033,18 +4256,13 @@ fn detect_added_caller(
     let lookup_ref = lookup.as_deref().unwrap_or(caller_path);
 
     if let BlobRead::Ok(before_src) = ctx.read_before(lookup_ref) {
-        let before_deps = extract_file_deps(caller_path, &before_src, &ctx.resolution_files);
+        let before_deps = ctx.extract_deps(caller_path, &before_src);
         let had_dep = before_deps.iter().any(|d| {
             d.resolved && (d.target == rel_path || previous_path.is_some_and(|old| d.target == old))
         });
-        let had_ref = !find_matching_references(
-            caller_path,
-            &before_src,
-            rel_path,
-            target_symbols,
-            &ctx.resolution_files,
-        )
-        .is_empty();
+        let had_ref = !ctx
+            .matching_references(caller_path, &before_src, rel_path, target_symbols)
+            .is_empty();
         return !had_dep && !had_ref;
     }
 
@@ -4156,7 +4374,7 @@ fn compute_architecture_impact(
                     }
                 }
             } else if let BlobRead::Ok(src) = ctx.read_after(&dep.target) {
-                for td in extract_file_deps(&dep.target, &src, &ctx.resolution_files) {
+                for td in ctx.extract_live_deps_or_parse(&dep.target, Some(&src)) {
                     if td.resolved && td.target != dep.target {
                         base_adj
                             .entry(dep.target.clone())
@@ -6150,6 +6368,52 @@ mod tests {
                 .iter()
                 .any(|c| c["path"] == "zz/LateCaller.php" && c["impact"] == "broken_risk"),
             "{impact_with_idx}"
+        );
+    }
+
+    #[test]
+    fn impact_unifies_onto_ir_store_and_manifest_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("psr4");
+        std::fs::create_dir_all(root.join("domain/Billing")).unwrap();
+        std::fs::create_dir_all(root.join("app/Controllers")).unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"autoload":{"psr-4":{"Domain\\":"domain/","App\\":"app/"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("domain/Billing/Invoice.php"),
+            "<?php\nnamespace Domain\\Billing;\nclass Invoice {\n    public function total(): int { return 10; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/Controllers/PayController.php"),
+            "<?php\nnamespace App\\Controllers;\nuse Domain\\Billing\\Invoice;\nclass PayController {\n    public function run(Invoice $inv): int { return $inv->total(); }\n}\n",
+        )
+        .unwrap();
+
+        let ir = GraphIrStore::open(&state, "psr4").unwrap();
+        ir.sync_workspace(&root).unwrap();
+
+        let impact = file_impact_with_ir(
+            &root,
+            None,
+            Some(&ir),
+            None,
+            None,
+            "domain/Billing/Invoice.php",
+            false,
+        )
+        .unwrap();
+        assert!(
+            impact["used_by"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["path"] == "app/Controllers/PayController.php"),
+            "expected PSR-4 caller resolved via IR & ManifestIndex: {impact}"
         );
     }
 }

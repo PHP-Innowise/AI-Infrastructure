@@ -64,7 +64,8 @@ const DETOUR_WALK: usize = 60_000;
 /// each child keeps its `STRONGEST` uses.
 const DENSE: usize = 2;
 pub const STRONGEST: usize = 3;
-const KEPT: usize = 4;
+const KEPT_LIVE: usize = 4;
+const KEPT_REVISIONS: usize = 8;
 /// Changed files drawn one by one; more of them are drawn as the children of
 /// the open folder, which can be opened in turn.
 const SINGLE: usize = 24;
@@ -244,6 +245,8 @@ struct Node {
     community_name: Loose,
     #[serde(default, rename = "_callable_class")]
     class: Loose,
+    #[serde(default)]
+    is_test: bool,
 }
 /// What a symbol is, as far as the graph tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,6 +293,8 @@ pub(crate) struct Symbol {
     pub(crate) at: u32,
     pub(crate) len: u16,
     pub(crate) kind: Kind,
+    pub(crate) is_test: bool,
+    pub(crate) is_semantic: bool,
 }
 /// A link between two symbols: the one that uses, the one that is used, the
 /// relation, and whether the tool only inferred it.
@@ -519,6 +524,9 @@ impl Builder<'_> {
                     .or_insert_with(|| name.to_owned());
             }
         }
+        let is_semantic =
+            node.node_kind.0.as_deref() == Some("semantic") || node.id.0.starts_with("sem:");
+        let file_is_test = is_test(&self.files[file as usize]);
         let symbol = Symbol {
             file,
             community,
@@ -527,6 +535,8 @@ impl Builder<'_> {
             at: self.names.len() as u32,
             len: kept.len() as u16,
             kind,
+            is_test: node.is_test || file_is_test,
+            is_semantic,
         };
         self.names.push_str(kept);
         // Of two nodes that share an id, links go to the later one.
@@ -761,6 +771,7 @@ pub struct Index {
     links: u64,
     unplaced: u64,
     backend: Option<String>,
+    ir_db_path: Option<PathBuf>,
 }
 /// The part of `path` that stands for it when `scope` is open: the child of
 /// the scope that holds it, or, outside the scope, the first folder where the
@@ -892,6 +903,63 @@ impl Index {
     pub fn read(source: impl std::io::Read, root: &Path) -> Result<Self> {
         Self::read_with(source, root, &|path| text_at(root, path))
     }
+    /// Reads a graph directly from typed SQLite IR nodes and links without a JSON round-trip.
+    pub(crate) fn from_ir_parts(
+        root: &Path,
+        ir_db_path: Option<PathBuf>,
+        backend: Option<String>,
+        ir_nodes: Vec<crate::graph_ir::IrNodeSpec>,
+        ir_links: Vec<crate::graph_ir::IrLinkSpec>,
+    ) -> Result<Self> {
+        let base = root.to_path_buf();
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        let mut builder = Builder {
+            root: root_str.trim_end_matches('/'),
+            files: Vec::new(),
+            file_ids: HashMap::new(),
+            node_symbol: HashMap::new(),
+            symbols: Vec::new(),
+            community_names: BTreeMap::new(),
+            names: String::new(),
+            uses: Vec::new(),
+            ties: Vec::new(),
+            kinds: Vec::new(),
+            kind_ids: HashMap::new(),
+            nodes: 0,
+            links: 0,
+            unplaced: 0,
+            early: Vec::new(),
+            listed: false,
+            backend,
+        };
+        for spec in ir_nodes {
+            builder.node(Node {
+                id: Text(spec.id),
+                source_file: Some(Text(spec.source_file)),
+                label: Loose(Some(spec.label)),
+                source_location: Loose(spec.source_location),
+                file_type: Loose(spec.file_type),
+                node_kind: Loose(spec.node_kind),
+                community: Loose(spec.community.map(|c| c.to_string())),
+                community_name: Loose(spec.community_name),
+                class: Loose(spec.callable_class.then(|| "true".to_owned())),
+                is_test: spec.is_test,
+            });
+        }
+        builder.listed = true;
+        for spec in ir_links {
+            builder.link(Link {
+                source: Text(spec.source),
+                target: Text(spec.target),
+                relation: spec.relation.map(Text),
+                confidence: spec.confidence.map(Text),
+                source_file: spec.source_file.map(Text),
+                context: spec.context.map(Text),
+            });
+        }
+        Self::finish_builder(builder, base, ir_db_path, &|path| text_at(root, path))
+    }
+
     /// Reads a graph, with `text` giving a file of its tree where it can be
     /// read.
     fn read_with(
@@ -927,6 +995,15 @@ impl Index {
         for link in std::mem::take(&mut builder.early) {
             builder.link(link);
         }
+        Self::finish_builder(builder, base, None, text)
+    }
+
+    fn finish_builder(
+        builder: Builder<'_>,
+        base: PathBuf,
+        ir_db_path: Option<PathBuf>,
+        text: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         // The node that stands for a file is named after it, by its name or
         // by the end of its path, and what it holds is the top of the file.
         let mut symbols = builder.symbols;
@@ -1022,6 +1099,7 @@ impl Index {
             links: builder.links,
             unplaced: builder.unplaced,
             backend: builder.backend,
+            ir_db_path,
         })
     }
     fn folder(&self, scope: &str) -> bool {
@@ -1162,6 +1240,10 @@ impl Index {
         self.backend.as_deref()
     }
 
+    pub(crate) fn ir_db_path(&self) -> Option<&Path> {
+        self.ir_db_path.as_deref()
+    }
+
     pub(crate) fn pairs(&self) -> &[(u32, u32, Pair)] {
         &self.pairs
     }
@@ -1265,9 +1347,29 @@ impl Index {
         filter: &str,
         whole: bool,
     ) -> Value {
+        self.view_with_whole_options(
+            project, scope, spread, focus, certain, filter, whole, 0, None, None,
+        )
+    }
+
+    /// Map view supporting server-side paging (`offset`, `limit`) and hierarchy expansion `depth`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn view_with_whole_options(
+        &self,
+        project: &str,
+        scope: &str,
+        spread: &[String],
+        focus: Option<&str>,
+        certain: bool,
+        filter: &str,
+        whole: bool,
+        offset: usize,
+        limit: Option<usize>,
+        depth: Option<usize>,
+    ) -> Value {
         if whole && scope.trim_matches('/').is_empty() && self.opened(scope).is_none() {
-            let expanded = self.whole_spread(WHOLE_FOLDERS);
-            let mut view = self.view_with_limits(
+            let expanded = self.whole_spread_with_depth(WHOLE_FOLDERS, depth);
+            let mut view = self.view_with_limits_opts(
                 project,
                 scope,
                 &expanded,
@@ -1275,16 +1377,71 @@ impl Index {
                 certain,
                 filter,
                 WHOLE_LIMITS,
+                offset,
+                limit,
+                depth,
             );
             view["whole"] = json!(true);
             return view;
         }
-        let mut view = self.view_with(project, scope, spread, focus, certain, filter);
+        let owned_spread;
+        let effective_spread = if spread.is_empty()
+            && let Some(max_depth) = depth.filter(|&d| d > 1)
+            && self.opened(scope).is_none()
+        {
+            owned_spread = self.spread_under_scope(scope.trim_matches('/'), max_depth - 1, SPREAD);
+            &owned_spread
+        } else {
+            spread
+        };
+        let mut view = self.view_with_limits_opts(
+            project,
+            scope,
+            effective_spread,
+            focus,
+            certain,
+            filter,
+            NORMAL_LIMITS,
+            offset,
+            limit,
+            depth,
+        );
         view["whole"] = json!(whole);
         view
     }
 
-    fn whole_spread(&self, limit: usize) -> Vec<String> {
+    fn spread_under_scope(&self, scope: &str, extra_levels: usize, limit: usize) -> Vec<String> {
+        let scope_depth = if scope.is_empty() {
+            0
+        } else {
+            scope.split('/').count()
+        };
+        let mut folders: BTreeSet<String> = BTreeSet::new();
+        for file in &self.files {
+            if !scope.is_empty()
+                && !file
+                    .strip_prefix(scope)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            {
+                continue;
+            }
+            for (at, ch) in file.char_indices() {
+                if ch == '/' {
+                    let folder = &file[..at];
+                    let segs = folder.split('/').count();
+                    if segs > scope_depth && segs <= scope_depth + extra_levels {
+                        folders.insert(folder.to_owned());
+                        if folders.len() >= limit {
+                            return folders.into_iter().collect();
+                        }
+                    }
+                }
+            }
+        }
+        folders.into_iter().collect()
+    }
+
+    fn whole_spread_with_depth(&self, limit: usize, max_depth: Option<usize>) -> Vec<String> {
         let mut file_weights = vec![0u64; self.files.len()];
         for (from, to, pair) in &self.pairs {
             let w = pair.weight(false);
@@ -1300,7 +1457,13 @@ impl Index {
             let w = file_weights[idx];
             for (at, ch) in file.char_indices() {
                 if ch == '/' {
-                    let entry = folder_stats.entry(&file[..at]).or_default();
+                    let folder = &file[..at];
+                    if let Some(d) = max_depth
+                        && folder.split('/').count() > d
+                    {
+                        continue;
+                    }
+                    let entry = folder_stats.entry(folder).or_default();
                     entry.0 += w;
                     entry.1 += 1;
                 }
@@ -1347,7 +1510,7 @@ impl Index {
         certain: bool,
         filter: &str,
     ) -> Value {
-        self.view_with_limits(
+        self.view_with_limits_opts(
             project,
             scope,
             spread,
@@ -1355,11 +1518,14 @@ impl Index {
             certain,
             filter,
             NORMAL_LIMITS,
+            0,
+            None,
+            None,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn view_with_limits(
+    fn view_with_limits_opts(
         &self,
         project: &str,
         scope: &str,
@@ -1368,6 +1534,9 @@ impl Index {
         certain: bool,
         filter: &str,
         limits: ViewLimits,
+        offset: usize,
+        limit: Option<usize>,
+        depth: Option<usize>,
     ) -> Value {
         if let Some(file) = self.opened(scope) {
             return self.file(project, file, &HashMap::new(), None, focus, certain, filter);
@@ -1436,37 +1605,54 @@ impl Index {
         // asked for, so it is drawn first, and where the picture is full the
         // open folder shows fewer, though never less than `OWN`.
         let mut shown = HashSet::new();
-        let mut drawn: HashMap<&str, usize> = HashMap::new();
-        for framed in [true, false] {
-            let full = if framed {
-                limits.spread.saturating_sub(limits.own)
-            } else {
-                limits.spread
-            };
+        let mut beyond = false;
+        if offset > 0 || limit.is_some() {
+            let cap = limit.unwrap_or(limits.spread).max(1);
+            children = children.into_iter().skip(offset).take(cap).collect();
             for (key, _) in &children {
-                let folder = holder(key);
-                if (folder != scope) != framed || shown.len() >= full {
-                    continue;
-                }
-                let count = drawn.entry(folder).or_default();
-                if *count < if framed { limits.held } else { limits.shown } {
-                    *count += 1;
-                    shown.insert(**key);
+                shown.insert(**key);
+            }
+            if offset == 0
+                && let Some(place) = focus.and_then(|path| tallies.get_key_value(path))
+                && place.1.inside
+                && shown.insert(*place.0)
+            {
+                children.push(place);
+                children.sort_by(busiest);
+                beyond = true;
+            }
+        } else {
+            let mut drawn: HashMap<&str, usize> = HashMap::new();
+            for framed in [true, false] {
+                let full = if framed {
+                    limits.spread.saturating_sub(limits.own)
+                } else {
+                    limits.spread
+                };
+                for (key, _) in &children {
+                    let folder = holder(key);
+                    if (folder != scope) != framed || shown.len() >= full {
+                        continue;
+                    }
+                    let count = drawn.entry(folder).or_default();
+                    if *count < if framed { limits.held } else { limits.shown } {
+                        *count += 1;
+                        shown.insert(**key);
+                    }
                 }
             }
-        }
-        children.retain(|(key, _)| shown.contains(**key));
-        // The selected place is drawn whatever the limits and the filter
-        // say: it is selected to be seen, and a search of the project leads
-        // to places that are not among the most linked of their folder.
-        let mut beyond = false;
-        if let Some(place) = focus.and_then(|path| tallies.get_key_value(path))
-            && place.1.inside
-            && shown.insert(*place.0)
-        {
-            children.push(place);
-            children.sort_by(busiest);
-            beyond = true;
+            children.retain(|(key, _)| shown.contains(**key));
+            // The selected place is drawn whatever the limits and the filter
+            // say: it is selected to be seen, and a search of the project leads
+            // to places that are not among the most linked of their folder.
+            if let Some(place) = focus.and_then(|path| tallies.get_key_value(path))
+                && place.1.inside
+                && shown.insert(*place.0)
+            {
+                children.push(place);
+                children.sort_by(busiest);
+                beyond = true;
+            }
         }
         // The folders that are spread out and hold something drawn, each
         // with how many places it holds and how many of them are drawn.
@@ -1599,6 +1785,15 @@ impl Index {
                 self.edge_json(source, target, edge)
             }).collect::<Vec<_>>(),
             "focus": focus,
+            "paging": {
+                "offset": offset,
+                "limit": limit,
+                "total": matching,
+                "returned": children.len(),
+                "has_more": offset + children.len() < matching,
+                "next_offset": (offset + children.len() < matching).then_some(offset + children.len()),
+            },
+            "depth": depth,
         });
         if let Some(ref backend) = self.backend {
             out["backend"] = json!(backend);
@@ -2495,6 +2690,14 @@ impl Index {
                 out[own].fill(true);
                 continue;
             }
+            let persisted_in_ir = self.backend.as_deref() == Some(crate::graph_ir::NATIVE_IR_TOOL)
+                || own.clone().any(|at| self.symbols[at].is_test);
+            if persisted_in_ir {
+                for at in own {
+                    out[at] = self.symbols[at].is_test;
+                }
+                continue;
+            }
             if !path.ends_with(".rs") || own.is_empty() {
                 continue;
             }
@@ -2609,6 +2812,7 @@ impl Index {
             kinds: self.kinds.clone(),
             unplaced: self.unplaced,
             backend: self.backend.clone(),
+            ir_db_path: self.ir_db_path.clone(),
         }
     }
 }
@@ -3059,6 +3263,7 @@ impl Index {
     /// The links of one place followed step by step, with `edited` giving
     /// what a chosen change did to one of its files, where that is known:
     /// among symbols it marks the ones the change touched.
+    /// `follow` with caller-provided edit flags and optional multi-hop `depth` + paging (`offset`, `limit`).
     #[allow(clippy::too_many_arguments)]
     pub fn follow_with(
         &self,
@@ -3070,6 +3275,26 @@ impl Index {
         edited: &dyn Fn(&str) -> Option<Edited>,
         focus: Option<&str>,
         certain: bool,
+    ) -> Option<Value> {
+        self.follow_with_depth(
+            project, root, out, into, changed, edited, focus, certain, None, 0, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn follow_with_depth(
+        &self,
+        project: &str,
+        root: &str,
+        out: &[String],
+        into: &[String],
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+        depth_limit: Option<usize>,
+        offset: usize,
+        limit: Option<usize>,
     ) -> Option<Value> {
         if let Some(Reach::Symbol(at)) = self.reach(root) {
             return Some(self.trace(project, at, out, into, changed, edited, focus, certain));
@@ -3141,16 +3366,26 @@ impl Index {
         let times = |list: &[String], place: &str| {
             list.iter().filter(|named| named.as_str() == place).count()
         };
+        let bfs_depth_cap = depth_limit.unwrap_or(0);
         // Places join in the order they are reached, the followed one first.
         let mut shown = vec![root];
+        let mut hops: HashMap<&str, usize> = HashMap::from([(root, 0)]);
         let mut seen = HashSet::from([root]);
         let mut full = false;
         let mut at = 0;
         while at < shown.len() {
             let place = shown[at];
+            let hop = hops.get(place).copied().unwrap_or(0);
             at += 1;
             for (list, side) in [(out, &uses), (into, &users)] {
-                let mut left = STEP * times(list, place);
+                let explicit = times(list, place);
+                let mut left = if explicit > 0 {
+                    STEP * explicit
+                } else if hop < bfs_depth_cap {
+                    STEP
+                } else {
+                    0
+                };
                 for (other, _) in side.get(place).into_iter().flatten() {
                     if left == 0 {
                         break;
@@ -3163,17 +3398,24 @@ impl Index {
                         break;
                     }
                     seen.insert(*other);
+                    hops.insert(*other, hop + 1);
                     shown.push(*other);
                     left -= 1;
                 }
             }
+        }
+        let total_shown = shown.len();
+        if offset > 0 || limit.is_some() {
+            let cap = limit.unwrap_or(FOLLOWED).max(1);
+            shown = shown.into_iter().skip(offset).take(cap).collect();
+            seen = shown.iter().copied().collect();
         }
         // A link between two places drawn is drawn where one of its sides
         // is unfolded: the uses of its user, or the users of what it uses.
         let linked = |source: &str, target: &str| {
             seen.contains(source)
                 && seen.contains(target)
-                && (times(out, source) > 0 || times(into, target) > 0)
+                && (times(out, source) > 0 || times(into, target) > 0 || bfs_depth_cap > 0)
         };
         let among = flows
             .keys()
@@ -3294,8 +3536,8 @@ impl Index {
                 "full": full,
                 "aside": among - between,
             },
-            "children": shown.len(),
-            "matching": shown.len(),
+            "children": total_shown,
+            "matching": total_shown,
             "nodes": shown.iter().map(|place| node(place)).collect::<Vec<_>>(),
             "between": between,
             "backbone": false,
@@ -3303,6 +3545,15 @@ impl Index {
                 self.edge_json(source, target, edge)
             }).collect::<Vec<_>>(),
             "focus": focus,
+            "paging": {
+                "offset": offset,
+                "limit": limit,
+                "total": total_shown,
+                "returned": shown.len(),
+                "has_more": offset + shown.len() < total_shown,
+                "next_offset": (offset + shown.len() < total_shown).then_some(offset + shown.len()),
+            },
+            "depth": depth_limit,
         }))
     }
 }
@@ -6804,8 +7055,20 @@ type Kept = (String, u64, Option<SystemTime>, Arc<Index>);
 
 #[derive(Default)]
 struct MapsCache {
-    kept: Vec<Kept>,
+    kept_live: Vec<Kept>,
+    kept_revisions: Vec<Kept>,
+    kept_live_ir: HashMap<String, (u64, Arc<Index>)>,
     inflight: HashMap<String, Arc<InFlight>>,
+}
+
+impl MapsCache {
+    fn pool_mut(&mut self, key: &str) -> (&mut Vec<Kept>, usize) {
+        if key.contains('@') {
+            (&mut self.kept_revisions, KEPT_REVISIONS)
+        } else {
+            (&mut self.kept_live, KEPT_LIVE)
+        }
+    }
 }
 
 struct InFlight {
@@ -6846,19 +7109,14 @@ impl InFlightGuard<'_> {
             if still_current {
                 cache.inflight.remove(self.project);
                 if let Ok(ref index) = result {
-                    if let Some(at) = cache
-                        .kept
-                        .iter()
-                        .position(|(name, ..)| name == self.project)
-                    {
-                        cache.kept.remove(at);
+                    let (pool, cap) = cache.pool_mut(self.project);
+                    if let Some(at) = pool.iter().position(|(name, ..)| name == self.project) {
+                        pool.remove(at);
                     }
-                    if cache.kept.len() >= KEPT {
-                        cache.kept.remove(0);
+                    if pool.len() >= cap {
+                        pool.remove(0);
                     }
-                    cache
-                        .kept
-                        .push((self.project.to_owned(), len, changed, index.clone()));
+                    pool.push((self.project.to_owned(), len, changed, index.clone()));
                 }
             }
         }
@@ -6964,18 +7222,22 @@ impl Maps {
                     .cache
                     .lock()
                     .map_err(|_| HarnessError::unavailable("The code graph map is unavailable."))?;
-                if let Some(at) = cache
-                    .kept
-                    .iter()
-                    .position(|(name, kept_len, kept_changed, _)| {
+                let (hit_index, wait_slot) = {
+                    let (pool, _) = cache.pool_mut(project);
+                    if let Some(at) = pool.iter().position(|(name, kept_len, kept_changed, _)| {
                         name == project && *kept_len == len && *kept_changed == changed
-                    })
-                {
-                    let entry = cache.kept.remove(at);
-                    let index = entry.3.clone();
-                    cache.kept.push(entry);
+                    }) {
+                        let entry = pool.remove(at);
+                        let index = entry.3.clone();
+                        pool.push(entry);
+                        (Some(index), None)
+                    } else {
+                        (None, cache.inflight.get(project).cloned())
+                    }
+                };
+                if let Some(index) = hit_index {
                     Action::Hit(index)
-                } else if let Some(existing) = cache.inflight.get(project).cloned() {
+                } else if let Some(existing) = wait_slot {
                     Action::Wait(existing)
                 } else {
                     let slot = Arc::new(InFlight {
@@ -7026,6 +7288,38 @@ impl Maps {
         }
     }
 
+    /// Stores an in-memory `Index` built directly from SQLite IR without requiring `live/graph.json`.
+    pub(crate) fn put_live_ir(&self, project: &str, ir_revision: u64, index: Arc<Index>) {
+        if let Ok(mut cache) = self.cache.lock() {
+            if cache.kept_live_ir.len() >= KEPT_LIVE
+                && !cache.kept_live_ir.contains_key(project)
+                && let Some(oldest) = cache.kept_live_ir.keys().next().cloned()
+            {
+                cache.kept_live_ir.remove(&oldest);
+            }
+            cache
+                .kept_live_ir
+                .insert(project.to_owned(), (ir_revision, index));
+        }
+    }
+
+    /// Returns a live in-memory `Index` built from SQLite IR when present.
+    pub(crate) fn live_ir(&self, project: &str) -> Option<(u64, Arc<Index>)> {
+        self.cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.kept_live_ir.get(project).cloned())
+    }
+
+    /// Drops ONLY live cached entries for `project`, preserving immutable `project@commit` entries.
+    pub(crate) fn forget_live(&self, project: &str) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.kept_live.retain(|(name, ..)| name != project);
+            cache.kept_live_ir.remove(project);
+            cache.inflight.retain(|name, _| name != project);
+        }
+    }
+
     /// Drops what was read for a project: its own graph and, under
     /// `project@commit`, the graphs of its other commits.
     pub fn forget(&self, project: &str) {
@@ -7036,7 +7330,9 @@ impl Maps {
                         .strip_prefix(project)
                         .is_some_and(|rest| rest.starts_with('@'))
             };
-            cache.kept.retain(|(name, ..)| !matches(name));
+            cache.kept_live.retain(|(name, ..)| !matches(name));
+            cache.kept_revisions.retain(|(name, ..)| !matches(name));
+            cache.kept_live_ir.retain(|name, _| !matches(name));
             cache.inflight.retain(|name, _| !matches(name));
         }
     }
@@ -14192,5 +14488,91 @@ where
         attach_ir_metadata(&mut view, idx.backend(), Some(&summary));
         assert_eq!(view["ir_summary"]["files"], 1);
         assert!(view["ir_summary"]["symbols"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn maps_cache_preserves_commit_entries_on_forget_live_and_pages_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let make_graph = |name: &str, nodes: Vec<Value>| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, json!({"nodes": nodes, "links": []}).to_string()).unwrap();
+            p
+        };
+        let live_path = make_graph(
+            "live.json",
+            vec![json!({"id": "a", "label": "a", "source_file": "src/a.rs"})],
+        );
+        let rev_path = make_graph(
+            "rev.json",
+            vec![json!({"id": "b", "label": "b", "source_file": "src/b.rs"})],
+        );
+
+        let maps = Maps::default();
+        let _ = maps.index("proj", &live_path, dir.path()).unwrap();
+        let rev_idx = maps.index("proj@abc123", &rev_path, dir.path()).unwrap();
+        maps.forget_live("proj");
+
+        // Revision pool survives `forget_live("proj")`.
+        let rev_hit = maps
+            .load_with("proj@abc123", &rev_path, |_| {
+                panic!("commit entry should survive forget_live")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&rev_idx, &rev_hit));
+
+        // Direct SQLite IR construction builds Index with persisted `is_test` without JSON.
+        let ir = crate::graph_ir::GraphIrStore::open(&dir.path().join("state"), "direct").unwrap();
+        let proj_dir = dir.path().join("repo");
+        std::fs::create_dir_all(proj_dir.join("src")).unwrap();
+        std::fs::write(
+            proj_dir.join("src/a.rs"),
+            "pub fn f() {}\n#[cfg(test)]\nmod t {\n    #[test]\n    fn t1() {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(proj_dir.join("src/b.rs"), "pub fn g() {}\n").unwrap();
+        std::fs::write(proj_dir.join("src/c.rs"), "pub fn h() {}\n").unwrap();
+        ir.sync_workspace(&proj_dir).unwrap();
+        let (ir_nodes, ir_links, ..) = ir.export_ir_graph_elements().unwrap();
+        let idx = Index::from_ir_parts(
+            &proj_dir,
+            Some(ir.db_path().to_path_buf()),
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            ir_nodes,
+            ir_links,
+        )
+        .unwrap();
+        assert_eq!(idx.without_tests().left_out().1, 1);
+
+        let page1 = idx.view_with_whole_options(
+            "direct",
+            "src",
+            &[],
+            None,
+            false,
+            "",
+            false,
+            0,
+            Some(2),
+            Some(2),
+        );
+        assert_eq!(page1["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(page1["paging"]["has_more"], json!(true));
+        assert_eq!(page1["paging"]["next_offset"], json!(2));
+        assert_eq!(page1["depth"], json!(2));
+
+        let page2 = idx.view_with_whole_options(
+            "direct",
+            "src",
+            &[],
+            None,
+            false,
+            "",
+            false,
+            2,
+            Some(2),
+            Some(2),
+        );
+        assert_eq!(page2["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(page2["paging"]["has_more"], json!(false));
     }
 }

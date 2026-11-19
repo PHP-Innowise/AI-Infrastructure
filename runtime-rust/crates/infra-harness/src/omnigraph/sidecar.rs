@@ -992,6 +992,11 @@ impl OmnigraphManager {
         let params = json!({ "project_id": project_id });
         let branch_ref = target_branch.as_deref();
         let snap_ref = snapshot_commit.as_deref();
+        let kind_filter = clean_opt(kind).map(str::to_ascii_lowercase);
+        let q_filter = clean_opt(q).map(str::to_ascii_lowercase);
+        let sid_filter = clean_opt(session_id);
+        let need_session_filter_edges = sid_filter.is_some();
+        let need_q_filter_edges = q_filter.is_some();
 
         let commits_fut = fetch_commits_with_digests(&client, &self.commit_cache, &active_branch);
         let atoms_fut = run_recent_atoms_query(
@@ -1008,97 +1013,93 @@ impl OmnigraphManager {
             branch_ref,
             snap_ref,
         );
-        let files_fut = query_edges_safe(
-            &client,
-            GQ_LIST_FILES,
-            "list_files",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let symbols_fut = query_edges_safe(
-            &client,
-            GQ_LIST_SYMBOLS,
-            "list_symbols",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let pub_fut = query_edges_safe(
-            &client,
-            GQ_LIST_PUBLISHED_EDGES,
-            "list_published_edges",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let con_fut = query_edges_safe(
-            &client,
-            GQ_LIST_CONSUMED_EDGES,
-            "list_consumed_edges",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let file_edges_fut = query_edges_safe(
-            &client,
-            GQ_LIST_FILE_EDGES,
-            "list_file_edges",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let rel_fut = query_edges_safe(
-            &client,
-            GQ_LIST_ATOM_RELATIONS,
-            "list_atom_relations",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let follow_fut = query_edges_safe(
-            &client,
-            GQ_LIST_SESSION_FOLLOWS,
-            "list_session_follows",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
-        let symbol_edges_fut = query_edges_safe(
-            &client,
-            GQ_LIST_SYMBOL_EDGES,
-            "list_symbol_edges",
-            &params,
-            branch_ref,
-            snap_ref,
-        );
+        let pub_stage1_fut = async {
+            if need_session_filter_edges {
+                Some(
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_PUBLISHED_EDGES,
+                        "list_published_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        };
+        let con_stage1_fut = async {
+            if need_session_filter_edges {
+                Some(
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_CONSUMED_EDGES,
+                        "list_consumed_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        };
+        let file_edges_stage1_fut = async {
+            if need_q_filter_edges {
+                Some(
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_FILE_EDGES,
+                        "list_file_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        };
+        let symbol_edges_stage1_fut = async {
+            if need_q_filter_edges {
+                Some(
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_SYMBOL_EDGES,
+                        "list_symbol_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        };
 
         let (
             branch_res,
             (commits_resp, commit_digests),
             atoms_res,
             session_rows,
-            file_rows,
-            symbol_rows,
-            pub_edges,
-            con_edges,
-            file_edges,
-            rel_edges,
-            follow_edges,
-            symbol_edge_rows,
+            pub_edges_stage1,
+            con_edges_stage1,
+            file_edges_stage1,
+            symbol_edges_stage1,
         ) = tokio::join!(
             client.list_branches(true),
             commits_fut,
             atoms_fut,
             sessions_fut,
-            files_fut,
-            symbols_fut,
-            pub_fut,
-            con_fut,
-            file_edges_fut,
-            rel_fut,
-            follow_fut,
-            symbol_edges_fut,
+            pub_stage1_fut,
+            con_stage1_fut,
+            file_edges_stage1_fut,
+            symbol_edges_stage1_fut,
         );
 
         let Ok(branch_list) = branch_res else {
@@ -1142,36 +1143,22 @@ impl OmnigraphManager {
             (atoms_res.rows, false)
         };
 
-        let mut files_by_atom: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for edge in &file_edges {
-            if let (Some(src), Some(dst)) =
-                (str_field(edge, "source_id"), str_field(edge, "target_id"))
-            {
-                let entry = files_by_atom.entry(src).or_default();
-                if !entry.contains(&dst) {
-                    entry.push(dst);
-                }
-            }
-        }
-        let mut symbols_by_atom_all: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for edge in &symbol_edge_rows {
-            if let (Some(src), Some(dst)) =
-                (str_field(edge, "source_id"), str_field(edge, "target_id"))
-            {
-                let entry = symbols_by_atom_all.entry(src).or_default();
-                if !entry.contains(&dst) {
-                    entry.push(dst);
-                }
-            }
-        }
-
-        let kind_filter = clean_opt(kind).map(str::to_ascii_lowercase);
-        let q_filter = clean_opt(q).map(str::to_ascii_lowercase);
-        let sid_filter = clean_opt(session_id);
+        let mut files_by_atom = file_edges_stage1
+            .as_deref()
+            .map(|edges| group_edge_targets_by_source(edges, None))
+            .unwrap_or_default();
+        let mut symbols_by_atom_all = symbol_edges_stage1
+            .as_deref()
+            .map(|edges| group_edge_targets_by_source(edges, None))
+            .unwrap_or_default();
 
         let mut session_linked_atoms = BTreeSet::new();
         if let Some(sid) = sid_filter {
-            for e in pub_edges.iter().chain(con_edges.iter()) {
+            for e in pub_edges_stage1
+                .iter()
+                .flatten()
+                .chain(con_edges_stage1.iter().flatten())
+            {
                 if str_field(e, "target_id").as_deref() == Some(sid)
                     && let Some(aid) = str_field(e, "source_id")
                 {
@@ -1184,14 +1171,18 @@ impl OmnigraphManager {
         for row in &raw_atom_rows {
             let mut atom = normalize_atom_row(row);
             let aid = str_field(&atom, "atom_id").unwrap_or_default();
-            atom["files"] = files_by_atom
-                .get(&aid)
-                .map(|files| json!(files))
-                .unwrap_or_else(|| json!([]));
-            atom["symbols"] = symbols_by_atom_all
-                .get(&aid)
-                .map(|syms| json!(syms))
-                .unwrap_or_else(|| json!([]));
+            if file_edges_stage1.is_some() {
+                atom["files"] = files_by_atom
+                    .get(&aid)
+                    .map(|files| json!(files))
+                    .unwrap_or_else(|| json!([]));
+            }
+            if symbol_edges_stage1.is_some() {
+                atom["symbols"] = symbols_by_atom_all
+                    .get(&aid)
+                    .map(|syms| json!(syms))
+                    .unwrap_or_else(|| json!([]));
+            }
             if let Some(ref kf) = kind_filter
                 && atom["kind"]
                     .as_str()
@@ -1218,7 +1209,7 @@ impl OmnigraphManager {
         let total_atoms = filtered_atoms.len();
         let page_start = effective_offset.min(total_atoms);
         let page_end = page_start.saturating_add(effective_limit).min(total_atoms);
-        let atoms = filtered_atoms[page_start..page_end].to_vec();
+        let mut atoms = filtered_atoms[page_start..page_end].to_vec();
         let kept_atom_ids: BTreeSet<String> = atoms
             .iter()
             .filter_map(|atom| str_field(atom, "atom_id"))
@@ -1227,31 +1218,245 @@ impl OmnigraphManager {
         let truncated = has_more || atoms.len() < total_atoms || backend_capped;
         let next_cursor = has_more.then(|| page_end.to_string());
 
-        let sessions: Vec<Value> = session_rows
-            .iter()
-            .map(|row| {
-                let mut obj = normalize_session_row(row);
-                if let Some(store) = &self.store
-                    && let Some(sid) = str_field(&obj, "session_id")
-                    && let Ok(sess) = store.get(&sid)
+        let has_filters = kind_filter.is_some() || q_filter.is_some() || sid_filter.is_some();
+        let is_paginated_subset = page_start > 0 || has_more;
+        let need_unlinked_view = !has_filters && !is_paginated_subset;
+        let allow_symbol_q_match = kind_filter.is_none() && sid_filter.is_none();
+        let need_edges_for_kept = !kept_atom_ids.is_empty();
+        let need_files_query = need_edges_for_kept
+            || need_unlinked_view
+            || (allow_symbol_q_match && q_filter.is_some());
+        let need_symbols_query = need_unlinked_view || (allow_symbol_q_match && q_filter.is_some());
+        let need_follows_query = !session_rows.is_empty();
+
+        let (
+            pub_edges_stage2,
+            con_edges_stage2,
+            file_edges_stage2,
+            symbol_edges_stage2,
+            rel_edges,
+            follow_edges,
+            file_rows,
+            symbol_rows,
+        ) = tokio::join!(
+            async {
+                if pub_edges_stage1.is_none() && need_edges_for_kept {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_PUBLISHED_EDGES,
+                        "list_published_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if con_edges_stage1.is_none() && need_edges_for_kept {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_CONSUMED_EDGES,
+                        "list_consumed_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if file_edges_stage1.is_none() && need_edges_for_kept {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_FILE_EDGES,
+                        "list_file_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if symbol_edges_stage1.is_none() && need_edges_for_kept {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_SYMBOL_EDGES,
+                        "list_symbol_edges",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if need_edges_for_kept {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_ATOM_RELATIONS,
+                        "list_atom_relations",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if need_follows_query {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_SESSION_FOLLOWS,
+                        "list_session_follows",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if need_files_query {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_FILES,
+                        "list_files",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+            async {
+                if need_symbols_query {
+                    query_edges_safe(
+                        &client,
+                        GQ_LIST_SYMBOLS,
+                        "list_symbols",
+                        &params,
+                        branch_ref,
+                        snap_ref,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                }
+            },
+        );
+
+        let pub_edges = pub_edges_stage1.unwrap_or(pub_edges_stage2);
+        let con_edges = con_edges_stage1.unwrap_or(con_edges_stage2);
+        let file_edges_fetched = file_edges_stage1.is_none();
+        let symbol_edges_fetched = symbol_edges_stage1.is_none();
+        let file_edges = file_edges_stage1.unwrap_or(file_edges_stage2);
+        let symbol_edge_rows = symbol_edges_stage1.unwrap_or(symbol_edges_stage2);
+
+        if file_edges_fetched || symbol_edges_fetched {
+            if file_edges_fetched {
+                files_by_atom = group_edge_targets_by_source(&file_edges, Some(&kept_atom_ids));
+            }
+            if symbol_edges_fetched {
+                symbols_by_atom_all =
+                    group_edge_targets_by_source(&symbol_edge_rows, Some(&kept_atom_ids));
+            }
+            for atom in &mut atoms {
+                let aid = str_field(atom, "atom_id").unwrap_or_default();
+                if file_edges_fetched {
+                    atom["files"] = files_by_atom
+                        .get(&aid)
+                        .map(|files| json!(files))
+                        .unwrap_or_else(|| json!([]));
+                }
+                if symbol_edges_fetched {
+                    atom["symbols"] = symbols_by_atom_all
+                        .get(&aid)
+                        .map(|syms| json!(syms))
+                        .unwrap_or_else(|| json!([]));
+                }
+            }
+        }
+
+        let mut kept_session_ids_filter: Option<BTreeSet<String>> = sid_filter.map(|sid| {
+            let mut keep = BTreeSet::new();
+            keep.insert(sid.to_owned());
+            for atom in &atoms {
+                if let Some(author_sid) = str_field(atom, "source_session_id") {
+                    keep.insert(author_sid);
+                }
+            }
+            for e in pub_edges.iter().chain(con_edges.iter()) {
+                if let (Some(src), Some(dst)) =
+                    (str_field(e, "source_id"), str_field(e, "target_id"))
+                    && kept_atom_ids.contains(&src)
                 {
-                    if let Some(space) = sess["omnigraph"]["shared_space"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                    {
+                    keep.insert(dst);
+                }
+            }
+            for e in &follow_edges {
+                if let (Some(src), Some(dst)) =
+                    (str_field(e, "source_id"), str_field(e, "target_id"))
+                    && (src == sid || dst == sid)
+                {
+                    keep.insert(src);
+                    keep.insert(dst);
+                }
+            }
+            keep
+        });
+        let filtered_sessions: Vec<Value> = session_rows
+            .iter()
+            .filter(|row| {
+                kept_session_ids_filter.as_mut().is_none_or(|keep| {
+                    str_field(row, "session_id").is_some_and(|sid| keep.contains(&sid))
+                })
+            })
+            .map(normalize_session_row)
+            .collect();
+        let session_meta_by_id = self
+            .store
+            .as_ref()
+            .map(|store| {
+                let unique_sids: BTreeSet<String> = filtered_sessions
+                    .iter()
+                    .filter_map(|obj| str_field(obj, "session_id"))
+                    .collect();
+                load_session_omnigraph_metadata_batch(store, &unique_sids)
+            })
+            .unwrap_or_default();
+        let sessions: Vec<Value> = filtered_sessions
+            .into_iter()
+            .map(|mut obj| {
+                if let Some(sid) = str_field(&obj, "session_id")
+                    && let Some(og) = session_meta_by_id.get(&sid)
+                {
+                    if let Some(space) = og["shared_space"].as_str().filter(|s| !s.is_empty()) {
                         obj["shared_space"] = json!(space);
                     }
-                    if sess["omnigraph"]["linked_session_ids"].is_array() {
-                        obj["linked_session_ids"] = sess["omnigraph"]["linked_session_ids"].clone();
+                    if og["linked_session_ids"].is_array() {
+                        obj["linked_session_ids"] = og["linked_session_ids"].clone();
                     }
                 }
                 obj
             })
             .collect();
-        let files: Vec<Value> = file_rows.iter().map(normalize_file_row).collect();
 
-        let has_filters = kind_filter.is_some() || q_filter.is_some() || sid_filter.is_some();
-        let is_paginated_subset = page_start > 0 || has_more;
         let (symbols, symbol_edges) = build_symbol_graph_entries(
             project_id,
             &symbol_rows,
@@ -1262,9 +1467,45 @@ impl OmnigraphManager {
             } else {
                 None
             },
-            !has_filters && !is_paginated_subset,
-            kind_filter.is_none() && sid_filter.is_none(),
+            need_unlinked_view,
+            allow_symbol_q_match,
         );
+
+        let kept_file_paths: BTreeSet<String> = if need_unlinked_view {
+            BTreeSet::new()
+        } else {
+            let mut paths = BTreeSet::new();
+            for atom in &atoms {
+                for f in atom["files"].as_array().into_iter().flatten() {
+                    if let Some(p) = f.as_str().filter(|p| !p.is_empty()) {
+                        paths.insert(p.to_owned());
+                    }
+                }
+            }
+            for sym in &symbols {
+                if let Some(p) = sym["file_path"].as_str().filter(|p| !p.is_empty()) {
+                    paths.insert(p.to_owned());
+                }
+            }
+            paths
+        };
+        let files: Vec<Value> = file_rows
+            .iter()
+            .filter(|row| {
+                if need_unlinked_view {
+                    return true;
+                }
+                let Some(path) = str_field(row, "path") else {
+                    return false;
+                };
+                kept_file_paths.contains(&path)
+                    || (allow_symbol_q_match
+                        && q_filter
+                            .as_deref()
+                            .is_some_and(|qf| path.to_ascii_lowercase().contains(qf)))
+            })
+            .map(normalize_file_row)
+            .collect();
 
         let mut edges = build_graph_edges(
             &pub_edges,
@@ -6396,6 +6637,60 @@ fn symbol_matches_query(symbol: &Value, q_lower: &str) -> bool {
     false
 }
 
+fn group_edge_targets_by_source(
+    edges: &[Value],
+    kept_sources: Option<&BTreeSet<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for edge in edges {
+        if let (Some(src), Some(dst)) = (str_field(edge, "source_id"), str_field(edge, "target_id"))
+            && kept_sources.is_none_or(|kept| kept.contains(&src))
+        {
+            let entry = grouped.entry(src).or_default();
+            if !entry.contains(&dst) {
+                entry.push(dst);
+            }
+        }
+    }
+    grouped
+}
+
+fn load_session_omnigraph_metadata_batch(
+    store: &SessionStore,
+    session_ids: &BTreeSet<String>,
+) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    if session_ids.is_empty() {
+        return out;
+    }
+    let Ok(db) = store.connection() else {
+        return out;
+    };
+    let ids: Vec<&str> = session_ids.iter().map(String::as_str).collect();
+    for chunk in ids.chunks(200) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, omnigraph FROM sessions WHERE id IN ({placeholders}) AND omnigraph IS NOT NULL"
+        );
+        let Ok(mut stmt) = db.prepare(&sql) else {
+            continue;
+        };
+        let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            continue;
+        };
+        for row in rows.flatten() {
+            if let Ok(parsed) = crate::strict_json::parse(row.1.as_bytes(), 16 * 1024 * 1024) {
+                out.insert(row.0, parsed);
+            }
+        }
+    }
+    out
+}
+
 fn build_symbol_graph_entries(
     project_id: &str,
     symbol_rows: &[Value],
@@ -6461,6 +6756,11 @@ fn build_symbol_graph_entries(
         let (Some(src), Some(fqn)) = (str_field(e, "source_id"), str_field(e, "target_id")) else {
             continue;
         };
+        let keep_src = kept_atom_ids.contains(&src);
+        if !keep_src && !(include_unlinked_symbols || (allow_symbol_q_match && q_filter.is_some()))
+        {
+            continue;
+        }
         let file_path = str_field(e, "file_path")
             .or_else(|| str_field(e, "path"))
             .unwrap_or_default();
@@ -6475,7 +6775,7 @@ fn build_symbol_graph_entries(
             project_id.to_string(),
         );
 
-        if !kept_atom_ids.contains(&src) || !seen_edges.insert((src.clone(), fqn.clone())) {
+        if !keep_src || !seen_edges.insert((src.clone(), fqn.clone())) {
             continue;
         }
         mentions_by_symbol
@@ -6591,7 +6891,8 @@ fn build_graph_edges(
     }
     for e in rel_edges {
         if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
-            && (kept_atom_ids.contains(&src) || kept_atom_ids.contains(&dst))
+            && kept_atom_ids.contains(&src)
+            && kept_atom_ids.contains(&dst)
         {
             let rel = e["relation"].as_str().unwrap_or("relates_to");
             edges.push(json!({
