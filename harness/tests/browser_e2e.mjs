@@ -1901,13 +1901,61 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     await driver.waitFor(
       (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true'
         && document.getElementById('run-view')?.getAttribute('data-open') === 'true',
-      'switch back to primary session_id with #run-view open before /resume and #session-summary checks',
+      'switch back to primary session_id with #run-view open before 1280x800 #run-detailed checks',
       10_000,
       mainSel,
     );
   }
 
-  // Responsive 761-920px breakpoint check (840x900) + /resume sidebar inert & focus
+  // 1. Resize 1280x800 -> check #run-detailed + #session-settings-toggle unclipped while session_id is still running
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await driver.waitFor(() => {
+    const toggle = document.getElementById('menu-toggle');
+    return Boolean(toggle && window.innerWidth === 1280 && getComputedStyle(toggle).display === 'none');
+  }, '1280x800 desktop layout before #run-detailed check');
+
+  const wasDetailedBeforeDesktopCheck = await driver.callFn(() => document.getElementById('run-card')?.getAttribute('data-detailed') === 'true');
+  if (!wasDetailedBeforeDesktopCheck) {
+    await driver.click('#run-detailed');
+  }
+  await waitForRunPanelDetailedSettled(driver);
+  await assertSessionSettingsToggleUnclipped(driver, 'Suite 5 (1280x800) with #run-detailed open');
+  if (!wasDetailedBeforeDesktopCheck) {
+    await driver.click('#run-calm');
+  }
+
+  // 2. Reopen #approvals-drawer and resolve perm-e2e-1 via Allow (completes session_id so /resume intercepts locally)
+  await driver.click('#approvals-queue-toggle');
+  await driver.waitFor(
+    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
+    '#approvals-drawer reopened for Allow resolution',
+  );
+  const sseBeforeAllow = driver.sseMessages.length;
+  await driver.click('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]');
+  await driver.waitUntil(
+    () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
+    'SSE delivers permission resolution event after Allow click',
+    15_000,
+  );
+  await driver.waitFor(() => {
+    const cnt = document.getElementById('approvals-queue-count');
+    const eventsText = document.getElementById('events')?.textContent || '';
+    const cleared = !cnt || cnt.hidden || cnt.textContent.trim() === '0';
+    const runClosed = document.getElementById('run-view')?.getAttribute('data-open') === 'false';
+    return cleared && eventsText.includes('Permission request handled') && runClosed;
+  }, 'approvals badge clears, #events shows Permission request handled, and session_id completes', 15_000);
+  const drawerStillOpen = await driver.callFn(() => document.getElementById('approvals-drawer')?.hidden === false);
+  if (drawerStillOpen) {
+    await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+    await driver.waitFor(() => document.getElementById('approvals-drawer')?.hidden === true, '#approvals-drawer closed after Allow');
+  }
+
+  // 3. Responsive 761-920px breakpoint check (840x900) + /resume sidebar inert & focus
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 840,
     height: 900,
@@ -1952,7 +2000,7 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   await driver.clickAt(resumeScrim.x, resumeScrim.y);
   await driver.waitFor(() => !document.getElementById('sidebar')?.classList.contains('open') && !document.getElementById('main')?.hasAttribute('inert'), 'close /resume drawer via #scrim');
 
-  // Mobile viewport 390x844 & #menu-toggle -> #sidebar.open + mobile Workspace tab without horizontal overflow
+  // 4. Mobile viewport 390x844 & #menu-toggle -> #sidebar.open + mobile Workspace tab without horizontal overflow
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 390,
     height: 844,
@@ -1983,7 +2031,7 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     `Horizontal overflow detected at 390x844: scrollWidth=${mobileDrawer.scrollWidth}, innerWidth=${mobileDrawer.innerWidth}`,
   );
 
-  // Close mobile #sidebar via exposed #scrim (to the right of the 265px drawer), test Workspace mobile tab, then restore 1440x900
+  // Close mobile #sidebar via exposed #scrim (to the right of the 265px drawer), test Workspace mobile tab
   const scrimPt = await driver.callFn(() => {
     const scrim = document.getElementById('scrim');
     if (!scrim) return null;
@@ -2021,6 +2069,7 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   await driver.click('#session-mobile-tab-chat');
   await driver.waitFor(() => document.getElementById('session-mobile-tab-chat')?.getAttribute('aria-selected') === 'true', 'restore mobile Chat tab');
 
+  // 5. Restore 1280x800 -> verify !sidebarOpen, !inert, and #theme-* click inside #sidebar
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 1280,
     height: 800,
@@ -2062,42 +2111,6 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     3_000,
     themeBeforeSidebarClick,
   );
-
-  // Verify #session-settings-toggle ("Next-turn settings") stays unclipped inside .configuration at 1280x800 with #run-detailed open
-  const wasDetailedBeforeDesktopCheck = await driver.callFn(() => document.getElementById('run-card')?.getAttribute('data-detailed') === 'true');
-  if (!wasDetailedBeforeDesktopCheck) {
-    await driver.click('#run-detailed');
-  }
-  await waitForRunPanelDetailedSettled(driver);
-  await assertSessionSettingsToggleUnclipped(driver, 'Suite 5 (1280x800) with #run-detailed open');
-  if (!wasDetailedBeforeDesktopCheck) {
-    await driver.click('#run-calm');
-  }
-
-  // Reopen #approvals-drawer and resolve perm-e2e-1 via Allow after #run-detailed checks finish
-  await driver.click('#approvals-queue-toggle');
-  await driver.waitFor(
-    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
-    '#approvals-drawer reopened for Allow resolution',
-  );
-  const sseBeforeAllow = driver.sseMessages.length;
-  await driver.click('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]');
-  await driver.waitUntil(
-    () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
-    'SSE delivers permission resolution event after Allow click',
-    15_000,
-  );
-  await driver.waitFor(() => {
-    const cnt = document.getElementById('approvals-queue-count');
-    const eventsText = document.getElementById('events')?.textContent || '';
-    const cleared = !cnt || cnt.hidden || cnt.textContent.trim() === '0';
-    return cleared && eventsText.includes('Permission request handled');
-  }, 'approvals badge clears and #events shows Permission request handled', 15_000);
-  const drawerStillOpen = await driver.callFn(() => document.getElementById('approvals-drawer')?.hidden === false);
-  if (drawerStillOpen) {
-    await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
-    await driver.waitFor(() => document.getElementById('approvals-drawer')?.hidden === true, '#approvals-drawer closed after Allow');
-  }
 
   driver.assertNoErrors('Suite 5');
 }
