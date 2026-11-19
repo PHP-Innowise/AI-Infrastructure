@@ -1797,7 +1797,7 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     3_000,
   );
 
-  // Escape closes #approvals-drawer and clears inert, then reopen & Allow perm-e2e-1
+  // Escape closes #approvals-drawer and clears inert (Allow resolution runs after 1280x800 #run-detailed checks while session_id is active)
   await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
   await driver.waitFor(() => {
     const d = document.getElementById('approvals-drawer');
@@ -1805,30 +1805,6 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const sidebar = document.getElementById('sidebar');
     return d?.hidden === true && !main?.hasAttribute('inert') && !sidebar?.hasAttribute('inert');
   }, '#approvals-drawer closes on Escape and clears inert');
-
-  await driver.click('#approvals-queue-toggle');
-  await driver.waitFor(
-    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
-    '#approvals-drawer reopened for Allow resolution',
-  );
-  const sseBeforeAllow = driver.sseMessages.length;
-  await driver.click('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]');
-  await driver.waitUntil(
-    () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
-    'SSE delivers permission resolution event after Allow click',
-    15_000,
-  );
-  await driver.waitFor(() => {
-    const cnt = document.getElementById('approvals-queue-count');
-    const eventsText = document.getElementById('events')?.textContent || '';
-    const cleared = !cnt || cnt.hidden || cnt.textContent.trim() === '0';
-    return cleared && eventsText.includes('Permission request handled');
-  }, 'approvals badge clears and #events shows Permission request handled', 15_000);
-  const drawerStillOpen = await driver.callFn(() => document.getElementById('approvals-drawer')?.hidden === false);
-  if (drawerStillOpen) {
-    await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
-    await driver.waitFor(() => document.getElementById('approvals-drawer')?.hidden === true, '#approvals-drawer closed after Allow');
-  }
 
   // WCAG AA >=4.5:1 contrast on .composer textarea::placeholder & .skill-hint[aria-selected="true"] .skill-hint-argument (Light & Dark)
   // Switch to idle completed other_session_id so composer slash hints open (#skill-hints-panel suppresses while session is running)
@@ -1923,8 +1899,9 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   if (mainSel) {
     await driver.click(mainSel);
     await driver.waitFor(
-      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
-      'switch back to primary session_id before /resume and #session-summary checks',
+      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true'
+        && document.getElementById('run-view')?.getAttribute('data-open') === 'true',
+      'switch back to primary session_id with #run-view open before /resume and #session-summary checks',
       10_000,
       mainSel,
     );
@@ -2095,6 +2072,31 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   await assertSessionSettingsToggleUnclipped(driver, 'Suite 5 (1280x800) with #run-detailed open');
   if (!wasDetailedBeforeDesktopCheck) {
     await driver.click('#run-calm');
+  }
+
+  // Reopen #approvals-drawer and resolve perm-e2e-1 via Allow after #run-detailed checks finish
+  await driver.click('#approvals-queue-toggle');
+  await driver.waitFor(
+    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
+    '#approvals-drawer reopened for Allow resolution',
+  );
+  const sseBeforeAllow = driver.sseMessages.length;
+  await driver.click('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]');
+  await driver.waitUntil(
+    () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
+    'SSE delivers permission resolution event after Allow click',
+    15_000,
+  );
+  await driver.waitFor(() => {
+    const cnt = document.getElementById('approvals-queue-count');
+    const eventsText = document.getElementById('events')?.textContent || '';
+    const cleared = !cnt || cnt.hidden || cnt.textContent.trim() === '0';
+    return cleared && eventsText.includes('Permission request handled');
+  }, 'approvals badge clears and #events shows Permission request handled', 15_000);
+  const drawerStillOpen = await driver.callFn(() => document.getElementById('approvals-drawer')?.hidden === false);
+  if (drawerStillOpen) {
+    await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+    await driver.waitFor(() => document.getElementById('approvals-drawer')?.hidden === true, '#approvals-drawer closed after Allow');
   }
 
   driver.assertNoErrors('Suite 5');
