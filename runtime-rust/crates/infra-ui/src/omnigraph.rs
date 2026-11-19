@@ -1,6 +1,6 @@
 use crate::{api, dom, graph_viewport, model as m, omnigraph_canvas};
 use serde_json::{json, Value as V};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -2835,6 +2835,7 @@ fn apply_camera(cam: &OmnigraphCamera) {
             }
         }
     }
+    graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), None, true);
 }
 
 fn fit_camera() {
@@ -3446,6 +3447,9 @@ async fn refresh_graph() {
     );
     match api::scoped("omnigraph-graph", &path).await {
         Ok((epoch, graph)) if m::current("omnigraph-graph", epoch) => {
+            m::set("omnigraph-page-count", json!(1));
+            m::set("omnigraph-raw-positions", V::Null);
+            m::set("omnigraph-structure-digest", V::Null);
             m::set("omnigraph-graph", graph.clone());
             sync_branch_selectors(&graph);
             sync_session_selectors(&graph);
@@ -3478,6 +3482,8 @@ async fn load_more_graph() {
     );
     match api::scoped("omnigraph-graph", &path).await {
         Ok((epoch, page)) if m::current("omnigraph-graph", epoch) => {
+            let pages = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) + 1;
+            m::set("omnigraph-page-count", json!(pages));
             let merged = merge_graph_page(m::data("omnigraph-graph"), page);
             m::set("omnigraph-graph", merged.clone());
             sync_branch_selectors(&merged);
@@ -3940,26 +3946,269 @@ fn render_studio() {
     render_pulse();
 }
 
-fn render_constellation() {
-    let graph = m::data("omnigraph-graph");
-    if !graph.is_object() {
-        return;
-    }
+fn omni_pin_key() -> String {
     let st = ui_state();
+    graph_viewport::pin_storage_key("omnigraph", &current_project_id(), &m::text(&st, "branch"))
+}
+
+fn current_constellation_filter(
+    st: &V,
+    cam: &OmnigraphCamera,
+    paged_count: usize,
+) -> omnigraph_canvas::ConstellationFilter {
     let highlighted: BTreeSet<String> = m::array(&st["highlighted_ids"])
         .into_iter()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
-    let filter = omnigraph_canvas::ConstellationFilter {
-        query: m::text(&st, "query"),
-        kind: m::text(&st, "kind"),
-        branch: m::text(&st, "branch"),
+    let path_nodes: BTreeSet<String> = m::array(&st["path_nodes"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let path_edges: BTreeSet<(String, String)> = m::array(&st["path_edges"])
+        .into_iter()
+        .filter_map(|v| {
+            let arr = v.as_array()?;
+            Some((
+                arr.first()?.as_str()?.to_owned(),
+                arr.get(1)?.as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    let mut anchored_positions = BTreeMap::new();
+    if paged_count > 1 {
+        if let Some(obj) = m::data("omnigraph-raw-positions").as_object() {
+            for (k, v) in obj {
+                if let (Some(x), Some(y)) = (v[0].as_f64(), v[1].as_f64()) {
+                    anchored_positions.insert(k.clone(), (x, y));
+                }
+            }
+        }
+    }
+    let pinned_positions = graph_viewport::load_pins(&omni_pin_key());
+    let (vw, vh) = viewport_size();
+    let viewport_bounds = (cam.scale > 0.05).then(|| {
+        (
+            -cam.pan_x / cam.scale,
+            -cam.pan_y / cam.scale,
+            vw / cam.scale,
+            vh / cam.scale,
+        )
+    });
+    let isolate_active = m::yes(&st["isolate_active"]);
+    let isolate_depth = if isolate_active {
+        st["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3) as usize
+    } else {
+        0
+    };
+    let selected_id = st["selected_id"].as_str().map(str::to_owned);
+    let isolate_seed = st["isolate_seed"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| selected_id.clone());
+
+    omnigraph_canvas::ConstellationFilter {
+        query: m::text(st, "query"),
+        kind: m::text(st, "kind"),
+        branch: m::text(st, "branch"),
         show_files: st["show_files"].as_bool().unwrap_or(true),
         show_sessions: st["show_sessions"].as_bool().unwrap_or(true),
-        selected_id: st["selected_id"].as_str().map(str::to_owned),
+        selected_id,
         highlighted_ids: highlighted,
+        anchored_positions,
+        pinned_positions,
+        path_nodes,
+        path_edges,
+        isolate_seed,
+        isolate_depth,
+        viewport_bounds: Some(viewport_bounds.unwrap_or((0.0, 0.0, vw.max(800.0), vh.max(500.0)))),
+        paged_count,
+        focused_id: st["focused_id"].as_str().map(str::to_owned),
+    }
+}
+
+fn try_patch_constellation_selection_in_place(
+    filter: &omnigraph_canvas::ConstellationFilter,
+    node_edges: &[(usize, usize)],
+    node_ids: &[String],
+) -> bool {
+    let Some(canvas) = dom::get("omnigraph-canvas") else {
+        return false;
     };
+    if canvas
+        .query_selector(".omni-plane")
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return false;
+    }
+    let selected = filter.selected_id.as_deref();
+    let mut neighbors = BTreeSet::new();
+    if let Some(sel) = selected {
+        if let Some(sel_idx) = node_ids.iter().position(|id| id == sel) {
+            for &(u, v) in node_edges {
+                if u == sel_idx {
+                    if let Some(id) = node_ids.get(v) {
+                        neighbors.insert(id.as_str());
+                    }
+                } else if v == sel_idx {
+                    if let Some(id) = node_ids.get(u) {
+                        neighbors.insert(id.as_str());
+                    }
+                }
+            }
+        }
+    }
+    let has_sel = selected.is_some();
+    let has_hl = !filter.highlighted_ids.is_empty();
+    let has_path = !filter.path_nodes.is_empty();
+    let roving_target = filter
+        .focused_id
+        .as_deref()
+        .or(selected)
+        .or_else(|| node_ids.first().map(String::as_str));
+
+    if let Ok(nodes) = canvas.query_selector_all(".omni-node[data-node-id]") {
+        for i in 0..nodes.length() {
+            let Some(el) = nodes
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let id = el.get_attribute("data-node-id").unwrap_or_default();
+            let is_sel = selected == Some(id.as_str());
+            let is_nbr = !is_sel && neighbors.contains(id.as_str());
+            let is_hl = filter.highlighted_ids.contains(&id) || filter.path_nodes.contains(&id);
+            let is_dim = if has_path {
+                !filter.path_nodes.contains(&id)
+            } else if has_sel {
+                !is_sel && !is_nbr && !is_hl
+            } else if has_hl {
+                !is_hl
+            } else {
+                false
+            };
+            let b = |v: bool| if v { "true" } else { "false" };
+            let _ = el.set_attribute("data-selected", b(is_sel));
+            let _ = el.set_attribute("data-neighbor", b(is_nbr));
+            let _ = el.set_attribute("data-highlighted", b(is_hl));
+            let _ = el.set_attribute("data-dimmed", b(is_dim));
+            let _ = el.set_attribute("aria-pressed", b(is_sel));
+            let _ = el.set_attribute(
+                "tabindex",
+                if roving_target == Some(id.as_str()) {
+                    "0"
+                } else {
+                    "-1"
+                },
+            );
+        }
+    }
+    if let Ok(edges) = canvas.query_selector_all(".omni-edge[data-from][data-to]") {
+        for i in 0..edges.length() {
+            let Some(el) = edges
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let from = el.get_attribute("data-from").unwrap_or_default();
+            let to = el.get_attribute("data-to").unwrap_or_default();
+            let is_sel = selected.is_some_and(|s| from == s || to == s);
+            let is_path = filter.path_edges.contains(&(from.clone(), to.clone()))
+                || filter.path_edges.contains(&(to.clone(), from.clone()));
+            let is_hl =
+                filter.highlighted_ids.contains(&from) || filter.highlighted_ids.contains(&to);
+            let lit = is_path
+                || is_sel
+                || (filter.highlighted_ids.contains(&from) && filter.highlighted_ids.contains(&to));
+            let dim = if has_path {
+                !is_path
+            } else if has_sel {
+                !is_sel && !is_hl
+            } else if has_hl {
+                !is_hl
+            } else {
+                false
+            };
+            let b = |v: bool| if v { "true" } else { "false" };
+            let _ = el.set_attribute("data-selected", b(is_sel || is_path));
+            let _ = el.set_attribute("data-lit", b(lit));
+            let _ = el.set_attribute("data-dimmed", b(dim));
+            let _ = el.set_attribute("data-path", b(is_path));
+        }
+    }
+    true
+}
+
+fn render_constellation() {
+    let mut graph = m::data("omnigraph-graph");
+    if !graph.is_object() {
+        return;
+    }
+    let changes_doc = m::data("graph-changes");
+    let impact_doc = m::data("graph-impact");
+    omnigraph_canvas::inject_workspace_drift(
+        &mut graph,
+        changes_doc.is_object().then_some(&changes_doc),
+        impact_doc.is_object().then_some(&impact_doc),
+    );
+    let st = ui_state();
+    let paged_count = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) as usize;
     let mut cam = load_camera();
+    let filter = current_constellation_filter(&st, &cam, paged_count);
+    let has_pins = !filter.pinned_positions.is_empty();
+    dom::hidden("omni-reset-pins", !has_pins);
+    dom::attr(
+        "omni-isolate-toggle",
+        "aria-pressed",
+        if filter.isolate_depth > 0 {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    dom::hidden("omni-path-clear", filter.path_nodes.is_empty());
+
+    let new_digest = omnigraph_canvas::constellation_structure_digest(&graph, &filter);
+    let prev_digest = m::data("omnigraph-structure-digest").as_u64().unwrap_or(0);
+    let cached_edges: Vec<(usize, usize)> = m::array(&m::data("omnigraph-nav-edges"))
+        .into_iter()
+        .filter_map(|v| {
+            let a = v.as_array()?;
+            Some((a.first()?.as_u64()? as usize, a.get(1)?.as_u64()? as usize))
+        })
+        .collect();
+    let cached_ids: Vec<String> = m::array(&m::data("omnigraph-nav-rects"))
+        .into_iter()
+        .filter_map(|v| v["id"].as_str().map(str::to_owned))
+        .collect();
+
+    if prev_digest == new_digest
+        && prev_digest != 0
+        && !cached_ids.is_empty()
+        && try_patch_constellation_selection_in_place(&filter, &cached_edges, &cached_ids)
+    {
+        let viewport = omnigraph_canvas::CanvasViewport {
+            pan_x: cam.pan_x,
+            pan_y: cam.pan_y,
+            scale: cam.scale,
+        };
+        let rendered = omnigraph_canvas::render_constellation(&graph, &filter, &viewport);
+        if let Some(scene) = rendered.dense_scene {
+            graph_viewport::canvas2d::store_scene("omnigraph-canvas", scene);
+            graph_viewport::canvas2d::paint_scene(
+                "omnigraph-canvas",
+                cam.to_viewport(),
+                None,
+                true,
+            );
+        }
+        return;
+    }
+
     let viewport = omnigraph_canvas::CanvasViewport {
         pan_x: cam.pan_x,
         pan_y: cam.pan_y,
@@ -3973,6 +4222,16 @@ fn render_constellation() {
         radar.set_inner_html(&rendered.radar_html);
         dom::hide(&radar, rendered.radar_html.trim().is_empty());
     }
+    m::set(
+        "omnigraph-structure-digest",
+        json!(rendered.structure_digest),
+    );
+    if let Some(scene) = rendered.dense_scene {
+        graph_viewport::canvas2d::store_scene("omnigraph-canvas", scene);
+    } else {
+        graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
+    }
+
     let pos_map: V = rendered
         .positions
         .into_iter()
@@ -3980,10 +4239,32 @@ fn render_constellation() {
         .collect::<serde_json::Map<String, V>>()
         .into();
     m::set("omnigraph-positions", pos_map);
+
+    let raw_map: V = rendered
+        .raw_positions
+        .into_iter()
+        .map(|(k, (x, y))| (k, json!([x, y])))
+        .collect::<serde_json::Map<String, V>>()
+        .into();
+    m::set("omnigraph-raw-positions", raw_map);
+
+    let nav_rects: Vec<V> = rendered
+        .node_rects
+        .iter()
+        .map(|(id, x, y, w, h)| json!({ "id": id, "x": x, "y": y, "w": w, "h": h }))
+        .collect();
+    m::set("omnigraph-nav-rects", V::Array(nav_rects));
+    let nav_edges: Vec<V> = rendered
+        .node_edges
+        .iter()
+        .map(|(u, v)| json!([u, v]))
+        .collect();
+    m::set("omnigraph-nav-edges", V::Array(nav_edges));
+
     cam.plane_w = rendered.width;
     cam.plane_h = rendered.height;
     save_camera(&cam);
-    if cam.fit_mode {
+    if cam.fit_mode && filter.anchored_positions.is_empty() && filter.pinned_positions.is_empty() {
         fit_camera();
     } else {
         apply_camera(&cam);
@@ -4490,6 +4771,113 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         .as_ref()
         .and_then(|el| el.closest("#omnigraph-canvas").ok().flatten())
         .is_some();
+
+    // Ensure #project matches Omnigraph project before inspect-file-graph bubbles to session::event.
+    if kind == "pointerdown" {
+        if let Some(inspect_btn) = target_el.as_ref().and_then(|el| {
+            el.closest("[data-action='inspect-file-graph']")
+                .ok()
+                .flatten()
+        }) {
+            if inspect_btn
+                .closest("#omnigraph-view")
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                let project = current_project_id();
+                if !project.is_empty() && dom::value("project") != project {
+                    crate::session::sync_project(&project);
+                }
+            }
+        }
+    }
+
+    // Shift+drag node pinning on constellation cards.
+    if matches!(
+        kind,
+        "pointerdown" | "pointermove" | "pointerup" | "pointercancel"
+    ) {
+        let mut node_drag = m::data("omnigraph-node-drag");
+        if kind == "pointerdown" {
+            if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
+                if pe.shift_key() {
+                    if let Some(node_el) = target_el
+                        .as_ref()
+                        .and_then(|el| el.closest(".omni-node[data-node-id]").ok().flatten())
+                    {
+                        let node_id = node_el.get_attribute("data-node-id").unwrap_or_default();
+                        let raw = m::data("omnigraph-raw-positions");
+                        if let (false, Some(x0), Some(y0)) = (
+                            node_id.is_empty(),
+                            raw[&node_id][0].as_f64(),
+                            raw[&node_id][1].as_f64(),
+                        ) {
+                            graph_viewport::capture_pointer(&node_el, pe.pointer_id());
+                            m::set(
+                                "omnigraph-node-drag",
+                                json!({
+                                    "active": true,
+                                    "node_id": node_id,
+                                    "start_cx": pe.client_x() as f64,
+                                    "start_cy": pe.client_y() as f64,
+                                    "orig_x": x0,
+                                    "orig_y": y0,
+                                    "curr_x": x0,
+                                    "curr_y": y0,
+                                    "moved": false,
+                                }),
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+        } else if m::yes(&node_drag["active"]) {
+            if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
+                let cam = load_camera();
+                let node_id = m::text(&node_drag, "node_id");
+                let dx = ((pe.client_x() as f64) - node_drag["start_cx"].as_f64().unwrap_or(0.0))
+                    / cam.scale.max(0.1);
+                let dy = ((pe.client_y() as f64) - node_drag["start_cy"].as_f64().unwrap_or(0.0))
+                    / cam.scale.max(0.1);
+                let nx = (node_drag["orig_x"].as_f64().unwrap_or(0.0) + dx).max(8.0);
+                let ny = (node_drag["orig_y"].as_f64().unwrap_or(0.0) + dy).max(8.0);
+                if kind == "pointermove" {
+                    let moved = dx.abs() > 2.0 || dy.abs() > 2.0;
+                    node_drag["curr_x"] = json!(nx);
+                    node_drag["curr_y"] = json!(ny);
+                    node_drag["moved"] = json!(moved);
+                    m::set("omnigraph-node-drag", node_drag);
+                    if let Some(el) = dom::get("omnigraph-canvas").and_then(|c| {
+                        c.query_selector(&format!(".omni-node[data-node-id=\"{node_id}\"]"))
+                            .ok()
+                            .flatten()
+                    }) {
+                        let _ = el.set_attribute("data-pinned", "true");
+                        if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
+                            let _ = html_el.style().set_property("left", &format!("{nx:.1}px"));
+                            let _ = html_el.style().set_property("top", &format!("{ny:.1}px"));
+                        }
+                    }
+                    return true;
+                }
+                let was_moved = m::yes(&node_drag["moved"]);
+                m::set("omnigraph-node-drag", V::Null);
+                if kind == "pointerup" && was_moved {
+                    graph_viewport::save_pin(&omni_pin_key(), &node_id, (nx, ny));
+                    dom::hidden("omni-reset-pins", false);
+                    graph_viewport::announce_live(
+                        "omnigraph-live-announce",
+                        &format!("Pinned node {node_id}"),
+                    );
+                    render_constellation();
+                }
+                return true;
+            }
+        }
+    }
+
     let mut drag = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
     if kind == "pointerdown" && !in_canvas {
         return false;
@@ -4522,6 +4910,43 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             }
             graph_viewport::CanvasDragOutcome::Ended { suppress_click } => {
                 m::set("omnigraph-drag", drag.to_json());
+                if !suppress_click && kind == "pointerup" && in_canvas {
+                    if let Some(me) = event.dyn_ref::<web_sys::MouseEvent>() {
+                        if let Some(canvas_el) = dom::get("omnigraph-canvas") {
+                            let rect = canvas_el.get_bounding_client_rect();
+                            let wx = ((me.client_x() as f64 - rect.left()) - cam.pan_x)
+                                / cam.scale.max(0.05);
+                            let wy = ((me.client_y() as f64 - rect.top()) - cam.pan_y)
+                                / cam.scale.max(0.05);
+                            if target_el
+                                .as_ref()
+                                .and_then(|el| el.closest(".omni-node").ok().flatten())
+                                .is_none()
+                            {
+                                if let Some((0, idx)) = graph_viewport::canvas2d::hit_test_scene(
+                                    "omnigraph-canvas",
+                                    wx,
+                                    wy,
+                                    8.0,
+                                ) {
+                                    if let Some(nid) = m::array(&m::data("omnigraph-nav-rects"))
+                                        .get(idx)
+                                        .and_then(|v| v["id"].as_str())
+                                        .map(str::to_owned)
+                                    {
+                                        set_ui_state(|s| {
+                                            s["selected_id"] = json!(nid);
+                                            s["drawer_tab"] = json!("inspector");
+                                        });
+                                        render_tabs();
+                                        render_constellation();
+                                        render_inspector();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if suppress_click {
                     dom::later("omnigraph-drag-clear", 70, || {
                         let mut d = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
@@ -4538,6 +4963,23 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             }
         }
     }
+    if kind == "pointermove" && in_canvas {
+        if let Some(me) = event.dyn_ref::<web_sys::MouseEvent>() {
+            if let Some(canvas_el) = dom::get("omnigraph-canvas") {
+                let cam = load_camera();
+                let rect = canvas_el.get_bounding_client_rect();
+                let wx = ((me.client_x() as f64 - rect.left()) - cam.pan_x) / cam.scale.max(0.05);
+                let wy = ((me.client_y() as f64 - rect.top()) - cam.pan_y) / cam.scale.max(0.05);
+                let hit = graph_viewport::canvas2d::hit_test_scene("omnigraph-canvas", wx, wy, 8.0);
+                graph_viewport::canvas2d::paint_scene(
+                    "omnigraph-canvas",
+                    cam.to_viewport(),
+                    hit,
+                    true,
+                );
+            }
+        }
+    }
     if kind == "dblclick" && in_canvas {
         if let Some(node_el) = target_el
             .as_ref()
@@ -4548,8 +4990,18 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
             {
+                let symbol_fqn = node_el
+                    .get_attribute("data-symbol-fqn")
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                let project = current_project_id();
                 spawn_local(async move {
-                    open_file_in_code_map(&path).await;
+                    open_target_in_code_map(
+                        (!project.is_empty()).then_some(project.as_str()),
+                        &path,
+                        symbol_fqn.as_deref(),
+                    )
+                    .await;
                 });
                 return true;
             }
@@ -4658,6 +5110,88 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     }
 
     if !in_input && !event.ctrl_key() && !event.meta_key() && !event.alt_key() {
+        let in_constellation = target
+            .as_ref()
+            .is_some_and(|el| el.closest("#omnigraph-canvas").ok().flatten().is_some());
+        if in_constellation
+            && matches!(
+                event.key().as_str(),
+                "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
+            )
+        {
+            let rects_val = m::array(&m::data("omnigraph-nav-rects"));
+            let edges_val = m::array(&m::data("omnigraph-nav-edges"));
+            let ids: Vec<String> = rects_val
+                .iter()
+                .map(|r| r["id"].as_str().unwrap_or("").to_owned())
+                .collect();
+            let rects: Vec<(f64, f64, f64, f64)> = rects_val
+                .iter()
+                .map(|r| {
+                    (
+                        r["x"].as_f64().unwrap_or(0.0),
+                        r["y"].as_f64().unwrap_or(0.0),
+                        r["w"].as_f64().unwrap_or(200.0),
+                        r["h"].as_f64().unwrap_or(64.0),
+                    )
+                })
+                .collect();
+            let curr_id = target
+                .as_ref()
+                .and_then(|el| el.closest(".omni-node[data-node-id]").ok().flatten())
+                .and_then(|el| el.get_attribute("data-node-id"))
+                .or_else(|| ui_state()["focused_id"].as_str().map(str::to_owned))
+                .or_else(|| ui_state()["selected_id"].as_str().map(str::to_owned));
+            let curr_idx = curr_id
+                .as_deref()
+                .and_then(|cid| ids.iter().position(|id| id == cid))
+                .unwrap_or(0);
+            let mut connected = Vec::new();
+            for pair in &edges_val {
+                if let (Some(u), Some(v)) = (pair[0].as_u64(), pair[1].as_u64()) {
+                    let (u, v) = (u as usize, v as usize);
+                    if u == curr_idx {
+                        connected.push(v);
+                    } else if v == curr_idx {
+                        connected.push(u);
+                    }
+                }
+            }
+            if let Some(next_idx) =
+                graph_viewport::next_roving_node_index(&rects, &connected, curr_idx, &event.key())
+            {
+                if let Some(next_id) = ids.get(next_idx).cloned() {
+                    set_ui_state(|s| s["focused_id"] = json!(next_id));
+                    if let Some(canvas) = dom::get("omnigraph-canvas") {
+                        if let Ok(nodes) = canvas.query_selector_all(".omni-node[data-node-id]") {
+                            for i in 0..nodes.length() {
+                                if let Some(el) = nodes
+                                    .item(i)
+                                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                                {
+                                    let is_next = el.get_attribute("data-node-id").as_deref()
+                                        == Some(next_id.as_str());
+                                    let _ = el.set_attribute(
+                                        "tabindex",
+                                        if is_next { "0" } else { "-1" },
+                                    );
+                                    if is_next {
+                                        if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
+                                            let _ = he.focus();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    graph_viewport::announce_live(
+                        "omnigraph-live-announce",
+                        &format!("Focused {next_id}"),
+                    );
+                    return true;
+                }
+            }
+        }
         match event.key().as_str() {
             "+" | "=" => {
                 zoom_canvas_at(ZOOM_STEP, None);
@@ -4670,6 +5204,32 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
             "0" => {
                 fit_camera();
                 return true;
+            }
+            "1" => {
+                reset_camera_100();
+                return true;
+            }
+            "Escape" => {
+                let st = ui_state();
+                if !m::array(&st["path_nodes"]).is_empty() || m::yes(&st["isolate_active"]) {
+                    set_ui_state(|s| {
+                        s["path_nodes"] = json!([]);
+                        s["path_edges"] = json!([]);
+                        s["isolate_active"] = json!(false);
+                    });
+                    render_constellation();
+                    graph_viewport::announce_live(
+                        "omnigraph-live-announce",
+                        "Cleared path and isolation",
+                    );
+                    return true;
+                }
+                if st["selected_id"].as_str().is_some_and(|s| !s.is_empty()) {
+                    set_ui_state(|s| s["selected_id"] = V::Null);
+                    render_constellation();
+                    render_inspector();
+                    return true;
+                }
             }
             _ => {}
         }
@@ -5526,7 +6086,14 @@ async fn submit_share_form() {
     crate::session::sync_working_indicator();
 }
 
-pub fn resolve_code_map_target_path(payload: &V) -> Option<String> {
+pub fn resolve_code_map_target(payload: &V) -> Option<(String, Option<String>)> {
+    let fqn = payload["fqn"]
+        .as_str()
+        .or_else(|| payload["symbol_fqn"].as_str())
+        .or_else(|| payload["node_id"].as_str())
+        .map(str::trim)
+        .filter(|s| s.contains("::"))
+        .map(str::to_owned);
     let direct = payload
         .as_str()
         .or_else(|| payload["path"].as_str())
@@ -5534,30 +6101,107 @@ pub fn resolve_code_map_target_path(payload: &V) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty());
     if let Some(path) = direct {
-        return Some(path.to_owned());
+        return Some((path.to_owned(), fqn));
     }
-    let fqn = payload["fqn"]
-        .as_str()
-        .or_else(|| payload["symbol_fqn"].as_str())
-        .or_else(|| payload["node_id"].as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())?;
-    fqn.split_once("::")
+    let raw_fqn = fqn.as_deref().or_else(|| {
+        payload["fqn"]
+            .as_str()
+            .or_else(|| payload["symbol_fqn"].as_str())
+            .or_else(|| payload["node_id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })?;
+    let path = raw_fqn
+        .split_once("::")
         .map(|(head, _)| head.trim())
-        .filter(|head| !head.is_empty() && (head.contains('/') || head.contains('.')))
-        .map(str::to_owned)
+        .filter(|head| !head.is_empty() && (head.contains('/') || head.contains('.')))?
+        .to_owned();
+    Some((path, Some(raw_fqn.to_owned())))
 }
 
-async fn open_file_in_code_map(path: &str) {
-    let project = current_project_id();
-    if !project.is_empty() && dom::value("project") != project {
-        crate::session::sync_project(&project);
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn resolve_code_map_target_path(payload: &V) -> Option<String> {
+    resolve_code_map_target(payload).map(|(p, _)| p)
+}
+
+pub(crate) async fn open_target_in_code_map(
+    project: Option<&str>,
+    path: &str,
+    symbol_fqn: Option<&str>,
+) {
+    let resolved_project = project
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(current_project_id);
+    if !resolved_project.is_empty() && dom::value("project") != resolved_project {
+        crate::session::sync_project(&resolved_project);
     }
     if m::read(|s| s.view != "sessions") {
         crate::session::open_view("sessions", true).await;
     }
     crate::session::set_mobile_pane("graph");
-    crate::graph_map::focus_file_in_session(path);
+    crate::graph_map::focus_target_in_session(path, symbol_fqn);
+}
+
+#[allow(dead_code)]
+async fn open_file_in_code_map(path: &str) {
+    open_target_in_code_map(None, path, None).await;
+}
+
+pub(crate) async fn focus_context_for_file(project: Option<&str>, path: &str) {
+    if let Some(p) = project.map(str::trim).filter(|s| !s.is_empty()) {
+        dom::set_value("omnigraph-project", p);
+    }
+    if m::read(|s| s.view != "omnigraph") {
+        crate::session::open_view("omnigraph", true).await;
+    }
+    let trimmed = path.trim();
+    if !trimmed.is_empty() {
+        dom::set_value("omnigraph-search", trimmed);
+        set_ui_state(|s| {
+            s["query"] = json!(trimmed);
+            s["show_files"] = json!(true);
+            s["stage_tab"] = json!("constellation");
+        });
+    }
+    render_tabs();
+    refresh_graph().await;
+    let graph = m::data("omnigraph-graph");
+    let matched_id = m::array(&graph["files"])
+        .into_iter()
+        .find(|f| {
+            f["path"].as_str() == Some(trimmed)
+                || f["file_path"].as_str() == Some(trimmed)
+                || f.as_str() == Some(trimmed)
+        })
+        .and_then(|f| {
+            f["id"]
+                .as_str()
+                .or_else(|| f["path"].as_str())
+                .or_else(|| f.as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            m::array(&graph["atoms"])
+                .into_iter()
+                .find(|a| {
+                    a["files"]
+                        .as_array()
+                        .is_some_and(|fs| fs.iter().any(|x| x.as_str() == Some(trimmed)))
+                })
+                .and_then(|a| a["id"].as_str().map(str::to_owned))
+        });
+    if let Some(nid) = matched_id {
+        set_ui_state(|s| {
+            s["selected_id"] = json!(nid);
+            s["drawer_tab"] = json!("inspector");
+        });
+        render_tabs();
+        render_constellation();
+        render_inspector();
+        fly_to_node(&nid);
+    }
 }
 
 pub async fn event(
@@ -5612,6 +6256,19 @@ pub async fn event(
             }
             "omnigraph-search" => {
                 run_search(value.to_owned()).await;
+                return true;
+            }
+            "omni-isolate-depth" => {
+                let depth = value.trim().parse::<u64>().unwrap_or(2).clamp(1, 3);
+                set_ui_state(|s| {
+                    s["isolate_depth"] = json!(depth);
+                    s["isolate_active"] = json!(true);
+                });
+                render_constellation();
+                graph_viewport::announce_live(
+                    "omnigraph-live-announce",
+                    &format!("Isolated {depth} hops"),
+                );
                 return true;
             }
             "omni-export-scope"
@@ -6000,6 +6657,9 @@ pub async fn event(
                 s["show_files"] = json!(true);
                 s["show_sessions"] = json!(true);
                 s["highlighted_ids"] = json!([]);
+                s["path_nodes"] = json!([]);
+                s["path_edges"] = json!([]);
+                s["isolate_active"] = json!(false);
             });
             dom::hidden("omnigraph-search-clear", true);
             sync_controls_from_state();
@@ -6139,9 +6799,93 @@ pub async fn event(
             true
         }
         "omnigraph-open-code-map" => {
-            if let Some(path) = resolve_code_map_target_path(payload) {
-                open_file_in_code_map(&path).await;
+            if let Some((path, fqn)) = resolve_code_map_target(payload) {
+                let proj = payload["project_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(current_project_id);
+                open_target_in_code_map(
+                    (!proj.is_empty()).then_some(proj.as_str()),
+                    &path,
+                    fqn.as_deref(),
+                )
+                .await;
             }
+            true
+        }
+        "omni-reset-pins" => {
+            graph_viewport::clear_pins(&omni_pin_key());
+            dom::hidden("omni-reset-pins", true);
+            render_constellation();
+            graph_viewport::announce_live("omnigraph-live-announce", "Reset pinned layout");
+            true
+        }
+        "omni-isolate-toggle" => {
+            let st = ui_state();
+            let next_active = !m::yes(&st["isolate_active"]);
+            let depth = dom::value("omni-isolate-depth")
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(2)
+                .clamp(1, 3);
+            let seed = st["selected_id"].as_str().unwrap_or("").to_owned();
+            set_ui_state(|s| {
+                s["isolate_active"] = json!(next_active && !seed.is_empty());
+                s["isolate_depth"] = json!(depth);
+                if !seed.is_empty() {
+                    s["isolate_seed"] = json!(seed);
+                }
+            });
+            render_constellation();
+            graph_viewport::announce_live(
+                "omnigraph-live-announce",
+                if next_active {
+                    "Isolation enabled"
+                } else {
+                    "Isolation cleared"
+                },
+            );
+            true
+        }
+        "omni-path-trace" => {
+            let from_q = dom::value("omni-path-from");
+            let to_q = dom::value("omni-path-to");
+            let graph = m::data("omnigraph-graph");
+            let st = ui_state();
+            let paged_count = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) as usize;
+            let cam = load_camera();
+            let base_filter = current_constellation_filter(&st, &cam, paged_count);
+            if let Some((path_nodes, path_edges)) =
+                omnigraph_canvas::compute_constellation_path(&graph, &base_filter, &from_q, &to_q)
+            {
+                let edge_json: Vec<V> = path_edges.iter().map(|(a, b)| json!([a, b])).collect();
+                let count = path_nodes.len();
+                set_ui_state(|s| {
+                    s["path_nodes"] = json!(path_nodes);
+                    s["path_edges"] = V::Array(edge_json);
+                });
+                render_constellation();
+                graph_viewport::announce_live(
+                    "omnigraph-live-announce",
+                    &format!("Traced path with {count} nodes"),
+                );
+            } else {
+                graph_viewport::announce_live(
+                    "omnigraph-live-announce",
+                    "No path found between A and B",
+                );
+            }
+            true
+        }
+        "omni-path-clear" => {
+            set_ui_state(|s| {
+                s["path_nodes"] = json!([]);
+                s["path_edges"] = json!([]);
+            });
+            render_constellation();
+            graph_viewport::announce_live("omnigraph-live-announce", "Cleared path trace");
             true
         }
         "omnigraph-load-more" => {
@@ -7905,5 +8649,26 @@ mod tests {
 
         let (visible_after, _) = render_pagination_bar_html(&merged);
         assert!(!visible_after);
+    }
+
+    #[test]
+    fn resolve_code_map_target_preserves_file_path_and_symbol_fqn() {
+        assert_eq!(
+            resolve_code_map_target(&json!({
+                "file_path": "src/Order/PlaceOrder.php",
+                "symbol_fqn": "App\\Order\\PlaceOrder::execute"
+            })),
+            Some((
+                "src/Order/PlaceOrder.php".to_owned(),
+                Some("App\\Order\\PlaceOrder::execute".to_owned())
+            ))
+        );
+        assert_eq!(
+            resolve_code_map_target(&json!({"fqn": "src/Auth/Token.php::Token::verify"})),
+            Some((
+                "src/Auth/Token.php".to_owned(),
+                Some("src/Auth/Token.php::Token::verify".to_owned())
+            ))
+        );
     }
 }
