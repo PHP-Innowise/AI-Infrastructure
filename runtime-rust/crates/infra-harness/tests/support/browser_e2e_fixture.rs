@@ -331,11 +331,6 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
                                             "builtin": true
                                         },
                                         {
-                                            "name": "resume",
-                                            "description": "Open the session list to resume a conversation",
-                                            "builtin": true
-                                        },
-                                        {
                                             "name": "new",
                                             "description": "Start a new session",
                                             "builtin": true
