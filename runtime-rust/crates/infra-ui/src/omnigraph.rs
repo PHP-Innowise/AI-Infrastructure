@@ -2941,6 +2941,17 @@ fn viewport_size() -> (f64, f64) {
     (w, h)
 }
 
+fn empty_state_camera(viewport: (f64, f64), plane: (f64, f64)) -> OmnigraphCamera {
+    OmnigraphCamera {
+        scale: 1.0,
+        pan_x: (viewport.0 - plane.0) * 0.5,
+        pan_y: (viewport.1 - plane.1) * 0.5,
+        plane_w: plane.0,
+        plane_h: plane.1,
+        fit_mode: false,
+    }
+}
+
 fn apply_camera(cam: &OmnigraphCamera) {
     let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(240.0));
     graph_viewport::apply_transform_3d_by_id(
@@ -4983,13 +4994,21 @@ fn render_constellation() {
         .collect();
     m::set("omnigraph-nav-edges", V::Array(nav_edges));
 
-    cam.plane_w = rendered.width;
-    cam.plane_h = rendered.height;
-    save_camera(&cam);
-    if cam.fit_mode && filter.anchored_positions.is_empty() && filter.pinned_positions.is_empty() {
-        fit_camera();
+    if rendered.node_count == 0 {
+        let empty_cam = empty_state_camera(viewport_size(), (rendered.width, rendered.height));
+        apply_camera(&empty_cam);
     } else {
-        apply_camera(&cam);
+        cam.plane_w = rendered.width;
+        cam.plane_h = rendered.height;
+        save_camera(&cam);
+        if cam.fit_mode
+            && filter.anchored_positions.is_empty()
+            && filter.pinned_positions.is_empty()
+        {
+            fit_camera();
+        } else {
+            apply_camera(&cam);
+        }
     }
     render_omni_history_bar();
 }
@@ -5848,13 +5867,18 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     }
 
     let mut drag = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
-    if kind == "pointerdown" && !in_canvas {
+    let in_interactive = target_el.as_ref().is_some_and(|el| {
+        el.closest("button, a, input, select, textarea, .omni-empty-state")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if kind == "pointerdown" && (!in_canvas || in_interactive) {
         return false;
     }
-    if matches!(
-        kind,
-        "pointerdown" | "pointermove" | "pointerup" | "pointercancel"
-    ) {
+    if (kind == "pointerdown" && in_canvas)
+        || (drag.active && matches!(kind, "pointermove" | "pointerup" | "pointercancel"))
+    {
         let mut cam = load_camera();
         match graph_viewport::handle_canvas_drag(
             kind,
@@ -7806,6 +7830,9 @@ pub async fn event(
             });
             dom::hidden("omnigraph-search-clear", true);
             sync_controls_from_state();
+            let mut cam = load_camera();
+            cam.fit_mode = true;
+            save_camera(&cam);
             refresh_graph().await;
             true
         }
@@ -10047,5 +10074,11 @@ mod tests {
         });
         assert!(hist.can_back());
         assert!(!hist.can_forward());
+
+        let empty_cam = empty_state_camera((920.0, 520.0), (760.0, 400.0));
+        assert_eq!(empty_cam.scale, 1.0);
+        assert_eq!(empty_cam.pan_x, 80.0);
+        assert_eq!(empty_cam.pan_y, 60.0);
+        assert!(!empty_cam.fit_mode);
     }
 }
