@@ -139,8 +139,9 @@ svg { flex:none; }
 .view { min-height:0; flex:1; display:flex; flex-direction:column; }
 .configuration { padding:16px var(--page-x); border-bottom:1px solid var(--line); }
 .configuration:has(> .session-summary:not([hidden])) { padding-block:8px; }
-.session-summary { display:flex; align-items:center; gap:8px; max-width:1160px; margin:0 0; }
+.session-summary { display:flex; align-items:center; gap:8px; max-width:1160px; margin:0 0; flex-shrink:0; }
 .session-summary-text { flex:1; min-width:0; margin:0; color:var(--ink-2); font-size:var(--text-ui); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#session-settings-toggle { flex-shrink:0; }
 .session-summary:not([hidden]) ~ .session-settings:not([hidden]) { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
 .button.compact { min-height:var(--control-height-sm); padding:0 8px; }
 .option-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; max-width:1160px; margin:12px 0 0; }
@@ -792,8 +793,9 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .clash-state.fixed,.clash-state.defended,.clash-state.proposed,.clash-state.deferred { color:var(--warning); background:var(--warning-soft); }
 @media (max-width:760px) { .fleet-settings-row { gap:12px; } .fleet-settings-row .field { width:calc(50% - 6px); } .fleet-settings-row > .checkbox { flex-basis:100%; } .fleet-progress { padding:16px; } .fleet-findings { gap:12px; } .fleet-finding { padding:12px; } .fleet-actions .button { min-height:40px; } }
 @media (max-width:760px) { .workspace-options { gap:8px 12px; margin-top:12px; } .workspace-options > .field { width:calc(50% - 7px); } .workspace-git { flex-basis:100%; } }
-#sessions-view .configuration { flex:0 1 auto; max-height:min(60%,560px); overflow:auto; background:linear-gradient(var(--paper) 30%,transparent) center top / 100% 24px no-repeat local,linear-gradient(transparent,var(--paper) 70%) center bottom / 100% 24px no-repeat local,linear-gradient(var(--shadow),transparent) center top / 100% 8px no-repeat scroll,linear-gradient(transparent,var(--shadow)) center bottom / 100% 8px no-repeat scroll; background-color:var(--paper); }
-.conversation { overflow:auto; min-height:120px; flex:1 1 160px; scroll-behavior:smooth; }
+#sessions-view .configuration { flex:0 1 auto; min-height:96px; max-height:min(60%,560px); overflow:auto; background:linear-gradient(var(--paper) 30%,transparent) center top / 100% 24px no-repeat local,linear-gradient(transparent,var(--paper) 70%) center bottom / 100% 24px no-repeat local,linear-gradient(var(--shadow),transparent) center top / 100% 8px no-repeat scroll,linear-gradient(transparent,var(--shadow)) center bottom / 100% 8px no-repeat scroll; background-color:var(--paper); }
+#sessions-view:not(.output-resized) .configuration:has(> .session-summary:not([hidden]) ~ .session-settings[hidden]) { flex:0 0 auto; min-height:0; }
+.conversation { overflow:auto; min-height:80px; flex:1 1 160px; scroll-behavior:smooth; }
 .output-resizer { flex:none; height:16px; display:grid; place-items:center; cursor:row-resize; touch-action:none; user-select:none; background:transparent; }
 .output-resizer::after { content:""; width:40px; height:4px; border-radius:var(--radius-sm); background:var(--field-line-hover); }
 .output-resizer:hover::after,.output-resizer:focus-visible::after { background:var(--purple); }
@@ -843,8 +845,8 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .step-target { min-width:0; color:var(--ink-2); font-family:var(--font-mono); overflow-wrap:anywhere; }
 .step-row[data-state="running"] .step-state { color:var(--purple); }
 .step-row[data-state="failed"] .step-state { color:var(--error); }
-#events [data-event-id] { transition:background-color var(--motion-slow) var(--ease-standard); }
-#events .run-flash { background-color:var(--purple-tint); transition:none; }
+#events [data-event-id]:is(.run-flash-fade,[data-flash-fade="true"]) { transition:background-color var(--motion-slow) var(--ease-standard); }
+#events [data-event-id].run-flash,#events .run-flash { background-color:var(--purple-tint); transition:none; }
 .run-divider { display:flex; align-items:center; gap:12px; margin:0 0 16px; color:var(--muted); font-size:var(--text-meta); text-align:center; }
 .run-divider::before,.run-divider::after { content:""; flex:1; min-width:24px; height:1px; background:var(--line); }
 .run-divider.run-new-since { color:var(--purple); font-weight:var(--weight-strong); }

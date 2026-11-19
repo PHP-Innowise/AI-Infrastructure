@@ -54,9 +54,11 @@ pub const MODAL_OVERLAY_IDS: [&str; 3] = ["command-palette", "approvals-drawer",
 const FALLBACK_RESTORE_SELECTOR: &str = "#view-tabs [aria-selected=\"true\"], #new-session";
 const MODAL_FOCUSABLE_SELECTOR: &str = "button:not([disabled]), a[href], input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled]), details > summary:not([tabindex=\"-1\"]), [tabindex]:not([tabindex=\"-1\"])";
 
+pub const MOBILE_BREAKPOINT_QUERY: &str = "(max-width: 920px)";
+
 pub fn is_mobile_viewport() -> bool {
     window()
-        .match_media("(max-width: 920px)")
+        .match_media(MOBILE_BREAKPOINT_QUERY)
         .ok()
         .flatten()
         .is_some_and(|list| list.matches())
@@ -114,9 +116,10 @@ fn overlay_inert_targets(
 
 fn set_inert_attr(id: &str, inert: bool) {
     if let Some(e) = get(id) {
-        if inert {
+        let has_inert = e.has_attribute("inert");
+        if inert && !has_inert {
             let _ = e.set_attribute("inert", "");
-        } else {
+        } else if !inert && has_inert {
             let _ = e.remove_attribute("inert");
         }
     }
@@ -1436,12 +1439,34 @@ mod tests {
                 ("command-palette", false),
             ]
         );
+        // Mobile -> desktop with closed sidebar clears `inert` on `#sidebar`.
+        assert_eq!(
+            overlay_inert_targets(false, false, false, false, false),
+            [
+                ("sidebar", false),
+                ("main", false),
+                ("approvals-drawer", false),
+                ("run-file-card", false),
+                ("command-palette", false),
+            ]
+        );
         // Mobile open sidebar: main inert, sidebar active.
         assert_eq!(
             overlay_inert_targets(false, false, false, true, true),
             [
                 ("sidebar", false),
                 ("main", true),
+                ("approvals-drawer", false),
+                ("run-file-card", false),
+                ("command-palette", false),
+            ]
+        );
+        // Mobile -> desktop with open sidebar clears `inert` on both `#sidebar` and `#main`.
+        assert_eq!(
+            overlay_inert_targets(false, false, false, true, false),
+            [
+                ("sidebar", false),
+                ("main", false),
                 ("approvals-drawer", false),
                 ("run-file-card", false),
                 ("command-palette", false),
