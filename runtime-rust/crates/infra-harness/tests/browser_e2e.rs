@@ -498,6 +498,14 @@ fn browser_e2e_fixture_serves_graph_sse_and_range_contracts() {
             .is_empty(),
         "expected backoff hit: {omni_search}"
     );
+    let omni_changes = get_json(
+        &client,
+        &format!("{url}/api/omnigraph/changes?project_id={project_id}&branch=main"),
+    );
+    assert!(
+        omni_changes["events"].is_array() && omni_changes["cursor"] == "cur-1",
+        "expected omnigraph changes feed events array: {omni_changes}"
+    );
 
     let system_run_id = receipt["system_run_id"]
         .as_str()
