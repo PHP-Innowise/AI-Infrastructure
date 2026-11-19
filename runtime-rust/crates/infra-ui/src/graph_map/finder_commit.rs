@@ -1794,7 +1794,10 @@ pub(super) fn normalize_map_state(mut state: V) -> V {
     if !state["whole"].is_boolean() {
         state["whole"] = json!(false);
     }
-    if !matches!(state["side_tab"].as_str(), Some("details" | "changes")) {
+    if !matches!(
+        state["side_tab"].as_str(),
+        Some("details" | "changes" | "analysis")
+    ) {
         state["side_tab"] = json!("details");
     }
     if !matches!(

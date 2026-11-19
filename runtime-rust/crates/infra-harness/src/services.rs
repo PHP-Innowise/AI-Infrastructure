@@ -389,20 +389,100 @@ impl NativeServices {
                 self.store.publish_event("system_run", sid, project_id, ev);
             }
             "results.start_check" => {
-                let check = val.get("check").filter(|v| v.is_object()).unwrap_or(val);
-                let Some(check_id) = check["id"].as_str().filter(|s| !s.is_empty()) else {
-                    return;
-                };
-                let sid = check["session_id"]
-                    .as_str()
+                let explicit_check = val.get("check").filter(|v| v.is_object());
+                let session = val.get("session").filter(|v| v.is_object());
+                let explicit_id = explicit_check
+                    .and_then(|c| c["id"].as_str())
+                    .or_else(|| val["id"].as_str())
                     .filter(|s| !s.is_empty())
-                    .or_else(|| params["session_id"].as_str().filter(|s| !s.is_empty()))
+                    .map(str::to_owned);
+                let sid = explicit_check
+                    .and_then(|c| c["session_id"].as_str())
+                    .or_else(|| val["session_id"].as_str())
+                    .or_else(|| {
+                        session.and_then(|s| s["id"].as_str().or_else(|| s["session_id"].as_str()))
+                    })
+                    .or_else(|| params["session_id"].as_str())
+                    .filter(|s| !s.is_empty())
                     .unwrap_or("")
                     .to_owned();
+                let mut db_check_val: Option<Value> = None;
+                if explicit_id.is_none()
+                    && !sid.is_empty()
+                    && let Ok(db) = self.store.connection()
+                {
+                    let has_checks = db
+                        .query_row(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checks'",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .is_ok();
+                    if has_checks
+                        && let Ok((row_id, raw_data)) = db.query_row(
+                            "SELECT id, data FROM checks WHERE session_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                            [&sid],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                        )
+                    {
+                        let mut parsed = serde_json::from_str::<Value>(&raw_data)
+                            .unwrap_or_else(|_| json!({}));
+                        if parsed["id"].as_str().is_none_or(str::is_empty) {
+                            parsed["id"] = json!(row_id);
+                        }
+                        db_check_val = Some(parsed);
+                    }
+                }
+                let latest_session_check =
+                    session
+                        .and_then(|s| s["checks"].as_array())
+                        .and_then(|checks| {
+                            checks.iter().rev().find(|c| {
+                                c.is_object() && c["id"].as_str().is_some_and(|s| !s.is_empty())
+                            })
+                        });
+                let check_id = explicit_id
+                    .or_else(|| {
+                        db_check_val
+                            .as_ref()
+                            .and_then(|c| c["id"].as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        latest_session_check
+                            .and_then(|c| c["id"].as_str())
+                            .map(str::to_owned)
+                    });
+                if check_id.is_none() && session.is_none() && sid.is_empty() {
+                    return;
+                }
+                let check_obj = explicit_check
+                    .or(db_check_val.as_ref())
+                    .or(latest_session_check)
+                    .unwrap_or(val);
                 let project_id = (!sid.is_empty())
                     .then(|| self.store.session_project_id(&sid))
-                    .flatten();
-                let status = check["status"].as_str().unwrap_or("queued");
+                    .flatten()
+                    .or_else(|| {
+                        session
+                            .and_then(|s| s["project_id"].as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        val["project_id"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    });
+                let status = explicit_check
+                    .and_then(|c| c["status"].as_str())
+                    .or_else(|| db_check_val.as_ref().and_then(|c| c["status"].as_str()))
+                    .or_else(|| latest_session_check.and_then(|c| c["status"].as_str()))
+                    .or_else(|| val["status"].as_str())
+                    .or_else(|| session.and_then(|s| s["status"].as_str()))
+                    .unwrap_or("queued");
                 self.store.publish_event(
                     "results_check",
                     (!sid.is_empty()).then_some(sid.clone()),
@@ -413,7 +493,8 @@ impl NativeServices {
                         "session_id": sid,
                         "project_id": project_id,
                         "status": status,
-                        "check": check,
+                        "check": check_obj,
+                        "session": session,
                     }),
                 );
             }
@@ -2363,5 +2444,138 @@ mod tests {
 
         services.close().await.unwrap();
         degraded.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn results_start_check_emits_sse_for_session_and_checks_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("state")).unwrap();
+        let project_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project = store.register(&project_dir).unwrap();
+        let pid = project["id"].as_str().unwrap().to_owned();
+        {
+            let db = store.connection().unwrap();
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS checks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at) VALUES('s1','S1',?1,?2,'claude','edit','native',0,'completed','now','now')",
+                rusqlite::params![pid, project_dir.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO checks(id,session_id,data) VALUES('chk-db','s1',?1)",
+                [r#"{"id":"chk-db","session_id":"s1","status":"running"}"#],
+            )
+            .unwrap();
+        }
+
+        let mut rx = match store.stream().subscribe(None) {
+            crate::store::ReplayStart::Frames { rx, .. } => rx,
+            _ => panic!("expected Frames subscriber"),
+        };
+
+        struct StartCheckStub;
+        impl Domain for StartCheckStub {
+            fn execute<'a>(&'a self, _op: &'a str, req: Value) -> Reply<'a> {
+                Box::pin(async move {
+                    let mode = req["query"]["mode"].as_str().unwrap_or("");
+                    let body = match mode {
+                        "session_with_db" => {
+                            json!({"session": {"id": "s1", "status": "queued"}})
+                        }
+                        "session_only" => {
+                            json!({"session": {"id": "s2", "project_id": "p2", "status": "queued"}})
+                        }
+                        _ => {
+                            json!({"check": {"id": "chk-legacy", "session_id": "s1", "status": "passed"}})
+                        }
+                    };
+                    Ok(Payload::Json(body))
+                })
+            }
+        }
+
+        struct NoopDomain;
+        impl Domain for NoopDomain {
+            fn execute<'a>(&'a self, _op: &'a str, _req: Value) -> Reply<'a> {
+                Box::pin(async { Ok(Payload::Json(json!({}))) })
+            }
+        }
+        let noop: Arc<dyn Domain> = Arc::new(NoopDomain);
+        let domain: Arc<dyn Domain> = Arc::new(StartCheckStub);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "knowledge",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "omnigraph",
+            "delivery",
+        ]
+        .into_iter()
+        .map(|k| (k.to_owned(), Arc::clone(&noop)))
+        .collect();
+        domains.insert("results".into(), domain);
+        let services = NativeServices::new(
+            store,
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap();
+
+        services
+            .request(
+                "results.start_check",
+                json!({"params":{"session_id":"s1"},"query":{"mode":"session_with_db"},"body":{}}),
+            )
+            .await
+            .unwrap();
+        let f1 = rx.recv().await.unwrap();
+        assert_eq!(f1.event, "results_check");
+        assert_eq!(f1.session_id.as_deref(), Some("s1"));
+        assert_eq!(f1.data["check_id"], "chk-db");
+        assert_eq!(f1.data["status"], "running");
+
+        services
+            .request(
+                "results.start_check",
+                json!({"params":{"session_id":"s2"},"query":{"mode":"session_only"},"body":{}}),
+            )
+            .await
+            .unwrap();
+        let f2 = rx.recv().await.unwrap();
+        assert_eq!(f2.event, "results_check");
+        assert_eq!(f2.session_id.as_deref(), Some("s2"));
+        assert_eq!(f2.project_id.as_deref(), Some("p2"));
+
+        services
+            .request(
+                "results.start_check",
+                json!({"params":{"session_id":"s1"},"query":{"mode":"legacy"},"body":{}}),
+            )
+            .await
+            .unwrap();
+        let f3 = rx.recv().await.unwrap();
+        assert_eq!(f3.event, "results_check");
+        assert_eq!(f3.data["check_id"], "chk-legacy");
+        assert_eq!(f3.data["status"], "passed");
+
+        services.close().await.unwrap();
     }
 }

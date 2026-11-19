@@ -45,10 +45,37 @@ pub enum Target {
     Named(String),
     /// One commit against its parent, as a history lists it.
     Commit(String),
+    /// A range comparison between two revisions (`range:<from>..<to>` or `range:<from>...<to>`).
+    Range {
+        from: String,
+        to: String,
+        three_dot: bool,
+    },
     /// What a run of an agent changed, as its session recorded it.
     Run(String),
     /// What a multi-service system change run changed, as its execution evidence recorded it.
     SysRun(String),
+}
+/// Validates a Git revision token used in `range:` targets and `base` range queries.
+pub(crate) fn is_valid_range_ref(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains("//")
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && !name.ends_with(".lock")
+        && !name.contains("/.")
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name
+            .chars()
+            .any(|letter| letter.is_control() || letter.is_whitespace())
+        && !name
+            .chars()
+            .any(|letter| matches!(letter, ':' | '?' | '*' | '[' | '\\'))
 }
 impl Target {
     pub fn parse(text: &str) -> Result<Self> {
@@ -78,6 +105,23 @@ impl Target {
                 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .then(|| Self::Commit(hash.to_ascii_lowercase()))
             .ok_or_else(invalid);
+        }
+        if let Some(spec) = text.strip_prefix("range:") {
+            let (from, to, three_dot) = if let Some((from, to)) = spec.split_once("...") {
+                (from, to, true)
+            } else if let Some((from, to)) = spec.split_once("..") {
+                (from, to, false)
+            } else {
+                return Err(invalid());
+            };
+            if !is_valid_range_ref(from) || !is_valid_range_ref(to) {
+                return Err(invalid());
+            }
+            return Ok(Self::Range {
+                from: from.to_owned(),
+                to: to.to_owned(),
+                three_dot,
+            });
         }
         if let Some(session) = text.strip_prefix("run:") {
             return (!session.is_empty()
@@ -119,6 +163,14 @@ impl Target {
             Self::Pull(number) => format!("pr:{number}"),
             Self::Named(name) => format!("ref:{name}"),
             Self::Commit(hash) => format!("commit:{hash}"),
+            Self::Range {
+                from,
+                to,
+                three_dot,
+            } => {
+                let sep = if *three_dot { "..." } else { ".." };
+                format!("range:{from}{sep}{to}")
+            }
             Self::Run(session) => format!("run:{session}"),
             Self::SysRun(run_id) => format!("sysrun:{run_id}"),
         }
@@ -487,6 +539,55 @@ fn named(root: &Path, prefix: String, name: &str, pulls: &[Pull]) -> Result<Reso
         notes: Vec::new(),
     })
 }
+/// Two arbitrary commits or refs compared directly (`from..to`) or from their merge base (`from...to`).
+fn range(root: &Path, prefix: String, from: &str, to: &str, three_dot: bool) -> Result<Resolved> {
+    let from_oid = commit(root, from)?.ok_or_else(|| {
+        HarnessError::missing(format!("This checkout has no commit or ref {from}."))
+    })?;
+    let to_oid = commit(root, to)?.ok_or_else(|| {
+        HarnessError::missing(format!("This checkout has no commit or ref {to}."))
+    })?;
+    let mut notes = Vec::new();
+    let base_oid = if three_dot {
+        match line(root, &["merge-base", &from_oid, &to_oid])? {
+            Some(mb) => mb,
+            None => {
+                notes.push(format!(
+                    "{to} shares no merge base with {from}, so direct comparison is shown."
+                ));
+                from_oid.clone()
+            }
+        }
+    } else {
+        from_oid.clone()
+    };
+    let files = diff(root, &base_oid, Some(&to_oid))?;
+    let sep = if three_dot { "..." } else { ".." };
+    let title = line(root, &["log", "-1", "--format=%s", &to_oid, "--"])?;
+    Ok(Resolved {
+        target: Target::Range {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            three_dot,
+        },
+        kind: "range",
+        name: format!("{from}{sep}{to}"),
+        title,
+        pull: None,
+        files,
+        head: Some(Side {
+            name: to.to_owned(),
+            commit: to_oid.clone(),
+        }),
+        base: Some(Side {
+            name: from.to_owned(),
+            commit: base_oid,
+        }),
+        revision: Some(to_oid),
+        prefix,
+        notes,
+    })
+}
 /// One commit as a history shows it: what it changed against its parent,
 /// wherever it stands.
 fn single(root: &Path, prefix: String, hash: &str) -> Result<Resolved> {
@@ -833,6 +934,11 @@ pub fn resolve(root: &Path, target: &Target, pulls: &[Pull]) -> Result<Resolved>
         Target::Uncommitted => work(root, prefix, pulls, false),
         Target::Named(name) => named(root, prefix, name, pulls),
         Target::Commit(hash) => single(root, prefix, hash),
+        Target::Range {
+            from,
+            to,
+            three_dot,
+        } => range(root, prefix, from, to, *three_dot),
         Target::Pull(number) => pull(root, prefix, *number),
         // Git knows nothing of a run: its session does.
         Target::Run(_) | Target::SysRun(_) => Err(HarnessError::invalid(
@@ -2031,5 +2137,71 @@ mod tests {
             "<?php // not committed\n"
         );
         assert!(export(&repository.folder, "0000000", &into.with_file_name("none")).is_err());
+    }
+
+    #[test]
+    fn range_target_parses_strictly_and_resolves_two_and_three_dot_diffs() {
+        assert_eq!(
+            Target::parse("range:main..HEAD").unwrap(),
+            Target::Range {
+                from: "main".to_owned(),
+                to: "HEAD".to_owned(),
+                three_dot: false,
+            }
+        );
+        assert_eq!(
+            Target::parse("range:v1.0...feature/x").unwrap().text(),
+            "range:v1.0...feature/x"
+        );
+        for bad in [
+            "range:",
+            "range:..HEAD",
+            "range:main..",
+            "range:-bad..HEAD",
+            "range:main..-bad",
+            "range:a b..c",
+            "range:a@{0}..b",
+            "range:a..b..c",
+            "range:a\n..b",
+        ] {
+            assert!(
+                Target::parse(bad).is_err(),
+                "expected strict validation to reject {bad:?}"
+            );
+        }
+
+        let repo = Repository::new();
+        let base_c = repo.git(&["rev-parse", "HEAD"]);
+        repo.write("src/cart.php", "<?php // main edit\n");
+        repo.commit("main-step");
+        let main_c = repo.git(&["rev-parse", "HEAD"]);
+
+        repo.git(&["checkout", "--quiet", "-b", "feat", &base_c]);
+        repo.write("src/feat.php", "<?php // feat\n");
+        repo.commit("feat-step");
+        let feat_c = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["checkout", "--quiet", "main"]);
+
+        let two_dot = resolve(
+            &repo.folder,
+            &Target::parse(&format!("range:{base_c}..{main_c}")).unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(two_dot.kind, "range");
+        assert_eq!(two_dot.base.as_ref().unwrap().commit, base_c);
+        assert_eq!(two_dot.revision.as_deref(), Some(main_c.as_str()));
+        assert_eq!(paths(&two_dot), [('M', "src/cart.php")]);
+
+        // Three-dot compares merge-base(main, feat)..feat, excluding main's own edits.
+        let three_dot = resolve(
+            &repo.folder,
+            &Target::parse("range:main...feat").unwrap(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(three_dot.base.as_ref().unwrap().commit, base_c);
+        assert_eq!(three_dot.revision.as_deref(), Some(feat_c.as_str()));
+        assert_eq!(paths(&three_dot), [('A', "src/feat.php")]);
     }
 }

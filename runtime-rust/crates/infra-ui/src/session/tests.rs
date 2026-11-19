@@ -1133,4 +1133,127 @@ mod update_tests {
         );
         assert_eq!(super::resolve_initial_project("", "", &[]), "");
     }
+
+    #[test]
+    fn sse_and_snapshot_events_merge_sorted_and_deduped_and_active_panes_route_cleanly() {
+        let mut events = vec![
+            json!({"id": 10, "kind": "status", "text": "start"}),
+            json!({"id": 12, "kind": "text", "text": "late live sse"}),
+        ];
+        let mut seen = ["10".to_owned(), "12".to_owned()].into_iter().collect();
+        let mut cursor = 12u64;
+
+        // Snapshot backfill arrives with an earlier missed event #11 plus duplicate #10/#12.
+        let (fresh, out_of_order) = merge_ordered_events(
+            &mut events,
+            &mut seen,
+            &mut cursor,
+            vec![
+                json!({"id": "12", "kind": "text", "text": "dup"}),
+                json!({"id": 11, "kind": "text", "text": "snapshot backfill"}),
+                json!({"id": 10, "kind": "status", "text": "dup"}),
+            ],
+        );
+        assert!(out_of_order);
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(parsed_event_id(&fresh[0]), Some(11));
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(parsed_event_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12]
+        );
+        assert_eq!(cursor, 12);
+
+        // Strictly newer event appends cleanly without requiring replay.
+        let (fresh2, out_of_order2) = merge_ordered_events(
+            &mut events,
+            &mut seen,
+            &mut cursor,
+            vec![json!({"id": 13, "kind": "result", "text": "done"})],
+        );
+        assert!(!out_of_order2);
+        assert_eq!(fresh2.len(), 1);
+        assert_eq!(cursor, 13);
+
+        // Only active visible diff/checks pane should render.
+        assert_eq!(
+            active_diff_pane_target("changes", "graph").map(|t| t.1),
+            Some("results-diff")
+        );
+        assert_eq!(
+            active_diff_pane_target("sessions", "diff").map(|t| t.1),
+            Some("workspace-diff-viewer")
+        );
+        assert_eq!(active_diff_pane_target("sessions", "graph"), None);
+        assert_eq!(active_diff_pane_target("checks", "diff"), None);
+
+        assert_eq!(
+            active_checks_pane_target("checks", "graph").map(|t| t.0),
+            Some("results-checks")
+        );
+        assert_eq!(
+            active_checks_pane_target("sessions", "checks").map(|t| t.0),
+            Some("workspace-checks-list")
+        );
+        assert_eq!(active_checks_pane_target("sessions", "diff"), None);
+
+        let files_a = vec![json!({"status": "M", "path": "src/a.rs"})];
+        let files_b = vec![json!({"status": "A", "path": "src/a.rs"})];
+        assert_eq!(
+            files_summary_hash("workspace-results", &files_a),
+            files_summary_hash("workspace-results", &files_a)
+        );
+        assert_ne!(
+            files_summary_hash("workspace-results", &files_a),
+            files_summary_hash("workspace-results", &files_b)
+        );
+        assert_ne!(
+            files_summary_hash("workspace-results", &files_a),
+            files_summary_hash("results-diff", &files_a)
+        );
+    }
+
+    #[test]
+    fn responsive_viewport_plan_syncs_mobile_to_desktop_without_churn() {
+        let mut last = Some(false);
+        // Same breakpoint desktop->desktop avoids redundant inert/graph churn.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, false, true),
+            ViewportSyncPlan {
+                close_sidebar: false,
+                sync_inert: false,
+                sync_graph: false,
+            }
+        );
+        // Desktop->mobile syncs inert and embedded graph without closing drawer.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, true, true),
+            ViewportSyncPlan {
+                close_sidebar: false,
+                sync_inert: true,
+                sync_graph: true,
+            }
+        );
+        // Same breakpoint mobile->mobile avoids churn.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, true, false),
+            ViewportSyncPlan {
+                close_sidebar: false,
+                sync_inert: false,
+                sync_graph: false,
+            }
+        );
+        // Mobile->desktop closes sidebar, clears inert, and syncs embedded graph when in sessions.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, false, true),
+            ViewportSyncPlan {
+                close_sidebar: true,
+                sync_inert: true,
+                sync_graph: true,
+            }
+        );
+        assert_eq!(last, Some(false));
+    }
 }

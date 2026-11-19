@@ -1668,11 +1668,14 @@ pub struct Graphs {
     live_json_writers: Mutex<BTreeMap<String, Arc<LiveJsonFlush>>>,
 }
 
+type PendingLiveJson = (u64, u64, Arc<Vec<u8>>);
+
 #[derive(Default)]
 struct LiveJsonFlush {
     dirty: AtomicBool,
     active: AtomicBool,
     cancel: AtomicBool,
+    pending: Mutex<Option<PendingLiveJson>>,
     done_lock: Mutex<()>,
 }
 
@@ -1861,12 +1864,22 @@ impl Graphs {
         }
     }
 
-    fn schedule_live_json_write(&self, project: &str, root: PathBuf, counts: (u64, u64)) {
+    fn schedule_live_json_write(
+        &self,
+        project: &str,
+        root: PathBuf,
+        snapshot: Option<(u64, u64, Arc<Vec<u8>>)>,
+    ) {
         if self.stopping.load(Ordering::Acquire) {
             return;
         }
         let slot = self.live_json_flush_slot(project);
         slot.cancel.store(false, Ordering::Release);
+        if let Some(snap) = snapshot
+            && let Ok(mut pending) = slot.pending.lock()
+        {
+            *pending = Some(snap);
+        }
         slot.dirty.store(true, Ordering::Release);
         if slot
             .active
@@ -1881,7 +1894,6 @@ impl Graphs {
         };
         let weak_me = Arc::downgrade(&me);
         let proj = project.to_owned();
-        let initial_counts = counts;
         let _ = std::thread::Builder::new()
             .name("harness-graph-json".into())
             .spawn(move || {
@@ -1893,8 +1905,6 @@ impl Graphs {
                     }
                 }
                 let _reset = ActiveReset(&slot.active);
-                let mut latest_counts;
-                let _ = initial_counts;
                 loop {
                     if !slot.dirty.swap(false, Ordering::AcqRel) {
                         break;
@@ -1907,13 +1917,22 @@ impl Graphs {
                     {
                         break;
                     }
+                    let queued_snapshot =
+                        slot.pending.lock().ok().and_then(|mut guard| guard.take());
                     if let Ok(setting) = graphs.setting(&proj)
                         && setting["enabled"] == true
-                        && let Ok(ir) = graphs.ir_store(&proj)
                     {
                         let live_graph = live(&graphs.store.state, &proj);
-                        if let Ok((nodes, edges)) = ir.write_live_graph_atomic(&live_graph) {
-                            latest_counts = (nodes, edges);
+                        let written = if let Some((nodes, edges, bytes)) = queued_snapshot {
+                            crate::graph_ir::write_live_graph_json_bytes_atomic(&live_graph, &bytes)
+                                .ok()
+                                .map(|()| (nodes, edges))
+                        } else if let Ok(ir) = graphs.ir_store(&proj) {
+                            ir.write_live_graph_atomic(&live_graph).ok()
+                        } else {
+                            None
+                        };
+                        if let Some(latest_counts) = written {
                             let fresh_print = graphs.print(&proj, &root, false);
                             let commit = fresh_print.as_ref().and_then(|p| p.commit.as_deref());
                             write_live_summary(&live_graph, commit, Some(latest_counts), None);
@@ -2187,17 +2206,24 @@ impl Graphs {
             limit,
             depth,
         } = *shown;
-        if base.is_some()
-            && (!matches!(target, Some(Target::Pull(_)))
-                || cycle.is_some() == link.is_some()
-                || path.is_some()
-                || shared.is_some()
-                || pattern.is_some()
-                || followed.is_some())
-        {
-            return Err(HarnessError::invalid(
-                "Choose a pull request to inspect a base cycle or link.",
-            ));
+        if base.is_some() {
+            let valid_pr_base = matches!(target, Some(Target::Pull(_)))
+                && cycle.is_some() != link.is_some()
+                && path.is_none()
+                && shared.is_none()
+                && pattern.is_none()
+                && followed.is_none();
+            let valid_range_base = matches!(target, Some(Target::Range { .. }))
+                && !(cycle.is_some() && link.is_some())
+                && path.is_none()
+                && shared.is_none()
+                && pattern.is_none()
+                && followed.is_none();
+            if !valid_pr_base && !valid_range_base {
+                return Err(HarnessError::invalid(
+                    "Choose a pull request to inspect a base cycle or link.",
+                ));
+            }
         }
         if (launch.is_some() || compare_launch.is_some())
             && (!matches!(target, Some(Target::Run(_) | Target::SysRun(_)))
@@ -2437,35 +2463,47 @@ impl Graphs {
             _ => self.resolve_chosen_or_commit(project, &root, target)?,
         };
         if let Some(expected) = base {
-            let chosen = chosen(&resolved);
-            let commit = &resolved
-                .base
-                .as_ref()
-                .filter(|base| base.commit == expected)
-                .ok_or_else(|| {
-                    HarnessError::conflict("The pull request base changed. Reopen the PR cycle.")
-                })?
-                .commit;
-            let found = self.graph_at(project, &root, Some(commit), &resolved.prefix, true)?;
-            let (key, graph, tree) = found.graph.ok_or_else(|| {
-                HarnessError::unavailable("The PR base graph is no longer cached. Return to the PR cycle to prepare it again.")
-            })?;
-            let (index, cache_hit) = self.maps.index_with_cache_hit(&key, &graph, &tree)?;
-            if notests && index.has_rust_sources() && !index.has_test_spans() {
-                return Err(HarnessError::unavailable(
-                    "This cached base graph cannot be shown with Without tests.",
-                ));
+            let matches_base = |side: &crate::graph_changes::Side| {
+                side.commit == expected
+                    || (matches!(target, Target::Range { .. })
+                        && (side.name == expected
+                            || (expected.len() >= 4 && side.commit.starts_with(expected))))
+            };
+            if cycle.is_some() || link.is_some() {
+                let chosen = chosen(&resolved);
+                let commit = &resolved
+                    .base
+                    .as_ref()
+                    .filter(|base| matches_base(base))
+                    .ok_or_else(|| {
+                        HarnessError::conflict(
+                            "The pull request base changed. Reopen the PR cycle.",
+                        )
+                    })?
+                    .commit;
+                let found = self.graph_at(project, &root, Some(commit), &resolved.prefix, true)?;
+                let (key, graph, tree) = found.graph.ok_or_else(|| {
+                    HarnessError::unavailable("The PR base graph is no longer cached. Return to the PR cycle to prepare it again.")
+                })?;
+                let (index, cache_hit) = self.maps.index_with_cache_hit(&key, &graph, &tree)?;
+                if notests && index.has_rust_sources() && !index.has_test_spans() {
+                    return Err(HarnessError::unavailable(
+                        "This cached base graph cannot be shown with Without tests.",
+                    ));
+                }
+                let index = asked(index);
+                let mut view = follow(&index, &[], &|_| None, &Ok(None))
+                    .ok_or_else(|| HarnessError::invalid("Choose a base cycle or link."))?;
+                view["project_id"] = json!(project);
+                view["target"] = json!(target.text());
+                view["base"] = chosen["base"].clone();
+                view["chosen"] = chosen;
+                view["state"] = json!("ready");
+                told(&mut view);
+                return Ok((view, cache_hit));
+            } else if !resolved.base.as_ref().is_some_and(matches_base) {
+                return Err(HarnessError::conflict("The range base changed."));
             }
-            let index = asked(index);
-            let mut view = follow(&index, &[], &|_| None, &Ok(None))
-                .ok_or_else(|| HarnessError::invalid("Choose a base cycle or link."))?;
-            view["project_id"] = json!(project);
-            view["target"] = json!(target.text());
-            view["base"] = chosen["base"].clone();
-            view["chosen"] = chosen;
-            view["state"] = json!("ready");
-            told(&mut view);
-            return Ok((view, cache_hit));
         }
         let rules = if reads_rules {
             match &resolved.revision {
@@ -2657,7 +2695,7 @@ impl Graphs {
         view["project_id"] = json!(project);
         view["target"] = json!(target.text());
         view["chosen"] = chosen(&resolved);
-        if matches!(target, Target::Commit(_))
+        if matches!(target, Target::Commit(_) | Target::Range { .. })
             && let Some(revision) = resolved
                 .revision
                 .as_deref()
@@ -2813,7 +2851,7 @@ impl Graphs {
         {
             return Ok(resolved);
         }
-        if matches!(target, Target::Commit(_)) {
+        if matches!(target, Target::Commit(_) | Target::Range { .. }) {
             let resolved = Arc::new(graph_changes::resolve(root, target, &[])?);
             lock(&self.chosen)?.insert((project.to_owned(), target.text()), resolved.clone());
             return Ok(resolved);
@@ -2927,7 +2965,9 @@ impl Graphs {
                     target_label: Target::SysRun(run_id.clone()).text(),
                 })
             }
-            Some(t @ (Target::Named(_) | Target::Commit(_) | Target::Pull(_))) => {
+            Some(
+                t @ (Target::Named(_) | Target::Commit(_) | Target::Pull(_) | Target::Range { .. }),
+            ) => {
                 let existing = lock(&self.chosen)?
                     .get(&(project.to_owned(), t.text()))
                     .cloned();
@@ -3075,10 +3115,8 @@ impl Graphs {
         notests: bool,
     ) -> Result<Value> {
         let ctx = self.impact_context(project, target, focus_session, agent)?;
-        let ir = if ctx.resolved.as_ref().is_none_or(|r| r.revision.is_none())
-            && crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
-        {
-            self.ir_store(project).ok()
+        let ir = if ctx.resolved.as_ref().is_none_or(|r| r.revision.is_none()) {
+            self.get_ir_store_readonly(project)
         } else {
             None
         };
@@ -3122,10 +3160,8 @@ impl Graphs {
             return Err(HarnessError::invalid("Invalid code graph file path."));
         }
         let ctx = self.impact_context(project, target, focus_session, agent)?;
-        let ir = if ctx.resolved.as_ref().is_none_or(|r| r.revision.is_none())
-            && crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
-        {
-            self.ir_store(project).ok()
+        let ir = if ctx.resolved.as_ref().is_none_or(|r| r.revision.is_none()) {
+            self.get_ir_store_readonly(project)
         } else {
             None
         };
@@ -3206,6 +3242,22 @@ impl Graphs {
             .entry(project.to_owned())
             .or_insert_with(|| opened)
             .clone())
+    }
+    /// Returns a cached `GraphIrStore` from `ir_stores` if already open, or opens an existing
+    /// store strictly read-only without creating files or writing `ir_meta`/DDL.
+    pub(crate) fn get_ir_store_readonly(
+        &self,
+        project: &str,
+    ) -> Option<Arc<crate::graph_ir::GraphIrStore>> {
+        if let Ok(stores) = self.ir_stores.lock()
+            && let Some(existing) = stores.get(project)
+        {
+            return Some(existing.clone());
+        }
+        crate::graph_ir::GraphIrStore::open_readonly(&self.store.state, project)
+            .ok()
+            .flatten()
+            .map(Arc::new)
     }
     fn evict_ir_store(&self, project: &str) {
         if let Ok(mut stores) = self.ir_stores.lock() {
@@ -3434,15 +3486,25 @@ impl Graphs {
             return Ok(());
         }
         let home = folder(&self.store.state, project);
-        let live_graph = live(&self.store.state, project);
+        let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
+        let live_bytes = Arc::new(crate::graph_ir::encode_node_link_payload_from_elements(
+            &ir_nodes, &ir_links,
+        )?);
+        let index = Arc::new(crate::graph_map::Index::from_ir_parts(
+            root,
+            Some(ir.db_path().to_path_buf()),
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            ir_nodes,
+            ir_links,
+        )?);
         let rev = self.bump_ir_revision(project);
         self.maps.forget_live(project);
-        let (_idx, nodes, edges) = self.build_index_from_ir_store(project, root, &ir)?;
+        self.maps.put_live_ir(project, rev, index);
         let fresh_print = self.print(project, root, true);
         let elapsed = tenth(started.elapsed().as_secs_f64());
         let hash = fresh_print.as_ref().map(|p| p.hash.clone());
         let commit_owned = fresh_print.and_then(|p| p.commit);
-        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
+        let bytes = live_bytes.len() as u64;
         let disk = size(&home);
         self.edit(project, |setting| {
             if setting["enabled"] != true || self.stopping.load(Ordering::Acquire) {
@@ -3465,7 +3527,11 @@ impl Graphs {
                 fields.remove("failure");
             }
         })?;
-        self.schedule_live_json_write(project, root.to_path_buf(), (nodes, edges));
+        self.schedule_live_json_write(
+            project,
+            root.to_path_buf(),
+            Some((nodes, edges, live_bytes)),
+        );
         self.emit_status_event(
             project,
             "ready",
@@ -5058,7 +5124,15 @@ impl Domain for Graphs {
                         Some("1") => true,
                         Some(_) => return Err(HarnessError::invalid("Invalid graph check.")),
                     };
-                    self.status(project, visit)?
+                    let me = self.me.upgrade().ok_or_else(|| {
+                        HarnessError::unavailable("The code graph is shutting down.")
+                    })?;
+                    let project = project.to_owned();
+                    tokio::task::spawn_blocking(move || me.status(&project, visit))
+                        .await
+                        .map_err(|_| {
+                            HarnessError::unavailable("The code graph status could not be read.")
+                        })??
                 }
                 "graph.auto_start" => {
                     if !project.is_empty()
@@ -5097,7 +5171,20 @@ impl Domain for Graphs {
                                     HarnessError::unavailable("The change could not be read.")
                                 })??
                         }
-                        (action, None) if action != "changes" => self.act(project, action)?,
+                        (action, None) if action != "changes" => {
+                            let me = self.me.upgrade().ok_or_else(|| {
+                                HarnessError::unavailable("The code graph is shutting down.")
+                            })?;
+                            let project = project.to_owned();
+                            let action = action.to_owned();
+                            tokio::task::spawn_blocking(move || me.act(&project, &action))
+                                .await
+                                .map_err(|_| {
+                                    HarnessError::unavailable(
+                                        "The code graph action could not run.",
+                                    )
+                                })??
+                        }
                         _ => return Err(HarnessError::invalid("Invalid code graph action.")),
                     }
                 }
@@ -5174,10 +5261,11 @@ impl Domain for Graphs {
                     if agent.chars().any(char::is_control) {
                         return Err(HarnessError::invalid("Invalid code graph agent."));
                     }
-                    let target = match query["target"].as_str() {
-                        None | Some("") => None,
-                        Some(text) => Some(Target::parse(text)?),
-                    };
+                    let target = query["target"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(Target::parse)
+                        .transpose()?;
                     let followed = Followed::parse(
                         &text("follow")?,
                         query["out"].as_str().unwrap_or(""),
@@ -5243,11 +5331,14 @@ impl Domain for Graphs {
                     }
                     let cycle = text("cycle")?;
                     let base = text("base")?;
-                    if !base.is_empty()
-                        && (!matches!(base.len(), 40 | 64)
-                            || !base.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                    {
-                        return Err(HarnessError::invalid("Invalid pull request base."));
+                    if !base.is_empty() {
+                        let valid_hex = matches!(base.len(), 40 | 64)
+                            && base.bytes().all(|byte| byte.is_ascii_hexdigit());
+                        let valid_range_ref = matches!(target, Some(Target::Range { .. }))
+                            && graph_changes::is_valid_range_ref(&base);
+                        if !valid_hex && !valid_range_ref {
+                            return Err(HarnessError::invalid("Invalid pull request base."));
+                        }
                     }
                     if !cycle.is_empty()
                         && (cycle.chars().any(char::is_control)
@@ -5381,10 +5472,11 @@ impl Domain for Graphs {
                         Some("1") => true,
                         Some(_) => return Err(HarnessError::invalid("Invalid graph filter.")),
                     };
-                    let target = match query["target"].as_str() {
-                        None | Some("") => None,
-                        Some(text) => Some(Target::parse(text)?),
-                    };
+                    let target = query["target"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(Target::parse)
+                        .transpose()?;
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -5404,9 +5496,26 @@ impl Domain for Graphs {
                         Some("1") => Ok(true),
                         Some(_) => Err(HarnessError::invalid("Invalid graph filter.")),
                     };
-                    let target = match query["target"].as_str() {
-                        None | Some("") => None,
-                        Some(text) => Some(Target::parse(text)?),
+                    let is_impact = operation == "graph.file_impact";
+                    let raw_target = query["target"].as_str().unwrap_or("");
+                    let raw_from = query["from"].as_str().unwrap_or("");
+                    let raw_to = query["to"].as_str().unwrap_or("");
+                    let target = if !raw_target.is_empty() {
+                        if !is_impact && (!raw_from.is_empty() || !raw_to.is_empty()) {
+                            return Err(HarnessError::invalid(
+                                "Specify either target or from/to range parameters, not both.",
+                            ));
+                        }
+                        Some(Target::parse(raw_target)?)
+                    } else if !is_impact && (!raw_from.is_empty() || !raw_to.is_empty()) {
+                        if raw_from.is_empty() || raw_to.is_empty() {
+                            return Err(HarnessError::invalid(
+                                "Both 'from' and 'to' are required for a range.",
+                            ));
+                        }
+                        Some(Target::parse(&format!("range:{raw_from}..{raw_to}"))?)
+                    } else {
+                        None
                     };
                     let focus_session = query["focus_session"].as_str().unwrap_or("");
                     if focus_session.len() > 1024 || focus_session.chars().any(char::is_control) {
@@ -5419,7 +5528,6 @@ impl Domain for Graphs {
                         return Err(HarnessError::invalid("Invalid code graph agent."));
                     }
                     let agent = (!agent.trim().is_empty()).then(|| agent.trim().to_owned());
-                    let is_impact = operation == "graph.file_impact";
                     let path = if is_impact {
                         let value = query["path"].as_str().unwrap_or("");
                         if value.trim().is_empty()
@@ -5577,7 +5685,7 @@ mod tests {
                 "/api/projects/{project_id}/graph/changes",
                 200,
                 false,
-                &["target", "focus_session", "notests"][..]
+                &["target", "from", "to", "focus_session", "notests"][..],
             )
         );
         let impact_route = crate::http::ROUTES
@@ -9072,6 +9180,150 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(paged["paging"]["has_more"], true);
             assert_eq!(paged["depth"], 2);
             assert!(paged["ir_revision"].as_u64().unwrap_or(0) >= 1);
+
+            graphs.close();
+        }
+
+        #[tokio::test]
+        async fn p0_async_status_act_range_map_changes_and_single_pass_update() {
+            let dir = tempfile::tempdir().unwrap();
+            let state = dir.path().join("state");
+            let ws = dir.path().join("repo");
+            std::fs::create_dir_all(ws.join("src")).unwrap();
+            std::fs::write(ws.join("src/a.rs"), "pub fn alpha() -> i32 { 1 }\n").unwrap();
+
+            let git = |args: &[&str]| -> String {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&ws)
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@example.test")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@example.test")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{args:?}: {out:?}");
+                String::from_utf8_lossy(&out.stdout).trim().to_owned()
+            };
+            git(&["init", "--quiet"]);
+            git(&["add", "--all"]);
+            git(&["commit", "--quiet", "-m", "c1"]);
+            let c1 = git(&["rev-parse", "HEAD"]);
+
+            std::fs::write(
+                ws.join("src/b.rs"),
+                "pub fn beta() -> i32 { crate::a::alpha() }\n",
+            )
+            .unwrap();
+            git(&["add", "--all"]);
+            git(&["commit", "--quiet", "-m", "c2"]);
+            let c2 = git(&["rev-parse", "HEAD"]);
+
+            let store = SessionStore::open(&state).unwrap();
+            let proj = store.register(&ws).unwrap();
+            let pid = proj["id"].as_str().unwrap().to_owned();
+            let graphs = Graphs::with_native_backend(store, Duration::ZERO);
+            let domain = crate::services::Domain::execute(
+                &*graphs,
+                "graph.act",
+                json!({"params":{"project_id":pid},"query":{},"body":{"action":"enable"}}),
+            );
+            let Payload::Json(enabled) = domain.await.unwrap() else {
+                panic!("expected json");
+            };
+            assert!(enabled["enabled"] == true);
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let Payload::Json(st) = crate::services::Domain::execute(
+                    &*graphs,
+                    "graph.status",
+                    json!({"params":{"project_id":pid},"query":{"visit":"1"},"body":{}}),
+                )
+                .await
+                .unwrap() else {
+                    panic!("expected json");
+                };
+                if st["state"] == "ready" {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for graph");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            // `target=range:<A>..<B>` and `from`/`to` on `graph.changes`.
+            let Payload::Json(ch_target) = crate::services::Domain::execute(
+                &*graphs,
+                "graph.changes",
+                json!({"params":{"project_id":pid},"query":{"target":format!("range:{c1}..{c2}")},"body":{}}),
+            )
+            .await
+            .unwrap()
+            else {
+                panic!("expected json");
+            };
+            let Payload::Json(ch_params) = crate::services::Domain::execute(
+                &*graphs,
+                "graph.changes",
+                json!({"params":{"project_id":pid},"query":{"from":c1,"to":c2},"body":{}}),
+            )
+            .await
+            .unwrap() else {
+                panic!("expected json");
+            };
+            assert!(
+                ch_target["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f["path"] == "src/b.rs"),
+                "expected src/b.rs in range target changes: {ch_target}"
+            );
+            assert_eq!(ch_target["files"], ch_params["files"]);
+            assert!(
+                crate::services::Domain::execute(
+                    &*graphs,
+                    "graph.changes",
+                    json!({"params":{"project_id":pid},"query":{"target":format!("range:{c1}..{c2}"),"from":c1},"body":{}}),
+                )
+                .await
+                .is_err()
+            );
+
+            // `graph.map` with `target=range:<A>..<B>` and relaxed `base=<short-sha>`.
+            let Payload::Json(mapped) = crate::services::Domain::execute(
+                &*graphs,
+                "graph.map",
+                json!({"params":{"project_id":pid},"query":{"target":format!("range:{c1}..{c2}"),"base":&c1[..7]},"body":{}}),
+            )
+            .await
+            .unwrap()
+            else {
+                panic!("expected json");
+            };
+            assert!(mapped["nodes"].is_array(), "expected range map: {mapped}");
+
+            // Single-pass `apply_ir_path_updates` updates live Index and live/graph.json.
+            std::fs::write(ws.join("src/c.rs"), "pub fn gamma() -> i32 { 3 }\n").unwrap();
+            graphs
+                .apply_ir_path_updates(&pid, &ws, &["src/c.rs".to_owned()])
+                .unwrap();
+            let idx = graphs.live_index(&pid).expect("updated live index");
+            assert!(idx.files().iter().any(|p| p == "src/c.rs"));
+
+            let live_json = state.join("graphs").join(&pid).join("live/graph.json");
+            let flush_deadline = Instant::now() + Duration::from_secs(5);
+            let mut wrote_c = false;
+            while Instant::now() < flush_deadline {
+                if let Ok(text) = std::fs::read_to_string(&live_json)
+                    && text.contains("src/c.rs")
+                {
+                    wrote_c = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(wrote_c, "expected live/graph.json to contain src/c.rs");
 
             graphs.close();
         }

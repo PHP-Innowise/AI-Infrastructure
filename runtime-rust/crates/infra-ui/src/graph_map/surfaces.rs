@@ -178,6 +178,25 @@ pub(super) fn surface_state(surface: MapSurface) -> V {
         fresh("")
     }
 }
+pub(super) fn effective_target_from(target: &str, compare_base: &str) -> String {
+    let target = target.trim();
+    let base = compare_base.trim();
+    if !base.is_empty()
+        && !target.is_empty()
+        && target != "work"
+        && !target.starts_with("range:")
+        && !target.starts_with("sysrun:")
+    {
+        let head = target.strip_prefix("commit:").unwrap_or(target).trim();
+        if !head.is_empty() && head != base {
+            return format!("range:{base}..{head}");
+        }
+    }
+    target.to_owned()
+}
+pub(super) fn effective_target(state: &V) -> String {
+    effective_target_from(&m::text(state, "target"), &m::text(state, "compare_base"))
+}
 pub(super) fn save_surface_state(surface: MapSurface, state: &V) {
     m::set(surface.state_model_key, normalize_map_state(state.clone()));
 }
@@ -189,7 +208,7 @@ pub(super) fn surface_changes_doc(surface: MapSurface, state: &V) -> Option<V> {
             return None;
         }
         let scope_key = scope.scope_key();
-        let target = m::text(state, "target");
+        let target = effective_target(state);
         let target_key = if target.is_empty() {
             "work"
         } else {
@@ -221,7 +240,7 @@ pub(super) fn surface_changes_doc(surface: MapSurface, state: &V) -> Option<V> {
     Some(data)
 }
 pub(super) fn impact_cache_key(scope_key: &str, path: &str, state: &V) -> String {
-    let raw_target = m::text(state, "target");
+    let raw_target = effective_target(state);
     let target = if raw_target.is_empty() {
         "work"
     } else {
@@ -617,7 +636,8 @@ pub(super) fn build_overlay_extras(surface: MapSurface, view: &V, state: &V) -> 
     let nodes = m::array(&view["nodes"]);
     let edges = m::array(&view["edges"]);
     let n_count = nodes.len();
-    let at = |p: &V| nodes.iter().position(|node| &node["path"] == p);
+    let path_index = build_path_index(&nodes);
+    let at = |p: &V| lookup_path_index(&nodes, &path_index, p);
     let mut out_adj = vec![Vec::new(); n_count];
     let mut in_adj = vec![Vec::new(); n_count];
     for e in &edges {
@@ -730,7 +750,7 @@ pub(super) fn active_modal_lens(state: &V, view: &V) -> &'static str {
         || m::text(view, "mode") == "patterns"
     {
         "architecture"
-    } else if !m::text(state, "target").is_empty() || m::text(view, "mode") == "changes" {
+    } else if !effective_target(state).is_empty() || m::text(view, "mode") == "changes" {
         "changes"
     } else {
         "dependencies"
@@ -742,7 +762,7 @@ pub(super) fn sync_modal_lens_and_display(state: &V, view: &V) {
     for candidate in ["dependencies", "changes", "architecture", "tests", "runs"] {
         dom::attr(
             &format!("graph-map-lens-{candidate}"),
-            "aria-pressed",
+            "aria-selected",
             if candidate == lens { "true" } else { "false" },
         );
     }
@@ -771,7 +791,7 @@ pub(super) fn sync_surface_toolbar(surface: MapSurface, state: &V, changes: Opti
         return;
     }
     let prefix = surface.id_prefix;
-    let target = m::text(state, "target");
+    let target = effective_target(state);
     let changes_mode = !target.is_empty();
     let whole = m::yes(&state["whole"]);
     dom::attr(
@@ -1806,6 +1826,19 @@ pub fn contract_consumers_html(impact: &V, surface: &str) -> String {
     html.push_str("</div>");
     html
 }
+pub fn build_scoped_changes_path_for_state(
+    scope: &GraphTargetScope,
+    state: &V,
+    focus_session: &str,
+) -> String {
+    let raw_target = effective_target(state);
+    let target = if raw_target.is_empty() {
+        "work"
+    } else {
+        raw_target.as_str()
+    };
+    build_scoped_changes_path(scope, target, focus_session, m::yes(&state["notests"]))
+}
 pub(super) async fn fetch_surface_changes(surface: MapSurface, state: V) {
     let scope = surface_scope(surface);
     if scope.is_empty() {
@@ -1814,7 +1847,7 @@ pub(super) async fn fetch_surface_changes(surface: MapSurface, state: V) {
         return;
     }
     let scope_key = scope.scope_key();
-    let raw_target = m::text(&state, "target");
+    let raw_target = effective_target(&state);
     let effective_target = if raw_target.is_empty() {
         "work"
     } else {
@@ -1825,8 +1858,7 @@ pub(super) async fn fetch_surface_changes(surface: MapSurface, state: V) {
     } else {
         m::text(&state, "focus_session")
     };
-    let notests = m::yes(&state["notests"]);
-    let url = build_scoped_changes_path(&scope, effective_target, &sid, notests);
+    let url = build_scoped_changes_path_for_state(&scope, &state, &sid);
     match api::scoped(surface.changes_epoch, &url).await {
         Ok((epoch, doc)) => {
             if !m::current(surface.changes_epoch, epoch)
@@ -1855,7 +1887,7 @@ pub(super) async fn fetch_surface_impact(surface: MapSurface, state: V, path: St
         return;
     }
     let scope_key = scope.scope_key();
-    let raw_target = m::text(&state, "target");
+    let raw_target = effective_target(&state);
     let effective_target = if raw_target.is_empty() {
         "work"
     } else {
@@ -2088,8 +2120,11 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
             query.push(("focus_session", sid));
         }
     }
-    let target = m::text(state, "target");
-    for key in ["focus", "filter", "target", "launch", "compare_launch"] {
+    let target = effective_target(state);
+    if !target.is_empty() {
+        query.push(("target", target.clone()));
+    }
+    for key in ["focus", "filter", "launch", "compare_launch"] {
         if !m::text(state, key).is_empty() {
             query.push((key, m::text(state, key)));
         }
@@ -3057,8 +3092,7 @@ pub(super) async fn choose(target: &str) -> bool {
         scope.act_request("changes", Some(target))
     };
     let asked = api::post(&path, body).await;
-    if surface_scope(MODAL_SURFACE).scope_key() != scope_key
-        || m::text(&state(), "target") != target
+    if surface_scope(MODAL_SURFACE).scope_key() != scope_key || effective_target(&state()) != target
     {
         return false;
     }
@@ -3128,7 +3162,7 @@ pub(super) async fn load(quiet: bool) {
         return;
     }
     let scope_key = scope.scope_key();
-    let target = m::text(&state, "target");
+    let target = effective_target(&state);
     let path = build_scoped_map_path(&scope, &state, false);
     if !quiet {
         dom::attr("graph-map-canvas", "aria-busy", "true");
@@ -3303,10 +3337,10 @@ pub(super) fn apply_click_action(
     let mut out = ClickOutcome::reload();
     match action {
         "graph-side-tab" => {
-            let tab = if payload["tab"].as_str() == Some("changes") {
-                "changes"
-            } else {
-                "details"
+            let tab = match payload["tab"].as_str() {
+                Some("changes") => "changes",
+                Some("analysis") => "analysis",
+                _ => "details",
             };
             state["side_tab"] = json!(tab);
             state["side_pinned"] = json!(true);
@@ -4190,11 +4224,12 @@ pub async fn event(
             if dock.is_object() {
                 dock["range_base"] = V::Null;
                 dock["range_head"] = V::Null;
+                dock["range_anchor"] = V::Null;
                 m::set("graph-commit-graph", dock);
                 show_commit_dock();
             }
-            rerender_surface_preserving_camera(MODAL_SURFACE);
-            return true;
+            state["compare_base"] = V::Null;
+            chosen = true;
         }
         ("click", _, "graph-commit-select" | "graph-commit-reset") => {
             let Some(target) = commit_action_target(action, payload) else {
@@ -4276,6 +4311,7 @@ pub async fn event(
             match lens {
                 "dependencies" => {
                     state["target"] = json!("");
+                    state["compare_base"] = V::Null;
                     state["history"] = json!(false);
                     state["patterns"] = json!(false);
                     state["modules"] = json!(false);
@@ -4673,7 +4709,7 @@ pub async fn event(
         _ => return false,
     }
     m::set("graph-map", state.clone());
-    let target = m::text(&state, "target");
+    let target = effective_target(&state);
     if chosen || (kind == "click" && ["graph-map-go", "graph-find-choose"].contains(&action)) {
         // The filter field follows: it is emptied where the place changed.
         dom::set_value("graph-map-filter", &m::text(&state, "filter"));
@@ -5138,6 +5174,10 @@ pub(super) struct CachedSurfacePlan {
     pub(super) node_keys: Vec<String>,
     pub(super) node_labels: Vec<String>,
     pub(super) is_dense: bool,
+    pub(super) dense_node_htmls: Vec<String>,
+    pub(super) latest_patch: Option<CanvasSelectionPatch>,
+    pub(super) latest_roving_focus: Option<usize>,
+    pub(super) latest_path_nodes: BTreeSet<usize>,
 }
 
 thread_local! {
@@ -5156,7 +5196,7 @@ pub(super) fn pairs_for_view(view: &V, overlay: &CanvasOverlayContext<'_>) -> Ve
         &mut edges,
         &frames,
     );
-    let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
+    let node_index = build_path_index(&nodes);
     let plain = plain_map(view);
     let mut left_out = if overlay.hide_transitive && plain {
         said_twice(view)
@@ -5168,7 +5208,12 @@ pub(super) fn pairs_for_view(view: &V, overlay: &CanvasOverlayContext<'_>) -> Ve
         .iter()
         .zip(&left_out)
         .filter(|(_, said)| !**said)
-        .filter_map(|(edge, _)| Some((at(&edge["from"])?, at(&edge["to"])?)))
+        .filter_map(|(edge, _)| {
+            Some((
+                lookup_path_index(&nodes, &node_index, &edge["from"])?,
+                lookup_path_index(&nodes, &node_index, &edge["to"])?,
+            ))
+        })
         .collect()
 }
 
@@ -5222,6 +5267,13 @@ impl CachedSurfacePlan {
             node_keys: rendered.node_keys.clone(),
             node_labels: rendered.node_labels.clone(),
             is_dense: rendered.dense_scene.is_some(),
+            dense_node_htmls: rendered.dense_node_htmls.clone(),
+            latest_patch: None,
+            latest_roving_focus: overlay.and_then(|ctx| ctx.roving_focus),
+            latest_path_nodes: overlay
+                .and_then(|ctx| ctx.path_nodes)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
@@ -5323,6 +5375,87 @@ pub(super) fn patch_edge_state_dom(
     }
 }
 
+pub(super) fn apply_node_patch_to_el(
+    node_el: &web_sys::Element,
+    idx: usize,
+    np: &NodeSelectionState,
+    roving_focus: Option<usize>,
+    path_nodes: Option<&BTreeSet<usize>>,
+) {
+    let shared_path = np.shared_path || path_nodes.is_some_and(|nodes| nodes.contains(&idx));
+    let _ = node_el.set_attribute("data-selected", if np.selected { "true" } else { "false" });
+    let _ = node_el.set_attribute("data-dim", if np.dim { "true" } else { "false" });
+    toggle_bool_attr(node_el, "data-lit", np.lit || shared_path);
+    toggle_bool_attr(node_el, "data-shared-path", shared_path);
+    toggle_bool_attr(node_el, "data-focus-target", np.focus_target);
+    if let Some(roving) = roving_focus {
+        let _ = node_el.set_attribute("tabindex", if idx == roving { "0" } else { "-1" });
+    }
+    if let Some(pressed) = np.pressed {
+        let _ = node_el.set_attribute("aria-pressed", if pressed { "true" } else { "false" });
+    }
+    sync_node_blast_dom(node_el, np.blast);
+}
+
+fn is_important_cached_node(cached: &CachedSurfacePlan, idx: usize) -> bool {
+    if cached.latest_roving_focus == Some(idx) || cached.latest_path_nodes.contains(&idx) {
+        return true;
+    }
+    cached
+        .latest_patch
+        .as_ref()
+        .and_then(|patch| patch.nodes.get(idx))
+        .is_some_and(|np| np.selected || np.lit || np.focus_target || np.shared_path || np.failed)
+}
+
+fn is_important_node_el(cached: &CachedSurfacePlan, idx: usize, el: &web_sys::Element) -> bool {
+    is_important_cached_node(cached, idx)
+        || el.get_attribute("data-selected").as_deref() == Some("true")
+        || el.get_attribute("data-lit").as_deref() == Some("true")
+        || el.get_attribute("data-focus-target").as_deref() == Some("true")
+        || el.get_attribute("data-pinned").as_deref() == Some("true")
+        || el.get_attribute("data-shared-path").as_deref() == Some("true")
+        || el.get_attribute("tabindex").as_deref() == Some("0")
+        || el
+            .query_selector(".graph-map-node-suspect")
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+pub(super) fn mount_dense_node_if_needed(canvas_id: &str, idx: usize) -> Option<web_sys::Element> {
+    let canvas = dom::get(canvas_id)?;
+    if let Ok(Some(existing)) = canvas.query_selector(&format!(".graph-map-node[data-n='{idx}']")) {
+        return Some(existing);
+    }
+    let plane = canvas.query_selector(".graph-map-plane").ok().flatten()?;
+    let (html, patch, roving, path_nodes) = SURFACE_PLAN_CACHE.with(|cache| {
+        let guard = cache.borrow();
+        let entry = guard.get(canvas_id)?;
+        if !entry.is_dense {
+            return None;
+        }
+        let html = entry.dense_node_htmls.get(idx)?.clone();
+        if html.is_empty() {
+            return None;
+        }
+        Some((
+            html,
+            entry.latest_patch.clone(),
+            entry.latest_roving_focus,
+            entry.latest_path_nodes.clone(),
+        ))
+    })?;
+    let mut created = graph_viewport::append_html_elements(&plane, &html);
+    let el = created.pop()?;
+    if let Some(np) = patch.as_ref().and_then(|p| p.nodes.get(idx)) {
+        apply_node_patch_to_el(&el, idx, np, roving, Some(&path_nodes));
+    } else if let Some(r) = roving {
+        let _ = el.set_attribute("tabindex", if idx == r { "0" } else { "-1" });
+    }
+    Some(el)
+}
+
 /// Attempts to apply selection, highlight, cone, live-focus target, blast, and radar state
 /// changes to the existing DOM without rebuilding canvas `innerHTML`.
 pub(super) fn try_patch_canvas_dom_in_place(
@@ -5340,7 +5473,7 @@ pub(super) fn try_patch_canvas_dom_in_place(
     })?;
 
     let canvas = dom::get(canvas_id)?;
-    let _plane = canvas.query_selector(".graph-map-plane").ok().flatten()?;
+    let plane = canvas.query_selector(".graph-map-plane").ok().flatten()?;
     let node_els = dom::all(&format!("#{canvas_id} .graph-map-node[data-n]"));
     let patch =
         compute_canvas_selection_patch(view, &cached.nodes, &cached.frames, &cached.pairs, overlay);
@@ -5348,6 +5481,7 @@ pub(super) fn try_patch_canvas_dom_in_place(
         return None;
     }
 
+    let mut mounted_indices = HashSet::with_capacity(node_els.len());
     for node_el in &node_els {
         let Some(idx) = node_el
             .get_attribute("data-n")
@@ -5355,22 +5489,43 @@ pub(super) fn try_patch_canvas_dom_in_place(
         else {
             continue;
         };
+        mounted_indices.insert(idx);
         let Some(np) = patch.nodes.get(idx) else {
             continue;
         };
-        let shared_path =
-            np.shared_path || overlay.path_nodes.is_some_and(|nodes| nodes.contains(&idx));
-        let _ = node_el.set_attribute("data-selected", if np.selected { "true" } else { "false" });
-        let _ = node_el.set_attribute("data-dim", if np.dim { "true" } else { "false" });
-        toggle_bool_attr(node_el, "data-shared-path", shared_path);
-        toggle_bool_attr(node_el, "data-focus-target", np.focus_target);
-        if let Some(roving) = overlay.roving_focus {
-            let _ = node_el.set_attribute("tabindex", if idx == roving { "0" } else { "-1" });
+        apply_node_patch_to_el(node_el, idx, np, overlay.roving_focus, overlay.path_nodes);
+    }
+
+    if cached.is_dense {
+        let mut batch_html = String::new();
+        let mut batch_indices = Vec::new();
+        for (idx, np) in patch.nodes.iter().enumerate() {
+            if mounted_indices.contains(&idx) {
+                continue;
+            }
+            let important = np.selected
+                || np.lit
+                || np.focus_target
+                || np.shared_path
+                || np.failed
+                || overlay.roving_focus == Some(idx)
+                || overlay.path_nodes.is_some_and(|nodes| nodes.contains(&idx));
+            if !important {
+                continue;
+            }
+            if let Some(html) = cached.dense_node_htmls.get(idx).filter(|s| !s.is_empty()) {
+                batch_html.push_str(html);
+                batch_indices.push(idx);
+            }
         }
-        if let Some(pressed) = np.pressed {
-            let _ = node_el.set_attribute("aria-pressed", if pressed { "true" } else { "false" });
+        if !batch_html.is_empty() {
+            let new_els = graph_viewport::append_html_elements(&plane, &batch_html);
+            for (idx, el) in batch_indices.into_iter().zip(new_els) {
+                if let Some(np) = patch.nodes.get(idx) {
+                    apply_node_patch_to_el(&el, idx, np, overlay.roving_focus, overlay.path_nodes);
+                }
+            }
         }
-        sync_node_blast_dom(node_el, np.blast);
     }
 
     for el in dom::all(&format!(
@@ -5459,7 +5614,21 @@ pub(super) fn try_patch_canvas_dom_in_place(
         }
     }
 
+    let path_nodes_set = overlay.path_nodes.cloned().unwrap_or_default();
+    SURFACE_PLAN_CACHE.with(|cache| {
+        if let Some(entry) = cache.borrow_mut().get_mut(canvas_id) {
+            entry.latest_patch = Some(patch.clone());
+            if let Some(roving) = overlay.roving_focus {
+                entry.latest_roving_focus = Some(roving);
+            }
+            entry.latest_path_nodes = path_nodes_set;
+        }
+    });
+
     if cached.is_dense {
+        graph_viewport::canvas2d::update_scene(canvas_id, |scene| {
+            refresh_dense_scene_for_patch(scene, &cached.pairs, &cached.node_keys, &patch, overlay);
+        });
         if let Some(surface) = pan_surface_for_canvas(canvas_id) {
             let cam = load_surface_camera(surface);
             graph_viewport::canvas2d::paint_scene(canvas_id, cam.viewport_cam(), None, true);
@@ -5474,8 +5643,8 @@ pub(super) fn try_patch_canvas_dom_in_place(
     })
 }
 
-/// Marks offscreen nodes on large/dense canvases with `data-offscreen="true"` so CSS can
-/// skip heavy secondary layers outside the visible viewport.
+/// Marks offscreen nodes on large/dense canvases with `data-offscreen="true"` and dynamically
+/// reconciles mounted DOM nodes against the cached dense layout when panning or zooming.
 pub(super) fn sync_viewport_culling(canvas_id: &str, bounds: Option<ViewportBounds>) {
     let nodes = dom::all(&format!("#{canvas_id} .graph-map-node[data-n]"));
     let Some(bounds) = bounds else {
@@ -5484,26 +5653,108 @@ pub(super) fn sync_viewport_culling(canvas_id: &str, bounds: Option<ViewportBoun
         }
         return;
     };
-    let plan_nodes = SURFACE_PLAN_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .get(canvas_id)
-            .map(|entry| entry.nodes.clone())
-    });
-    let Some(plan_nodes) = plan_nodes else {
+    let cached = SURFACE_PLAN_CACHE.with(|cache| cache.borrow().get(canvas_id).cloned());
+    let Some(cached) = cached else {
         return;
     };
+    let mut mounted_els: HashMap<usize, web_sys::Element> = HashMap::with_capacity(nodes.len());
     for el in nodes {
-        let is_selected = el.get_attribute("data-selected").as_deref() == Some("true")
-            || el.get_attribute("data-lit").as_deref() == Some("true")
-            || el.get_attribute("data-focus-target").as_deref() == Some("true");
-        let offscreen = if is_selected {
-            false
-        } else if let Some(placed) = el
+        if let Some(idx) = el
             .get_attribute("data-n")
             .and_then(|s| s.parse::<usize>().ok())
-            .and_then(|idx| plan_nodes.get(idx))
         {
+            mounted_els.insert(idx, el);
+        }
+    }
+
+    if cached.is_dense && cached.dense_node_htmls.len() == cached.nodes.len() {
+        if let Some(plane) =
+            dom::get(canvas_id).and_then(|c| c.query_selector(".graph-map-plane").ok().flatten())
+        {
+            let rects: Vec<(f64, f64, f64, f64)> = cached
+                .nodes
+                .iter()
+                .map(|p| (p.x, p.y, BOX_WIDTH, BOX_HEIGHT))
+                .collect();
+            let mounted: Vec<(usize, bool)> = mounted_els
+                .iter()
+                .map(|(&idx, el)| (idx, is_important_node_el(&cached, idx, el)))
+                .collect();
+            let mut force_mount = Vec::new();
+            for (idx, html) in cached.dense_node_htmls.iter().enumerate() {
+                if !html.is_empty() && is_important_cached_node(&cached, idx) {
+                    force_mount.push(idx);
+                }
+            }
+            let visible = (bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
+            let mount = (
+                bounds.min_x - 120.0,
+                bounds.min_y - 120.0,
+                bounds.max_x + 120.0,
+                bounds.max_y + 120.0,
+            );
+            let unmount = (
+                bounds.min_x - 280.0,
+                bounds.min_y - 280.0,
+                bounds.max_x + 280.0,
+                bounds.max_y + 280.0,
+            );
+            let plan = graph_viewport::plan_viewport_reconcile(
+                &rects,
+                &mounted,
+                visible,
+                mount,
+                unmount,
+                &force_mount,
+            );
+            for idx in plan.to_unmount {
+                if !cached
+                    .dense_node_htmls
+                    .get(idx)
+                    .is_none_or(|s| s.is_empty())
+                {
+                    if let Some(el) = mounted_els.remove(&idx) {
+                        el.remove();
+                    }
+                }
+            }
+            let mut batch_html = String::new();
+            let mut batch_indices = Vec::new();
+            for idx in plan.to_mount {
+                if mounted_els.contains_key(&idx) {
+                    continue;
+                }
+                if let Some(html) = cached.dense_node_htmls.get(idx).filter(|s| !s.is_empty()) {
+                    batch_html.push_str(html);
+                    batch_indices.push(idx);
+                }
+            }
+            if !batch_html.is_empty() {
+                let inserted = graph_viewport::append_html_elements(&plane, &batch_html);
+                for (idx, el) in batch_indices.into_iter().zip(inserted) {
+                    if let Some(np) = cached.latest_patch.as_ref().and_then(|p| p.nodes.get(idx)) {
+                        apply_node_patch_to_el(
+                            &el,
+                            idx,
+                            np,
+                            cached.latest_roving_focus,
+                            Some(&cached.latest_path_nodes),
+                        );
+                    } else if let Some(roving) = cached.latest_roving_focus {
+                        let _ =
+                            el.set_attribute("tabindex", if idx == roving { "0" } else { "-1" });
+                    }
+                    mounted_els.insert(idx, el);
+                }
+            }
+        }
+    }
+
+    for (idx, el) in mounted_els {
+        let is_important = is_important_node_el(&cached, idx, &el);
+        let offscreen = if is_important {
+            false
+        } else if let Some(placed) = cached.nodes.get(idx) {
             !rect_intersects_viewport(placed.x, placed.y, BOX_WIDTH, BOX_HEIGHT, bounds)
         } else {
             false
@@ -5532,13 +5783,14 @@ pub(super) fn resolve_focus_bbox_with_cached_plan(
     let nodes = m::array(&view["nodes"]);
     let edges = m::array(&view["edges"]);
     let frames = m::array(&view["frames"]);
-    let at = |p: &V| nodes.iter().position(|node| &node["path"] == p);
+    let node_index = build_path_index(&nodes);
+    let frame_index = build_path_index(&frames);
     let weighted: Vec<(usize, usize, u64)> = edges
         .iter()
         .filter_map(|e| {
             Some((
-                at(&e["from"])?,
-                at(&e["to"])?,
+                lookup_path_index(&nodes, &node_index, &e["from"])?,
+                lookup_path_index(&nodes, &node_index, &e["to"])?,
                 e["links"].as_u64().unwrap_or(1),
             ))
         })
@@ -5546,11 +5798,11 @@ pub(super) fn resolve_focus_bbox_with_cached_plan(
     let framed = Frames {
         of: nodes
             .iter()
-            .map(|n| frames.iter().position(|f| f["path"] == n["holder"]))
+            .map(|n| lookup_path_index(&frames, &frame_index, &n["holder"]))
             .collect(),
         holder: frames
             .iter()
-            .map(|f| frames.iter().position(|h| h["path"] == f["holder"]))
+            .map(|f| lookup_path_index(&frames, &frame_index, &f["holder"]))
             .collect(),
     };
     let plan = if layered(view) && !m::yes(&view["pattern"]["declared"]) {
@@ -6447,6 +6699,12 @@ pub(super) fn move_roving_node_focus(
     };
     state["roving_focus"] = json!(next_idx);
     save_surface_state(surface, &state);
+    SURFACE_PLAN_CACHE.with(|cache| {
+        if let Some(entry) = cache.borrow_mut().get_mut(surface.canvas) {
+            entry.latest_roving_focus = Some(next_idx);
+        }
+    });
+    let _ = mount_dense_node_if_needed(surface.canvas, next_idx);
     if let Some(canvas) = dom::get(surface.canvas) {
         if let Ok(nodes) = canvas.query_selector_all(".graph-map-node[data-n]") {
             for i in 0..nodes.length() {
@@ -6482,37 +6740,63 @@ pub(super) fn move_roving_node_focus(
     graph_viewport::announce_live(&live_id, &format!("Focused {label}"));
     true
 }
-pub(super) async fn open_full_from_surface(surface: MapSurface) {
-    set_surface_scope(MODAL_SURFACE, surface_scope(surface));
-    let emb = surface_state(surface);
-    let target = m::text(&emb, "target");
-    let mut modal = anew(&target);
+
+pub(super) fn transfer_surface_state_to_modal(emb: &V, mut modal: V) -> V {
     modal["whole"] = json!(m::yes(&emb["whole"]));
     modal["notests"] = json!(m::yes(&emb["notests"]));
     modal["certain"] = json!(m::yes(&emb["certain"]));
-    modal["filter"] = json!(m::text(&emb, "filter"));
-    modal["scope"] = json!(m::text(&emb, "scope"));
+    modal["filter"] = json!(m::text(emb, "filter"));
+    modal["scope"] = json!(m::text(emb, "scope"));
     modal["spread"] = emb["spread"].clone();
     modal["focus"] = emb["focus"].clone();
     modal["launch"] = emb["launch"].clone();
     modal["compare_launch"] = emb["compare_launch"].clone();
     modal["agent"] = emb["agent"].clone();
     modal["run_id"] = emb["run_id"].clone();
-    modal["side_tab"] = json!(if m::text(&emb, "side_tab") == "changes" {
-        "changes"
-    } else {
-        "details"
+    modal["traced_path"] = emb["traced_path"].clone();
+    modal["isolate_active"] = json!(m::yes(&emb["isolate_active"]));
+    modal["isolate_depth"] = json!(emb["isolate_depth"].as_u64().unwrap_or(1).clamp(1, 4));
+    modal["failing"] = emb["failing"].clone();
+    modal["roving_focus"] = emb["roving_focus"].clone();
+    modal["compare_base"] = json!(m::text(emb, "compare_base"));
+    modal["patterns"] = json!(m::yes(&emb["patterns"]));
+    modal["history"] = json!(m::yes(&emb["history"]));
+    modal["modules"] = json!(m::yes(&emb["modules"]));
+    modal["no_incoming"] = json!(m::yes(&emb["no_incoming"]));
+    modal["lens_tests"] = json!(m::yes(&emb["lens_tests"]));
+    if !emb["fit"].is_null() {
+        modal["fit"] = json!(m::yes(&emb["fit"]));
+    }
+    if !m::text(emb, "range_base").is_empty() {
+        modal["range_base"] = json!(m::text(emb, "range_base"));
+    }
+    if !m::text(emb, "range_head").is_empty() {
+        modal["range_head"] = json!(m::text(emb, "range_head"));
+    }
+    if !m::text(emb, "range_anchor").is_empty() {
+        modal["range_anchor"] = json!(m::text(emb, "range_anchor"));
+    }
+    modal["side_tab"] = json!(match m::text(emb, "side_tab").as_str() {
+        k @ ("changes" | "analysis") => k,
+        _ => "details",
     });
-    modal["changes_filter"] = json!(match m::text(&emb, "changes_filter").as_str() {
+    modal["changes_filter"] = json!(match m::text(emb, "changes_filter").as_str() {
         k @ ("all" | "created" | "modified" | "deleted") => k,
         _ => "all",
     });
-    modal["member_filter"] = json!(match m::text(&emb, "member_filter").as_str() {
+    modal["member_filter"] = json!(match m::text(emb, "member_filter").as_str() {
         k @ ("all" | "used" | "exposed" | "risk") => k,
         _ => "all",
     });
     modal["side_pinned"] = json!(m::yes(&emb["side_pinned"]));
-    modal = normalize_map_state(modal);
+    normalize_map_state(modal)
+}
+
+pub(super) async fn open_full_from_surface(surface: MapSurface) {
+    set_surface_scope(MODAL_SURFACE, surface_scope(surface));
+    let emb = surface_state(surface);
+    let target = m::text(&emb, "target");
+    let modal = transfer_surface_state_to_modal(&emb, anew(&target));
     m::set("graph-map", modal.clone());
 
     let emb_changes = m::data(surface.changes_key);
@@ -6533,6 +6817,25 @@ pub(super) async fn open_full_from_surface(surface: MapSurface) {
     dom::set_checked("graph-map-whole", m::yes(&modal["whole"]));
     dom::set_checked("graph-map-notests", m::yes(&modal["notests"]));
     dom::set_checked("graph-map-certain", m::yes(&modal["certain"]));
+    dom::set_checked("graph-map-patterns", m::yes(&modal["patterns"]));
+    dom::set_checked("graph-map-history", m::yes(&modal["history"]));
+    dom::set_checked("graph-map-modules", m::yes(&modal["modules"]));
+    dom::set_checked("graph-map-no-incoming", m::yes(&modal["no_incoming"]));
+    dom::set_checked("graph-map-fit", m::yes(&modal["fit"]));
+    dom::set_value(
+        "graph-map-path-from",
+        &m::text(&modal["traced_path"], "from"),
+    );
+    dom::set_value("graph-map-path-to", &m::text(&modal["traced_path"], "to"));
+    dom::set_value(
+        "graph-map-isolate-depth",
+        &modal["isolate_depth"].as_u64().unwrap_or(1).to_string(),
+    );
+    let failing_lines: Vec<String> = m::array(&modal["failing"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    dom::set_value("graph-map-failing", &failing_lines.join("\n"));
     m::next("graph-find");
     dom::cancel_timer("graph-find-search");
     m::set("graph-find", V::Null);
@@ -7375,16 +7678,40 @@ fn handle_surface_node_pin_drag(
             if pe.button() != 0 || !pe.shift_key() {
                 return false;
             }
-            let Some(node_el) =
+            let idx = if let Some(node_el) =
                 target_el.and_then(|el| el.closest(".graph-map-node[data-n]").ok().flatten())
-            else {
-                return false;
-            };
-            let Some(idx) = node_el
-                .get_attribute("data-n")
-                .and_then(|s| s.parse::<usize>().ok())
-            else {
-                return false;
+            {
+                let Some(idx) = node_el
+                    .get_attribute("data-n")
+                    .and_then(|s| s.parse::<usize>().ok())
+                else {
+                    return false;
+                };
+                idx
+            } else {
+                let is_dense = SURFACE_PLAN_CACHE.with(|cache| {
+                    cache
+                        .borrow()
+                        .get(surface.canvas)
+                        .is_some_and(|entry| entry.is_dense)
+                });
+                if !is_dense {
+                    return false;
+                }
+                let Some(canvas) = dom::get(surface.canvas) else {
+                    return false;
+                };
+                let rect = canvas.get_bounding_client_rect();
+                let cam = load_surface_camera(surface);
+                let wx = (pe.client_x() as f64 - rect.left() - cam.pan_x) / cam.scale.max(0.05);
+                let wy = (pe.client_y() as f64 - rect.top() - cam.pan_y) / cam.scale.max(0.05);
+                let Some((0, idx)) =
+                    graph_viewport::canvas2d::hit_test_scene(surface.canvas, wx, wy, 4.0)
+                else {
+                    return false;
+                };
+                let _ = mount_dense_node_if_needed(surface.canvas, idx);
+                idx
             };
             let info = SURFACE_PLAN_CACHE.with(|cache| {
                 cache.borrow().get(surface.canvas).and_then(|entry| {

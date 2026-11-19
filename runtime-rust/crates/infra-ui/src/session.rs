@@ -2,7 +2,7 @@ use crate::{
     api, commands, dom, inbox, knowledge, management, model as m, omnigraph, run, systems,
 };
 use serde_json::{json, Value as V};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -25,6 +25,62 @@ pub use results::*;
 thread_local! {
     pub(super) static FILES: RefCell<Vec<web_sys::File>> = const { RefCell::new(Vec::new()) };
     static CAPTURED_GRAPH_CLICK: RefCell<Option<CapturedGraphClick>> = const { RefCell::new(None) };
+    static LAST_MOBILE_VIEWPORT: Cell<Option<bool>> = const { Cell::new(None) };
+    static MOBILE_MEDIA_QUERY: RefCell<Option<web_sys::MediaQueryList>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ViewportSyncPlan {
+    pub(super) close_sidebar: bool,
+    pub(super) sync_inert: bool,
+    pub(super) sync_graph: bool,
+}
+
+pub(super) fn plan_responsive_viewport(
+    last_mobile: &mut Option<bool>,
+    mobile: bool,
+    in_sessions_view: bool,
+) -> ViewportSyncPlan {
+    let prev = *last_mobile;
+    *last_mobile = Some(mobile);
+    if prev == Some(mobile) {
+        return ViewportSyncPlan {
+            close_sidebar: false,
+            sync_inert: false,
+            sync_graph: false,
+        };
+    }
+    ViewportSyncPlan {
+        close_sidebar: !mobile,
+        sync_inert: true,
+        sync_graph: in_sessions_view,
+    }
+}
+
+/// Synchronizes mobile sidebar visibility, overlay `inert` attributes, and the embedded
+/// code graph when the viewport crosses the mobile breakpoint.
+pub(super) fn sync_responsive_viewport() {
+    let mobile = dom::is_mobile_viewport();
+    let in_sessions_view = m::read(|s| s.view == "sessions");
+    let plan = LAST_MOBILE_VIEWPORT.with(|cell| {
+        let mut last = cell.get();
+        let plan = plan_responsive_viewport(&mut last, mobile, in_sessions_view);
+        cell.set(last);
+        plan
+    });
+    let sidebar_open = m::read(|s| s.workspace.sidebar_open)
+        || dom::get("sidebar").is_some_and(|e| e.class_list().contains("open"));
+    if plan.close_sidebar || (!mobile && sidebar_open) {
+        set_sidebar_open(false, false);
+    }
+    let stray_desktop_inert =
+        !mobile && dom::get("sidebar").is_some_and(|e| e.has_attribute("inert"));
+    if plan.sync_inert || stray_desktop_inert {
+        dom::sync_overlay_inert();
+    }
+    if plan.sync_graph {
+        crate::graph_map::sync_embedded(false);
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -451,16 +507,22 @@ pub fn initialize() {
         let _ = media.add_event_listener_with_callback("change", c.as_ref().unchecked_ref());
         c.forget();
     }
-    if let Ok(Some(mobile_media)) = dom::window().match_media("(max-width:920px)") {
+    LAST_MOBILE_VIEWPORT.with(|last| last.set(Some(dom::is_mobile_viewport())));
+    if let Ok(Some(mobile_media)) = dom::window().match_media(dom::MOBILE_BREAKPOINT_QUERY) {
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
-            if m::read(|s| s.view == "sessions") {
-                crate::graph_map::sync_embedded(false);
-            }
+            sync_responsive_viewport();
         });
         let _ =
             mobile_media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
         cb.forget();
+        MOBILE_MEDIA_QUERY.with(|slot| *slot.borrow_mut() = Some(mobile_media));
     }
+    let resize_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+        sync_responsive_viewport();
+    });
+    let _ = dom::window()
+        .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref());
+    resize_cb.forget();
     let capture_click = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
         if let Some(target) = event
             .target()
@@ -537,6 +599,8 @@ pub async fn bootstrap() {
                 sign_in(false).await;
             });
             m::set("bootstrapping", json!(true));
+            initialize_sse_listeners();
+            api::start_sse();
             let route = dom::hash_route();
             let wanted = dom::json_storage(PREFS);
             let sid = if !route.session.is_empty() {
@@ -549,8 +613,7 @@ pub async fn bootstrap() {
             }
             apply_hash_route().await;
             m::take("bootstrapping");
-            initialize_sse_listeners();
-            api::start_sse();
+            flush_pending_sse_resync();
             run::sync_approvals_badge();
             if m::read(|s| s.view != "sessions") && !dom::value("project").is_empty() {
                 crate::graph_map::sync_embedded(false);
@@ -559,10 +622,13 @@ pub async fn bootstrap() {
                 });
             }
         }
-        Ok(_) => dom::error(
-            "connection-message",
-            "The runner returned incomplete workspace configuration.",
-        ),
+        Ok(_) => {
+            dom::error(
+                "connection-message",
+                "The runner returned incomplete workspace configuration.",
+            );
+            dom::hidden("connection-banner", false);
+        }
         Err(e) => {
             dom::error("connection-message", &e.message);
             dom::hidden("connection-banner", false);
@@ -1407,12 +1473,8 @@ pub async fn event(
         if ["project", "project-switcher"].contains(&id) {
             if value == "__choose-folder__" {
                 management::folder_open("session").await;
-            } else if m::read(|s| s.view == "sessions") {
-                new_session(Some(value));
-                load_git().await;
             } else {
-                set_workspace_project(value);
-                load_git().await;
+                switch_project_from_shell(value).await;
             }
             return true;
         }

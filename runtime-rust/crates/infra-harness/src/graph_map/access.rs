@@ -88,41 +88,12 @@ impl Index {
             )
         })
     }
-    fn access_known(&self, file: u32) -> Option<Arc<[AccessRef]>> {
-        self.access
-            .read
-            .lock()
-            .ok()
-            .and_then(|held| held.get(&file).cloned())
-    }
-    /// What a file reads and writes of the other files of the graph, from
-    /// its source as it lies in the tree. A source that cannot be read, or
-    /// is of no language that is read, reaches nothing.
-    fn access_of(&self, file: u32) -> Arc<[AccessRef]> {
-        if let Some(found) = self.access_known(file) {
-            return found;
-        }
-        let path = &self.files[file as usize];
-        let (known, ids) = self.known();
+    fn access_refs_from_deps(
+        &self,
+        deps: Vec<crate::graph_deps::DepRef>,
+        ids: &HashMap<String, u32>,
+    ) -> Arc<[AccessRef]> {
         let mut refs = Vec::new();
-        let deps = if let Some(db_path) = self.ir_db_path.as_deref()
-            && let Ok(ir) = GraphIrStore::open_at(db_path)
-            && let Ok(Some((ir_deps, _))) = ir.file_outgoing_deps_if_fresh(&self.root, path)
-        {
-            ir_deps
-        } else if let Some(source) = text_at(&self.root, path) {
-            let (manifests, crate_map) = cached_manifests_for_root(&self.root, known);
-            extract_file_deps_with_context(
-                path,
-                &source,
-                known,
-                Some(&manifests),
-                None,
-                Some(&crate_map),
-            )
-        } else {
-            Vec::new()
-        };
         for dep in deps {
             let write = match dep.kind.as_str() {
                 "writes" => true,
@@ -148,11 +119,55 @@ impl Index {
                 }
             }
         }
-        let refs: Arc<[AccessRef]> = refs.into();
-        if let Ok(mut held) = self.access.read.lock() {
-            held.insert(file, refs.clone());
+        refs.into()
+    }
+    /// Batch-loads `AccessRef`s for multiple uncached file IDs using a single read-only
+    /// `GraphIrStore` connection and SQL query, falling back to disk parsing only for
+    /// missing or stale files.
+    fn load_access_batch(&self, files: &[u32]) -> HashMap<u32, Arc<[AccessRef]>> {
+        let mut loaded = HashMap::new();
+        if files.is_empty() {
+            return loaded;
         }
-        refs
+        let (known, ids) = self.known();
+        let rel_paths: Vec<&str> = files
+            .iter()
+            .map(|&f| self.files[f as usize].as_str())
+            .collect();
+        let mut ir_deps = self
+            .ir_db_path
+            .as_deref()
+            .and_then(|db_path| GraphIrStore::open_at_readonly(db_path).ok().flatten())
+            .and_then(|ir| ir.batch_access_deps_if_fresh(&self.root, &rel_paths).ok())
+            .unwrap_or_default();
+
+        let mut manifests_cache = None;
+        for &file in files {
+            let path = &self.files[file as usize];
+            let deps = if let Some(cached_ir) = ir_deps.remove(path) {
+                cached_ir
+            } else if let Some(source) = text_at(&self.root, path) {
+                let (manifests, crate_map) = manifests_cache
+                    .get_or_insert_with(|| cached_manifests_for_root(&self.root, known));
+                extract_file_deps_with_context(
+                    path,
+                    &source,
+                    known,
+                    Some(manifests),
+                    None,
+                    Some(crate_map),
+                )
+            } else {
+                Vec::new()
+            };
+            loaded.insert(file, self.access_refs_from_deps(deps, ids));
+        }
+        if let Ok(mut held) = self.access.read.lock() {
+            for (&file, refs) in &loaded {
+                held.insert(file, refs.clone());
+            }
+        }
+        loaded
     }
     /// The lines of a symbol of a file as far as the graph tells them: from
     /// where it starts to where the next symbol of the file starts. A type
@@ -276,14 +291,24 @@ impl Index {
         let mut room = ACCESS_SOURCES;
         let mut tallies: Vec<Option<Tally>> = vec![None; parts.len()];
         let (mut told, mut left, mut read) = (0u64, 0u64, 0u64);
-        for (edge, parts) in parts.iter().enumerate() {
-            if parts.is_empty() {
+        let mut known_sources: HashMap<u32, Arc<[AccessRef]>> = self
+            .access
+            .read
+            .lock()
+            .ok()
+            .map(|held| held.iter().map(|(&k, v)| (k, v.clone())).collect())
+            .unwrap_or_default();
+        let mut planned_fresh: HashSet<u32> = HashSet::new();
+        let mut admitted = vec![false; parts.len()];
+        let mut files_to_load = Vec::new();
+        for (edge, edge_parts) in parts.iter().enumerate() {
+            if edge_parts.is_empty() {
                 continue;
             }
-            let fresh = parts
+            let fresh = edge_parts
                 .iter()
                 .map(Part::source)
-                .filter(|file| self.access_known(*file).is_none())
+                .filter(|file| !known_sources.contains_key(file) && !planned_fresh.contains(file))
                 .collect::<BTreeSet<_>>();
             if fresh.len() > room {
                 left += 1;
@@ -291,9 +316,24 @@ impl Index {
             }
             room -= fresh.len();
             read += fresh.len() as u64;
+            admitted[edge] = true;
+            for file in fresh {
+                planned_fresh.insert(file);
+                files_to_load.push(file);
+            }
+        }
+        if !files_to_load.is_empty() {
+            known_sources.extend(self.load_access_batch(&files_to_load));
+        }
+        for (edge, edge_parts) in parts.iter().enumerate() {
+            if !admitted[edge] {
+                continue;
+            }
             let mut tally = Tally::default();
-            for part in parts {
-                let refs = self.access_of(part.source());
+            for part in edge_parts {
+                let Some(refs) = known_sources.get(&part.source()) else {
+                    continue;
+                };
                 for access in refs.iter() {
                     let own = match part {
                         Part::Whole(_, to) => access.target == *to,

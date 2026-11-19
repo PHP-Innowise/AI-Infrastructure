@@ -6,7 +6,7 @@ use crate::{api, dom, graph::GraphTargetScope, graph_viewport, model as m};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as V};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 
@@ -893,6 +893,8 @@ use render::blast_side;
 #[allow(unused_imports)]
 use render::build_node_badges_strip;
 #[allow(unused_imports)]
+use render::build_path_index;
+#[allow(unused_imports)]
 use render::canvas_structure_digest;
 #[allow(unused_imports)]
 use render::circle_told;
@@ -935,6 +937,8 @@ use render::link_group_members_html;
 #[allow(unused_imports)]
 use render::link_names;
 #[allow(unused_imports)]
+use render::lookup_path_index;
+#[allow(unused_imports)]
 use render::merge_diff_priority;
 #[allow(unused_imports)]
 use render::name_side;
@@ -962,6 +966,8 @@ use render::pattern_side;
 use render::radar_box_state;
 #[allow(unused_imports)]
 use render::reached;
+#[allow(unused_imports)]
+use render::refresh_dense_scene_for_patch;
 #[allow(unused_imports)]
 use render::role;
 #[allow(unused_imports)]
@@ -999,6 +1005,8 @@ use surfaces::active_modal_lens;
 #[allow(unused_imports)]
 use surfaces::apply_click_action;
 #[allow(unused_imports)]
+use surfaces::apply_node_patch_to_el;
+#[allow(unused_imports)]
 use surfaces::apply_surface_camera;
 #[allow(unused_imports)]
 use surfaces::apply_surface_live_focus;
@@ -1013,6 +1021,8 @@ use surfaces::blank_embedded_surface;
 use surfaces::build_map_path;
 #[allow(unused_imports)]
 use surfaces::build_overlay_extras;
+#[allow(unused_imports)]
+use surfaces::build_scoped_changes_path_for_state;
 #[allow(unused_imports)]
 use surfaces::build_surface_side_html;
 #[allow(unused_imports)]
@@ -1031,6 +1041,10 @@ use surfaces::combine_note;
 use surfaces::current_surface_live_focus;
 #[allow(unused_imports)]
 use surfaces::effective_sysrun_id;
+#[allow(unused_imports)]
+use surfaces::effective_target;
+#[allow(unused_imports)]
+use surfaces::effective_target_from;
 #[allow(unused_imports)]
 use surfaces::embedded_error_is_unbuilt;
 #[cfg(test)]
@@ -1104,6 +1118,8 @@ use surfaces::memory_links_fresh;
 use surfaces::memory_links_section;
 #[allow(unused_imports)]
 use surfaces::metric_count;
+#[allow(unused_imports)]
+use surfaces::mount_dense_node_if_needed;
 #[allow(unused_imports)]
 use surfaces::move_roving_node_focus;
 #[allow(unused_imports)]
@@ -1186,6 +1202,8 @@ use surfaces::sync_viewport_culling;
 use surfaces::target_pan_surface;
 #[allow(unused_imports)]
 use surfaces::toggle_bool_attr;
+#[allow(unused_imports)]
+use surfaces::transfer_surface_state_to_modal;
 #[allow(unused_imports)]
 use surfaces::try_patch_canvas_dom_in_place;
 #[allow(unused_imports)]

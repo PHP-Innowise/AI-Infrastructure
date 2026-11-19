@@ -923,11 +923,15 @@ pub fn render_palette() {
         }
         dom::add(&list, &btn);
     }
+    let active_opt_id = format!("command-palette-option-{active_idx}");
     dom::attr(
         "command-palette-input",
         "aria-activedescendant",
-        &format!("command-palette-option-{active_idx}"),
+        &active_opt_id,
     );
+    if let Some(active_el) = dom::get(&active_opt_id) {
+        active_el.scroll_into_view();
+    }
 }
 
 pub async fn execute_palette_entry(entry: PaletteEntry) {
@@ -960,7 +964,6 @@ pub async fn execute_palette_entry(entry: PaletteEntry) {
                 "harness.theme.v1",
                 if next == "system" { None } else { Some(next) },
             );
-            session::open_view(&m::read(|s| s.view.clone()), false).await;
             if let Some(radio) = dom::document()
                 .query_selector(&format!("input[name=\"theme\"][value=\"{next}\"]"))
                 .ok()
@@ -969,10 +972,6 @@ pub async fn execute_palette_entry(entry: PaletteEntry) {
             {
                 radio.set_checked(true);
             }
-            // Also notify settings change cleanly:
-            if let Some(el) = dom::get("theme-control") {
-                let _ = el;
-            }
             session::apply_theme(next);
         }
         "palette-view" => {
@@ -980,8 +979,7 @@ pub async fn execute_palette_entry(entry: PaletteEntry) {
         }
         "palette-project" => {
             if let Some(pid) = entry.payload.as_str() {
-                session::set_workspace_project(pid);
-                session::load_git().await;
+                session::switch_project_from_shell(pid).await;
             }
         }
         "palette-session" => {
@@ -991,6 +989,21 @@ pub async fn execute_palette_entry(entry: PaletteEntry) {
         }
         _ => {}
     }
+}
+
+pub(crate) fn is_palette_button_defer_target(id: &str, has_palette_item_ancestor: bool) -> bool {
+    id == "command-palette-close" || has_palette_item_ancestor
+}
+
+fn should_defer_palette_enter(target: &web_sys::Element) -> bool {
+    is_palette_button_defer_target(
+        &target.id(),
+        target
+            .closest(".command-palette-item")
+            .ok()
+            .flatten()
+            .is_some(),
+    )
 }
 
 /// Global keyboard handler for `Cmd/Ctrl+K` Command Palette and palette navigation.
@@ -1038,6 +1051,13 @@ pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
             true
         }
         "Enter" => {
+            if event
+                .target()
+                .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|target| should_defer_palette_enter(&target))
+            {
+                return false;
+            }
             let (query, selected) = m::read(|s| {
                 (
                     s.workspace.command_palette_query.clone(),
@@ -1105,5 +1125,21 @@ mod tests {
 
         let laravel = collect_palette_entries("laravel");
         assert!(laravel.iter().any(|e| e.payload == json!("laravel-app")));
+    }
+
+    #[test]
+    fn enter_key_defers_to_close_and_option_buttons_only() {
+        assert!(is_palette_button_defer_target(
+            "command-palette-close",
+            false
+        ));
+        assert!(is_palette_button_defer_target(
+            "command-palette-option-0",
+            true
+        ));
+        assert!(!is_palette_button_defer_target(
+            "command-palette-input",
+            false
+        ));
     }
 }

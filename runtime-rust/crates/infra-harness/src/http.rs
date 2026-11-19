@@ -12,7 +12,7 @@ use axum::{
 use flate2::{Compression, write::GzEncoder};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::Write as _,
     path::PathBuf,
     pin::Pin,
@@ -415,7 +415,7 @@ pub const ROUTES: &[Route] = &[
         operation: "graph.changes",
         status: 200,
         token: false,
-        query: &["target", "focus_session", "notests"],
+        query: &["target", "from", "to", "focus_session", "notests"],
     },
     Route {
         method: "GET",
@@ -564,6 +564,8 @@ pub const ROUTES: &[Route] = &[
             "config_path",
             "service",
             "target",
+            "from",
+            "to",
             "focus_session",
             "notests",
             "run_id",
@@ -1927,6 +1929,7 @@ async fn run_sse_stream(
     mut stream: tokio::net::TcpStream,
     clean_headers: Vec<u8>,
     mut reg: SseRegistration,
+    mut tracker_shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     if stream.write_all(&clean_headers).await.is_err() || stream.flush().await.is_err() {
         return;
@@ -1987,10 +1990,15 @@ async fn run_sse_stream(
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
-    while !*reg.shutdown.borrow() {
+    while !*reg.shutdown.borrow() && !*tracker_shutdown.borrow() {
         tokio::select! {
             changed = reg.shutdown.changed() => {
                 if changed.is_err() || *reg.shutdown.borrow() {
+                    break;
+                }
+            }
+            changed = tracker_shutdown.changed() => {
+                if changed.is_err() || *tracker_shutdown.borrow() {
                     break;
                 }
             }
@@ -2083,6 +2091,303 @@ fn rewrite_sse_response_head(head: &[u8]) -> Vec<u8> {
     out
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ExpectedResp {
+    is_head: bool,
+}
+
+#[derive(Clone)]
+struct SseTaskTracker {
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    cancel: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for SseTaskTracker {
+    fn default() -> Self {
+        let (cancel, _) = tokio::sync::watch::channel(false);
+        Self {
+            tasks: Arc::new(Mutex::new(Vec::new())),
+            cancel,
+        }
+    }
+}
+
+impl SseTaskTracker {
+    fn spawn(&self, stream: tokio::net::TcpStream, clean_head: Vec<u8>, reg: SseRegistration) {
+        let cancel_rx = self.cancel.subscribe();
+        let handle = tokio::spawn(run_sse_stream(stream, clean_head, reg, cancel_rx));
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain(|h| !h.is_finished());
+            tasks.push(handle);
+        }
+    }
+
+    async fn shutdown(self, timeout: std::time::Duration) {
+        let _ = self.cancel.send(true);
+        let handles = self
+            .tasks
+            .lock()
+            .map(|mut t| std::mem::take(&mut *t))
+            .unwrap_or_default();
+        if handles.is_empty() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        for handle in handles {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                handle.abort();
+                continue;
+            }
+            let wait = deadline.saturating_duration_since(now);
+            let abort_handle = handle.abort_handle();
+            if tokio::time::timeout(wait, handle).await.is_err() {
+                abort_handle.abort();
+            }
+        }
+    }
+}
+
+struct SseTaskAbortGuard(Option<SseTaskTracker>);
+
+impl Drop for SseTaskAbortGuard {
+    fn drop(&mut self) {
+        if let Some(tracker) = self.0.take() {
+            let _ = tracker.cancel.send(true);
+            if let Ok(mut tasks) = tracker.tasks.lock() {
+                for handle in tasks.drain(..) {
+                    handle.abort();
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ChunkStage {
+    SizeLine { line: Vec<u8> },
+    Data { remaining: u64 },
+    DataCr,
+    DataLf,
+    Trailers { line_non_empty: bool },
+}
+
+#[derive(Clone, Debug)]
+struct ChunkDecoder {
+    stage: ChunkStage,
+}
+
+enum ChunkStep {
+    NeedMore,
+    Done { consumed: usize },
+    Invalid,
+}
+
+impl ChunkDecoder {
+    fn new() -> Self {
+        Self {
+            stage: ChunkStage::SizeLine { line: Vec::new() },
+        }
+    }
+
+    fn advance(&mut self, data: &[u8]) -> ChunkStep {
+        let mut idx = 0;
+        while idx < data.len() {
+            match &mut self.stage {
+                ChunkStage::SizeLine { line } => {
+                    let b = data[idx];
+                    idx += 1;
+                    if b == b'\n' {
+                        let raw = std::str::from_utf8(line).unwrap_or("");
+                        let size_part = raw
+                            .trim_end_matches('\r')
+                            .split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim();
+                        let Ok(size) = u64::from_str_radix(size_part, 16) else {
+                            return ChunkStep::Invalid;
+                        };
+                        if size == 0 {
+                            self.stage = ChunkStage::Trailers {
+                                line_non_empty: false,
+                            };
+                        } else {
+                            self.stage = ChunkStage::Data { remaining: size };
+                        }
+                    } else {
+                        if line.len() >= 4096 {
+                            return ChunkStep::Invalid;
+                        }
+                        line.push(b);
+                    }
+                }
+                ChunkStage::Data { remaining } => {
+                    let take = (*remaining).min((data.len() - idx) as u64) as usize;
+                    *remaining -= take as u64;
+                    idx += take;
+                    if *remaining == 0 {
+                        self.stage = ChunkStage::DataCr;
+                    }
+                }
+                ChunkStage::DataCr => {
+                    let b = data[idx];
+                    idx += 1;
+                    if b == b'\r' {
+                        self.stage = ChunkStage::DataLf;
+                    } else if b == b'\n' {
+                        self.stage = ChunkStage::SizeLine { line: Vec::new() };
+                    } else {
+                        return ChunkStep::Invalid;
+                    }
+                }
+                ChunkStage::DataLf => {
+                    let b = data[idx];
+                    idx += 1;
+                    if b == b'\n' {
+                        self.stage = ChunkStage::SizeLine { line: Vec::new() };
+                    } else {
+                        return ChunkStep::Invalid;
+                    }
+                }
+                ChunkStage::Trailers { line_non_empty } => {
+                    let b = data[idx];
+                    idx += 1;
+                    if b == b'\n' {
+                        if !*line_non_empty {
+                            return ChunkStep::Done { consumed: idx };
+                        }
+                        *line_non_empty = false;
+                    } else if b != b'\r' {
+                        *line_non_empty = true;
+                    }
+                }
+            }
+        }
+        ChunkStep::NeedMore
+    }
+}
+
+fn trim_ascii_crlf(mut bytes: &[u8]) -> &[u8] {
+    while let Some((&b, rest)) = bytes.split_first() {
+        if b == b'\r' || b == b'\n' {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn parse_http_headers_meta(head: &[u8]) -> (Option<u16>, bool, Option<u64>) {
+    let text = String::from_utf8_lossy(head);
+    let mut lines = text.split("\r\n");
+    let status = lines.next().and_then(|first| {
+        first
+            .split_ascii_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+    });
+    let mut is_chunked = false;
+    let mut content_length = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+            {
+                is_chunked = true;
+            }
+        } else if name.eq_ignore_ascii_case("content-length")
+            && content_length.is_none()
+            && let Ok(len) = value.trim().parse::<u64>()
+        {
+            content_length = Some(len);
+        }
+    }
+    (status, is_chunked, content_length)
+}
+
+enum ReqParseState {
+    Passthrough,
+    Headers { buf: Vec<u8> },
+    FixedBody { remaining: u64 },
+    Chunked(ChunkDecoder),
+}
+
+impl ReqParseState {
+    fn feed(&mut self, mut bytes: &[u8], expected: &mut VecDeque<ExpectedResp>) -> bool {
+        while !bytes.is_empty() {
+            match self {
+                Self::Passthrough => return false,
+                Self::Headers { buf } => {
+                    let prev_len = buf.len();
+                    let search_from = prev_len.saturating_sub(3);
+                    let take = bytes.len().min(65536usize.saturating_sub(prev_len).max(4));
+                    buf.extend_from_slice(&bytes[..take]);
+                    if buf.len() >= 14 && trim_ascii_crlf(buf).starts_with(b"PRI * HTTP/2.0") {
+                        *self = Self::Passthrough;
+                        return true;
+                    }
+                    let Some(rel_end) = find_header_end(&buf[search_from..]) else {
+                        if buf.len() >= 65536 {
+                            *self = Self::Passthrough;
+                            return false;
+                        }
+                        bytes = &bytes[take..];
+                        continue;
+                    };
+                    let end = search_from + rel_end + 4;
+                    let consumed = end - prev_len;
+                    bytes = &bytes[consumed..];
+                    let trimmed = trim_ascii_crlf(&buf[..end]);
+                    let is_head = trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case(b"HEAD ");
+                    let (_, is_chunked, content_length) = parse_http_headers_meta(trimmed);
+                    expected.push_back(ExpectedResp { is_head });
+                    buf.clear();
+                    if is_chunked {
+                        *self = Self::Chunked(ChunkDecoder::new());
+                    } else if let Some(len) = content_length.filter(|&n| n > 0) {
+                        *self = Self::FixedBody { remaining: len };
+                    }
+                }
+                Self::FixedBody { remaining } => {
+                    let take = (*remaining).min(bytes.len() as u64) as usize;
+                    *remaining -= take as u64;
+                    bytes = &bytes[take..];
+                    if *remaining == 0 {
+                        *self = Self::Headers { buf: Vec::new() };
+                    }
+                }
+                Self::Chunked(decoder) => match decoder.advance(bytes) {
+                    ChunkStep::NeedMore => return false,
+                    ChunkStep::Done { consumed } => {
+                        bytes = &bytes[consumed..];
+                        *self = Self::Headers { buf: Vec::new() };
+                    }
+                    ChunkStep::Invalid => {
+                        *self = Self::Passthrough;
+                        return false;
+                    }
+                },
+            }
+        }
+        false
+    }
+}
+
+enum RespState {
+    Passthrough,
+    ProbingHead { head_probe: Vec<u8> },
+    FixedBody { remaining: u64 },
+    Chunked(ChunkDecoder),
+    CloseDelimited,
+}
+
 enum SseIoState {
     Active(tokio::net::TcpStream),
     HandoffDone,
@@ -2090,20 +2395,26 @@ enum SseIoState {
 
 struct SseIo {
     state: SseIoState,
-    expect_response_head: bool,
-    head_probe: Vec<u8>,
+    req_parser: ReqParseState,
+    expected_responses: VecDeque<ExpectedResp>,
+    resp_state: RespState,
     pending_out: Vec<u8>,
     pending_offset: usize,
+    sse_tasks: SseTaskTracker,
 }
 
 impl SseIo {
-    fn new(stream: tokio::net::TcpStream) -> Self {
+    fn new(stream: tokio::net::TcpStream, sse_tasks: SseTaskTracker) -> Self {
         Self {
             state: SseIoState::Active(stream),
-            expect_response_head: false,
-            head_probe: Vec::new(),
+            req_parser: ReqParseState::Headers { buf: Vec::new() },
+            expected_responses: VecDeque::new(),
+            resp_state: RespState::ProbingHead {
+                head_probe: Vec::new(),
+            },
             pending_out: Vec::new(),
             pending_offset: 0,
+            sse_tasks,
         }
     }
 
@@ -2155,7 +2466,17 @@ impl AsyncRead for SseIo {
         };
         let poll = Pin::new(stream).poll_read(cx, buf);
         if matches!(poll, Poll::Ready(Ok(()))) && buf.filled().len() > before {
-            this.expect_response_head = true;
+            let h2 = this
+                .req_parser
+                .feed(&buf.filled()[before..], &mut this.expected_responses);
+            if h2
+                && matches!(
+                    &this.resp_state,
+                    RespState::ProbingHead { head_probe } if head_probe.is_empty()
+                )
+            {
+                this.resp_state = RespState::Passthrough;
+            }
         }
         poll
     }
@@ -2178,55 +2499,137 @@ impl AsyncWrite for SseIo {
                 Poll::Ready(Ok(())) => {}
             }
         }
-        if !this.expect_response_head {
-            let SseIoState::Active(stream) = &mut this.state else {
-                return Poll::Ready(Ok(data.len()));
-            };
-            return Pin::new(stream).poll_write(cx, data);
+        if data.is_empty() {
+            return Poll::Ready(Ok(0));
         }
-        this.head_probe.extend_from_slice(data);
-        if this.head_probe.len() >= 5 && !this.head_probe.starts_with(b"HTTP/") {
-            this.expect_response_head = false;
-            this.pending_out = std::mem::take(&mut this.head_probe);
-            this.pending_offset = 0;
-            if let Poll::Ready(Err(err)) = this.drain_pending(cx) {
-                return Poll::Ready(Err(err));
+        match &mut this.resp_state {
+            RespState::Passthrough | RespState::CloseDelimited => {
+                let SseIoState::Active(stream) = &mut this.state else {
+                    return Poll::Ready(Ok(data.len()));
+                };
+                Pin::new(stream).poll_write(cx, data)
             }
-            return Poll::Ready(Ok(data.len()));
-        }
-        if let Some(header_end) = find_header_end(&this.head_probe) {
-            if let Some(token) = extract_sse_handoff_token(&this.head_probe[..header_end])
-                && let Some(reg) = take_sse_handoff(&token)
-            {
-                let clean_head = rewrite_sse_response_head(&this.head_probe[..header_end]);
-                this.expect_response_head = false;
-                this.head_probe.clear();
-                this.pending_out.clear();
-                this.pending_offset = 0;
-                if let SseIoState::Active(stream) =
-                    std::mem::replace(&mut this.state, SseIoState::HandoffDone)
-                {
-                    tokio::spawn(run_sse_stream(stream, clean_head, reg));
+            RespState::FixedBody { remaining } => {
+                let limit = (*remaining).min(data.len() as u64) as usize;
+                let SseIoState::Active(stream) = &mut this.state else {
+                    return Poll::Ready(Ok(data.len()));
+                };
+                let poll = Pin::new(stream).poll_write(cx, &data[..limit]);
+                if let Poll::Ready(Ok(n)) = &poll {
+                    *remaining -= *n as u64;
+                    if *remaining == 0 {
+                        this.resp_state = RespState::ProbingHead {
+                            head_probe: Vec::new(),
+                        };
+                    }
                 }
-                return Poll::Ready(Ok(data.len()));
+                poll
             }
-            this.expect_response_head = false;
-            this.pending_out = std::mem::take(&mut this.head_probe);
-            this.pending_offset = 0;
-            if let Poll::Ready(Err(err)) = this.drain_pending(cx) {
-                return Poll::Ready(Err(err));
+            RespState::Chunked(decoder) => {
+                let mut probe = decoder.clone();
+                let (limit, invalid) = match probe.advance(data) {
+                    ChunkStep::NeedMore => (data.len(), false),
+                    ChunkStep::Done { consumed } => (consumed, false),
+                    ChunkStep::Invalid => (data.len(), true),
+                };
+                let SseIoState::Active(stream) = &mut this.state else {
+                    return Poll::Ready(Ok(data.len()));
+                };
+                let poll = Pin::new(stream).poll_write(cx, &data[..limit]);
+                if let Poll::Ready(Ok(n)) = &poll {
+                    if invalid {
+                        this.resp_state = RespState::Passthrough;
+                    } else if matches!(decoder.advance(&data[..*n]), ChunkStep::Done { .. }) {
+                        this.resp_state = RespState::ProbingHead {
+                            head_probe: Vec::new(),
+                        };
+                    }
+                }
+                poll
             }
-            return Poll::Ready(Ok(data.len()));
+            RespState::ProbingHead { head_probe } => {
+                let prev_len = head_probe.len();
+                let search_from = prev_len.saturating_sub(3);
+                head_probe.extend_from_slice(data);
+                if head_probe.len() >= 5 && !head_probe.starts_with(b"HTTP/") {
+                    this.pending_out = std::mem::take(head_probe);
+                    this.pending_offset = 0;
+                    this.resp_state = RespState::Passthrough;
+                    if let Poll::Ready(Err(err)) = this.drain_pending(cx) {
+                        return Poll::Ready(Err(err));
+                    }
+                    return Poll::Ready(Ok(data.len()));
+                }
+                if let Some(rel_end) = find_header_end(&head_probe[search_from..]) {
+                    let header_end = search_from + rel_end;
+                    let end = header_end + 4;
+                    let consumed = end - prev_len;
+                    if let Some(token) = extract_sse_handoff_token(&head_probe[..header_end])
+                        && let Some(reg) = take_sse_handoff(&token)
+                    {
+                        let _ = this.expected_responses.pop_front();
+                        let clean_head = rewrite_sse_response_head(&head_probe[..header_end]);
+                        head_probe.clear();
+                        this.pending_out.clear();
+                        this.pending_offset = 0;
+                        this.resp_state = RespState::Passthrough;
+                        if let SseIoState::Active(stream) =
+                            std::mem::replace(&mut this.state, SseIoState::HandoffDone)
+                        {
+                            this.sse_tasks.spawn(stream, clean_head, reg);
+                        }
+                        return Poll::Ready(Ok(data.len()));
+                    }
+                    let (status, is_chunked, content_length) =
+                        parse_http_headers_meta(&head_probe[..header_end]);
+                    let is_interim =
+                        status.is_some_and(|code| (100..200).contains(&code) && code != 101);
+                    let req = if is_interim {
+                        ExpectedResp { is_head: false }
+                    } else {
+                        this.expected_responses
+                            .pop_front()
+                            .unwrap_or(ExpectedResp { is_head: false })
+                    };
+                    let next_state = if status == Some(101) {
+                        RespState::Passthrough
+                    } else if is_interim || req.is_head || matches!(status, Some(204 | 304)) {
+                        RespState::ProbingHead {
+                            head_probe: Vec::new(),
+                        }
+                    } else if is_chunked {
+                        RespState::Chunked(ChunkDecoder::new())
+                    } else if let Some(len) = content_length {
+                        if len == 0 {
+                            RespState::ProbingHead {
+                                head_probe: Vec::new(),
+                            }
+                        } else {
+                            RespState::FixedBody { remaining: len }
+                        }
+                    } else {
+                        RespState::CloseDelimited
+                    };
+                    head_probe.truncate(end);
+                    this.pending_out = std::mem::take(head_probe);
+                    this.pending_offset = 0;
+                    this.resp_state = next_state;
+                    if let Poll::Ready(Err(err)) = this.drain_pending(cx) {
+                        return Poll::Ready(Err(err));
+                    }
+                    return Poll::Ready(Ok(consumed));
+                }
+                if head_probe.len() >= 8192 {
+                    this.pending_out = std::mem::take(head_probe);
+                    this.pending_offset = 0;
+                    this.resp_state = RespState::Passthrough;
+                    if let Poll::Ready(Err(err)) = this.drain_pending(cx) {
+                        return Poll::Ready(Err(err));
+                    }
+                }
+                Poll::Ready(Ok(data.len()))
+            }
         }
-        if this.head_probe.len() >= 8192 {
-            this.expect_response_head = false;
-            this.pending_out = std::mem::take(&mut this.head_probe);
-            this.pending_offset = 0;
-            if let Poll::Ready(Err(err)) = this.drain_pending(cx) {
-                return Poll::Ready(Err(err));
-            }
-        }
-        Poll::Ready(Ok(data.len()))
     }
 
     fn poll_write_vectored(
@@ -2234,8 +2637,10 @@ impl AsyncWrite for SseIo {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
-        if !self.expect_response_head
-            && self.pending_offset >= self.pending_out.len()
+        if matches!(
+            self.resp_state,
+            RespState::Passthrough | RespState::CloseDelimited
+        ) && self.pending_offset >= self.pending_out.len()
             && let SseIoState::Active(stream) = &mut self.as_mut().get_mut().state
         {
             return Pin::new(stream).poll_write_vectored(cx, bufs);
@@ -2247,8 +2652,10 @@ impl AsyncWrite for SseIo {
     }
 
     fn is_write_vectored(&self) -> bool {
-        !self.expect_response_head
-            && self.pending_offset >= self.pending_out.len()
+        matches!(
+            self.resp_state,
+            RespState::Passthrough | RespState::CloseDelimited
+        ) && self.pending_offset >= self.pending_out.len()
             && matches!(&self.state, SseIoState::Active(stream) if stream.is_write_vectored())
     }
 
@@ -2285,7 +2692,10 @@ impl AsyncWrite for SseIo {
     }
 }
 
-struct SseListener(tokio::net::TcpListener);
+struct SseListener {
+    listener: tokio::net::TcpListener,
+    tasks: SseTaskTracker,
+}
 
 impl axum::serve::Listener for SseListener {
     type Io = SseIo;
@@ -2293,15 +2703,15 @@ impl axum::serve::Listener for SseListener {
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
-            match self.0.accept().await {
-                Ok((stream, addr)) => return (SseIo::new(stream), addr),
+            match self.listener.accept().await {
+                Ok((stream, addr)) => return (SseIo::new(stream, self.tasks.clone()), addr),
                 Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
             }
         }
     }
 
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.0.local_addr()
+        self.listener.local_addr()
     }
 }
 
@@ -2520,16 +2930,26 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
 }
 pub async fn serve_listener(listener: tokio::net::TcpListener, app: App) -> Result<()> {
     let mut shutdown = app.shutdown.subscribe();
-    axum::serve(SseListener(listener), app.router())
-        .with_graceful_shutdown(async move {
-            while !*shutdown.borrow() {
-                if shutdown.changed().await.is_err() {
-                    break;
-                }
+    let sse_tasks = SseTaskTracker::default();
+    let mut abort_guard = SseTaskAbortGuard(Some(sse_tasks.clone()));
+    let result = axum::serve(
+        SseListener {
+            listener,
+            tasks: sse_tasks.clone(),
+        },
+        app.router(),
+    )
+    .with_graceful_shutdown(async move {
+        while !*shutdown.borrow() {
+            if shutdown.changed().await.is_err() {
+                break;
             }
-        })
-        .await
-        .map_err(Into::into)
+        }
+    })
+    .await;
+    abort_guard.0 = None;
+    sse_tasks.shutdown(std::time::Duration::from_secs(2)).await;
+    result.map_err(Into::into)
 }
 
 #[cfg(test)]
