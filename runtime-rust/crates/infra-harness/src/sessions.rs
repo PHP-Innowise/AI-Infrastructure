@@ -475,6 +475,21 @@ impl Sessions {
             .await;
             done.store(true, Ordering::Release);
         });
+        let weak_desk = Arc::downgrade(&result.permissions);
+        result.store.set_waiting_counter(Arc::new(move |sid| {
+            weak_desk
+                .upgrade()
+                .map_or(0, |desk| desk.waiting(sid).len())
+        }));
+        let weak_desk_events = Arc::downgrade(&result.permissions);
+        let store_for_events = result.store.clone();
+        result.permissions.set_change_notifier(Arc::new(move |sid| {
+            let counts = weak_desk_events
+                .upgrade()
+                .map(|desk| desk.waiting_counts())
+                .unwrap_or_default();
+            store_for_events.emit_waiting_change(sid, counts);
+        }));
         result.start_inbox();
         Ok(result)
     }
@@ -1241,9 +1256,37 @@ impl Sessions {
                 "UPDATE harness_generations SET generation=?1 WHERE session_id=?2",
                 params![old_generation, sid],
             )?;
+            drop(db);
+            self.store.emit_session_status(sid);
+            self.emit_results_check(check_id);
             return Err(HarnessError::conflict("The run queue is full."));
         }
+        self.store.emit_session_status(sid);
+        self.emit_results_check(check_id);
         Ok(generation)
+    }
+    fn emit_results_check(&self, check_id: &str) {
+        let Ok(Some(check)) = self.store.get_check(check_id) else {
+            return;
+        };
+        let sid = check["session_id"].as_str().unwrap_or("").to_owned();
+        let project_id = (!sid.is_empty())
+            .then(|| self.store.session_project_id(&sid))
+            .flatten();
+        let status = check["status"].as_str().unwrap_or("").to_owned();
+        self.store.publish_event(
+            "results_check",
+            (!sid.is_empty()).then_some(sid.clone()),
+            project_id.clone(),
+            json!({
+                "id": check_id,
+                "check_id": check_id,
+                "session_id": sid,
+                "project_id": project_id,
+                "status": status,
+                "check": check,
+            }),
+        );
     }
     pub fn history_session_ids(&self, session: &Value) -> Result<Vec<String>> {
         let sid = session["id"]
@@ -1596,6 +1639,7 @@ impl Sessions {
                 }
                 // The concrete CheckWorkflow settles an already-cancelled or
                 // obsolete queued receipt before performing any workspace I/O.
+                self.emit_results_check(check_id);
                 worker
                     .run_check(
                         session,
@@ -1617,6 +1661,7 @@ impl Sessions {
             if finalize_job(&self.store, &job, &result, &cancel).is_err() {
                 self.stop_failed(&cancel);
             }
+            self.emit_results_check(check_id);
             if self
                 .store
                 .inbox_settle(&job.sid, &job.generation, false, None)
@@ -2394,6 +2439,51 @@ impl Domain for Sessions {
                     return Ok(Payload::Json(
                         json!({"counts": self.permissions.waiting_counts()}),
                     ));
+                }
+                "sessions.permission_rules_list" => {
+                    self.store.get(sid)?;
+                    let rules = self.permissions.list_session_rules(sid)?;
+                    return Ok(Payload::Json(json!({
+                        "session_id": sid,
+                        "rules": rules,
+                    })));
+                }
+                "sessions.permission_rules_delete" => {
+                    self.store.get(sid)?;
+                    if !store::exact(body, &[], &["rule_key", "id", "all"]) {
+                        return Err(HarnessError::invalid(
+                            "Invalid session permission rule revocation request.",
+                        ));
+                    }
+                    let req_query = &request["query"];
+                    let all_from_query =
+                        matches!(req_query["all"].as_str(), Some("1" | "true" | "yes"));
+                    let all = match body.get("all") {
+                        None | Some(Value::Null) => all_from_query,
+                        Some(Value::Bool(b)) => *b,
+                        Some(_) => {
+                            return Err(HarnessError::invalid(
+                                "Permission rule 'all' flag must be boolean.",
+                            ));
+                        }
+                    };
+                    let rule_key = body["rule_key"]
+                        .as_str()
+                        .or_else(|| req_query["rule_key"].as_str());
+                    let rule_id = request["params"]["rule_id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| body["id"].as_str())
+                        .or_else(|| req_query["id"].as_str());
+                    let (removed, rules) = self
+                        .permissions
+                        .revoke_session_rule(sid, rule_key, rule_id, all)?;
+                    return Ok(Payload::Json(json!({
+                        "ok": true,
+                        "session_id": sid,
+                        "removed": removed,
+                        "rules": rules,
+                    })));
                 }
                 "sessions.cancel" => {
                     if !store::exact(body, &[], &[]) {
