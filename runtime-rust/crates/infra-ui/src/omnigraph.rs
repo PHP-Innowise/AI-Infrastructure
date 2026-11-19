@@ -1931,7 +1931,7 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
         ));
     }
     html.push_str(&format!(
-        "<div class=\"omni-inspector-group\"><h4>Confidence &amp; Priority</h4><div class=\"omni-node-meta\"><span>{:.0}% confidence</span>{}</div><div class=\"omni-confidence-track\" role=\"progressbar\" aria-valuenow=\"{}\" aria-valuemin=\"0\" aria-valuemax=\"100\"><div class=\"omni-confidence-fill\" style=\"--omni-confidence:{:.2}\"></div></div></div>",
+        "<div class=\"omni-inspector-group\"><h4>Confidence &amp; Priority</h4><div class=\"omni-node-meta\"><span>{:.0}% confidence</span>{}</div><div class=\"omni-confidence-track\" role=\"progressbar\" aria-label=\"Confidence score\" aria-valuenow=\"{}\" aria-valuemin=\"0\" aria-valuemax=\"100\"><div class=\"omni-confidence-fill\" style=\"--omni-confidence:{:.2}\"></div></div></div>",
         confidence * 100.0,
         if pin > 0 {
             format!("<span class=\"omni-meta-pill\">Pin {pin}</span>")
@@ -2769,20 +2769,151 @@ fn set_ui_state(patch: impl FnOnce(&mut V)) {
     m::set("omnigraph-ui", state);
 }
 
+fn finite_or(raw: &V, fallback: f64) -> f64 {
+    raw.as_f64().filter(|v| v.is_finite()).unwrap_or(fallback)
+}
+
+fn escape_css_attr_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn find_omni_node_el(canvas: &web_sys::Element, node_id: &str) -> Option<web_sys::Element> {
+    let escaped = escape_css_attr_value(node_id);
+    canvas
+        .query_selector(&format!(".omni-node[data-node-id=\"{escaped}\"]"))
+        .ok()
+        .flatten()
+}
+
+fn clamped_radar_rect(
+    cam: graph_viewport::Camera,
+    viewport: (f64, f64),
+    plane: (f64, f64),
+    min_side: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let min_w = min_side.min(plane.0);
+    let min_h = min_side.min(plane.1);
+    let (vx, vy, vw, vh) =
+        graph_viewport::radar_viewport_rect(cam, viewport, plane, min_w.min(min_h))?;
+    let vw = vw.clamp(min_w, plane.0);
+    let vh = vh.clamp(min_h, plane.1);
+    let vx = vx.clamp(0.0, (plane.0 - vw).max(0.0));
+    let vy = vy.clamp(0.0, (plane.1 - vh).max(0.0));
+    Some((vx, vy, vw, vh))
+}
+
+fn pan_to_keep_rect_in_view(
+    cam: &mut OmnigraphCamera,
+    rect: (f64, f64, f64, f64),
+    viewport: (f64, f64),
+    margin: f64,
+) -> bool {
+    let scale = cam.scale.max(0.05);
+    let (rx, ry, rw, rh) = rect;
+    let (vw, vh) = viewport;
+    let sx0 = rx * scale + cam.pan_x;
+    let sy0 = ry * scale + cam.pan_y;
+    let sx1 = (rx + rw) * scale + cam.pan_x;
+    let sy1 = (ry + rh) * scale + cam.pan_y;
+    let mut next_x = cam.pan_x;
+    let mut next_y = cam.pan_y;
+    if sx0 < margin {
+        next_x += margin - sx0;
+    } else if sx1 > vw - margin {
+        next_x -= sx1 - (vw - margin);
+    }
+    if sy0 < margin {
+        next_y += margin - sy0;
+    } else if sy1 > vh - margin {
+        next_y -= sy1 - (vh - margin);
+    }
+    if (next_x - cam.pan_x).abs() > 0.5 || (next_y - cam.pan_y).abs() > 0.5 {
+        cam.pan_x = next_x;
+        cam.pan_y = next_y;
+        cam.fit_mode = false;
+        return true;
+    }
+    false
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct OmniNavEntry {
+    selected_id: Option<String>,
+    branch: String,
+    cam: OmnigraphCamera,
+}
+
+#[derive(Default)]
+struct OmniNavHistory {
+    entries: Vec<OmniNavEntry>,
+    cursor: usize,
+}
+
+impl OmniNavHistory {
+    fn push(&mut self, entry: OmniNavEntry) {
+        if let Some(cur) = self.entries.get(self.cursor) {
+            if cur.selected_id == entry.selected_id && cur.branch == entry.branch {
+                return;
+            }
+        }
+        if !self.entries.is_empty() && self.cursor + 1 < self.entries.len() {
+            self.entries.truncate(self.cursor + 1);
+        }
+        self.entries.push(entry);
+        if self.entries.len() > 32 {
+            let drain = self.entries.len() - 32;
+            self.entries.drain(0..drain);
+        }
+        self.cursor = self.entries.len().saturating_sub(1);
+    }
+
+    fn can_back(&self) -> bool {
+        self.cursor > 0 && !self.entries.is_empty()
+    }
+
+    fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+}
+
+thread_local! {
+    static OMNI_HOVER_HIT: RefCell<Option<Option<(u8, usize)>>> = const { RefCell::new(None) };
+    static OMNI_NAV_HISTORY: RefCell<OmniNavHistory> = RefCell::new(OmniNavHistory::default());
+}
+
+fn clear_omni_hover_state(cam: &OmnigraphCamera) {
+    let had_hover = OMNI_HOVER_HIT.with(|h| h.borrow_mut().take().flatten().is_some());
+    if had_hover {
+        graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), None, true);
+    }
+    if let Some(he) =
+        dom::get("omnigraph-canvas").and_then(|c| c.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = he.style().set_property("cursor", "");
+    }
+}
+
 fn load_camera() -> OmnigraphCamera {
     let raw = m::data("omnigraph-camera");
     if !raw.is_object() {
         return OmnigraphCamera::default();
     }
     OmnigraphCamera {
-        scale: raw["scale"]
-            .as_f64()
-            .unwrap_or(1.0)
-            .clamp(CAMERA_MIN, CAMERA_MAX),
-        pan_x: raw["pan_x"].as_f64().unwrap_or(16.0),
-        pan_y: raw["pan_y"].as_f64().unwrap_or(16.0),
-        plane_w: raw["plane_w"].as_f64().unwrap_or(0.0),
-        plane_h: raw["plane_h"].as_f64().unwrap_or(0.0),
+        scale: finite_or(&raw["scale"], 1.0).clamp(CAMERA_MIN, CAMERA_MAX),
+        pan_x: finite_or(&raw["pan_x"], 16.0),
+        pan_y: finite_or(&raw["pan_y"], 16.0),
+        plane_w: finite_or(&raw["plane_w"], 0.0).max(0.0),
+        plane_h: finite_or(&raw["plane_h"], 0.0).max(0.0),
         fit_mode: raw["fit_mode"].as_bool().unwrap_or(true),
     }
 }
@@ -2823,7 +2954,7 @@ fn apply_camera(cam: &OmnigraphCamera) {
         if let Some(radar_view) = dom::get("omnigraph-canvas-radar")
             .and_then(|r| r.query_selector(".omni-radar-view").ok().flatten())
         {
-            if let Some((vx, vy, vw, vh)) = graph_viewport::radar_viewport_rect(
+            if let Some((vx, vy, vw, vh)) = clamped_radar_rect(
                 cam.to_viewport(),
                 viewport_size(),
                 (cam.plane_w, cam.plane_h),
@@ -2837,7 +2968,8 @@ fn apply_camera(cam: &OmnigraphCamera) {
         }
     }
     sync_omnigraph_viewport_culling(cam);
-    graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), None, true);
+    let hover = OMNI_HOVER_HIT.with(|h| h.borrow().flatten());
+    graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), hover, true);
 }
 
 fn fit_camera() {
@@ -3052,6 +3184,30 @@ pub async fn open_knowledge_atom(project_id: &str, target_atom_id: &str) {
     }
 }
 
+pub(crate) async fn open_from_system_service(service: String) {
+    set_ui_state(|s| {
+        s["stage_tab"] = json!("constellation");
+        s["drawer_tab"] = json!("inspector");
+    });
+    crate::session::open_view("omnigraph", true).await;
+    let query = service.trim().to_owned();
+    if !query.is_empty() {
+        dom::set_value("omnigraph-search", &query);
+        run_search(query).await;
+        let hits = m::array(&m::data("omnigraph-search-results")["hits"]);
+        if let Some(first_id) = hits
+            .first()
+            .map(|h| atom_id(&h["atom"]))
+            .filter(|s| !s.is_empty())
+        {
+            set_ui_state(|s| s["selected_id"] = json!(first_id));
+            render_constellation();
+            render_inspector();
+            fly_to_node(&first_id);
+        }
+    }
+}
+
 pub fn hydrate_status(status: &V) {
     if !status.is_object() {
         return;
@@ -3220,19 +3376,52 @@ pub fn visibility() {
 
 pub fn on_project_changed() {
     dom::cancel_timer("omnigraph-pulse");
+    OMNI_DENSE_CACHE.with(|c| *c.borrow_mut() = None);
+    OMNI_HOVER_HIT.with(|h| *h.borrow_mut() = None);
+    OMNI_NAV_HISTORY.with(|h| *h.borrow_mut() = OmniNavHistory::default());
+    graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
     m::set("omnigraph-graph", V::Null);
     m::set("omnigraph-diff", V::Null);
     m::set("omnigraph-search-results", V::Null);
     m::set("omnigraph-commit-detail", V::Null);
+    m::set("omnigraph-positions", V::Null);
+    m::set("omnigraph-raw-positions", V::Null);
+    m::set("omnigraph-structure-digest", V::Null);
+    m::set("omnigraph-nav-rects", json!([]));
+    m::set("omnigraph-nav-edges", json!([]));
+    m::set("omnigraph-anchor-filter-key", V::Null);
+    m::set("omnigraph-page-count", json!(1));
+    m::set("omnigraph-camera", V::Null);
     m::set("omnigraph-pulse-events", json!([]));
     reset_pulse_cursor();
     set_ui_state(|s| {
         s["branch"] = json!("main");
         s["snapshot"] = V::Null;
+        s["kind"] = json!("");
+        s["query"] = json!("");
+        s["show_files"] = json!(true);
+        s["show_sessions"] = json!(true);
         s["selected_id"] = V::Null;
+        s["focused_id"] = V::Null;
         s["selected_commit_id"] = V::Null;
         s["highlighted_ids"] = json!([]);
+        s["path_nodes"] = json!([]);
+        s["path_edges"] = json!([]);
+        s["isolate_active"] = json!(false);
+        s["isolate_seed"] = V::Null;
     });
+    if let Some(el) = dom::get("omnigraph-canvas") {
+        el.set_inner_html("");
+    }
+    if let Some(radar) = dom::get("omnigraph-canvas-radar") {
+        radar.set_inner_html("");
+        dom::hide(&radar, true);
+    }
+    if let Some(dag) = dom::get("omnigraph-dag-container") {
+        dag.set_inner_html("");
+    }
+    sync_controls_from_state();
+    render_inspector();
     if m::read(|s| s.view == "omnigraph") {
         spawn_local(async {
             load().await;
@@ -3249,6 +3438,7 @@ fn schedule_pulse_poll() {
     if dom::document().hidden()
         || m::read(|s| s.view != "omnigraph")
         || !m::yes(&m::data("omnigraph-status")["connected"])
+        || m::yes(&ui_state()["pulse_paused"])
     {
         return;
     }
@@ -3435,22 +3625,24 @@ fn graph_request_path(
     format!("/api/omnigraph/graph{}", dom::query(&params))
 }
 
-async fn refresh_graph() {
+async fn refresh_graph_with_limit(limit: usize, preserve_pages: Option<usize>) {
     let project = current_project_id();
     let st = ui_state();
-    let path = graph_request_path(
-        project,
-        m::text(&st, "branch"),
-        m::text(&st, "snapshot"),
-        m::text(&st, "kind"),
-        m::text(&st, "query"),
-        String::new(),
-        None,
-    );
+    let params = vec![
+        ("project_id", project),
+        ("branch", m::text(&st, "branch")),
+        ("snapshot", m::text(&st, "snapshot")),
+        ("kind", m::text(&st, "kind")),
+        ("q", String::new()),
+        ("limit", limit.max(GRAPH_PAGE_LIMIT).to_string()),
+    ];
+    let path = format!("/api/omnigraph/graph{}", dom::query(&params));
     match api::scoped("omnigraph-graph", &path).await {
         Ok((epoch, graph)) if m::current("omnigraph-graph", epoch) => {
-            m::set("omnigraph-page-count", json!(1));
-            m::set("omnigraph-raw-positions", V::Null);
+            m::set("omnigraph-page-count", json!(preserve_pages.unwrap_or(1)));
+            if preserve_pages.is_none() {
+                m::set("omnigraph-raw-positions", V::Null);
+            }
             m::set("omnigraph-structure-digest", V::Null);
             m::set("omnigraph-graph", graph.clone());
             sync_branch_selectors(&graph);
@@ -3460,6 +3652,18 @@ async fn refresh_graph() {
         Err(e) if !e.aborted => dom::error("omnigraph-error", &e.message),
         _ => {}
     }
+}
+
+async fn refresh_graph() {
+    refresh_graph_with_limit(GRAPH_PAGE_LIMIT, None).await;
+}
+
+async fn refresh_graph_preserving_pages() {
+    let pages = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) as usize;
+    let target_limit = pages
+        .saturating_mul(GRAPH_PAGE_LIMIT)
+        .min(GRAPH_PAGE_LIMIT * 8);
+    refresh_graph_with_limit(target_limit, Some(pages)).await;
 }
 
 async fn load_more_graph() {
@@ -3478,7 +3682,7 @@ async fn load_more_graph() {
         m::text(&st, "branch"),
         m::text(&st, "snapshot"),
         m::text(&st, "kind"),
-        m::text(&st, "query"),
+        String::new(),
         summary.next_cursor,
         Some(summary.next_offset),
     );
@@ -3556,7 +3760,7 @@ async fn run_search(query: String) {
 }
 
 async fn poll_changes(force: bool) {
-    if !force && m::read(|s| s.view != "omnigraph") {
+    if !force && (m::read(|s| s.view != "omnigraph") || m::yes(&ui_state()["pulse_paused"])) {
         return;
     }
     let project = current_project_id();
@@ -3585,7 +3789,7 @@ async fn poll_changes(force: bool) {
                 m::set("omnigraph-pulse-events", json!(merged));
                 render_pulse();
                 if !force {
-                    refresh_graph().await;
+                    refresh_graph_preserving_pages().await;
                     refresh_pill().await;
                 }
             } else {
@@ -3826,6 +4030,11 @@ fn sync_controls_from_state() {
         let k = el.get_attribute("data-kind").unwrap_or_default();
         let _ = el.set_attribute("aria-pressed", if k == kind { "true" } else { "false" });
     }
+    let query = m::text(&st, "query");
+    if dom::value("omnigraph-search") != query {
+        dom::set_value("omnigraph-search", &query);
+    }
+    dom::hidden("omnigraph-search-clear", query.trim().is_empty());
     let branch = m::text(&st, "branch");
     if !branch.is_empty() {
         dom::set_value("omnigraph-branch", &branch);
@@ -3839,6 +4048,23 @@ fn sync_controls_from_state() {
         "omnigraph-show-files",
         st["show_files"].as_bool().unwrap_or(true),
     );
+    let iso_active = m::yes(&st["isolate_active"]);
+    dom::attr(
+        "omni-isolate-toggle",
+        "aria-pressed",
+        if iso_active { "true" } else { "false" },
+    );
+    let iso_depth = st["isolate_depth"].as_u64().unwrap_or(1).clamp(1, 3);
+    dom::set_value("omni-isolate-depth", &iso_depth.to_string());
+    let path_from = m::text(&st, "path_from");
+    let path_to = m::text(&st, "path_to");
+    if !path_from.is_empty() || dom::value("omni-path-from") != path_from {
+        dom::set_value("omni-path-from", &path_from);
+    }
+    if !path_to.is_empty() || dom::value("omni-path-to") != path_to {
+        dom::set_value("omni-path-to", &path_to);
+    }
+    dom::hidden("omni-path-clear", m::array(&st["path_nodes"]).is_empty());
     let snapshot = m::text(&st, "snapshot");
     dom::hidden("omnigraph-timetravel-banner", snapshot.is_empty());
     if !snapshot.is_empty() {
@@ -3953,6 +4179,20 @@ fn omni_pin_key() -> String {
     graph_viewport::pin_storage_key("omnigraph", &current_project_id(), &m::text(&st, "branch"))
 }
 
+fn anchor_filter_signature(st: &V) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        current_project_id(),
+        m::text(st, "branch"),
+        m::text(st, "kind"),
+        m::text(st, "query").trim(),
+        st["show_files"].as_bool().unwrap_or(true),
+        st["show_sessions"].as_bool().unwrap_or(true),
+        m::yes(&st["isolate_active"]),
+        st["isolate_depth"].as_u64().unwrap_or(2),
+    )
+}
+
 fn current_constellation_filter(
     st: &V,
     cam: &OmnigraphCamera,
@@ -3977,7 +4217,8 @@ fn current_constellation_filter(
         })
         .collect();
     let mut anchored_positions = BTreeMap::new();
-    if paged_count > 1 {
+    let sig = anchor_filter_signature(st);
+    if paged_count > 1 && m::data("omnigraph-anchor-filter-key").as_str() == Some(sig.as_str()) {
         if let Some(obj) = m::data("omnigraph-raw-positions").as_object() {
             for (k, v) in obj {
                 if let (Some(x), Some(y)) = (v[0].as_f64(), v[1].as_f64()) {
@@ -3987,8 +4228,8 @@ fn current_constellation_filter(
         }
     }
     let pinned_positions = graph_viewport::load_pins(&omni_pin_key());
-    let (vw, vh) = viewport_size();
-    let viewport_bounds = (cam.scale > 0.05).then(|| {
+    let (vw, vh, measured) = viewport_size_measured();
+    let viewport_bounds = (measured && cam.scale > 0.05).then(|| {
         (
             -cam.pan_x / cam.scale,
             -cam.pan_y / cam.scale,
@@ -4023,7 +4264,7 @@ fn current_constellation_filter(
         path_edges,
         isolate_seed,
         isolate_depth,
-        viewport_bounds: Some(viewport_bounds.unwrap_or((0.0, 0.0, vw.max(800.0), vh.max(500.0)))),
+        viewport_bounds,
         paged_count,
         focused_id: st["focused_id"].as_str().map(str::to_owned),
     }
@@ -4032,6 +4273,7 @@ fn current_constellation_filter(
 #[derive(Clone, Debug)]
 struct OmniDenseCacheEntry {
     node_rects: Vec<(String, f64, f64, f64, f64)>,
+    node_titles: Vec<String>,
     node_index_by_id: HashMap<String, usize>,
     node_htmls: Vec<String>,
     edge_endpoints: Vec<(String, String)>,
@@ -4109,9 +4351,8 @@ fn is_important_omni_node(
 
 fn mount_omni_dense_node_if_needed(node_id: &str) -> Option<web_sys::Element> {
     let canvas = dom::get("omnigraph-canvas")?;
-    if let Ok(Some(existing)) =
-        canvas.query_selector(&format!(".omni-node[data-node-id=\"{node_id}\"]"))
-    {
+    if let Some(existing) = find_omni_node_el(&canvas, node_id) {
+        let _ = existing.remove_attribute("data-offscreen");
         return Some(existing);
     }
     let plane = canvas.query_selector(".omni-plane").ok().flatten()?;
@@ -4126,6 +4367,7 @@ fn mount_omni_dense_node_if_needed(node_id: &str) -> Option<web_sys::Element> {
     }
     let mut created = graph_viewport::append_html_elements(&plane, html);
     let el = created.pop()?;
+    let _ = el.remove_attribute("data-offscreen");
     let roving_target = entry
         .latest_focused_id
         .as_deref()
@@ -4476,22 +4718,124 @@ fn try_patch_constellation_selection_in_place(
             let _ = el.set_attribute("data-path", b(is_path));
         }
     }
+    if let Some(radar) = dom::get("omnigraph-canvas-radar") {
+        if let Ok(dots) = radar.query_selector_all(".omni-radar-dot[data-node-id]") {
+            let b = |v: bool| if v { "true" } else { "false" };
+            for i in 0..dots.length() {
+                if let Some(dot) = dots
+                    .item(i)
+                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                {
+                    let nid = dot.get_attribute("data-node-id").unwrap_or_default();
+                    let _ = dot.set_attribute("data-selected", b(selected == Some(nid.as_str())));
+                    let _ = dot.set_attribute(
+                        "data-highlighted",
+                        b(filter.highlighted_ids.contains(&nid)),
+                    );
+                }
+            }
+        }
+    }
     true
+}
+
+fn attach_omni_hover_leave_once() {
+    let Some(canvas) = dom::get("omnigraph-canvas") else {
+        return;
+    };
+    if canvas.get_attribute("data-omni-leave-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = canvas.set_attribute("data-omni-leave-bound", "true");
+    let leave = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+        let cam = load_camera();
+        clear_omni_hover_state(&cam);
+    });
+    let _ = canvas.add_event_listener_with_callback("pointerleave", leave.as_ref().unchecked_ref());
+    leave.forget();
+}
+
+fn title_for_omni_node(graph: &V, id: &str) -> String {
+    for a in m::array(&graph["atoms"]) {
+        if atom_id(&a) == id {
+            if let Some(t) = a["title"].as_str().filter(|s| !s.is_empty()) {
+                return t.to_owned();
+            }
+        }
+    }
+    for s in m::array(&graph["sessions"]) {
+        if session_node_id(&s) == id {
+            let t = m::summary(&s);
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    for sym in m::array(&graph["symbols"]) {
+        if symbol_node_id(&sym) == id || sym["fqn"].as_str() == Some(id) {
+            return symbol_display_label(&sym);
+        }
+    }
+    id.rsplit('/').next().unwrap_or(id).to_owned()
+}
+
+fn render_omni_history_bar() {
+    let Some(tools) = dom::get("omni-canvas-tools") else {
+        return;
+    };
+    let bar = if let Some(existing) = dom::get("omni-history-bar") {
+        existing
+    } else {
+        let el = dom::el("div", "omni-history-bar graph-history-group", "");
+        let _ = el.set_attribute("id", "omni-history-bar");
+        let _ = el.set_attribute("role", "group");
+        let _ = el.set_attribute("aria-label", "Constellation navigation history");
+        let _ = tools.append_child(&el);
+        el
+    };
+    let (can_back, can_fwd, crumb) = OMNI_NAV_HISTORY.with(|h| {
+        let hist = h.borrow();
+        let label = hist
+            .entries
+            .get(hist.cursor)
+            .and_then(|e| e.selected_id.clone())
+            .unwrap_or_else(|| "Overview".to_owned());
+        (hist.can_back(), hist.can_forward(), label)
+    });
+    let back_dis = if can_back { "" } else { " disabled" };
+    let fwd_dis = if can_fwd { "" } else { " disabled" };
+    bar.set_inner_html(&format!(
+        "<button type=\"button\" class=\"button compact session-graph-btn\" id=\"omni-history-back\" data-action=\"omnigraph-history-back\" title=\"Navigate back in Constellation\" aria-label=\"Navigate back\"{back_dis}>←</button><button type=\"button\" class=\"button compact session-graph-btn\" id=\"omni-history-forward\" data-action=\"omnigraph-history-forward\" title=\"Navigate forward in Constellation\" aria-label=\"Navigate forward\"{fwd_dis}>→</button><span class=\"omni-meta-pill\" id=\"omni-history-crumb\">{}</span>",
+        esc(crumb.rsplit('/').next().unwrap_or(&crumb))
+    ));
 }
 
 fn render_constellation() {
     let mut graph = m::data("omnigraph-graph");
     if !graph.is_object() {
+        OMNI_DENSE_CACHE.with(|c| *c.borrow_mut() = None);
+        OMNI_HOVER_HIT.with(|h| *h.borrow_mut() = None);
+        graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
+        if let Some(el) = dom::get("omnigraph-canvas") {
+            el.set_inner_html("");
+        }
+        if let Some(radar) = dom::get("omnigraph-canvas-radar") {
+            radar.set_inner_html("");
+            dom::hide(&radar, true);
+        }
         return;
     }
-    let changes_doc = m::data("graph-changes");
-    let impact_doc = m::data("graph-impact");
-    omnigraph_canvas::inject_workspace_drift(
-        &mut graph,
-        changes_doc.is_object().then_some(&changes_doc),
-        impact_doc.is_object().then_some(&impact_doc),
-    );
+    attach_omni_hover_leave_once();
     let st = ui_state();
+    if m::text(&st, "snapshot").trim().is_empty() {
+        let changes_doc = m::data("graph-changes");
+        let impact_doc = m::data("graph-impact");
+        omnigraph_canvas::inject_workspace_drift(
+            &mut graph,
+            changes_doc.is_object().then_some(&changes_doc),
+            impact_doc.is_object().then_some(&impact_doc),
+        );
+    }
     let paged_count = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) as usize;
     let mut cam = load_camera();
     let filter = current_constellation_filter(&st, &cam, paged_count);
@@ -4528,7 +4872,9 @@ fn render_constellation() {
         && try_patch_constellation_selection_in_place(&filter, &cached_edges, &cached_ids)
     {
         sync_omnigraph_viewport_culling(&cam);
-        graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), None, true);
+        let hover = OMNI_HOVER_HIT.with(|h| h.borrow().flatten());
+        graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), hover, true);
+        render_omni_history_bar();
         return;
     }
 
@@ -4538,6 +4884,7 @@ fn render_constellation() {
         scale: cam.scale,
     };
     let rendered = omnigraph_canvas::render_constellation(&graph, &filter, &viewport);
+    OMNI_HOVER_HIT.with(|h| *h.borrow_mut() = None);
     if let Some(el) = dom::get("omnigraph-canvas") {
         el.set_inner_html(&rendered.html);
     }
@@ -4562,6 +4909,11 @@ fn render_constellation() {
         .enumerate()
         .map(|(i, (id, ..))| (id.clone(), i))
         .collect();
+    let node_titles: Vec<String> = rendered
+        .node_rects
+        .iter()
+        .map(|(id, ..)| title_for_omni_node(&graph, id))
+        .collect();
     let mut cache_neighbors = BTreeSet::new();
     if let Some(sel) = filter.selected_id.as_deref() {
         if let Some(&sel_idx) = node_index_by_id.get(sel) {
@@ -4580,6 +4932,7 @@ fn render_constellation() {
     }
     let cache_entry = OmniDenseCacheEntry {
         node_rects: rendered.node_rects.clone(),
+        node_titles,
         node_index_by_id,
         node_htmls: rendered.node_htmls,
         edge_endpoints: rendered.edge_endpoints,
@@ -4612,6 +4965,10 @@ fn render_constellation() {
         .collect::<serde_json::Map<String, V>>()
         .into();
     m::set("omnigraph-raw-positions", raw_map);
+    m::set(
+        "omnigraph-anchor-filter-key",
+        json!(anchor_filter_signature(&st)),
+    );
 
     let nav_rects: Vec<V> = rendered
         .node_rects
@@ -4634,20 +4991,23 @@ fn render_constellation() {
     } else {
         apply_camera(&cam);
     }
+    render_omni_history_bar();
 }
 
 fn render_dag() {
     let graph = m::data("omnigraph-graph");
+    let Some(el) = dom::get("omnigraph-dag-container") else {
+        return;
+    };
     if !graph.is_object() {
+        el.set_inner_html("<p class=\"empty-note\">No branch history loaded for this project.</p>");
         return;
     }
     let st = ui_state();
     let branch = m::text(&st, "branch");
     let snapshot = st["snapshot"].as_str();
     let html = omnigraph_canvas::render_branch_dag(&graph, &branch, snapshot);
-    if let Some(el) = dom::get("omnigraph-dag-container") {
-        el.set_inner_html(&html);
-    }
+    el.set_inner_html(&html);
 }
 
 fn render_merge() {
@@ -4688,12 +5048,33 @@ fn render_inspector() {
     let graph = m::data("omnigraph-graph");
     let sessions = m::read(|s| s.sessions.clone());
     let branch = m::text(&st, "branch");
-    body.set_inner_html(&render_node_inspector_html(
-        &graph,
-        &selected_id,
-        &sessions,
-        &branch,
-    ));
+    let mut html = render_node_inspector_html(&graph, &selected_id, &sessions, &branch);
+    if !selected_id.is_empty() {
+        let mut extras = Vec::new();
+        if graph_viewport::load_pins(&omni_pin_key()).contains_key(&selected_id) {
+            extras.push(format!(
+                "<button type=\"button\" class=\"button compact\" id=\"omni-unpin-node\" data-action=\"omnigraph-unpin-node\" data-payload=\"{}\">Unpin node</button>",
+                esc(&json!({ "node_id": selected_id }).to_string())
+            ));
+        }
+        let sys_cfg = m::data("system-map-catalog-cache");
+        let has_sys = sys_cfg.is_object()
+            && (!m::array(&sys_cfg["services"]).is_empty()
+                || !dom::value("system-project").is_empty());
+        if has_sys {
+            extras.push(format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-system-map\" data-payload=\"{}\">Open in System Map ↗</button>",
+                esc(&json!({ "node_id": selected_id }).to_string())
+            ));
+        }
+        if !extras.is_empty() {
+            html.push_str(&format!(
+                "<div class=\"omni-inspector-card\"><div class=\"omni-chip-list\">{}</div></div>",
+                extras.join("")
+            ));
+        }
+    }
+    body.set_inner_html(&html);
 }
 
 fn render_pulse() {
@@ -5137,25 +5518,194 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         .and_then(|el| el.closest("#omnigraph-canvas").ok().flatten())
         .is_some();
 
-    // Ensure #project matches Omnigraph project before inspect-file-graph bubbles to session::event.
-    if kind == "pointerdown" {
-        if let Some(inspect_btn) = target_el.as_ref().and_then(|el| {
-            el.closest("[data-action='inspect-file-graph']")
-                .ok()
-                .flatten()
-        }) {
-            if inspect_btn
-                .closest("#omnigraph-view")
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                let project = current_project_id();
-                if !project.is_empty() && dom::value("project") != project {
-                    crate::session::sync_project(&project);
+    fn sync_live_omni_pin_drag_edges(
+        dragged_id: &str,
+        nx: f64,
+        ny: f64,
+        is_dense: bool,
+        cam: &OmnigraphCamera,
+    ) {
+        let mut updated_dense: Option<Vec<(usize, omnigraph_canvas::CubicPoints)>> = None;
+        let mut svg_updates: Vec<(String, String, String)> = Vec::new();
+        OMNI_DENSE_CACHE.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(entry) = guard.as_mut() else {
+                return;
+            };
+            let Some(&drag_idx) = entry.node_index_by_id.get(dragged_id) else {
+                return;
+            };
+            if let Some(rect) = entry.node_rects.get_mut(drag_idx) {
+                rect.1 = nx;
+                rect.2 = ny;
+            }
+            let mut dense_list = Vec::new();
+            for (edge_idx, (from, to)) in entry.edge_endpoints.iter().enumerate() {
+                if from != dragged_id && to != dragged_id {
+                    continue;
+                }
+                let Some(&u_idx) = entry.node_index_by_id.get(from) else {
+                    continue;
+                };
+                let Some(&v_idx) = entry.node_index_by_id.get(to) else {
+                    continue;
+                };
+                let (_, ux, uy, uw, uh) = entry.node_rects[u_idx];
+                let (_, vx, vy, vw, vh) = entry.node_rects[v_idx];
+                let cubic = omnigraph_canvas::route_rect_cubic(
+                    (ux, uy, uw, uh),
+                    (vx, vy, vw, vh),
+                    from == to,
+                    0,
+                    1,
+                    edge_idx,
+                );
+                if is_dense {
+                    dense_list.push((edge_idx, cubic));
+                } else {
+                    let path_d = format!(
+                        "M {:.1} {:.1} C {:.1} {:.1}, {:.1} {:.1}, {:.1} {:.1}",
+                        cubic.0 .0,
+                        cubic.0 .1,
+                        cubic.1 .0,
+                        cubic.1 .1,
+                        cubic.2 .0,
+                        cubic.2 .1,
+                        cubic.3 .0,
+                        cubic.3 .1
+                    );
+                    svg_updates.push((from.clone(), to.clone(), path_d));
+                }
+            }
+            if is_dense {
+                updated_dense = Some(dense_list);
+            }
+        });
+
+        if let Some(edge_updates) = updated_dense {
+            let drag_idx_opt = OMNI_DENSE_CACHE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .and_then(|e| e.node_index_by_id.get(dragged_id).copied())
+            });
+            graph_viewport::canvas2d::update_scene("omnigraph-canvas", |scene| {
+                if let Some(d_idx) = drag_idx_opt {
+                    if let Some(n) = scene.nodes.get_mut(d_idx) {
+                        n.x = nx;
+                        n.y = ny;
+                        n.pinned = true;
+                    }
+                }
+                for (edge_idx, (p0, p1, p2, p3)) in edge_updates {
+                    if let Some(old) = scene.edges.get(edge_idx).cloned() {
+                        scene.edges[edge_idx] = graph_viewport::canvas2d::DenseEdgeSpec::from_cubic(
+                            old.index,
+                            p0,
+                            p1,
+                            p2,
+                            p3,
+                            old.weight,
+                            old.guessed,
+                            old.against,
+                            old.kind,
+                            old.on,
+                            old.lit,
+                            old.dim,
+                            old.portal,
+                        );
+                    }
+                }
+            });
+            graph_viewport::canvas2d::paint_scene(
+                "omnigraph-canvas",
+                cam.to_viewport(),
+                None,
+                true,
+            );
+        } else if !svg_updates.is_empty() {
+            if let Some(canvas) = dom::get("omnigraph-canvas") {
+                for (from, to, d) in svg_updates {
+                    let f_esc = escape_css_attr_value(&from);
+                    let t_esc = escape_css_attr_value(&to);
+                    if let Ok(edges) = canvas.query_selector_all(&format!(
+                        ".omni-edge[data-from=\"{f_esc}\"][data-to=\"{t_esc}\"]"
+                    )) {
+                        for i in 0..edges.length() {
+                            if let Some(el) = edges
+                                .item(i)
+                                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                            {
+                                let _ = el.set_attribute("d", &d);
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    fn select_omni_node_with_history(nid: String) {
+        let branch = m::text(&ui_state(), "branch");
+        let cam = load_camera();
+        OMNI_NAV_HISTORY.with(|h| {
+            h.borrow_mut().push(OmniNavEntry {
+                selected_id: Some(nid.clone()),
+                branch,
+                cam,
+            });
+        });
+        set_ui_state(|s| {
+            s["selected_id"] = json!(nid);
+            s["focused_id"] = json!(nid);
+            s["drawer_tab"] = json!("inspector");
+        });
+        render_tabs();
+        render_constellation();
+        render_inspector();
+    }
+
+    fn dense_file_target_for_node(graph: &V, nid: &str) -> Option<(String, Option<String>)> {
+        if let Some(f) = m::array(&graph["files"])
+            .into_iter()
+            .find(|f| file_node_id(f) == nid || f["path"].as_str() == Some(nid))
+        {
+            let p = f["path"].as_str().unwrap_or(nid).trim();
+            if !p.is_empty() {
+                return Some((p.to_owned(), None));
+            }
+        }
+        if let Some(sym) = m::array(&graph["symbols"])
+            .into_iter()
+            .find(|s| symbol_node_id(s) == nid || s["fqn"].as_str() == Some(nid))
+        {
+            let p = symbol_file_path(&sym);
+            if !p.is_empty() {
+                let fqn = sym["fqn"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                return Some((p, fqn));
+            }
+        }
+        if let Some(atom) = m::array(&graph["atoms"])
+            .into_iter()
+            .find(|a| atom_id(a) == nid)
+        {
+            if let Some(p) = m::array(&atom["files"])
+                .into_iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .next()
+            {
+                return Some((p, None));
+            }
+        }
+        None
     }
 
     // Shift+drag node pinning on constellation cards.
@@ -5255,17 +5805,19 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                     node_drag["curr_y"] = json!(ny);
                     node_drag["moved"] = json!(moved);
                     m::set("omnigraph-node-drag", node_drag);
-                    if let Some(el) = dom::get("omnigraph-canvas").and_then(|c| {
-                        c.query_selector(&format!(".omni-node[data-node-id=\"{node_id}\"]"))
-                            .ok()
-                            .flatten()
-                    }) {
+                    if let Some(el) =
+                        dom::get("omnigraph-canvas").and_then(|c| find_omni_node_el(&c, &node_id))
+                    {
+                        let _ = el.remove_attribute("data-offscreen");
                         let _ = el.set_attribute("data-pinned", "true");
                         if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
                             let _ = html_el.style().set_property("left", &format!("{nx:.1}px"));
                             let _ = html_el.style().set_property("top", &format!("{ny:.1}px"));
                         }
                     }
+                    let is_dense =
+                        OMNI_DENSE_CACHE.with(|c| c.borrow().as_ref().is_some_and(|e| e.is_dense));
+                    sync_live_omni_pin_drag_edges(&node_id, nx, ny, is_dense, &cam);
                     return true;
                 }
                 let was_moved = m::yes(&node_drag["moved"]);
@@ -5273,10 +5825,21 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 if kind == "pointerup" && was_moved {
                     graph_viewport::save_pin(&omni_pin_key(), &node_id, (nx, ny));
                     dom::hidden("omni-reset-pins", false);
+                    let mut drag = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
+                    drag.suppress_click = true;
+                    m::set("omnigraph-drag", drag.to_json());
+                    dom::later("omnigraph-drag-clear", 70, || {
+                        let mut d = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
+                        d.clear_suppress();
+                        m::set("omnigraph-drag", d.to_json());
+                    });
                     graph_viewport::announce_live(
                         "omnigraph-live-announce",
                         &format!("Pinned node {node_id}"),
                     );
+                    render_constellation();
+                    render_inspector();
+                } else if kind == "pointercancel" {
                     render_constellation();
                 }
                 return true;
@@ -5329,25 +5892,40 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                                 .and_then(|el| el.closest(".omni-node").ok().flatten())
                                 .is_none()
                             {
-                                if let Some((0, idx)) = graph_viewport::canvas2d::hit_test_scene(
+                                match graph_viewport::canvas2d::hit_test_scene(
                                     "omnigraph-canvas",
                                     wx,
                                     wy,
                                     8.0,
                                 ) {
-                                    if let Some(nid) = m::array(&m::data("omnigraph-nav-rects"))
-                                        .get(idx)
-                                        .and_then(|v| v["id"].as_str())
-                                        .map(str::to_owned)
-                                    {
-                                        set_ui_state(|s| {
-                                            s["selected_id"] = json!(nid);
-                                            s["drawer_tab"] = json!("inspector");
-                                        });
-                                        render_tabs();
-                                        render_constellation();
-                                        render_inspector();
+                                    Some((0, idx)) => {
+                                        if let Some(nid) = m::array(&m::data("omnigraph-nav-rects"))
+                                            .get(idx)
+                                            .and_then(|v| v["id"].as_str())
+                                            .map(str::to_owned)
+                                        {
+                                            select_omni_node_with_history(nid);
+                                        }
                                     }
+                                    Some((1, edge_idx)) => {
+                                        let pair = OMNI_DENSE_CACHE.with(|c| {
+                                            c.borrow().as_ref().and_then(|e| {
+                                                e.edge_endpoints.get(edge_idx).cloned()
+                                            })
+                                        });
+                                        if let Some((from, to)) = pair {
+                                            set_ui_state(|s| {
+                                                s["selected_id"] = json!(from.clone());
+                                                s["focused_id"] = json!(from.clone());
+                                                s["highlighted_ids"] = json!([from, to]);
+                                                s["drawer_tab"] = json!("inspector");
+                                            });
+                                            render_tabs();
+                                            render_constellation();
+                                            render_inspector();
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -5370,19 +5948,39 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         }
     }
     if kind == "pointermove" && in_canvas {
-        if let Some(me) = event.dyn_ref::<web_sys::MouseEvent>() {
-            if let Some(canvas_el) = dom::get("omnigraph-canvas") {
+        let is_dense = OMNI_DENSE_CACHE.with(|c| c.borrow().as_ref().is_some_and(|e| e.is_dense));
+        if is_dense {
+            if let (Some(me), Some(canvas_el)) = (
+                event.dyn_ref::<web_sys::MouseEvent>(),
+                dom::get("omnigraph-canvas"),
+            ) {
                 let cam = load_camera();
                 let rect = canvas_el.get_bounding_client_rect();
                 let wx = ((me.client_x() as f64 - rect.left()) - cam.pan_x) / cam.scale.max(0.05);
                 let wy = ((me.client_y() as f64 - rect.top()) - cam.pan_y) / cam.scale.max(0.05);
                 let hit = graph_viewport::canvas2d::hit_test_scene("omnigraph-canvas", wx, wy, 8.0);
-                graph_viewport::canvas2d::paint_scene(
-                    "omnigraph-canvas",
-                    cam.to_viewport(),
-                    hit,
-                    true,
-                );
+                let changed = OMNI_HOVER_HIT.with(|prev| {
+                    let mut guard = prev.borrow_mut();
+                    if *guard == Some(hit) {
+                        false
+                    } else {
+                        *guard = Some(hit);
+                        true
+                    }
+                });
+                if changed {
+                    graph_viewport::canvas2d::paint_scene(
+                        "omnigraph-canvas",
+                        cam.to_viewport(),
+                        hit,
+                        true,
+                    );
+                    if let Ok(he) = canvas_el.dyn_into::<web_sys::HtmlElement>() {
+                        let _ = he
+                            .style()
+                            .set_property("cursor", if hit.is_some() { "pointer" } else { "" });
+                    }
+                }
             }
         }
     }
@@ -5410,6 +6008,44 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                     .await;
                 });
                 return true;
+            }
+        }
+        let is_dense = OMNI_DENSE_CACHE.with(|c| c.borrow().as_ref().is_some_and(|e| e.is_dense));
+        if is_dense {
+            if let (Some(me), Some(canvas_el)) = (
+                event.dyn_ref::<web_sys::MouseEvent>(),
+                dom::get("omnigraph-canvas"),
+            ) {
+                let cam = load_camera();
+                let rect = canvas_el.get_bounding_client_rect();
+                let wx = ((me.client_x() as f64 - rect.left()) - cam.pan_x) / cam.scale.max(0.05);
+                let wy = ((me.client_y() as f64 - rect.top()) - cam.pan_y) / cam.scale.max(0.05);
+                if let Some((0, idx)) =
+                    graph_viewport::canvas2d::hit_test_scene("omnigraph-canvas", wx, wy, 8.0)
+                {
+                    let nid = OMNI_DENSE_CACHE.with(|c| {
+                        c.borrow()
+                            .as_ref()
+                            .and_then(|e| e.node_rects.get(idx).map(|(id, ..)| id.clone()))
+                    });
+                    if let Some(node_id) = nid {
+                        let graph = m::data("omnigraph-graph");
+                        if let Some((path, symbol_fqn)) =
+                            dense_file_target_for_node(&graph, &node_id)
+                        {
+                            let project = current_project_id();
+                            spawn_local(async move {
+                                open_target_in_code_map(
+                                    (!project.is_empty()).then_some(project.as_str()),
+                                    &path,
+                                    symbol_fqn.as_deref(),
+                                )
+                                .await;
+                            });
+                            return true;
+                        }
+                    }
+                }
             }
         }
         if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
@@ -5466,6 +6102,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
         && dom::get("omnigraph-search")
             .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
     {
+        event.prevent_default();
         dom::focus("omnigraph-search");
         return true;
     }
@@ -5483,6 +6120,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                     .iter()
                     .position(|t| id == format!("omni-tab-{t}"))
                 {
+                    event.prevent_default();
                     let next = match key.as_str() {
                         "ArrowRight" => (pos + 1) % stage_tabs.len(),
                         "ArrowLeft" => (pos + stage_tabs.len() - 1) % stage_tabs.len(),
@@ -5499,6 +6137,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                     .iter()
                     .position(|t| id == format!("omni-drawer-tab-{t}"))
                 {
+                    event.prevent_default();
                     let next = match key.as_str() {
                         "ArrowRight" => (pos + 1) % drawer_tabs.len(),
                         "ArrowLeft" => (pos + drawer_tabs.len() - 1) % drawer_tabs.len(),
@@ -5516,6 +6155,30 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     }
 
     if !in_input && !event.ctrl_key() && !event.meta_key() && !event.alt_key() {
+        let in_radar = target
+            .as_ref()
+            .is_some_and(|el| el.closest(".omni-radar").ok().flatten().is_some());
+        if in_radar
+            && matches!(
+                event.key().as_str(),
+                "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown"
+            )
+        {
+            event.prevent_default();
+            let mut cam = load_camera();
+            let step = 80.0;
+            match event.key().as_str() {
+                "ArrowLeft" => cam.pan_x += step,
+                "ArrowRight" => cam.pan_x -= step,
+                "ArrowUp" => cam.pan_y += step,
+                "ArrowDown" => cam.pan_y -= step,
+                _ => {}
+            }
+            cam.fit_mode = false;
+            save_camera(&cam);
+            apply_camera(&cam);
+            return true;
+        }
         let in_constellation = target
             .as_ref()
             .is_some_and(|el| el.closest("#omnigraph-canvas").ok().flatten().is_some());
@@ -5525,18 +6188,20 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                 "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
             )
         {
+            event.prevent_default();
             let curr_id = target
                 .as_ref()
                 .and_then(|el| el.closest(".omni-node[data-node-id]").ok().flatten())
                 .and_then(|el| el.get_attribute("data-node-id"))
                 .or_else(|| ui_state()["focused_id"].as_str().map(str::to_owned))
                 .or_else(|| ui_state()["selected_id"].as_str().map(str::to_owned));
-            let (ids, rects, curr_idx, edges) = OMNI_DENSE_CACHE
+            let (ids, titles, rects, curr_idx, edges) = OMNI_DENSE_CACHE
                 .with(|c| {
                     let g = c.borrow();
                     let entry = g.as_ref()?;
                     let ids: Vec<String> =
                         entry.node_rects.iter().map(|(id, ..)| id.clone()).collect();
+                    let titles = entry.node_titles.clone();
                     let rects: Vec<(f64, f64, f64, f64)> = entry
                         .node_rects
                         .iter()
@@ -5546,7 +6211,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                         .as_deref()
                         .and_then(|cid| entry.node_index_by_id.get(cid).copied())
                         .unwrap_or(0);
-                    Some((ids, rects, curr_idx, entry.node_edges.clone()))
+                    Some((ids, titles, rects, curr_idx, entry.node_edges.clone()))
                 })
                 .unwrap_or_else(|| {
                     let rects_val = m::array(&m::data("omnigraph-nav-rects"));
@@ -5555,6 +6220,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                         .iter()
                         .map(|r| r["id"].as_str().unwrap_or("").to_owned())
                         .collect();
+                    let titles = ids.clone();
                     let rects: Vec<(f64, f64, f64, f64)> = rects_val
                         .iter()
                         .map(|r| {
@@ -5576,7 +6242,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                             Some((pair[0].as_u64()? as usize, pair[1].as_u64()? as usize))
                         })
                         .collect();
-                    (ids, rects, curr_idx, edges)
+                    (ids, titles, rects, curr_idx, edges)
                 });
             let mut connected = Vec::new();
             for (u, v) in edges {
@@ -5596,6 +6262,16 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                             entry.latest_focused_id = Some(next_id.clone());
                         }
                     });
+                    if let Some(&target_rect) = rects.get(next_idx) {
+                        let (vw, vh, measured) = viewport_size_measured();
+                        if measured {
+                            let mut cam = load_camera();
+                            if pan_to_keep_rect_in_view(&mut cam, target_rect, (vw, vh), 28.0) {
+                                save_camera(&cam);
+                                apply_camera(&cam);
+                            }
+                        }
+                    }
                     let _ = mount_omni_dense_node_if_needed(&next_id);
                     if let Some(canvas) = dom::get("omnigraph-canvas") {
                         if let Ok(nodes) = canvas.query_selector_all(".omni-node[data-node-id]") {
@@ -5611,6 +6287,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                                         if is_next { "0" } else { "-1" },
                                     );
                                     if is_next {
+                                        let _ = el.remove_attribute("data-offscreen");
                                         if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
                                             let _ = he.focus();
                                         }
@@ -5619,9 +6296,14 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                             }
                         }
                     }
+                    let label = titles
+                        .get(next_idx)
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| next_id.clone());
                     graph_viewport::announce_live(
                         "omnigraph-live-announce",
-                        &format!("Focused {next_id}"),
+                        &format!("Focused {label}"),
                     );
                     return true;
                 }
@@ -6695,15 +7377,35 @@ pub async fn event(
             }
             "omni-isolate-depth" => {
                 let depth = value.trim().parse::<u64>().unwrap_or(2).clamp(1, 3);
-                set_ui_state(|s| {
-                    s["isolate_depth"] = json!(depth);
-                    s["isolate_active"] = json!(true);
-                });
-                render_constellation();
-                graph_viewport::announce_live(
-                    "omnigraph-live-announce",
-                    &format!("Isolated {depth} hops"),
-                );
+                let st = ui_state();
+                let seed = st["isolate_seed"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| st["selected_id"].as_str().filter(|s| !s.is_empty()))
+                    .map(str::to_owned)
+                    .unwrap_or_default();
+                if seed.is_empty() {
+                    set_ui_state(|s| {
+                        s["isolate_depth"] = json!(depth);
+                        s["isolate_active"] = json!(false);
+                    });
+                    sync_controls_from_state();
+                    graph_viewport::announce_live(
+                        "omnigraph-live-announce",
+                        "Select a node first to isolate its neighborhood",
+                    );
+                } else {
+                    set_ui_state(|s| {
+                        s["isolate_depth"] = json!(depth);
+                        s["isolate_seed"] = json!(seed);
+                        s["isolate_active"] = json!(true);
+                    });
+                    render_constellation();
+                    graph_viewport::announce_live(
+                        "omnigraph-live-announce",
+                        &format!("Isolated {depth} hops"),
+                    );
+                }
                 return true;
             }
             "omni-export-scope"
@@ -7086,7 +7788,12 @@ pub async fn event(
         "omnigraph-clear-filters" => {
             dom::set_value("omnigraph-search", "");
             m::set("omnigraph-search-results", V::Null);
+            let cur_branch = m::text(&ui_state(), "branch");
+            if !cur_branch.is_empty() && cur_branch != "main" {
+                let _ = switch_branch_state("main", false);
+            }
             set_ui_state(|s| {
+                s["branch"] = json!("main");
                 s["query"] = json!("");
                 s["kind"] = json!("");
                 s["show_files"] = json!(true);
@@ -7095,6 +7802,7 @@ pub async fn event(
                 s["path_nodes"] = json!([]);
                 s["path_edges"] = json!([]);
                 s["isolate_active"] = json!(false);
+                s["isolate_seed"] = V::Null;
             });
             dom::hidden("omnigraph-search-clear", true);
             sync_controls_from_state();
@@ -7168,6 +7876,11 @@ pub async fn event(
             let paused = !m::yes(&ui_state()["pulse_paused"]);
             set_ui_state(|s| s["pulse_paused"] = json!(paused));
             sync_pulse_toggle();
+            if paused {
+                dom::cancel_timer("omnigraph-pulse");
+            } else {
+                schedule_pulse_poll();
+            }
             true
         }
         "omnigraph-return-live" | "omni-return-live" => {
@@ -7188,8 +7901,48 @@ pub async fn event(
                 .unwrap_or("")
                 .to_owned();
             if !node_id.is_empty() {
+                if action == "omnigraph-focus-hit" {
+                    let mut graph = m::data("omnigraph-graph");
+                    if graph.is_object() {
+                        let already_loaded = m::array(&graph["atoms"])
+                            .iter()
+                            .any(|a| atom_id(a) == node_id)
+                            || m::array(&graph["files"])
+                                .iter()
+                                .any(|f| file_node_id(f) == node_id)
+                            || m::array(&graph["sessions"])
+                                .iter()
+                                .any(|s| session_node_id(s) == node_id)
+                            || m::array(&graph["symbols"])
+                                .iter()
+                                .any(|s| symbol_node_id(s) == node_id);
+                        if !already_loaded {
+                            if let Some(hit_atom) =
+                                m::array(&m::data("omnigraph-search-results")["hits"])
+                                    .into_iter()
+                                    .map(|h| h["atom"].clone())
+                                    .find(|a| atom_id(a) == node_id)
+                            {
+                                let mut atoms = m::array(&graph["atoms"]);
+                                atoms.push(hit_atom);
+                                graph["atoms"] = V::Array(atoms);
+                                m::set("omnigraph-graph", graph);
+                            }
+                        }
+                    }
+                }
+                let branch = m::text(&ui_state(), "branch");
+                let cam = load_camera();
+                OMNI_NAV_HISTORY.with(|h| {
+                    h.borrow_mut().push(OmniNavEntry {
+                        selected_id: Some(node_id.clone()),
+                        branch,
+                        cam,
+                    });
+                });
                 set_ui_state(|s| {
                     s["selected_id"] = json!(node_id);
+                    s["focused_id"] = json!(node_id);
                     s["drawer_tab"] = json!("inspector");
                     if action == "omnigraph-focus-hit" {
                         s["stage_tab"] = json!("constellation");
@@ -7200,6 +7953,90 @@ pub async fn event(
                 render_inspector();
                 fly_to_node(&node_id);
             }
+            true
+        }
+        "omnigraph-unpin-node" => {
+            let node_id = payload["node_id"]
+                .as_str()
+                .or_else(|| payload.as_str())
+                .unwrap_or("")
+                .to_owned();
+            if !node_id.is_empty() {
+                let key = omni_pin_key();
+                let mut pins = graph_viewport::load_pins(&key);
+                if pins.remove(&node_id).is_some() {
+                    graph_viewport::persist_pins_map(&key, &pins);
+                    dom::hidden("omni-reset-pins", pins.is_empty());
+                    render_constellation();
+                    render_inspector();
+                    graph_viewport::announce_live(
+                        "omnigraph-live-announce",
+                        &format!("Unpinned node {node_id}"),
+                    );
+                }
+            }
+            true
+        }
+        "omnigraph-history-back" | "omnigraph-history-forward" => {
+            let delta: isize = if action == "omnigraph-history-back" {
+                -1
+            } else {
+                1
+            };
+            let target = OMNI_NAV_HISTORY.with(|h| {
+                let mut hist = h.borrow_mut();
+                if delta < 0 && hist.can_back() {
+                    hist.cursor -= 1;
+                    hist.entries.get(hist.cursor).cloned()
+                } else if delta > 0 && hist.can_forward() {
+                    hist.cursor += 1;
+                    hist.entries.get(hist.cursor).cloned()
+                } else {
+                    None
+                }
+            });
+            if let Some(entry) = target {
+                let cur_branch = m::text(&ui_state(), "branch");
+                if !entry.branch.is_empty() && entry.branch != cur_branch {
+                    let _ = switch_branch_state(&entry.branch, false);
+                }
+                set_ui_state(|s| {
+                    s["selected_id"] = entry
+                        .selected_id
+                        .as_ref()
+                        .map(|id| json!(id))
+                        .unwrap_or(V::Null);
+                    s["focused_id"] = s["selected_id"].clone();
+                    s["stage_tab"] = json!("constellation");
+                });
+                save_camera(&entry.cam);
+                sync_controls_from_state();
+                render_tabs();
+                render_constellation();
+                render_inspector();
+                apply_camera(&entry.cam);
+            }
+            true
+        }
+        "inspect-file-graph" => {
+            if m::read(|s| s.view != "omnigraph") {
+                return false;
+            }
+            if let Some((path, fqn)) = resolve_code_map_target(payload) {
+                let project = current_project_id();
+                open_target_in_code_map(
+                    (!project.is_empty()).then_some(project.as_str()),
+                    &path,
+                    fqn.as_deref(),
+                )
+                .await;
+                return true;
+            }
+            false
+        }
+        "omnigraph-open-system-map" => {
+            crate::session::open_view("systems", true).await;
+            crate::systems::focus_system_graph_workspace();
             true
         }
         "omnigraph-pulse-focus" => {
@@ -7265,14 +8102,40 @@ pub async fn event(
                 .parse::<u64>()
                 .unwrap_or(2)
                 .clamp(1, 3);
-            let seed = st["selected_id"].as_str().unwrap_or("").to_owned();
+            let seed = st["selected_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    if !next_active {
+                        st["isolate_seed"].as_str().filter(|s| !s.is_empty())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("")
+                .to_owned();
+            if next_active && seed.is_empty() {
+                set_ui_state(|s| {
+                    s["isolate_active"] = json!(false);
+                    s["isolate_depth"] = json!(depth);
+                });
+                sync_controls_from_state();
+                graph_viewport::announce_live(
+                    "omnigraph-live-announce",
+                    "Select a node first to isolate its neighborhood",
+                );
+                return true;
+            }
             set_ui_state(|s| {
-                s["isolate_active"] = json!(next_active && !seed.is_empty());
+                s["isolate_active"] = json!(next_active);
                 s["isolate_depth"] = json!(depth);
-                if !seed.is_empty() {
+                if next_active {
                     s["isolate_seed"] = json!(seed);
+                } else {
+                    s["isolate_seed"] = V::Null;
                 }
             });
+            sync_controls_from_state();
             render_constellation();
             graph_viewport::announce_live(
                 "omnigraph-live-announce",
@@ -7292,6 +8155,10 @@ pub async fn event(
             let paged_count = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) as usize;
             let cam = load_camera();
             let base_filter = current_constellation_filter(&st, &cam, paged_count);
+            set_ui_state(|s| {
+                s["path_from"] = json!(from_q.trim());
+                s["path_to"] = json!(to_q.trim());
+            });
             if let Some((path_nodes, path_edges)) =
                 omnigraph_canvas::compute_constellation_path(&graph, &base_filter, &from_q, &to_q)
             {
@@ -7301,12 +8168,15 @@ pub async fn event(
                     s["path_nodes"] = json!(path_nodes);
                     s["path_edges"] = V::Array(edge_json);
                 });
+                dom::hidden("omnigraph-status-message", true);
                 render_constellation();
                 graph_viewport::announce_live(
                     "omnigraph-live-announce",
                     &format!("Traced path with {count} nodes"),
                 );
             } else {
+                dom::text("omnigraph-status-message", "No path found between A and B.");
+                dom::hidden("omnigraph-status-message", false);
                 graph_viewport::announce_live(
                     "omnigraph-live-announce",
                     "No path found between A and B",
@@ -7316,9 +8186,13 @@ pub async fn event(
         }
         "omni-path-clear" => {
             set_ui_state(|s| {
+                s["path_from"] = json!("");
+                s["path_to"] = json!("");
                 s["path_nodes"] = json!([]);
                 s["path_edges"] = json!([]);
             });
+            dom::hidden("omnigraph-status-message", true);
+            sync_controls_from_state();
             render_constellation();
             graph_viewport::announce_live("omnigraph-live-announce", "Cleared path trace");
             true
@@ -9105,5 +9979,73 @@ mod tests {
                 Some("src/Auth/Token.php::Token::verify".to_owned())
             ))
         );
+    }
+
+    #[test]
+    fn camera_sanitation_css_escaping_pan_into_view_and_nav_history_behave_safely() {
+        m::set(
+            "omnigraph-camera",
+            json!({
+                "scale": "not-a-number",
+                "pan_x": null,
+                "pan_y": f64::NAN,
+                "plane_w": -50.0,
+                "plane_h": 480.0,
+                "fit_mode": false
+            }),
+        );
+        let cam = load_camera();
+        assert_eq!(cam.scale, 1.0);
+        assert_eq!(cam.pan_x, 16.0);
+        assert_eq!(cam.pan_y, 16.0);
+        assert_eq!(cam.plane_w, 0.0);
+        assert_eq!(cam.plane_h, 480.0);
+        m::take("omnigraph-camera");
+
+        assert_eq!(
+            escape_css_attr_value("App\\Auth\\\"Token\"\\Service"),
+            "App\\\\Auth\\\\\\\"Token\\\"\\\\Service"
+        );
+
+        let radar = clamped_radar_rect(
+            graph_viewport::Camera::new(-10000.0, -10000.0, 2.0),
+            (920.0, 580.0),
+            (600.0, 400.0),
+            16.0,
+        )
+        .expect("radar rect");
+        assert!(radar.0 + radar.2 <= 600.01);
+        assert!(radar.1 + radar.3 <= 400.01);
+
+        let mut view_cam = OmnigraphCamera {
+            scale: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            plane_w: 2000.0,
+            plane_h: 2000.0,
+            fit_mode: false,
+        };
+        assert!(pan_to_keep_rect_in_view(
+            &mut view_cam,
+            (1500.0, 1200.0, 200.0, 80.0),
+            (800.0, 600.0),
+            24.0
+        ));
+        assert!(1500.0 * view_cam.scale + view_cam.pan_x >= 0.0);
+        assert!(1700.0 * view_cam.scale + view_cam.pan_x <= 800.0);
+
+        let mut hist = OmniNavHistory::default();
+        hist.push(OmniNavEntry {
+            selected_id: Some("a1".to_owned()),
+            branch: "main".to_owned(),
+            cam: view_cam.clone(),
+        });
+        hist.push(OmniNavEntry {
+            selected_id: Some("a2".to_owned()),
+            branch: "main".to_owned(),
+            cam: view_cam,
+        });
+        assert!(hist.can_back());
+        assert!(!hist.can_forward());
     }
 }
