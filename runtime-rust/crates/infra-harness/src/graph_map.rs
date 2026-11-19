@@ -7343,9 +7343,10 @@ impl Maps {
         state: &Path,
         project: &str,
     ) -> Option<crate::graph_ir::IrSummary> {
-        crate::graph_ir::GraphIrStore::read_summary_if_exists(state, project)
+        crate::graph_ir::GraphIrStore::open_readonly(state, project)
             .ok()
             .flatten()
+            .and_then(|ir| ir.summary_counts().ok().flatten())
     }
 }
 

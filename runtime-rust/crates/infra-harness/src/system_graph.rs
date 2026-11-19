@@ -2778,16 +2778,10 @@ impl SystemGraphDomain {
             }
 
             if target.service_id != "__system__" && !provided_tokens.is_empty() {
-                let ir_data = if crate::graph_ir::GraphIrStore::exists(
-                    self.graphs.state_dir(),
-                    &target.graph_id,
-                ) {
-                    crate::graph_ir::GraphIrStore::open(self.graphs.state_dir(), &target.graph_id)
-                        .ok()
-                        .and_then(|ir| ir.semantic_edges_for_system().ok())
-                } else {
-                    None
-                };
+                let ir_data = self
+                    .graphs
+                    .get_ir_store_readonly(&target.graph_id)
+                    .and_then(|ir| ir.semantic_edges_for_system().ok());
                 if let Some((_, ref sem_edges)) = ir_data {
                     for (rel_path, _kind, sem_target, from_sym, _line, _ev) in sem_edges {
                         let stripped = sem_target
@@ -2833,23 +2827,30 @@ impl SystemGraphDomain {
                         }
                     }
                 }
-                let candidate_files: Vec<String> = match (&live_idx, &ir_data) {
-                    (Some(idx), _) => idx
-                        .files()
+                let ir_populated = ir_data
+                    .as_ref()
+                    .is_some_and(|(ir_files, _)| !ir_files.is_empty());
+                let candidate_files: Vec<String> = if ir_populated && !entry.stale {
+                    // Clean populated IR already provided semantic edges; skip disk walks.
+                    Vec::new()
+                } else if ir_populated {
+                    entry
+                        .changed_files
+                        .iter()
+                        .map(|f| f.path.as_str())
+                        .filter(|p| !graph_map::is_test_path(p))
+                        .take(MAX_UNDECLARED_SCAN_FILES)
+                        .map(str::to_owned)
+                        .collect()
+                } else if let Some(idx) = &live_idx {
+                    idx.files()
                         .iter()
                         .filter(|p| !graph_map::is_test_path(p))
                         .take(MAX_UNDECLARED_SCAN_FILES)
                         .cloned()
-                        .collect(),
-                    (None, Some((ir_files, _))) => ir_files
-                        .iter()
-                        .filter(|p| !graph_map::is_test_path(p))
-                        .take(MAX_UNDECLARED_SCAN_FILES)
-                        .cloned()
-                        .collect(),
-                    (None, None) => {
-                        collect_service_code_files(&target.root, MAX_UNDECLARED_SCAN_FILES)
-                    }
+                        .collect()
+                } else {
+                    collect_service_code_files(&target.root, MAX_UNDECLARED_SCAN_FILES)
                 };
                 for rel_path in candidate_files {
                     if rel_path == "ai-service.json" || rel_path.ends_with(".lock") {
@@ -4895,14 +4896,19 @@ impl ServiceSemanticSignals {
 
     fn ingest_ir_store(
         &mut self,
+        graphs: Option<&Graphs>,
         state_dir: &Path,
         graph_id: &str,
         certain: bool,
     ) -> Option<Vec<String>> {
-        if !crate::graph_ir::GraphIrStore::exists(state_dir, graph_id) {
-            return None;
-        }
-        let store = crate::graph_ir::GraphIrStore::open(state_dir, graph_id).ok()?;
+        let store = graphs
+            .and_then(|g| g.get_ir_store_readonly(graph_id))
+            .or_else(|| {
+                crate::graph_ir::GraphIrStore::open_readonly(state_dir, graph_id)
+                    .ok()
+                    .flatten()
+                    .map(Arc::new)
+            })?;
         let (files, edges) = store.semantic_edges_for_system().ok()?;
         if files.is_empty() && edges.is_empty() {
             return None;
@@ -4974,7 +4980,28 @@ fn read_bounded_service_file(
     Some((content, len))
 }
 
+#[cfg(test)]
 fn collect_service_semantics_with(
+    state_dir: Option<&Path>,
+    target: Option<&ResolvedServiceTarget>,
+    index: Option<&Arc<Index>>,
+    certain: bool,
+    need_content_probes: bool,
+    on_file: impl FnMut(&str, &str),
+) -> (ServiceSemanticSignals, usize, bool) {
+    collect_service_semantics_with_graphs(
+        None,
+        state_dir,
+        target,
+        index,
+        certain,
+        need_content_probes,
+        on_file,
+    )
+}
+
+fn collect_service_semantics_with_graphs(
+    graphs: Option<&Graphs>,
     state_dir: Option<&Path>,
     target: Option<&ResolvedServiceTarget>,
     index: Option<&Arc<Index>>,
@@ -4983,9 +5010,9 @@ fn collect_service_semantics_with(
     mut on_file: impl FnMut(&str, &str),
 ) -> (ServiceSemanticSignals, usize, bool) {
     let mut signals = ServiceSemanticSignals::default();
-    let ir_files = state_dir
-        .zip(target)
-        .and_then(|(state, target)| signals.ingest_ir_store(state, &target.graph_id, certain));
+    let ir_files = state_dir.zip(target).and_then(|(state, target)| {
+        signals.ingest_ir_store(graphs, state, &target.graph_id, certain)
+    });
     let ir_loaded = ir_files.is_some();
     if !ir_loaded && let Some(idx) = index {
         signals.ingest_index(idx, certain);
@@ -5345,7 +5372,8 @@ fn bridge_view(
         .filter(|(_, probes)| !probes.is_empty())
         .collect::<Vec<_>>();
     let state_dir = Some(graphs.state_dir());
-    let (provider_semantics, files_read, raw_cut) = collect_service_semantics_with(
+    let (provider_semantics, files_read, raw_cut) = collect_service_semantics_with_graphs(
+        Some(graphs),
         state_dir,
         provider_target,
         provider_index.as_ref(),
@@ -5367,7 +5395,8 @@ fn bridge_view(
     );
     let scanned = if probes.is_empty() { 0 } else { files_read };
     let cut = !probes.is_empty() && raw_cut;
-    let (consumer_semantics, _, _) = collect_service_semantics_with(
+    let (consumer_semantics, _, _) = collect_service_semantics_with_graphs(
+        Some(graphs),
         state_dir,
         consumer_target,
         consumer_index.as_ref(),

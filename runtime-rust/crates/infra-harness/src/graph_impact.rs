@@ -99,6 +99,8 @@ struct TargetContext<'a> {
     crate_map: Arc<CratePackageMap>,
     reexports: ReexportIndex,
     ir_store: Option<IrStoreHandle<'a>>,
+    ir_fresh: bool,
+    dirty_or_unindexed: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -752,23 +754,79 @@ impl<'a> TargetContext<'a> {
         let rev_files = revision
             .as_deref()
             .and_then(|rev| git_tree_files(root, rev));
-        let disk_files = if revision.is_none() {
-            collect_workspace_files(root, is_git)
-        } else {
-            BTreeSet::new()
-        };
-
         let ir_store = if revision.is_none() {
             if let Some(store) = explicit_ir {
                 Some(IrStoreHandle::Borrowed(store))
             } else {
                 index
                     .and_then(Index::ir_db_path)
-                    .and_then(|db_path| GraphIrStore::open_at(db_path).ok())
+                    .and_then(|db_path| GraphIrStore::open_at_readonly(db_path).ok().flatten())
                     .map(IrStoreHandle::Owned)
             }
         } else {
             None
+        };
+
+        let mut ir_fresh = false;
+        let mut ir_known_files: BTreeSet<String> = BTreeSet::new();
+        let mut dirty_or_unindexed: BTreeSet<String> = BTreeSet::new();
+        if let Some(handle) = &ir_store {
+            let store = handle.as_store();
+            let summary = store.summary_counts().ok().flatten();
+            if summary
+                .as_ref()
+                .is_some_and(|s| s.files > 0 && !s.truncated)
+                && let Ok((stamps, manifest_stamp, stored_head)) = store.file_stamps_and_meta()
+            {
+                ir_known_files.extend(stamps.keys().cloned());
+                let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+                let manifest_ok = manifest_stamp.as_deref()
+                    == Some(crate::graph_ir::compute_root_manifest_stamp(&real_root).as_str());
+                if manifest_ok {
+                    if is_git {
+                        let current_head = crate::graph_ir::current_git_head(&real_root);
+                        if stored_head == current_head
+                            && let Some(dirty) = collect_git_dirty_files(root)
+                        {
+                            for p in dirty {
+                                if !is_scannable_code(&p) {
+                                    continue;
+                                }
+                                let matches_ir = stamps.get(&p).is_some_and(|&(sz, mtime)| {
+                                    file_disk_stamp(root, &p) == Some((sz, mtime))
+                                });
+                                if !matches_ir {
+                                    dirty_or_unindexed.insert(p);
+                                }
+                            }
+                            if dirty_or_unindexed.len() <= MAX_CALLER_SCAN {
+                                ir_fresh = true;
+                            } else {
+                                dirty_or_unindexed.clear();
+                            }
+                        }
+                    } else {
+                        if stamps.len() <= 500 {
+                            for (p, &(sz, mtime)) in &stamps {
+                                if is_scannable_code(p)
+                                    && file_disk_stamp(root, p) != Some((sz, mtime))
+                                {
+                                    dirty_or_unindexed.insert(p.clone());
+                                }
+                            }
+                        }
+                        ir_fresh = true;
+                    }
+                }
+            } else if let Ok(known) = store.known_files() {
+                ir_known_files = known;
+            }
+        }
+
+        let disk_files = if revision.is_none() && !ir_fresh {
+            collect_workspace_files(root, is_git)
+        } else {
+            BTreeSet::new()
         };
 
         let mut resolution_files = BTreeSet::new();
@@ -780,11 +838,8 @@ impl<'a> TargetContext<'a> {
         if let Some(idx) = index {
             resolution_files.extend(idx.files().iter().cloned());
         }
-        if let Some(handle) = &ir_store
-            && let Ok(ir_known) = handle.as_store().known_files()
-        {
-            resolution_files.extend(ir_known);
-        }
+        resolution_files.extend(ir_known_files);
+        resolution_files.extend(dirty_or_unindexed.iter().cloned());
         if let Some(res) = resolved {
             for change in &res.files {
                 if let Some(p) = normalize_rel_opt(&change.path) {
@@ -832,6 +887,8 @@ impl<'a> TargetContext<'a> {
             crate_map,
             reexports,
             ir_store,
+            ir_fresh,
+            dirty_or_unindexed,
         }
     }
 
@@ -3596,13 +3653,19 @@ impl CallerScanIndex {
             for caller in known_callers {
                 push_path(caller, false);
             }
-            if let Some(idx) = index {
-                for path in idx.files() {
+            if ctx.ir_fresh {
+                for dirty in &ctx.dirty_or_unindexed {
+                    push_path(dirty, true);
+                }
+            } else {
+                if let Some(idx) = index {
+                    for path in idx.files() {
+                        push_path(path, false);
+                    }
+                }
+                for path in ctx.existing_files() {
                     push_path(path, false);
                 }
-            }
-            for path in ctx.existing_files() {
-                push_path(path, false);
             }
         }
 
@@ -4348,6 +4411,16 @@ fn compute_architecture_impact(
             }
         }
     } else {
+        if ctx.ir_fresh
+            && let Some(ir) = ctx.ir()
+            && let Ok(edges) = ir.all_resolved_file_edges()
+        {
+            for (src_path, dst_path) in edges {
+                if src_path != dst_path {
+                    base_adj.entry(src_path).or_default().insert(dst_path);
+                }
+            }
+        }
         for (src_path, (_, deps)) in caller_cache {
             for dep in deps {
                 if dep.resolved && dep.target != *src_path {
@@ -4797,6 +4870,69 @@ fn git_tree_files(root: &Path, rev: &str) -> Option<BTreeSet<String>> {
         }
     }
     Some(set)
+}
+
+fn file_disk_stamp(root: &Path, rel: &str) -> Option<(i64, i64)> {
+    let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+    let nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0u128, |d| d.as_nanos());
+    let mtime_ns = i64::try_from(nanos).unwrap_or(i64::MAX);
+    Some((size, mtime_ns))
+}
+
+fn collect_git_dirty_files(root: &Path) -> Option<BTreeSet<String>> {
+    let prefix_out = projects::git(
+        root,
+        &["rev-parse".to_owned(), "--show-prefix".to_owned()],
+        10,
+    )
+    .ok()?;
+    if prefix_out.code != 0 {
+        return None;
+    }
+    let prefix = String::from_utf8_lossy(&prefix_out.stdout)
+        .trim()
+        .replace('\\', "/");
+    let status_out = projects::git(
+        root,
+        &[
+            "status".to_owned(),
+            "--porcelain=v1".to_owned(),
+            "-z".to_owned(),
+            "--untracked-files=all".to_owned(),
+            "--no-renames".to_owned(),
+        ],
+        GIT_TIMEOUT_SECS,
+    )
+    .ok()?;
+    if status_out.code != 0 {
+        return None;
+    }
+    let mut dirty = BTreeSet::new();
+    for chunk in status_out.stdout.split(|b| *b == 0) {
+        if chunk.len() < 4 {
+            continue;
+        }
+        let raw_path = String::from_utf8_lossy(&chunk[3..]).replace('\\', "/");
+        let rel_raw = if prefix.is_empty() {
+            raw_path.as_str()
+        } else if let Some(stripped) = raw_path.strip_prefix(&prefix) {
+            stripped
+        } else {
+            continue;
+        };
+        if let Some(norm) = normalize_rel_opt(rel_raw) {
+            dirty.insert(norm);
+        }
+    }
+    Some(dirty)
 }
 
 fn collect_workspace_files(root: &Path, is_git: bool) -> BTreeSet<String> {
@@ -6414,6 +6550,101 @@ mod tests {
                 .iter()
                 .any(|c| c["path"] == "app/Controllers/PayController.php"),
             "expected PSR-4 caller resolved via IR & ManifestIndex: {impact}"
+        );
+    }
+
+    #[test]
+    fn file_impact_with_fresh_readonly_ir_and_dirty_scan_detects_callers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(root.join("domain/Billing")).unwrap();
+        std::fs::create_dir_all(root.join("app/Controllers")).unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"autoload":{"psr-4":{"Domain\\":"domain/","App\\":"app/"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("domain/Billing/Invoice.php"),
+            "<?php\nnamespace Domain\\Billing;\nclass Invoice {\n    public function total(): int { return 10; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/Controllers/PayController.php"),
+            "<?php\nnamespace App\\Controllers;\nuse Domain\\Billing\\Invoice;\nclass PayController {\n    public function run(Invoice $inv): int { return $inv->total(); }\n}\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.test")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.test")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "--all"]);
+        git(&["commit", "--quiet", "-m", "init"]);
+
+        let ir = GraphIrStore::open(&state, "clean-ir").unwrap();
+        ir.sync_workspace(&root).unwrap();
+        drop(ir);
+
+        // Open read-only IR store; repo is clean so CallerScanIndex full disk walk is skipped.
+        let ro_ir = GraphIrStore::open_readonly(&state, "clean-ir")
+            .unwrap()
+            .expect("existing IR DB");
+        let impact_clean = file_impact_with_ir(
+            &root,
+            None,
+            Some(&ro_ir),
+            None,
+            None,
+            "domain/Billing/Invoice.php",
+            false,
+        )
+        .unwrap();
+        assert!(
+            impact_clean["used_by"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["path"] == "app/Controllers/PayController.php"),
+            "expected clean IR caller: {impact_clean}"
+        );
+
+        // Add an uncommitted dirty caller without updating IR; dirty scan picks it up.
+        std::fs::write(
+            root.join("app/Controllers/DirtyController.php"),
+            "<?php\nnamespace App\\Controllers;\nuse Domain\\Billing\\Invoice;\nclass DirtyController {\n    public function sum(Invoice $inv): int { return $inv->total(); }\n}\n",
+        )
+        .unwrap();
+        let impact_dirty = file_impact_with_ir(
+            &root,
+            None,
+            Some(&ro_ir),
+            None,
+            None,
+            "domain/Billing/Invoice.php",
+            false,
+        )
+        .unwrap();
+        let callers: Vec<&str> = impact_dirty["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["path"].as_str())
+            .collect();
+        assert!(
+            callers.contains(&"app/Controllers/PayController.php")
+                && callers.contains(&"app/Controllers/DirtyController.php"),
+            "expected both IR and dirty callers: {callers:?}"
         );
     }
 }

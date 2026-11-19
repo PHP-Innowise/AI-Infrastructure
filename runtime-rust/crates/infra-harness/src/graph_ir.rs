@@ -29,7 +29,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, UNIX_EPOCH},
 };
@@ -150,6 +150,8 @@ pub(crate) struct IrSyncStats {
 pub(crate) struct GraphIrStore {
     db_path: PathBuf,
     conn: Mutex<Connection>,
+    read_only: bool,
+    write_epoch: AtomicU64,
 }
 
 struct WalkedFile {
@@ -354,7 +356,48 @@ impl GraphIrStore {
         Ok(Self {
             db_path: db_path.to_path_buf(),
             conn: Mutex::new(conn),
+            read_only: false,
+            write_epoch: AtomicU64::new(0),
         })
+    }
+
+    /// Opens an existing `<state>/graphs/<project>/graph_ir.sqlite3` strictly read-only without
+    /// creating directories/files or executing any DDL/`ir_meta` writes. Returns `Ok(None)` if missing
+    /// or uninitialized.
+    pub(crate) fn open_readonly(state: &Path, project: &str) -> Result<Option<Self>> {
+        validate_project_id(project)?;
+        if !Self::exists(state, project) {
+            return Ok(None);
+        }
+        let db_path = state.join("graphs").join(project).join(DB_FILENAME);
+        Self::open_at_readonly(&db_path)
+    }
+
+    /// Opens an existing SQLite IR store at `db_path` strictly read-only without creating files
+    /// or executing any DDL/`ir_meta` writes. Returns `Ok(None)` if missing or uninitialized.
+    pub(crate) fn open_at_readonly(db_path: &Path) -> Result<Option<Self>> {
+        let Some(verified) = verify_existing_sqlite_path(db_path)? else {
+            return Ok(None);
+        };
+        let conn = Connection::open_with_flags(
+            &verified,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        let initialized: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ir_files')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !initialized {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            db_path: verified,
+            conn: Mutex::new(conn),
+            read_only: true,
+            write_epoch: AtomicU64::new(0),
+        }))
     }
 
     /// Returns whether `<state>/graphs/<project>/graph_ir.sqlite3` already exists on disk.
@@ -367,26 +410,6 @@ impl GraphIrStore {
             .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
     }
 
-    /// Reads the fast O(1) `ir_summary` row for an existing project DB without creating one.
-    pub(crate) fn read_summary_if_exists(state: &Path, project: &str) -> Result<Option<IrSummary>> {
-        if !Self::exists(state, project) {
-            return Ok(None);
-        }
-        let home = state.join("graphs").join(project);
-        let Ok(_custody) = PublicationFiles::new(&home) else {
-            return Ok(None);
-        };
-        let real_home = infra_core::fs::python_realpath(&home)?;
-        let db_path = real_home.join(DB_FILENAME);
-        infra_core::fs::admit_descendant(&real_home, &db_path)?;
-        let conn = Connection::open_with_flags(
-            &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
-        read_summary_from_conn(&conn)
-    }
-
     #[allow(dead_code)]
     pub(crate) fn db_path(&self) -> &Path {
         &self.db_path
@@ -396,8 +419,12 @@ impl GraphIrStore {
     ///
     /// Files matching `(size, mtime_ns)` in `ir_files` are skipped; changed/new files are parsed
     /// via `graph_ast::parse_file_ir`, deleted files are pruned, and cross-file dependencies +
-    /// `ir_summary` are updated atomically in one SQLite transaction.
+    /// `ir_summary` are updated atomically in one SQLite transaction. All CPU/disk AST parsing
+    /// completes before acquiring the `Immediate` SQLite write transaction.
     pub(crate) fn sync_workspace(&self, root: &Path) -> Result<IrSyncStats> {
+        if self.read_only {
+            return Err(HarnessError::invalid("Graph IR store is read-only."));
+        }
         if !root.is_dir() {
             return Err(HarnessError::invalid(
                 "Workspace directory does not exist for Graph IR sync.",
@@ -408,8 +435,9 @@ impl GraphIrStore {
         let files_scanned = walked.len();
         let known_files: BTreeSet<String> = walked.iter().map(|w| w.rel_path.clone()).collect();
         let manifest_stamp = compute_root_manifest_stamp(&real_root);
+        let git_head = current_git_head(&real_root);
 
-        let (existing, prev_manifest_stamp) = {
+        let (existing, prev_manifest_stamp, prev_git_head, mut epoch_before) = {
             let conn = lock_conn(&self.conn)?;
             let mut stmt = conn.prepare("SELECT path, size, mtime_ns FROM ir_files")?;
             let rows = stmt.query_map([], |row| {
@@ -430,7 +458,15 @@ impl GraphIrStore {
                     |r| r.get(0),
                 )
                 .optional()?;
-            (map, prev_stamp)
+            let prev_head: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM ir_meta WHERE key = 'git_head'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let epoch = self.write_epoch.load(Ordering::Acquire);
+            (map, prev_stamp, prev_head, epoch)
         };
 
         let removed: Vec<String> = existing
@@ -450,13 +486,23 @@ impl GraphIrStore {
             && !manifest_changed
             && let Some(mut summary) = self.summary_counts()?
         {
-            if summary.truncated != truncated {
-                let conn = lock_conn(&self.conn)?;
-                conn.execute(
-                    "UPDATE ir_summary SET truncated = ?1, max_files = ?2 WHERE id = 1",
-                    params![i64::from(truncated), MAX_IR_FILES as i64],
-                )?;
-                summary.truncated = truncated;
+            if summary.truncated != truncated || prev_git_head != git_head {
+                let mut conn = lock_conn(&self.conn)?;
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if summary.truncated != truncated {
+                    tx.execute(
+                        "UPDATE ir_summary SET truncated = ?1, max_files = ?2 WHERE id = 1",
+                        params![i64::from(truncated), MAX_IR_FILES as i64],
+                    )?;
+                    summary.truncated = truncated;
+                }
+                if let Some(ref head) = git_head {
+                    upsert_meta(&tx, "git_head", head)?;
+                } else if prev_git_head.is_some() {
+                    tx.execute("DELETE FROM ir_meta WHERE key = 'git_head'", [])?;
+                }
+                tx.commit()?;
+                self.write_epoch.fetch_add(1, Ordering::AcqRel);
             }
             return Ok(IrSyncStats {
                 files_scanned,
@@ -478,58 +524,109 @@ impl GraphIrStore {
             read_bounded_text_file(&real_root, rel, MAX_MANIFEST_READ_BYTES)
         });
 
+        let mut affected_targets = BTreeSet::new();
+        for path in &removed {
+            affected_targets.insert(path.clone());
+        }
+        let mut skip_re_resolve = BTreeSet::new();
+        for unit in &parsed_units {
+            affected_targets.insert(unit.rel_path.clone());
+            skip_re_resolve.insert(unit.rel_path.clone());
+        }
+
         let is_incremental_update = !existing.is_empty();
-        let summary = {
+        let mut parsed_re_resolve: BTreeMap<String, ParsedUnit> = BTreeMap::new();
+        let mut pending_re_resolve =
+            if is_incremental_update && (!affected_targets.is_empty() || manifest_changed) {
+                let conn = lock_conn(&self.conn)?;
+                epoch_before = self.write_epoch.load(Ordering::Acquire);
+                collect_affected_dependents(
+                    &conn,
+                    &affected_targets,
+                    &skip_re_resolve,
+                    manifest_changed,
+                    &[],
+                )?
+            } else {
+                Vec::new()
+            };
+
+        let summary = loop {
+            let missing_re_resolve: Vec<String> = pending_re_resolve
+                .iter()
+                .filter(|p| !parsed_re_resolve.contains_key(*p))
+                .cloned()
+                .collect();
+            if !missing_re_resolve.is_empty() {
+                let (units, _) = parse_paths_parallel(&real_root, &missing_re_resolve);
+                for unit in units {
+                    parsed_re_resolve.insert(unit.rel_path.clone(), unit);
+                }
+            }
+
             let mut conn = lock_conn(&self.conn)?;
+            if self.write_epoch.load(Ordering::Acquire) != epoch_before {
+                epoch_before = self.write_epoch.load(Ordering::Acquire);
+                let has_rows: bool =
+                    conn.query_row("SELECT EXISTS(SELECT 1 FROM ir_files)", [], |r| r.get(0))?;
+                pending_re_resolve =
+                    if has_rows && (!affected_targets.is_empty() || manifest_changed) {
+                        collect_affected_dependents(
+                            &conn,
+                            &affected_targets,
+                            &skip_re_resolve,
+                            manifest_changed,
+                            &[],
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                if pending_re_resolve
+                    .iter()
+                    .any(|p| !parsed_re_resolve.contains_key(p))
+                {
+                    continue;
+                }
+            }
+
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
 
-            let mut affected_targets = BTreeSet::new();
             for path in &removed {
-                affected_targets.insert(path.clone());
                 delete_file_records(&tx, path)?;
             }
-            let mut skip_re_resolve = BTreeSet::new();
             for unit in &parsed_units {
-                affected_targets.insert(unit.rel_path.clone());
-                skip_re_resolve.insert(unit.rel_path.clone());
                 upsert_parsed_file(&tx, unit, &now)?;
             }
-
-            let re_resolve_paths =
-                if is_incremental_update && (!affected_targets.is_empty() || manifest_changed) {
-                    collect_affected_dependents(
-                        &tx,
-                        &affected_targets,
-                        &skip_re_resolve,
-                        manifest_changed,
-                        &[],
-                    )?
-                } else {
-                    Vec::new()
-                };
 
             let reexports = build_reexport_index_from_db(&tx)?;
             for unit in &parsed_units {
                 replace_file_edges(&tx, unit, &known_files, &manifests, &reexports, &crate_map)?;
             }
-            if !re_resolve_paths.is_empty() {
-                re_resolve_unchanged_dependents(
-                    &tx,
-                    &real_root,
-                    &re_resolve_paths,
-                    &known_files,
-                    &manifests,
-                    &reexports,
-                    &crate_map,
-                )?;
+            for path in &pending_re_resolve {
+                if let Some(unit) = parsed_re_resolve.get(path) {
+                    replace_file_edges(
+                        &tx,
+                        unit,
+                        &known_files,
+                        &manifests,
+                        &reexports,
+                        &crate_map,
+                    )?;
+                }
             }
 
             let summary = recompute_summary(&tx, &now, truncated)?;
             upsert_meta(&tx, "updated_at", &now)?;
             upsert_meta(&tx, "manifest_stamp", &manifest_stamp)?;
+            if let Some(ref head) = git_head {
+                upsert_meta(&tx, "git_head", head)?;
+            } else {
+                tx.execute("DELETE FROM ir_meta WHERE key = 'git_head'", [])?;
+            }
             tx.commit()?;
-            summary
+            self.write_epoch.fetch_add(1, Ordering::AcqRel);
+            break summary;
         };
 
         Ok(IrSyncStats {
@@ -543,7 +640,11 @@ impl GraphIrStore {
 
     /// Incrementally re-indexes ONLY the specified changed or deleted relative paths in one transaction,
     /// and re-resolves reverse dependents, re-export consumers, and matching unresolved imports.
+    /// All CPU/disk parsing and manifest reads run before opening the `Immediate` write transaction.
     pub(crate) fn update_paths(&self, root: &Path, rel_paths: &[String]) -> Result<IrSyncStats> {
+        if self.read_only {
+            return Err(HarnessError::invalid("Graph IR store is read-only."));
+        }
         if !root.is_dir() {
             return Err(HarnessError::invalid(
                 "Workspace directory does not exist for Graph IR update.",
@@ -608,62 +709,104 @@ impl GraphIrStore {
         } else {
             None
         };
+        let git_head = current_git_head(&real_root);
+        let manifest_lang_vec: Vec<&str> = manifest_langs.into_iter().collect();
 
         let files_scanned = normalized.len();
         let files_parsed = parsed_units.len();
-        let files_removed;
 
-        let summary = {
+        let mut parsed_re_resolve: BTreeMap<String, ParsedUnit> = BTreeMap::new();
+        let (files_removed, summary) = loop {
+            let (
+                existing_files,
+                actually_removed,
+                affected_targets,
+                skip_re_resolve,
+                re_resolve_paths,
+                epoch_before,
+            ) = {
+                let conn = lock_conn(&self.conn)?;
+                let mut existing_files = BTreeSet::new();
+                {
+                    let mut stmt = conn.prepare("SELECT path FROM ir_files")?;
+                    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                    for row in rows {
+                        existing_files.insert(row?);
+                    }
+                }
+                let mut affected_targets = BTreeSet::new();
+                let mut skip_re_resolve = BTreeSet::new();
+                let mut actually_removed = 0usize;
+                for path in &removed {
+                    if existing_files.remove(path) {
+                        actually_removed += 1;
+                        affected_targets.insert(path.clone());
+                    }
+                }
+                for unit in &parsed_units {
+                    existing_files.insert(unit.rel_path.clone());
+                    affected_targets.insert(unit.rel_path.clone());
+                    skip_re_resolve.insert(unit.rel_path.clone());
+                }
+                let re_resolve_paths = if !affected_targets.is_empty() || manifest_changed {
+                    collect_affected_dependents(
+                        &conn,
+                        &affected_targets,
+                        &skip_re_resolve,
+                        manifest_changed,
+                        &manifest_lang_vec,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let epoch = self.write_epoch.load(Ordering::Acquire);
+                (
+                    existing_files,
+                    actually_removed,
+                    affected_targets,
+                    skip_re_resolve,
+                    re_resolve_paths,
+                    epoch,
+                )
+            };
+
+            let missing_re_resolve: Vec<String> = re_resolve_paths
+                .iter()
+                .filter(|p| !parsed_re_resolve.contains_key(*p))
+                .cloned()
+                .collect();
+            if !missing_re_resolve.is_empty() {
+                let (units, _) = parse_paths_parallel(&real_root, &missing_re_resolve);
+                for unit in units {
+                    parsed_re_resolve.insert(unit.rel_path.clone(), unit);
+                }
+            }
+
+            let crate_map = if !parsed_units.is_empty() || !re_resolve_paths.is_empty() {
+                let known_vec: Vec<String> = existing_files.iter().cloned().collect();
+                CratePackageMap::from_reader(&known_vec, &|rel| {
+                    read_bounded_text_file(&real_root, rel, MAX_MANIFEST_READ_BYTES)
+                })
+            } else {
+                CratePackageMap::default()
+            };
+
             let mut conn = lock_conn(&self.conn)?;
+            if self.write_epoch.load(Ordering::Acquire) != epoch_before {
+                continue;
+            }
+
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
-
-            let mut existing_files = BTreeSet::new();
-            {
-                let mut stmt = tx.prepare("SELECT path FROM ir_files")?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    existing_files.insert(row?);
-                }
-            }
-
-            let mut affected_targets = BTreeSet::new();
-            let mut skip_re_resolve = BTreeSet::new();
-            let mut actually_removed = 0usize;
             for path in &removed {
-                if existing_files.remove(path) {
-                    actually_removed += 1;
-                    affected_targets.insert(path.clone());
-                }
                 delete_file_records(&tx, path)?;
             }
-            files_removed = actually_removed;
-
             for unit in &parsed_units {
-                existing_files.insert(unit.rel_path.clone());
-                affected_targets.insert(unit.rel_path.clone());
-                skip_re_resolve.insert(unit.rel_path.clone());
                 upsert_parsed_file(&tx, unit, &now)?;
             }
 
-            let manifest_lang_vec: Vec<&str> = manifest_langs.into_iter().collect();
-            let re_resolve_paths = if !affected_targets.is_empty() || manifest_changed {
-                collect_affected_dependents(
-                    &tx,
-                    &affected_targets,
-                    &skip_re_resolve,
-                    manifest_changed,
-                    &manifest_lang_vec,
-                )?
-            } else {
-                Vec::new()
-            };
-
+            let _ = (&affected_targets, &skip_re_resolve);
             if !parsed_units.is_empty() || !re_resolve_paths.is_empty() {
-                let known_vec: Vec<String> = existing_files.iter().cloned().collect();
-                let crate_map = CratePackageMap::from_reader(&known_vec, &|rel| {
-                    read_bounded_text_file(&real_root, rel, MAX_MANIFEST_READ_BYTES)
-                });
                 let reexports = build_reexport_index_from_db(&tx)?;
                 for unit in &parsed_units {
                     replace_file_edges(
@@ -675,16 +818,17 @@ impl GraphIrStore {
                         &crate_map,
                     )?;
                 }
-                if !re_resolve_paths.is_empty() {
-                    re_resolve_unchanged_dependents(
-                        &tx,
-                        &real_root,
-                        &re_resolve_paths,
-                        &existing_files,
-                        &manifests,
-                        &reexports,
-                        &crate_map,
-                    )?;
+                for path in &re_resolve_paths {
+                    if let Some(unit) = parsed_re_resolve.get(path) {
+                        replace_file_edges(
+                            &tx,
+                            unit,
+                            &existing_files,
+                            &manifests,
+                            &reexports,
+                            &crate_map,
+                        )?;
+                    }
                 }
             }
 
@@ -700,8 +844,12 @@ impl GraphIrStore {
             if let Some(stamp) = &manifest_stamp {
                 upsert_meta(&tx, "manifest_stamp", stamp)?;
             }
+            if let Some(ref head) = git_head {
+                upsert_meta(&tx, "git_head", head)?;
+            }
             tx.commit()?;
-            summary
+            self.write_epoch.fetch_add(1, Ordering::AcqRel);
+            break (actually_removed, summary);
         };
 
         Ok(IrSyncStats {
@@ -760,6 +908,152 @@ impl GraphIrStore {
             .map_err(Into::into)
     }
 
+    /// Returns all indexed file `(size, mtime_ns)` stamps alongside `manifest_stamp` and `git_head`.
+    pub(crate) fn file_stamps_and_meta(&self) -> Result<FileStampsSnapshot> {
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare("SELECT path, size, mtime_ns FROM ir_files")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?;
+        let mut stamps = BTreeMap::new();
+        for row in rows {
+            let (path, stamp) = row?;
+            stamps.insert(path, stamp);
+        }
+        let manifest_stamp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM ir_meta WHERE key = 'manifest_stamp'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let git_head: Option<String> = conn
+            .query_row(
+                "SELECT value FROM ir_meta WHERE key = 'git_head'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok((stamps, manifest_stamp, git_head))
+    }
+
+    /// Returns deduplicated `(source_file, target_file)` dependency pairs from `ir_edges`.
+    pub(crate) fn all_resolved_file_edges(&self) -> Result<Vec<(String, String)>> {
+        let conn = lock_conn(&self.conn)?;
+        let mut stmt = conn.prepare("SELECT DISTINCT source_file, target_file FROM ir_edges")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Batch-loads fresh outgoing `reads`/`writes` dependencies for `rel_paths` using ONE lock and
+    /// bounded `ir_files` + `ir_edges` SQL queries (zero DDL, zero N+1 `ir_symbols` queries).
+    pub(crate) fn batch_access_deps_if_fresh(
+        &self,
+        root: &Path,
+        rel_paths: &[&str],
+    ) -> Result<BTreeMap<String, Vec<DepRef>>> {
+        let mut disk_stamps: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+        for &raw in rel_paths {
+            let rel = clean_rel_key(raw);
+            if rel.is_empty() || disk_stamps.contains_key(&rel) {
+                continue;
+            }
+            if let Ok(meta) = fs::symlink_metadata(root.join(&rel))
+                && !meta.file_type().is_symlink()
+                && meta.is_file()
+            {
+                disk_stamps.insert(
+                    rel,
+                    (
+                        i64::try_from(meta.len()).unwrap_or(i64::MAX),
+                        mtime_nanos(&meta),
+                    ),
+                );
+            }
+        }
+        if disk_stamps.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let keys: Vec<String> = disk_stamps.keys().cloned().collect();
+        let mut out: BTreeMap<String, Vec<DepRef>> = BTreeMap::new();
+        let conn = lock_conn(&self.conn)?;
+
+        for chunk in keys.chunks(500) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT f.path, f.size, f.mtime_ns, e.target_file, e.target_symbol, e.relation, e.context, e.line
+                 FROM ir_files f
+                 LEFT JOIN ir_edges e
+                   ON e.source_file = f.path
+                  AND e.relation IN ('reads', 'writes')
+                 WHERE f.path IN ({placeholders})
+                 ORDER BY f.path, e.id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params_vec: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let mut grouped_by_source: BTreeMap<String, BTreeMap<(String, String), DepRef>> =
+                BTreeMap::new();
+            let mut fresh_paths: BTreeSet<String> = BTreeSet::new();
+            let rows = stmt.query_map(params_vec.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                ))
+            })?;
+            for row in rows {
+                let (
+                    source_file,
+                    db_size,
+                    db_mtime,
+                    target_file,
+                    target_symbol,
+                    relation,
+                    context,
+                    line,
+                ) = row?;
+                if disk_stamps.get(&source_file) != Some(&(db_size, db_mtime)) {
+                    continue;
+                }
+                fresh_paths.insert(source_file.clone());
+                let grouped = grouped_by_source.entry(source_file).or_default();
+                if let (Some(target_file), Some(relation)) = (target_file, relation) {
+                    let line_u32 = line.unwrap_or(0).max(0) as u32;
+                    push_stored_edge_into_dep_map(
+                        grouped,
+                        target_file,
+                        target_symbol,
+                        relation,
+                        context,
+                        line_u32,
+                        None,
+                    );
+                }
+            }
+            for path in fresh_paths {
+                let deps = grouped_by_source
+                    .remove(&path)
+                    .map(|g| g.into_values().collect())
+                    .unwrap_or_default();
+                out.insert(path, deps);
+            }
+        }
+        Ok(out)
+    }
+
     /// Returns stored declarations and outgoing dependencies for `rel_path` when its on-disk
     /// `(size, mtime_ns)` still matches the indexed record in `ir_files`.
     pub(crate) fn file_outgoing_deps_if_fresh(
@@ -813,57 +1107,23 @@ impl GraphIrStore {
             })?;
             for row in rows {
                 let (target_file, target_symbol, relation, context, line) = row?;
-                let key = (target_file.clone(), relation.clone());
-                let entry = grouped.entry(key).or_insert_with(|| {
-                    let target_members = target_members_cache
-                        .entry(target_file.clone())
+                let mut load_members = |target: &str| {
+                    target_members_cache
+                        .entry(target.to_owned())
                         .or_insert_with(|| {
-                            read_declared_members_from_conn(&conn, &target_file).unwrap_or_default()
+                            read_declared_members_from_conn(&conn, target).unwrap_or_default()
                         })
-                        .clone();
-                    DepRef {
-                        target: target_file.clone(),
-                        resolved: true,
-                        exists: true,
-                        kind: relation.clone(),
-                        symbols: Vec::new(),
-                        line: Some(line),
-                        evidence: None,
-                        member_refs: Vec::new(),
-                        target_members,
-                    }
-                });
-                if entry.line.is_none_or(|prev| line < prev) {
-                    entry.line = Some(line);
-                }
-                if let Some(sym) = target_symbol {
-                    let short = sym.rsplit("::").next().unwrap_or(&sym).to_owned();
-                    if !short.is_empty() && !entry.symbols.contains(&short) {
-                        entry.symbols.push(short);
-                    }
-                    if let Some((parent, member)) = sym.split_once("::") {
-                        push_ir_member_ref(
-                            &mut entry.member_refs,
-                            member,
-                            context.as_deref().unwrap_or("method"),
-                            Some(parent),
-                            &relation,
-                            line,
-                        );
-                    } else if context
-                        .as_deref()
-                        .is_some_and(|c| !matches!(c, "import" | "inheritance"))
-                    {
-                        push_ir_member_ref(
-                            &mut entry.member_refs,
-                            &sym,
-                            context.as_deref().unwrap_or("symbol"),
-                            None,
-                            &relation,
-                            line,
-                        );
-                    }
-                }
+                        .clone()
+                };
+                push_stored_edge_into_dep_map(
+                    &mut grouped,
+                    target_file,
+                    target_symbol,
+                    relation,
+                    context,
+                    line,
+                    Some(&mut load_members),
+                );
             }
         }
 
@@ -1052,62 +1312,79 @@ impl GraphIrStore {
     /// Writes `live/graph.json` via a private temporary file and atomic rename without removing
     /// the previous published `live/graph.json` while building.
     pub(crate) fn write_live_graph_atomic(&self, live_graph_path: &Path) -> Result<(u64, u64)> {
-        let parent = live_graph_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .ok_or_else(|| HarnessError::invalid("Live graph path has no parent directory."))?;
-        let leaf = live_graph_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty() && !s.contains(['/', '\\', '\0']))
-            .ok_or_else(|| HarnessError::invalid("Invalid live graph filename."))?;
-
-        infra_host::util::private_directory(parent)?;
-        let custody = PublicationFiles::new(parent)?;
-        let real_parent = infra_core::fs::python_realpath(parent)?;
-        let dest = real_parent.join(leaf);
-        infra_core::fs::admit_descendant(&real_parent, &dest)?;
-        if let Ok(meta) = fs::symlink_metadata(&dest)
-            && (meta.file_type().is_symlink() || !meta.is_file())
-        {
-            return Err(HarnessError::forbidden(
-                "Live graph destination is not an ordinary file.",
-            ));
-        }
-
         let (payload, node_count, link_count) = self.export_node_link_json_with_counts()?;
         let bytes = serde_json::to_vec(&payload)?;
-
-        let tmp_name = format!(".{leaf}.{}.tmp", uuid::Uuid::new_v4().simple());
-        let tmp_path = real_parent.join(&tmp_name);
-        let mut opts = OpenOptions::new();
-        opts.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let write_result = (|| -> Result<()> {
-            let mut file = opts.open(&tmp_path)?;
-            file.write_all(&bytes)?;
-            file.flush()?;
-            file.sync_all()?;
-            drop(file);
-            custody.check()?;
-            fs::rename(&tmp_path, &dest)?;
-            #[cfg(unix)]
-            if let Ok(dir_handle) = File::open(&real_parent) {
-                let _ = dir_handle.sync_all();
-            }
-            Ok(())
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&tmp_path);
-        }
-        write_result?;
+        write_live_graph_json_bytes_atomic(live_graph_path, &bytes)?;
         Ok((node_count, link_count))
     }
+}
+
+/// Encodes already-exported `IrNodeSpec` / `IrLinkSpec` slices into `live/graph.json` bytes
+/// without performing another SQLite query.
+pub(crate) fn encode_node_link_payload_from_elements(
+    node_specs: &[IrNodeSpec],
+    link_specs: &[IrLinkSpec],
+) -> Result<Vec<u8>> {
+    let payload = node_link_payload_from_elements(node_specs, link_specs);
+    serde_json::to_vec(&payload).map_err(Into::into)
+}
+
+/// Atomically writes serialized `live/graph.json` bytes with directory/file custody checks.
+pub(crate) fn write_live_graph_json_bytes_atomic(
+    live_graph_path: &Path,
+    bytes: &[u8],
+) -> Result<()> {
+    let parent = live_graph_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| HarnessError::invalid("Live graph path has no parent directory."))?;
+    let leaf = live_graph_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && !s.contains(['/', '\\', '\0']))
+        .ok_or_else(|| HarnessError::invalid("Invalid live graph filename."))?;
+
+    infra_host::util::private_directory(parent)?;
+    let custody = PublicationFiles::new(parent)?;
+    let real_parent = infra_core::fs::python_realpath(parent)?;
+    let dest = real_parent.join(leaf);
+    infra_core::fs::admit_descendant(&real_parent, &dest)?;
+    if let Ok(meta) = fs::symlink_metadata(&dest)
+        && (meta.file_type().is_symlink() || !meta.is_file())
+    {
+        return Err(HarnessError::forbidden(
+            "Live graph destination is not an ordinary file.",
+        ));
+    }
+
+    let tmp_name = format!(".{leaf}.{}.tmp", uuid::Uuid::new_v4().simple());
+    let tmp_path = real_parent.join(&tmp_name);
+    let mut opts = OpenOptions::new();
+    opts.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let write_result = (|| -> Result<()> {
+        let mut file = opts.open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        custody.check()?;
+        fs::rename(&tmp_path, &dest)?;
+        #[cfg(unix)]
+        if let Ok(dir_handle) = File::open(&real_parent) {
+            let _ = dir_handle.sync_all();
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
 }
 
 /// Normalizes a raw workspace or absolute file path into a clean relative repo path.
@@ -1178,7 +1455,7 @@ fn ensure_column(conn: &Connection, table: &str, col: &str, col_def: &str) -> Re
     Ok(())
 }
 
-fn compute_root_manifest_stamp(real_root: &Path) -> String {
+pub(crate) fn compute_root_manifest_stamp(real_root: &Path) -> String {
     let mut entries = Vec::new();
     let Ok(dir_entries) = fs::read_dir(real_root) else {
         return String::new();
@@ -1311,8 +1588,27 @@ fn specifier_might_match_paths(
         .any(|tok| spec_lower.contains(tok.as_str()) || syms_lower.contains(tok.as_str()))
 }
 
+pub(crate) fn current_git_head(real_root: &Path) -> Option<String> {
+    let out = crate::projects::git(
+        real_root,
+        &[
+            "rev-parse".to_owned(),
+            "--verify".to_owned(),
+            "--quiet".to_owned(),
+            "HEAD".to_owned(),
+        ],
+        5,
+    )
+    .ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!head.is_empty()).then_some(head)
+}
+
 fn collect_affected_dependents(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     affected_targets: &BTreeSet<String>,
     skip_files: &BTreeSet<String>,
     manifest_changed: bool,
@@ -1320,8 +1616,8 @@ fn collect_affected_dependents(
 ) -> Result<Vec<String>> {
     let mut candidates = BTreeSet::new();
     {
-        let mut stmt =
-            tx.prepare_cached("SELECT DISTINCT source_file FROM ir_edges WHERE target_file = ?1")?;
+        let mut stmt = conn
+            .prepare_cached("SELECT DISTINCT source_file FROM ir_edges WHERE target_file = ?1")?;
         for target in affected_targets {
             let rows = stmt.query_map([target], |row| row.get::<_, String>(0))?;
             for row in rows {
@@ -1339,7 +1635,7 @@ fn collect_affected_dependents(
         .collect();
     if manifest_changed || !tokens.is_empty() {
         let mut stmt =
-            tx.prepare("SELECT source_file, specifier, symbols_json FROM ir_unresolved_imports")?;
+            conn.prepare("SELECT source_file, specifier, symbols_json FROM ir_unresolved_imports")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1359,7 +1655,7 @@ fn collect_affected_dependents(
     }
 
     if manifest_changed {
-        let mut stmt = tx.prepare("SELECT path, language FROM ir_files")?;
+        let mut stmt = conn.prepare("SELECT path, language FROM ir_files")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -1379,22 +1675,6 @@ fn collect_affected_dependents(
     }
 
     Ok(candidates.into_iter().collect())
-}
-
-fn re_resolve_unchanged_dependents(
-    tx: &Transaction<'_>,
-    real_root: &Path,
-    targets: &[String],
-    known_files: &BTreeSet<String>,
-    manifests: &ManifestIndex,
-    reexports: &ReexportIndex,
-    crate_map: &CratePackageMap,
-) -> Result<()> {
-    let (units, _) = parse_paths_parallel(real_root, targets);
-    for unit in &units {
-        replace_file_edges(tx, unit, known_files, manifests, reexports, crate_map)?;
-    }
-    Ok(())
 }
 
 fn read_declared_members_from_conn(
@@ -1427,6 +1707,68 @@ fn read_declared_members_from_conn(
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+pub(crate) type FileStampsSnapshot = (BTreeMap<String, (i64, i64)>, Option<String>, Option<String>);
+type TargetMembersLoader<'a> = &'a mut dyn FnMut(&str) -> Vec<DeclaredMember>;
+
+fn push_stored_edge_into_dep_map(
+    grouped: &mut BTreeMap<(String, String), DepRef>,
+    target_file: String,
+    target_symbol: Option<String>,
+    relation: String,
+    context: Option<String>,
+    line: u32,
+    target_members_loader: Option<TargetMembersLoader<'_>>,
+) {
+    let key = (target_file.clone(), relation.clone());
+    let entry = grouped.entry(key).or_insert_with(|| {
+        let target_members = target_members_loader
+            .map(|loader| loader(&target_file))
+            .unwrap_or_default();
+        DepRef {
+            target: target_file,
+            resolved: true,
+            exists: true,
+            kind: relation.clone(),
+            symbols: Vec::new(),
+            line: Some(line),
+            evidence: None,
+            member_refs: Vec::new(),
+            target_members,
+        }
+    });
+    if entry.line.is_none_or(|prev| line < prev) {
+        entry.line = Some(line);
+    }
+    if let Some(sym) = target_symbol {
+        let short = sym.rsplit("::").next().unwrap_or(&sym).to_owned();
+        if !short.is_empty() && !entry.symbols.contains(&short) {
+            entry.symbols.push(short);
+        }
+        if let Some((parent, member)) = sym.split_once("::") {
+            push_ir_member_ref(
+                &mut entry.member_refs,
+                member,
+                context.as_deref().unwrap_or("method"),
+                Some(parent),
+                &relation,
+                line,
+            );
+        } else if context
+            .as_deref()
+            .is_some_and(|c| !matches!(c, "import" | "inheritance"))
+        {
+            push_ir_member_ref(
+                &mut entry.member_refs,
+                &sym,
+                context.as_deref().unwrap_or("symbol"),
+                None,
+                &relation,
+                line,
+            );
+        }
+    }
 }
 
 fn push_ir_member_ref(
@@ -1485,6 +1827,47 @@ fn validate_project_id(project: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn verify_existing_sqlite_path(db_path: &Path) -> Result<Option<PathBuf>> {
+    let parent = db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| HarnessError::invalid("Graph IR database path has no parent."))?;
+    let name = db_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && !s.contains(['/', '\\', '\0']))
+        .ok_or_else(|| HarnessError::invalid("Invalid Graph IR database filename."))?;
+    if !parent.is_dir() {
+        return Ok(None);
+    }
+    let custody = PublicationFiles::new(parent)?;
+    let real_dir = infra_core::fs::python_realpath(parent)?;
+    let verified = real_dir.join(name);
+    infra_core::fs::admit_descendant(&real_dir, &verified)?;
+    match fs::symlink_metadata(&verified) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err(HarnessError::forbidden(
+                    "Graph IR database must be an ordinary regular file.",
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if meta.nlink() != 1 {
+                    return Err(HarnessError::forbidden(
+                        "Graph IR database must not be hard-linked.",
+                    ));
+                }
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    }
+    custody.check()?;
+    Ok(Some(verified))
 }
 
 fn ensure_private_sqlite_path(dir: &Path, filename: &str) -> Result<PathBuf> {
@@ -2733,36 +3116,28 @@ fn collect_graph_elements(
     (nodes, links, node_count, link_count)
 }
 
-fn build_node_link_payload(
-    files: &[String],
-    symbols: &[StoredSymbolRow],
-    edges: &[StoredEdgeRow],
-    sem_edges: &[StoredSemanticRow],
-) -> (Value, u64, u64) {
-    let (node_specs, link_specs, node_count, link_count) =
-        collect_graph_elements(files, symbols, edges, sem_edges);
-
+fn node_link_payload_from_elements(node_specs: &[IrNodeSpec], link_specs: &[IrLinkSpec]) -> Value {
     let nodes: Vec<Value> = node_specs
-        .into_iter()
+        .iter()
         .map(|spec| {
             let mut node = json!({
                 "id": spec.id,
                 "label": spec.label,
                 "source_file": spec.source_file,
             });
-            if let Some(loc) = spec.source_location {
+            if let Some(loc) = &spec.source_location {
                 node["source_location"] = json!(loc);
             }
-            if let Some(ft) = spec.file_type {
+            if let Some(ft) = &spec.file_type {
                 node["file_type"] = json!(ft);
             }
-            if let Some(nk) = spec.node_kind {
+            if let Some(nk) = &spec.node_kind {
                 node["node_kind"] = json!(nk);
             }
             if let Some(comm) = spec.community {
                 node["community"] = json!(comm);
             }
-            if let Some(comm_name) = spec.community_name {
+            if let Some(comm_name) = &spec.community_name {
                 node["community_name"] = json!(comm_name);
             }
             if spec.callable_class {
@@ -2776,42 +3151,50 @@ fn build_node_link_payload(
         .collect();
 
     let links: Vec<Value> = link_specs
-        .into_iter()
+        .iter()
         .map(|spec| {
             let mut link = json!({
                 "source": spec.source,
                 "target": spec.target,
             });
-            if let Some(rel) = spec.relation {
+            if let Some(rel) = &spec.relation {
                 link["relation"] = json!(rel);
             }
-            if let Some(ctx) = spec.context {
+            if let Some(ctx) = &spec.context {
                 link["context"] = json!(ctx);
             }
-            if let Some(ev) = spec.confidence {
+            if let Some(ev) = &spec.confidence {
                 link["confidence"] = json!(ev);
             }
-            if let Some(src_file) = spec.source_file {
+            if let Some(src_file) = &spec.source_file {
                 link["source_file"] = json!(src_file);
             }
-            if let Some(evidence) = spec.evidence {
+            if let Some(evidence) = &spec.evidence {
                 link["evidence"] = json!(evidence);
             }
             link
         })
         .collect();
 
-    (
-        json!({
-            "directed": true,
-            "multigraph": false,
-            "backend": NATIVE_IR_TOOL,
-            "nodes": nodes,
-            "links": links,
-        }),
-        node_count,
-        link_count,
-    )
+    json!({
+        "directed": true,
+        "multigraph": false,
+        "backend": NATIVE_IR_TOOL,
+        "nodes": nodes,
+        "links": links,
+    })
+}
+
+fn build_node_link_payload(
+    files: &[String],
+    symbols: &[StoredSymbolRow],
+    edges: &[StoredEdgeRow],
+    sem_edges: &[StoredSemanticRow],
+) -> (Value, u64, u64) {
+    let (node_specs, link_specs, node_count, link_count) =
+        collect_graph_elements(files, symbols, edges, sem_edges);
+    let payload = node_link_payload_from_elements(&node_specs, &link_specs);
+    (payload, node_count, link_count)
 }
 
 #[cfg(test)]
@@ -3077,5 +3460,105 @@ mod tests {
             }),
             "unresolved importer should resolve after target creation: {links2:?}"
         );
+    }
+
+    #[test]
+    fn open_readonly_does_not_create_or_mutate_and_batch_reads_fresh_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        // Missing DB returns None without creating any sqlite file.
+        assert!(
+            GraphIrStore::open_readonly(&state, "missing")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!state.join("graphs/missing").join(DB_FILENAME).exists());
+
+        // Empty dummy file returns None without mutating it.
+        let empty_db = state.join("graphs/empty").join(DB_FILENAME);
+        fs::create_dir_all(empty_db.parent().unwrap()).unwrap();
+        fs::write(&empty_db, b"").unwrap();
+        assert!(
+            GraphIrStore::open_readonly(&state, "empty")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::metadata(&empty_db).unwrap().len(), 0);
+
+        fs::write(
+            root.join("composer.json"),
+            r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/B.php"),
+            "<?php\nnamespace App;\nclass B {\n    public static int $count = 0;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/A.php"),
+            "<?php\nnamespace App;\nuse App\\B;\nclass A {\n    public function go(): int { B::$count = 1; return B::$count; }\n}\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/C.php"), "<?php\nclass C {}\n").unwrap();
+
+        let rw = GraphIrStore::open(&state, "ro").unwrap();
+        rw.sync_workspace(&root).unwrap();
+        let updated_before: String = rw
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM ir_meta WHERE key = 'updated_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(rw);
+
+        // Open existing DB strictly read-only.
+        let ro = GraphIrStore::open_readonly(&state, "ro")
+            .unwrap()
+            .expect("existing populated IR store");
+        assert!(ro.read_only);
+        assert!(ro.summary_counts().unwrap().is_some());
+        assert!(ro.sync_workspace(&root).is_err());
+        assert!(ro.update_paths(&root, &["src/A.php".to_owned()]).is_err());
+        let updated_after: String = ro
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM ir_meta WHERE key = 'updated_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated_before, updated_after);
+
+        // Make src/C.php stale on disk and verify batch lookup filters it out.
+        fs::write(
+            root.join("src/C.php"),
+            "<?php\nclass C { public int $x = 1; }\n",
+        )
+        .unwrap();
+        let batch = ro
+            .batch_access_deps_if_fresh(
+                &root,
+                &["src/A.php", "src/B.php", "src/C.php", "src/missing.php"],
+            )
+            .unwrap();
+        assert!(
+            batch
+                .get("src/A.php")
+                .is_some_and(|deps| deps.iter().any(|d| d.target == "src/B.php")),
+            "expected batched A->B dep: {batch:?}"
+        );
+        assert!(batch.contains_key("src/B.php"));
+        assert!(!batch.contains_key("src/C.php"));
+        assert!(!batch.contains_key("src/missing.php"));
     }
 }
