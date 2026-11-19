@@ -557,7 +557,7 @@ fn rebuild(version: &str, engine: Option<Stale>, interface: Option<Stale>) -> St
         commands.push(ASSEMBLE_ENGINE);
     }
     format!(
-        "The clone is now at {version}, but {}, so the Harness kept running its previous version. In the clone, run `{}`, then press Update again or run `./accelerator-app update`. Stopping the Harness with `./accelerator-app stop` and starting it with `./accelerator-app open` also starts the rebuilt version. {HELD}",
+        "The clone is now at {version}, but {}, so the Harness kept running its previous version. In the clone, run `{}`, then press Update again or run `./infra-engine app update`. Stopping the Harness with `./infra-engine app stop` and starting it with `./infra-engine app open` also starts the rebuilt version. {HELD}",
         problems.join(" and "),
         commands.join("`, then `"),
     )

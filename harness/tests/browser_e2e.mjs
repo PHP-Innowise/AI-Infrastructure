@@ -43,6 +43,19 @@ function contrastRatio(c1, c2) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+function blendedContrastRatio(fgCss, bgCss, fgOpacity = 1) {
+  const fg = parseRgb(fgCss);
+  const bg = parseRgb(bgCss);
+  if (!fg || !bg) return null;
+  const alpha = Math.max(0, Math.min(1, fg.a * fgOpacity));
+  const blended = {
+    r: fg.r * alpha + bg.r * (1 - alpha),
+    g: fg.g * alpha + bg.g * (1 - alpha),
+    b: fg.b * alpha + bg.b * (1 - alpha),
+  };
+  return contrastRatio(blended, bg);
+}
+
 function parseArgs(argv) {
   const opts = {
     url: '',
@@ -51,6 +64,7 @@ function parseArgs(argv) {
     otherSessionId: '',
     commitA: '',
     commitB: '',
+    systemRunId: '',
     chrome: process.env.HARNESS_CHROME_BIN || '/opt/google/chrome/chrome',
     timeoutMs: 120_000,
   };
@@ -83,6 +97,9 @@ function parseArgs(argv) {
         break;
       case 'commit-b':
         opts.commitB = val;
+        break;
+      case 'system-run-id':
+        opts.systemRunId = val;
         break;
       case 'chrome':
         opts.chrome = val;
@@ -298,6 +315,7 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
   const finishedBodies = new Map();
   const sseMessages = [];
   const sseConnections = [];
+  let expectedNetworkScope = null;
 
   cdp.on('Runtime.exceptionThrown', (params) => {
     const d = params.exceptionDetails || {};
@@ -310,7 +328,11 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     const text = (params.args || [])
       .map((a) => a.value ?? a.description ?? JSON.stringify(a))
       .join(' ');
-    consoleErrors.push(text);
+    if (expectedNetworkScope) {
+      expectedNetworkScope.consoleErrors.push(text);
+    } else {
+      consoleErrors.push(text);
+    }
   });
 
   cdp.on('Network.requestWillBeSent', (params) => {
@@ -337,7 +359,12 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
       sseConnections.push(record);
     }
     if (r.status >= 400) {
-      httpErrors.push(`HTTP ${r.status} ${url}`);
+      const msg = `HTTP ${r.status} ${url}`;
+      if (expectedNetworkScope) {
+        expectedNetworkScope.httpErrors.push(msg);
+      } else {
+        httpErrors.push(msg);
+      }
     }
   });
 
@@ -351,8 +378,25 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
   cdp.on('Network.loadingFailed', (params) => {
     if (params.canceled) return;
     const req = requestUrlById.get(params.requestId);
-    loadingErrors.push(`${params.errorText || 'load failed'} (${req?.url || params.requestId})`);
+    const msg = `${params.errorText || 'load failed'} (${req?.url || params.requestId})`;
+    if (expectedNetworkScope) {
+      expectedNetworkScope.loadingErrors.push(msg);
+    } else {
+      loadingErrors.push(msg);
+    }
   });
+
+  async function allowHttpErrors(fn) {
+    assert(!expectedNetworkScope, 'allowHttpErrors scopes must not be nested');
+    const scope = { httpErrors: [], consoleErrors: [], loadingErrors: [] };
+    expectedNetworkScope = scope;
+    try {
+      const result = await fn(scope);
+      return { ...scope, result };
+    } finally {
+      expectedNetworkScope = null;
+    }
+  }
 
   cdp.on('Network.eventSourceMessageReceived', (params) => {
     sseMessages.push({
@@ -451,13 +495,13 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     return box;
   }
 
-  async function clickAt(x, y, { modifiers = 0 } = {}) {
+  async function clickAt(x, y, { modifiers = 0, button = 'left' } = {}) {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
     await cdp.send('Input.dispatchMouseEvent', {
       type: 'mousePressed',
       x,
       y,
-      button: 'left',
+      button,
       clickCount: 1,
       modifiers,
     });
@@ -465,7 +509,42 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
       type: 'mouseReleased',
       x,
       y,
-      button: 'left',
+      button,
+      clickCount: 1,
+      modifiers,
+    });
+  }
+
+  async function rightClickAt(x, y, options = {}) {
+    await clickAt(x, y, { ...options, button: 'right' });
+  }
+
+  async function dragAt(x1, y1, x2, y2, { button = 'left', modifiers = 0, steps = 6 } = {}) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x1, y: y1, modifiers });
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: x1,
+      y: y1,
+      button,
+      clickCount: 1,
+      modifiers,
+    });
+    for (let s = 1; s <= steps; s += 1) {
+      const t = s / steps;
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: x1 + (x2 - x1) * t,
+        y: y1 + (y2 - y1) * t,
+        button,
+        buttons: button === 'left' ? 1 : 2,
+        modifiers,
+      });
+    }
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: x2,
+      y: y2,
+      button,
       clickCount: 1,
       modifiers,
     });
@@ -517,12 +596,15 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     sseMessages,
     sseConnections,
     assertNoErrors,
+    allowHttpErrors,
     evalJs,
     callFn,
     waitFor,
     waitUntil,
     elementBox,
     clickAt,
+    rightClickAt,
+    dragAt,
     click,
     pressKey,
     readLatestFinishedJson,
@@ -593,7 +675,7 @@ async function suite1BootThemeTransport(driver, opts) {
   driver.assertNoErrors('Suite 1');
 }
 
-async function assertDenseCanvasGeometry(driver, canvasSelector, label) {
+async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr = 1 } = {}) {
   const geom = await driver.callFn((sel) => {
     const host = document.querySelector(sel);
     if (!host) return { error: `Missing canvas host ${sel}` };
@@ -624,12 +706,13 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label) {
     const overlapX = Math.min(planeRect.right, hostRect.right) - Math.max(planeRect.left, hostRect.left);
     const nodeCount = plane.querySelectorAll('.graph-map-node').length;
     return {
+      dpr: window.devicePixelRatio || 1,
       width: canvas.width,
       height: canvas.height,
       position: cs.position,
       pointerEvents: cs.pointerEvents,
       hostRect: { top: hostRect.top, bottom: hostRect.bottom, left: hostRect.left, right: hostRect.right, height: hostRect.height },
-      canvasRect: { top: canvasRect.top, bottom: canvasRect.bottom, left: canvasRect.left, right: canvasRect.right },
+      canvasRect: { top: canvasRect.top, bottom: canvasRect.bottom, left: canvasRect.left, right: canvasRect.right, width: canvasRect.width, height: canvasRect.height },
       planeRect: { top: planeRect.top, bottom: planeRect.bottom, left: planeRect.left, right: planeRect.right },
       overlapY,
       overlapX,
@@ -641,6 +724,14 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label) {
 
   assert(!geom.error, `${label}: ${geom.error}`);
   assert(geom.width > 0 && geom.height > 0, `${label}: dense canvas zero sized (${geom.width}x${geom.height})`);
+  if (minDpr > 1) {
+    assert(
+      geom.dpr >= minDpr
+        && geom.width >= Math.floor(geom.canvasRect.width * minDpr * 0.9)
+        && geom.height >= Math.floor(geom.canvasRect.height * minDpr * 0.9),
+      `${label}: expected HiDPI >=${minDpr}x backing store, got ${JSON.stringify(geom)}`,
+    );
+  }
   assert(geom.position === 'absolute', `${label}: expected .graph-dense-canvas position === "absolute", got "${geom.position}"`);
   assert(geom.nonZeroPixels > 0 && geom.dataUrlDiffers, `${label}: dense canvas is blank`);
   assert(
@@ -676,6 +767,68 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
       && c.querySelector('canvas.graph-dense-canvas[data-dense-canvas="true"]');
   }, 'embedded dense Canvas2D (#session-graph-canvas)');
   await assertDenseCanvasGeometry(driver, '#session-graph-canvas', 'Embedded Code Graph');
+
+  // Exercise embedded #session-graph-workspace controls (zoom, pan, node select, Isolate, Changes)
+  const embeddedZoomBefore = await driver.callFn(() => document.getElementById('session-graph-zoom-level')?.textContent || '');
+  await driver.click('#session-graph-zoom-in');
+  await driver.waitFor((prev) => {
+    const txt = document.getElementById('session-graph-zoom-level')?.textContent || '';
+    return txt && txt !== prev;
+  }, 'embedded #session-graph-zoom-in updates zoom level', 5_000, embeddedZoomBefore);
+  await driver.click('#session-graph-zoom-level');
+
+  const embeddedCanvasBox = await driver.elementBox('#session-graph-canvas');
+  const embeddedPlaneBeforePan = await driver.callFn(() => document.querySelector('#session-graph-canvas .graph-map-plane')?.style.transform || '');
+  await driver.dragAt(embeddedCanvasBox.x + 24, embeddedCanvasBox.y + 24, embeddedCanvasBox.x + 84, embeddedCanvasBox.y + 56);
+  await driver.waitFor((prev) => {
+    const t = document.querySelector('#session-graph-canvas .graph-map-plane')?.style.transform || '';
+    return t && t !== prev;
+  }, 'embedded #session-graph-canvas pan transform update', 5_000, embeddedPlaneBeforePan);
+
+  const embeddedNode = await driver.callFn(() => {
+    const host = document.getElementById('session-graph-canvas');
+    const cr = host.getBoundingClientRect();
+    for (const n of host.querySelectorAll('.graph-map-node')) {
+      const nr = n.getBoundingClientRect();
+      const cx = nr.left + nr.width / 2;
+      const cy = nr.top + nr.height / 2;
+      if (cx > cr.left + 8 && cx < cr.right - 8 && cy > cr.top + 8 && cy < cr.bottom - 8) {
+        return { cx, cy };
+      }
+    }
+    return null;
+  });
+  assert(embeddedNode, 'Expected clickable visible node inside #session-graph-canvas');
+  await driver.clickAt(embeddedNode.cx, embeddedNode.cy);
+  await driver.waitFor(() => {
+    const side = document.getElementById('session-graph-side');
+    return Boolean(side && side.textContent.trim().length > 0);
+  }, 'embedded #session-graph-side updates on node select');
+
+  await driver.click('#session-graph-isolate-toggle');
+  await driver.waitFor(
+    () => document.getElementById('session-graph-isolate-toggle')?.getAttribute('aria-pressed') === 'true'
+      && document.getElementById('session-graph-canvas')?.getAttribute('aria-busy') !== 'true',
+    'embedded Isolate active',
+  );
+  await driver.click('#session-graph-isolate-toggle');
+  await driver.waitFor(
+    () => document.getElementById('session-graph-isolate-toggle')?.getAttribute('aria-pressed') === 'false',
+    'embedded Isolate cleared',
+  );
+
+  await driver.click('#session-graph-mode-changes');
+  await driver.waitFor(
+    () => document.getElementById('session-graph-mode-changes')?.getAttribute('aria-pressed') === 'true'
+      && document.getElementById('session-graph-canvas')?.getAttribute('aria-busy') !== 'true',
+    'embedded Changes mode active',
+  );
+  await driver.click('#session-graph-mode-whole');
+  await driver.waitFor(
+    () => document.getElementById('session-graph-mode-whole')?.getAttribute('aria-pressed') === 'true'
+      && document.getElementById('session-graph-canvas')?.getAttribute('aria-busy') !== 'true',
+    'embedded Whole graph mode restored',
+  );
 
   // Open full #graph-map modal
   await driver.click('#session-graph-open-full');
@@ -932,6 +1085,146 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     return uiCleared && clearedMapOk;
   }, 'A..B commit range cleared');
   await driver.click('#graph-commit-graph-close');
+
+  // HiDPI deviceScaleFactor=2 while #graph-map Canvas2D is open
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 2,
+    mobile: false,
+  });
+  await driver.callFn(() => window.dispatchEvent(new Event('resize')));
+  await driver.click('#graph-map-zoom-in');
+  await driver.waitFor(() => {
+    const c = document.querySelector('#graph-map-canvas canvas.graph-dense-canvas[data-dense-canvas="true"]');
+    return Boolean(c && (window.devicePixelRatio || 1) >= 2 && c.width >= Math.floor(c.getBoundingClientRect().width * 1.8));
+  }, 'HiDPI deviceScaleFactor:2 backing store resize on open #graph-map', 8_000);
+  await assertDenseCanvasGeometry(driver, '#graph-map-canvas', 'HiDPI 2x #graph-map Modal', { minDpr: 2 });
+  await driver.click('#graph-map-zoom-level');
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await driver.callFn(() => window.dispatchEvent(new Event('resize')));
+
+  // Hover neighbor lighting + right-click Explain on Canvas2D + Shift+drag pin/unpin + Back/Forward
+  const pinTarget = await driver.callFn(() => {
+    const host = document.getElementById('graph-map-canvas');
+    const cr = host.getBoundingClientRect();
+    const out = [];
+    for (const n of host.querySelectorAll('.graph-map-node')) {
+      const nr = n.getBoundingClientRect();
+      const cx = nr.left + nr.width / 2;
+      const cy = nr.top + nr.height / 2;
+      if (cx > cr.left + 20 && cx < cr.right - 20 && cy > cr.top + 20 && cy < cr.bottom - 20) {
+        out.push({ cx, cy, payload: n.getAttribute('data-payload') || '' });
+        if (out.length >= 2) break;
+      }
+    }
+    return out;
+  });
+  assert(pinTarget.length >= 1, 'Expected visible node targets in #graph-map-canvas for hover/pin/explain');
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pinTarget[0].cx, y: pinTarget[0].cy });
+  await driver.callFn(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+  // Camera & selection history Back / Forward (if two nodes + history buttons exist)
+  if (pinTarget.length >= 2) {
+    await driver.clickAt(pinTarget[0].cx, pinTarget[0].cy);
+    await driver.clickAt(pinTarget[1].cx, pinTarget[1].cy);
+    const hasHistoryNav = await driver.callFn(() => {
+      const back = document.getElementById('graph-map-nav-back');
+      return Boolean(back && !back.disabled);
+    });
+    if (hasHistoryNav) {
+      await driver.click('#graph-map-nav-back');
+      await driver.waitFor(
+        () => !document.getElementById('graph-map-nav-forward')?.disabled,
+        '#graph-map-nav-forward enabled after Back navigation',
+        5_000,
+      );
+      await driver.click('#graph-map-nav-forward');
+      await driver.waitFor(
+        () => document.getElementById('graph-map-nav-forward')?.disabled === true,
+        '#graph-map-nav-forward disabled at history head',
+        5_000,
+      );
+    }
+  }
+
+  // Shift+drag pin + single-node unpin / Reset pins
+  await driver.dragAt(pinTarget[0].cx, pinTarget[0].cy, pinTarget[0].cx + 36, pinTarget[0].cy + 20, { modifiers: 8 });
+  const pinControls = await driver.waitFor(() => {
+    const reset = document.getElementById('graph-map-reset-pins');
+    const undo = document.getElementById('graph-map-pin-undo');
+    const unpin = document.querySelector('#graph-map-side .graph-map-unpin-btn');
+    const pinned = document.querySelector('#graph-map-canvas .graph-map-node[data-pinned="true"]');
+    if ((reset && !reset.hidden) || (undo && !undo.hidden) || unpin || pinned) {
+      return { hasReset: Boolean(reset && !reset.hidden), hasUnpin: Boolean(unpin), hasUndo: Boolean(undo && !undo.hidden) };
+    }
+    return null;
+  }, 'Shift+drag pin state reflected in UI controls', 5_000);
+  if (pinControls.hasUnpin) {
+    await driver.click('#graph-map-side .graph-map-unpin-btn');
+  } else if (pinControls.hasUndo) {
+    await driver.click('#graph-map-pin-undo');
+  } else if (pinControls.hasReset) {
+    await driver.click('#graph-map-reset-pins');
+  }
+  await driver.callFn(() => {
+    const reset = document.getElementById('graph-map-reset-pins');
+    if (reset && !reset.hidden) reset.click();
+  });
+
+  // Canvas2D right-click Explain menu & dialog
+  await driver.rightClickAt(pinTarget[0].cx, pinTarget[0].cy);
+  const explainText = await driver.waitFor(() => {
+    const btn = document.getElementById('graph-explain-action');
+    if (!btn || btn.hidden) return null;
+    const text = (btn.textContent || '').trim();
+    return text.toLowerCase().includes('explain') ? text : null;
+  }, 'right-click #graph-explain-action context menu', 5_000);
+  assert(explainText.toLowerCase().includes('explain'), `Unexpected explain action text: ${explainText}`);
+  await driver.click('#graph-explain-action');
+  await driver.waitFor(() => {
+    const dlg = document.getElementById('graph-explanation');
+    const subj = document.getElementById('graph-explanation-subject');
+    return Boolean(dlg && dlg.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
+  }, '#graph-explanation dialog opens with subject from Canvas2D context menu', 8_000);
+  await driver.click('#graph-explanation-close');
+  await driver.waitFor(() => !document.getElementById('graph-explanation')?.hasAttribute('open'), '#graph-explanation closes cleanly');
+
+  // Cmd/Ctrl+K palette opens visibly ABOVE <dialog open> #graph-map in top layer
+  await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
+  await driver.waitFor(() => {
+    const p = document.getElementById('command-palette');
+    const input = document.getElementById('command-palette-input');
+    return Boolean(p && !p.hidden && (p.tagName !== 'DIALOG' || p.hasAttribute('open')) && document.activeElement === input);
+  }, 'Cmd/Ctrl+K palette opens above <dialog open> #graph-map');
+  const paletteAboveGraph = await driver.callFn(() => {
+    const p = document.getElementById('command-palette');
+    const card = p.querySelector('.command-palette-card') || p;
+    const r = card.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return {
+      graphOpen: Boolean(document.getElementById('graph-map')?.hasAttribute('open')),
+      hitInPalette: Boolean(hit && p.contains(hit)),
+      w: r.width,
+      h: r.height,
+    };
+  });
+  assert(
+    paletteAboveGraph.graphOpen && paletteAboveGraph.hitInPalette && paletteAboveGraph.w > 100 && paletteAboveGraph.h > 40,
+    `Expected #command-palette stacked above #graph-map: ${JSON.stringify(paletteAboveGraph)}`,
+  );
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(() => {
+    const p = document.getElementById('command-palette');
+    const g = document.getElementById('graph-map');
+    return Boolean(p && p.hidden && !p.hasAttribute('open') && g && g.hasAttribute('open'));
+  }, 'Cmd/Ctrl+K Escape closes palette without closing #graph-map');
+
   driver.assertNoErrors('Suite 2');
 }
 
@@ -975,6 +1268,34 @@ async function suite3MapLenses(driver) {
       ['ready', 'ir', 'fresh', 'stale', 'warning', 'building', 'error', 'failed'].includes(state.pillTone),
       `Lens ${lens}: unexpected freshness data-tone="${state.pillTone}"`,
     );
+
+    const renderedLens = await driver.callFn((activeLens) => {
+      const plane = document.querySelector('#graph-map-canvas .graph-map-plane');
+      const sideText = (document.getElementById('graph-map-side')?.textContent || '').trim();
+      const legendText = (document.getElementById('graph-map-legend')?.textContent || '').trim();
+      const openedCount = document.querySelectorAll('#graph-map-canvas [data-run-opened="true"], #graph-map-canvas .graph-map-node-opened').length;
+      const archActive = plane?.getAttribute('data-architecture') === 'true'
+        || document.querySelectorAll('#graph-map-canvas [data-architecture-layer="true"], #graph-map-canvas [data-layer="true"]').length > 0;
+      const nodeCount = document.querySelectorAll('#graph-map-canvas .graph-map-node').length;
+      return { activeLens, sideText, legendText, openedCount, archActive, nodeCount };
+    }, lens);
+    assert(renderedLens.nodeCount > 0, `Lens ${lens}: expected rendered nodes in #graph-map-canvas`);
+    if (lens === 'architecture') {
+      assert(
+        renderedLens.archActive && renderedLens.sideText.length > 0,
+        `Architecture lens must render layer attributes and side details: ${JSON.stringify(renderedLens)}`,
+      );
+    } else if (lens === 'tests') {
+      assert(
+        renderedLens.sideText.length > 0 || renderedLens.legendText.length > 0,
+        `Tests lens must render coverage/test-reach summary: ${JSON.stringify(renderedLens)}`,
+      );
+    } else if (lens === 'runs') {
+      assert(
+        renderedLens.openedCount > 0 || renderedLens.legendText.includes('◉') || renderedLens.sideText.length > 0,
+        `Runs lens must render opened/run details: ${JSON.stringify(renderedLens)}`,
+      );
+    }
   }
 
   await driver.click('#graph-map-close');
@@ -990,6 +1311,29 @@ async function suite4LiveSseAndStyling(driver, opts) {
   assert(
     sseConn.mimeType.includes('text/event-stream') || (sseConn.headers['content-type'] || '').includes('text/event-stream'),
     `Expected text/event-stream MIME on /api/events/stream, got ${sseConn.mimeType}`,
+  );
+  const sseState = await driver.callFn(() => document.getElementById('sse-status')?.getAttribute('data-state') || '');
+  if (sseState) {
+    assert(sseState === 'live', `Expected #sse-status[data-state="live"], got "${sseState}"`);
+  }
+
+  // Verify #run-now #run-verb / #run-target DOM structure
+  const runStruct = await driver.callFn(() => {
+    const now = document.getElementById('run-now');
+    const textWrap = document.getElementById('run-now-text');
+    const verb = document.getElementById('run-verb');
+    const target = document.getElementById('run-target');
+    return {
+      hasNow: Boolean(now),
+      hasTextWrap: Boolean(textWrap && now?.contains(textWrap)),
+      hasVerb: Boolean(verb && textWrap?.contains(verb)),
+      targetTag: target?.tagName || '',
+      targetInWrap: Boolean(target && textWrap?.contains(target)),
+    };
+  });
+  assert(
+    runStruct.hasNow && runStruct.hasTextWrap && runStruct.hasVerb && runStruct.targetInWrap && runStruct.targetTag === 'BDI',
+    `Unexpected #run-now verb/target structure: ${JSON.stringify(runStruct)}`,
   );
 
   // Switch between other_session_id -> session_id if available, then ensure session_id is active
@@ -1416,7 +1760,19 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
   });
   assert(shiftTabInside, 'Shift+Tab focus escaped #approvals-drawer');
 
-  // Escape closes #approvals-drawer and clears inert
+  // Verify approval card <details> state survives refresh, then resolve pending permission via Allow
+  await driver.callFn(() => {
+    const det = document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] details.permission-diff-wrap');
+    if (det) det.open = true;
+    window.dispatchEvent(new Event('focus'));
+  });
+  await driver.waitFor(
+    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] details.permission-diff-wrap')?.open),
+    '#approvals-drawer <details> state preserved across focus refresh',
+    3_000,
+  );
+
+  // Escape closes #approvals-drawer and clears inert, then reopen & Allow perm-e2e-1
   await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
   await driver.waitFor(() => {
     const d = document.getElementById('approvals-drawer');
@@ -1425,7 +1781,147 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     return d?.hidden === true && !main?.hasAttribute('inert') && !sidebar?.hasAttribute('inert');
   }, '#approvals-drawer closes on Escape and clears inert');
 
-  // Mobile viewport 390x844 & #menu-toggle -> #sidebar.open without horizontal overflow
+  await driver.click('#approvals-queue-toggle');
+  await driver.waitFor(
+    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
+    '#approvals-drawer reopened for Allow resolution',
+  );
+  const sseBeforeAllow = driver.sseMessages.length;
+  await driver.click('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]');
+  await driver.waitUntil(
+    () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
+    'SSE delivers permission resolution event after Allow click',
+    15_000,
+  );
+  await driver.waitFor(() => {
+    const cnt = document.getElementById('approvals-queue-count');
+    const eventsText = document.getElementById('events')?.textContent || '';
+    const cleared = !cnt || cnt.hidden || cnt.textContent.trim() === '0';
+    return cleared && eventsText.includes('Permission request handled');
+  }, 'approvals badge clears and #events shows Permission request handled', 15_000);
+  const drawerStillOpen = await driver.callFn(() => document.getElementById('approvals-drawer')?.hidden === false);
+  if (drawerStillOpen) {
+    await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+    await driver.waitFor(() => document.getElementById('approvals-drawer')?.hidden === true, '#approvals-drawer closed after Allow');
+  }
+
+  // WCAG AA >=4.5:1 contrast on .composer textarea::placeholder & .skill-hint[aria-selected="true"] .skill-hint-argument (Light & Dark)
+  const themeBeforeContrast = await driver.callFn(() => document.documentElement.getAttribute('data-theme') || 'light');
+  for (const theme of ['light', 'dark']) {
+    await driver.click(`#theme-${theme}`);
+    await driver.waitFor(
+      (expected) => document.documentElement.getAttribute('data-theme') === expected,
+      `switch theme to ${theme} for WCAG AA check`,
+      4_000,
+      theme,
+    );
+    await driver.callFn(() => {
+      const p = document.getElementById('prompt');
+      p.value = '/model';
+      p.focus();
+      p.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const samples = await driver.waitFor(() => {
+      const p = document.getElementById('prompt');
+      const panel = document.getElementById('skill-hints-panel');
+      const selHint = document.querySelector('#skill-hints .skill-hint[aria-selected="true"]');
+      if (!p || !panel || panel.hidden || !selHint) return null;
+      const bgOf = (el) => {
+        const layers = [];
+        for (let cur = el; cur; cur = cur.parentElement) {
+          const c = getComputedStyle(cur).backgroundColor;
+          const m = c.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)/i);
+          if (m) layers.push({ r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: m[4] === undefined ? 1 : Number(m[4]) });
+        }
+        let acc = { r: 255, g: 255, b: 255 };
+        for (let i = layers.length - 1; i >= 0; i -= 1) {
+          const l = layers[i];
+          acc = {
+            r: l.r * l.a + acc.r * (1 - l.a),
+            g: l.g * l.a + acc.g * (1 - l.a),
+            b: l.b * l.a + acc.b * (1 - l.a),
+          };
+        }
+        return `rgb(${acc.r.toFixed(1)}, ${acc.g.toFixed(1)}, ${acc.b.toFixed(1)})`;
+      };
+      const phCs = getComputedStyle(p, '::placeholder');
+      const argEl = selHint.querySelector('.skill-hint-argument');
+      const nameEl = selHint.querySelector('.skill-hint-name') || selHint;
+      const argCs = argEl ? getComputedStyle(argEl) : null;
+      const nameCs = getComputedStyle(nameEl);
+      return {
+        promptBg: bgOf(p),
+        placeholderColor: phCs.color,
+        placeholderOpacity: Number.parseFloat(phCs.opacity || '1'),
+        hintBg: bgOf(selHint),
+        hintNameColor: nameCs.color,
+        hintArgColor: argCs?.color || '',
+        hintArgOpacity: argCs ? Number.parseFloat(argCs.opacity || '1') : 1,
+      };
+    }, `${theme} theme .composer placeholder & .skill-hint[aria-selected="true"] samples`, 6_000);
+    const phRatio = blendedContrastRatio(samples.placeholderColor, samples.promptBg, samples.placeholderOpacity);
+    assert(phRatio !== null && phRatio >= 4.5, `${theme} .composer textarea::placeholder WCAG contrast < 4.5:1 (${phRatio?.toFixed(2)}:1, ${JSON.stringify(samples)})`);
+    const nameRatio = blendedContrastRatio(samples.hintNameColor, samples.hintBg, 1);
+    assert(nameRatio !== null && nameRatio >= 4.5, `${theme} .skill-hint[aria-selected="true"] .skill-hint-name contrast < 4.5:1 (${nameRatio?.toFixed(2)}:1)`);
+    if (samples.hintArgColor) {
+      const argRatio = blendedContrastRatio(samples.hintArgColor, samples.hintBg, samples.hintArgOpacity);
+      assert(argRatio !== null && argRatio >= 4.5, `${theme} .skill-hint[aria-selected="true"] .skill-hint-argument contrast < 4.5:1 (${argRatio?.toFixed(2)}:1, ${JSON.stringify(samples)})`);
+    }
+    await driver.callFn(() => {
+      const p = document.getElementById('prompt');
+      p.value = '';
+      p.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+  await driver.click(`#theme-${themeBeforeContrast}`);
+  await driver.waitFor((t) => document.documentElement.getAttribute('data-theme') === t, 'restore theme after WCAG checks', 4_000, themeBeforeContrast);
+
+  // Responsive 761-920px breakpoint check (840x900) + /resume sidebar inert & focus
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 840,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const midViewport = await driver.waitFor(() => {
+    const btn = document.getElementById('menu-toggle');
+    if (!btn || getComputedStyle(btn).display === 'none' || window.innerWidth !== 840) return null;
+    return { scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth };
+  }, '840x900 responsive layout settled');
+  assert(midViewport.scrollWidth <= midViewport.innerWidth + 1, `Horizontal overflow at 840x900: ${JSON.stringify(midViewport)}`);
+
+  await driver.callFn(() => {
+    const p = document.getElementById('prompt');
+    p.value = '/resume';
+    p.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await driver.click('#send');
+  const resumeState = await driver.waitFor(() => {
+    const sb = document.getElementById('sidebar');
+    const main = document.getElementById('main');
+    if (!sb || !sb.classList.contains('open')) return null;
+    return {
+      open: true,
+      mainInert: main?.hasAttribute('inert'),
+      sidebarInert: sb.hasAttribute('inert'),
+      focusInsideSidebar: Boolean(document.activeElement && sb.contains(document.activeElement)),
+    };
+  }, '/resume opens #sidebar with #main inert and sidebar focus', 5_000);
+  assert(
+    resumeState.mainInert && !resumeState.sidebarInert && resumeState.focusInsideSidebar,
+    `/resume sidebar inert/focus check failed: ${JSON.stringify(resumeState)}`,
+  );
+  const resumeScrim = await driver.callFn(() => {
+    const scrim = document.getElementById('scrim');
+    if (!scrim) return null;
+    const r = scrim.getBoundingClientRect();
+    return { x: Math.max(r.left + 8, r.right - 24), y: r.top + 120 };
+  });
+  assert(resumeScrim, 'Expected exposed #scrim at 840x900 after /resume');
+  await driver.clickAt(resumeScrim.x, resumeScrim.y);
+  await driver.waitFor(() => !document.getElementById('sidebar')?.classList.contains('open') && !document.getElementById('main')?.hasAttribute('inert'), 'close /resume drawer via #scrim');
+
+  // Mobile viewport 390x844 & #menu-toggle -> #sidebar.open + mobile Workspace tab without horizontal overflow
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 390,
     height: 844,
@@ -1456,7 +1952,7 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     `Horizontal overflow detected at 390x844: scrollWidth=${mobileDrawer.scrollWidth}, innerWidth=${mobileDrawer.innerWidth}`,
   );
 
-  // Close mobile #sidebar via exposed #scrim (to the right of the 265px drawer), then restore 1280x800 desktop viewport
+  // Close mobile #sidebar via exposed #scrim (to the right of the 265px drawer), test Workspace mobile tab, then restore 1440x900
   const scrimPt = await driver.callFn(() => {
     const scrim = document.getElementById('scrim');
     if (!scrim) return null;
@@ -1473,6 +1969,26 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     const main = document.getElementById('main');
     return sb && !sb.classList.contains('open') && sb.hasAttribute('inert') && main && !main.hasAttribute('inert');
   }, 'mobile #sidebar closes on #scrim click and restores #main active');
+
+  await driver.click('#session-mobile-tab-graph');
+  const mobileWs = await driver.waitFor(() => {
+    const tab = document.getElementById('session-mobile-tab-graph');
+    const pane = document.getElementById('sessions-right-pane');
+    if (tab?.getAttribute('aria-selected') !== 'true' || !pane) return null;
+    const r = pane.getBoundingClientRect();
+    return {
+      width: r.width,
+      height: r.height,
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth: window.innerWidth,
+    };
+  }, 'mobile Workspace tab switches to #sessions-right-pane');
+  assert(
+    mobileWs.width > 120 && mobileWs.height > 120 && mobileWs.scrollWidth <= mobileWs.innerWidth + 1,
+    `Mobile Workspace pane layout check failed: ${JSON.stringify(mobileWs)}`,
+  );
+  await driver.click('#session-mobile-tab-chat');
+  await driver.waitFor(() => document.getElementById('session-mobile-tab-chat')?.getAttribute('aria-selected') === 'true', 'restore mobile Chat tab');
 
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 1280,
@@ -1530,6 +2046,323 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
   driver.assertNoErrors('Suite 5');
 }
 
+async function suite6OmnigraphStudio(driver) {
+  console.log('[Suite 6] Omnigraph Context Studio (radar, Reset filters, search, pulse)');
+  await driver.click('#sidebar-omnigraph-pill');
+  await driver.waitFor(() => {
+    const studio = document.getElementById('omnigraph-studio');
+    const canvas = document.getElementById('omnigraph-canvas');
+    const radar = document.querySelector('#omnigraph-canvas-radar .omni-radar-svg .omni-radar-view');
+    const items = canvas?.querySelectorAll('.omni-node, canvas.graph-dense-canvas[data-dense-canvas="true"]').length || 0;
+    return Boolean(studio && !studio.hidden && canvas && items > 0 && radar);
+  }, 'Omnigraph studio constellation & radar visible', 15_000);
+
+  // Pan constellation radar to bottom-right corner and verify clamped viewBox bounds
+  const radarBoxes = await driver.callFn(() => {
+    const svg = document.querySelector('#omnigraph-canvas-radar .omni-radar-svg');
+    const view = svg?.querySelector('.omni-radar-view');
+    if (!svg || !view) return null;
+    const sr = svg.getBoundingClientRect();
+    const vr = view.getBoundingClientRect();
+    const vb = svg.viewBox?.baseVal;
+    return {
+      sx: sr.left,
+      sy: sr.top,
+      sw: sr.width,
+      sh: sr.height,
+      vx: vr.left + vr.width / 2,
+      vy: vr.top + vr.height / 2,
+      vbW: vb?.width || sr.width,
+      vbH: vb?.height || sr.height,
+    };
+  });
+  assert(radarBoxes, 'Expected .omni-radar-svg and .omni-radar-view inside #omnigraph-canvas-radar');
+  await driver.dragAt(
+    radarBoxes.vx,
+    radarBoxes.vy,
+    radarBoxes.sx + radarBoxes.sw - 3,
+    radarBoxes.sy + radarBoxes.sh - 3,
+    { steps: 8 },
+  );
+  const clampedRadar = await driver.callFn(async () => {
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const svg = document.querySelector('#omnigraph-canvas-radar .omni-radar-svg');
+    const view = svg?.querySelector('.omni-radar-view');
+    if (!svg || !view) return null;
+    const vb = svg.viewBox?.baseVal;
+    const x = Number.parseFloat(view.getAttribute('x') || '0');
+    const y = Number.parseFloat(view.getAttribute('y') || '0');
+    const w = Number.parseFloat(view.getAttribute('width') || '0');
+    const h = Number.parseFloat(view.getAttribute('height') || '0');
+    return { x, y, w, h, vbW: vb?.width || 0, vbH: vb?.height || 0 };
+  });
+  assert(
+    clampedRadar
+      && clampedRadar.x >= -0.5
+      && clampedRadar.y >= -0.5
+      && clampedRadar.x + clampedRadar.w <= clampedRadar.vbW + 1
+      && clampedRadar.y + clampedRadar.h <= clampedRadar.vbH + 1,
+    `Expected Omnigraph radar view rect clamped inside SVG bounds: ${JSON.stringify(clampedRadar)}`,
+  );
+
+  // Select `main` branch, test search hit, then zero-result Reset filters on `main`
+  await driver.callFn(() => {
+    const sel = document.getElementById('omnigraph-branch');
+    if (sel && sel.value !== 'main') {
+      sel.value = 'main';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  await driver.waitFor(
+    () => document.getElementById('omnigraph-branch')?.value === 'main'
+      && document.getElementById('omnigraph-canvas')?.getAttribute('aria-busy') !== 'true',
+    'Omnigraph main branch ready',
+  );
+
+  await driver.callFn(() => {
+    const input = document.getElementById('omnigraph-search');
+    input.value = 'backoff';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await driver.waitFor(() => {
+    const c = document.getElementById('omnigraph-canvas');
+    const text = c?.textContent || '';
+    const count = c?.querySelectorAll('.omni-node, canvas.graph-dense-canvas[data-dense-canvas="true"]').length || 0;
+    return c?.getAttribute('aria-busy') !== 'true' && (text.includes('backoff') || count > 0);
+  }, 'Omnigraph search match for "backoff"', 10_000);
+
+  await driver.callFn(() => {
+    const input = document.getElementById('omnigraph-search');
+    input.value = 'zzz-nonexistent-e2e-filter';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const resetBox = await driver.waitFor(() => {
+    const c = document.getElementById('omnigraph-canvas');
+    if (!c || c.getAttribute('aria-busy') === 'true') return null;
+    const btn = Array.from(c.querySelectorAll('button')).find((b) => (b.textContent || '').includes('Reset filters'));
+    if (!btn) return null;
+    const r = btn.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? { cx: r.left + r.width / 2, cy: r.top + r.height / 2 } : null;
+  }, 'Omnigraph zero-result empty state "Reset filters" button on main', 10_000);
+  await driver.clickAt(resetBox.cx, resetBox.cy);
+  await driver.waitFor(() => {
+    const input = document.getElementById('omnigraph-search');
+    const c = document.getElementById('omnigraph-canvas');
+    const count = c?.querySelectorAll('.omni-node, canvas.graph-dense-canvas[data-dense-canvas="true"]').length || 0;
+    return input?.value === '' && c?.getAttribute('aria-busy') !== 'true' && count > 0;
+  }, 'Omnigraph Reset filters clears query and restores constellation', 10_000);
+
+  // Pause & resume pulse toggle
+  await driver.click('#omni-toggle-pulse');
+  await driver.waitFor(
+    () => document.getElementById('omnigraph-view')?.getAttribute('data-pulse-paused') === 'true'
+      && (document.getElementById('omni-toggle-pulse')?.textContent || '').includes('Play pulse'),
+    'Omnigraph pulse paused',
+  );
+  await driver.click('#omni-toggle-pulse');
+  await driver.waitFor(
+    () => document.getElementById('omnigraph-view')?.getAttribute('data-pulse-paused') === 'false',
+    'Omnigraph pulse resumed',
+  );
+
+  driver.assertNoErrors('Suite 6');
+}
+
+async function suite7SystemMap(driver, opts) {
+  console.log('[Suite 7] System Map (kinds_off legend, unfold risk, side-tab nav, waves)');
+  await driver.click('button.nav-item[data-nav="systems"]');
+  await driver.waitFor(() => {
+    const cat = document.getElementById('system-catalog');
+    const c = document.getElementById('system-map-canvas');
+    const nodes = c?.querySelectorAll('.system-map-node, .graph-map-node, canvas.graph-dense-canvas[data-dense-canvas="true"]').length || 0;
+    const legendBtns = document.querySelectorAll('#system-map-arrow-legend button[data-action="system-map-kind-toggle"]').length;
+    return Boolean(cat && !cat.hidden && nodes > 0 && legendBtns > 0);
+  }, 'System catalog & #system-map-canvas rendered with legend', 15_000);
+
+  // Legend kinds_off filter toggle
+  const firstLegendKind = '#system-map-arrow-legend button[data-action="system-map-kind-toggle"][aria-pressed="true"]';
+  const kindPayload = await driver.callFn((sel) => document.querySelector(sel)?.getAttribute('data-sys-edge-kind') || '', firstLegendKind);
+  assert(kindPayload, 'Expected active system arrow legend kind button');
+  const kindBtnSel = `#system-map-arrow-legend button[data-action="system-map-kind-toggle"][data-sys-edge-kind="${kindPayload}"]`;
+  await driver.click(kindBtnSel);
+  await driver.waitFor(
+    (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'false',
+    `SystemMap legend kind "${kindPayload}" toggled off (kinds_off)`,
+    5_000,
+    kindBtnSel,
+  );
+  await driver.click(kindBtnSel);
+  await driver.waitFor(
+    (sel) => document.querySelector(sel)?.getAttribute('aria-pressed') === 'true',
+    `SystemMap legend kind "${kindPayload}" restored on`,
+    5_000,
+    kindBtnSel,
+  );
+
+  // Unfold contracts & unmatched risks (gateway -> payments)
+  await driver.click('#system-map-unfold');
+  await driver.waitFor(
+    () => document.getElementById('system-map-unfold')?.getAttribute('aria-pressed') === 'true'
+      && document.getElementById('system-map-canvas')?.getAttribute('aria-busy') !== 'true',
+    'SystemMap unfold with unmatched contract risk settled',
+    10_000,
+  );
+
+  // Select service node & keyboard navigate #system-map-side tabs
+  const sysNode = await driver.callFn(() => {
+    const host = document.getElementById('system-map-canvas');
+    const cr = host.getBoundingClientRect();
+    for (const n of host.querySelectorAll('.system-map-node, .graph-map-node')) {
+      const nr = n.getBoundingClientRect();
+      const cx = nr.left + nr.width / 2;
+      const cy = nr.top + nr.height / 2;
+      if (cx > cr.left + 8 && cx < cr.right - 8 && cy > cr.top + 8 && cy < cr.bottom - 8) {
+        return { cx, cy };
+      }
+    }
+    return null;
+  });
+  assert(sysNode, 'Expected clickable node inside #system-map-canvas');
+  await driver.clickAt(sysNode.cx, sysNode.cy);
+  const sideTabs = await driver.waitFor(() => {
+    const tabs = Array.from(document.querySelectorAll('#system-map-side [role="tab"][data-action="system-map-side-tab"]'));
+    return tabs.length > 0 ? tabs.length : null;
+  }, '#system-map-side tabs rendered after node selection', 5_000);
+  if (sideTabs >= 2) {
+    await driver.callFn(() => {
+      document.querySelector('#system-map-side [role="tab"][aria-selected="true"]')?.focus();
+    });
+    await driver.pressKey({ key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 });
+    await driver.waitFor(() => {
+      const active = document.activeElement;
+      const side = document.getElementById('system-map-side');
+      return Boolean(side && active && side.contains(active) && active.getAttribute('role') === 'tab');
+    }, '#system-map-side ArrowRight tab keyboard navigation', 4_000);
+  }
+
+  // Open System Changes view & test wave play/pause without DOM teardown
+  await driver.click('#view-tabs [data-view="system-changes"]');
+  await driver.waitFor((preferredId) => {
+    const sel = document.getElementById('system-runs');
+    if (!sel) return false;
+    const opts = Array.from(sel.options).filter((o) => o.value);
+    if (opts.length === 0) return false;
+    const chosen = (preferredId && opts.some((o) => o.value === preferredId)) ? preferredId : opts[0].value;
+    if (sel.value !== chosen) {
+      sel.value = chosen;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return Boolean(document.querySelector('#system-change-topology-arrow-legend [data-action="system-map-wave-play"]'));
+  }, 'System change topology wave play button ready', 12_000, opts.systemRunId || '');
+
+  const waveBefore = await driver.callFn(() => {
+    window.__e2eWaveCanvas = document.getElementById('system-change-topology-canvas');
+    window.__e2eWaveLegend = document.getElementById('system-change-topology-arrow-legend');
+    return Boolean(window.__e2eWaveCanvas && window.__e2eWaveLegend);
+  });
+  assert(waveBefore, 'Expected #system-change-topology-canvas and legend before wave play');
+
+  const playSel = '#system-change-topology-arrow-legend [data-action="system-map-wave-play"]';
+  await driver.click(playSel);
+  await driver.callFn(() => new Promise((r) => setTimeout(r, 250)));
+  await driver.click(playSel);
+  const waveAfter = await driver.callFn(() => {
+    const sameCanvas = document.getElementById('system-change-topology-canvas') === window.__e2eWaveCanvas;
+    const sameLegend = document.getElementById('system-change-topology-arrow-legend') === window.__e2eWaveLegend;
+    delete window.__e2eWaveCanvas;
+    delete window.__e2eWaveLegend;
+    return { sameCanvas, sameLegend };
+  });
+  assert(waveAfter.sameCanvas && waveAfter.sameLegend, `Expected wave play/pause without DOM teardown: ${JSON.stringify(waveAfter)}`);
+
+  driver.assertNoErrors('Suite 7');
+}
+
+async function suite8NegativeNetworkAndSseRecovery(driver, cdp) {
+  console.log('[Suite 8] Negative 403 error handling & SSE disconnect/reconnect recovery');
+  await driver.click('button.nav-item[data-nav="sessions"]');
+  await driver.waitFor(
+    () => document.getElementById('sse-status')?.getAttribute('data-state') === 'live',
+    'SSE live before negative recovery tests',
+    8_000,
+  );
+
+  let mode = 'passthrough';
+  cdp.on('Fetch.requestPaused', async (params) => {
+    try {
+      const reqUrl = params.request?.url || '';
+      if (mode === 'forbid_api' && reqUrl.startsWith(`${driver.origin}/api/`)) {
+        const body = Buffer.from(JSON.stringify({ error: 'Forbidden fixture token check' })).toString('base64');
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 403,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body,
+        });
+        return;
+      }
+      if (mode === 'drop_stream' && (reqUrl.includes('/api/events/stream') || reqUrl.includes('/api/health'))) {
+        await cdp.send('Fetch.failRequest', {
+          requestId: params.requestId,
+          errorReason: 'ConnectionReset',
+        });
+        return;
+      }
+      await cdp.send('Fetch.continueRequest', { requestId: params.requestId });
+    } catch {
+      // ignore closed request/session races during teardown
+    }
+  });
+
+  await driver.allowHttpErrors(async (scope) => {
+    try {
+      // Phase A: Inject HTTP 403 refusal -> verify #connection-banner displays error
+      mode = 'forbid_api';
+      await cdp.send('Fetch.enable', {
+        patterns: [{ urlPattern: `${driver.origin}/api/*`, requestStage: 'Request' }],
+      });
+      await driver.click('#refresh-sessions');
+      await driver.waitUntil(async () => {
+        const ui = await driver.callFn(() => {
+          const b = document.getElementById('connection-banner');
+          const msg = document.getElementById('connection-message')?.textContent || '';
+          return Boolean(b && !b.hidden && msg.trim().length > 0);
+        });
+        return ui && scope.httpErrors.some((e) => e.includes('HTTP 403'));
+      }, '#connection-banner surfaced after 403 API refusal', 8_000);
+
+      // Phase B: Attempt #reconnect while /api/events/stream + /api/health fail -> verify disconnected state, then recover cleanly
+      mode = 'drop_stream';
+      await cdp.send('Fetch.enable', {
+        patterns: [
+          { urlPattern: `${driver.origin}/api/events/stream*`, requestStage: 'Request' },
+          { urlPattern: `${driver.origin}/api/health*`, requestStage: 'Request' },
+        ],
+      });
+      await driver.click('#reconnect');
+      await driver.waitFor(() => {
+        const b = document.getElementById('connection-banner');
+        const sse = document.getElementById('sse-status')?.getAttribute('data-state') || '';
+        return Boolean(b && !b.hidden && sse !== 'live');
+      }, 'SSE remains disconnected while stream/health requests fail', 8_000);
+
+      mode = 'passthrough';
+      await cdp.send('Fetch.disable');
+      await driver.click('#reconnect');
+      await driver.waitFor(() => {
+        const b = document.getElementById('connection-banner');
+        const sse = document.getElementById('sse-status')?.getAttribute('data-state') || '';
+        return Boolean(b && b.hidden && sse === 'live');
+      }, '#connection-banner hides and #sse-status returns to live after #reconnect', 12_000);
+    } finally {
+      mode = 'passthrough';
+      await cdp.send('Fetch.disable').catch(() => {});
+    }
+  });
+
+  driver.assertNoErrors('Suite 8');
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const { browserWsUrl, pageWsUrl, cleanup } = await launchChrome(opts.chrome, opts.timeoutMs);
@@ -1574,9 +2407,14 @@ async function main() {
       await suite3MapLenses(driver);
       await suite4LiveSseAndStyling(driver, opts);
       await suite5ModalsApprovalsPaletteMobile(driver, pageCdp);
+      await suite6OmnigraphStudio(driver);
+      await suite7SystemMap(driver, opts);
+
+      driver.assertNoErrors('Suites 1-7 check');
+      await suite8NegativeNetworkAndSseRecovery(driver, pageCdp);
 
       driver.assertNoErrors('final check');
-      console.log('ALL 5 HEADLESS CHROME CDP E2E SUITES PASSED');
+      console.log('ALL 8 HEADLESS CHROME CDP E2E SUITES PASSED');
     })();
 
     await Promise.race([runSuites, timeoutPromise]);

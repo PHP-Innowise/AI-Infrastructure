@@ -11,12 +11,19 @@ use std::{
 const ICON_LIMIT: usize = 8 * 1024 * 1024;
 const RECORD_LIMIT: usize = 65536;
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
-const PNG_SIZES: [u32; 10] = [16, 22, 24, 32, 48, 64, 128, 256, 512, 1024];
+#[cfg(target_os = "linux")]
+pub(super) const PNG_SIZES: &[u32] = &[16, 22, 24, 32, 48, 64, 128, 256, 512];
+#[cfg(target_os = "macos")]
+pub(super) const PNG_SIZES: &[u32] = &[16, 32, 64, 128, 256, 512, 1024];
+#[cfg(windows)]
+pub(super) const PNG_SIZES: &[u32] = &[16, 24, 32, 48, 64, 128, 256];
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub(super) const PNG_SIZES: &[u32] = &[16, 22, 24, 32, 48, 64, 128, 256, 512, 1024];
 #[cfg(target_os = "macos")]
 const BUNDLE_ID: &str = "local.ai-infrastructure.accelerator";
 
 #[cfg(target_os = "linux")]
-pub(super) fn desktop_exec(executable: &Path) -> Result<String> {
+pub(super) fn desktop_exec_with_args(executable: &Path, subcommand: &str) -> Result<String> {
     let value = executable
         .to_str()
         .ok_or_else(|| HarnessError::invalid("Desktop executable path is not Unicode."))?;
@@ -44,12 +51,17 @@ pub(super) fn desktop_exec(executable: &Path) -> Result<String> {
     } else {
         value.to_string()
     };
-    let command = format!("{} app open", argument.replace('%', "%%"));
+    let command = format!("{} {subcommand}", argument.replace('%', "%%"));
     Ok(command
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\t', "\\t")
         .replace('\r', "\\r"))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn desktop_exec(executable: &Path) -> Result<String> {
+    desktop_exec_with_args(executable, "app open")
 }
 
 struct SourceImage {
@@ -108,13 +120,13 @@ pub(super) struct Inputs {
 }
 impl Inputs {
     pub(super) fn admit(source: &Path, engine: &Path) -> Result<Self> {
-        // Canonical install preflights every shipped icon on every platform.
+        // Preflight the PNG icon sizes published on this platform.
         let mut images = BTreeMap::new();
         let svg = SourceImage::read(
             &source.join("harness/web/icons/ai-accelerator.svg"),
             ICON_LIMIT,
         )?;
-        for size in PNG_SIZES {
+        for &size in PNG_SIZES {
             images.insert(
                 size,
                 SourceImage::read(
@@ -522,9 +534,20 @@ pub(super) fn install_paths(config: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-pub(super) fn installation_record(source: &Path, executable: &Path) -> Result<Vec<u8>> {
-    let value = serde_json::json!({"clone":source,"executable":executable,
-        "path":std::env::var("PATH").unwrap_or_default(),"installed":Layout::current()?.paths});
+pub(super) fn installation_record_with_path(
+    source: &Path,
+    executable: &Path,
+    path_override: Option<&str>,
+) -> Result<Vec<u8>> {
+    let path = path_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+    let value = serde_json::json!({
+        "clone": source,
+        "executable": executable,
+        "path": path,
+        "installed": Layout::current()?.paths,
+    });
     let bytes = format!("{}\n", infra_core::domain::json::sorted_pretty(&value)?).into_bytes();
     if bytes.len() > RECORD_LIMIT {
         return Err(HarnessError::invalid(
