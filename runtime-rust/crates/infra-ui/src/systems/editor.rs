@@ -1,9 +1,9 @@
+use super::*;
 use crate::{api, dom, management, model as m, session};
 use serde_json::{json, Value as V};
 use std::collections::BTreeMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
-use super::*;
 
 pub(super) fn editor_lock_state(scanning: bool, dirty: bool) -> (&'static str, &'static str, bool) {
     if scanning {
@@ -100,7 +100,6 @@ pub(super) fn discard_editor_draft(from_lock_banner: bool) {
         }
     }
 }
-
 
 pub async fn editor_open() {
     if m::yes(&m::data("editor-pending")) {

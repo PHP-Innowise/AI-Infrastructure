@@ -1,7 +1,7 @@
-use crate::{api, dom, model as m, session, systems};
-use serde_json::{json, Value as V};
 use super::registered;
 use super::skills::{create_skill_controls, skills_controls, validate_create_skill_inputs};
+use crate::{api, dom, model as m, session, systems};
+use serde_json::{json, Value as V};
 
 pub async fn folder_open(purpose: &str) {
     folder_open_at(purpose, "", "Choose a project folder").await;
@@ -229,7 +229,10 @@ pub(super) fn build_keyed_file_items(files: &[V]) -> Vec<V> {
         .iter()
         .map(|file| {
             let base = setup_file_key(file, 0);
-            let idx = *seen.entry(base.clone()).and_modify(|n| *n += 1).or_insert(0);
+            let idx = *seen
+                .entry(base.clone())
+                .and_modify(|n| *n += 1)
+                .or_insert(0);
             file_preview_item(file, idx)
         })
         .collect()

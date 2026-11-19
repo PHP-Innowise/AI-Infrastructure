@@ -339,9 +339,8 @@ pub fn start() -> Result<(), JsValue> {
     session::initialize();
     knowledge::initialize();
     management::initialize();
-    // INTEGRATOR: uncomment after merging swarm/ui-ops:
-    // systems::initialize();
-    // activity::initialize();
+    systems::initialize();
+    activity::initialize();
     omnigraph::initialize();
     spawn_local(async {
         session::bootstrap().await;

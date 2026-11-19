@@ -28,28 +28,26 @@ fn ensure_graph_event_bridge(store: &SessionStore) {
     if !store.stream().claim_graph_bridge() {
         return;
     }
-    // INTEGRATOR (when merging swarm/backend-ir + swarm/backend-http):
-    // let mut rx = crate::graph::subscribe_graph_events();
-    // let store = store.clone();
-    // if let Ok(handle) = tokio::runtime::Handle::try_current() {
-    //     handle.spawn(async move {
-    //         loop {
-    //             match rx.recv().await {
-    //                 Ok(ev) => {
-    //                     if ev.state_dir == store.state {
-    //                         let pid = ev.project_id.clone();
-    //                         if let Ok(val) = serde_json::to_value(&ev) {
-    //                             store.publish_event("graph_status", None, Some(pid), val);
-    //                         }
-    //                     }
-    //                 }
-    //                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-    //                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-    //             }
-    //         }
-    //     });
-    // }
-    let _ = store;
+    let mut rx = crate::graph::subscribe_graph_events();
+    let store = store.clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if ev.state_dir == store.state {
+                            let pid = ev.project_id.clone();
+                            if let Ok(val) = serde_json::to_value(&ev) {
+                                store.publish_event("graph_status", None, Some(pid), val);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 }
 pub trait Domain: Send + Sync {
     fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a>;

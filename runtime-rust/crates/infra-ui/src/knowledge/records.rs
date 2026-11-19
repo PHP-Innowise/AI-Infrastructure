@@ -1,5 +1,5 @@
-use crate::{api, dom, model as m, session};
 use super::usage::{capsule_bar_label, render_capsule_bar_html, render_capsule_legend_html};
+use crate::{api, dom, model as m, session};
 use serde_json::{json, Value as V};
 use std::collections::BTreeSet;
 

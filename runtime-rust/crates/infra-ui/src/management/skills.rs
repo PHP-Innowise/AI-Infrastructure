@@ -1,6 +1,6 @@
+use super::setup::{file_list, invalidate};
 use crate::{api, dom, model as m};
 use serde_json::{json, Value as V};
-use super::setup::{file_list, invalidate};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CreateSkillValidation {

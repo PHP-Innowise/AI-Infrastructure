@@ -1,27 +1,26 @@
 mod memory_use;
 mod records;
-mod usage;
 #[cfg(test)]
 mod tests;
+mod usage;
 
-#[allow(unused_imports)]
-pub use records::{
-    brain_config, bytes, followup_brain, load, load_brain_link, load_context, open_from_omnigraph,
-    linked_controls, render_detail_omnigraph_action_html, render_linked,
-    render_linked_omnigraph_html,
-    reset_project,
-};
 #[allow(unused_imports)]
 pub use memory_use::{leave_memory, load_memory_use, visibility};
+#[allow(unused_imports)]
+pub use records::{
+    brain_config, bytes, followup_brain, linked_controls, load, load_brain_link, load_context,
+    open_from_omnigraph, render_detail_omnigraph_action_html, render_linked,
+    render_linked_omnigraph_html, reset_project,
+};
 pub use usage::usage;
 
+use crate::{api, dom, model as m, session};
 use memory_use::*;
 use records::*;
-use usage::*;
-use crate::{api, dom, model as m, session};
 use serde_json::{json, Value as V};
 use std::cell::Cell;
 use std::rc::Rc;
+use usage::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 
@@ -103,7 +102,7 @@ fn wire_responsive_reflow() {
 
 pub fn initialize() {
     wire_responsive_reflow();
-    // INTEGRATOR: crate::session::on_project_change(|project| crate::knowledge::on_global_project_change(project));
+    crate::session::on_project_change(crate::knowledge::on_global_project_change);
     m::set("memory-window", json!(30));
     for (days, label) in [(7, "7 d"), (30, "30 d"), (90, "90 d"), (0, "All")] {
         let b = dom::button(label, "memory-window", json!(days));
@@ -554,7 +553,6 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
     true
 }
 
-
 pub fn key_event(event: &web_sys::KeyboardEvent) -> bool {
     let Some(target) = event
         .target()
@@ -607,7 +605,6 @@ pub fn key_event(event: &web_sys::KeyboardEvent) -> bool {
     }
     true
 }
-
 
 #[cfg(test)]
 #[allow(unused_imports)]

@@ -1268,13 +1268,17 @@ pub(super) fn attach_canvas_wheel(canvas_id: &'static str) {
     });
 }
 pub fn attach_wheel_listeners() {
+    thread_local! {
+        static GRAPH_HOOKS_WIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
     attach_canvas_wheel("session-graph-canvas");
     attach_canvas_wheel("graph-map-canvas");
     attach_canvas_wheel("graph-link-canvas");
     attach_system_wheel_listeners();
-    // INTEGRATOR: once swarm/ui-chat (`api::on_sse` & `session::register_failure_localizer`) is merged, register:
-    // crate::api::on_sse("graph_status", |payload| crate::graph::on_graph_status_sse(payload));
-    // crate::session::register_failure_localizer(crate::graph_map::localize_failure_request);
+    if !GRAPH_HOOKS_WIRED.with(|wired| wired.replace(true)) {
+        crate::api::on_sse("graph_status", crate::graph::on_graph_status_sse);
+        crate::session::register_failure_localizer(crate::graph_map::localize_failure_request);
+    }
 }
 /// Attaches non-passive cursor-anchored wheel zoom + node/side hover listeners to the embedded
 /// System code-graph surfaces (`#system-member-graph-canvas`, `#system-change-graph-canvas`).

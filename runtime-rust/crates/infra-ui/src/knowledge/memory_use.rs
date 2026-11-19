@@ -1,5 +1,6 @@
 use super::{
-    analytics_slice, bytes, horizon_bin_days, horizon_ticks, usage::history_day_heights, viewport_is_mobile,
+    analytics_slice, bytes, horizon_bin_days, horizon_ticks, usage::history_day_heights,
+    viewport_is_mobile,
 };
 use crate::{api, dom, model as m};
 use serde_json::{json, Value as V};
@@ -435,7 +436,10 @@ pub(super) fn metric_label(key: &str) -> String {
     }
 }
 
-pub(super) fn memory_stage_metrics(stage: &str, stage_model: &V) -> Option<Vec<(String, String, bool)>> {
+pub(super) fn memory_stage_metrics(
+    stage: &str,
+    stage_model: &V,
+) -> Option<Vec<(String, String, bool)>> {
     let map = stage_model.as_object()?;
     let order: &[&str] = match stage {
         "brain" => &[
@@ -1180,7 +1184,11 @@ fn chunk_matches(chunk: &V, data: &V, filter: &str) -> bool {
         _ => true,
     }
 }
-pub(super) fn memory_table_sort_dir(sort: &V, default_field: &str, field: &str) -> Option<&'static str> {
+pub(super) fn memory_table_sort_dir(
+    sort: &V,
+    default_field: &str,
+    field: &str,
+) -> Option<&'static str> {
     let active = sort["field"].as_str().unwrap_or(default_field);
     if active != field {
         return None;
@@ -1920,4 +1928,3 @@ pub(super) fn memory_changes(data: &V, before: &V) {
         ),
     );
 }
-

@@ -13,19 +13,19 @@ pub use catalog_map::{
 };
 pub use editor::{add_service, edit_field, editor_open};
 #[allow(unused_imports)]
-pub use runs::{overlap_rows, receipt_changed_files, OverlapRow};
-#[allow(unused_imports)]
 pub(crate) use runs::{on_sse_system_resync, on_sse_system_run};
+#[allow(unused_imports)]
+pub use runs::{overlap_rows, receipt_changed_files, OverlapRow};
 
 use crate::{activity::events_card, api, dom, management, model as m, run, session, system_map};
-use serde_json::{json, Value as V};
-use wasm_bindgen_futures::spawn_local;
 #[allow(unused_imports)]
 use catalog_map::*;
 #[allow(unused_imports)]
 use editor::*;
 #[allow(unused_imports)]
 use runs::*;
+use serde_json::{json, Value as V};
+use wasm_bindgen_futures::spawn_local;
 
 fn editor_current(project: &str, config: &str, generation: u64) -> bool {
     dom::value("system-project") == project
@@ -157,9 +157,9 @@ pub fn initialize() {
         return;
     }
     m::set("systems-initialized", json!(true));
-    // INTEGRATOR: crate::api::on_sse("system_run", crate::systems::on_sse_system_run);
-    // INTEGRATOR: crate::api::on_sse("resync", crate::systems::on_sse_system_resync);
-    // INTEGRATOR: crate::session::on_project_change(|project| crate::systems::on_global_project_change(project));
+    crate::api::on_sse("system_run", crate::systems::on_sse_system_run);
+    crate::api::on_sse("resync", crate::systems::on_sse_system_resync);
+    crate::session::on_project_change(crate::systems::on_global_project_change);
 }
 
 pub(super) fn can_switch_system_project_now() -> bool {
@@ -225,7 +225,6 @@ pub(super) fn discovery_current(epoch: u64) -> bool {
         )
 }
 
-
 pub async fn load() {
     initialize();
     if !sync_editor_target() {
@@ -267,7 +266,6 @@ pub async fn load() {
         _ => {}
     }
 }
-
 
 pub(super) fn controls() {
     let pending = m::yes(&m::data("system-pending"));
@@ -827,12 +825,11 @@ pub async fn event(
     true
 }
 
-
 #[cfg(test)]
 #[allow(unused_imports)]
 mod test_exports {
-    pub(super) use super::*;
     pub(super) use super::catalog_map::*;
     pub(super) use super::editor::*;
     pub(super) use super::runs::*;
+    pub(super) use super::*;
 }

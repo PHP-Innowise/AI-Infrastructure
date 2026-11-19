@@ -309,7 +309,8 @@ pub(super) fn creator_should_retry_poll(cached_detail: &V, id: &str, status: u16
     if events_card::is_terminal_poll_status(status) {
         return false;
     }
-    let loaded_same = m::text(&cached_detail["run"], "id") == id && cached_detail["run"].is_object();
+    let loaded_same =
+        m::text(&cached_detail["run"], "id") == id && cached_detail["run"].is_object();
     !(loaded_same && !creator_busy(&cached_detail["run"]))
 }
 
@@ -337,7 +338,8 @@ pub(super) fn apply_sse_creator_delta(
     data: &V,
 ) -> CreatorSseOutcome {
     let event_project = first_non_empty_field(data, &["project_id", "project"]);
-    if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project {
+    if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project
+    {
         return CreatorSseOutcome::Ignore;
     }
     let event_id = first_non_empty_field(data, &["run_id", "id"]);

@@ -7,14 +7,14 @@ mod tests;
 pub use creator::{creator_list, creator_models, creator_read, reset_creator_project};
 #[allow(unused_imports)]
 pub(crate) use creator::{on_sse_creator_resync, on_sse_creator_run};
-pub use setup::{folder_open, folder_open_at, load_attachment, load_setup};
 #[allow(unused_imports)]
 pub use setup::invalidate;
+pub use setup::{folder_open, folder_open_at, load_attachment, load_setup};
 pub use skills::{accelerators, load_skills};
 
 use crate::{activity::events_card, api, dom, model as m, run, session};
-use serde_json::{json, Value as V};
 use creator::*;
+use serde_json::{json, Value as V};
 use setup::*;
 use skills::*;
 use wasm_bindgen_futures::spawn_local;
@@ -26,9 +26,9 @@ pub fn initialize() {
     dom::set_value("creator-count", "3");
     if !m::yes(&m::data("management-initialized")) {
         m::set("management-initialized", json!(true));
-        // INTEGRATOR: crate::api::on_sse("creator_run", crate::management::on_sse_creator_run);
-        // INTEGRATOR: crate::api::on_sse("resync", crate::management::on_sse_creator_resync);
-        // INTEGRATOR: crate::session::on_project_change(|project| crate::management::on_global_project_change(project));
+        crate::api::on_sse("creator_run", crate::management::on_sse_creator_run);
+        crate::api::on_sse("resync", crate::management::on_sse_creator_resync);
+        crate::session::on_project_change(crate::management::on_global_project_change);
     }
 }
 
@@ -340,7 +340,6 @@ pub async fn event(
     }
     true
 }
-
 
 #[cfg(test)]
 #[allow(unused_imports)]

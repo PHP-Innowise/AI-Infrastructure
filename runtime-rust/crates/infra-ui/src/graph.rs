@@ -700,7 +700,6 @@ pub(crate) fn sync_freshness_pill(prefix: &str, status: &V, view: &V) {
 }
 
 /// Processes SSE `event: "graph_status"` updates without destroying user camera or selection.
-#[allow(dead_code)] // INTEGRATOR: wired via api::on_sse("graph_status", ...) once swarm/ui-chat merges
 pub(crate) fn on_graph_status_sse(event: &V) {
     if !event.is_object() {
         return;

@@ -888,13 +888,9 @@ mod display_tests {
             restored_system_recovery_permission(&json!({"permissions": "bypass"})),
             "bypass"
         );
-        assert_eq!(
-            restored_system_recovery_permission(&json!({})),
-            "auto"
-        );
+        assert_eq!(restored_system_recovery_permission(&json!({})), "auto");
 
-        let exec =
-            system_execute_payload("claude", "edit", "service", "manual", json!(900), true);
+        let exec = system_execute_payload("claude", "edit", "service", "manual", json!(900), true);
         assert_eq!(exec["permissions"], "manual");
         assert_eq!(exec["mode"], "edit");
         assert_eq!(exec["access"], "service");
@@ -931,9 +927,7 @@ mod display_tests {
             )
         );
         assert_eq!(
-            system_permissions_panel_state(
-                &json!({"active": true, "waiting_permissions": []})
-            ),
+            system_permissions_panel_state(&json!({"active": true, "waiting_permissions": []})),
             (false, String::new())
         );
 
@@ -964,13 +958,15 @@ mod display_tests {
         use crate::activity::events_card;
 
         // Transient poll errors retry active/unloaded runs; terminal HTTP status stops.
-        let active_run = json!({"id": "sys-1", "project_id": "proj-a", "active": true, "status": "running"});
+        let active_run =
+            json!({"id": "sys-1", "project_id": "proj-a", "active": true, "status": "running"});
         assert!(system_should_retry_poll(&active_run, "sys-1", 0));
         assert!(system_should_retry_poll(&active_run, "sys-1", 503));
         assert!(!system_should_retry_poll(&active_run, "sys-1", 404));
         assert!(!system_should_retry_poll(&active_run, "sys-1", 403));
 
-        let stopped_run = json!({"id": "sys-1", "project_id": "proj-a", "active": false, "status": "failed"});
+        let stopped_run =
+            json!({"id": "sys-1", "project_id": "proj-a", "active": false, "status": "failed"});
         assert!(!system_should_retry_poll(&stopped_run, "sys-1", 500));
 
         // SSE delta merges status/event/completion and rejects foreign projects.

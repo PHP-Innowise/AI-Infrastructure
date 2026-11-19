@@ -1,7 +1,10 @@
 use super::ingest::*;
 use crate::{
     dom, model as m,
-    run::files_map::{self, count_words, focus_element_no_scroll, normalize_view, offered_filters, splice_draft, truth, FileTouchEntry},
+    run::files_map::{
+        self, count_words, focus_element_no_scroll, normalize_view, offered_filters, splice_draft,
+        truth, FileTouchEntry,
+    },
 };
 use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet};
@@ -673,7 +676,11 @@ pub(super) fn command_localize_payload(
         })
     };
     if project_id.is_empty() && cfg!(target_arch = "wasm32") {
-        let fallback_id = if prefer_system { "system-project" } else { "project" };
+        let fallback_id = if prefer_system {
+            "system-project"
+        } else {
+            "project"
+        };
         project_id = dom::value(fallback_id);
     }
 
@@ -742,7 +749,9 @@ pub(super) fn build_command_render_items_for(
 }
 
 #[cfg(test)]
-pub(super) fn build_command_render_items(snap: &InspectorSnapshot) -> (String, usize, usize, Vec<V>) {
+pub(super) fn build_command_render_items(
+    snap: &InspectorSnapshot,
+) -> (String, usize, usize, Vec<V>) {
     build_command_render_items_for(None, "", "", snap)
 }
 
@@ -1028,7 +1037,10 @@ pub(super) fn capture_details_open_state(root_el: &web_sys::Element) -> BTreeMap
     states
 }
 
-pub(super) fn apply_details_open_state(root_el: &web_sys::Element, states: &BTreeMap<String, bool>) {
+pub(super) fn apply_details_open_state(
+    root_el: &web_sys::Element,
+    states: &BTreeMap<String, bool>,
+) {
     if states.is_empty() {
         return;
     }
@@ -1714,7 +1726,7 @@ pub fn initialize() {
         return;
     }
     m::set("activity-initialized", json!(true));
-    // INTEGRATOR: crate::session::on_project_change(|project| crate::activity::on_global_project_change(project));
+    crate::session::on_project_change(crate::activity::on_global_project_change);
 }
 
 #[allow(dead_code)]
@@ -1732,4 +1744,3 @@ pub(super) fn roving_tabindex(active: bool) -> &'static str {
         "-1"
     }
 }
-

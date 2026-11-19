@@ -688,7 +688,6 @@ pub(super) fn build_overlay_extras(surface: MapSurface, view: &V, state: &V) -> 
     }
 }
 
-#[allow(dead_code)] // INTEGRATOR: triggered by graph::on_graph_status_sse once swarm/ui-chat merges
 pub(crate) fn show_non_destructive_stale_banner(project_id: &str, message: &str) {
     let text = if message.trim().is_empty() {
         "Graph updated — Refresh"

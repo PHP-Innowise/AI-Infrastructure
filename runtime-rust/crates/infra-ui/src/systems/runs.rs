@@ -1,10 +1,10 @@
+use super::*;
+use crate::activity::events_card;
 use crate::{api, dom, model as m, run, session};
 use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
-use super::*;
-use crate::activity::events_card;
 
 pub(super) fn normalized_system_permission(value: Option<&str>) -> &'static str {
     match value {
@@ -334,7 +334,8 @@ pub(super) fn apply_sse_system_delta(
     data: &V,
 ) -> SystemSseOutcome {
     let event_project = first_non_empty_sys(data, &["project_id", "project"]);
-    if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project {
+    if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project
+    {
         return SystemSseOutcome::Ignore;
     }
     let event_id = first_non_empty_sys(data, &["run_id", "id"]);
@@ -389,7 +390,11 @@ pub(super) fn apply_sse_system_delta(
     }
     let is_active = m::yes(&run_doc["active"]);
     let stopped = was_active && !is_active;
-    if data["event"].is_object() && data["status"].is_null() && data["active"].is_null() && event_appended {
+    if data["event"].is_object()
+        && data["status"].is_null()
+        && data["active"].is_null()
+        && event_appended
+    {
         return SystemSseOutcome::UpdatedRenderOnly;
     }
     SystemSseOutcome::RefreshRun {
@@ -678,7 +683,12 @@ pub(super) fn step_row_state(status: &str) -> &'static str {
     }
 }
 
-pub(super) fn build_system_step_view(step: &V, receipts: &V, running: bool, idx: usize) -> SystemStepView {
+pub(super) fn build_system_step_view(
+    step: &V,
+    receipts: &V,
+    running: bool,
+    idx: usize,
+) -> SystemStepView {
     let raw_status = shown_status(step, receipts, running);
     let stage_class = step_stage_class(raw_status.trim()).to_owned();
     let row_state = step_row_state(raw_status.trim()).to_owned();
@@ -984,7 +994,6 @@ pub(super) fn run_has_agent_activity(v: &V) -> bool {
         || !m::array(&v["receipts"]).is_empty()
 }
 
-
 pub(super) fn build_system_localize_payload(
     run_doc: &V,
     service_id: &str,
@@ -1127,8 +1136,7 @@ pub(super) fn failed_services_in_run(run_doc: &V) -> Vec<String> {
 }
 
 fn mark_failed_services_on_map(services: &[String]) {
-    m::set("system-failed-services", json!(services));
-    // INTEGRATOR: crate::system_map::mark_failed_services(services);
+    crate::system_map::mark_failed_services(services);
 }
 
 #[cfg(test)]
@@ -1999,4 +2007,3 @@ pub(super) fn render_system_events_only() {
     events_card::render_structured_events("system-events", &run_events);
     dom::hidden("system-events-log", run_events.is_empty());
 }
-

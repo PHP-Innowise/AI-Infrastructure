@@ -218,7 +218,10 @@ pub fn usage(v: &V) {
     m::set("context-turns", json!(turns));
     render_usage();
 }
-pub(super) fn context_turn_roving_states(shown: &[V], selected_id: &V) -> Vec<(String, bool, &'static str)> {
+pub(super) fn context_turn_roving_states(
+    shown: &[V],
+    selected_id: &V,
+) -> Vec<(String, bool, &'static str)> {
     let checked_idx = shown.iter().position(|t| &t["id"] == selected_id);
     let tab_idx = checked_idx.unwrap_or_else(|| shown.len().saturating_sub(1));
     shown

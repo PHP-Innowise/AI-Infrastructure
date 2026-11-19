@@ -1,8 +1,8 @@
+use super::*;
 use crate::{api, dom, model as m, session, system_map};
 use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, VecDeque};
 use wasm_bindgen_futures::spawn_local;
-use super::*;
 
 pub fn adopt_sidebar_project(previous_view: &str) {
     let held = [
@@ -661,7 +661,6 @@ pub(super) fn sync_changes_map_workspace() {
     sync_change_service_tabs();
     system_map::refresh_changes_map(&project, &config, cat, &status, &overlay);
 }
-
 
 /// Opening Services shows the project's system when its file exists: the
 /// form already names it, so a Load system click on every visit added

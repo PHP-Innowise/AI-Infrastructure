@@ -21,11 +21,8 @@ pub(crate) fn is_terminal_poll_status(status: u16) -> bool {
 }
 
 /// Whether the multiplexed `/api/events/stream` SSE connection is active.
-/// Standalone `swarm/ui-ops` tracks `sse-connected` in model state; on
-/// integration with `swarm/ui-chat`, wire directly to `crate::api::sse_connected()`.
 pub(crate) fn sse_is_connected() -> bool {
-    // INTEGRATOR: crate::api::sse_connected()
-    m::yes(&m::data("sse-connected"))
+    crate::api::sse_connected() || m::yes(&m::data("sse-connected"))
 }
 
 #[cfg(test)]
@@ -39,24 +36,8 @@ pub(crate) fn set_sse_connected_for_tests(connected: bool) {
 /// `{"project_id", "session_id"?, "config_path"?, "run_id"?, "service_id"?,
 ///   "failing_queries": [...], "hint_paths": [...], "prefer_full_modal": bool}`.
 pub(crate) fn localize_failure_payload(req: &V) {
-    // INTEGRATOR: replace fallback below with: crate::session::localize_failure_on_map(req);
     m::set("last-localize-failure-request", req.clone());
-    if !cfg!(target_arch = "wasm32") {
-        return;
-    }
-    let service_id = m::text(req, "service_id");
-    let config_path = m::text(req, "config_path");
-    let hint = req["hint_paths"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    if !config_path.is_empty() && !service_id.is_empty() && service_id != "__system__" {
-        crate::systems::drill_down_service_map("changes", &service_id, hint);
-    } else {
-        m::set("pending-failure-localize", req.clone());
-        crate::systems::focus_system_graph_workspace();
-    }
+    crate::session::localize_failure_on_map(req);
 }
 
 #[cfg(test)]
@@ -196,7 +177,10 @@ pub(crate) fn normalize_event_kind(raw: &str) -> &'static str {
         "error"
     } else if k.contains("perm") || k.contains("approv") || k.contains("wait") {
         "permission"
-    } else if k.contains("tool") || k.contains("cmd") || k.contains("command") || k.contains("shell")
+    } else if k.contains("tool")
+        || k.contains("cmd")
+        || k.contains("command")
+        || k.contains("shell")
     {
         "tool"
     } else if k.contains("think") || k.contains("reason") {
@@ -349,7 +333,10 @@ fn ensure_structured_events_chrome(scope: &str, filter_kind: &str, query: &str) 
             );
             btn.set_class_name("run-filter");
             let _ = btn.set_attribute("data-kind", fid);
-            let _ = btn.set_attribute("aria-pressed", if *fid == filter_kind { "true" } else { "false" });
+            let _ = btn.set_attribute(
+                "aria-pressed",
+                if *fid == filter_kind { "true" } else { "false" },
+            );
             dom::add(&filter_row, &btn);
         }
         dom::add(&toolbar, &filter_row);
@@ -489,7 +476,10 @@ pub(crate) fn render_structured_events_html_for_test(
     query: &str,
 ) -> String {
     let (total, items) = build_structured_event_items(raw_events, filter_kind, query);
-    let mut out = format!("<div id=\"{}\" class=\"structured-events-panel\">", escape_html(scope));
+    let mut out = format!(
+        "<div id=\"{}\" class=\"structured-events-panel\">",
+        escape_html(scope)
+    );
     out.push_str("<div class=\"structured-events-toolbar\"><div class=\"structured-events-filter-row\" role=\"group\">");
     for (fid, label) in EVENT_FILTER_KINDS {
         let payload = escape_html(&json!({ "scope": scope, "kind": fid }).to_string());
@@ -517,10 +507,14 @@ pub(crate) fn render_structured_events_html_for_test(
                 "<article class=\"structured-event-card\" data-kind=\"{kind}\"><div class=\"structured-event-head\"><span class=\"structured-event-badge\" data-kind=\"{kind}\">{badge}</span>"
             ));
             if !meta.is_empty() {
-                out.push_str(&format!("<span class=\"structured-event-meta\">{meta}</span>"));
+                out.push_str(&format!(
+                    "<span class=\"structured-event-meta\">{meta}</span>"
+                ));
             }
             if !time.is_empty() {
-                out.push_str(&format!("<span class=\"structured-event-time\">{time}</span>"));
+                out.push_str(&format!(
+                    "<span class=\"structured-event-time\">{time}</span>"
+                ));
             }
             out.push_str(&format!(
                 "</div><div class=\"structured-event-body\">{body}</div></article>"

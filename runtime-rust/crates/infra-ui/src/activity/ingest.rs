@@ -1,6 +1,8 @@
 use crate::{
     api, classify, dom, model as m,
-    run::files_map::{self, normalize_view, offered_filters, tidy_path, FileCardAction, FileTouchEntry},
+    run::files_map::{
+        self, normalize_view, offered_filters, tidy_path, FileCardAction, FileTouchEntry,
+    },
 };
 use serde_json::{json, Value as V};
 use std::{
@@ -2286,4 +2288,3 @@ pub(crate) fn system_card_actions(root: &str, entry: &FileTouchEntry) -> Vec<Fil
     });
     actions
 }
-

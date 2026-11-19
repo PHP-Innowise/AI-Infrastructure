@@ -4958,9 +4958,11 @@ pub(crate) fn mark_failed_services(failed_ids: &[String]) {
         .map(|s| json!(s))
         .collect();
     m::set("system-failed-services", V::Array(arr));
-    for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
-        if m::data(surface.map_key).is_object() {
-            render_surface(surface, false);
+    if cfg!(target_arch = "wasm32") {
+        for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
+            if m::data(surface.map_key).is_object() {
+                render_surface(surface, false);
+            }
         }
     }
 }
