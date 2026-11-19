@@ -1214,4 +1214,46 @@ mod update_tests {
             files_summary_hash("results-diff", &files_a)
         );
     }
+
+    #[test]
+    fn responsive_viewport_plan_syncs_mobile_to_desktop_without_churn() {
+        let mut last = Some(false);
+        // Same breakpoint desktop->desktop avoids redundant inert/graph churn.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, false, true),
+            ViewportSyncPlan {
+                close_sidebar: false,
+                sync_inert: false,
+                sync_graph: false,
+            }
+        );
+        // Desktop->mobile syncs inert and embedded graph without closing drawer.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, true, true),
+            ViewportSyncPlan {
+                close_sidebar: false,
+                sync_inert: true,
+                sync_graph: true,
+            }
+        );
+        // Same breakpoint mobile->mobile avoids churn.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, true, false),
+            ViewportSyncPlan {
+                close_sidebar: false,
+                sync_inert: false,
+                sync_graph: false,
+            }
+        );
+        // Mobile->desktop closes sidebar, clears inert, and syncs embedded graph when in sessions.
+        assert_eq!(
+            plan_responsive_viewport(&mut last, false, true),
+            ViewportSyncPlan {
+                close_sidebar: true,
+                sync_inert: true,
+                sync_graph: true,
+            }
+        );
+        assert_eq!(last, Some(false));
+    }
 }
