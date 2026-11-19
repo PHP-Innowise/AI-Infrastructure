@@ -954,7 +954,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .skill-hints-list { list-style:none; margin:0; padding:0; }
 .composer-notice { color:var(--muted); font-size:var(--text-ui); margin:0 0 12px; overflow-wrap:anywhere; }
 .composer-notice code { font-family:var(--font-mono); }
-.skill-hint { display:flex; flex-direction:column; gap:2px; padding:8px 12px; border-radius:var(--radius-sm); cursor:pointer; transition:background-color var(--motion-fast) var(--ease-standard); }
+.skill-hint { display:flex; flex-direction:column; gap:2px; width:100%; padding:8px 12px; border:0; border-radius:var(--radius-sm); background:transparent; color:inherit; text-align:left; cursor:pointer; transition:background-color var(--motion-fast) var(--ease-standard); }
 .skill-hint:hover { background:var(--hover); }
 .skill-hint[aria-selected="true"] { background:var(--purple-soft); }
 .skill-hint-name { color:var(--ink); font-family:var(--font-mono); font-size:var(--text-ui); line-height:var(--leading-ui); overflow-wrap:anywhere; }

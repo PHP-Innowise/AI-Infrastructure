@@ -319,6 +319,23 @@ fn present(data: &V, files: bool) {
     m::set("composer-active", json!(0));
     render();
 }
+pub(crate) fn composer_hint_parts(item: &V) -> (String, String, String) {
+    let name = item["name"]
+        .as_str()
+        .or_else(|| item["path"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    let hint = item["hint"]
+        .as_str()
+        .or_else(|| item["argumentHint"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    let description = m::text(item, "description");
+    (name, hint, description)
+}
+
 fn render() {
     let items = m::array(&m::data("composer-items"));
     let count = items.len().min(200);
@@ -329,31 +346,33 @@ fn render() {
     };
     dom::clear("skill-hints");
     for (index, item) in items.iter().take(200).enumerate() {
-        let name = item["name"]
-            .as_str()
-            .or_else(|| item["path"].as_str())
-            .unwrap_or("");
-        let e = dom::button(
-            &format!(
-                "{}{}{}",
-                name,
-                if item["description"].is_string() {
-                    " · "
-                } else {
-                    ""
-                },
-                m::text(item, "description")
-            ),
-            "composer-choose",
-            json!(index),
-        );
-        let _ = e.set_attribute("role", "option");
-        let _ = e.set_attribute("id", &format!("composer-option-{index}"));
-        let _ = e.set_attribute(
+        let (name, hint, description) = composer_hint_parts(item);
+        let li = dom::el("li", "", "");
+        let _ = li.set_attribute("role", "none");
+        let btn = dom::button("", "composer-choose", json!(index));
+        btn.set_class_name("skill-hint");
+        let _ = btn.set_attribute("role", "option");
+        let _ = btn.set_attribute("id", &format!("composer-option-{index}"));
+        let _ = btn.set_attribute(
             "aria-selected",
             if index == active { "true" } else { "false" },
         );
-        dom::append("skill-hints", &e);
+        let title = dom::el("span", "skill-hint-name", &name);
+        if !hint.is_empty() {
+            dom::add(
+                &title,
+                &dom::el("span", "skill-hint-argument", &format!(" {hint}")),
+            );
+        }
+        dom::add(&btn, &title);
+        if !description.is_empty() {
+            dom::add(
+                &btn,
+                &dom::el("span", "skill-hint-description", &description),
+            );
+        }
+        dom::add(&li, &btn);
+        dom::append("skill-hints", &li);
     }
     dom::text("skill-hints-status", &format!("{} matches", items.len()));
     if let Some(id) = active_option_id(count, active) {
@@ -1170,5 +1189,21 @@ mod tests {
         assert_eq!(palette_boundary_index(5, true), 4);
         assert_eq!(palette_boundary_index(0, false), 0);
         assert_eq!(palette_boundary_index(0, true), 0);
+
+        assert_eq!(
+            composer_hint_parts(&json!({
+                "name": "/model",
+                "argumentHint": "[model]",
+                "description": "Choose the model"
+            })),
+            ("/model".into(), "[model]".into(), "Choose the model".into())
+        );
+        assert_eq!(
+            composer_hint_parts(&json!({
+                "path": "src/main.rs",
+                "hint": " line "
+            })),
+            ("src/main.rs".into(), "line".into(), String::new())
+        );
     }
 }
