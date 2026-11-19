@@ -1,6 +1,7 @@
 use crate::{api, dom, graph_viewport, model as m, omnigraph_canvas};
 use serde_json::{json, Value as V};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -2835,6 +2836,7 @@ fn apply_camera(cam: &OmnigraphCamera) {
             }
         }
     }
+    sync_omnigraph_viewport_culling(cam);
     graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), None, true);
 }
 
@@ -4027,6 +4029,301 @@ fn current_constellation_filter(
     }
 }
 
+#[derive(Clone, Debug)]
+struct OmniDenseCacheEntry {
+    node_rects: Vec<(String, f64, f64, f64, f64)>,
+    node_index_by_id: HashMap<String, usize>,
+    node_htmls: Vec<String>,
+    edge_endpoints: Vec<(String, String)>,
+    node_edges: Vec<(usize, usize)>,
+    is_dense: bool,
+    latest_selected_id: Option<String>,
+    latest_focused_id: Option<String>,
+    latest_highlighted_ids: BTreeSet<String>,
+    latest_path_nodes: BTreeSet<String>,
+    latest_path_edges: BTreeSet<(String, String)>,
+    latest_neighbors: BTreeSet<String>,
+    pinned_ids: BTreeSet<String>,
+}
+
+thread_local! {
+    static OMNI_DENSE_CACHE: RefCell<Option<OmniDenseCacheEntry>> = const { RefCell::new(None) };
+}
+
+fn patch_omni_node_el(
+    el: &web_sys::Element,
+    id: &str,
+    selected: Option<&str>,
+    neighbors: &BTreeSet<String>,
+    highlighted_ids: &BTreeSet<String>,
+    path_nodes: &BTreeSet<String>,
+    roving_target: Option<&str>,
+) {
+    let has_sel = selected.is_some();
+    let has_hl = !highlighted_ids.is_empty();
+    let has_path = !path_nodes.is_empty();
+    let is_sel = selected == Some(id);
+    let is_nbr = !is_sel && neighbors.contains(id);
+    let is_hl = highlighted_ids.contains(id) || path_nodes.contains(id);
+    let is_dim = if has_path {
+        !path_nodes.contains(id)
+    } else if has_sel {
+        !is_sel && !is_nbr && !is_hl
+    } else if has_hl {
+        !is_hl
+    } else {
+        false
+    };
+    let b = |v: bool| if v { "true" } else { "false" };
+    let _ = el.set_attribute("data-selected", b(is_sel));
+    let _ = el.set_attribute("data-neighbor", b(is_nbr));
+    let _ = el.set_attribute("data-highlighted", b(is_hl));
+    let _ = el.set_attribute("data-dimmed", b(is_dim));
+    let _ = el.set_attribute("aria-pressed", b(is_sel));
+    let _ = el.set_attribute(
+        "tabindex",
+        if roving_target == Some(id) { "0" } else { "-1" },
+    );
+}
+
+fn is_important_omni_node(
+    entry: &OmniDenseCacheEntry,
+    id: &str,
+    el: Option<&web_sys::Element>,
+) -> bool {
+    let el_important = el.is_some_and(|e| {
+        e.get_attribute("data-selected").as_deref() == Some("true")
+            || e.get_attribute("data-neighbor").as_deref() == Some("true")
+            || e.get_attribute("data-highlighted").as_deref() == Some("true")
+            || e.get_attribute("data-pinned").as_deref() == Some("true")
+            || e.get_attribute("tabindex").as_deref() == Some("0")
+    });
+    el_important
+        || entry.latest_selected_id.as_deref() == Some(id)
+        || entry.latest_focused_id.as_deref() == Some(id)
+        || entry.latest_neighbors.contains(id)
+        || entry.latest_highlighted_ids.contains(id)
+        || entry.latest_path_nodes.contains(id)
+        || entry.pinned_ids.contains(id)
+}
+
+fn mount_omni_dense_node_if_needed(node_id: &str) -> Option<web_sys::Element> {
+    let canvas = dom::get("omnigraph-canvas")?;
+    if let Ok(Some(existing)) =
+        canvas.query_selector(&format!(".omni-node[data-node-id=\"{node_id}\"]"))
+    {
+        return Some(existing);
+    }
+    let plane = canvas.query_selector(".omni-plane").ok().flatten()?;
+    let entry = OMNI_DENSE_CACHE.with(|c| c.borrow().clone())?;
+    if !entry.is_dense {
+        return None;
+    }
+    let &idx = entry.node_index_by_id.get(node_id)?;
+    let html = entry.node_htmls.get(idx)?.as_str();
+    if html.is_empty() {
+        return None;
+    }
+    let mut created = graph_viewport::append_html_elements(&plane, html);
+    let el = created.pop()?;
+    let roving_target = entry
+        .latest_focused_id
+        .as_deref()
+        .or(entry.latest_selected_id.as_deref())
+        .or_else(|| entry.node_rects.first().map(|(id, ..)| id.as_str()));
+    patch_omni_node_el(
+        &el,
+        node_id,
+        entry.latest_selected_id.as_deref(),
+        &entry.latest_neighbors,
+        &entry.latest_highlighted_ids,
+        &entry.latest_path_nodes,
+        roving_target,
+    );
+    Some(el)
+}
+
+fn sync_omnigraph_viewport_culling(cam: &OmnigraphCamera) {
+    let Some(entry) = OMNI_DENSE_CACHE.with(|c| c.borrow().clone()) else {
+        return;
+    };
+    if !entry.is_dense || entry.node_htmls.len() != entry.node_rects.len() {
+        return;
+    }
+    let (vw, vh, measured) = viewport_size_measured();
+    let bounds = measured
+        .then(|| graph_viewport::world_viewport_bounds(cam.to_viewport(), (vw, vh), 0.0))
+        .flatten();
+    let Some(canvas) = dom::get("omnigraph-canvas") else {
+        return;
+    };
+    let nodes = dom::all("#omnigraph-canvas .omni-node[data-node-id]");
+    let Some((min_x, min_y, max_x, max_y)) = bounds else {
+        for el in nodes {
+            let _ = el.remove_attribute("data-offscreen");
+        }
+        return;
+    };
+    let Some(plane) = canvas.query_selector(".omni-plane").ok().flatten() else {
+        return;
+    };
+    let mut mounted_els: HashMap<usize, web_sys::Element> = HashMap::with_capacity(nodes.len());
+    for el in nodes {
+        if let Some(id) = el.get_attribute("data-node-id") {
+            if let Some(&idx) = entry.node_index_by_id.get(&id) {
+                mounted_els.insert(idx, el);
+            }
+        }
+    }
+    let rects: Vec<(f64, f64, f64, f64)> = entry
+        .node_rects
+        .iter()
+        .map(|(_, x, y, w, h)| (*x, *y, *w, *h))
+        .collect();
+    let mounted: Vec<(usize, bool)> = mounted_els
+        .iter()
+        .map(|(&idx, el)| {
+            let id = entry
+                .node_rects
+                .get(idx)
+                .map(|r| r.0.as_str())
+                .unwrap_or("");
+            (idx, is_important_omni_node(&entry, id, Some(el)))
+        })
+        .collect();
+    let force_mount: Vec<usize> = entry
+        .node_rects
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (id, ..))| {
+            (!entry.node_htmls.get(idx).is_none_or(|h| h.is_empty())
+                && is_important_omni_node(&entry, id, None))
+            .then_some(idx)
+        })
+        .collect();
+    let visible = (min_x, min_y, max_x, max_y);
+    let mount = (min_x - 120.0, min_y - 120.0, max_x + 120.0, max_y + 120.0);
+    let unmount = (min_x - 280.0, min_y - 280.0, max_x + 280.0, max_y + 280.0);
+    let plan = graph_viewport::plan_viewport_reconcile(
+        &rects,
+        &mounted,
+        visible,
+        mount,
+        unmount,
+        &force_mount,
+    );
+    for idx in plan.to_unmount {
+        if !entry.node_htmls.get(idx).is_none_or(|h| h.is_empty()) {
+            if let Some(el) = mounted_els.remove(&idx) {
+                el.remove();
+            }
+        }
+    }
+    let mut batch_html = String::new();
+    let mut batch_indices = Vec::new();
+    for idx in plan.to_mount {
+        if mounted_els.contains_key(&idx) {
+            continue;
+        }
+        if let Some(html) = entry.node_htmls.get(idx).filter(|s| !s.is_empty()) {
+            batch_html.push_str(html);
+            batch_indices.push(idx);
+        }
+    }
+    let roving_target = entry
+        .latest_focused_id
+        .as_deref()
+        .or(entry.latest_selected_id.as_deref())
+        .or_else(|| entry.node_rects.first().map(|(id, ..)| id.as_str()));
+    if !batch_html.is_empty() {
+        let inserted = graph_viewport::append_html_elements(&plane, &batch_html);
+        for (idx, el) in batch_indices.into_iter().zip(inserted) {
+            if let Some((id, ..)) = entry.node_rects.get(idx) {
+                patch_omni_node_el(
+                    &el,
+                    id,
+                    entry.latest_selected_id.as_deref(),
+                    &entry.latest_neighbors,
+                    &entry.latest_highlighted_ids,
+                    &entry.latest_path_nodes,
+                    roving_target,
+                );
+            }
+            mounted_els.insert(idx, el);
+        }
+    }
+    for (idx, el) in mounted_els {
+        let Some((id, x, y, w, h)) = entry.node_rects.get(idx) else {
+            continue;
+        };
+        let important = is_important_omni_node(&entry, id, Some(&el));
+        let offscreen = !important
+            && (x + w < min_x - 120.0
+                || *x > max_x + 120.0
+                || y + h < min_y - 120.0
+                || *y > max_y + 120.0);
+        let _ = el.set_attribute("data-offscreen", if offscreen { "true" } else { "false" });
+    }
+}
+
+fn refresh_omni_dense_scene(
+    scene: &mut graph_viewport::canvas2d::DenseScene,
+    filter: &omnigraph_canvas::ConstellationFilter,
+    neighbors: &BTreeSet<String>,
+    node_ids: &[String],
+    edge_endpoints: &[(String, String)],
+) {
+    let selected = filter.selected_id.as_deref();
+    let has_sel = selected.is_some();
+    let has_hl = !filter.highlighted_ids.is_empty();
+    let has_path = !filter.path_nodes.is_empty();
+    for node in &mut scene.nodes {
+        let Some(id) = node_ids.get(node.index) else {
+            continue;
+        };
+        let is_sel = selected == Some(id.as_str());
+        let is_nbr = !is_sel && neighbors.contains(id.as_str());
+        let is_hl = filter.highlighted_ids.contains(id) || filter.path_nodes.contains(id);
+        let is_dim = if has_path {
+            !filter.path_nodes.contains(id)
+        } else if has_sel {
+            !is_sel && !is_nbr && !is_hl
+        } else if has_hl {
+            !is_hl
+        } else {
+            false
+        };
+        node.selected = is_sel;
+        node.lit = is_nbr || is_hl;
+        node.dim = is_dim;
+    }
+    for edge in &mut scene.edges {
+        let Some((from, to)) = edge_endpoints.get(edge.index) else {
+            continue;
+        };
+        let is_sel_edge = selected.is_some_and(|s| from == s || to == s);
+        let is_path_edge = filter.path_edges.contains(&(from.clone(), to.clone()))
+            || filter.path_edges.contains(&(to.clone(), from.clone()));
+        let is_hl_edge =
+            filter.highlighted_ids.contains(from) || filter.highlighted_ids.contains(to);
+        let lit = is_path_edge
+            || is_sel_edge
+            || (filter.highlighted_ids.contains(from) && filter.highlighted_ids.contains(to));
+        let dim = if has_path {
+            !is_path_edge
+        } else if has_sel {
+            !is_sel_edge && !is_hl_edge
+        } else if has_hl {
+            !is_hl_edge
+        } else {
+            false
+        };
+        edge.on = is_sel_edge || is_path_edge;
+        edge.lit = lit;
+        edge.dim = dim;
+    }
+}
+
 fn try_patch_constellation_selection_in_place(
     filter: &omnigraph_canvas::ConstellationFilter,
     node_edges: &[(usize, usize)],
@@ -4035,26 +4332,26 @@ fn try_patch_constellation_selection_in_place(
     let Some(canvas) = dom::get("omnigraph-canvas") else {
         return false;
     };
-    if canvas
-        .query_selector(".omni-plane")
-        .ok()
-        .flatten()
-        .is_none()
-    {
+    let Some(plane) = canvas.query_selector(".omni-plane").ok().flatten() else {
         return false;
-    }
+    };
     let selected = filter.selected_id.as_deref();
+    let index_by_id: HashMap<&str, usize> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
     let mut neighbors = BTreeSet::new();
     if let Some(sel) = selected {
-        if let Some(sel_idx) = node_ids.iter().position(|id| id == sel) {
+        if let Some(&sel_idx) = index_by_id.get(sel) {
             for &(u, v) in node_edges {
                 if u == sel_idx {
                     if let Some(id) = node_ids.get(v) {
-                        neighbors.insert(id.as_str());
+                        neighbors.insert(id.clone());
                     }
                 } else if v == sel_idx {
                     if let Some(id) = node_ids.get(u) {
-                        neighbors.insert(id.as_str());
+                        neighbors.insert(id.clone());
                     }
                 }
             }
@@ -4069,6 +4366,7 @@ fn try_patch_constellation_selection_in_place(
         .or(selected)
         .or_else(|| node_ids.first().map(String::as_str));
 
+    let mut mounted_ids = HashSet::new();
     if let Ok(nodes) = canvas.query_selector_all(".omni-node[data-node-id]") {
         for i in 0..nodes.length() {
             let Some(el) = nodes
@@ -4078,35 +4376,73 @@ fn try_patch_constellation_selection_in_place(
                 continue;
             };
             let id = el.get_attribute("data-node-id").unwrap_or_default();
-            let is_sel = selected == Some(id.as_str());
-            let is_nbr = !is_sel && neighbors.contains(id.as_str());
-            let is_hl = filter.highlighted_ids.contains(&id) || filter.path_nodes.contains(&id);
-            let is_dim = if has_path {
-                !filter.path_nodes.contains(&id)
-            } else if has_sel {
-                !is_sel && !is_nbr && !is_hl
-            } else if has_hl {
-                !is_hl
-            } else {
-                false
-            };
-            let b = |v: bool| if v { "true" } else { "false" };
-            let _ = el.set_attribute("data-selected", b(is_sel));
-            let _ = el.set_attribute("data-neighbor", b(is_nbr));
-            let _ = el.set_attribute("data-highlighted", b(is_hl));
-            let _ = el.set_attribute("data-dimmed", b(is_dim));
-            let _ = el.set_attribute("aria-pressed", b(is_sel));
-            let _ = el.set_attribute(
-                "tabindex",
-                if roving_target == Some(id.as_str()) {
-                    "0"
-                } else {
-                    "-1"
-                },
+            mounted_ids.insert(id.clone());
+            patch_omni_node_el(
+                &el,
+                &id,
+                selected,
+                &neighbors,
+                &filter.highlighted_ids,
+                &filter.path_nodes,
+                roving_target,
             );
         }
     }
-    if let Ok(edges) = canvas.query_selector_all(".omni-edge[data-from][data-to]") {
+
+    let mut is_dense = false;
+    let mut edge_endpoints = Vec::new();
+    OMNI_DENSE_CACHE.with(|cache| {
+        if let Some(entry) = cache.borrow_mut().as_mut() {
+            is_dense = entry.is_dense;
+            edge_endpoints = entry.edge_endpoints.clone();
+            entry.latest_selected_id = filter.selected_id.clone();
+            entry.latest_focused_id = filter.focused_id.clone();
+            entry.latest_highlighted_ids = filter.highlighted_ids.clone();
+            entry.latest_path_nodes = filter.path_nodes.clone();
+            entry.latest_path_edges = filter.path_edges.clone();
+            entry.latest_neighbors = neighbors.clone();
+            if entry.is_dense && entry.node_htmls.len() == entry.node_rects.len() {
+                let mut batch_html = String::new();
+                let mut batch_ids = Vec::new();
+                for (idx, (id, ..)) in entry.node_rects.iter().enumerate() {
+                    if mounted_ids.contains(id) {
+                        continue;
+                    }
+                    let important = selected == Some(id.as_str())
+                        || neighbors.contains(id)
+                        || filter.highlighted_ids.contains(id)
+                        || filter.path_nodes.contains(id)
+                        || roving_target == Some(id.as_str());
+                    if important {
+                        if let Some(html) = entry.node_htmls.get(idx).filter(|s| !s.is_empty()) {
+                            batch_html.push_str(html);
+                            batch_ids.push(id.as_str());
+                        }
+                    }
+                }
+                if !batch_html.is_empty() {
+                    let inserted = graph_viewport::append_html_elements(&plane, &batch_html);
+                    for (id, el) in batch_ids.into_iter().zip(inserted) {
+                        patch_omni_node_el(
+                            &el,
+                            id,
+                            selected,
+                            &neighbors,
+                            &filter.highlighted_ids,
+                            &filter.path_nodes,
+                            roving_target,
+                        );
+                    }
+                }
+            }
+        }
+    });
+
+    if is_dense {
+        graph_viewport::canvas2d::update_scene("omnigraph-canvas", |scene| {
+            refresh_omni_dense_scene(scene, filter, &neighbors, node_ids, &edge_endpoints);
+        });
+    } else if let Ok(edges) = canvas.query_selector_all(".omni-edge[data-from][data-to]") {
         for i in 0..edges.length() {
             let Some(el) = edges
                 .item(i)
@@ -4191,21 +4527,8 @@ fn render_constellation() {
         && !cached_ids.is_empty()
         && try_patch_constellation_selection_in_place(&filter, &cached_edges, &cached_ids)
     {
-        let viewport = omnigraph_canvas::CanvasViewport {
-            pan_x: cam.pan_x,
-            pan_y: cam.pan_y,
-            scale: cam.scale,
-        };
-        let rendered = omnigraph_canvas::render_constellation(&graph, &filter, &viewport);
-        if let Some(scene) = rendered.dense_scene {
-            graph_viewport::canvas2d::store_scene("omnigraph-canvas", scene);
-            graph_viewport::canvas2d::paint_scene(
-                "omnigraph-canvas",
-                cam.to_viewport(),
-                None,
-                true,
-            );
-        }
+        sync_omnigraph_viewport_culling(&cam);
+        graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), None, true);
         return;
     }
 
@@ -4226,11 +4549,53 @@ fn render_constellation() {
         "omnigraph-structure-digest",
         json!(rendered.structure_digest),
     );
+    let is_dense = rendered.dense_scene.is_some();
     if let Some(scene) = rendered.dense_scene {
         graph_viewport::canvas2d::store_scene("omnigraph-canvas", scene);
     } else {
         graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
     }
+
+    let node_index_by_id: HashMap<String, usize> = rendered
+        .node_rects
+        .iter()
+        .enumerate()
+        .map(|(i, (id, ..))| (id.clone(), i))
+        .collect();
+    let mut cache_neighbors = BTreeSet::new();
+    if let Some(sel) = filter.selected_id.as_deref() {
+        if let Some(&sel_idx) = node_index_by_id.get(sel) {
+            for &(u, v) in &rendered.node_edges {
+                if u == sel_idx {
+                    if let Some((id, ..)) = rendered.node_rects.get(v) {
+                        cache_neighbors.insert(id.clone());
+                    }
+                } else if v == sel_idx {
+                    if let Some((id, ..)) = rendered.node_rects.get(u) {
+                        cache_neighbors.insert(id.clone());
+                    }
+                }
+            }
+        }
+    }
+    let cache_entry = OmniDenseCacheEntry {
+        node_rects: rendered.node_rects.clone(),
+        node_index_by_id,
+        node_htmls: rendered.node_htmls,
+        edge_endpoints: rendered.edge_endpoints,
+        node_edges: rendered.node_edges.clone(),
+        is_dense,
+        latest_selected_id: filter.selected_id.clone(),
+        latest_focused_id: filter.focused_id.clone(),
+        latest_highlighted_ids: filter.highlighted_ids.clone(),
+        latest_path_nodes: filter.path_nodes.clone(),
+        latest_path_edges: filter.path_edges.clone(),
+        latest_neighbors: cache_neighbors,
+        pinned_ids: filter.pinned_positions.keys().cloned().collect(),
+    };
+    OMNI_DENSE_CACHE.with(|cache| {
+        *cache.borrow_mut() = Some(cache_entry);
+    });
 
     let pos_map: V = rendered
         .positions
@@ -4802,34 +5167,75 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         if kind == "pointerdown" {
             if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
                 if pe.shift_key() {
-                    if let Some(node_el) = target_el
+                    let resolved = if let Some(node_el) = target_el
                         .as_ref()
                         .and_then(|el| el.closest(".omni-node[data-node-id]").ok().flatten())
                     {
-                        let node_id = node_el.get_attribute("data-node-id").unwrap_or_default();
-                        let raw = m::data("omnigraph-raw-positions");
-                        if let (false, Some(x0), Some(y0)) = (
-                            node_id.is_empty(),
-                            raw[&node_id][0].as_f64(),
-                            raw[&node_id][1].as_f64(),
-                        ) {
-                            graph_viewport::capture_pointer(&node_el, pe.pointer_id());
-                            m::set(
-                                "omnigraph-node-drag",
-                                json!({
-                                    "active": true,
-                                    "node_id": node_id,
-                                    "start_cx": pe.client_x() as f64,
-                                    "start_cy": pe.client_y() as f64,
-                                    "orig_x": x0,
-                                    "orig_y": y0,
-                                    "curr_x": x0,
-                                    "curr_y": y0,
-                                    "moved": false,
-                                }),
-                            );
-                            return true;
+                        (
+                            node_el.get_attribute("data-node-id").unwrap_or_default(),
+                            Some(node_el),
+                        )
+                    } else {
+                        let is_dense = OMNI_DENSE_CACHE
+                            .with(|c| c.borrow().as_ref().is_some_and(|e| e.is_dense));
+                        if is_dense {
+                            dom::get("omnigraph-canvas")
+                                .and_then(|canvas_el| {
+                                    let rect = canvas_el.get_bounding_client_rect();
+                                    let cam = load_camera();
+                                    let wx = ((pe.client_x() as f64 - rect.left()) - cam.pan_x)
+                                        / cam.scale.max(0.05);
+                                    let wy = ((pe.client_y() as f64 - rect.top()) - cam.pan_y)
+                                        / cam.scale.max(0.05);
+                                    let (0, idx) = graph_viewport::canvas2d::hit_test_scene(
+                                        "omnigraph-canvas",
+                                        wx,
+                                        wy,
+                                        4.0,
+                                    )?
+                                    else {
+                                        return None;
+                                    };
+                                    let nid = OMNI_DENSE_CACHE.with(|c| {
+                                        c.borrow()
+                                            .as_ref()?
+                                            .node_rects
+                                            .get(idx)
+                                            .map(|(id, ..)| id.clone())
+                                    })?;
+                                    let el = mount_omni_dense_node_if_needed(&nid);
+                                    Some((nid, el))
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            (String::new(), None)
                         }
+                    };
+                    let (node_id, maybe_el) = resolved;
+                    let raw = m::data("omnigraph-raw-positions");
+                    if let (false, Some(x0), Some(y0)) = (
+                        node_id.is_empty(),
+                        raw[&node_id][0].as_f64(),
+                        raw[&node_id][1].as_f64(),
+                    ) {
+                        if let Some(cap) = maybe_el.or_else(|| dom::get("omnigraph-canvas")) {
+                            graph_viewport::capture_pointer(&cap, pe.pointer_id());
+                        }
+                        m::set(
+                            "omnigraph-node-drag",
+                            json!({
+                                "active": true,
+                                "node_id": node_id,
+                                "start_cx": pe.client_x() as f64,
+                                "start_cy": pe.client_y() as f64,
+                                "orig_x": x0,
+                                "orig_y": y0,
+                                "curr_x": x0,
+                                "curr_y": y0,
+                                "moved": false,
+                            }),
+                        );
+                        return true;
                     }
                 }
             }
@@ -5119,42 +5525,65 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                 "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
             )
         {
-            let rects_val = m::array(&m::data("omnigraph-nav-rects"));
-            let edges_val = m::array(&m::data("omnigraph-nav-edges"));
-            let ids: Vec<String> = rects_val
-                .iter()
-                .map(|r| r["id"].as_str().unwrap_or("").to_owned())
-                .collect();
-            let rects: Vec<(f64, f64, f64, f64)> = rects_val
-                .iter()
-                .map(|r| {
-                    (
-                        r["x"].as_f64().unwrap_or(0.0),
-                        r["y"].as_f64().unwrap_or(0.0),
-                        r["w"].as_f64().unwrap_or(200.0),
-                        r["h"].as_f64().unwrap_or(64.0),
-                    )
-                })
-                .collect();
             let curr_id = target
                 .as_ref()
                 .and_then(|el| el.closest(".omni-node[data-node-id]").ok().flatten())
                 .and_then(|el| el.get_attribute("data-node-id"))
                 .or_else(|| ui_state()["focused_id"].as_str().map(str::to_owned))
                 .or_else(|| ui_state()["selected_id"].as_str().map(str::to_owned));
-            let curr_idx = curr_id
-                .as_deref()
-                .and_then(|cid| ids.iter().position(|id| id == cid))
-                .unwrap_or(0);
+            let (ids, rects, curr_idx, edges) = OMNI_DENSE_CACHE
+                .with(|c| {
+                    let g = c.borrow();
+                    let entry = g.as_ref()?;
+                    let ids: Vec<String> =
+                        entry.node_rects.iter().map(|(id, ..)| id.clone()).collect();
+                    let rects: Vec<(f64, f64, f64, f64)> = entry
+                        .node_rects
+                        .iter()
+                        .map(|(_, x, y, w, h)| (*x, *y, *w, *h))
+                        .collect();
+                    let curr_idx = curr_id
+                        .as_deref()
+                        .and_then(|cid| entry.node_index_by_id.get(cid).copied())
+                        .unwrap_or(0);
+                    Some((ids, rects, curr_idx, entry.node_edges.clone()))
+                })
+                .unwrap_or_else(|| {
+                    let rects_val = m::array(&m::data("omnigraph-nav-rects"));
+                    let edges_val = m::array(&m::data("omnigraph-nav-edges"));
+                    let ids: Vec<String> = rects_val
+                        .iter()
+                        .map(|r| r["id"].as_str().unwrap_or("").to_owned())
+                        .collect();
+                    let rects: Vec<(f64, f64, f64, f64)> = rects_val
+                        .iter()
+                        .map(|r| {
+                            (
+                                r["x"].as_f64().unwrap_or(0.0),
+                                r["y"].as_f64().unwrap_or(0.0),
+                                r["w"].as_f64().unwrap_or(200.0),
+                                r["h"].as_f64().unwrap_or(64.0),
+                            )
+                        })
+                        .collect();
+                    let curr_idx = curr_id
+                        .as_deref()
+                        .and_then(|cid| ids.iter().position(|id| id == cid))
+                        .unwrap_or(0);
+                    let edges: Vec<(usize, usize)> = edges_val
+                        .iter()
+                        .filter_map(|pair| {
+                            Some((pair[0].as_u64()? as usize, pair[1].as_u64()? as usize))
+                        })
+                        .collect();
+                    (ids, rects, curr_idx, edges)
+                });
             let mut connected = Vec::new();
-            for pair in &edges_val {
-                if let (Some(u), Some(v)) = (pair[0].as_u64(), pair[1].as_u64()) {
-                    let (u, v) = (u as usize, v as usize);
-                    if u == curr_idx {
-                        connected.push(v);
-                    } else if v == curr_idx {
-                        connected.push(u);
-                    }
+            for (u, v) in edges {
+                if u == curr_idx {
+                    connected.push(v);
+                } else if v == curr_idx {
+                    connected.push(u);
                 }
             }
             if let Some(next_idx) =
@@ -5162,6 +5591,12 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
             {
                 if let Some(next_id) = ids.get(next_idx).cloned() {
                     set_ui_state(|s| s["focused_id"] = json!(next_id));
+                    OMNI_DENSE_CACHE.with(|c| {
+                        if let Some(entry) = c.borrow_mut().as_mut() {
+                            entry.latest_focused_id = Some(next_id.clone());
+                        }
+                    });
+                    let _ = mount_omni_dense_node_if_needed(&next_id);
                     if let Some(canvas) = dom::get("omnigraph-canvas") {
                         if let Ok(nodes) = canvas.query_selector_all(".omni-node[data-node-id]") {
                             for i in 0..nodes.length() {

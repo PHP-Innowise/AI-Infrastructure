@@ -13,9 +13,28 @@ pub struct RenderedCanvas {
     pub plan_nodes: Vec<Placed>,
     pub plan_frames: Vec<Framed>,
     pub dense_scene: Option<graph_viewport::canvas2d::DenseScene>,
+    pub dense_node_htmls: Vec<String>,
     pub node_keys: Vec<String>,
     pub pairs: Vec<(usize, usize)>,
     pub node_labels: Vec<String>,
+}
+
+pub(super) fn build_path_index(items: &[V]) -> HashMap<&str, usize> {
+    let mut map = HashMap::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        if let Some(p) = item["path"].as_str() {
+            map.entry(p).or_insert(idx);
+        }
+    }
+    map
+}
+
+pub(super) fn lookup_path_index(items: &[V], map: &HashMap<&str, usize>, key: &V) -> Option<usize> {
+    if let Some(s) = key.as_str() {
+        map.get(s).copied()
+    } else {
+        items.iter().position(|item| &item["path"] == key)
+    }
 }
 /// Scale thresholds beyond which non-essential marks and offscreen details are simplified.
 pub const LARGE_GRAPH_NODE_THRESHOLD: usize = 80;
@@ -124,39 +143,7 @@ pub(super) fn build_node_badges_strip(badges: &[String]) -> (String, String) {
     (attrs, strip)
 }
 
-pub(super) fn hash_json_value<H: std::hash::Hasher>(val: &V, state: &mut H) {
-    use std::hash::Hash;
-    match val {
-        V::Null => 0u8.hash(state),
-        V::Bool(b) => {
-            1u8.hash(state);
-            b.hash(state);
-        }
-        V::Number(n) => {
-            2u8.hash(state);
-            n.to_string().hash(state);
-        }
-        V::String(s) => {
-            3u8.hash(state);
-            s.hash(state);
-        }
-        V::Array(items) => {
-            4u8.hash(state);
-            items.len().hash(state);
-            for item in items {
-                hash_json_value(item, state);
-            }
-        }
-        V::Object(map) => {
-            5u8.hash(state);
-            map.len().hash(state);
-            for (k, v) in map {
-                k.hash(state);
-                hash_json_value(v, state);
-            }
-        }
-    }
-}
+pub(super) use crate::graph_viewport::hash_json_value;
 
 pub(super) fn impact_canvas_digest<H: std::hash::Hasher>(
     lookup: Option<&ImpactLookup>,
@@ -281,7 +268,8 @@ impl SelectionContext {
         pairs: &[(usize, usize)],
         cone_reach: (usize, usize),
     ) -> Self {
-        let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
+        let path_index = build_path_index(nodes);
+        let at = |path: &V| lookup_path_index(nodes, &path_index, path);
         let focus = view["focus"]["path"].as_str();
         let chosen = focus.and_then(|path| at(&json!(path)));
         let chosen_link = Some(&view["focus"])
@@ -328,13 +316,6 @@ impl SelectionContext {
                 }
                 _ => self.shared_edges.contains(&pair),
             }
-    }
-
-    pub(super) fn near(&self, pairs: &[(usize, usize)], node: usize) -> bool {
-        self.chosen == Some(node)
-            || pairs
-                .iter()
-                .any(|&(from, to)| (from == node || to == node) && self.lit((from, to)))
     }
 }
 
@@ -408,9 +389,12 @@ pub(super) fn radar_box_state(
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct NodeSelectionState {
     pub(super) selected: bool,
+    pub(super) lit: bool,
     pub(super) dim: bool,
     pub(super) shared_path: bool,
     pub(super) focus_target: bool,
+    pub(super) changed: bool,
+    pub(super) failed: bool,
     pub(super) pressed: Option<bool>,
     pub(super) blast: Option<(u64, f64)>,
     pub(super) radar_state: &'static str,
@@ -420,6 +404,7 @@ pub(super) struct NodeSelectionState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct EdgeSelectionState {
     pub(super) edge_state: &'static str,
+    pub(super) lit: bool,
     pub(super) shared_path: bool,
 }
 
@@ -487,17 +472,58 @@ pub(super) fn compute_canvas_selection_patch(
         impact_lookup.as_ref(),
     );
 
+    let mut near_nodes = vec![false; nodes.len()];
+    if let Some(chosen) = sel.chosen {
+        if chosen < near_nodes.len() {
+            near_nodes[chosen] = true;
+        }
+    }
+    let mut edges_by_pair = HashMap::with_capacity(pairs.len());
+    for &(from, to) in pairs {
+        let is_lit = sel.lit((from, to));
+        if is_lit {
+            if let Some(slot) = near_nodes.get_mut(from) {
+                *slot = true;
+            }
+            if let Some(slot) = near_nodes.get_mut(to) {
+                *slot = true;
+            }
+        }
+        let edge_state = if sel.cycle_view || sel.selected {
+            if is_lit {
+                "on"
+            } else {
+                "off"
+            }
+        } else {
+            ""
+        };
+        edges_by_pair.insert(
+            (from, to),
+            EdgeSelectionState {
+                edge_state,
+                lit: is_lit,
+                shared_path: sel.shared_edges.contains(&(from, to)),
+            },
+        );
+    }
+
     let node_patches = nodes
         .iter()
         .enumerate()
         .map(|(index, node)| {
-            let is_lit = sel.near(pairs, index);
+            let is_lit = near_nodes[index];
             let placed_cycle = plan_nodes.get(index).is_some_and(|p| p.cycle);
+            let changed =
+                node["changed"].as_u64().unwrap_or(0) > 0 || node_change_statuses[index].is_some();
             NodeSelectionState {
                 selected: sel.chosen == Some(index),
+                lit: is_lit,
                 dim: sel.selected && !is_lit,
                 shared_path: !sel.shared_edges.is_empty() && is_lit,
                 focus_target: focus_overlay.nodes.contains(&index),
+                changed,
+                failed: node["suspect"].as_u64().is_some(),
                 pressed: (sel.shared || sel.pattern_view).then_some(sel.chosen == Some(index)),
                 blast: blast[index],
                 radar_state: radar_box_state(
@@ -513,26 +539,6 @@ pub(super) fn compute_canvas_selection_patch(
         })
         .collect();
 
-    let mut edges_by_pair = HashMap::with_capacity(pairs.len());
-    for &(from, to) in pairs {
-        let edge_state = if sel.cycle_view || sel.selected {
-            if sel.lit((from, to)) {
-                "on"
-            } else {
-                "off"
-            }
-        } else {
-            ""
-        };
-        edges_by_pair.insert(
-            (from, to),
-            EdgeSelectionState {
-                edge_state,
-                shared_path: sel.shared_edges.contains(&(from, to)),
-            },
-        );
-    }
-
     let frame_targets = (0..frames.len())
         .map(|index| focus_overlay.frames.contains(&index))
         .collect();
@@ -543,6 +549,55 @@ pub(super) fn compute_canvas_selection_patch(
         frame_targets,
         focus: focus_overlay,
         selected_bbox,
+    }
+}
+
+/// Refreshes `DenseScene` visual selection/highlight/path/diff flags during an in-place patch
+/// so Canvas2D stays synchronized with DOM attributes.
+pub(super) fn refresh_dense_scene_for_patch(
+    scene: &mut graph_viewport::canvas2d::DenseScene,
+    pairs: &[(usize, usize)],
+    node_keys: &[String],
+    patch: &CanvasSelectionPatch,
+    overlay: &CanvasOverlayContext<'_>,
+) {
+    let has_traced = overlay.path_nodes.is_some_and(|pn| !pn.is_empty());
+    for dn in &mut scene.nodes {
+        let on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&dn.index));
+        if let Some(np) = patch.nodes.get(dn.index) {
+            dn.selected = np.selected;
+            dn.lit = np.lit || on_traced;
+            dn.dim = np.dim || (has_traced && !on_traced);
+            dn.changed = np.changed;
+            dn.failed = np.failed;
+        }
+        if let Some(pins) = overlay.pinned_positions {
+            dn.pinned = node_keys
+                .get(dn.index)
+                .is_some_and(|k| pins.contains_key(k));
+        }
+    }
+    for de in &mut scene.edges {
+        let Some(&(from, to)) = pairs.get(de.index) else {
+            continue;
+        };
+        let on_traced = overlay
+            .path_edges
+            .is_some_and(|pe| pe.contains(&(from, to)) || pe.contains(&(to, from)));
+        if let Some(ep) = patch.edges_by_pair.get(&(from, to)) {
+            let edge_state = if has_traced {
+                if on_traced {
+                    "on"
+                } else {
+                    "off"
+                }
+            } else {
+                ep.edge_state
+            };
+            de.on = edge_state == "on" || ep.shared_path || on_traced;
+            de.lit = ep.lit || on_traced;
+            de.dim = edge_state == "off";
+        }
     }
 }
 /// Renders a dependency map view using the default `"graph-map"` SVG ID prefix.
@@ -734,7 +789,8 @@ pub fn canvas_with_overlays(
     );
     let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
     let impact_lookup = ImpactLookup::from_sources(overlay.impact, overlay.changes, &nodes);
-    let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
+    let path_index = build_path_index(&nodes);
+    let at = |path: &V| lookup_path_index(&nodes, &path_index, path);
     // A link whose end is not drawn is not drawn either. Nor is, where
     // that was asked for, a link that a longer way already joins: without
     // those the picture holds fewer links that pass layers, and every box
@@ -746,23 +802,26 @@ pub fn canvas_with_overlays(
         vec![false; edges.len()]
     };
     left_out.resize(edges.len(), false);
-    let edges = edges
-        .iter()
-        .zip(&left_out)
-        .filter(|(edge, said)| !**said && at(&edge["from"]).is_some() && at(&edge["to"]).is_some())
-        .map(|(edge, _)| edge)
-        .collect::<Vec<_>>();
-    let pairs = edges
-        .iter()
-        .filter_map(|edge| Some((at(&edge["from"])?, at(&edge["to"])?)))
-        .collect::<Vec<_>>();
+    let mut filtered_edges = Vec::with_capacity(edges.len());
+    let mut pairs = Vec::with_capacity(edges.len());
+    for (edge, said) in edges.iter().zip(&left_out) {
+        if *said {
+            continue;
+        }
+        if let (Some(u), Some(v)) = (at(&edge["from"]), at(&edge["to"])) {
+            filtered_edges.push(edge);
+            pairs.push((u, v));
+        }
+    }
+    let edges = filtered_edges;
     let weighted = pairs
         .iter()
         .zip(&edges)
         .map(|((from, to), edge)| (*from, *to, edge["links"].as_u64().unwrap_or(1)))
         .collect::<Vec<_>>();
     // A folder that is spread out is a frame around what it holds.
-    let frame = |path: &V| frames.iter().position(|frame| &frame["path"] == path);
+    let frame_index = build_path_index(&frames);
+    let frame = |path: &V| lookup_path_index(&frames, &frame_index, path);
     let framed = Frames {
         of: nodes.iter().map(|node| frame(&node["holder"])).collect(),
         holder: frames.iter().map(|held| frame(&held["holder"])).collect(),
@@ -913,12 +972,23 @@ pub fn canvas_with_overlays(
                 _ => shared_edges.contains(&pair),
             }
     };
-    let near = |node| {
-        chosen == Some(node)
-            || pairs
-                .iter()
-                .any(|&(from, to)| (from == node || to == node) && lit((from, to)))
-    };
+    let mut near_nodes = vec![false; nodes.len()];
+    if let Some(chosen_idx) = chosen {
+        if chosen_idx < near_nodes.len() {
+            near_nodes[chosen_idx] = true;
+        }
+    }
+    for &(from, to) in &pairs {
+        if lit((from, to)) {
+            if let Some(slot) = near_nodes.get_mut(from) {
+                *slot = true;
+            }
+            if let Some(slot) = near_nodes.get_mut(to) {
+                *slot = true;
+            }
+        }
+    }
+    let near = |node: usize| near_nodes.get(node).copied().unwrap_or(false);
     // Among followed symbols a name too long for its box keeps its end,
     // where the method stands after its class.
     let named = names(view);
@@ -1084,7 +1154,7 @@ pub fn canvas_with_overlays(
     // What each box is joined with by links that are led through no layer:
     // the boxes it uses far away, and the boxes far away that use it.
     let mut far: Vec<(Vec<usize>, Vec<usize>)> = vec![(vec![], vec![]); nodes.len()];
-    for (wire_i, (wire, kinds)) in plan.wires.iter().zip(&wire_kinds).enumerate() {
+    for (wire, kinds) in plan.wires.iter().zip(&wire_kinds) {
         let edge = edges[wire.edge];
         let (links, guessed) = (
             edge["links"].as_u64().unwrap_or(0),
@@ -1231,30 +1301,18 @@ pub fn canvas_with_overlays(
         // the rules is always drawn.
         let portal = wire.portal && !against;
         if is_dense && !hidden {
-            let nums: Vec<f64> = wire
-                .path
-                .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse::<f64>().ok())
-                .collect();
-            let pts: Vec<(f64, f64)> = nums
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&[x, y]| (x, y))
-                .collect();
-            dense_edges.push(graph_viewport::canvas2d::DenseEdgeSpec {
-                index: wire_i,
-                pts,
-                weight: links.max(1),
-                guessed: guess,
+            dense_edges.push(graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
+                wire.edge,
+                &wire.path,
+                links.max(1),
+                guess,
                 against,
-                kind: arrow_kind.to_owned(),
-                on: edge_state == "on" || on_path,
-                lit: lit((from, to)),
-                dim: edge_state == "off",
+                arrow_kind.to_owned(),
+                edge_state == "on" || on_path,
+                lit((from, to)),
+                edge_state == "off",
                 portal,
-            });
+            ));
         }
         if !is_dense {
             html.push_str(&format!(
@@ -1526,6 +1584,11 @@ pub fn canvas_with_overlays(
     }
     let blast = blast_marks(view, &nodes);
     let mut dense_nodes = Vec::new();
+    let mut dense_node_htmls = if is_dense {
+        Vec::with_capacity(nodes.len())
+    } else {
+        Vec::new()
+    };
     let active_roving = overlay
         .roving_focus
         .filter(|i| *i < nodes.len())
@@ -1535,10 +1598,14 @@ pub fn canvas_with_overlays(
         let placed = &plan.nodes[index];
         if let Some(cone) = overlay.isolate_cone {
             if !cone.contains(&index) {
+                if is_dense {
+                    dense_node_htmls.push(String::new());
+                }
                 continue;
             }
         }
         let is_pinned = pinned_set.contains(&index);
+        let mut skip_offscreen_dom = false;
         if is_dense {
             let on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
             let lit_here = near(index);
@@ -1564,6 +1631,7 @@ pub fn canvas_with_overlays(
             if let Some(bounds) = overlay.viewport_bounds {
                 let is_important = chosen == Some(index)
                     || is_pinned
+                    || index == active_roving
                     || node["suspect"].as_u64().is_some()
                     || overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
                 if !is_important
@@ -1575,7 +1643,7 @@ pub fn canvas_with_overlays(
                         bounds,
                     )
                 {
-                    continue;
+                    skip_offscreen_dom = true;
                 }
             }
         }
@@ -2017,8 +2085,8 @@ pub fn canvas_with_overlays(
             || (overlay
                 .path_nodes
                 .is_some_and(|pn| !pn.is_empty() && !is_on_traced_path));
-        html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{badge_attrs}{pin_attr}{position}{node_path_attr} tabindex=\"{roving_tabindex}\" data-roving-index=\"{index}\" title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>",
+        let mut node_buf = format!(
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{badge_attrs}{pin_attr}{position}{node_path_attr} tabindex=\"{roving_tabindex}\" data-roving-index=\"{index}\" title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node_payload),
             escape(kind),
             opened && !symbol,
@@ -2029,6 +2097,7 @@ pub fn canvas_with_overlays(
             leaning(out, into),
             out > 0,
             into > 0,
+            if lit || is_on_traced_path { " data-lit=\"true\"" } else { "" },
             if end { " data-end=\"true\"" } else { "" },
             if both { " data-shared=\"true\"" } else { "" },
             if is_on_traced_path { " data-shared-path=\"true\"" } else { "" },
@@ -2045,7 +2114,7 @@ pub fn canvas_with_overlays(
             } else {
                 escape(&m::text(node, "name"))
             },
-        ));
+        );
         if changed > 0 {
             // A changed file carries Git's letter and a folder how many
             // changed. So does a symbol: the letter where its own lines
@@ -2070,20 +2139,20 @@ pub fn canvas_with_overlays(
                 }
                 None => count(changed),
             };
-            html.push_str(&format!(
+            node_buf.push_str(&format!(
                 "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{pill_text}</span>",
                 escape(&pill_kind),
             ));
         } else if let Some(status) = node_change_status {
             let (badge, _) = change_status_badge(status);
             if !badge.is_empty() {
-                html.push_str(&format!(
+                node_buf.push_str(&format!(
                     "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{badge}</span>",
                     escape(status)
                 ));
             }
         } else if folder {
-            html.push_str(&format!(
+            node_buf.push_str(&format!(
                 "<span class=\"graph-map-node-count\" aria-hidden=\"true\">{}</span>",
                 count(node["files"].as_u64().unwrap_or(0))
             ));
@@ -2091,16 +2160,23 @@ pub fn canvas_with_overlays(
         // The second line is the last of what a box holds: it is laid out
         // under the rest, and only where the picture is drawn large.
         if !detail.is_empty() {
-            html.push_str(&format!(
+            node_buf.push_str(&format!(
                 "<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{}</span>",
                 escape(&detail)
             ));
         }
         if !blast_attr.is_empty() {
-            html.push_str("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>");
+            node_buf.push_str("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>");
         }
-        html.push_str(&badges_strip);
-        html.push_str("</button>");
+        node_buf.push_str(&badges_strip);
+        node_buf.push_str("</button>");
+        if is_dense {
+            dense_node_htmls.push(node_buf.clone());
+        }
+        if skip_offscreen_dom {
+            continue;
+        }
+        html.push_str(&node_buf);
         if followed {
             html.push_str(&handles(
                 node,
@@ -2318,6 +2394,7 @@ pub fn canvas_with_overlays(
         plan_nodes: plan.nodes,
         plan_frames: plan.frames,
         dense_scene,
+        dense_node_htmls,
         node_keys,
         pairs,
         node_labels,
@@ -2916,7 +2993,19 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
 pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>, off: &KindsOff) -> String {
     let diff_info = LinkDiffInfo::from_view(view, impact);
     let (names, held) = link_names(view);
-    let at = |key: &V| names.iter().position(|(name, _)| &name["key"] == key);
+    let mut name_key_index: HashMap<&str, usize> = HashMap::with_capacity(names.len());
+    for (idx, (name, _)) in names.iter().enumerate() {
+        if let Some(k) = name["key"].as_str() {
+            name_key_index.entry(k).or_insert(idx);
+        }
+    }
+    let at = |key: &V| {
+        if let Some(s) = key.as_str() {
+            name_key_index.get(s).copied()
+        } else {
+            names.iter().position(|(name, _)| &name["key"] == key)
+        }
+    };
     let edges = m::array(&view["edges"]);
     let pairs = edges
         .iter()

@@ -9212,3 +9212,205 @@ fn modal_lenses_side_tabs_paged_paths_and_memory_bridge_follow_contract() {
     );
     assert_no_inline_hex_colors(&bridge);
 }
+
+#[test]
+fn dense_canvas_captures_node_htmls_preserves_wire_edge_indices_and_refreshes_scene() {
+    let mut nodes = Vec::with_capacity(185);
+    for i in 0..185 {
+        nodes.push(json!({
+            "path": format!("src/n{i}.php"),
+            "name": format!("N{i}.php"),
+            "layer": i % 3,
+            "in": 1,
+            "out": 1,
+        }));
+    }
+    let edges = json!([
+        {"from": "src/n0.php", "to": "src/n1.php", "links": 2},
+        {"from": "src/n1.php", "to": "src/n2.php", "links": 2},
+        // Corridor/skip edge 0 -> 2: filtered when hide_transitive = true, or kept when hide_transitive = false
+        {"from": "src/n0.php", "to": "src/n2.php", "links": 1}
+    ]);
+    let view = json!({
+        "nodes": nodes,
+        "edges": edges,
+        "frames": [],
+        "pattern": {"declared": false},
+    });
+    // Tight viewport near origin; node 184 lies well offscreen while roving_focus = Some(184).
+    let tight_bounds = ViewportBounds {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 260.0,
+        max_y: 180.0,
+    };
+    let overlay = CanvasOverlayContext {
+        live_focus: None,
+        changes: None,
+        impact: None,
+        links_off: [false; 7],
+        hide_transitive: false,
+        cone: (0, 0),
+        pinned_positions: None,
+        path_nodes: None,
+        path_edges: None,
+        isolate_cone: None,
+        viewport_bounds: Some(tight_bounds),
+        roving_focus: Some(184),
+    };
+    let rendered = canvas_with_overlays(&view, "graph-map", overlay);
+    assert_eq!(rendered.dense_node_htmls.len(), 185);
+    let scene = rendered.dense_scene.as_ref().expect("dense_scene expected");
+    assert_eq!(scene.nodes.len(), 185);
+    // Roving focus node (184) must stay mounted even when offscreen, whereas nearby offscreen node 183 is skipped from initial HTML.
+    assert!(
+        rendered.html.contains("data-n=\"184\"") && rendered.html.contains("tabindex=\"0\""),
+        "roving focus node must stay mounted in dense html"
+    );
+    assert!(
+        !rendered.html.contains("data-n=\"183\""),
+        "offscreen non-important node should be omitted from initial html"
+    );
+    assert!(
+        rendered.dense_node_htmls[183].contains("data-n=\"183\""),
+        "cached dense_node_htmls must retain omitted node HTML for reveal-on-pan"
+    );
+
+    // Every DenseEdgeSpec index points back into pairs (valid even for multi-segment wires).
+    let pairs = pairs_for_view(
+        &view,
+        &CanvasOverlayContext {
+            live_focus: None,
+            changes: None,
+            impact: None,
+            links_off: [false; 7],
+            hide_transitive: false,
+            cone: (0, 0),
+            pinned_positions: None,
+            path_nodes: None,
+            path_edges: None,
+            isolate_cone: None,
+            viewport_bounds: None,
+            roving_focus: None,
+        },
+    );
+    assert!(scene.edges.iter().all(|e| e.index < pairs.len()));
+    assert!(
+        scene.edges.iter().any(|e| {
+            e.cmds
+                .iter()
+                .any(|c| matches!(c, graph_viewport::canvas2d::DensePathCmd::Line(_, _)))
+                && e.cmds
+                    .iter()
+                    .any(|c| matches!(c, graph_viewport::canvas2d::DensePathCmd::Curve { .. }))
+        }),
+        "skip-layer corridor wire should retain MoveTo+CurveTo+LineTo segments"
+    );
+
+    // Patch selection + traced path onto cached DenseScene in place.
+    let mut path_view = view.clone();
+    path_view["focus"] = json!({"path": "src/n0.php"});
+    let mut path_nodes = BTreeSet::new();
+    path_nodes.insert(0);
+    path_nodes.insert(1);
+    let mut path_edges = BTreeSet::new();
+    path_edges.insert((0, 1));
+    let mut pins = BTreeMap::new();
+    pins.insert("src/n0.php".to_owned(), (90.0, 90.0));
+    let patch_overlay = CanvasOverlayContext {
+        live_focus: None,
+        changes: None,
+        impact: None,
+        links_off: [false; 7],
+        hide_transitive: false,
+        cone: (0, 0),
+        pinned_positions: Some(&pins),
+        path_nodes: Some(&path_nodes),
+        path_edges: Some(&path_edges),
+        isolate_cone: None,
+        viewport_bounds: None,
+        roving_focus: None,
+    };
+    let patch = compute_canvas_selection_patch(
+        &path_view,
+        &rendered.plan_nodes,
+        &rendered.plan_frames,
+        &pairs,
+        &patch_overlay,
+    );
+    let mut updated_scene = scene.clone();
+    refresh_dense_scene_for_patch(
+        &mut updated_scene,
+        &pairs,
+        &rendered.node_keys,
+        &patch,
+        &patch_overlay,
+    );
+    assert!(updated_scene.nodes[0].selected);
+    assert!(updated_scene.nodes[0].lit);
+    assert!(updated_scene.nodes[0].pinned);
+    assert!(updated_scene.nodes[1].lit);
+    assert!(updated_scene.nodes[2].dim);
+    assert!(updated_scene
+        .edges
+        .iter()
+        .any(|e| pairs[e.index] == (0, 1) && e.on && e.lit));
+    assert!(updated_scene
+        .edges
+        .iter()
+        .any(|e| pairs[e.index] == (1, 2) && e.dim && !e.on));
+}
+
+#[test]
+fn compare_base_range_targets_and_open_full_state_transfer_work() {
+    let range_state = json!({
+        "target": "head_sha",
+        "compare_base": "base_sha",
+        "traced_path": {"from": "a.php", "to": "b.php"},
+        "isolate_active": true,
+        "isolate_depth": 3,
+        "failing": ["tests/AuthTest.php"],
+        "roving_focus": 4,
+        "side_tab": "analysis",
+        "patterns": true,
+        "history": false,
+        "modules": true,
+        "no_incoming": true,
+        "lens_tests": true,
+        "fit": false,
+    });
+    assert_eq!(effective_target(&range_state), "range:base_sha..head_sha");
+    assert_eq!(effective_target_from("range:x..y", "ignored"), "range:x..y");
+    assert_eq!(effective_target_from("head_sha", ""), "head_sha");
+
+    let map_url = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &range_state, false);
+    assert!(
+        map_url.contains("target=range%3Abase_sha..head_sha"),
+        "scoped map path must use range:<base>..<head>: {map_url}"
+    );
+    let changes_url =
+        build_scoped_changes_path_for_state(&GraphTargetScope::single("proj-1"), &range_state, "");
+    assert!(
+        changes_url.contains("target=range%3Abase_sha..head_sha"),
+        "scoped changes path must use range:<base>..<head>: {changes_url}"
+    );
+    assert_eq!(
+        active_modal_lens(&json!({"compare_base": "b", "target": "h"}), &json!({})),
+        "changes"
+    );
+
+    let transferred = transfer_surface_state_to_modal(&range_state, fresh("head_sha"));
+    assert_eq!(transferred["traced_path"]["from"], json!("a.php"));
+    assert_eq!(transferred["traced_path"]["to"], json!("b.php"));
+    assert_eq!(transferred["isolate_active"], json!(true));
+    assert_eq!(transferred["isolate_depth"], json!(3));
+    assert_eq!(transferred["failing"], json!(["tests/AuthTest.php"]));
+    assert_eq!(transferred["roving_focus"], json!(4));
+    assert_eq!(transferred["compare_base"], json!("base_sha"));
+    assert_eq!(transferred["side_tab"], json!("analysis"));
+    assert_eq!(transferred["patterns"], json!(true));
+    assert_eq!(transferred["modules"], json!(true));
+    assert_eq!(transferred["no_incoming"], json!(true));
+    assert_eq!(transferred["lens_tests"], json!(true));
+    assert_eq!(transferred["fit"], json!(false));
+}

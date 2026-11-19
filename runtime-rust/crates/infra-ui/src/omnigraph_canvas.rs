@@ -104,6 +104,8 @@ pub struct RenderedCanvas {
     pub dense_scene: Option<graph_viewport::canvas2d::DenseScene>,
     pub node_rects: Vec<(String, f64, f64, f64, f64)>,
     pub node_edges: Vec<(usize, usize)>,
+    pub node_htmls: Vec<String>,
+    pub edge_endpoints: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -599,6 +601,8 @@ pub fn render_constellation(
             dense_scene: None,
             node_rects: Vec::new(),
             node_edges: Vec::new(),
+            node_htmls: Vec::new(),
+            edge_endpoints: Vec::new(),
         };
     }
 
@@ -766,21 +770,30 @@ pub fn render_constellation(
 
     html.push_str(&render_orbital_guides(&placed_nodes, width, height));
 
+    let edge_endpoints: Vec<(String, String)> = routed
+        .iter()
+        .map(|(edge, _)| (edge.from.clone(), edge.to.clone()))
+        .collect();
     let dense_scene = if is_dense {
         let dense_edges = routed
             .iter()
             .enumerate()
-            .map(|(i, (edge, r))| graph_viewport::canvas2d::DenseEdgeSpec {
-                index: i,
-                pts: vec![r.p0, r.p1, r.p2, r.p3],
-                weight: if r.on_path { 3 } else { 1 },
-                guessed: false,
-                against: false,
-                kind: edge.arrow_key.clone(),
-                on: r.selected || r.on_path,
-                lit: r.lit,
-                dim: r.dimmed,
-                portal: false,
+            .map(|(i, (edge, r))| {
+                graph_viewport::canvas2d::DenseEdgeSpec::from_cubic(
+                    i,
+                    r.p0,
+                    r.p1,
+                    r.p2,
+                    r.p3,
+                    if r.on_path { 3 } else { 1 },
+                    false,
+                    false,
+                    edge.arrow_key.clone(),
+                    r.selected || r.on_path,
+                    r.lit,
+                    r.dimmed,
+                    false,
+                )
             })
             .collect();
         let dense_nodes = placed_nodes
@@ -896,6 +909,12 @@ pub fn render_constellation(
         .or(selected_id)
         .or_else(|| placed_nodes.first().map(|n| n.id.as_str()));
 
+    let mut node_htmls = if is_dense {
+        Vec::with_capacity(placed_nodes.len())
+    } else {
+        Vec::new()
+    };
+
     // Interactive HTML node cards (viewport-virtualized in Dense tier when bounds are known).
     for (idx, node) in placed_nodes.iter().enumerate() {
         let is_selected = selected_id == Some(node.id.as_str());
@@ -918,17 +937,8 @@ pub fn render_constellation(
                 || node.y + node.h < vy - pad
                 || node.y > vy + vh + pad
         });
-        if is_dense
-            && offscreen
-            && !is_selected
-            && !is_neighbor
-            && !is_highlighted
-            && !node.user_pinned
-        {
-            continue;
-        }
         let is_roving_active = active_roving_id == Some(node.id.as_str());
-        html.push_str(&render_constellation_node(
+        let node_html = render_constellation_node(
             node,
             idx,
             is_selected,
@@ -937,7 +947,21 @@ pub fn render_constellation(
             is_dimmed,
             offscreen,
             is_roving_active,
-        ));
+        );
+        if is_dense {
+            node_htmls.push(node_html.clone());
+        }
+        if is_dense
+            && offscreen
+            && !is_selected
+            && !is_neighbor
+            && !is_highlighted
+            && !node.user_pinned
+            && !is_roving_active
+        {
+            continue;
+        }
+        html.push_str(&node_html);
     }
 
     html.push_str("</div>");
@@ -964,6 +988,8 @@ pub fn render_constellation(
         dense_scene,
         node_rects,
         node_edges,
+        node_htmls,
+        edge_endpoints,
     }
 }
 
@@ -5089,6 +5115,60 @@ mod tests {
         assert_eq!(
             constellation_structure_digest(&graph, &filter),
             constellation_structure_digest(&graph, &sel_filter)
+        );
+    }
+
+    #[test]
+    fn dense_constellation_keeps_cubic_curves_node_htmls_and_offscreen_roving_node() {
+        let mut atoms = Vec::with_capacity(190);
+        let mut links = Vec::with_capacity(189);
+        for i in 0..190 {
+            atoms.push(json!({
+                "id": format!("a-{i}"),
+                "kind": "insight",
+                "title": format!("Atom {i}"),
+                "branch": "main",
+            }));
+            if i > 0 {
+                links.push(json!({
+                    "from": format!("a-{}", i - 1),
+                    "to": format!("a-{i}"),
+                    "relation": "follows",
+                }));
+            }
+        }
+        let graph = json!({
+            "active_branch": "main",
+            "sessions": [],
+            "atoms": atoms,
+            "files": [],
+            "symbols": [],
+            "links": links,
+        });
+        let rendered = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                focused_id: Some("a-189".to_owned()),
+                viewport_bounds: Some((-10.0, -10.0, 10.0, 10.0)),
+                paged_count: 10,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        let scene = rendered.dense_scene.as_ref().expect("dense scene");
+        assert_eq!(rendered.node_htmls.len(), rendered.node_count);
+        assert_eq!(rendered.edge_endpoints.len(), rendered.edge_count);
+        assert!(
+            scene.edges.iter().all(|e| e
+                .cmds
+                .iter()
+                .any(|c| matches!(c, graph_viewport::canvas2d::DensePathCmd::Curve { .. }))),
+            "dense constellation edges should preserve cubic Bezier commands"
+        );
+        assert!(
+            rendered.html.contains("data-node-id=\"a-189\"")
+                && rendered.html.contains("tabindex=\"0\""),
+            "offscreen roving focus node must remain mounted in dense constellation"
         );
     }
 }

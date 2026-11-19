@@ -8,7 +8,7 @@
 use crate::dom;
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::Element;
@@ -1235,8 +1235,153 @@ pub fn announce_live(element_id: &str, message: &str) {
     }
 }
 
+/// Pure reconciliation plan for dense viewport DOM culling / reveal-on-pan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewportReconcilePlan {
+    pub to_mount: Vec<usize>,
+    pub to_unmount: Vec<usize>,
+    pub to_offscreen: Vec<(usize, bool)>,
+}
+
+/// Returns true when rectangle `(x, y, w, h)` intersects `(min_x, min_y, max_x, max_y)`.
+pub fn rect_intersects_bounds(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    bounds: (f64, f64, f64, f64),
+) -> bool {
+    x + w >= bounds.0 && x <= bounds.2 && y + h >= bounds.1 && y <= bounds.3
+}
+
+/// Computes world-space viewport bounds `(min_x, min_y, max_x, max_y)` with margin.
+pub fn world_viewport_bounds(
+    cam: Camera,
+    viewport: (f64, f64),
+    margin: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    if !(cam.scale.is_finite() && cam.scale > 0.0 && viewport.0 > 0.0 && viewport.1 > 0.0) {
+        return None;
+    }
+    let pad = margin.max(0.0);
+    Some((
+        (-cam.tx / cam.scale) - pad,
+        (-cam.ty / cam.scale) - pad,
+        (-cam.tx + viewport.0) / cam.scale + pad,
+        (-cam.ty + viewport.1) / cam.scale + pad,
+    ))
+}
+
+/// Plans which nodes to mount, unmount (with hysteresis), or toggle `data-offscreen`
+/// on pan/zoom so dense graphs reveal offscreen nodes without leaking unbounded DOM nodes.
+pub fn plan_viewport_reconcile(
+    rects: &[(f64, f64, f64, f64)],
+    mounted: &[(usize, bool)],
+    visible_bounds: (f64, f64, f64, f64),
+    mount_bounds: (f64, f64, f64, f64),
+    unmount_bounds: (f64, f64, f64, f64),
+    force_mount: &[usize],
+) -> ViewportReconcilePlan {
+    let mut mounted_keep: HashMap<usize, bool> = HashMap::with_capacity(mounted.len());
+    for &(idx, keep) in mounted {
+        mounted_keep
+            .entry(idx)
+            .and_modify(|prev| *prev |= keep)
+            .or_insert(keep);
+    }
+    let force_set: HashSet<usize> = force_mount.iter().copied().collect();
+    let mut plan = ViewportReconcilePlan::default();
+
+    for (idx, &(x, y, w, h)) in rects.iter().enumerate() {
+        let forced = force_set.contains(&idx);
+        let in_mount = rect_intersects_bounds(x, y, w, h, mount_bounds);
+        let in_vis = rect_intersects_bounds(x, y, w, h, visible_bounds);
+        if let Some(&keep) = mounted_keep.get(&idx) {
+            let offscreen = !forced && !keep && !in_vis;
+            if !forced && !keep && !rect_intersects_bounds(x, y, w, h, unmount_bounds) {
+                plan.to_unmount.push(idx);
+            } else {
+                plan.to_offscreen.push((idx, offscreen));
+            }
+        } else if forced || in_mount {
+            plan.to_mount.push(idx);
+        }
+    }
+
+    for &(idx, _) in mounted {
+        if idx >= rects.len() {
+            plan.to_unmount.push(idx);
+        }
+    }
+    plan
+}
+
+/// Parses an HTML fragment containing sibling node elements and appends them into `plane`,
+/// returning the appended elements so the caller can sync attributes on them in one pass.
+#[cfg(target_arch = "wasm32")]
+pub fn append_html_elements(plane: &Element, batch_html: &str) -> Vec<Element> {
+    if batch_html.is_empty() {
+        return Vec::new();
+    }
+    let Ok(wrapper) = dom::document().create_element("div") else {
+        return Vec::new();
+    };
+    wrapper.set_inner_html(batch_html);
+    let mut inserted = Vec::new();
+    while let Some(child) = wrapper.first_element_child() {
+        if plane.append_child(&child).is_ok() {
+            inserted.push(child);
+        } else {
+            child.remove();
+        }
+    }
+    inserted
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn append_html_elements(_plane: &Element, _batch_html: &str) -> Vec<Element> {
+    Vec::new()
+}
+
+pub(crate) fn hash_json_value<H: std::hash::Hasher>(val: &Value, state: &mut H) {
+    use std::hash::Hash;
+    match val {
+        Value::Null => 0u8.hash(state),
+        Value::Bool(b) => {
+            1u8.hash(state);
+            b.hash(state);
+        }
+        Value::Number(n) => {
+            2u8.hash(state);
+            n.to_string().hash(state);
+        }
+        Value::String(s) => {
+            3u8.hash(state);
+            s.hash(state);
+        }
+        Value::Array(items) => {
+            4u8.hash(state);
+            items.len().hash(state);
+            for item in items {
+                hash_json_value(item, state);
+            }
+        }
+        Value::Object(map) => {
+            5u8.hash(state);
+            map.len().hash(state);
+            for (k, v) in map {
+                k.hash(state);
+                hash_json_value(v, state);
+            }
+        }
+    }
+}
+
 pub(crate) mod canvas2d {
     use super::*;
+
+    const NODE_HIT_PAD: f64 = 2.0;
+    const EDGE_HIT_PAD: f64 = 12.0;
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct DenseNodeSpec {
@@ -1255,10 +1400,22 @@ pub(crate) mod canvas2d {
         pub failed: bool,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum DensePathCmd {
+        Move(f64, f64),
+        Line(f64, f64),
+        Curve {
+            c1: (f64, f64),
+            c2: (f64, f64),
+            to: (f64, f64),
+        },
+    }
+
     #[derive(Clone, Debug, PartialEq)]
     pub struct DenseEdgeSpec {
         pub index: usize,
         pub pts: Vec<(f64, f64)>,
+        pub cmds: Vec<DensePathCmd>,
         pub weight: u64,
         pub guessed: bool,
         pub against: bool,
@@ -1267,6 +1424,324 @@ pub(crate) mod canvas2d {
         pub lit: bool,
         pub dim: bool,
         pub portal: bool,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    impl DenseEdgeSpec {
+        pub fn from_svg_path(
+            index: usize,
+            path_d: &str,
+            weight: u64,
+            guessed: bool,
+            against: bool,
+            kind: String,
+            on: bool,
+            lit: bool,
+            dim: bool,
+            portal: bool,
+        ) -> Self {
+            let cmds = parse_svg_path_cmds(path_d);
+            let pts = sample_cmds_polyline(&cmds);
+            Self {
+                index,
+                pts,
+                cmds,
+                weight,
+                guessed,
+                against,
+                kind,
+                on,
+                lit,
+                dim,
+                portal,
+            }
+        }
+
+        pub fn from_cubic(
+            index: usize,
+            p0: (f64, f64),
+            p1: (f64, f64),
+            p2: (f64, f64),
+            p3: (f64, f64),
+            weight: u64,
+            guessed: bool,
+            against: bool,
+            kind: String,
+            on: bool,
+            lit: bool,
+            dim: bool,
+            portal: bool,
+        ) -> Self {
+            let cmds = vec![
+                DensePathCmd::Move(p0.0, p0.1),
+                DensePathCmd::Curve {
+                    c1: p1,
+                    c2: p2,
+                    to: p3,
+                },
+            ];
+            let pts = sample_cmds_polyline(&cmds);
+            Self {
+                index,
+                pts,
+                cmds,
+                weight,
+                guessed,
+                against,
+                kind,
+                on,
+                lit,
+                dim,
+                portal,
+            }
+        }
+    }
+
+    /// Parses SVG `M`/`m`/`L`/`l`/`H`/`h`/`V`/`v`/`C`/`c`/`Z`/`z` path commands into absolute `DensePathCmd`s.
+    pub fn parse_svg_path_cmds(path_d: &str) -> Vec<DensePathCmd> {
+        let bytes = path_d.as_bytes();
+        let mut i = 0usize;
+        let len = bytes.len();
+        let skip_sep = |idx: &mut usize| {
+            while *idx < len && (bytes[*idx].is_ascii_whitespace() || bytes[*idx] == b',') {
+                *idx += 1;
+            }
+        };
+        let next_num = |idx: &mut usize| -> Option<f64> {
+            skip_sep(idx);
+            if *idx >= len || bytes[*idx].is_ascii_alphabetic() {
+                return None;
+            }
+            let start = *idx;
+            if bytes[*idx] == b'+' || bytes[*idx] == b'-' {
+                *idx += 1;
+            }
+            let mut has_digit = false;
+            while *idx < len && bytes[*idx].is_ascii_digit() {
+                has_digit = true;
+                *idx += 1;
+            }
+            if *idx < len && bytes[*idx] == b'.' {
+                *idx += 1;
+                while *idx < len && bytes[*idx].is_ascii_digit() {
+                    has_digit = true;
+                    *idx += 1;
+                }
+            }
+            if !has_digit {
+                *idx = start;
+                return None;
+            }
+            if *idx < len && (bytes[*idx] == b'e' || bytes[*idx] == b'E') {
+                let exp_pos = *idx;
+                *idx += 1;
+                if *idx < len && (bytes[*idx] == b'+' || bytes[*idx] == b'-') {
+                    *idx += 1;
+                }
+                let mut exp_digits = false;
+                while *idx < len && bytes[*idx].is_ascii_digit() {
+                    exp_digits = true;
+                    *idx += 1;
+                }
+                if !exp_digits {
+                    *idx = exp_pos;
+                }
+            }
+            path_d[start..*idx].parse::<f64>().ok()
+        };
+
+        let mut cmds = Vec::new();
+        let mut cur = (0.0_f64, 0.0_f64);
+        let mut start_pt = (0.0_f64, 0.0_f64);
+        let mut active_cmd: Option<u8> = None;
+
+        while i < len {
+            skip_sep(&mut i);
+            if i >= len {
+                break;
+            }
+            if bytes[i].is_ascii_alphabetic() {
+                let cmd = bytes[i];
+                i += 1;
+                if cmd == b'Z' || cmd == b'z' {
+                    if (cur.0 - start_pt.0).abs() > 1e-6 || (cur.1 - start_pt.1).abs() > 1e-6 {
+                        cmds.push(DensePathCmd::Line(start_pt.0, start_pt.1));
+                        cur = start_pt;
+                    }
+                    active_cmd = None;
+                } else {
+                    active_cmd = Some(cmd);
+                }
+                continue;
+            }
+            let Some(cmd) = active_cmd else {
+                break;
+            };
+            match cmd {
+                b'M' | b'm' => {
+                    let (Some(x), Some(y)) = (next_num(&mut i), next_num(&mut i)) else {
+                        break;
+                    };
+                    let pt = if cmd == b'm' {
+                        (cur.0 + x, cur.1 + y)
+                    } else {
+                        (x, y)
+                    };
+                    cmds.push(DensePathCmd::Move(pt.0, pt.1));
+                    cur = pt;
+                    start_pt = pt;
+                    active_cmd = Some(if cmd == b'm' { b'l' } else { b'L' });
+                }
+                b'L' | b'l' => {
+                    let (Some(x), Some(y)) = (next_num(&mut i), next_num(&mut i)) else {
+                        break;
+                    };
+                    let pt = if cmd == b'l' {
+                        (cur.0 + x, cur.1 + y)
+                    } else {
+                        (x, y)
+                    };
+                    cmds.push(DensePathCmd::Line(pt.0, pt.1));
+                    cur = pt;
+                }
+                b'H' | b'h' => {
+                    let Some(x) = next_num(&mut i) else {
+                        break;
+                    };
+                    let nx = if cmd == b'h' { cur.0 + x } else { x };
+                    cur = (nx, cur.1);
+                    cmds.push(DensePathCmd::Line(cur.0, cur.1));
+                }
+                b'V' | b'v' => {
+                    let Some(y) = next_num(&mut i) else {
+                        break;
+                    };
+                    let ny = if cmd == b'v' { cur.1 + y } else { y };
+                    cur = (cur.0, ny);
+                    cmds.push(DensePathCmd::Line(cur.0, cur.1));
+                }
+                b'C' | b'c' => {
+                    let (Some(x1), Some(y1), Some(x2), Some(y2), Some(x), Some(y)) = (
+                        next_num(&mut i),
+                        next_num(&mut i),
+                        next_num(&mut i),
+                        next_num(&mut i),
+                        next_num(&mut i),
+                        next_num(&mut i),
+                    ) else {
+                        break;
+                    };
+                    let (c1, c2, to) = if cmd == b'c' {
+                        (
+                            (cur.0 + x1, cur.1 + y1),
+                            (cur.0 + x2, cur.1 + y2),
+                            (cur.0 + x, cur.1 + y),
+                        )
+                    } else {
+                        ((x1, y1), (x2, y2), (x, y))
+                    };
+                    cmds.push(DensePathCmd::Curve { c1, c2, to });
+                    cur = to;
+                }
+                _ => {
+                    let _ = next_num(&mut i);
+                }
+            }
+        }
+        cmds
+    }
+
+    fn sample_cubic_into(
+        p0: (f64, f64),
+        c1: (f64, f64),
+        c2: (f64, f64),
+        p3: (f64, f64),
+        out: &mut Vec<(f64, f64)>,
+    ) {
+        let poly_len = (c1.0 - p0.0).hypot(c1.1 - p0.1)
+            + (c2.0 - c1.0).hypot(c2.1 - c1.1)
+            + (p3.0 - c2.0).hypot(p3.1 - c2.1);
+        let steps = ((poly_len / 12.0).ceil() as usize).clamp(8, 32);
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            let mt = 1.0 - t;
+            let b0 = mt * mt * mt;
+            let b1 = 3.0 * mt * mt * t;
+            let b2 = 3.0 * mt * t * t;
+            let b3 = t * t * t;
+            out.push((
+                b0 * p0.0 + b1 * c1.0 + b2 * c2.0 + b3 * p3.0,
+                b0 * p0.1 + b1 * c1.1 + b2 * c2.1 + b3 * p3.1,
+            ));
+        }
+    }
+
+    /// Samples a sequence of `DensePathCmd`s into an ordered polyline along the actual curves.
+    pub fn sample_cmds_polyline(cmds: &[DensePathCmd]) -> Vec<(f64, f64)> {
+        let mut pts = Vec::new();
+        let mut cur = (0.0_f64, 0.0_f64);
+        for cmd in cmds {
+            match *cmd {
+                DensePathCmd::Move(x, y) => {
+                    cur = (x, y);
+                    if pts.last().copied() != Some(cur) {
+                        pts.push(cur);
+                    }
+                }
+                DensePathCmd::Line(x, y) => {
+                    cur = (x, y);
+                    pts.push(cur);
+                }
+                DensePathCmd::Curve { c1, c2, to } => {
+                    if pts.is_empty() {
+                        pts.push(cur);
+                    }
+                    sample_cubic_into(cur, c1, c2, to, &mut pts);
+                    cur = to;
+                }
+            }
+        }
+        pts
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn cmds_bounds(cmds: &[DensePathCmd]) -> Option<(f64, f64, f64, f64)> {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut push = |px: f64, py: f64| {
+            min_x = min_x.min(px);
+            min_y = min_y.min(py);
+            max_x = max_x.max(px);
+            max_y = max_y.max(py);
+        };
+        for cmd in cmds {
+            match *cmd {
+                DensePathCmd::Move(x, y) | DensePathCmd::Line(x, y) => push(x, y),
+                DensePathCmd::Curve { c1, c2, to } => {
+                    push(c1.0, c1.1);
+                    push(c2.0, c2.1);
+                    push(to.0, to.1);
+                }
+            }
+        }
+        min_x.is_finite().then_some((min_x, min_y, max_x, max_y))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn pts_bounds(pts: &[(f64, f64)]) -> Option<(f64, f64, f64, f64)> {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for &(px, py) in pts {
+            min_x = min_x.min(px);
+            min_y = min_y.min(py);
+            max_x = max_x.max(px);
+            max_y = max_y.max(py);
+        }
+        min_x.is_finite().then_some((min_x, min_y, max_x, max_y))
     }
 
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -1297,10 +1772,10 @@ pub(crate) mod canvas2d {
             for node in &scene.nodes {
                 let slot = node_rects.len();
                 node_rects.push((node.index, node.x, node.y, node.w, node.h));
-                let x0 = (node.x / cell).floor() as i32;
-                let x1 = ((node.x + node.w) / cell).floor() as i32;
-                let y0 = (node.y / cell).floor() as i32;
-                let y1 = ((node.y + node.h) / cell).floor() as i32;
+                let x0 = ((node.x - NODE_HIT_PAD) / cell).floor() as i32;
+                let x1 = ((node.x + node.w + NODE_HIT_PAD) / cell).floor() as i32;
+                let y0 = ((node.y - NODE_HIT_PAD) / cell).floor() as i32;
+                let y1 = ((node.y + node.h + NODE_HIT_PAD) / cell).floor() as i32;
                 for gx in x0..=x1 {
                     for gy in y0..=y1 {
                         node_cells.entry((gx, gy)).or_default().push(slot);
@@ -1309,30 +1784,43 @@ pub(crate) mod canvas2d {
             }
 
             for edge in &scene.edges {
-                if edge.pts.len() < 2 {
+                let sampled = if !edge.cmds.is_empty() {
+                    sample_cmds_polyline(&edge.cmds)
+                } else if edge.pts.len() == 4 {
+                    sample_cmds_polyline(&[
+                        DensePathCmd::Move(edge.pts[0].0, edge.pts[0].1),
+                        DensePathCmd::Curve {
+                            c1: edge.pts[1],
+                            c2: edge.pts[2],
+                            to: edge.pts[3],
+                        },
+                    ])
+                } else {
+                    edge.pts.clone()
+                };
+                if sampled.len() < 2 {
                     continue;
                 }
                 let slot = edge_polys.len();
-                let mut min_x = f64::INFINITY;
-                let mut min_y = f64::INFINITY;
-                let mut max_x = f64::NEG_INFINITY;
-                let mut max_y = f64::NEG_INFINITY;
-                for &(px, py) in &edge.pts {
-                    min_x = min_x.min(px);
-                    min_y = min_y.min(py);
-                    max_x = max_x.max(px);
-                    max_y = max_y.max(py);
-                }
-                edge_polys.push((edge.index, edge.pts.clone()));
-                let pad = 10.0;
-                let x0 = ((min_x - pad) / cell).floor() as i32;
-                let x1 = ((max_x + pad) / cell).floor() as i32;
-                let y0 = ((min_y - pad) / cell).floor() as i32;
-                let y1 = ((max_y + pad) / cell).floor() as i32;
-                for gx in x0..=x1 {
-                    for gy in y0..=y1 {
-                        edge_cells.entry((gx, gy)).or_default().push(slot);
+                let mut touched: BTreeSet<(i32, i32)> = BTreeSet::new();
+                for pair in sampled.windows(2) {
+                    let min_x = pair[0].0.min(pair[1].0);
+                    let max_x = pair[0].0.max(pair[1].0);
+                    let min_y = pair[0].1.min(pair[1].1);
+                    let max_y = pair[0].1.max(pair[1].1);
+                    let x0 = ((min_x - EDGE_HIT_PAD) / cell).floor() as i32;
+                    let x1 = ((max_x + EDGE_HIT_PAD) / cell).floor() as i32;
+                    let y0 = ((min_y - EDGE_HIT_PAD) / cell).floor() as i32;
+                    let y1 = ((max_y + EDGE_HIT_PAD) / cell).floor() as i32;
+                    for gx in x0..=x1 {
+                        for gy in y0..=y1 {
+                            touched.insert((gx, gy));
+                        }
                     }
+                }
+                edge_polys.push((edge.index, sampled));
+                for key in touched {
+                    edge_cells.entry(key).or_default().push(slot);
                 }
             }
 
@@ -1351,10 +1839,10 @@ pub(crate) mod canvas2d {
             if let Some(slots) = self.node_cells.get(&(gx, gy)) {
                 for &slot in slots.iter().rev() {
                     let (idx, x, y, w, h) = self.node_rects[slot];
-                    if world_x >= x - 2.0
-                        && world_x <= x + w + 2.0
-                        && world_y >= y - 2.0
-                        && world_y <= y + h + 2.0
+                    if world_x >= x - NODE_HIT_PAD
+                        && world_x <= x + w + NODE_HIT_PAD
+                        && world_y >= y - NODE_HIT_PAD
+                        && world_y <= y + h + NODE_HIT_PAD
                     {
                         return Some((0, idx));
                     }
@@ -1362,13 +1850,23 @@ pub(crate) mod canvas2d {
             }
             let tol_sq = tol * tol;
             let mut best_edge: Option<(usize, f64)> = None;
-            if let Some(slots) = self.edge_cells.get(&(gx, gy)) {
-                for &slot in slots {
-                    let (idx, ref pts) = self.edge_polys[slot];
-                    for pair in pts.windows(2) {
-                        let d2 = point_to_segment_dist_sq(world_x, world_y, pair[0], pair[1]);
-                        if d2 <= tol_sq && best_edge.is_none_or(|(_, prev)| d2 < prev) {
-                            best_edge = Some((idx, d2));
+            let extra = (tol - EDGE_HIT_PAD).max(0.0);
+            let ex0 = ((world_x - extra) / self.cell_size).floor() as i32;
+            let ex1 = ((world_x + extra) / self.cell_size).floor() as i32;
+            let ey0 = ((world_y - extra) / self.cell_size).floor() as i32;
+            let ey1 = ((world_y + extra) / self.cell_size).floor() as i32;
+            for cx in ex0..=ex1 {
+                for cy in ey0..=ey1 {
+                    if let Some(slots) = self.edge_cells.get(&(cx, cy)) {
+                        for &slot in slots {
+                            let (idx, ref pts) = self.edge_polys[slot];
+                            for pair in pts.windows(2) {
+                                let d2 =
+                                    point_to_segment_dist_sq(world_x, world_y, pair[0], pair[1]);
+                                if d2 <= tol_sq && best_edge.is_none_or(|(_, prev)| d2 < prev) {
+                                    best_edge = Some((idx, d2));
+                                }
+                            }
                         }
                     }
                 }
@@ -1404,6 +1902,22 @@ pub(crate) mod canvas2d {
         DENSE_SCENES.with(|s| {
             s.borrow_mut().insert(canvas_id.to_owned(), (scene, grid));
         });
+    }
+
+    /// Updates visual state flags (`selected`, `lit`, `dim`, `on`, `failed`, etc.) of an
+    /// already-stored `DenseScene` without rebuilding the spatial hit grid.
+    pub fn update_scene<F>(canvas_id: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut DenseScene),
+    {
+        DENSE_SCENES.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some((scene, _)) = guard.get_mut(canvas_id) else {
+                return false;
+            };
+            f(scene);
+            true
+        })
     }
 
     pub fn clear_scene(canvas_id: &str) {
@@ -1588,19 +2102,16 @@ pub(crate) mod canvas2d {
             dashed.push(&wasm_bindgen::JsValue::from_f64(4.0));
 
             for edge in &scene.edges {
-                if edge.pts.len() < 2 {
+                let bounds = if !edge.cmds.is_empty() {
+                    cmds_bounds(&edge.cmds)
+                } else if edge.pts.len() >= 2 {
+                    pts_bounds(&edge.pts)
+                } else {
+                    None
+                };
+                let Some((ex0, ey0, ex1, ey1)) = bounds else {
                     continue;
-                }
-                let mut ex0 = f64::INFINITY;
-                let mut ey0 = f64::INFINITY;
-                let mut ex1 = f64::NEG_INFINITY;
-                let mut ey1 = f64::NEG_INFINITY;
-                for &(px, py) in &edge.pts {
-                    ex0 = ex0.min(px);
-                    ey0 = ey0.min(py);
-                    ex1 = ex1.max(px);
-                    ey1 = ey1.max(py);
-                }
+                };
                 if ex1 < view_x0 || ex0 > view_x1 || ey1 < view_y0 || ey0 > view_y1 {
                     continue;
                 }
@@ -1634,19 +2145,31 @@ pub(crate) mod canvas2d {
                 });
 
                 ctx.begin_path();
-                ctx.move_to(edge.pts[0].0, edge.pts[0].1);
-                if edge.pts.len() == 4 {
-                    ctx.bezier_curve_to(
-                        edge.pts[1].0,
-                        edge.pts[1].1,
-                        edge.pts[2].0,
-                        edge.pts[2].1,
-                        edge.pts[3].0,
-                        edge.pts[3].1,
-                    );
+                if !edge.cmds.is_empty() {
+                    for cmd in &edge.cmds {
+                        match *cmd {
+                            DensePathCmd::Move(x, y) => ctx.move_to(x, y),
+                            DensePathCmd::Line(x, y) => ctx.line_to(x, y),
+                            DensePathCmd::Curve { c1, c2, to } => {
+                                ctx.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1);
+                            }
+                        }
+                    }
                 } else {
-                    for p in &edge.pts[1..] {
-                        ctx.line_to(p.0, p.1);
+                    ctx.move_to(edge.pts[0].0, edge.pts[0].1);
+                    if edge.pts.len() == 4 {
+                        ctx.bezier_curve_to(
+                            edge.pts[1].0,
+                            edge.pts[1].1,
+                            edge.pts[2].0,
+                            edge.pts[2].1,
+                            edge.pts[3].0,
+                            edge.pts[3].1,
+                        );
+                    } else {
+                        for p in &edge.pts[1..] {
+                            ctx.line_to(p.0, p.1);
+                        }
                     }
                 }
                 ctx.stroke();
@@ -2001,6 +2524,7 @@ mod tests {
             edges: vec![canvas2d::DenseEdgeSpec {
                 index: 7,
                 pts: vec![(160.0, 66.0), (300.0, 200.0)],
+                cmds: Vec::new(),
                 weight: 2,
                 guessed: false,
                 against: false,
@@ -2015,5 +2539,99 @@ mod tests {
         assert_eq!(grid.hit_test(90.0, 65.0, 6.0), Some((0, 3)));
         assert_eq!(grid.hit_test(230.0, 133.0, 6.0), Some((1, 7)));
         assert_eq!(grid.hit_test(10.0, 10.0, 6.0), None);
+    }
+
+    #[test]
+    fn dense_edge_preserves_multi_segment_bezier_and_hit_grid_covers_pad_and_curves() {
+        let path_d = "M0.0 0.0 C100.0 0.0 100.0 100.0 200.0 100.0 L300.0 100.0 C350.0 100.0 350.0 200.0 400.0 200.0";
+        let edge = canvas2d::DenseEdgeSpec::from_svg_path(
+            42,
+            path_d,
+            1,
+            false,
+            false,
+            "calls".to_owned(),
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            edge.cmds,
+            vec![
+                canvas2d::DensePathCmd::Move(0.0, 0.0),
+                canvas2d::DensePathCmd::Curve {
+                    c1: (100.0, 0.0),
+                    c2: (100.0, 100.0),
+                    to: (200.0, 100.0),
+                },
+                canvas2d::DensePathCmd::Line(300.0, 100.0),
+                canvas2d::DensePathCmd::Curve {
+                    c1: (350.0, 100.0),
+                    c2: (350.0, 200.0),
+                    to: (400.0, 200.0),
+                },
+            ]
+        );
+        assert!(edge.pts.len() > 16);
+
+        // Node aligned exactly on a 128px grid cell boundary (128.0) must still hit within 2.0px pad at 126.5!
+        let scene = canvas2d::DenseScene {
+            width: 500.0,
+            height: 300.0,
+            nodes: vec![canvas2d::DenseNodeSpec {
+                index: 1,
+                x: 128.0,
+                y: 128.0,
+                w: 127.0,
+                h: 30.0,
+                label: "CellEdge".to_owned(),
+                role: "file".to_owned(),
+                selected: false,
+                lit: false,
+                dim: false,
+                changed: false,
+                pinned: false,
+                failed: false,
+            }],
+            edges: vec![edge],
+        };
+        let grid = canvas2d::SpatialHitGrid::build(&scene, 128.0);
+        // 1.5px outside left/top cell boundary (cell 0) and 1.5px outside right/bottom boundary
+        assert_eq!(grid.hit_test(126.5, 140.0, 6.0), Some((0, 1)));
+        assert_eq!(grid.hit_test(140.0, 126.5, 6.0), Some((0, 1)));
+        assert_eq!(grid.hit_test(256.5, 140.0, 6.0), Some((0, 1)));
+        assert_eq!(grid.hit_test(140.0, 159.5, 6.0), Some((0, 1)));
+        // Midpoint of first cubic Bezier (t=0.5 -> (100.0, 50.0)) hits
+        assert_eq!(grid.hit_test(100.0, 50.0, 6.0), Some((1, 42)));
+        // Straight L segment (250.0, 100.0) hits
+        assert_eq!(grid.hit_test(250.0, 100.0, 6.0), Some((1, 42)));
+        // Second cubic Bezier midpoint (350.0, 150.0) hits
+        assert_eq!(grid.hit_test(350.0, 150.0, 6.0), Some((1, 42)));
+        // Raw control point (100.0, 0.0) is >30px off the actual curve, so it must NOT hit!
+        assert_eq!(grid.hit_test(100.0, 0.0, 6.0), None);
+    }
+
+    #[test]
+    fn viewport_reconcile_mounts_on_pan_with_hysteresis_and_keeps_forced_nodes() {
+        let rects = vec![
+            (10.0, 10.0, 160.0, 30.0),   // 0: initially visible
+            (900.0, 10.0, 160.0, 30.0),  // 1: offscreen right, revealed on pan
+            (2500.0, 10.0, 160.0, 30.0), // 2: far offscreen, forced (roving/selected)
+            (-600.0, 10.0, 160.0, 30.0), // 3: far left, outside unmount bounds
+        ];
+        // Initial mount only had node 0 and node 3 mounted (node 2 forced)
+        let mounted = vec![(0, false), (3, false)];
+        // Pan right so viewport covers x in [800, 1400]
+        let plan = plan_viewport_reconcile(
+            &rects,
+            &mounted,
+            (800.0, 0.0, 1400.0, 600.0),
+            (700.0, -100.0, 1500.0, 700.0),
+            (460.0, -340.0, 1740.0, 940.0),
+            &[2],
+        );
+        assert_eq!(plan.to_mount, vec![1, 2]);
+        assert_eq!(plan.to_unmount, vec![0, 3]);
     }
 }
