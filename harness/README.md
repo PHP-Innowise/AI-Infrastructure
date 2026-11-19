@@ -2744,6 +2744,49 @@ synthetic providers, and skipped when that runtime was absent; their CI then had
 a separate runtime-install job. Current native coverage comes from the Rust
 assertions described above. Live clients and providers require separate evidence.
 
+### Headless Chrome CDP E2E smoke test
+
+[`harness/tests/browser_e2e.mjs`](tests/browser_e2e.mjs) is a zero-dependency
+Node 22 ESM smoke suite driven over Chrome DevTools Protocol (CDP). It verifies:
+1. WASM boot (`#connecting`/`#connection-banner`), pre-WASM `data-theme` & theme
+   toggle, and `/assets/infra_ui_bg.wasm` HTTP 200 transport.
+2. Embedded Code Graph and `#graph-map` dense Canvas2D rendering
+   (`canvas.graph-dense-canvas[data-dense-canvas="true"]` non-blank pixels,
+   `position: absolute` stage overlap), wheel zoom, pan, node selection,
+   `From -> To` path trace, `Isolate`, and `A..B` commit-range diff.
+3. All 5 `#graph-map` lenses (`role="tab"` + `aria-selected`, no `aria-pressed`)
+   and `#graph-map-freshness` visibility/tone.
+4. Live `/api/events/stream` SSE streaming into `#events`, `.conversation-*` /
+   `.md-body` / `.md-code-block` / `.tool-output` computed styling, and
+   code-block Copy button state (`Copy` -> `Copied` -> `Copy`).
+5. `#command-palette` (`Ctrl/Cmd+K`, focus, `ArrowDown`, `Escape` restore),
+   `#approvals-drawer` (`role="dialog"`, `aria-modal="true"`, `inert`, `Tab`
+   trap across `<details><summary>`, z-index hierarchy, `Escape` cleanup), and
+   `390x844` mobile `#menu-toggle` / `#sidebar.open` overflow check.
+
+Build the `wasm-ui` bundle first (`infra-engine repo build-ui --root "$PWD"`),
+then run via Rust integration test (requires Chrome/Chromium and Node 22+):
+
+```bash
+HARNESS_BROWSER_E2E=1 HARNESS_UI_ROOT="$PWD" \
+  cargo test --manifest-path runtime-rust/Cargo.toml -p infra-harness --test browser_e2e --locked -- --nocapture
+```
+
+Or run the Node runner directly against an active Harness or fixture server:
+
+```bash
+node harness/tests/browser_e2e.mjs \
+  --url http://127.0.0.1:<port> \
+  --project-id <project-id> \
+  --session-id <session-id> \
+  [--other-session-id <other-session-id>] \
+  [--commit-a <sha>] [--commit-b <sha>] \
+  [--chrome /opt/google/chrome/chrome] [--timeout-ms 120000]
+```
+
+Use `HARNESS_CHROME_BIN` (or `--chrome`) when Chrome is installed outside
+`/opt/google/chrome/chrome`.
+
 The browser workflow was informed by the official
 [DeepSeek Harness web mode](https://www.deepseek.com/harness/en/).
 This implementation uses locally installed native CLIs rather than
