@@ -1686,6 +1686,52 @@ mod offline_omnigraph {
         .into_response()
     }
 
+    async fn changes_feed(AxumPath(graph_id): AxumPath<String>, headers: HeaderMap) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        axum::Json(json!({
+            "blocks": [],
+            "cursor": "cur-1",
+            "caught_up": true
+        }))
+        .into_response()
+    }
+
+    async fn changes_baseline(
+        State(st): State<Arc<OmniState>>,
+        AxumPath(graph_id): AxumPath<String>,
+        headers: HeaderMap,
+        body: Option<axum::Json<Value>>,
+    ) -> Response {
+        if let Err(r) = auth_ok(&headers) {
+            return *r;
+        }
+        if graph_id != HARNESS_GRAPH_ID {
+            return err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.");
+        }
+        let bname = body
+            .as_ref()
+            .and_then(|v| v["branch"].as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("main");
+        let head = st
+            .branches
+            .get(bname)
+            .or_else(|| st.branches.get("main"))
+            .map(|b| b.head_commit.as_str())
+            .unwrap_or("c-0002");
+        axum::Json(json!({
+            "snapshot_commit_id": head,
+            "resume_cursor": "cur-1",
+            "records": []
+        }))
+        .into_response()
+    }
+
     fn eval_query(
         snap: &Snapshot,
         qname: &str,
@@ -2040,6 +2086,11 @@ mod offline_omnigraph {
             .route(
                 "/graphs/{graph_id}/commits/{commit_id}/changes",
                 get(commit_changes),
+            )
+            .route("/graphs/{graph_id}/changes", get(changes_feed))
+            .route(
+                "/graphs/{graph_id}/changes/baseline",
+                post(changes_baseline),
             )
             .route("/graphs/{graph_id}/query", post(query_inline))
             .route("/graphs/{graph_id}/queries/{name}", post(query_stored))
