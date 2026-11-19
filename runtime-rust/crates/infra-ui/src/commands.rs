@@ -545,14 +545,7 @@ pub async fn intercept(text: &str) -> bool {
         }
         "memory" => session::open_view("memory-use", true).await,
         "resume" => {
-            dom::class("sidebar", "open", true);
-            dom::class("scrim", "open", true);
-            dom::attr("menu-toggle", "aria-expanded", "true");
-            if let Some(e) = dom::all("#history button").first() {
-                if let Some(x) = e.dyn_ref::<web_sys::HtmlElement>() {
-                    let _ = x.focus();
-                }
-            }
+            session::set_sidebar_open(true, true);
         }
         _ => {
             if m::read(|s| s.sid.is_empty()) {
@@ -590,7 +583,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         open_palette();
         return true;
     }
-    if kind == "click" && action == "command-palette-close" {
+    if kind == "click" && (id == "command-palette" || action == "command-palette-close") {
         close_palette();
         return true;
     }
@@ -847,20 +840,25 @@ pub fn open_palette() {
         s.workspace.command_palette_selected = 0;
     });
     dom::set_value("command-palette-input", "");
+    dom::attr("command-palette-input", "aria-expanded", "true");
     dom::hidden("command-palette", false);
     render_palette();
     dom::focus("command-palette-input");
 }
 
 pub fn close_palette() {
-    if !palette_open() {
-        return;
-    }
+    let was_open = palette_open()
+        || dom::get("command-palette")
+            .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
     m::write(|s| {
         s.workspace.command_palette_open = false;
         s.workspace.command_palette_query.clear();
         s.workspace.command_palette_selected = 0;
     });
+    dom::attr("command-palette-input", "aria-expanded", "false");
+    if !was_open {
+        return;
+    }
     dom::hidden("command-palette", true);
     dom::restore_focus_for_overlay("command-palette");
 }
@@ -1006,6 +1004,14 @@ fn should_defer_palette_enter(target: &web_sys::Element) -> bool {
     )
 }
 
+pub(crate) fn palette_boundary_index(count: usize, end: bool) -> usize {
+    if end {
+        count.saturating_sub(1)
+    } else {
+        0
+    }
+}
+
 /// Global keyboard handler for `Cmd/Ctrl+K` Command Palette and palette navigation.
 pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
     if (event.ctrl_key() || event.meta_key())
@@ -1046,6 +1052,21 @@ pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
             m::write(|s| {
                 s.workspace.command_palette_selected =
                     next_option_index(count, s.workspace.command_palette_selected, false);
+            });
+            render_palette();
+            true
+        }
+        "Home" => {
+            m::write(|s| s.workspace.command_palette_selected = palette_boundary_index(0, false));
+            render_palette();
+            true
+        }
+        "End" => {
+            let count =
+                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
+                    .len();
+            m::write(|s| {
+                s.workspace.command_palette_selected = palette_boundary_index(count, true);
             });
             render_palette();
             true
@@ -1141,5 +1162,13 @@ mod tests {
             "command-palette-input",
             false
         ));
+    }
+
+    #[test]
+    fn palette_home_end_boundaries_stay_in_range() {
+        assert_eq!(palette_boundary_index(5, false), 0);
+        assert_eq!(palette_boundary_index(5, true), 4);
+        assert_eq!(palette_boundary_index(0, false), 0);
+        assert_eq!(palette_boundary_index(0, true), 0);
     }
 }

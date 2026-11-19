@@ -864,6 +864,10 @@ pub(crate) fn normalize_right_tab(tab: &str) -> &'static str {
 
 /// Switches between the side-by-side right-pane tabs (`Code graph` | `Changes & Diff` | `Checks`).
 pub(crate) fn set_workspace_right_tab(tab: &str) {
+    set_workspace_right_tab_inner(tab, true);
+}
+
+pub(crate) fn set_workspace_right_tab_inner(tab: &str, fetch_results: bool) {
     let tab = normalize_right_tab(tab);
     m::write(|s| s.workspace.right_tab = tab.to_owned());
     dom::attr("sessions-right-pane", "data-right-tab", tab);
@@ -887,7 +891,7 @@ pub(crate) fn set_workspace_right_tab(tab: &str) {
     }
     if tab == "graph" {
         crate::graph_map::sync_embedded(false);
-    } else {
+    } else if fetch_results {
         spawn_local(async {
             results().await;
         });

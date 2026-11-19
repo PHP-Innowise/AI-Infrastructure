@@ -127,12 +127,18 @@ fn set_inert_attr(id: &str, inert: bool) {
 
 /// Synchronizes `inert` attributes across the shell, sidebar, and stacked modal overlays.
 pub fn sync_overlay_inert() {
-    let is_open = |id: &str| get(id).is_some_and(|e| !e.has_attribute("hidden"));
+    let is_open =
+        |id: &str| get(id).is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
+    let other_dialog_open = document()
+        .query_selector("dialog[open]:not(#command-palette):not(#approvals-drawer)")
+        .ok()
+        .flatten()
+        .is_some();
     let sidebar_open = get("sidebar").is_some_and(|e| e.class_list().contains("open"));
     for (id, inert) in overlay_inert_targets(
         is_open("command-palette"),
         is_open("approvals-drawer"),
-        is_open("run-file-card"),
+        is_open("run-file-card") || other_dialog_open,
         sidebar_open,
         is_mobile_viewport(),
     ) {
@@ -146,12 +152,27 @@ pub fn hidden(id: &str, v: bool) {
     }
 }
 pub fn hide(e: &Element, v: bool) {
-    if v {
+    let id = e.id();
+    if let Ok(dialog) = e.clone().dyn_into::<web_sys::HtmlDialogElement>() {
+        if v {
+            let _ = e.set_attribute("hidden", "");
+            if dialog.open() {
+                dialog.close();
+            }
+        } else {
+            if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !dialog.open() {
+                save_focus_for_overlay(&id);
+            }
+            let _ = e.remove_attribute("hidden");
+            if !dialog.open() {
+                let _ = dialog.show_modal();
+            }
+        }
+    } else if v {
         let _ = e.set_attribute("hidden", "");
     } else {
         let _ = e.remove_attribute("hidden");
     }
-    let id = e.id();
     if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
         sync_overlay_inert();
     }
@@ -307,9 +328,11 @@ pub fn save_focus_for_overlay(overlay_id: &str) {
 }
 
 pub fn restore_focus_for_overlay(overlay_id: &str) {
+    let mut had_saved = false;
     let saved = FOCUS_RETURN_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
         let pos = stack.iter().rposition(|(id, _)| id == overlay_id)?;
+        had_saved = true;
         Some(stack.remove(pos).1)
     });
     if let Some(el) = saved {
@@ -318,6 +341,13 @@ pub fn restore_focus_for_overlay(overlay_id: &str) {
             return;
         }
     }
+    let active_lost = document().active_element().is_none_or(|active| {
+        active.tag_name() == "BODY"
+            || get(overlay_id).is_some_and(|overlay| overlay.contains(Some(&active)))
+    });
+    if !had_saved && !active_lost {
+        return;
+    }
     if let Some(fallback) = document()
         .query_selector(FALLBACK_RESTORE_SELECTOR)
         .ok()
@@ -325,6 +355,16 @@ pub fn restore_focus_for_overlay(overlay_id: &str) {
     {
         focus_element(&fallback);
     }
+}
+
+pub fn click_outside_element(el: &Element, mouse: &web_sys::MouseEvent) -> bool {
+    let rect = el.get_bounding_client_rect();
+    let x = f64::from(mouse.client_x());
+    let y = f64::from(mouse.client_y());
+    if mouse.detail() == 0 && x == 0.0 && y == 0.0 {
+        return false;
+    }
+    x < rect.left() || x > rect.right() || y < rect.top() || y > rect.bottom()
 }
 
 pub fn dialog(id: &str, open: bool) {
@@ -343,6 +383,7 @@ pub fn dialog(id: &str, open: bool) {
             }
             restore_focus_for_overlay(id);
         }
+        sync_overlay_inert();
     }
 }
 pub fn validity(id: &str) -> bool {
@@ -1015,13 +1056,21 @@ fn modal_focusables(card: &Element) -> Vec<Element> {
 fn active_overlay_container() -> Option<Element> {
     for id in MODAL_OVERLAY_IDS {
         if let Some(el) = get(id) {
-            if !el.has_attribute("hidden") {
+            if !el.has_attribute("hidden") || el.has_attribute("open") {
                 return Some(el);
             }
         }
     }
-    if let Ok(Some(dialog)) = document().query_selector("dialog[open]") {
-        return Some(dialog);
+    if let Ok(dialogs) = document().query_selector_all("dialog[open]") {
+        let len = dialogs.length();
+        if len > 0 {
+            if let Some(last) = dialogs
+                .item(len - 1)
+                .and_then(|n| n.dyn_into::<Element>().ok())
+            {
+                return Some(last);
+            }
+        }
     }
     if is_mobile_viewport() {
         if let Some(sidebar) = get("sidebar") {
@@ -1330,6 +1379,10 @@ pub fn wire_a11y_widgets() {
         if let Some(target) = event.target().and_then(|v| v.dyn_into::<Element>().ok()) {
             if target.tag_name() == "DIALOG" {
                 let id = target.id();
+                if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
+                    let _ = target.set_attribute("hidden", "");
+                }
+                sync_overlay_inert();
                 if !id.is_empty() {
                     restore_focus_for_overlay(&id);
                 }

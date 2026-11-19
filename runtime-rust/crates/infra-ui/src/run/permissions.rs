@@ -1604,11 +1604,18 @@ pub(super) async fn decide_permission(payload: &V) {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| m::read(|s| s.sid.clone()));
+    let origin_kind = m::text(payload, "origin_kind");
+    let origin_run_id = m::text(payload, "origin_run_id");
     if decide_permission_for(container_id, &sid, payload).await {
         let current_sid = m::read(|s| s.sid.clone());
         let epoch = m::read(|s| s.epoch);
         if sid == current_sid {
             session::poll(epoch).await;
+        }
+        if origin_kind == "system" && !origin_run_id.is_empty() {
+            crate::systems::read_system_run(&origin_run_id).await;
+        } else if origin_kind == "creator" && !origin_run_id.is_empty() {
+            crate::management::creator_read(&origin_run_id).await;
         }
         if m::read(|s| s.approvals.drawer_open) {
             refresh_approvals_queue().await;
@@ -1735,7 +1742,7 @@ pub(crate) fn total_pending_approvals_count() -> usize {
                 total += count;
             }
         }
-        for key in ["system-run", "creator-run"] {
+        for key in ["system-run", "creator-detail", "creator-run"] {
             if let Some(run_val) = s.data.get(key) {
                 if let Some(arr) = run_val["waiting_permissions"].as_array() {
                     total += arr.len();
@@ -1938,6 +1945,174 @@ pub(crate) async fn revoke_all_permission_rules(sid: &str) {
     }
 }
 
+pub(crate) fn approvals_queue_reconcile_plan(
+    existing_keys: &[String],
+    next_keys: &[String],
+) -> Vec<String> {
+    let next_set: std::collections::BTreeSet<&str> = next_keys.iter().map(String::as_str).collect();
+    existing_keys
+        .iter()
+        .filter(|k| !next_set.contains(k.as_str()))
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn is_shortcut_text_input(tag_name: &str, input_type: Option<&str>) -> bool {
+    match tag_name {
+        "TEXTAREA" | "SELECT" => true,
+        "INPUT" => {
+            let kind = input_type.unwrap_or("text").trim().to_ascii_lowercase();
+            !matches!(kind.as_str(), "radio" | "checkbox" | "button" | "submit")
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn can_target_drawer_shortcut(
+    in_pending_card: bool,
+    in_drawer_list: bool,
+    in_queue_item: bool,
+) -> bool {
+    in_pending_card || in_drawer_list || in_queue_item
+}
+
+enum ApprovalQueueEntry {
+    Card {
+        key: String,
+        label: String,
+        sid: String,
+        ask: V,
+        jump_action: &'static str,
+        jump_label: &'static str,
+        jump_payload: V,
+        origin_kind: &'static str,
+        origin_run_id: String,
+    },
+    Notice {
+        key: String,
+        title: String,
+        pending_count: usize,
+        jump_action: &'static str,
+        jump_payload: V,
+    },
+}
+
+impl ApprovalQueueEntry {
+    fn key(&self) -> &str {
+        match self {
+            Self::Card { key, .. } | Self::Notice { key, .. } => key,
+        }
+    }
+}
+
+fn inject_approval_button_payloads(
+    block: &web_sys::Element,
+    sid: &str,
+    origin_kind: &str,
+    origin_run_id: &str,
+) {
+    let Ok(buttons) = block.query_selector_all("button[data-action=\"permission-decide\"]") else {
+        return;
+    };
+    for i in 0..buttons.length() {
+        let Some(btn) = buttons
+            .item(i)
+            .and_then(|e| e.dyn_into::<web_sys::Element>().ok())
+        else {
+            continue;
+        };
+        let Some(raw_p) = btn.get_attribute("data-payload") else {
+            continue;
+        };
+        if let Ok(mut p) = serde_json::from_str::<V>(&raw_p) {
+            p["session_id"] = json!(sid);
+            p["container"] = json!("approvals-drawer-list");
+            if !origin_kind.is_empty() {
+                p["origin_kind"] = json!(origin_kind);
+            }
+            if !origin_run_id.is_empty() {
+                p["origin_run_id"] = json!(origin_run_id);
+            }
+            let _ = btn.set_attribute("data-payload", &p.to_string());
+        }
+    }
+}
+
+fn collect_background_run_approvals(entries: &mut Vec<ApprovalQueueEntry>) {
+    for (run_key, origin_kind, title, target_view) in [
+        ("system-run", "system", "System orchestration", "systems"),
+        (
+            "creator-detail",
+            "creator",
+            "Infrastructure Creator",
+            "creator",
+        ),
+        (
+            "creator-run",
+            "creator",
+            "Infrastructure Creator",
+            "creator",
+        ),
+    ] {
+        let run_val = m::data(run_key);
+        if run_val.is_null() {
+            continue;
+        }
+        let run_id = if run_key == "creator-detail" {
+            m::text(&run_val["run"], "id")
+        } else {
+            m::text(&run_val, "id")
+        };
+        let sid = run_val["session_id"]
+            .as_str()
+            .or_else(|| run_val["session"]["id"].as_str())
+            .or_else(|| run_val["run"]["session_id"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        let waiting = m::array(&run_val["waiting_permissions"]);
+        if !waiting.is_empty() && !sid.is_empty() {
+            for (idx, mut ask) in waiting.into_iter().enumerate() {
+                if ask["state"].is_null() {
+                    ask["state"] = json!("pending");
+                }
+                let req_id = m::text(&ask, "request_id");
+                let key = if req_id.is_empty() {
+                    format!("{origin_kind}:{run_id}:idx:{idx}")
+                } else {
+                    format!("{origin_kind}:{run_id}:{req_id}")
+                };
+                entries.push(ApprovalQueueEntry::Card {
+                    key,
+                    label: title.to_owned(),
+                    sid: sid.clone(),
+                    ask,
+                    jump_action: "approvals-jump-view",
+                    jump_label: "Open view",
+                    jump_payload: json!(target_view),
+                    origin_kind,
+                    origin_run_id: run_id.clone(),
+                });
+            }
+            continue;
+        }
+        let pending_count = run_val["waiting_permissions"]
+            .as_array()
+            .map(|a| a.len())
+            .or_else(|| run_val["waiting_permissions"].as_u64().map(|n| n as usize))
+            .unwrap_or(0);
+        if pending_count > 0 {
+            entries.push(ApprovalQueueEntry::Notice {
+                key: format!("notice:{run_key}"),
+                title: title.to_owned(),
+                pending_count,
+                jump_action: "approvals-jump-view",
+                jump_payload: json!(target_view),
+            });
+        }
+    }
+}
+
 pub(crate) async fn refresh_approvals_queue() {
     let Some(container) = dom::get("approvals-drawer-list") else {
         return;
@@ -1956,85 +2131,196 @@ pub(crate) async fn refresh_approvals_queue() {
         })
         .collect();
 
-    let mut aggregated = Vec::<(String, String, V)>::new();
+    let mut entries = Vec::<ApprovalQueueEntry>::new();
+    let fetches = js_sys::Array::new();
     for (sid, label) in waiting_sids.into_iter().take(12) {
         let url = format!("/api/sessions/{}?limit=1&tail=1", dom::enc(&sid));
-        if let Ok(v) = api::get(&url).await {
-            for mut ask in m::array(&v["waiting_permissions"]) {
-                ask["state"] = json!("pending");
-                aggregated.push((sid.clone(), label.clone(), ask));
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let session = api::get(&url).await.unwrap_or(V::Null);
+            let item = json!({ "sid": sid, "label": label, "session": session });
+            Ok(wasm_bindgen::JsValue::from_str(&item.to_string()))
+        });
+        fetches.push(&promise);
+    }
+    if fetches.length() > 0 {
+        if let Ok(resolved) =
+            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&fetches)).await
+        {
+            for val in js_sys::Array::from(&resolved).iter() {
+                let Some(raw) = val.as_string() else {
+                    continue;
+                };
+                let Ok(parsed) = serde_json::from_str::<V>(&raw) else {
+                    continue;
+                };
+                let sid = m::text(&parsed, "sid");
+                let label = m::text(&parsed, "label");
+                for (idx, mut ask) in m::array(&parsed["session"]["waiting_permissions"])
+                    .into_iter()
+                    .enumerate()
+                {
+                    ask["state"] = json!("pending");
+                    let req_id = m::text(&ask, "request_id");
+                    let key = if req_id.is_empty() {
+                        format!("session:{sid}:idx:{idx}")
+                    } else {
+                        format!("session:{sid}:{req_id}")
+                    };
+                    entries.push(ApprovalQueueEntry::Card {
+                        key,
+                        label: label.clone(),
+                        sid: sid.clone(),
+                        ask,
+                        jump_action: "approvals-jump-session",
+                        jump_label: "Open session",
+                        jump_payload: json!(sid),
+                        origin_kind: "",
+                        origin_run_id: String::new(),
+                    });
+                }
             }
         }
     }
+    collect_background_run_approvals(&mut entries);
 
-    container.set_text_content(None);
-    if aggregated.is_empty() {
+    let scroll_top = container.scroll_top();
+    let focused_key = dom::document()
+        .active_element()
+        .filter(|active| container.contains(Some(active)))
+        .and_then(|active| active.closest("[data-approval-key]").ok().flatten())
+        .and_then(|item| item.get_attribute("data-approval-key"));
+
+    let mut existing_map = std::collections::BTreeMap::<String, web_sys::Element>::new();
+    let mut existing_keys = Vec::<String>::new();
+    for child in dom::children(&container) {
+        if let Some(key) = child.get_attribute("data-approval-key") {
+            existing_keys.push(key.clone());
+            existing_map.insert(key, child);
+        } else {
+            child.remove();
+        }
+    }
+    let next_keys: Vec<String> = entries.iter().map(|e| e.key().to_owned()).collect();
+    for obsolete in approvals_queue_reconcile_plan(&existing_keys, &next_keys) {
+        if let Some(el) = existing_map.remove(&obsolete) {
+            el.remove();
+        }
+    }
+
+    if entries.is_empty() {
         dom::add(
             &container,
             &dom::el(
                 "p",
-                "muted",
+                "muted approvals-queue-empty",
                 "No pending permission approvals across sessions.",
             ),
         );
     } else {
-        for (sid, label, ask) in &aggregated {
-            let wrap = dom::el("div", "approvals-queue-item", "");
-            let header = dom::el("div", "approvals-queue-item-head", "");
-            dom::add(&header, &dom::el("strong", "", label));
-            let jump = dom::button("Open session", "approvals-jump-session", json!(sid));
-            let _ = jump.class_list().add_1("compact");
-            dom::add(&header, &jump);
-            dom::add(&wrap, &header);
-
-            let card_holder = dom::el("div", "approvals-queue-card", "");
-            if let Some((block, _)) =
-                upsert_permission_card_in(&card_holder, "approvals-drawer-list", ask, true, false)
-            {
-                if let Ok(buttons) =
-                    block.query_selector_all("button[data-action=\"permission-decide\"]")
-                {
-                    for i in 0..buttons.length() {
-                        if let Some(btn) = buttons
-                            .item(i)
-                            .and_then(|e| e.dyn_into::<web_sys::Element>().ok())
-                        {
-                            if let Some(raw_p) = btn.get_attribute("data-payload") {
-                                if let Ok(mut p) = serde_json::from_str::<V>(&raw_p) {
-                                    p["session_id"] = json!(sid);
-                                    let _ = btn.set_attribute("data-payload", &p.to_string());
-                                }
-                            }
+        for (idx, entry) in entries.iter().enumerate() {
+            let key = entry.key();
+            let wrap = match existing_map.remove(key) {
+                Some(existing) => existing,
+                None => {
+                    let el = dom::el("div", "approvals-queue-item", "");
+                    let _ = el.set_attribute("data-approval-key", key);
+                    el
+                }
+            };
+            let current_at_idx = container.children().item(idx as u32);
+            if current_at_idx.as_ref() != Some(&wrap) {
+                let _ = container.insert_before(&wrap, current_at_idx.as_ref().map(|e| e.as_ref()));
+            }
+            match entry {
+                ApprovalQueueEntry::Card {
+                    label,
+                    sid,
+                    ask,
+                    jump_action,
+                    jump_label,
+                    jump_payload,
+                    origin_kind,
+                    origin_run_id,
+                    ..
+                } => {
+                    let header = wrap
+                        .query_selector(".approvals-queue-item-head")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| {
+                            let h = dom::el("div", "approvals-queue-item-head", "");
+                            dom::add(&wrap, &h);
+                            h
+                        });
+                    match header.query_selector("strong").ok().flatten() {
+                        Some(strong)
+                            if strong.text_content().as_deref() == Some(label.as_str()) => {}
+                        _ => {
+                            header.set_text_content(None);
+                            dom::add(&header, &dom::el("strong", "", label));
+                            let jump = dom::button(jump_label, jump_action, jump_payload.clone());
+                            let _ = jump.class_list().add_1("compact");
+                            dom::add(&header, &jump);
                         }
+                    }
+                    let card_holder = wrap
+                        .query_selector(".approvals-queue-card")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| {
+                            let c = dom::el("div", "approvals-queue-card", "");
+                            dom::add(&wrap, &c);
+                            c
+                        });
+                    if let Some((block, _)) = upsert_permission_card_in(
+                        &card_holder,
+                        "approvals-drawer-list",
+                        ask,
+                        true,
+                        true,
+                    ) {
+                        inject_approval_button_payloads(&block, sid, origin_kind, origin_run_id);
+                    }
+                }
+                ApprovalQueueEntry::Notice {
+                    title,
+                    pending_count,
+                    jump_action,
+                    jump_payload,
+                    ..
+                } => {
+                    let text = format!("{title} · {pending_count} waiting");
+                    let header = wrap
+                        .query_selector(".approvals-queue-item-head")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| {
+                            let h = dom::el("div", "approvals-queue-item-head", "");
+                            dom::add(&wrap, &h);
+                            h
+                        });
+                    if header
+                        .query_selector("strong")
+                        .ok()
+                        .flatten()
+                        .is_none_or(|s| s.text_content().as_deref() != Some(text.as_str()))
+                    {
+                        header.set_text_content(None);
+                        dom::add(&header, &dom::el("strong", "", &text));
+                        let open_btn = dom::button("Open view", jump_action, jump_payload.clone());
+                        let _ = open_btn.class_list().add_1("compact");
+                        dom::add(&header, &open_btn);
                     }
                 }
             }
-            dom::add(&wrap, &card_holder);
-            dom::add(&container, &wrap);
         }
     }
-    for (run_key, title, target_view) in [
-        ("system-run", "System orchestration", "systems"),
-        ("creator-run", "Infrastructure Creator", "creator"),
-    ] {
-        let run_val = m::data(run_key);
-        let pending_count = run_val["waiting_permissions"]
-            .as_array()
-            .map(|a| a.len())
-            .or_else(|| run_val["waiting_permissions"].as_u64().map(|n| n as usize))
-            .unwrap_or(0);
-        if pending_count > 0 {
-            let notice = dom::el("div", "approvals-queue-item", "");
-            let header = dom::el("div", "approvals-queue-item-head", "");
-            dom::add(
-                &header,
-                &dom::el("strong", "", &format!("{title} · {pending_count} waiting")),
-            );
-            let open_btn = dom::button("Open view", "approvals-jump-view", json!(target_view));
-            let _ = open_btn.class_list().add_1("compact");
-            dom::add(&header, &open_btn);
-            dom::add(&notice, &header);
-            dom::add(&container, &notice);
+    container.set_scroll_top(scroll_top);
+    if let Some(prev_key) = focused_key {
+        if !next_keys.contains(&prev_key) && m::read(|s| s.approvals.drawer_open) {
+            if let Some(close) = dom::get("approvals-drawer-close") {
+                focus_node(&close);
+            }
         }
     }
     schedule_permission_countdowns();
@@ -2042,6 +2328,7 @@ pub(crate) async fn refresh_approvals_queue() {
 }
 
 pub(crate) async fn open_approvals_drawer() {
+    crate::commands::close_palette();
     m::write(|s| s.approvals.drawer_open = true);
     dom::save_focus_for_overlay("approvals-drawer");
     dom::hidden("approvals-drawer", false);
@@ -2055,12 +2342,15 @@ pub(crate) async fn open_approvals_drawer() {
 }
 
 pub(crate) fn close_approvals_drawer() {
-    if !m::read(|s| s.approvals.drawer_open) {
+    let was_open = m::read(|s| s.approvals.drawer_open)
+        || dom::get("approvals-drawer")
+            .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
+    m::write(|s| s.approvals.drawer_open = false);
+    dom::attr("approvals-queue-toggle", "aria-expanded", "false");
+    if !was_open {
         return;
     }
-    m::write(|s| s.approvals.drawer_open = false);
     dom::hidden("approvals-drawer", true);
-    dom::attr("approvals-queue-toggle", "aria-expanded", "false");
     dom::restore_focus_for_overlay("approvals-drawer");
 }
 
@@ -2072,7 +2362,7 @@ pub(crate) async fn toggle_approvals_drawer() {
     }
 }
 
-/// Scoped Alt+A (Allow), Alt+Shift+A (Allow session), and Alt+D (Deny) when focused in a pending card or Approvals drawer.
+/// Scoped Alt+A (Allow), Alt+Shift+A (Allow session), and Alt+D (Deny) when focused in a pending card or Approvals drawer item.
 pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool {
     if !event.alt_key() || event.ctrl_key() || event.meta_key() || event.is_composing() {
         return false;
@@ -2087,24 +2377,37 @@ pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool
     let Some(active) = dom::document().active_element() else {
         return false;
     };
-    if matches!(active.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT") {
+    let input_type = active.get_attribute("type");
+    if is_shortcut_text_input(&active.tag_name(), input_type.as_deref()) {
         return false;
     }
-    let card = active
+    let pending_card = active
         .closest(".conversation-permission[data-state=\"pending\"]")
         .ok()
+        .flatten();
+    let in_drawer_list = active
+        .closest("#approvals-drawer-list")
+        .ok()
         .flatten()
+        .is_some();
+    let queue_item = active.closest(".approvals-queue-item").ok().flatten();
+    if !can_target_drawer_shortcut(pending_card.is_some(), in_drawer_list, queue_item.is_some()) {
+        return false;
+    }
+    let card = pending_card
         .or_else(|| {
-            active
-                .closest("#approvals-drawer")
-                .ok()
-                .flatten()
-                .and_then(|drawer| {
-                    drawer
-                        .query_selector(".conversation-permission[data-state=\"pending\"]")
-                        .ok()
-                        .flatten()
-                })
+            queue_item.and_then(|item| {
+                item.query_selector(".conversation-permission[data-state=\"pending\"]")
+                    .ok()
+                    .flatten()
+            })
+        })
+        .or_else(|| {
+            dom::get("approvals-drawer-list").and_then(|list| {
+                list.query_selector(".conversation-permission[data-state=\"pending\"]")
+                    .ok()
+                    .flatten()
+            })
         });
     let Some(card) = card else {
         return false;

@@ -120,6 +120,20 @@ pub fn start() -> Result<(), JsValue> {
                     });
                     return;
                 }
+                if let Ok(Some(diff_btn)) = target
+                    .closest("[data-action=\"diff-copy-path\"],[data-action=\"diff-copy-hunk\"]")
+                {
+                    event.prevent_default();
+                    let action = diff_btn.get_attribute("data-action").unwrap_or_default();
+                    spawn_local(async move {
+                        if action == "diff-copy-path" {
+                            run::copy_diff_path_button(&diff_btn).await;
+                        } else {
+                            run::copy_diff_hunk_button(&diff_btn).await;
+                        }
+                    });
+                    return;
+                }
                 if graph_explanation::click(&target) {
                     return;
                 }
@@ -188,6 +202,14 @@ pub fn start() -> Result<(), JsValue> {
                 session::workspace_split_key(key);
                 return;
             }
+            if k == "pointerover" {
+                if let Ok(Some(hover_el)) = target.closest(
+                    "[data-action=\"memory-retrieval\"],[data-action=\"memory-horizon-chunk\"]",
+                ) {
+                    knowledge::hover(&hover_el);
+                }
+                return;
+            }
             if [
                 "pointerdown",
                 "pointermove",
@@ -223,6 +245,14 @@ pub fn start() -> Result<(), JsValue> {
                 target
             };
             if dom::is_disabled(&element) {
+                return;
+            }
+            if k == "click" && element.id() == "approvals-drawer" {
+                if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
+                    if dom::click_outside_element(&element, mouse) {
+                        run::close_approvals_drawer();
+                    }
+                }
                 return;
             }
             let id = element.id();
@@ -300,6 +330,31 @@ pub fn start() -> Result<(), JsValue> {
     });
     dom::window().add_event_listener_with_callback("popstate", pop.as_ref().unchecked_ref())?;
     pop.forget();
+    let cancel_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+        let Some(target) = event
+            .target()
+            .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+        else {
+            return;
+        };
+        match target.id().as_str() {
+            "command-palette" => {
+                event.prevent_default();
+                commands::close_palette();
+            }
+            "approvals-drawer" => {
+                event.prevent_default();
+                run::close_approvals_drawer();
+            }
+            _ => {}
+        }
+    });
+    dom::document().add_event_listener_with_callback_and_bool(
+        "cancel",
+        cancel_cb.as_ref().unchecked_ref(),
+        true,
+    )?;
+    cancel_cb.forget();
     if let Some(conv) = dom::get("conversation") {
         let scroll_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
             run::on_conversation_scroll();

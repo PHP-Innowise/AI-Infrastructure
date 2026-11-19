@@ -387,6 +387,58 @@ fn settle(run: &mut V, call: &mut V, event: &V) {
     run["files"] = V::Object(files);
 }
 
+pub(super) fn run_strip_now_parts(
+    done: bool,
+    outcome: &str,
+    open: &[V],
+) -> (String, String, String, bool) {
+    if done {
+        return (format!("Run {outcome}"), String::new(), String::new(), true);
+    }
+    if open.len() == 1 {
+        let target = open[0]["path"]
+            .as_str()
+            .or_else(|| open[0]["detail"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        return (m::text(&open[0], "tool"), target, String::new(), false);
+    }
+    if !open.is_empty() {
+        if let Some(latest) = open.iter().max_by(|a, b| {
+            let ak = (m::string(&a["started"]), m::string(&a["event_id"]));
+            let bk = (m::string(&b["started"]), m::string(&b["event_id"]));
+            ak.cmp(&bk)
+        }) {
+            let tool = m::text(latest, "tool");
+            let target = latest["path"]
+                .as_str()
+                .or_else(|| latest["detail"].as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if !tool.is_empty() && !target.is_empty() {
+                return (tool, target, format!("+{} more", open.len() - 1), false);
+            }
+        }
+        return (
+            format!("{} steps running", open.len()),
+            String::new(),
+            String::new(),
+            true,
+        );
+    }
+    ("Model’s turn".into(), String::new(), String::new(), true)
+}
+
+pub(super) fn can_prompt_notifications() -> bool {
+    let has_notification = js_sys::Reflect::get(&dom::window(), &"Notification".into())
+        .ok()
+        .is_some_and(|v| !v.is_undefined() && !v.is_null());
+    has_notification
+        && web_sys::Notification::permission() == web_sys::NotificationPermission::Default
+}
+
 pub fn render() {
     let run = m::data("run");
     let session = m::read(|s| s.selected.clone());
@@ -425,27 +477,10 @@ pub fn render() {
         .cloned()
         .collect();
     let done = m::yes(&run["finished"]) || !m::active(&session);
-    let now = if done {
-        format!(
-            "Run {}",
-            run["outcome"]
-                .as_str()
-                .unwrap_or_else(|| session["status"].as_str().unwrap_or("finished"))
-        )
-    } else if open.len() == 1 {
-        format!(
-            "{} · {}",
-            m::text(&open[0], "tool"),
-            open[0]["path"]
-                .as_str()
-                .or_else(|| open[0]["detail"].as_str())
-                .unwrap_or("")
-        )
-    } else if !open.is_empty() {
-        format!("{} steps running", open.len())
-    } else {
-        "Model’s turn".into()
-    };
+    let outcome = run["outcome"]
+        .as_str()
+        .unwrap_or_else(|| session["status"].as_str().unwrap_or("finished"));
+    let (verb, target, more, plain) = run_strip_now_parts(done, outcome, &open);
     if mode == Mode::Now {
         update_clock();
     } else {
@@ -453,8 +488,12 @@ pub fn render() {
         dom::cancel_timer("run-clock");
         dom::text("run-clock", "");
     }
-    dom::text("run-now-text", &now);
-    dom::text("run-verb", &now);
+    dom::text("run-verb", &verb);
+    dom::attr("run-verb", "data-plain", truth(plain));
+    dom::text("run-target", &target);
+    dom::hidden("run-target", target.is_empty());
+    dom::text("run-more", &more);
+    dom::hidden("run-more", more.is_empty());
     // The counts go into the chips' own box: the second line also holds the Calm/Detailed switch,
     // Close and the away summary, which a text written over the whole line would delete.
     let counts = counts(&run);
@@ -591,6 +630,10 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         }
         return true;
     }
+    if kind == "input" && action == "diff-filter" {
+        filter_diff_files(payload["scope"].as_str().unwrap_or(""), value);
+        return true;
+    }
     if kind != "click" {
         return false;
     }
@@ -671,6 +714,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             if let Ok(p) = web_sys::Notification::request_permission() {
                 let _ = wasm_bindgen_futures::JsFuture::from(p).await;
             }
+            dom::hidden("run-notify", !can_prompt_notifications());
         }
         "events-jump-latest" => jump_to_latest(),
         "events-load-earlier" => load_earlier_events().await,
@@ -680,6 +724,15 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         }
         "diff-collapse-all" => {
             toggle_all_diff_groups(payload["scope"].as_str().unwrap_or(""), false);
+        }
+        "diff-show-more" => {
+            show_all_diff_lines(
+                payload["scope"].as_str().unwrap_or(""),
+                payload["file"].as_str().unwrap_or(""),
+            );
+        }
+        "tool-output-expand" => {
+            toggle_tool_output_expand(payload.as_str().unwrap_or(""));
         }
         "approvals-queue-toggle" => toggle_approvals_drawer().await,
         "approvals-drawer-close" => close_approvals_drawer(),

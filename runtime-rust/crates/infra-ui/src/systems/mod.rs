@@ -12,6 +12,7 @@ pub use catalog_map::{
     switch_services_to_topology,
 };
 pub use editor::{add_service, edit_field, editor_open};
+pub(crate) use runs::read as read_system_run;
 #[allow(unused_imports)]
 pub(crate) use runs::{on_sse_system_resync, on_sse_system_run};
 #[allow(unused_imports)]
@@ -159,6 +160,15 @@ pub fn initialize() {
     }
     m::set("systems-initialized", json!(true));
     crate::api::on_sse("system_run", crate::systems::on_sse_system_run);
+    crate::api::on_sse("system_graph_status", |payload| {
+        let project = dom::value("system-project");
+        let ev_project = m::text(payload, "project_id");
+        if !project.is_empty() && (ev_project.is_empty() || ev_project == project) {
+            spawn_local(async {
+                poll_system_graph_status(false).await;
+            });
+        }
+    });
     crate::api::on_sse("resync", crate::systems::on_sse_system_resync);
     crate::session::on_project_change(crate::systems::on_global_project_change);
 }
@@ -798,7 +808,6 @@ pub async fn event(
         "system-open-session" => {
             let sid = m::text(&m::data("system-run"), "session_id");
             session::select(&sid).await;
-            session::open_view("sessions", true).await;
         }
         "system-discovery-start" => discovery_start().await,
         "system-discovery-cancel" => {

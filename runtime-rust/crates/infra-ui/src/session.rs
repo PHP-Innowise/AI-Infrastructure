@@ -1719,7 +1719,6 @@ pub async fn event(
                     crate::graph::run_state(false);
                 }
                 select(&target_id).await;
-                open_view("sessions", true).await;
             }
         }
         "session-open" => {
@@ -1729,7 +1728,6 @@ pub async fn event(
                 crate::graph::run_state(false);
             }
             select(target_id).await;
-            open_view("sessions", true).await;
         }
         "cancel-session" => session_action("cancel", json!({}), "composer-error").await,
         "inbox-cancel" => inbox::cancel(payload.as_str().unwrap_or("")).await,
@@ -1983,6 +1981,12 @@ pub async fn event(
             {
                 return true;
             }
+            if dom::get("merge-archive-content").is_some_and(|e| !e.has_attribute("hidden")) {
+                dom::hidden("merge-archive-content", true);
+                dom::attr("merge-archive", "aria-expanded", "false");
+                dom::text("merge-archive", "View saved context");
+                return true;
+            }
             let generation = m::bind_scope("merge-archive-scope", &sid, "");
             match api::scoped(
                 "merge-archive",
@@ -1999,6 +2003,8 @@ pub async fn event(
                 {
                     dom::pretty("merge-archive-content", &value);
                     dom::hidden("merge-archive-content", false);
+                    dom::attr("merge-archive", "aria-expanded", "true");
+                    dom::text("merge-archive", "Hide saved context");
                 }
                 Err(error)
                     if !error.aborted
