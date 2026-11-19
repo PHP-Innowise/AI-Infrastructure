@@ -37,9 +37,24 @@ pub(crate) fn system_permissions_hint(provider: &str, mode: &str, permission: &s
     }
 }
 
+pub(super) fn is_systems_view(view: &str) -> bool {
+    matches!(view, "systems" | "system-changes")
+}
+
 pub(super) fn system_permissions_panel_state(v: &V) -> (bool, String) {
     let waiting = m::array(&v["waiting_permissions"]);
-    (!waiting.is_empty(), run::permission_panel_lead(&waiting))
+    if !waiting.is_empty() {
+        return (true, run::permission_panel_lead(&waiting));
+    }
+    if let Some(count) = v["waiting_permissions"].as_u64().filter(|&n| n > 0) {
+        let noun = if count == 1 {
+            "permission request"
+        } else {
+            "permission requests"
+        };
+        return (true, format!("{count} {noun} waiting for your decision."));
+    }
+    (false, String::new())
 }
 
 pub(super) fn system_execute_payload(
@@ -84,10 +99,9 @@ pub(super) fn system_resume_payload(
 /// that best (the agent's own reason, failed checks, the CLI's message); the
 /// journal's error is the fallback, a code read as words.
 pub(super) fn run_status(v: &V) -> String {
-    if m::yes(&v["active"])
-        && v["status"] != "queued"
-        && !m::array(&v["waiting_permissions"]).is_empty()
-    {
+    let has_waiting = !m::array(&v["waiting_permissions"]).is_empty()
+        || v["waiting_permissions"].as_u64().unwrap_or(0) > 0;
+    if m::yes(&v["active"]) && v["status"] != "queued" && has_waiting {
         return "Waiting for your answer to a permission request…".into();
     }
     let status = m::label(v["status"].as_str().unwrap_or(""));
@@ -377,8 +391,21 @@ pub(super) fn apply_sse_system_delta(
     if data["session_id"].is_string() {
         run_doc["session_id"] = data["session_id"].clone();
     }
+    let mut permissions_changed = false;
     if data["waiting_permissions"].is_array() {
         run_doc["waiting_permissions"] = data["waiting_permissions"].clone();
+    } else if let Some(count) = data["waiting_permissions"].as_u64() {
+        if count == 0 {
+            run_doc["waiting_permissions"] = json!([]);
+        } else {
+            let existing_len = run_doc["waiting_permissions"]
+                .as_array()
+                .map(|a| a.len() as u64);
+            if existing_len != Some(count) {
+                run_doc["waiting_permissions"] = json!(count);
+                permissions_changed = true;
+            }
+        }
     }
     let mut event_appended = false;
     if data["event"].is_object() || data["event"].is_string() {
@@ -393,12 +420,13 @@ pub(super) fn apply_sse_system_delta(
     if data["event"].is_object()
         && data["status"].is_null()
         && data["active"].is_null()
+        && !permissions_changed
         && event_appended
     {
         return SystemSseOutcome::UpdatedRenderOnly;
     }
     SystemSseOutcome::RefreshRun {
-        immediate: stopped || !is_active,
+        immediate: stopped || !is_active || permissions_changed,
         stopped,
     }
 }
@@ -415,7 +443,7 @@ fn schedule_system_poll(id: &str, project: &str, generation: u64, delay_ms: i32)
 
 #[allow(dead_code)]
 pub(crate) fn on_sse_system_resync(_: &V) {
-    if !m::read(|s| matches!(s.view.as_str(), "systems" | "services" | "changes")) {
+    if !m::read(|s| is_systems_view(&s.view)) {
         return;
     }
     let project = dom::value("system-project");
@@ -437,7 +465,7 @@ pub(crate) fn on_sse_system_resync(_: &V) {
 
 #[allow(dead_code)]
 pub(crate) fn on_sse_system_run(data: &V) {
-    if !m::read(|s| matches!(s.view.as_str(), "systems" | "services" | "changes")) {
+    if !m::read(|s| is_systems_view(&s.view)) {
         return;
     }
     let project = dom::value("system-project");

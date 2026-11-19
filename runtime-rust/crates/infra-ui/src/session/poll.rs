@@ -1,4 +1,93 @@
 use super::*;
+use std::collections::BTreeSet;
+
+#[derive(Default)]
+struct StreamSyncBuffer {
+    initial_poll_epoch: Option<u64>,
+    buffered_sse_events: Vec<V>,
+    pending_sse_resync: bool,
+}
+
+thread_local! {
+    static STREAM_SYNC: RefCell<StreamSyncBuffer> = RefCell::new(StreamSyncBuffer::default());
+}
+
+fn clear_stream_sync() {
+    STREAM_SYNC.with(|sync| {
+        let mut s = sync.borrow_mut();
+        s.initial_poll_epoch = None;
+        s.buffered_sse_events.clear();
+        s.pending_sse_resync = false;
+    });
+}
+
+pub(crate) fn parsed_event_id(event: &V) -> Option<u64> {
+    event["id"]
+        .as_u64()
+        .or_else(|| event["id"].as_str()?.trim().parse().ok())
+}
+
+/// Deduplicates, sorts, and merges incoming events into `events` by numeric `id`.
+/// Returns `(fresh_events, out_of_order)` where `out_of_order` indicates an insertion
+/// precedes an already-stored event and requires replaying `#events`.
+pub(crate) fn merge_ordered_events(
+    events: &mut Vec<V>,
+    seen: &mut BTreeSet<String>,
+    cursor: &mut u64,
+    mut incoming: Vec<V>,
+) -> (Vec<V>, bool) {
+    incoming.sort_by_key(|ev| {
+        let id = parsed_event_id(ev);
+        (id.is_none(), id.unwrap_or(0))
+    });
+    let prev_last_id = events.iter().rev().find_map(parsed_event_id);
+    let mut fresh = Vec::new();
+    let mut out_of_order = false;
+    for ev in incoming {
+        let key = m::string(&ev["id"]);
+        if !key.is_empty() && !seen.insert(key) {
+            continue;
+        }
+        if let Some(ev_id) = parsed_event_id(&ev) {
+            *cursor = (*cursor).max(ev_id);
+            if prev_last_id.is_some_and(|last| ev_id < last) {
+                out_of_order = true;
+            }
+        }
+        events.push(ev.clone());
+        fresh.push(ev);
+    }
+    if out_of_order {
+        events.sort_by_key(|ev| {
+            let id = parsed_event_id(ev);
+            (id.is_none(), id.unwrap_or(0))
+        });
+    }
+    (fresh, out_of_order)
+}
+
+pub(crate) fn flush_pending_sse_resync() {
+    let pending = STREAM_SYNC.with(|sync| {
+        let mut s = sync.borrow_mut();
+        let was = s.pending_sse_resync;
+        s.pending_sse_resync = false;
+        was
+    });
+    if pending && !m::read(|s| s.auth_failed || s.boot.is_null()) {
+        spawn_local(async {
+            resync_session_state().await;
+        });
+    }
+}
+
+async fn resync_session_state() {
+    refresh().await;
+    let (sid, epoch) = m::read(|s| (s.sid.clone(), s.epoch));
+    let initial_pending = STREAM_SYNC.with(|sync| sync.borrow().initial_poll_epoch == Some(epoch));
+    if !sid.is_empty() && !initial_pending {
+        poll(epoch).await;
+    }
+}
 
 pub(crate) fn permissions_hint_mode<'a>(
     read_only: bool,
@@ -224,10 +313,12 @@ pub fn new_session(project: Option<&str>) {
     }
     reset_preflight(true);
     reset_results();
+    run::reset_diff_view_state();
     save_preferences();
     reset_merge_archive();
     m::take("merge-draft");
     stop_poll();
+    clear_stream_sync();
     m::write(|s| {
         s.epoch += 1;
         s.sid.clear();
@@ -270,9 +361,11 @@ pub async fn select(id: &str) {
     let before_project = dom::value("project");
     reset_preflight(false);
     reset_results();
+    run::reset_diff_view_state();
     save_preferences();
     stop_poll();
-    m::write(|s| {
+    clear_stream_sync();
+    let epoch = m::write(|s| {
         s.epoch += 1;
         s.sid = id.into();
         s.selected = V::Null;
@@ -283,6 +376,10 @@ pub async fn select(id: &str) {
         s.stream.oldest_event_id = None;
         s.stream.latest_event_id = None;
         s.stream.visible_limit = 120;
+        s.epoch
+    });
+    STREAM_SYNC.with(|sync| {
+        sync.borrow_mut().initial_poll_epoch = Some(epoch);
     });
     reset_session_settings_state();
     m::take("session-settings-owner");
@@ -298,7 +395,6 @@ pub async fn select(id: &str) {
             open_view("sessions", true).await;
         });
     }
-    let epoch = m::read(|s| s.epoch);
     poll(epoch).await;
     if !m::read(|s| m::selection_matches(&s.sid, s.epoch, id, epoch)) {
         return;
@@ -332,6 +428,7 @@ pub async fn select(id: &str) {
 pub fn stop_poll() {
     dom::cancel_timer("session-poll");
     m::next("session-poll");
+    clear_stream_sync();
     inbox::stop();
     dom::error("inbox-error", "");
 }
@@ -413,12 +510,28 @@ pub async fn poll(epoch: u64) {
     match api::scoped("session-poll", &path).await {
         Ok((e, data)) if m::current("session-poll", e) && epoch == m::read(|s| s.epoch) => {
             if data["session"]["id"] != sid {
+                STREAM_SYNC.with(|sync| {
+                    let mut s = sync.borrow_mut();
+                    if s.initial_poll_epoch == Some(epoch) {
+                        s.initial_poll_epoch = None;
+                        s.buffered_sse_events.clear();
+                    }
+                });
                 dom::error(
                     "events-error",
                     "The runner returned a different session. Refresh before retrying.",
                 );
                 return;
             }
+            let buffered = STREAM_SYNC.with(|sync| {
+                let mut s = sync.borrow_mut();
+                if s.initial_poll_epoch == Some(epoch) {
+                    s.initial_poll_epoch = None;
+                    std::mem::take(&mut s.buffered_sse_events)
+                } else {
+                    Vec::new()
+                }
+            });
             m::write(|s| s.stream.consecutive_poll_errors = 0);
             let waiting_list = data["waiting_permissions"].as_array().cloned();
             let mut session = data["session"].clone();
@@ -431,8 +544,9 @@ pub async fn poll(epoch: u64) {
             apply_settings(&session);
             let events = m::array(&data["events"]);
             let length = events.len();
-            let mut fresh_events = Vec::new();
-            m::write(|s| {
+            let mut incoming = events;
+            incoming.extend(buffered);
+            let (fresh_events, out_of_order) = m::write(|s| {
                 if let Some(has_older) = data["has_older"].as_bool() {
                     if initial_poll {
                         s.stream.has_older = has_older;
@@ -441,11 +555,7 @@ pub async fn poll(epoch: u64) {
                 if initial_poll {
                     if let Some(oldest) = data["oldest_event_id"].as_u64() {
                         s.stream.oldest_event_id = Some(oldest);
-                    } else if let Some(first_id) = events.first().and_then(|ev| {
-                        ev["id"]
-                            .as_u64()
-                            .or_else(|| ev["id"].as_str()?.parse().ok())
-                    }) {
+                    } else if let Some(first_id) = incoming.iter().find_map(parsed_event_id) {
                         s.stream.oldest_event_id = Some(first_id);
                     }
                 }
@@ -455,28 +565,11 @@ pub async fn poll(epoch: u64) {
                 if let Some(total) = data["total_events"].as_u64() {
                     s.stream.total_events = total as usize;
                 }
+                merge_ordered_events(&mut s.events, &mut s.seen, &mut s.cursor, incoming)
             });
-            for event in events {
-                let key = m::string(&event["id"]);
-                let fresh = m::write(|s| {
-                    if !s.seen.insert(key) {
-                        false
-                    } else {
-                        s.cursor = s.cursor.max(
-                            event["id"]
-                                .as_u64()
-                                .or_else(|| event["id"].as_str()?.parse().ok())
-                                .unwrap_or(0),
-                        );
-                        s.events.push(event.clone());
-                        true
-                    }
-                });
-                if fresh {
-                    fresh_events.push(event);
-                }
-            }
-            if initial_poll && m::read(|s| s.events.len() > s.stream.visible_limit) {
+            if (initial_poll && m::read(|s| s.events.len() > s.stream.visible_limit))
+                || (!initial_poll && out_of_order)
+            {
                 run::replay_visible_stream();
             } else {
                 for event in &fresh_events {
@@ -522,6 +615,9 @@ pub async fn poll(epoch: u64) {
                 crate::graph_map::sync_embedded_changes();
             }
             dom::error("events-error", "");
+            if !m::yes(&m::data("bootstrapping")) {
+                flush_pending_sse_resync();
+            }
             if (!initial_poll && length == 250)
                 || m::read(|s| m::active(&s.selected))
                 || inbox::watching(&sid)
@@ -542,6 +638,29 @@ pub async fn poll(epoch: u64) {
         }
         Ok(_) => {}
         Err(e) if !e.aborted && epoch == m::read(|s| s.epoch) => {
+            let buffered = STREAM_SYNC.with(|sync| {
+                let mut s = sync.borrow_mut();
+                if s.initial_poll_epoch == Some(epoch) {
+                    s.initial_poll_epoch = None;
+                    std::mem::take(&mut s.buffered_sse_events)
+                } else {
+                    Vec::new()
+                }
+            });
+            if !buffered.is_empty() {
+                let (fresh_events, out_of_order) = m::write(|s| {
+                    merge_ordered_events(&mut s.events, &mut s.seen, &mut s.cursor, buffered)
+                });
+                if out_of_order {
+                    run::replay_visible_stream();
+                } else {
+                    for event in &fresh_events {
+                        run::observe(event.clone());
+                    }
+                }
+                run::render();
+                controls();
+            }
             dom::error("events-error", &e.message);
             if (m::read(|s| m::active(&s.selected)) || inbox::watching(&sid))
                 && ![401, 403, 404].contains(&e.status)
@@ -576,30 +695,43 @@ pub(crate) fn initialize_sse_listeners() {
 
     api::on_sse("session_event", |payload| {
         let target_sid = m::text(payload, "session_id");
-        let (current_sid, was_active) =
-            m::read(|s| (s.sid.clone(), !s.sid.is_empty() && m::active(&s.selected)));
-        let event = if payload["event"].is_object() {
+        let (current_sid, current_epoch, was_active) = m::read(|s| {
+            (
+                s.sid.clone(),
+                s.epoch,
+                !s.sid.is_empty() && m::active(&s.selected),
+            )
+        });
+        let mut event = if payload["event"].is_object() {
             payload["event"].clone()
         } else {
             payload.clone()
         };
+        if event["id"].is_null() && !payload["id"].is_null() {
+            event["id"] = payload["id"].clone();
+        }
         if !target_sid.is_empty() && target_sid == current_sid {
-            let key = m::string(&event["id"]);
-            let fresh = m::write(|s| {
-                if !key.is_empty() && !s.seen.insert(key) {
-                    false
-                } else {
-                    let ev_id = payload["id"]
-                        .as_u64()
-                        .or_else(|| event["id"].as_u64())
-                        .or_else(|| event["id"].as_str()?.parse().ok())
-                        .unwrap_or(0);
-                    s.cursor = s.cursor.max(ev_id);
-                    s.events.push(event.clone());
+            let buffered = STREAM_SYNC.with(|sync| {
+                let mut s = sync.borrow_mut();
+                if s.initial_poll_epoch == Some(current_epoch) {
+                    s.buffered_sse_events.push(event.clone());
                     true
+                } else {
+                    false
                 }
             });
-            if fresh {
+            if buffered {
+                return;
+            }
+            let (fresh_events, out_of_order) = m::write(|s| {
+                merge_ordered_events(&mut s.events, &mut s.seen, &mut s.cursor, vec![event])
+            });
+            if out_of_order {
+                run::replay_visible_stream();
+                run::render();
+                controls();
+                run::sync_approvals_badge();
+            } else if let Some(event) = fresh_events.into_iter().next() {
                 run::observe(event.clone());
                 run::render();
                 controls();
@@ -700,29 +832,52 @@ pub(crate) fn initialize_sse_listeners() {
         }
     });
 
+    api::on_sse("sse_open", |_| {
+        if m::read(|s| s.auth_failed || s.boot.is_null()) {
+            return;
+        }
+        let defer = m::yes(&m::data("bootstrapping"))
+            || STREAM_SYNC.with(|sync| sync.borrow().initial_poll_epoch.is_some());
+        if defer {
+            STREAM_SYNC.with(|sync| sync.borrow_mut().pending_sse_resync = true);
+            return;
+        }
+        spawn_local(async {
+            resync_session_state().await;
+        });
+    });
+
     api::on_sse("resync", |_| {
         spawn_local(async {
-            refresh().await;
-            let (sid, epoch) = m::read(|s| (s.sid.clone(), s.epoch));
-            if !sid.is_empty() {
-                poll(epoch).await;
-            }
+            resync_session_state().await;
         });
     });
 
     api::on_sse("sse_error", |_| {
-        let (sid, epoch, active) = m::read(|s| {
+        let (sid, epoch, active, auth_failed) = m::read(|s| {
             (
                 s.sid.clone(),
                 s.epoch,
                 !s.sid.is_empty() && (m::active(&s.selected) || inbox::watching(&s.sid)),
+                s.auth_failed,
             )
         });
+        if auth_failed {
+            return;
+        }
         if active && !sid.is_empty() {
-            dom::later("session-poll", 250, move || {
-                spawn_local(async move {
-                    poll(epoch).await;
+            let initial_pending =
+                STREAM_SYNC.with(|sync| sync.borrow().initial_poll_epoch == Some(epoch));
+            if !initial_pending {
+                dom::later("session-poll", 250, move || {
+                    spawn_local(async move {
+                        poll(epoch).await;
+                    });
                 });
+            }
+        } else {
+            spawn_local(async {
+                let _ = api::get("/api/sessions").await;
             });
         }
     });

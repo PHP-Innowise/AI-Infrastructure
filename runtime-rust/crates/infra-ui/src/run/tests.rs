@@ -1557,4 +1557,90 @@ new file mode 100644
         assert!(timed_html.contains("permission-expiry-badge"));
         assert!(timed_html.contains("data-expires-ms="));
     }
+
+    #[test]
+    fn incremental_markdown_copy_timers_and_persistent_diff_open_state() {
+        assert_eq!(copy_timer_key(Some("blk-1"), 7), "md-copy-reset-blk-1");
+        assert_eq!(copy_timer_key(Some("blk-2"), 7), "md-copy-reset-blk-2");
+        assert_ne!(
+            copy_timer_key(Some("blk-1"), 1),
+            copy_timer_key(Some("blk-2"), 1)
+        );
+        assert_eq!(copy_timer_key(None, 42), "md-copy-reset-42");
+
+        // Unclosed fence must not advance settled boundary past the paragraph before the fence.
+        let streaming_open_fence = "First para.\n\n```rust\nlet x = 1;\n\nstill inside fence";
+        let settled = find_settled_markdown_boundary(streaming_open_fence, 0);
+        assert_eq!(&streaming_open_fence[..settled], "First para.\n\n");
+
+        // Closed fence with trailing newline settles the complete code block while trailing chunk remains live.
+        let streaming_closed_fence = "First para.\n\n```rust\nlet x = 1;\n```\n\nTrailing live";
+        let settled2 = find_settled_markdown_boundary(streaming_closed_fence, 0);
+        assert_eq!(
+            &streaming_closed_fence[..settled2],
+            "First para.\n\n```rust\nlet x = 1;\n```\n\n"
+        );
+        assert_eq!(
+            format!(
+                "{}{}",
+                render_assistant_markdown_html(&streaming_closed_fence[..settled2]),
+                render_assistant_markdown_html(&streaming_closed_fence[settled2..])
+            ),
+            render_assistant_markdown_html(streaming_closed_fence)
+        );
+
+        let blocks = split_top_level_html_blocks(
+            "<p>One</p><div class=\"md-code-block\"><pre><code>fn a() {}</code></pre></div><p>Two</p>",
+        );
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks[0].starts_with("<p>One"));
+        assert!(blocks[1].starts_with("<div class=\"md-code-block\">"));
+        assert!(blocks[2].starts_with("<p>Two"));
+
+        let mut expanded = std::collections::HashSet::new();
+        let mut collapsed = std::collections::BTreeSet::new();
+        assert!(is_diff_file_open(
+            true,
+            "workspace-results:a.rs",
+            &expanded,
+            &collapsed
+        ));
+        assert!(!is_diff_file_open(
+            false,
+            "workspace-results:z.rs",
+            &expanded,
+            &collapsed
+        ));
+
+        // Explicit user expand overrides >20-file default collapsed state.
+        expanded.insert("workspace-results:z.rs".into());
+        assert!(is_diff_file_open(
+            false,
+            "workspace-results:z.rs",
+            &expanded,
+            &collapsed
+        ));
+
+        // Explicit user collapse overrides default open state.
+        collapsed.insert("workspace-results:a.rs".into());
+        assert!(!is_diff_file_open(
+            true,
+            "workspace-results:a.rs",
+            &expanded,
+            &collapsed
+        ));
+
+        assert_eq!(
+            diff_content_hash("workspace-results", "diff --git a/x b/x"),
+            diff_content_hash("workspace-results", "diff --git a/x b/x")
+        );
+        assert_ne!(
+            diff_content_hash("workspace-results", "diff A"),
+            diff_content_hash("workspace-results", "diff B")
+        );
+        assert_ne!(
+            diff_content_hash("workspace-results", "diff A"),
+            diff_content_hash("results-diff", "diff A")
+        );
+    }
 }

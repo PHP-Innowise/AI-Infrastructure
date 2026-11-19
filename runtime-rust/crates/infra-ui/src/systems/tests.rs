@@ -1082,4 +1082,81 @@ mod display_tests {
             &json!({"catalog": {"system": "demo", "services": []}})
         ));
     }
+
+    #[test]
+    fn systems_view_routes_and_waiting_permissions_counts_and_arrays_work_cleanly() {
+        assert!(is_systems_view("systems"));
+        assert!(is_systems_view("system-changes"));
+        assert!(!is_systems_view("services"));
+        assert!(!is_systems_view("changes"));
+
+        let mut run_doc = json!({
+            "id": "run-1",
+            "project_id": "proj-a",
+            "active": true,
+            "status": "running",
+            "waiting_permissions": [],
+            "events": []
+        });
+
+        // Count SSE frame arrives before hydrated objects -> updates doc & requests immediate refresh.
+        let outcome = apply_sse_system_delta(
+            &mut run_doc,
+            "proj-a",
+            "run-1",
+            &json!({"run_id": "run-1", "project_id": "proj-a", "waiting_permissions": 2}),
+        );
+        assert_eq!(
+            outcome,
+            SystemSseOutcome::RefreshRun {
+                immediate: true,
+                stopped: false,
+            }
+        );
+        assert_eq!(run_doc["waiting_permissions"], json!(2));
+        assert_eq!(
+            run_status(&run_doc),
+            "Waiting for your answer to a permission request…"
+        );
+        assert_eq!(
+            system_permissions_panel_state(&run_doc),
+            (
+                true,
+                "2 permission requests waiting for your decision.".into()
+            )
+        );
+
+        // Once hydrated with 2 ask objects, a delta with count=2 preserves objects and renders event-only.
+        run_doc["waiting_permissions"] = json!([
+            {"request_id": "p1", "tool": "Edit", "summary": "edit a.php"},
+            {"request_id": "p2", "tool": "Bash", "summary": "phpunit"}
+        ]);
+        let ev_outcome = apply_sse_system_delta(
+            &mut run_doc,
+            "proj-a",
+            "run-1",
+            &json!({
+                "run_id": "run-1",
+                "project_id": "proj-a",
+                "waiting_permissions": 2,
+                "event": {"id": 9, "kind": "status", "text": "waiting"}
+            }),
+        );
+        assert_eq!(ev_outcome, SystemSseOutcome::UpdatedRenderOnly);
+        assert!(run_doc["waiting_permissions"].is_array());
+        assert_eq!(run_doc["waiting_permissions"].as_array().unwrap().len(), 2);
+
+        // Count 0 clears waiting_permissions back to empty array.
+        let _ = apply_sse_system_delta(
+            &mut run_doc,
+            "proj-a",
+            "run-1",
+            &json!({"run_id": "run-1", "project_id": "proj-a", "waiting_permissions": 0}),
+        );
+        assert_eq!(run_doc["waiting_permissions"], json!([]));
+        assert_eq!(
+            system_permissions_panel_state(&run_doc),
+            (false, String::new())
+        );
+    }
 }

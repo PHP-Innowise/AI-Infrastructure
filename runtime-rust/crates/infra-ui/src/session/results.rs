@@ -42,11 +42,81 @@ pub(super) fn reset_results() {
     dom::clear("workspace-checks-list");
 }
 
+pub(super) fn active_diff_pane_target(
+    view: &str,
+    right_tab: &str,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    match (view, right_tab) {
+        ("changes", _) => Some((
+            "results-files",
+            "results-diff",
+            "results-diff",
+            "results-diff-note",
+        )),
+        ("sessions", "diff") => Some((
+            "workspace-diff-files",
+            "workspace-diff-viewer",
+            "workspace-results",
+            "workspace-diff-note",
+        )),
+        _ => None,
+    }
+}
+
+pub(super) fn active_checks_pane_target(
+    view: &str,
+    right_tab: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (view, right_tab) {
+        ("checks", _) => Some(("results-checks", "results-status")),
+        ("sessions", "checks") => Some(("workspace-checks-list", "workspace-checks-status")),
+        _ => None,
+    }
+}
+
+pub(super) fn files_summary_hash(scope_id: &str, files: &[V]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    feed(scope_id.as_bytes());
+    feed(b":");
+    for file in files {
+        feed(m::text(file, "status").as_bytes());
+        feed(b"\x1f");
+        feed(m::text(file, "path").as_bytes());
+        feed(b"\x1e");
+    }
+    format!("{hash:016x}:{}", files.len())
+}
+
+fn set_workspace_note_error(id: &str, msg: &str, is_error: bool) {
+    dom::text(id, msg);
+    if let Some(el) = dom::get(id) {
+        if is_error {
+            let _ = el.set_attribute("data-error", "true");
+        } else {
+            let _ = el.remove_attribute("data-error");
+        }
+    }
+}
+
 pub(super) fn render_results_files_into(container_id: &str, scope_id: &str, files: &[V]) {
     let Some(container) = dom::get(container_id) else {
         return;
     };
+    let hash = files_summary_hash(scope_id, files);
+    let already_rendered = container.get_attribute("data-files-hash").as_deref()
+        == Some(hash.as_str())
+        && (files.is_empty() || container.first_element_child().is_some());
+    if already_rendered {
+        return;
+    }
     dom::clear(container_id);
+    let _ = container.set_attribute("data-files-hash", &hash);
     if files.is_empty() {
         dom::text(container_id, "No changed files listed.");
         return;
@@ -78,11 +148,6 @@ pub(super) fn render_results_files_into(container_id: &str, scope_id: &str, file
     }
 }
 
-pub(super) fn render_results_files(files: &[V]) {
-    render_results_files_into("results-files", "results-diff", files);
-    render_results_files_into("workspace-diff-files", "workspace-results", files);
-}
-
 pub async fn results() {
     dom::cancel_timer("results-poll");
     if !results_relevant() {
@@ -97,9 +162,15 @@ pub async fn results() {
     let sid = m::read(|s| s.sid.clone());
     if sid.is_empty() {
         dom::error("results-error", "Choose a session first.");
-        dom::text(
+        set_workspace_note_error(
             "workspace-diff-note",
             "Select or start a session to view changes.",
+            true,
+        );
+        set_workspace_note_error(
+            "workspace-checks-status",
+            "Select or start a session to view checks.",
+            true,
         );
         return;
     }
@@ -108,14 +179,19 @@ pub async fn results() {
     match api::scoped(key, &path).await {
         Ok((e, v)) if m::current(key, e) && m::read(|s| s.sid == sid) && results_relevant() => {
             m::write(|s| s.diff_view.results_retry_count = 0);
+            dom::error("results-error", "");
             m::set("results", v.clone());
+            let (view, right_tab) = m::read(|s| (s.view.clone(), s.workspace.right_tab.clone()));
             let snapshot = &v["snapshot"];
-            dom::text("results-workspace", &m::text(&v, "workspace"));
-            dom::hidden(
-                "delivery-section",
-                m::read(|s| s.selected["workspace"] != "worktree"),
-            );
-            let checking = m::array(&v["checks"]).iter().any(m::active);
+            if result_view() {
+                dom::text("results-workspace", &m::text(&v, "workspace"));
+                dom::hidden(
+                    "delivery-section",
+                    m::read(|s| s.selected["workspace"] != "worktree"),
+                );
+            }
+            let checks = m::array(&v["checks"]);
+            let checking = checks.iter().any(m::active);
             let status_msg = if checking {
                 "Verification is queued or running; agent outcome stays separate."
             } else if m::read(|s| m::active(&s.selected)) {
@@ -123,199 +199,229 @@ pub async fn results() {
             } else {
                 "Verification results are current to the recorded snapshots."
             };
-            dom::text("results-status", status_msg);
-            dom::text("workspace-checks-status", status_msg);
-            dom::text(
-                "results-base",
-                &if snapshot["available"] == true {
-                    format!(
-                        "Branch: {} · Base: {}{}{}",
-                        snapshot["branch"].as_str().unwrap_or("detached HEAD"),
-                        m::text(snapshot, "base"),
-                        if snapshot["baseline_recorded"] == true {
-                            " (first launch)"
-                        } else {
-                            " (current HEAD; original baseline unavailable)"
-                        },
-                        if snapshot["preexisting_changes"] == true {
-                            " · Workspace already had uncommitted changes at first launch."
-                        } else {
-                            ""
-                        }
-                    )
-                } else {
-                    String::new()
-                },
-            );
-            let diff_note = format!(
-                "{}{}",
-                m::text(snapshot, "message"),
-                if snapshot["available"] == true && snapshot["complete"] != true {
-                    " Preview is truncated or omits file contents; verification freshness cannot be certified."
-                } else {
-                    ""
-                }
-            );
-            dom::text("results-diff-note", &diff_note);
-            dom::text("workspace-diff-note", &diff_note);
-            render_results_files(&m::array(&snapshot["files"]));
-            let diff_text = snapshot["diff"].as_str().unwrap_or("");
-            if diff_text.trim().is_empty() {
-                dom::text("results-diff", "No text diff available.");
-                dom::text("workspace-diff-viewer", "No text diff available.");
-            } else {
-                crate::run::render_grouped_diff_into("results-diff", diff_text, "results-diff");
-                crate::run::render_grouped_diff_into(
-                    "workspace-diff-viewer",
-                    diff_text,
-                    "workspace-results",
-                );
+            if result_view() {
+                dom::text("results-status", status_msg);
             }
-            dom::text("results-usage-note", &m::text(&v, "notice"));
-            let totals = &v["totals"];
-            let amount = |key: &str, suffix: &str| {
-                let t = &totals[key];
-                if t["unknown_launches"].as_u64().unwrap_or(0) > 0
-                    && t["reported"].as_f64().unwrap_or(0.) == 0.
-                {
-                    "—".into()
-                } else {
-                    t["reported"]
-                        .as_f64()
-                        .map(|n| {
-                            if key == "cost_usd" {
-                                format!("≈ {}{n:.4}", "$")
-                            } else {
-                                format!("{n:.0}{suffix}")
-                            }
-                        })
-                        .unwrap_or_else(|| "—".into())
-                }
-            };
-            let unknown = ["tokens", "cost_usd"]
-                .iter()
-                .filter_map(|key| {
-                    totals[*key]["unknown_launches"]
-                        .as_u64()
-                        .filter(|n| *n > 0)
-                        .map(|n| {
+            if let Some((files_id, diff_id, scope_id, note_id)) =
+                active_diff_pane_target(&view, &right_tab)
+            {
+                if view == "changes" {
+                    dom::text(
+                        "results-base",
+                        &if snapshot["available"] == true {
                             format!(
-                                "{} not reported for {n} launches",
-                                if *key == "cost_usd" { "cost" } else { "tokens" }
-                            )
-                        })
-                })
-                .collect::<Vec<_>>();
-            dom::text(
-                "results-totals",
-                &format!(
-                    "{} · {} · {}{}",
-                    amount("tokens", " tokens"),
-                    amount("cost_usd", ""),
-                    amount("seconds", " s"),
-                    if unknown.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {}", unknown.join(" · "))
-                    }
-                ),
-            );
-            let checks = m::array(&v["checks"]);
-            let render_checks_into = |container_id: &str| {
-                dom::keyed_render(
-                    container_id,
-                    &checks,
-                    |c| m::text(c, "id"),
-                    |check| {
-                        let status_str = m::text(check, "status");
-                        let cmd_str = m::text(check, "command");
-                        let d =
-                            dom::details(&format!("{} · {cmd_str}", status_str.to_uppercase()), "");
-                        if ["queued", "running", "failed", "timed_out", "output_limit"]
-                            .contains(&status_str.as_str())
-                        {
-                            let _ = d.set_attribute("open", "");
-                        }
-                        let current = snapshot["complete"] == true
-                            && check["snapshot_complete"] == true
-                            && snapshot["id"] == check["snapshot_id"]
-                            && check["workspace_changed"] != true;
-                        let freshness = if check["kind"] == "target" {
-                            format!(
-                                "Target {} · tested commit {}{}",
-                                m::text(check, "target_branch"),
-                                m::text(check, "candidate"),
-                                if check["workspace_changed"] == true {
-                                    " · Check changed the workspace"
+                                "Branch: {} · Base: {}{}{}",
+                                snapshot["branch"].as_str().unwrap_or("detached HEAD"),
+                                m::text(snapshot, "base"),
+                                if snapshot["baseline_recorded"] == true {
+                                    " (first launch)"
+                                } else {
+                                    " (current HEAD; original baseline unavailable)"
+                                },
+                                if snapshot["preexisting_changes"] == true {
+                                    " · Workspace already had uncommitted changes at first launch."
                                 } else {
                                     ""
                                 }
                             )
-                        } else if current {
-                            "Matches the current diff".into()
-                        } else if check["workspace_changed"] == true
-                            || snapshot["id"].is_string()
-                                && check["snapshot_id"].is_string()
-                                && snapshot["id"] != check["snapshot_id"]
-                        {
-                            "Workspace changed since this check".into()
                         } else {
-                            "Freshness unavailable".into()
-                        };
-                        dom::add(
-                            &d,
-                            &dom::el(
-                                "p",
-                                "knowledge-note",
-                                &format!(
-                                    "{} · exit code {} · {}s · {freshness}",
-                                    check["started_at"]
-                                        .as_str()
-                                        .or_else(|| check["created_at"].as_str())
-                                        .unwrap_or("not recorded"),
-                                    check["exit_code"]
-                                        .as_i64()
-                                        .map(|n| n.to_string())
-                                        .unwrap_or_else(|| "unavailable".into()),
-                                    check["seconds"]
-                                        .as_f64()
-                                        .map(|n| n.to_string())
-                                        .unwrap_or_else(|| "unknown".into())
-                                ),
-                            ),
-                        );
-                        let output_text = check["output"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("Waiting for output…");
-                        dom::add(&d, &dom::el("pre", "fleet-report-text", output_text));
-                        if matches!(status_str.as_str(), "failed" | "timed_out" | "output_limit") {
-                            let req = crate::run::failure_localize_payload(check, output_text);
-                            let btn =
-                                dom::button("Localize failure on map", "localize-run-failure", req);
-                            let _ = btn.class_list().add_1("compact");
-                            dom::add(&d, &btn);
-                        }
-                        d
-                    },
-                );
-                if checks.is_empty() {
-                    dom::append(
-                        container_id,
-                        &dom::el("p", "knowledge-note", "No independent checks run yet."),
+                            String::new()
+                        },
                     );
                 }
-            };
-            render_checks_into("results-checks");
-            render_checks_into("workspace-checks-list");
-            if result_view() {
+                let diff_note = format!(
+                    "{}{}",
+                    m::text(snapshot, "message"),
+                    if snapshot["available"] == true && snapshot["complete"] != true {
+                        " Preview is truncated or omits file contents; verification freshness cannot be certified."
+                    } else {
+                        ""
+                    }
+                );
+                set_workspace_note_error(note_id, &diff_note, false);
+                render_results_files_into(files_id, scope_id, &m::array(&snapshot["files"]));
+                let diff_text = snapshot["diff"].as_str().unwrap_or("");
+                if diff_text.trim().is_empty() {
+                    crate::run::render_empty_diff_into(diff_id, "No text diff available.");
+                } else {
+                    crate::run::render_grouped_diff_into(diff_id, diff_text, scope_id);
+                }
+            }
+            if view == "usage" {
+                dom::text("results-usage-note", &m::text(&v, "notice"));
+                let totals = &v["totals"];
+                let amount = |key: &str, suffix: &str| {
+                    let t = &totals[key];
+                    if t["unknown_launches"].as_u64().unwrap_or(0) > 0
+                        && t["reported"].as_f64().unwrap_or(0.) == 0.
+                    {
+                        "—".into()
+                    } else {
+                        t["reported"]
+                            .as_f64()
+                            .map(|n| {
+                                if key == "cost_usd" {
+                                    format!("≈ {}{n:.4}", "$")
+                                } else {
+                                    format!("{n:.0}{suffix}")
+                                }
+                            })
+                            .unwrap_or_else(|| "—".into())
+                    }
+                };
+                let unknown = ["tokens", "cost_usd"]
+                    .iter()
+                    .filter_map(|key| {
+                        totals[*key]["unknown_launches"]
+                            .as_u64()
+                            .filter(|n| *n > 0)
+                            .map(|n| {
+                                format!(
+                                    "{} not reported for {n} launches",
+                                    if *key == "cost_usd" { "cost" } else { "tokens" }
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                dom::text(
+                    "results-totals",
+                    &format!(
+                        "{} · {} · {}{}",
+                        amount("tokens", " tokens"),
+                        amount("cost_usd", ""),
+                        amount("seconds", " s"),
+                        if unknown.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", unknown.join(" · "))
+                        }
+                    ),
+                );
+            }
+            if let Some((checks_list_id, checks_status_id)) =
+                active_checks_pane_target(&view, &right_tab)
+            {
+                set_workspace_note_error(checks_status_id, status_msg, false);
+                if checks.is_empty() {
+                    let already_empty = dom::get(checks_list_id).is_some_and(|c| {
+                        c.child_element_count() == 1
+                            && c.first_element_child().is_some_and(|f| f.tag_name() == "P")
+                    });
+                    if !already_empty {
+                        dom::clear(checks_list_id);
+                        dom::append(
+                            checks_list_id,
+                            &dom::el("p", "knowledge-note", "No independent checks run yet."),
+                        );
+                    }
+                } else {
+                    if let Some(c) = dom::get(checks_list_id) {
+                        if let Some(first) = c.first_element_child() {
+                            if first.tag_name() == "P" && first.get_attribute("data-key").is_none()
+                            {
+                                dom::clear(checks_list_id);
+                            }
+                        }
+                    }
+                    dom::keyed_render(
+                        checks_list_id,
+                        &checks,
+                        |c| m::text(c, "id"),
+                        |check| {
+                            let status_str = m::text(check, "status");
+                            let cmd_str = m::text(check, "command");
+                            let d = dom::details(
+                                &format!("{} · {cmd_str}", status_str.to_uppercase()),
+                                "",
+                            );
+                            if ["queued", "running", "failed", "timed_out", "output_limit"]
+                                .contains(&status_str.as_str())
+                            {
+                                let _ = d.set_attribute("open", "");
+                            }
+                            let current = snapshot["complete"] == true
+                                && check["snapshot_complete"] == true
+                                && snapshot["id"] == check["snapshot_id"]
+                                && check["workspace_changed"] != true;
+                            let freshness = if check["kind"] == "target" {
+                                format!(
+                                    "Target {} · tested commit {}{}",
+                                    m::text(check, "target_branch"),
+                                    m::text(check, "candidate"),
+                                    if check["workspace_changed"] == true {
+                                        " · Check changed the workspace"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                            } else if current {
+                                "Matches the current diff".into()
+                            } else if check["workspace_changed"] == true
+                                || snapshot["id"].is_string()
+                                    && check["snapshot_id"].is_string()
+                                    && snapshot["id"] != check["snapshot_id"]
+                            {
+                                "Workspace changed since this check".into()
+                            } else {
+                                "Freshness unavailable".into()
+                            };
+                            dom::add(
+                                &d,
+                                &dom::el(
+                                    "p",
+                                    "knowledge-note",
+                                    &format!(
+                                        "{} · exit code {} · {}s · {freshness}",
+                                        check["started_at"]
+                                            .as_str()
+                                            .or_else(|| check["created_at"].as_str())
+                                            .unwrap_or("not recorded"),
+                                        check["exit_code"]
+                                            .as_i64()
+                                            .map(|n| n.to_string())
+                                            .unwrap_or_else(|| "unavailable".into()),
+                                        check["seconds"]
+                                            .as_f64()
+                                            .map(|n| n.to_string())
+                                            .unwrap_or_else(|| "unknown".into())
+                                    ),
+                                ),
+                            );
+                            let output_text = check["output"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("Waiting for output…");
+                            dom::add(&d, &dom::el("pre", "fleet-report-text", output_text));
+                            if matches!(
+                                status_str.as_str(),
+                                "failed" | "timed_out" | "output_limit"
+                            ) {
+                                let req = crate::run::failure_localize_payload(check, output_text);
+                                let btn = dom::button(
+                                    "Localize failure on map",
+                                    "localize-run-failure",
+                                    req,
+                                );
+                                let _ = btn.class_list().add_1("compact");
+                                dom::add(&d, &btn);
+                            }
+                            d
+                        },
+                    );
+                }
+            }
+            if view == "usage" {
                 dom::rows("results-launches", &m::array(&v["launches"]));
                 knowledge::usage(&v);
+            }
+            if view == "changes" {
                 delivery_load(&sid).await;
                 if !m::current(key, e) || !m::read(|s| s.sid == sid) || !results_relevant() {
                     return;
                 }
                 sync_results_memory_prefill(&sid);
+            }
+            if result_view() {
                 result_controls();
                 let view = m::read(|s| s.view.clone());
                 render_tabs(&view, "sessions");
@@ -331,6 +437,8 @@ pub async fn results() {
         Ok(_) => {}
         Err(e) if !e.aborted && m::read(|s| s.sid == sid) && results_relevant() => {
             dom::error("results-error", &e.message);
+            set_workspace_note_error("workspace-diff-note", &e.message, true);
+            set_workspace_note_error("workspace-checks-status", &e.message, true);
             if ![401, 403, 404].contains(&e.status) {
                 let attempt = m::write(|s| {
                     s.diff_view.results_retry_count =
@@ -779,7 +887,7 @@ pub(crate) fn set_workspace_right_tab(tab: &str) {
     }
     if tab == "graph" {
         crate::graph_map::sync_embedded(false);
-    } else if !m::read(|s| s.sid.is_empty()) {
+    } else {
         spawn_local(async {
             results().await;
         });

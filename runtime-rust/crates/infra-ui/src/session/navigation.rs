@@ -81,7 +81,9 @@ pub(crate) async fn apply_hash_route() {
     open_view_inner(target_view, false, false).await;
     if !route.path.is_empty() {
         if target_view == "sessions" {
+            set_mobile_pane("graph");
             set_workspace_right_tab("diff");
+            results().await;
             crate::run::jump_to_diff_file("workspace-results", &route.path);
         } else if target_view == "changes" {
             crate::run::jump_to_diff_file("results-diff", &route.path);

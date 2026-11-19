@@ -63,6 +63,7 @@ pub fn reset() {
     });
     hide_card(false);
     m::take("permission-pending");
+    clear_stream_md_cache();
     dom::clear("events");
     dom::clear("run-tree");
     dom::clear("run-pane-plan");

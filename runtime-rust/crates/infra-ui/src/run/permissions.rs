@@ -932,7 +932,7 @@ fn sync_card_expiry_slot(
     }
 }
 
-fn upsert_permission_card_in(
+pub(super) fn upsert_permission_card_in(
     container: &web_sys::Element,
     container_id: &str,
     event: &V,
@@ -1729,7 +1729,9 @@ pub(crate) fn total_pending_approvals_count() -> usize {
             total += current_pending;
         }
         for (sid, &count) in &s.approvals.waiting_counts {
-            if !s.sessions.iter().any(|sess| m::text(sess, "id") == *sid) {
+            if !s.sessions.iter().any(|sess| m::text(sess, "id") == *sid)
+                && (counted_current || *sid != s.sid)
+            {
                 total += count;
             }
         }

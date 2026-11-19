@@ -263,6 +263,23 @@ pub(crate) fn set_workspace_project(id: &str) {
     }
 }
 
+/// Shared project switcher used by both `#project-switcher` and the Command Palette.
+pub(crate) async fn switch_project_from_shell(id: &str) -> bool {
+    if m::read(|s| s.view == "sessions") {
+        if m::read(|s| s.pending) {
+            let current = m::current_project();
+            dom::set_value("project-switcher", &current);
+            dom::set_value("project", &current);
+            return false;
+        }
+        new_session(Some(id));
+    } else {
+        set_workspace_project(id);
+    }
+    load_git().await;
+    true
+}
+
 pub fn sync_project(id: &str) {
     let previous_global = m::current_project();
     m::set_current_project(id);
