@@ -187,7 +187,7 @@ fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
     let edges = [(0, 1, 1), (0, 2, 1), (0, 3, 1)];
     let plain = laid_out(4, &edges, Routing::PLAIN);
     let middle = plain.nodes[0].y + BOX_HEIGHT / 2.0;
-    assert!(plain.wires.iter().all(|wire| ends_at(wire).0 .1 == middle));
+    assert!(plain.wires.iter().all(|wire| ends_at(wire).0.1 == middle));
     let plan = laid_out(4, &edges, Routing::CLEAN);
     // The boxes stand where they stood.
     assert_eq!(plan.nodes, plain.nodes);
@@ -195,7 +195,7 @@ fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
     used.sort_by(|a, b| plan.nodes[*a].y.total_cmp(&plan.nodes[*b].y));
     let leaves = used.map(|node| {
         let edge = edges.iter().position(|(_, to, _)| *to == node).unwrap();
-        ends_at(wire_of(&plan, edge)).0 .1
+        ends_at(wire_of(&plan, edge)).0.1
     });
     // The link to the box above leaves above, four apart, about the
     // middle of the side.
@@ -207,7 +207,7 @@ fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
     // Each of them reaches the middle of its own box: one link there.
     for (edge, (_, to, _)) in edges.iter().enumerate() {
         assert_eq!(
-            ends_at(wire_of(&plan, edge)).1 .1,
+            ends_at(wire_of(&plan, edge)).1.1,
             plan.nodes[*to].y + BOX_HEIGHT / 2.0
         );
     }
@@ -219,7 +219,7 @@ fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
     let ys = plan
         .wires
         .iter()
-        .map(|wire| ends_at(wire).0 .1)
+        .map(|wire| ends_at(wire).0.1)
         .collect::<Vec<_>>();
     let (least, most) = (
         ys.iter().copied().fold(f64::INFINITY, f64::min),
@@ -233,7 +233,7 @@ fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
     // The links that arrive at one box stand apart the same way.
     let into = [(0, 2, 1), (1, 2, 1)];
     let plan = laid_out(3, &into, Routing::CLEAN);
-    let arrive = [0, 1].map(|edge| ends_at(wire_of(&plan, edge)).1 .1);
+    let arrive = [0, 1].map(|edge| ends_at(wire_of(&plan, edge)).1.1);
     assert_eq!((arrive[0] - arrive[1]).abs(), PORT_GAP);
     assert_eq!(
         arrive[0] < arrive[1],
@@ -411,10 +411,12 @@ fn a_link_that_passes_many_layers_is_a_portal_and_takes_no_slot() {
     assert!(plan.height < plain.height);
     // One layer fewer and it is led through the layers as any other.
     let near = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1)];
-    assert!(laid_out(4, &near, Routing::CLEAN)
-        .wires
-        .iter()
-        .all(|wire| !wire.portal));
+    assert!(
+        laid_out(4, &near, Routing::CLEAN)
+            .wires
+            .iter()
+            .all(|wire| !wire.portal)
+    );
     // A link that closes a cycle is drawn however far it runs.
     let ring = [(0, 1, 9), (1, 2, 9), (2, 3, 9), (3, 4, 9), (4, 0, 1)];
     let plan = laid_out(5, &ring, Routing::CLEAN);
@@ -427,12 +429,16 @@ fn unlinked_nodes_sit_below_and_nothing_overlaps() {
     assert_eq!(plan.wires.len(), 1);
     let apart = plan.apart.unwrap();
     let loose = plan.nodes[2..].iter().collect::<Vec<_>>();
-    assert!(loose
-        .iter()
-        .all(|node| node.layer.is_none() && node.y >= apart + CAPTION));
-    assert!(plan.nodes[..2]
-        .iter()
-        .all(|node| node.y + BOX_HEIGHT < apart));
+    assert!(
+        loose
+            .iter()
+            .all(|node| node.layer.is_none() && node.y >= apart + CAPTION)
+    );
+    assert!(
+        plan.nodes[..2]
+            .iter()
+            .all(|node| node.y + BOX_HEIGHT < apart)
+    );
     for (index, a) in plan.nodes.iter().enumerate() {
         assert!(a.x + BOX_WIDTH <= plan.width && a.y + BOX_HEIGHT <= plan.height);
         for b in &plan.nodes[index + 1..] {
@@ -736,8 +742,11 @@ fn a_run_is_laid_over_the_map_of_what_it_changed() {
     let html = side(&selected);
     assert!(!html.contains("not opened by the run"));
     assert!(html.contains("src/Order/Order.php</span><span class=\"graph-map-row-links\">1 link · opened by the run</span>"), "{html}");
-    assert!(html
-        .contains("src/Order/Invoice.php</span><span class=\"graph-map-row-links\">1 link</span>"));
+    assert!(
+        html.contains(
+            "src/Order/Invoice.php</span><span class=\"graph-map-row-links\">1 link</span>"
+        )
+    );
     assert_eq!(html.matches(" · opened by the run").count(), 1);
     // An opened file of the run lists what uses it alike.
     let mut opened = file();
@@ -804,8 +813,10 @@ fn a_picture_of_a_run_says_what_of_its_looking_is_not_recorded() {
     // The Show list names a run that is shown, and the map is opened
     // on what its button asks for.
     let place = json!({"git": true, "branch": "main", "base": "origin/main"});
-    assert!(targets(&place, "run:0b0e7f3a")
-        .ends_with("<option value=\"run:0b0e7f3a\" selected>A run of an agent</option>"));
+    assert!(
+        targets(&place, "run:0b0e7f3a")
+            .ends_with("<option value=\"run:0b0e7f3a\" selected>A run of an agent</option>")
+    );
     // With a session on the screen the list offers its run; where
     // that run is the one shown it is called by what it is here, and
     // another session's run stays a run of an agent.
@@ -848,17 +859,23 @@ fn the_show_list_offers_the_checkout_and_keeps_what_was_picked() {
     // What the picker chose stays in the list while it is shown: a
     // request by its title when it is known, a commit by its hash.
     assert!(targets(&place, "pr:9").ends_with("<option value=\"pr:9\" selected>#9 Wip</option>"));
-    assert!(targets(&place, "pr:77")
-        .ends_with("<option value=\"pr:77\" selected>Pull request #77</option>"));
+    assert!(
+        targets(&place, "pr:77")
+            .ends_with("<option value=\"pr:77\" selected>Pull request #77</option>")
+    );
     assert!(targets(&place, "commit:1a2b3c4d5e6f7a8b9c0d").ends_with(
         "<option value=\"commit:1a2b3c4d5e6f7a8b9c0d\" selected>Commit 1a2b3c4d</option>"
     ));
-    assert!(targets(&place, "ref:feature/x")
-        .ends_with("<option value=\"ref:feature/x\" selected>feature/x</option>"));
+    assert!(
+        targets(&place, "ref:feature/x")
+            .ends_with("<option value=\"ref:feature/x\" selected>feature/x</option>")
+    );
     // Without an open request the default branch is the base.
     let alone = json!({"git": true, "branch": "main", "base": "origin/main", "pull": null, "against": null, "pulls": []});
-    assert!(targets(&alone, "")
-        .contains("<option value=\"work\">Current work: main against origin/main</option>"));
+    assert!(
+        targets(&alone, "")
+            .contains("<option value=\"work\">Current work: main against origin/main</option>")
+    );
     // Outside Git there is only the project.
     assert_eq!(
         targets(&json!({"git": false}), ""),
@@ -1503,8 +1520,10 @@ fn the_summary_says_how_much_is_read_and_how_much_is_guessed() {
     // What the manifests of Rust crates rule out is said after it.
     let mut ruled = view();
     ruled["totals"]["ruled_out"] = json!(1157);
-    assert!(summary(&ruled)
-        .ends_with("270 skipped, their file is unclear · 1,157 ruled out by Cargo manifests"));
+    assert!(
+        summary(&ruled)
+            .ends_with("270 skipped, their file is unclear · 1,157 ruled out by Cargo manifests")
+    );
     ruled["totals"]["ruled_out"] = json!(0);
     assert_eq!(summary(&ruled), summary(&view()));
     let mut capped = view();
@@ -1542,8 +1561,10 @@ fn the_summary_says_how_much_is_read_and_how_much_is_guessed() {
     let mut kept = view();
     kept["matching"] = json!(0);
     kept["beyond"] = json!(true);
-    assert!(note(&kept)
-        .starts_with("No name here matches the filter. The selected one is drawn as well."));
+    assert!(
+        note(&kept)
+            .starts_with("No name here matches the filter. The selected one is drawn as well.")
+    );
     kept["matching"] = json!(2);
     assert!(note(&kept).starts_with("The selected one is drawn as well."));
 }
@@ -1989,9 +2010,11 @@ fn a_frame_is_a_band_across_the_layers_above_what_lies_in_none() {
     assert!(plan.width >= frame.x + frame.width + MARGIN);
     assert_eq!(plan.height, plan.nodes[5].y + BOX_HEIGHT + ROW_GAP);
     // Without frames the picture is as it was.
-    assert!(plan_with(4, &[(0, 1, 1)], &Frames::default())
-        .frames
-        .is_empty());
+    assert!(
+        plan_with(4, &[(0, 1, 1)], &Frames::default())
+            .frames
+            .is_empty()
+    );
     assert_eq!(
         plan_with(4, &[(0, 1, 1), (2, 1, 1)], &Frames::default()),
         super::plan(4, &[(0, 1, 1), (2, 1, 1)])
@@ -2108,16 +2131,23 @@ fn a_spread_out_folder_is_drawn_as_a_frame_with_its_name_and_a_way_back() {
     assert!(html.find("graph-map-frame\"").unwrap() < html.find("graph-map-edge").unwrap());
     // Its head: − gathers the folder, then its name and how much of it
     // is drawn.
-    assert!(html.contains("data-action=\"graph-map-gather\" data-payload=\"&quot;src/Cart&quot;\""));
+    assert!(
+        html.contains("data-action=\"graph-map-gather\" data-payload=\"&quot;src/Cart&quot;\"")
+    );
     assert!(html.contains(
         "title=\"Draw Cart as one box again\" aria-label=\"Draw Cart as one box again\">−</button>"
     ));
-    assert!(html.contains("title=\"src/Cart\">Cart<span class=\"graph-map-frame-count\"> · 2 of 5 drawn</span></span>"));
+    assert!(html.contains(
+        "title=\"src/Cart\">Cart<span class=\"graph-map-frame-count\"> · 2 of 5 drawn</span></span>"
+    ));
     // A folder has + at its corner, in the frame as outside it; a file
     // has none.
     assert_eq!(html.matches("data-action=\"graph-map-spread\"").count(), 2);
-    assert!(html
-        .contains("data-action=\"graph-map-spread\" data-payload=\"&quot;src/Cart/Rules&quot;\""));
+    assert!(
+        html.contains(
+            "data-action=\"graph-map-spread\" data-payload=\"&quot;src/Cart/Rules&quot;\""
+        )
+    );
     assert!(html.contains("title=\"Open Order here, among the others\""));
     // What the frame holds lies in it; the rest lies under it.
     let frames = Frames {
@@ -2306,7 +2336,7 @@ fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
     // says which two places it joins.
     let html = canvas(&super::tests::view());
     assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 2);
-    assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" tabindex=\"0\" role=\"button\"><title>Order uses Cart · select to see what makes up this link</title>"));
+    assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" role=\"button\"><title>Order uses Cart · select to see what makes up this link</title>"));
     // They lie over the links that are seen.
     assert!(
         html.rfind("class=\"graph-map-edge").unwrap()
@@ -2323,7 +2353,9 @@ fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
     // direction it runs.
     let side = side(&super::tests::view());
     assert!(side.contains("class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart\">↗</button></li>"));
-    assert!(side.contains("data-payload=\"{&quot;from&quot;:&quot;tests&quot;,&quot;to&quot;:&quot;src/Order&quot;}\""));
+    assert!(side.contains(
+        "data-payload=\"{&quot;from&quot;:&quot;tests&quot;,&quot;to&quot;:&quot;src/Order&quot;}\""
+    ));
     // A row of two symbols is one link, and has no window to open.
     let mut opened = file();
     opened["focus"] = json!({
@@ -2359,7 +2391,9 @@ fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
     assert!(!html.contains("graph-map-hit") && !html.contains("graph-map-link"));
     assert!(html.contains("title=\"src/Order/Notifier.php\">Notifier.php</span>"));
     assert!(html.contains("<title>Order uses Cart · imports from</title>"));
-    assert!(html.contains("<title>Order uses Cart.add&lt;T&gt;() · calls, guessed by name</title>"));
+    assert!(
+        html.contains("<title>Order uses Cart.add&lt;T&gt;() · calls, guessed by name</title>")
+    );
     // A name says what it is, where it lies and how much it does here.
     assert!(html.contains("data-payload=\"&quot;src/Order/Order.php#L3:Order&quot;\" data-folder=\"false\" data-kind=\"type\" data-selected=\"false\" data-dim=\"false\" data-flow=\"uses\" data-out=\"true\" data-in=\"false\""));
     assert!(html.contains("title=\"src/Order/Order.php:3\" aria-label=\"Order, type, src/Order/Order.php:3, uses through 2 links here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">T</span><span class=\"graph-map-node-name\">Order</span><span class=\"graph-map-node-count\" aria-hidden=\"true\">2</span></button>"));
@@ -2632,8 +2666,11 @@ fn followed_symbols_say_what_they_are_and_which_file_each_lies_in() {
     assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span><span class=\"graph-map-node-detail\" aria-hidden=\"true\">Price.php:9</span></button>"), "{html}");
     // The node of a file has no letter and no line, and its name is text.
     assert!(html.contains("title=\"Notifier&lt;T&gt;.php · src/Order/Notifier.php\" aria-label=\"Notifier&lt;T&gt;.php, the file itself, for what belongs to no symbol in it, such as its imports, uses others"), "{html}");
-    assert!(html
-        .contains("<span class=\"graph-map-node-name\"><bdi>Notifier&lt;T&gt;.php</bdi></span>"));
+    assert!(
+        html.contains(
+            "<span class=\"graph-map-node-name\"><bdi>Notifier&lt;T&gt;.php</bdi></span>"
+        )
+    );
     // The symbol they start from, with what the change did to it. No
     // box opens: selecting one again would leave the followed links.
     assert!(html.contains("data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\" data-folder=\"false\" data-kind=\"method\" data-open=\"false\" data-outside=\"false\" data-changed=\"true\""), "{html}");
@@ -2946,7 +2983,9 @@ fn the_side_panel_of_a_path_lists_the_next_and_the_one_before() {
     view["focus"] = focus;
     let html = side(&view);
     assert!(html.starts_with("<h3>core.php</h3><p class=\"graph-map-path\">lib/core.php</p><p class=\"knowledge-note\">File · 2 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;lib/core.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/core.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;core.php&quot;,&quot;path&quot;:&quot;lib/core.php&quot;}\">Path to…</button><h4>Next on the way <span class=\"graph-map-total\">1</span></h4>"), "{html}");
-    assert!(html.contains("<h4>Before it on the way <span class=\"graph-map-total\">5</span></h4>"));
+    assert!(
+        html.contains("<h4>Before it on the way <span class=\"graph-map-total\">5</span></h4>")
+    );
     assert!(html.contains("<p class=\"knowledge-note\">and 3 more</p>"));
     assert_eq!(html.matches("class=\"graph-map-row-look\"").count(), 3);
     assert!(html.contains("Uses by kind: calls 2"));
@@ -3360,8 +3399,10 @@ fn what_two_places_share_says_how_much_that_is_and_what_it_leaves_out() {
         )
     );
     none["certain"] = json!(true);
-    assert!(note(&none)
-        .ends_with("Links guessed by name are left out; with them there may be something."));
+    assert!(
+        note(&none)
+            .ends_with("Links guessed by name are left out; with them there may be something.")
+    );
     assert!(crumbs(&none).ends_with(&format!(": what uses both</span>{ASK_PATH}")));
     // One of the two in the other: they are not apart, and there is
     // nothing more to ask of them.
@@ -3698,7 +3739,9 @@ fn the_side_panel_of_what_two_places_share_says_what_a_box_is_to_them() {
     view["focus"] = focus;
     let html = side(&view);
     assert!(html.starts_with("<h3>db.php</h3><p class=\"graph-map-path\">lib/db.php</p><p class=\"knowledge-note\">File · 2 symbols · both use it: 2 links from users.php, 1 link from orders&lt;1&gt;.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;lib/db.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/db.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;db.php&quot;,&quot;path&quot;:&quot;lib/db.php&quot;}\">Path to…</button><h4>Next on the way <span class=\"graph-map-total\">0</span></h4>"), "{html}");
-    assert!(html.contains("<h4>Before it on the way <span class=\"graph-map-total\">2</span></h4>"));
+    assert!(
+        html.contains("<h4>Before it on the way <span class=\"graph-map-total\">2</span></h4>")
+    );
     assert_eq!(html.matches("class=\"graph-map-row-look\"").count(), 2);
     // What uses both says how far the two are from it.
     view["shared"]["side"] = json!("uses_both");
@@ -4130,7 +4173,9 @@ fn the_map_goes_to_the_place_a_search_found() {
     assert_eq!(
         kept(
             &name,
-            &["target", "scope", "focus", "filter", "follow", "out", "into", "certain"]
+            &[
+                "target", "scope", "focus", "filter", "follow", "out", "into", "certain"
+            ]
         ),
         [
             json!("pr:7"),
@@ -4159,7 +4204,9 @@ fn the_map_goes_to_the_place_a_search_found() {
     assert_eq!(
         kept(
             &there,
-            &["target", "scope", "focus", "filter", "follow", "out", "into", "certain"]
+            &[
+                "target", "scope", "focus", "filter", "follow", "out", "into", "certain"
+            ]
         ),
         [
             json!(""),
@@ -4657,7 +4704,9 @@ fn the_layers_of_a_folder_are_drawn_in_their_order_with_what_runs_against_it() {
     assert!(html.contains("aria-label=\"Model, layer, 1,200 files, uses others through 2 links, is used through 5 links\""));
     assert_eq!(html.matches("data-open=\"false\"").count(), 4);
     assert!(!html.contains("data-names=\"true\""));
-    assert!(html.contains("<span class=\"graph-map-node-count\" aria-hidden=\"true\">1,200</span>"));
+    assert!(
+        html.contains("<span class=\"graph-map-node-count\" aria-hidden=\"true\">1,200</span>")
+    );
     // A link back runs under the row, is marked, and says so; it is no
     // weaker direction of a cycle, and no layer is part of one.
     assert_eq!(html.matches(" graph-map-edge-against\"").count(), 2);
@@ -4689,7 +4738,7 @@ fn the_layers_of_a_folder_are_drawn_in_their_order_with_what_runs_against_it() {
     // A link between two layers is many links of many files: it is
     // selected like any link, and says what selecting it shows.
     assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 6);
-    assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" tabindex=\"0\" role=\"button\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
+    assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" role=\"button\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
     assert!(!html.contains("select to see what makes up this link"));
     // With nothing selected no link and no layer steps back.
     assert!(!html.contains("graph-map-edge-on") && !html.contains("graph-map-edge-off"));
@@ -4806,8 +4855,11 @@ fn the_layers_of_a_change_say_what_it_set_against_their_order_and_what_it_took_a
     let mut one = view.clone();
     one["edges"][5]["added"] = json!(1200);
     let html = canvas(&one);
-    assert!(html
-        .contains("· against the order of the layers · 1,200 links added by this change</title>"));
+    assert!(
+        html.contains(
+            "· against the order of the layers · 1,200 links added by this change</title>"
+        )
+    );
     assert!(html.contains(">+1,200</text>"));
     one["edges"][5]["added"] = json!(1);
     assert!(canvas(&one).contains("· 1 link added by this change</title>"));
@@ -5196,7 +5248,9 @@ fn a_selected_link_between_two_layers_lists_the_pairs_of_files_it_is_made_of() {
         html.contains("<path class=\"graph-map-edge graph-map-edge-on\" data-ends=\"1 3\""),
         "{html}"
     );
-    assert!(html.contains("<path class=\"graph-map-edge graph-map-edge-off graph-map-edge-against\" data-ends=\"3 1\""));
+    assert!(html.contains(
+        "<path class=\"graph-map-edge graph-map-edge-off graph-map-edge-against\" data-ends=\"3 1\""
+    ));
     assert_eq!(html.matches("data-selected=\"true\"").count(), 0);
     assert_eq!(html.matches("aria-pressed=\"true\"").count(), 0);
     assert_eq!(html.matches("data-dim=\"true\"").count(), 2);
@@ -5261,12 +5315,14 @@ fn a_link_between_two_layers_is_selected_and_any_other_is_looked_into() {
     );
     // A pair of files of the layers is looked into, and so is every
     // link of any other picture.
-    assert!(between(
-        shown.clone(),
-        "app/Models/Order.php",
-        "app/Services/Pay.php"
-    )
-    .is_none());
+    assert!(
+        between(
+            shown.clone(),
+            "app/Models/Order.php",
+            "app/Services/Pay.php"
+        )
+        .is_none()
+    );
     assert!(between(shown.clone(), "layer:model", "app/Services/Pay.php").is_none());
     assert!(between(shown.clone(), "app/Models/Order.php", "layer:services").is_none());
     assert!(between(map.clone(), "layer:services", "layer:model").is_none());
@@ -5559,10 +5615,12 @@ fn prompt_matcher_finds_matching_nodes_and_ignores_unrelated_text() {
         .expect("should match Auth & JwtGuard");
     assert_eq!(matched.phase, "predicting");
     assert!(matched.summary.starts_with("Focusing near "));
-    assert!(matched
-        .target_paths
-        .iter()
-        .any(|p| p == "src/Auth/JwtGuard.php"));
+    assert!(
+        matched
+            .target_paths
+            .iter()
+            .any(|p| p == "src/Auth/JwtGuard.php")
+    );
     assert!(matched.target_folders.iter().any(|p| p == "src/Auth"));
     assert!(match_prompt_targets(&view, "please explain this code").is_none());
 }
@@ -5608,9 +5666,11 @@ fn focus_overlay_renders_target_zone_entity_badges_and_unique_svg_ids() {
     assert!(rendered.html.contains("id=\"session-graph-arrow\""));
     assert!(rendered.html.contains("url(#session-graph-flow-0)"));
     assert!(!rendered.html.contains("id=\"graph-map-arrow\""));
-    assert!(rendered
-        .html
-        .contains("<rect class=\"graph-map-target-zone\""));
+    assert!(
+        rendered
+            .html
+            .contains("<rect class=\"graph-map-target-zone\"")
+    );
     assert!(rendered.html.contains("data-focus-target=\"true\""));
     assert_eq!(rendered.focus.entities.len(), 8);
     assert!(rendered.focus.bbox.is_some());
@@ -5632,12 +5692,16 @@ fn focus_overlay_renders_target_zone_entity_badges_and_unique_svg_ids() {
             rendered.html
         );
     }
-    assert!(rendered
-        .html
-        .contains("class=\"graph-map-node graph-map-entity-node is-blinking\""));
-    assert!(rendered
-        .html
-        .contains("<span class=\"graph-map-entity-badge\">NEW</span>"));
+    assert!(
+        rendered
+            .html
+            .contains("class=\"graph-map-node graph-map-entity-node is-blinking\"")
+    );
+    assert!(
+        rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">NEW</span>")
+    );
 
     let chips = focus_strip_chips_html(&focus);
     assert!(chips.contains("session-graph-focus-chip"));
@@ -5730,17 +5794,23 @@ fn created_entities_with_modified_or_deleted_change_render_accurate_badges() {
 
     let rendered = canvas_with(&view, "session-graph", Some(&focus));
     assert!(rendered.html.contains("data-entity-change=\"modified\""));
-    assert!(rendered
-        .html
-        .contains("<span class=\"graph-map-entity-badge\">MOD</span>"));
+    assert!(
+        rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">MOD</span>")
+    );
     assert!(rendered.html.contains("data-entity-change=\"created\""));
-    assert!(rendered
-        .html
-        .contains("<span class=\"graph-map-entity-badge\">NEW</span>"));
+    assert!(
+        rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">NEW</span>")
+    );
     assert!(rendered.html.contains("data-entity-change=\"deleted\""));
-    assert!(rendered
-        .html
-        .contains("<span class=\"graph-map-entity-badge\">DEL</span>"));
+    assert!(
+        rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">DEL</span>")
+    );
 
     let chips = focus_strip_chips_html(&focus);
     assert!(chips.contains("data-entity-change=\"modified\""));
@@ -5985,9 +6055,11 @@ fn canvas_with_overlays_tags_changes_diff_edges_and_synthetic_folder_edges() {
     assert!(bbox.2 - bbox.0 > BOX_WIDTH);
     assert!(rendered.html.contains("data-change-status=\"modified\""));
     assert!(rendered.html.contains("data-diff=\"added\""));
-    assert!(rendered
-        .html
-        .contains("class=\"graph-map-edge graph-map-edge-synthetic\""));
+    assert!(
+        rendered
+            .html
+            .contains("class=\"graph-map-edge graph-map-edge-synthetic\"")
+    );
     assert!(rendered.html.contains("data-diff=\"removed\" d=\"M"));
     assert!(rendered.html.contains("data-impact=\"added-dep\""));
     assert!(rendered.html.contains("data-impact=\"removed-dep\""));
@@ -7049,7 +7121,7 @@ fn canvas_with_overlays_renders_distinct_markers_attributes_and_breakdowns() {
         "marker-end=\"url(#session-graph-arrow)\"><title>A uses B · 3 links · calls 2, imports 1</title>"
     ));
     assert!(html.contains(
-        "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\" tabindex=\"0\" role=\"button\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
+        "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\" role=\"button\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
     ));
     // calls + instantiates collapse into 1 canonical kind -> not multi
     assert!(html.contains("<title>B uses C · 2 links · calls 1, instantiates 1</title>"));
@@ -7265,7 +7337,12 @@ fn scoped_url_builders_cover_single_project_and_system_service_endpoints() {
         "/api/systems/service-graph/commits?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=__system__&scope=*&query=feat&skip=20"
     );
     assert_eq!(
-        build_scoped_picker_path(&sys, "pulls", &json!({"state": "open", "query": "invoice"}), 0),
+        build_scoped_picker_path(
+            &sys,
+            "pulls",
+            &json!({"state": "open", "query": "invoice"}),
+            0
+        ),
         "/api/systems/service-graph/pulls?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&state=open&query=invoice"
     );
     assert_eq!(
@@ -7319,8 +7396,11 @@ fn system_header_switcher_sysrun_target_and_agent_options_render_cleanly() {
         Some("run-77"),
         Some("Contract v2 rollout"),
     );
-    assert!(whole_targets
-        .contains("<option value=\"sysrun:run-77\">System change: Contract v2 rollout</option>"));
+    assert!(
+        whole_targets.contains(
+            "<option value=\"sysrun:run-77\">System change: Contract v2 rollout</option>"
+        )
+    );
 
     let chosen_line = chosen(&json!({
         "chosen": {
@@ -7465,24 +7545,30 @@ fn append_system_task_draft_and_system_surface_live_focus_overlays() {
     };
 
     let member_canvas = canvas_with(&view, "system-member-graph", Some(&focus));
-    assert!(member_canvas
-        .html
-        .contains("data-action=\"system-member-graph-entity\""));
+    assert!(
+        member_canvas
+            .html
+            .contains("data-action=\"system-member-graph-entity\"")
+    );
     assert!(member_canvas.html.contains("is-blinking"));
     let member_chips = focus_strip_chips_html_for_surface(&focus, "system-member-graph");
     assert!(member_chips.contains("data-action=\"system-member-graph-focus-jump\""));
 
     let change_canvas = canvas_with(&view, "system-change-graph", Some(&focus));
-    assert!(change_canvas
-        .html
-        .contains("data-action=\"system-change-graph-entity\""));
+    assert!(
+        change_canvas
+            .html
+            .contains("data-action=\"system-change-graph-entity\"")
+    );
     let change_chips = focus_strip_chips_html_for_surface(&focus, "system-change-graph");
     assert!(change_chips.contains("data-action=\"system-change-graph-focus-jump\""));
 
     let session_canvas = canvas_with(&view, "session-graph", Some(&focus));
-    assert!(session_canvas
-        .html
-        .contains("data-action=\"session-graph-entity\""));
+    assert!(
+        session_canvas
+            .html
+            .contains("data-action=\"session-graph-entity\"")
+    );
     let session_chips = focus_strip_chips_html(&focus);
     assert!(session_chips.contains("data-action=\"session-graph-focus-jump\""));
 }
@@ -7557,14 +7643,20 @@ fn backend_system_graph_impact_and_system_run_launch_schemas_render_cleanly() {
         ]
     });
     let primary_opts = launch_options(&sys_run, false);
-    assert!(primary_opts
-        .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>"));
-    assert!(primary_opts
-        .contains("<option value=\"sess-launch-2\">Launch 2 · 2026-11-15 20:45 UTC</option>"));
+    assert!(
+        primary_opts
+            .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>")
+    );
+    assert!(
+        primary_opts
+            .contains("<option value=\"sess-launch-2\">Launch 2 · 2026-11-15 20:45 UTC</option>")
+    );
 
     let compare_opts = launch_options(&sys_run, true);
-    assert!(compare_opts
-        .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>"));
+    assert!(
+        compare_opts
+            .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>")
+    );
     assert!(!compare_opts.contains("value=\"sess-launch-2\""));
 }
 
@@ -8371,8 +8463,10 @@ fn a_box_says_it_is_part_of_a_circle_of_files_wherever_the_rest_lies() {
     // project is told as a whole.
     let mut all = view.clone();
     all["circles"]["groups"] = json!(2);
-    assert!(circles_side(&all)
-        .contains("9 files of the project use each other in 2 cycles; the largest holds 4."));
+    assert!(
+        circles_side(&all)
+            .contains("9 files of the project use each other in 2 cycles; the largest holds 4.")
+    );
     // More files than are named, and more circles than are listed.
     let mut many = view.clone();
     many["circles"]["here"] = json!(9);
@@ -8434,7 +8528,9 @@ fn the_key_of_a_path_offers_its_longer_ways_and_the_picture_marks_them() {
         "{key}"
     );
     assert!(key.contains("data-payload=\"{&quot;longer&quot;:0,&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"false\" title=\"The shortest ways alone\">none</button>"));
-    assert!(key.contains("title=\"Also the ways longer than the shortest by 3 links\">+3</button>"));
+    assert!(
+        key.contains("title=\"Also the ways longer than the shortest by 3 links\">+3</button>")
+    );
     assert!(key.contains("<span class=\"graph-arrow-legend-side\">1 drawn, lighter</span>"));
     // It stands before the note that ends the key, and a path has
     // neither links to leave out nor a reach to widen.
@@ -8751,8 +8847,11 @@ fn a_change_is_ranked_by_the_tests_that_fail() {
         "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"1\" data-action=\"graph-map-node\" data-payload=\"&quot;src/cart.php&quot;\" title=\"src/cart.php · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span><span class=\"graph-map-row-name\">cart.php</span><span class=\"graph-map-row-links\">src · 1 of 1 failing, 0 passing · 1 link from a failing test</span></button></li>"
     ), "{side}");
     assert!(side.contains("src · 1 of 1 failing, 1 passing · 2 links from a failing test"));
-    assert!(side
-        .contains("<p class=\"knowledge-note\">No failing test reaches 1 other changed file.</p>"));
+    assert!(
+        side.contains(
+            "<p class=\"knowledge-note\">No failing test reaches 1 other changed file.</p>"
+        )
+    );
     assert!(side.contains("<p class=\"knowledge-note\">No test file found for: Cart.</p>"));
     // The field keeps what was pasted, and the tests can be changed or
     // dropped; the buttons say which picture they rank.
@@ -8787,12 +8886,16 @@ fn a_change_is_ranked_by_the_tests_that_fail() {
     let mut none = view.clone();
     none["suspects"]["failing"] = json!([]);
     none["suspects"]["rows"] = json!([]);
-    assert!(suspects_side(&none, &state, MODAL_SURFACE)
-        .contains("None of the names is a test file of this graph."));
+    assert!(
+        suspects_side(&none, &state, MODAL_SURFACE)
+            .contains("None of the names is a test file of this graph.")
+    );
     let mut apart = view.clone();
     apart["suspects"]["rows"] = json!([]);
-    assert!(suspects_side(&apart, &state, MODAL_SURFACE)
-        .contains("No changed file is reached by the failing test."));
+    assert!(
+        suspects_side(&apart, &state, MODAL_SURFACE)
+            .contains("No changed file is reached by the failing test.")
+    );
     // Only a picture of a change is ranked.
     let mut folder = view.clone();
     folder["mode"] = json!("folder");
@@ -8979,12 +9082,14 @@ fn canvas_renders_renamed_pill_untouched_symbols_synthetic_deleted_and_commit_ed
         "target": "commit:abc123456789",
         "files": [{ "path": "src/NewName.php", "status": "renamed" }]
     });
-    assert!(ImpactLookup::from_sources(
-        None,
-        Some(&no_edge_diffs),
-        &view["nodes"].as_array().cloned().unwrap()
-    )
-    .is_none());
+    assert!(
+        ImpactLookup::from_sources(
+            None,
+            Some(&no_edge_diffs),
+            &view["nodes"].as_array().cloned().unwrap()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -9351,14 +9456,18 @@ fn dense_canvas_captures_node_htmls_preserves_wire_edge_indices_and_refreshes_sc
     assert!(updated_scene.nodes[0].pinned);
     assert!(updated_scene.nodes[1].lit);
     assert!(updated_scene.nodes[2].dim);
-    assert!(updated_scene
-        .edges
-        .iter()
-        .any(|e| pairs[e.index] == (0, 1) && e.on && e.lit));
-    assert!(updated_scene
-        .edges
-        .iter()
-        .any(|e| pairs[e.index] == (1, 2) && e.dim && !e.on));
+    assert!(
+        updated_scene
+            .edges
+            .iter()
+            .any(|e| pairs[e.index] == (0, 1) && e.on && e.lit)
+    );
+    assert!(
+        updated_scene
+            .edges
+            .iter()
+            .any(|e| pairs[e.index] == (1, 2) && e.dim && !e.on)
+    );
 }
 
 #[test]
@@ -9413,4 +9522,315 @@ fn compare_base_range_targets_and_open_full_state_transfer_work() {
     assert_eq!(transferred["no_incoming"], json!(true));
     assert_eq!(transferred["lens_tests"], json!(true));
     assert_eq!(transferred["fit"], json!(false));
+
+    // Default isolate_depth is 2 and secondary navigation modes survive modal promotion.
+    let sparse_state = json!({
+        "target": "head_sha",
+        "compare_base": "base_sha",
+        "out": ["src/a.php"],
+        "into": ["src/b.php"],
+        "follow": "src/a.php",
+        "shared": true,
+    });
+    let transferred_sparse = transfer_surface_state_to_modal(&sparse_state, fresh("head_sha"));
+    assert_eq!(transferred_sparse["isolate_depth"], json!(2));
+    assert_eq!(transferred_sparse["out"], json!(["src/a.php"]));
+    assert_eq!(transferred_sparse["into"], json!(["src/b.php"]));
+    assert_eq!(transferred_sparse["follow"], json!("src/a.php"));
+    assert_eq!(transferred_sparse["shared"], json!(true));
+
+    let scoped_map_req =
+        build_scoped_graph_request(&GraphTargetScope::single("proj-1"), vec![], &range_state);
+    assert!(
+        scoped_map_req.contains("target=range%3Abase_sha..head_sha"),
+        "{scoped_map_req}"
+    );
+    let scoped_find_req =
+        build_scoped_find_path(&GraphTargetScope::single("proj-1"), &range_state, "Auth")
+            .expect("find URL");
+    assert!(
+        scoped_find_req.contains("target=range%3Abase_sha..head_sha"),
+        "{scoped_find_req}"
+    );
+}
+
+#[test]
+fn handles_preserve_node_index_hit_paths_skip_tabindex_and_roving_respects_isolate_cone() {
+    let handle_html = handles(
+        &json!({
+            "name": "Service.php",
+            "path": "src/Service.php",
+            "more_out": 3,
+            "unfolded_out": true,
+            "more_in": 2,
+            "unfolded_in": false,
+        }),
+        1,
+        180.0,
+        40.0,
+        false,
+    );
+    assert!(handle_html.contains("data-of=\"1\""), "{handle_html}");
+    assert!(!handle_html.contains("data-of=\"344\""), "{handle_html}");
+    assert!(!handle_html.contains("data-of=\"355\""), "{handle_html}");
+
+    let view = json!({
+        "nodes": [
+            {"path": "src/a.php", "name": "a.php"},
+            {"path": "src/b.php", "name": "b.php"},
+            {"path": "src/c.php", "name": "c.php"},
+            {"path": "src/d.php", "name": "d.php"}
+        ],
+        "edges": [
+            {"from": "src/a.php", "to": "src/b.php", "links": 1},
+            {"from": "src/c.php", "to": "src/d.php", "links": 1}
+        ],
+        "frames": [],
+    });
+    let mut cone = BTreeSet::new();
+    cone.insert(2);
+    cone.insert(3);
+    let rendered = canvas_with_overlays(
+        &view,
+        "graph-map",
+        CanvasOverlayContext {
+            isolate_cone: Some(&cone),
+            roving_focus: Some(0),
+            ..Default::default()
+        },
+    );
+    assert!(
+        rendered.html.contains("class=\"graph-map-hit\"")
+            && rendered.html.contains("data-action=\"graph-map-link\""),
+        "{}",
+        rendered.html
+    );
+    assert!(
+        !rendered
+            .html
+            .contains("tabindex=\"0\" role=\"button\"><title>"),
+        "SVG hit paths must not hold tabindex=\"0\": {}",
+        rendered.html
+    );
+    // Node 0 is outside cone, so node 2 (first node in cone) receives roving tabindex="0".
+    assert!(
+        rendered.html.contains("data-n=\"2\"") && rendered.html.contains("tabindex=\"0\""),
+        "{}",
+        rendered.html
+    );
+}
+
+#[test]
+fn selection_patch_highlights_traced_paths_and_edge_impact_ignores_empty_target_wildcards() {
+    let nodes = vec![
+        json!({"path": "src/a.php", "name": "a.php"}),
+        json!({"path": "src/b.php", "name": "b.php"}),
+        json!({"path": "src/c.php", "name": "c.php"}),
+    ];
+    let pairs = vec![(0, 1), (0, 2)];
+    let mut path_nodes = BTreeSet::new();
+    path_nodes.insert(0);
+    path_nodes.insert(2);
+    let mut path_edges = BTreeSet::new();
+    path_edges.insert((0, 2));
+    let plan_nodes = vec![
+        Placed {
+            x: 10.0,
+            y: 10.0,
+            layer: Some(0),
+            cycle: false,
+        };
+        3
+    ];
+    let patch = compute_canvas_selection_patch(
+        &json!({"nodes": nodes, "edges": [], "frames": []}),
+        &plan_nodes,
+        &[],
+        &pairs,
+        &CanvasOverlayContext {
+            path_nodes: Some(&path_nodes),
+            path_edges: Some(&path_edges),
+            ..Default::default()
+        },
+    );
+    assert_eq!(patch.edges_by_pair[&(0, 2)].edge_state, "on");
+    assert!(patch.edges_by_pair[&(0, 2)].shared_path);
+    assert_eq!(patch.edges_by_pair[&(0, 1)].edge_state, "off");
+    assert!(patch.nodes[0].lit && !patch.nodes[0].dim);
+    assert!(!patch.nodes[1].lit && patch.nodes[1].dim);
+    assert!(patch.nodes[2].lit && !patch.nodes[2].dim);
+
+    // An empty `to` in `risk_callers` must not falsely mark unrelated outgoing edges as `broken_risk`.
+    let changes_doc = json!({
+        "target": "work",
+        "edge_diffs": {
+            "risk_callers": [
+                {"from": "src/a.php", "to": "", "impact": "broken_risk"},
+                {"from": "src/a.php", "to": "src/c.php", "impact": "broken_risk"}
+            ]
+        }
+    });
+    let lookup = ImpactLookup::from_sources(None, Some(&changes_doc), &nodes).expect("lookup");
+    assert_eq!(lookup.edge_impact(&nodes, 0, 1), None);
+    assert_eq!(lookup.edge_impact(&nodes, 0, 2), Some("broken_risk"));
+}
+
+#[test]
+fn pin_overrides_expand_frames_and_confidence_cycle_hints_and_commit_banner_gate_work() {
+    let mut plan = plan_beside(
+        2,
+        &[(0, 1, 1)],
+        &Frames {
+            of: vec![Some(0), None],
+            holder: vec![None],
+        },
+        None,
+    );
+    plan.frames = vec![Framed {
+        x: plan.nodes[0].x - 8.0,
+        y: plan.nodes[0].y - 22.0,
+        width: BOX_WIDTH + 16.0,
+        height: BOX_HEIGHT + 30.0,
+    }];
+    let keys = vec!["src/a.php".to_owned(), "src/b.php".to_owned()];
+    let mut pins = BTreeMap::new();
+    pins.insert("src/a.php".to_owned(), (900.0, 500.0));
+    let moved = apply_pin_overrides_to_plan(&mut plan, &keys, &[(0, 1)], &pins);
+    assert!(moved.contains(&0));
+    assert!(plan.frames[0].x + plan.frames[0].width >= 900.0 + BOX_WIDTH);
+    assert!(plan.frames[0].y + plan.frames[0].height >= 500.0 + BOX_HEIGHT);
+
+    // Non-commit views must not render stale commit range banners.
+    assert_eq!(
+        render_commit_banner_for_view(&json!({"mode": "whole"}), None),
+        ""
+    );
+
+    let view = json!({
+        "confidence": {"extracted": 8, "inferred": 2, "ratio": 0.8},
+        "circles": {
+            "groups": 1,
+            "here": 1,
+            "files": 3,
+            "largest": 3,
+            "listed": [{"start": "src/a.php", "files": 3, "names": ["a.php", "b.php"], "more": 1}]
+        },
+        "circle_remediation": [{
+            "files": 3,
+            "cuts": [{"from": "src/b.php", "to": "src/a.php", "links": 2, "breaks_cycles": true, "hint": "Invert via interface"}]
+        }],
+        "architecture": {
+            "declared": true,
+            "layers": [{"id": "ui", "name": "UI"}],
+            "violations": [],
+            "remediation": [{"from": "src/ui/View.php", "to": "src/infra/Db.php", "from_layer": "ui", "to_layer": "infra", "links": 3, "guessed": true, "hint": "Route through domain port"}]
+        }
+    });
+    let pill = confidence_pill_html(&view);
+    assert!(pill.contains("80% extracted"), "{pill}");
+    let changes_pill =
+        confidence_pill_html(&json!({"confidence": {"extracted_links": 3, "inferred_links": 1}}));
+    assert!(changes_pill.contains("75% extracted"), "{changes_pill}");
+    let circles = circles_side(&view);
+    assert!(circles.contains("Suggested cycle breaks"), "{circles}");
+    assert!(
+        circles.contains("breaks cycle · 2 links · Invert via interface"),
+        "{circles}"
+    );
+    let arch = architecture_side(&view);
+    assert!(arch.contains("80% extracted"), "{arch}");
+    assert!(arch.contains("Suggested layer breaks"), "{arch}");
+    assert!(
+        arch.contains("3 links · inferred · Route through domain port"),
+        "{arch}"
+    );
+    let cycle_view = side(&json!({
+        "mode": "cycle",
+        "cycle": {
+            "places": [{"path": "src/a.php"}, {"path": "src/b.php"}],
+            "cut_hints": [{"from": "src/b.php", "to": "src/a.php", "links": 1, "breaks_cycles": 2, "hint": "Break cycle edge"}]
+        }
+    }));
+    assert!(
+        cycle_view.contains("Suggested cycle breaks"),
+        "{cycle_view}"
+    );
+    assert!(
+        cycle_view.contains("breaks 2 · 1 link · Break cycle edge"),
+        "{cycle_view}"
+    );
+    let layers_view = layers_side(&json!({
+        "pattern": {
+            "declared": true,
+            "against": {"pairs": 0, "listed": []},
+            "remediation": [{"from": "src/x.php", "to": "src/y.php", "from_layer": "ui", "to_layer": "db", "links": 2, "hint": "Decouple db call"}]
+        }
+    }));
+    assert!(
+        layers_view.contains("Suggested layer breaks"),
+        "{layers_view}"
+    );
+    assert!(layers_view.contains("Decouple db call"), "{layers_view}");
+    crate::test_support::assert_no_inline_hex_colors(&format!(
+        "{pill}{changes_pill}{circles}{arch}{cycle_view}{layers_view}"
+    ));
+}
+
+#[test]
+fn dense_graph_skips_offscreen_extras_initially_and_populates_dense_meta() {
+    let nodes: Vec<V> = (0..185)
+        .map(|i| {
+            json!({
+                "path": format!("src/mod_{i}.php"),
+                "name": format!("mod_{i}.php"),
+                "folder": i % 15 == 0,
+                "out": 1,
+                "in": 1,
+            })
+        })
+        .collect();
+    let edges: Vec<V> = (0..184)
+        .map(|i| json!({"from": format!("src/mod_{i}.php"), "to": format!("src/mod_{}.php", i + 1), "links": 2, "kinds": {"calls": 2}}))
+        .collect();
+    let view = json!({
+        "nodes": nodes,
+        "edges": edges,
+        "frames": [],
+        "spread": [],
+    });
+    let rendered = canvas_with_overlays(
+        &view,
+        "graph-map",
+        CanvasOverlayContext {
+            viewport_bounds: Some(ViewportBounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 240.0,
+                max_y: 120.0,
+            }),
+            ..Default::default()
+        },
+    );
+    assert!(rendered.dense_scene.is_some());
+    let meta = rendered.dense_meta.as_ref().expect("dense meta");
+    assert_eq!(meta.edges.len(), 184);
+    assert_eq!(meta.nodes.len(), 185);
+    assert!(
+        meta.edges
+            .get(&0)
+            .is_some_and(|em| em.explain_kind == "link"
+                && em.from_index == Some(0)
+                && em.to_index == Some(1))
+    );
+    assert_eq!(rendered.dense_extra_specs.len(), 185);
+    // Lazily mount extras for an offscreen folder node when revealed by pan.
+    if let Some(Some(folder_spec)) = rendered
+        .dense_extra_specs
+        .iter()
+        .find(|s| s.as_ref().is_some_and(|x| x.folder_spread))
+    {
+        let extra = render_dense_node_extras_for_mounted(&view, folder_spec, None);
+        assert!(extra.contains("data-of="), "{extra}");
+        assert!(extra.contains("graph-map-spread"), "{extra}");
+    }
 }

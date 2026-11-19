@@ -6,11 +6,11 @@
 //! browser DOM while `wasm32-unknown-unknown` shares the exact same math.
 
 use crate::dom;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::Element;
 
 pub const DEFAULT_MIN_SCALE: f64 = 0.25;
@@ -201,12 +201,18 @@ pub fn fit(plane: (f64, f64), viewport: (f64, f64), options: FitOptions) -> Came
     let vw = (viewport.0 - options.margin_x * 2.0).max(options.min_inner_w);
     let vh = (viewport.1 - options.margin_y * 2.0).max(options.min_inner_h);
     let scale = (vw / pw).min(vh / ph).clamp(lo, hi);
-    let tx = ((viewport.0 - pw * scale) / 2.0)
-        .max(options.margin_x)
-        .round();
-    let ty = ((viewport.1 - ph * scale) / 2.0)
-        .max(options.margin_y)
-        .round();
+    let raw_tx = (viewport.0 - pw * scale) / 2.0;
+    let raw_ty = (viewport.1 - ph * scale) / 2.0;
+    let tx = if pw * scale <= viewport.0 - options.margin_x * 2.0 + 0.5 {
+        raw_tx.max(options.margin_x).floor()
+    } else {
+        raw_tx.round()
+    };
+    let ty = if ph * scale <= viewport.1 - options.margin_y * 2.0 + 0.5 {
+        raw_ty.max(options.margin_y).floor()
+    } else {
+        raw_ty.round()
+    };
     Camera { tx, ty, scale }
 }
 
@@ -362,7 +368,11 @@ pub fn apply_transform_3d(
     let level = lod_with(cam.scale, thresholds);
     let _ = canvas.set_attribute("data-lod", level);
     let _ = plane.set_attribute("data-lod", level);
-    let _ = plane.set_attribute("style", &plane_transform_style(cam, plane_size));
+    let mut style = plane_transform_style(cam, plane_size);
+    if canvas.get_attribute("data-dense").as_deref() == Some("true") {
+        style.push_str("transition:none;");
+    }
+    let _ = plane.set_attribute("style", &style);
     level
 }
 
@@ -427,10 +437,34 @@ pub fn radar_viewport_rect(
     {
         return None;
     }
-    let vx = (-cam.tx / cam.scale).clamp(0.0, plane.0);
-    let vy = (-cam.ty / cam.scale).clamp(0.0, plane.1);
-    let vw = (viewport.0 / cam.scale).clamp(min_side, (plane.0 - vx).max(min_side));
-    let vh = (viewport.1 / cam.scale).clamp(min_side, (plane.1 - vy).max(min_side));
+    let min_w = if min_side.is_finite() {
+        min_side.max(0.0).min(plane.0)
+    } else {
+        0.0
+    };
+    let min_h = if min_side.is_finite() {
+        min_side.max(0.0).min(plane.1)
+    } else {
+        0.0
+    };
+    let vp_w = if viewport.0.is_finite() {
+        viewport.0.max(0.0)
+    } else {
+        0.0
+    };
+    let vp_h = if viewport.1.is_finite() {
+        viewport.1.max(0.0)
+    } else {
+        0.0
+    };
+    let max_vx = (plane.0 - min_w).max(0.0);
+    let max_vy = (plane.1 - min_h).max(0.0);
+    let vx = (-cam.tx / cam.scale).clamp(0.0, max_vx);
+    let vy = (-cam.ty / cam.scale).clamp(0.0, max_vy);
+    let max_vw = (plane.0 - vx).max(min_w);
+    let max_vh = (plane.1 - vy).max(min_h);
+    let vw = (vp_w / cam.scale).clamp(min_w, max_vw);
+    let vh = (vp_h / cam.scale).clamp(min_h, max_vh);
     Some((vx, vy, vw, vh))
 }
 
@@ -1030,6 +1064,236 @@ pub fn clear_pins(storage_key: &str) {
     });
     #[cfg(target_arch = "wasm32")]
     dom::save(storage_key, None);
+}
+
+/// Removes a single node pin from persistent storage and returns `true` if present.
+#[allow(dead_code)]
+pub fn remove_pin(storage_key: &str, node_key: &str) -> bool {
+    if storage_key.is_empty() || node_key.is_empty() {
+        return false;
+    }
+    let mut map = load_pins(storage_key);
+    let removed = map.remove(node_key).is_some();
+    if removed {
+        if map.is_empty() {
+            clear_pins(storage_key);
+        } else {
+            persist_pins_map(storage_key, &map);
+        }
+    }
+    removed
+}
+
+/// Escapes a value for safe interpolation inside a CSS attribute selector (`[attr="..."]`).
+#[allow(dead_code)]
+pub fn escape_css_attr_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            '\t' => out.push_str("\\9 "),
+            '\0' => out.push('\u{fffd}'),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Shifts `cam.tx`/`cam.ty` minimally (keeping `cam.scale`) so world `rect` `(x, y, w, h)`
+/// sits inside the `[margin .. viewport - margin]` safe region. Returns `None` when already visible.
+#[allow(dead_code)]
+pub fn pan_to_keep_rect_in_view(
+    cam: Camera,
+    rect: (f64, f64, f64, f64),
+    viewport: (f64, f64),
+    margin: f64,
+) -> Option<Camera> {
+    if !cam.scale.is_finite()
+        || cam.scale <= 0.0
+        || !rect.0.is_finite()
+        || !rect.1.is_finite()
+        || !rect.2.is_finite()
+        || !rect.3.is_finite()
+        || !viewport.0.is_finite()
+        || !viewport.1.is_finite()
+        || viewport.0 <= 0.0
+        || viewport.1 <= 0.0
+    {
+        return None;
+    }
+    let sw = (rect.2.max(0.0)) * cam.scale;
+    let sh = (rect.3.max(0.0)) * cam.scale;
+    let sx0 = rect.0 * cam.scale + cam.tx;
+    let sy0 = rect.1 * cam.scale + cam.ty;
+    let sx1 = sx0 + sw;
+    let sy1 = sy0 + sh;
+    let safe_margin = if margin.is_finite() {
+        margin.max(0.0)
+    } else {
+        0.0
+    };
+    let mx = safe_margin.min((viewport.0 - 4.0).max(0.0) * 0.4);
+    let my = safe_margin.min((viewport.1 - 4.0).max(0.0) * 0.4);
+
+    let dx = if sw > viewport.0 - mx * 2.0 {
+        if sx1 < mx || sx0 > viewport.0 - mx {
+            (viewport.0 - sw) * 0.5 - sx0
+        } else {
+            0.0
+        }
+    } else if sx0 < mx {
+        mx - sx0
+    } else if sx1 > viewport.0 - mx {
+        (viewport.0 - mx) - sx1
+    } else {
+        0.0
+    };
+
+    let dy = if sh > viewport.1 - my * 2.0 {
+        if sy1 < my || sy0 > viewport.1 - my {
+            (viewport.1 - sh) * 0.5 - sy0
+        } else {
+            0.0
+        }
+    } else if sy0 < my {
+        my - sy0
+    } else if sy1 > viewport.1 - my {
+        (viewport.1 - my) - sy1
+    } else {
+        0.0
+    };
+
+    if dx.abs() < 0.5 && dy.abs() < 0.5 {
+        return None;
+    }
+    Some(Camera {
+        tx: (cam.tx + dx).round(),
+        ty: (cam.ty + dy).round(),
+        scale: cam.scale,
+    })
+}
+
+/// Snapshot of camera + focus/target state for Back/Forward navigation & breadcrumbs.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraSelectionEntry {
+    pub key: String,
+    pub label: String,
+    pub target: String,
+    pub cam: Camera,
+}
+
+/// Bounded browser-style Back/Forward camera & selection history stack.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct CameraSelectionHistory {
+    entries: Vec<CameraSelectionEntry>,
+    cursor: usize,
+    max_entries: usize,
+}
+
+impl Default for CameraSelectionHistory {
+    fn default() -> Self {
+        Self::new(48)
+    }
+}
+
+#[allow(dead_code)]
+impl CameraSelectionHistory {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            cursor: 0,
+            max_entries: max_entries.max(2),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+    }
+
+    pub fn entries(&self) -> &[CameraSelectionEntry] {
+        &self.entries
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn current(&self) -> Option<&CameraSelectionEntry> {
+        self.entries.get(self.cursor)
+    }
+
+    pub fn can_back(&self) -> bool {
+        !self.entries.is_empty() && self.cursor > 0
+    }
+
+    pub fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    pub fn update_active_camera(&mut self, cam: Camera) {
+        if !cam.scale.is_finite() || cam.scale <= 0.0 {
+            return;
+        }
+        if let Some(active) = self.entries.get_mut(self.cursor) {
+            active.cam = cam;
+        }
+    }
+
+    pub fn push(&mut self, entry: CameraSelectionEntry) {
+        if !entry.cam.scale.is_finite() || entry.cam.scale <= 0.0 {
+            return;
+        }
+        if let Some(cur) = self.entries.get(self.cursor) {
+            if cur.key == entry.key && cur.target == entry.target {
+                if let Some(mut_cur) = self.entries.get_mut(self.cursor) {
+                    mut_cur.cam = entry.cam;
+                    if !entry.label.is_empty() {
+                        mut_cur.label = entry.label;
+                    }
+                }
+                return;
+            }
+        }
+        if !self.entries.is_empty() && self.cursor + 1 < self.entries.len() {
+            self.entries.truncate(self.cursor + 1);
+        }
+        self.entries.push(entry);
+        if self.entries.len() > self.max_entries {
+            let overflow = self.entries.len() - self.max_entries;
+            self.entries.drain(0..overflow);
+        }
+        self.cursor = self.entries.len().saturating_sub(1);
+    }
+
+    pub fn back(&mut self) -> Option<&CameraSelectionEntry> {
+        if !self.can_back() {
+            return None;
+        }
+        self.cursor -= 1;
+        self.entries.get(self.cursor)
+    }
+
+    pub fn forward(&mut self) -> Option<&CameraSelectionEntry> {
+        if !self.can_forward() {
+            return None;
+        }
+        self.cursor += 1;
+        self.entries.get(self.cursor)
+    }
+
+    pub fn jump_to(&mut self, index: usize) -> Option<&CameraSelectionEntry> {
+        if index >= self.entries.len() {
+            return None;
+        }
+        self.cursor = index;
+        self.entries.get(self.cursor)
+    }
 }
 
 pub fn has_pins(storage_key: &str) -> bool {
@@ -1752,6 +2016,205 @@ pub(crate) mod canvas2d {
         pub edges: Vec<DenseEdgeSpec>,
     }
 
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct DenseEdgeMeta {
+        pub explain_kind: String,
+        pub explain_payload: Value,
+        pub from_index: Option<usize>,
+        pub to_index: Option<usize>,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct DenseNodeMeta {
+        pub explain_kind: String,
+        pub explain_payload: Value,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct DenseSceneMeta {
+        pub nodes: HashMap<usize, DenseNodeMeta>,
+        pub edges: HashMap<usize, DenseEdgeMeta>,
+        pub kind_hover: Option<String>,
+        pub hidden_kinds: HashSet<String>,
+        pub label_min_scale: Option<f64>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum EdgeDashKind {
+        Solid,
+        Dashed,
+        Dotted,
+        DashDot,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum EdgeColorSlot {
+        Base,
+        Calls,
+        Imports,
+        Extends,
+        Implements,
+        Writes,
+        Reads,
+        Uses,
+        Http,
+        Event,
+        Rpc,
+        Graphql,
+        Shared,
+        Code,
+        Against,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EdgeVisualStyle {
+        pub color: EdgeColorSlot,
+        pub dash: EdgeDashKind,
+        pub hollow_arrow: bool,
+    }
+
+    pub fn edge_kind_matches(filter_kind: &str, edge_kind: &str) -> bool {
+        let want = filter_kind.trim().to_ascii_lowercase();
+        if want.is_empty() {
+            return false;
+        }
+        edge_kind
+            .split(|c: char| c.is_whitespace() || c == ',' || c == '|')
+            .map(|tok| tok.trim().to_ascii_lowercase())
+            .any(|tok| !tok.is_empty() && tok == want)
+    }
+
+    #[allow(dead_code)]
+    pub fn edge_visual_style(kind: &str, guessed: bool, against: bool) -> EdgeVisualStyle {
+        let primary = kind
+            .split(|c: char| c.is_whitespace() || c == ',' || c == '|')
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let (color, mut dash, hollow_arrow) = match primary.as_str() {
+            "calls" | "call" => (EdgeColorSlot::Calls, EdgeDashKind::Solid, false),
+            "imports" | "import" | "include" => {
+                (EdgeColorSlot::Imports, EdgeDashKind::Dashed, false)
+            }
+            "extends" | "extend" | "inherit" => (EdgeColorSlot::Extends, EdgeDashKind::Solid, true),
+            "implements" | "implement" | "trait" => {
+                (EdgeColorSlot::Implements, EdgeDashKind::DashDot, true)
+            }
+            "writes" | "write" => (EdgeColorSlot::Writes, EdgeDashKind::Solid, false),
+            "reads" | "read" => (EdgeColorSlot::Reads, EdgeDashKind::Dotted, true),
+            "uses" | "use" => (EdgeColorSlot::Uses, EdgeDashKind::Solid, false),
+            "http" | "rest" => (EdgeColorSlot::Http, EdgeDashKind::Solid, false),
+            "event" | "events" => (EdgeColorSlot::Event, EdgeDashKind::Dashed, false),
+            "rpc" | "grpc" => (EdgeColorSlot::Rpc, EdgeDashKind::Solid, false),
+            "graphql" | "gql" => (EdgeColorSlot::Graphql, EdgeDashKind::DashDot, false),
+            "shared" => (EdgeColorSlot::Shared, EdgeDashKind::Dashed, false),
+            "code" => (EdgeColorSlot::Code, EdgeDashKind::Solid, false),
+            _ => (EdgeColorSlot::Base, EdgeDashKind::Solid, false),
+        };
+        if guessed && dash == EdgeDashKind::Solid {
+            dash = EdgeDashKind::Dashed;
+        }
+        if against {
+            return EdgeVisualStyle {
+                color: EdgeColorSlot::Against,
+                dash: EdgeDashKind::Dashed,
+                hollow_arrow,
+            };
+        }
+        EdgeVisualStyle {
+            color,
+            dash,
+            hollow_arrow,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn should_show_dense_labels(scale: f64, label_min_scale: Option<f64>) -> bool {
+        let min_scale = label_min_scale
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(DEFAULT_LOD.far_below);
+        scale.is_finite() && scale >= min_scale
+    }
+
+    #[allow(dead_code)]
+    pub fn edge_end_tangent(edge: &DenseEdgeSpec) -> Option<((f64, f64), (f64, f64))> {
+        let unit = |from: (f64, f64), to: (f64, f64)| -> Option<(f64, f64)> {
+            let dx = to.0 - from.0;
+            let dy = to.1 - from.1;
+            let len = (dx * dx + dy * dy).sqrt();
+            (len > 1e-4).then(|| (dx / len, dy / len))
+        };
+        if !edge.cmds.is_empty() {
+            let mut cur = (0.0, 0.0);
+            let mut tip = None;
+            let mut prev_dir = None;
+            for cmd in &edge.cmds {
+                match *cmd {
+                    DensePathCmd::Move(x, y) => {
+                        cur = (x, y);
+                    }
+                    DensePathCmd::Line(x, y) => {
+                        let to = (x, y);
+                        if let Some(u) = unit(cur, to) {
+                            prev_dir = Some((to, u));
+                        }
+                        tip = Some(to);
+                        cur = to;
+                    }
+                    DensePathCmd::Curve { c1, c2, to } => {
+                        let u = unit(c2, to)
+                            .or_else(|| unit(c1, to))
+                            .or_else(|| unit(cur, to));
+                        if let Some(u) = u {
+                            prev_dir = Some((to, u));
+                        }
+                        tip = Some(to);
+                        cur = to;
+                    }
+                }
+            }
+            if let (Some(_), Some(res)) = (tip, prev_dir) {
+                return Some(res);
+            }
+        }
+        if edge.pts.len() >= 2 {
+            let last = *edge.pts.last()?;
+            for &prev in edge.pts[..edge.pts.len() - 1].iter().rev() {
+                if let Some(u) = unit(prev, last) {
+                    return Some((last, u));
+                }
+            }
+        }
+        None
+    }
+
+    #[allow(dead_code)]
+    pub fn edge_midpoint(edge: &DenseEdgeSpec) -> Option<(f64, f64)> {
+        if !edge.pts.is_empty() {
+            if edge.pts.len() == 4 && edge.cmds.is_empty() {
+                let p0 = edge.pts[0];
+                let p1 = edge.pts[1];
+                let p2 = edge.pts[2];
+                let p3 = edge.pts[3];
+                let mx = 0.125 * p0.0 + 0.375 * p1.0 + 0.375 * p2.0 + 0.125 * p3.0;
+                let my = 0.125 * p0.1 + 0.375 * p1.1 + 0.375 * p2.1 + 0.125 * p3.1;
+                return Some((mx, my));
+            }
+            return Some(edge.pts[edge.pts.len() / 2]);
+        }
+        if !edge.cmds.is_empty() {
+            let sampled = sample_cmds_polyline(&edge.cmds);
+            if !sampled.is_empty() {
+                return Some(sampled[sampled.len() / 2]);
+            }
+        }
+        None
+    }
+
     #[derive(Clone, Debug, Default)]
     pub struct SpatialHitGrid {
         cell_size: f64,
@@ -1834,6 +2297,19 @@ pub(crate) mod canvas2d {
         }
 
         pub fn hit_test(&self, world_x: f64, world_y: f64, tol: f64) -> Option<(u8, usize)> {
+            self.hit_test_filtered(world_x, world_y, tol, |_| true)
+        }
+
+        pub fn hit_test_filtered<F>(
+            &self,
+            world_x: f64,
+            world_y: f64,
+            tol: f64,
+            mut allow_edge: F,
+        ) -> Option<(u8, usize)>
+        where
+            F: FnMut(usize) -> bool,
+        {
             let gx = (world_x / self.cell_size).floor() as i32;
             let gy = (world_y / self.cell_size).floor() as i32;
             if let Some(slots) = self.node_cells.get(&(gx, gy)) {
@@ -1860,6 +2336,9 @@ pub(crate) mod canvas2d {
                     if let Some(slots) = self.edge_cells.get(&(cx, cy)) {
                         for &slot in slots {
                             let (idx, ref pts) = self.edge_polys[slot];
+                            if !allow_edge(idx) {
+                                continue;
+                            }
                             for pair in pts.windows(2) {
                                 let d2 =
                                     point_to_segment_dist_sq(world_x, world_y, pair[0], pair[1]);
@@ -1893,15 +2372,133 @@ pub(crate) mod canvas2d {
     }
 
     thread_local! {
-        static DENSE_SCENES: RefCell<HashMap<String, (DenseScene, SpatialHitGrid)>> =
+        static DENSE_SCENES: RefCell<HashMap<String, (DenseScene, SpatialHitGrid, DenseSceneMeta)>> =
             RefCell::new(HashMap::new());
+        static LAST_CAMERAS: RefCell<HashMap<String, Camera>> = RefCell::new(HashMap::new());
     }
 
     pub fn store_scene(canvas_id: &str, scene: DenseScene) {
+        store_scene_with_meta(canvas_id, scene, DenseSceneMeta::default());
+    }
+
+    pub fn store_scene_with_meta(canvas_id: &str, scene: DenseScene, meta: DenseSceneMeta) {
         let grid = SpatialHitGrid::build(&scene, 128.0);
         DENSE_SCENES.with(|s| {
-            s.borrow_mut().insert(canvas_id.to_owned(), (scene, grid));
+            s.borrow_mut()
+                .insert(canvas_id.to_owned(), (scene, grid, meta));
         });
+        #[cfg(target_arch = "wasm32")]
+        if let Some(host) = dom::get(canvas_id) {
+            let _ = host.set_attribute("data-dense", "true");
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_scene_meta(canvas_id: &str, meta: DenseSceneMeta) -> bool {
+        DENSE_SCENES.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some((_, _, existing_meta)) = guard.get_mut(canvas_id) else {
+                return false;
+            };
+            *existing_meta = meta;
+            true
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn set_kind_hover(canvas_id: &str, kind: Option<&str>) -> bool {
+        DENSE_SCENES.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
+                return false;
+            };
+            let next = kind
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned);
+            if meta.kind_hover == next {
+                return false;
+            }
+            meta.kind_hover = next;
+            true
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn set_hidden_kinds(canvas_id: &str, hidden: HashSet<String>) -> bool {
+        DENSE_SCENES.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
+                return false;
+            };
+            meta.hidden_kinds = hidden;
+            true
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn explain_target_for_hit(
+        canvas_id: &str,
+        kind: u8,
+        index: usize,
+    ) -> Option<(String, Value)> {
+        DENSE_SCENES.with(|s| {
+            let guard = s.borrow();
+            let (scene, _, meta) = guard.get(canvas_id)?;
+            match kind {
+                0 => meta
+                    .nodes
+                    .get(&index)
+                    .map(|n| (n.explain_kind.clone(), n.explain_payload.clone()))
+                    .or_else(|| {
+                        scene
+                            .nodes
+                            .iter()
+                            .find(|n| n.index == index && !n.label.is_empty())
+                            .map(|n| ("node".to_owned(), Value::String(n.label.clone())))
+                    }),
+                1 => meta
+                    .edges
+                    .get(&index)
+                    .map(|e| (e.explain_kind.clone(), e.explain_payload.clone())),
+                _ => None,
+            }
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn last_camera(canvas_id: &str) -> Option<Camera> {
+        LAST_CAMERAS.with(|c| c.borrow().get(canvas_id).copied())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
+    pub fn hit_test_client(
+        canvas_id: &str,
+        client_x: f64,
+        client_y: f64,
+        tol_px: f64,
+    ) -> Option<(u8, usize)> {
+        let host = dom::get(canvas_id)?;
+        let cam = last_camera(canvas_id)?;
+        if !cam.scale.is_finite() || cam.scale <= 0.0 {
+            return None;
+        }
+        let rect = host.get_bounding_client_rect();
+        let wx = (client_x - rect.left() - cam.tx) / cam.scale;
+        let wy = (client_y - rect.top() - cam.ty) / cam.scale;
+        hit_test_scene(canvas_id, wx, wy, tol_px / cam.scale.max(0.25))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(dead_code)]
+    pub fn hit_test_client(
+        _canvas_id: &str,
+        _client_x: f64,
+        _client_y: f64,
+        _tol_px: f64,
+    ) -> Option<(u8, usize)> {
+        None
     }
 
     /// Updates visual state flags (`selected`, `lit`, `dim`, `on`, `failed`, etc.) of an
@@ -1912,7 +2509,7 @@ pub(crate) mod canvas2d {
     {
         DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();
-            let Some((scene, _)) = guard.get_mut(canvas_id) else {
+            let Some((scene, _, _)) = guard.get_mut(canvas_id) else {
                 return false;
             };
             f(scene);
@@ -1924,8 +2521,12 @@ pub(crate) mod canvas2d {
         DENSE_SCENES.with(|s| {
             s.borrow_mut().remove(canvas_id);
         });
+        LAST_CAMERAS.with(|c| {
+            c.borrow_mut().remove(canvas_id);
+        });
         #[cfg(target_arch = "wasm32")]
         if let Some(host) = dom::get(canvas_id) {
+            let _ = host.remove_attribute("data-dense");
             if let Ok(Some(el)) = host.query_selector("canvas[data-dense-canvas='true']") {
                 el.remove();
             }
@@ -1939,9 +2540,20 @@ pub(crate) mod canvas2d {
         tol: f64,
     ) -> Option<(u8, usize)> {
         DENSE_SCENES.with(|s| {
-            s.borrow()
-                .get(canvas_id)
-                .and_then(|(_, grid)| grid.hit_test(world_x, world_y, tol))
+            let guard = s.borrow();
+            let (scene, grid, meta) = guard.get(canvas_id)?;
+            if meta.hidden_kinds.is_empty() {
+                return grid.hit_test(world_x, world_y, tol);
+            }
+            grid.hit_test_filtered(world_x, world_y, tol, |edge_idx| {
+                let Some(edge) = scene.edges.iter().find(|e| e.index == edge_idx) else {
+                    return true;
+                };
+                !meta
+                    .hidden_kinds
+                    .iter()
+                    .any(|hk| edge_kind_matches(hk, &edge.kind))
+            })
         })
     }
 
@@ -1990,6 +2602,8 @@ pub(crate) mod canvas2d {
             pub(super) fn set_line_dash(this: &Ctx2d, dash: &js_sys::Array);
             #[wasm_bindgen(method, js_name = beginPath)]
             pub(super) fn begin_path(this: &Ctx2d);
+            #[wasm_bindgen(method, js_name = closePath)]
+            pub(super) fn close_path(this: &Ctx2d);
             #[wasm_bindgen(method, js_name = moveTo)]
             pub(super) fn move_to(this: &Ctx2d, x: f64, y: f64);
             #[wasm_bindgen(method, js_name = lineTo)]
@@ -2018,8 +2632,54 @@ pub(crate) mod canvas2d {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn css_token(el: &Element, var: &str, fallback: &str) -> String {
-        if let Ok(Some(style)) = dom::window().get_computed_style(el) {
+    #[derive(Clone)]
+    struct CanvasPalette {
+        paper: String,
+        line: String,
+        ink: String,
+        muted: String,
+        purple: String,
+        against: String,
+        changed: String,
+        warn: String,
+        edge_base: String,
+        edge_calls: String,
+        edge_imports: String,
+        edge_extends: String,
+        edge_implements: String,
+        edge_writes: String,
+        edge_reads: String,
+        edge_uses: String,
+        sys_http: String,
+        sys_event: String,
+        sys_rpc: String,
+        sys_graphql: String,
+        sys_shared: String,
+        sys_code: String,
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    struct DashArrays {
+        solid: js_sys::Array,
+        dashed: js_sys::Array,
+        dotted: js_sys::Array,
+        dash_dot: js_sys::Array,
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    thread_local! {
+        static PALETTE_CACHE: RefCell<HashMap<(String, String), CanvasPalette>> =
+            RefCell::new(HashMap::new());
+        static DASH_CACHE: RefCell<Option<DashArrays>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn css_token(
+        style: Option<&web_sys::CssStyleDeclaration>,
+        var: &str,
+        fallback: &str,
+    ) -> String {
+        if let Some(style) = style {
             if let Ok(val) = style.get_property_value(var) {
                 let t = val.trim();
                 if !t.is_empty() {
@@ -2030,18 +2690,119 @@ pub(crate) mod canvas2d {
         fallback.to_owned()
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn resolve_palette(canvas_id: &str, host: &Element) -> CanvasPalette {
+        let theme_key = dom::document()
+            .document_element()
+            .and_then(|root| root.get_attribute("data-theme"))
+            .unwrap_or_default();
+        let key = (canvas_id.to_owned(), theme_key);
+        if let Some(cached) = PALETTE_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+            return cached;
+        }
+        let style = dom::window().get_computed_style(host).ok().flatten();
+        let s = style.as_ref();
+        let palette = CanvasPalette {
+            paper: css_token(s, "--paper", "rgb(255, 255, 255)"),
+            line: css_token(s, "--line", "rgb(203, 213, 225)"),
+            ink: css_token(s, "--ink", "rgb(15, 23, 42)"),
+            muted: css_token(s, "--muted", "rgb(100, 116, 139)"),
+            purple: css_token(s, "--purple", "rgb(124, 58, 237)"),
+            against: css_token(s, "--error", "rgb(220, 38, 38)"),
+            changed: css_token(s, "--success", "rgb(22, 163, 74)"),
+            warn: css_token(s, "--warning", "rgb(217, 119, 6)"),
+            edge_base: css_token(s, "--map-edge-from", "rgb(100, 116, 139)"),
+            edge_calls: css_token(s, "--map-edge-calls", "rgb(34, 102, 194)"),
+            edge_imports: css_token(s, "--map-edge-imports", "rgb(92, 89, 104)"),
+            edge_extends: css_token(s, "--map-edge-extends", "rgb(104, 65, 198)"),
+            edge_implements: css_token(s, "--map-edge-implements", "rgb(12, 107, 120)"),
+            edge_writes: css_token(s, "--map-edge-writes", "rgb(184, 75, 20)"),
+            edge_reads: css_token(s, "--map-edge-reads", "rgb(122, 92, 0)"),
+            edge_uses: css_token(s, "--map-edge-uses", "rgb(145, 41, 118)"),
+            sys_http: css_token(s, "--sys-edge-http", "rgb(29, 95, 214)"),
+            sys_event: css_token(s, "--sys-edge-event", "rgb(12, 107, 120)"),
+            sys_rpc: css_token(s, "--sys-edge-rpc", "rgb(104, 65, 198)"),
+            sys_graphql: css_token(s, "--sys-edge-graphql", "rgb(145, 41, 118)"),
+            sys_shared: css_token(s, "--sys-edge-shared", "rgb(21, 110, 57)"),
+            sys_code: css_token(s, "--sys-edge-code", "rgb(184, 75, 20)"),
+        };
+        PALETTE_CACHE.with(|c| {
+            let mut map = c.borrow_mut();
+            if map.len() > 24 {
+                map.clear();
+            }
+            map.insert(key, palette.clone());
+        });
+        palette
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn with_dash_arrays<F: FnOnce(&DashArrays)>(f: F) {
+        DASH_CACHE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let arrays = slot.get_or_insert_with(|| {
+                let solid = js_sys::Array::new();
+                let dashed = js_sys::Array::new();
+                dashed.push(&wasm_bindgen::JsValue::from_f64(7.0));
+                dashed.push(&wasm_bindgen::JsValue::from_f64(4.0));
+                let dotted = js_sys::Array::new();
+                dotted.push(&wasm_bindgen::JsValue::from_f64(2.5));
+                dotted.push(&wasm_bindgen::JsValue::from_f64(3.5));
+                let dash_dot = js_sys::Array::new();
+                dash_dot.push(&wasm_bindgen::JsValue::from_f64(6.0));
+                dash_dot.push(&wasm_bindgen::JsValue::from_f64(3.0));
+                dash_dot.push(&wasm_bindgen::JsValue::from_f64(2.0));
+                dash_dot.push(&wasm_bindgen::JsValue::from_f64(3.0));
+                DashArrays {
+                    solid,
+                    dashed,
+                    dotted,
+                    dash_dot,
+                }
+            });
+            f(arrays);
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn palette_slot(p: &CanvasPalette, slot: EdgeColorSlot) -> &str {
+        match slot {
+            EdgeColorSlot::Base => &p.edge_base,
+            EdgeColorSlot::Calls => &p.edge_calls,
+            EdgeColorSlot::Imports => &p.edge_imports,
+            EdgeColorSlot::Extends => &p.edge_extends,
+            EdgeColorSlot::Implements => &p.edge_implements,
+            EdgeColorSlot::Writes => &p.edge_writes,
+            EdgeColorSlot::Reads => &p.edge_reads,
+            EdgeColorSlot::Uses => &p.edge_uses,
+            EdgeColorSlot::Http => &p.sys_http,
+            EdgeColorSlot::Event => &p.sys_event,
+            EdgeColorSlot::Rpc => &p.sys_rpc,
+            EdgeColorSlot::Graphql => &p.sys_graphql,
+            EdgeColorSlot::Shared => &p.sys_shared,
+            EdgeColorSlot::Code => &p.sys_code,
+            EdgeColorSlot::Against => &p.against,
+        }
+    }
+
     #[allow(unused_variables)]
     pub fn paint_scene(canvas_id: &str, cam: Camera, hover: Option<(u8, usize)>, draw_nodes: bool) {
         #[cfg(target_arch = "wasm32")]
         DENSE_SCENES.with(|store| {
             let guard = store.borrow();
-            let Some((scene, _)) = guard.get(canvas_id) else {
+            let Some((scene, _, meta)) = guard.get(canvas_id) else {
                 return;
             };
             let Some(host) = dom::get(canvas_id) else {
                 return;
             };
-            let (vw, vh, _) = viewport_size(canvas_id, 64.0, (800.0, 500.0));
+            let (vw, vh, measured) = viewport_size(canvas_id, 64.0, (800.0, 500.0));
+            if !measured || !cam.scale.is_finite() || cam.scale <= 0.0 {
+                return;
+            }
+            LAST_CAMERAS.with(|c| {
+                c.borrow_mut().insert(canvas_id.to_owned(), cam);
+            });
             let dpr = dom::window().device_pixel_ratio().clamp(1.0, 2.0);
             let target_w = ((vw * dpr).round() as u32).max(1);
             let target_h = ((vh * dpr).round() as u32).max(1);
@@ -2070,15 +2831,12 @@ pub(crate) mod canvas2d {
                 return;
             };
 
-            let col_paper = css_token(&host, "--paper", "rgb(255, 255, 255)");
-            let col_line = css_token(&host, "--line", "rgb(203, 213, 225)");
-            let col_ink = css_token(&host, "--ink", "rgb(15, 23, 42)");
-            let col_muted = css_token(&host, "--muted", "rgb(100, 116, 139)");
-            let col_purple = css_token(&host, "--purple", "rgb(124, 58, 237)");
-            let col_against = css_token(&host, "--error", "rgb(220, 38, 38)");
-            let col_changed = css_token(&host, "--success", "rgb(22, 163, 74)");
-            let col_warn = css_token(&host, "--warning", "rgb(217, 119, 6)");
-            let col_edge_base = css_token(&host, "--map-edge-from", "rgb(100, 116, 139)");
+            let pal = resolve_palette(canvas_id, &host);
+            let host_kind_hover = host
+                .get_attribute("data-kind-hover")
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            let active_kind_hover = host_kind_hover.as_deref().or(meta.kind_hover.as_deref());
 
             ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
             ctx.clear_rect(0.0, 0.0, target_w as f64, target_h as f64);
@@ -2095,89 +2853,184 @@ pub(crate) mod canvas2d {
             let view_y0 = -cam.ty / cam.scale.max(0.05) - 64.0;
             let view_x1 = view_x0 + vw / cam.scale.max(0.05) + 128.0;
             let view_y1 = view_y0 + vh / cam.scale.max(0.05) + 128.0;
+            let draw_arrows = cam.scale >= 0.35;
+            let badge_min_scale = 0.55;
 
-            let solid = js_sys::Array::new();
-            let dashed = js_sys::Array::new();
-            dashed.push(&wasm_bindgen::JsValue::from_f64(5.0));
-            dashed.push(&wasm_bindgen::JsValue::from_f64(4.0));
-
-            for edge in &scene.edges {
-                let bounds = if !edge.cmds.is_empty() {
-                    cmds_bounds(&edge.cmds)
-                } else if edge.pts.len() >= 2 {
-                    pts_bounds(&edge.pts)
-                } else {
-                    None
-                };
-                let Some((ex0, ey0, ex1, ey1)) = bounds else {
-                    continue;
-                };
-                if ex1 < view_x0 || ex0 > view_x1 || ey1 < view_y0 || ey0 > view_y1 {
-                    continue;
-                }
-                let hovered = hover == Some((1, edge.index));
-                let active = hovered || edge.on || edge.lit;
-                ctx.set_global_alpha(if edge.dim && !active {
-                    0.16
-                } else if active {
-                    0.96
-                } else if edge.portal {
-                    0.45
-                } else {
-                    0.72
-                });
-                ctx.set_stroke_style(if active {
-                    &col_purple
-                } else if edge.against {
-                    &col_against
-                } else {
-                    &col_edge_base
-                });
-                ctx.set_line_width(if active {
-                    2.2
-                } else {
-                    (1.0 + (edge.weight.saturating_sub(1) as f64) * 0.25).min(2.6)
-                });
-                ctx.set_line_dash(if edge.guessed || edge.against {
-                    &dashed
-                } else {
-                    &solid
-                });
-
-                ctx.begin_path();
-                if !edge.cmds.is_empty() {
-                    for cmd in &edge.cmds {
-                        match *cmd {
-                            DensePathCmd::Move(x, y) => ctx.move_to(x, y),
-                            DensePathCmd::Line(x, y) => ctx.line_to(x, y),
-                            DensePathCmd::Curve { c1, c2, to } => {
-                                ctx.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1);
+            let mut hovered_neighbors: HashSet<usize> = HashSet::new();
+            match hover {
+                Some((0, h_node)) => {
+                    hovered_neighbors.insert(h_node);
+                    for em in meta.edges.values() {
+                        if em.from_index == Some(h_node) {
+                            if let Some(to) = em.to_index {
+                                hovered_neighbors.insert(to);
+                            }
+                        } else if em.to_index == Some(h_node) {
+                            if let Some(from) = em.from_index {
+                                hovered_neighbors.insert(from);
                             }
                         }
                     }
-                } else {
-                    ctx.move_to(edge.pts[0].0, edge.pts[0].1);
-                    if edge.pts.len() == 4 {
-                        ctx.bezier_curve_to(
-                            edge.pts[1].0,
-                            edge.pts[1].1,
-                            edge.pts[2].0,
-                            edge.pts[2].1,
-                            edge.pts[3].0,
-                            edge.pts[3].1,
-                        );
-                    } else {
-                        for p in &edge.pts[1..] {
-                            ctx.line_to(p.0, p.1);
+                }
+                Some((1, h_edge)) => {
+                    if let Some(em) = meta.edges.get(&h_edge) {
+                        if let Some(from) = em.from_index {
+                            hovered_neighbors.insert(from);
+                        }
+                        if let Some(to) = em.to_index {
+                            hovered_neighbors.insert(to);
                         }
                     }
                 }
-                ctx.stroke();
+                _ => {}
             }
 
-            ctx.set_line_dash(&solid);
+            with_dash_arrays(|dashes| {
+                for edge in &scene.edges {
+                    if !meta.hidden_kinds.is_empty()
+                        && meta
+                            .hidden_kinds
+                            .iter()
+                            .any(|hk| edge_kind_matches(hk, &edge.kind))
+                    {
+                        continue;
+                    }
+                    let bounds = if !edge.cmds.is_empty() {
+                        cmds_bounds(&edge.cmds)
+                    } else if edge.pts.len() >= 2 {
+                        pts_bounds(&edge.pts)
+                    } else {
+                        None
+                    };
+                    let Some((ex0, ey0, ex1, ey1)) = bounds else {
+                        continue;
+                    };
+                    if ex1 < view_x0 || ex0 > view_x1 || ey1 < view_y0 || ey0 > view_y1 {
+                        continue;
+                    }
+                    let incident_hovered = match hover {
+                        Some((0, h_node)) => meta.edges.get(&edge.index).is_some_and(|em| {
+                            em.from_index == Some(h_node) || em.to_index == Some(h_node)
+                        }),
+                        Some((1, h_edge)) => edge.index == h_edge,
+                        _ => false,
+                    };
+                    let hovered = incident_hovered;
+                    let hover_dimmed = hover.is_some() && !hovered;
+                    let kind_matched =
+                        active_kind_hover.is_some_and(|hk| edge_kind_matches(hk, &edge.kind));
+                    let kind_dimmed = active_kind_hover.is_some() && !kind_matched;
+                    let active = hovered || kind_matched || edge.on || edge.lit;
+                    let style = edge_visual_style(&edge.kind, edge.guessed, edge.against);
+                    let stroke_col = if hovered || edge.on || edge.lit {
+                        &pal.purple
+                    } else {
+                        palette_slot(&pal, style.color)
+                    };
+
+                    ctx.set_global_alpha(if (edge.dim || kind_dimmed || hover_dimmed) && !active {
+                        0.15
+                    } else if active {
+                        0.96
+                    } else if edge.portal {
+                        0.45
+                    } else {
+                        0.76
+                    });
+                    ctx.set_stroke_style(stroke_col);
+                    ctx.set_line_width(if active {
+                        2.3
+                    } else {
+                        (1.0 + (edge.weight.saturating_sub(1) as f64) * 0.25).min(2.6)
+                    });
+                    ctx.set_line_dash(match style.dash {
+                        EdgeDashKind::Solid => &dashes.solid,
+                        EdgeDashKind::Dashed => &dashes.dashed,
+                        EdgeDashKind::Dotted => &dashes.dotted,
+                        EdgeDashKind::DashDot => &dashes.dash_dot,
+                    });
+
+                    ctx.begin_path();
+                    if !edge.cmds.is_empty() {
+                        for cmd in &edge.cmds {
+                            match *cmd {
+                                DensePathCmd::Move(x, y) => ctx.move_to(x, y),
+                                DensePathCmd::Line(x, y) => ctx.line_to(x, y),
+                                DensePathCmd::Curve { c1, c2, to } => {
+                                    ctx.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1);
+                                }
+                            }
+                        }
+                    } else {
+                        ctx.move_to(edge.pts[0].0, edge.pts[0].1);
+                        if edge.pts.len() == 4 {
+                            ctx.bezier_curve_to(
+                                edge.pts[1].0,
+                                edge.pts[1].1,
+                                edge.pts[2].0,
+                                edge.pts[2].1,
+                                edge.pts[3].0,
+                                edge.pts[3].1,
+                            );
+                        } else {
+                            for p in &edge.pts[1..] {
+                                ctx.line_to(p.0, p.1);
+                            }
+                        }
+                    }
+                    ctx.stroke();
+
+                    if draw_arrows {
+                        if let Some((tip, dir)) = edge_end_tangent(edge) {
+                            let len = if active { 7.5 } else { 6.5 };
+                            let half_w = if active { 3.4 } else { 2.9 };
+                            let base_x = tip.0 - dir.0 * len;
+                            let base_y = tip.1 - dir.1 * len;
+                            let nx = -dir.1 * half_w;
+                            let ny = dir.0 * half_w;
+                            ctx.set_line_dash(&dashes.solid);
+                            ctx.begin_path();
+                            ctx.move_to(tip.0, tip.1);
+                            ctx.line_to(base_x + nx, base_y + ny);
+                            ctx.line_to(base_x - nx, base_y - ny);
+                            ctx.close_path();
+                            if style.hollow_arrow {
+                                ctx.set_fill_style(&pal.paper);
+                                ctx.fill();
+                                ctx.set_line_width(1.2);
+                                ctx.stroke();
+                            } else {
+                                ctx.set_fill_style(stroke_col);
+                                ctx.fill();
+                            }
+                        }
+                    }
+
+                    if edge.weight > 1 && (active || cam.scale >= badge_min_scale) {
+                        if let Some((mx, my)) = edge_midpoint(edge) {
+                            let label = edge.weight.to_string();
+                            let bw = ((label.len() as f64) * 6.2 + 8.0).max(16.0);
+                            let bh = 14.0;
+                            let bx = mx - bw * 0.5;
+                            let by = my - bh * 0.5;
+                            ctx.set_line_dash(&dashes.solid);
+                            ctx.set_fill_style(&pal.paper);
+                            ctx.fill_rect(bx, by, bw, bh);
+                            ctx.set_line_width(1.0);
+                            ctx.set_stroke_style(stroke_col);
+                            ctx.stroke_rect(bx, by, bw, bh);
+                            ctx.set_font("600 9.5px sans-serif");
+                            ctx.set_fill_style(stroke_col);
+                            ctx.fill_text(&label, bx + 4.0, by + 10.5, bw - 8.0);
+                        }
+                    }
+                }
+
+                ctx.set_line_dash(&dashes.solid);
+            });
+
             if draw_nodes {
-                let show_labels = cam.scale >= 0.45;
+                let show_labels = should_show_dense_labels(cam.scale, meta.label_min_scale);
                 if show_labels {
                     ctx.set_font("500 11px sans-serif");
                 }
@@ -2189,32 +3042,36 @@ pub(crate) mod canvas2d {
                     {
                         continue;
                     }
-                    let hovered = hover == Some((0, node.index));
-                    ctx.set_global_alpha(if node.dim && !hovered && !node.selected && !node.lit {
-                        0.32
-                    } else {
-                        0.96
-                    });
-                    ctx.set_fill_style(&col_paper);
+                    let hovered =
+                        hover == Some((0, node.index)) || hovered_neighbors.contains(&node.index);
+                    let hover_dimmed = hover.is_some() && !hovered;
+                    ctx.set_global_alpha(
+                        if (node.dim || hover_dimmed) && !hovered && !node.selected && !node.lit {
+                            0.32
+                        } else {
+                            0.96
+                        },
+                    );
+                    ctx.set_fill_style(&pal.paper);
                     ctx.fill_rect(node.x, node.y, node.w, node.h);
                     ctx.set_line_width(if node.selected || hovered { 2.0 } else { 1.1 });
                     ctx.set_stroke_style(if node.failed {
-                        &col_against
+                        &pal.against
                     } else if node.selected || hovered || node.lit {
-                        &col_purple
+                        &pal.purple
                     } else if node.changed {
-                        &col_changed
+                        &pal.changed
                     } else if node.pinned {
-                        &col_warn
+                        &pal.warn
                     } else {
-                        &col_line
+                        &pal.line
                     });
                     ctx.stroke_rect(node.x, node.y, node.w, node.h);
                     if show_labels && !node.label.is_empty() {
                         ctx.set_fill_style(if node.dim && !node.selected {
-                            &col_muted
+                            &pal.muted
                         } else {
-                            &col_ink
+                            &pal.ink
                         });
                         ctx.fill_text(
                             &node.label,
@@ -2633,5 +3490,195 @@ mod tests {
         );
         assert_eq!(plan.to_mount, vec![1, 2]);
         assert_eq!(plan.to_unmount, vec![0, 3]);
+    }
+
+    #[test]
+    fn radar_viewport_rect_clamps_without_overhang_or_tiny_plane_panic() {
+        // Far-right / far-bottom pan clamps inside plane bounds (`vx + vw <= plane.0`).
+        let rect = radar_viewport_rect(
+            Camera::new(-995.0, -495.0, 1.0),
+            (200.0, 100.0),
+            (1000.0, 500.0),
+            24.0,
+        )
+        .expect("valid rect");
+        assert!(rect.0 + rect.2 <= 1000.0 + 1e-6);
+        assert!(rect.1 + rect.3 <= 500.0 + 1e-6);
+        assert!(rect.2 >= 24.0);
+        assert!(rect.3 >= 24.0);
+
+        // Plane smaller than `min_side` must never panic on `clamp(min, max)`.
+        let tiny = radar_viewport_rect(
+            Camera::new(-40.0, -40.0, 1.0),
+            (300.0, 200.0),
+            (10.0, 12.0),
+            24.0,
+        )
+        .expect("tiny plane rect");
+        assert_eq!(tiny, (0.0, 0.0, 10.0, 12.0));
+    }
+
+    #[test]
+    fn pan_to_keep_rect_in_view_and_escape_css_attr_work() {
+        let cam = Camera::new(0.0, 0.0, 1.0);
+        assert_eq!(
+            pan_to_keep_rect_in_view(cam, (100.0, 80.0, 140.0, 32.0), (800.0, 500.0), 24.0),
+            None
+        );
+        // Node clipped off the right edge shifts camera left just enough to reveal it + margin.
+        let panned =
+            pan_to_keep_rect_in_view(cam, (900.0, 80.0, 140.0, 32.0), (800.0, 500.0), 24.0)
+                .expect("should pan right-clipped node into view");
+        assert_eq!(panned.scale, 1.0);
+        assert!(900.0 + 140.0 + panned.tx <= 800.0 - 24.0 + 1.0);
+        assert!(panned.dy_or_zero(cam) == 0.0);
+
+        assert_eq!(
+            escape_css_attr_value("src/a\"b\\c\n"),
+            "src/a\\\"b\\\\c\\a "
+        );
+    }
+
+    #[test]
+    fn camera_selection_history_tracks_back_forward_dedup_and_breadcrumbs() {
+        let mut hist = CameraSelectionHistory::new(3);
+        assert!(!hist.can_back());
+        assert!(!hist.can_forward());
+
+        hist.push(CameraSelectionEntry {
+            key: "".into(),
+            label: "Root".into(),
+            target: "work".into(),
+            cam: Camera::new(0.0, 0.0, 1.0),
+        });
+        hist.push(CameraSelectionEntry {
+            key: "a.rs".into(),
+            label: "a.rs".into(),
+            target: "work".into(),
+            cam: Camera::new(-50.0, -20.0, 1.2),
+        });
+        // Same target + key updates camera instead of pushing duplicate entry.
+        hist.push(CameraSelectionEntry {
+            key: "a.rs".into(),
+            label: "a.rs".into(),
+            target: "work".into(),
+            cam: Camera::new(-80.0, -30.0, 1.5),
+        });
+        assert_eq!(hist.entries().len(), 2);
+        assert!(hist.can_back());
+        assert!(!hist.can_forward());
+
+        let back = hist.back().expect("back entry").clone();
+        assert_eq!(back.label, "Root");
+        assert!(hist.can_forward());
+
+        // Pushing from back truncates forward branch and honors capacity 3.
+        hist.push(CameraSelectionEntry {
+            key: "b.rs".into(),
+            label: "b.rs".into(),
+            target: "work".into(),
+            cam: Camera::new(-10.0, -10.0, 1.0),
+        });
+        assert!(!hist.can_forward());
+        hist.push(CameraSelectionEntry {
+            key: "c.rs".into(),
+            label: "c.rs".into(),
+            target: "work".into(),
+            cam: Camera::new(-20.0, -20.0, 1.0),
+        });
+        hist.push(CameraSelectionEntry {
+            key: "d.rs".into(),
+            label: "d.rs".into(),
+            target: "work".into(),
+            cam: Camera::new(-30.0, -30.0, 1.0),
+        });
+        assert_eq!(hist.entries().len(), 3);
+        assert_eq!(hist.entries()[0].key, "b.rs");
+        assert_eq!(hist.jump_to(1).expect("jump").key, "c.rs");
+        assert!(hist.can_back());
+        assert!(hist.can_forward());
+    }
+
+    #[test]
+    fn canvas2d_styles_tangents_hidden_kinds_and_explain_meta_work() {
+        let calls = canvas2d::edge_visual_style("calls imports", false, false);
+        assert_eq!(calls.color, canvas2d::EdgeColorSlot::Calls);
+        assert_eq!(calls.dash, canvas2d::EdgeDashKind::Solid);
+        assert!(!calls.hollow_arrow);
+
+        let impl_edge = canvas2d::edge_visual_style("implements", false, false);
+        assert_eq!(impl_edge.color, canvas2d::EdgeColorSlot::Implements);
+        assert_eq!(impl_edge.dash, canvas2d::EdgeDashKind::DashDot);
+        assert!(impl_edge.hollow_arrow);
+
+        let against = canvas2d::edge_visual_style("calls", false, true);
+        assert_eq!(against.color, canvas2d::EdgeColorSlot::Against);
+        assert_eq!(against.dash, canvas2d::EdgeDashKind::Dashed);
+
+        assert!(canvas2d::edge_kind_matches("imports", "calls imports"));
+        assert!(!canvas2d::edge_kind_matches("writes", "calls imports"));
+        assert!(!canvas2d::should_show_dense_labels(0.45, None));
+        assert!(canvas2d::should_show_dense_labels(0.50, None));
+
+        let edge = canvas2d::DenseEdgeSpec::from_svg_path(
+            9,
+            "M 0 0 L 100 0 L 100 50",
+            4,
+            false,
+            false,
+            "imports".to_owned(),
+            false,
+            false,
+            false,
+            false,
+        );
+        let (tip, dir) = canvas2d::edge_end_tangent(&edge).expect("tangent");
+        assert!((tip.0 - 100.0).abs() < 1e-6 && (tip.1 - 50.0).abs() < 1e-6);
+        assert!(dir.0.abs() < 1e-6 && (dir.1 - 1.0).abs() < 1e-6);
+        assert!(canvas2d::edge_midpoint(&edge).is_some());
+
+        let scene = canvas2d::DenseScene {
+            width: 300.0,
+            height: 200.0,
+            nodes: vec![],
+            edges: vec![edge],
+        };
+        let mut meta = canvas2d::DenseSceneMeta::default();
+        meta.edges.insert(
+            9,
+            canvas2d::DenseEdgeMeta {
+                explain_kind: "link".to_owned(),
+                explain_payload: json!({"from": "a.rs", "to": "b.rs"}),
+                from_index: Some(0),
+                to_index: Some(1),
+            },
+        );
+        canvas2d::store_scene_with_meta("test-dense-meta", scene, meta);
+        assert_eq!(
+            canvas2d::hit_test_scene("test-dense-meta", 100.0, 25.0, 6.0),
+            Some((1, 9))
+        );
+        assert_eq!(
+            canvas2d::explain_target_for_hit("test-dense-meta", 1, 9),
+            Some(("link".to_owned(), json!({"from": "a.rs", "to": "b.rs"})))
+        );
+        let mut hidden = HashSet::new();
+        hidden.insert("imports".to_owned());
+        assert!(canvas2d::set_hidden_kinds("test-dense-meta", hidden));
+        assert_eq!(
+            canvas2d::hit_test_scene("test-dense-meta", 100.0, 25.0, 6.0),
+            None
+        );
+        canvas2d::clear_scene("test-dense-meta");
+    }
+
+    trait CameraTestExt {
+        fn dy_or_zero(self, other: Self) -> f64;
+    }
+
+    impl CameraTestExt for Camera {
+        fn dy_or_zero(self, other: Self) -> f64 {
+            self.ty - other.ty
+        }
     }
 }

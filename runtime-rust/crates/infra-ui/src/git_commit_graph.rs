@@ -1,7 +1,53 @@
 #![allow(dead_code)]
 
 use serde_json::Value;
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+thread_local! {
+    static COMMIT_LAYOUT_CACHE: RefCell<Option<(u64, Rc<Vec<CommitRowLayout>>)>> =
+        const { RefCell::new(None) };
+}
+
+fn commit_layouts_cache_key(commits: &[Value], selected_commit: Option<&str>) -> u64 {
+    let mut h = DefaultHasher::new();
+    commits.len().hash(&mut h);
+    selected_commit.hash(&mut h);
+    for commit in commits {
+        commit["commit"].as_str().hash(&mut h);
+        commit["short"].as_str().hash(&mut h);
+        commit["merge"].as_bool().hash(&mut h);
+        if let Some(parents) = commit["parents"].as_array() {
+            parents.len().hash(&mut h);
+            for p in parents {
+                p.as_str().hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+fn build_layouts_cached(
+    commits: &[Value],
+    selected_commit: Option<&str>,
+) -> Rc<Vec<CommitRowLayout>> {
+    let key = commit_layouts_cache_key(commits, selected_commit);
+    if let Some(hit) = COMMIT_LAYOUT_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|(cached_key, layouts)| (*cached_key == key).then(|| Rc::clone(layouts)))
+    }) {
+        return hit;
+    }
+    let built = Rc::new(build_layouts(commits, selected_commit));
+    COMMIT_LAYOUT_CACHE.with(|c| {
+        *c.borrow_mut() = Some((key, Rc::clone(&built)));
+    });
+    built
+}
 
 pub const ROW_HEIGHT: usize = 36;
 const MID_Y: usize = ROW_HEIGHT / 2;
@@ -210,7 +256,7 @@ fn render_commit_graph_rows_with_options(
     now: i64,
     surface: CommitGraphSurface,
 ) -> String {
-    let layouts = build_layouts(commits, selected_commit);
+    let layouts = build_layouts_cached(commits, selected_commit);
     let base_idx = range.and_then(|(b, _)| selected_commit_row_index(commits, Some(b)));
     let head_idx = range.and_then(|(_, h)| selected_commit_row_index(commits, Some(h)));
     let total = commits.len();
@@ -1309,9 +1355,11 @@ mod tests {
         assert_eq!(layouts[0].rail_width, 38);
         assert!(layouts[0].rail_svg.contains("git-graph-dot-merge"));
         assert!(layouts[0].rail_svg.contains("git-graph-dot-inner"));
-        assert!(layouts[0]
-            .rail_svg
-            .contains("d=\"M 12 18 C 12 27, 26 27, 26 36\""));
+        assert!(
+            layouts[0]
+                .rail_svg
+                .contains("d=\"M 12 18 C 12 27, 26 27, 26 36\"")
+        );
 
         // c4 continues lane 0 while c3 passes through on lane 1.
         assert_eq!(layouts[1].lane, 0);
@@ -1320,9 +1368,11 @@ mod tests {
         // c3 is on lane 1 and curves back into c2 on lane 0.
         assert_eq!(layouts[2].lane, 1);
         assert_ne!(layouts[2].color, layouts[0].color);
-        assert!(layouts[2]
-            .rail_svg
-            .contains("d=\"M 26 18 C 26 27, 12 27, 12 36\""));
+        assert!(
+            layouts[2]
+                .rail_svg
+                .contains("d=\"M 26 18 C 26 27, 12 27, 12 36\"")
+        );
 
         // After lane 1 collapses into lane 0, c2 and c1 drop back to 1-lane width.
         assert_eq!(layouts[3].lane, 0);
@@ -1482,8 +1532,11 @@ mod tests {
         assert!(html.contains("<div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">Add DAG renderer</span><span class=\"git-graph-badges\"><span class=\"graph-pick-badge\" data-kind=\"branch\">feat/dag</span></span></div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">abcdef1</code><span class=\"git-graph-who\">Ada</span><span class=\"git-graph-when\">just now</span></div></div>"));
         assert!(html.contains("<li class=\"git-graph-row\" id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"false\" data-current=\"false\" data-action=\"graph-commit-select\""));
         assert!(html.contains("data-selected=\"true\""));
-        assert!(html
-            .ends_with("data-action=\"graph-commit-graph-more\">Show older commits</button></li>"));
+        assert!(
+            html.ends_with(
+                "data-action=\"graph-commit-graph-more\">Show older commits</button></li>"
+            )
+        );
 
         let empty_no_more =
             render_commit_graph_rows(&[], None, None, false, 0, CommitGraphSurface::Dock);
@@ -1559,8 +1612,10 @@ mod tests {
         );
         assert!(fallback.contains("deadbeef"));
         assert!(fallback.contains("Fix bug"));
-        assert!(fallback
-            .contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>"));
+        assert!(
+            fallback
+                .contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>")
+        );
     }
 
     #[test]
@@ -1729,7 +1784,9 @@ mod tests {
         assert!(
             dock_html.contains("id=\"graph-commit-row-0\" role=\"option\" aria-selected=\"false\"")
         );
-        assert!(dock_html.contains("id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"true\" data-current=\"true\""));
+        assert!(dock_html.contains(
+            "id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"true\" data-current=\"true\""
+        ));
 
         let range = resolve_commit_range_selection(&commits, Some("commit:c2"), "c0");
         assert_eq!(range, Some(("c0".to_owned(), "c2".to_owned())));
@@ -1766,5 +1823,11 @@ mod tests {
         assert!(windowed.contains("class=\"git-graph-spacer\""));
         assert!(windowed.contains("graph-commit-row-30"));
         assert!(!windowed.contains("graph-commit-row-0\""));
+
+        let first = build_layouts_cached(&many, Some("sha5"));
+        let second = build_layouts_cached(&many, Some("sha5"));
+        assert!(Rc::ptr_eq(&first, &second));
+        let changed = build_layouts_cached(&many, Some("sha6"));
+        assert!(!Rc::ptr_eq(&first, &changed));
     }
 }

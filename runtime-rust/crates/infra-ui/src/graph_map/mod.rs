@@ -4,10 +4,10 @@
 //! in turn to its classes, methods and functions and the files around them.
 use crate::{api, dom, graph::GraphTargetScope, graph_viewport, model as m};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as V};
+use serde_json::{Value as V, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use wasm_bindgen::{closure::Closure, JsCast};
+use wasm_bindgen::{JsCast, closure::Closure};
 use wasm_bindgen_futures::spawn_local;
 
 mod diff_impact;
@@ -20,6 +20,16 @@ mod surfaces;
 #[cfg(test)]
 mod tests;
 
+#[allow(unused_imports)]
+pub use diff_impact::CONE_REACH;
+#[allow(unused_imports)]
+pub use diff_impact::CanvasOverlayContext;
+#[allow(unused_imports)]
+pub use diff_impact::EdgeKinds;
+#[allow(unused_imports)]
+pub use diff_impact::KeyState;
+#[allow(unused_imports)]
+pub use diff_impact::KindsOff;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use diff_impact::arrow_kind_for_edge;
@@ -73,15 +83,7 @@ pub use diff_impact::with_run;
 #[allow(unused_imports)]
 pub use diff_impact::with_system_run;
 #[allow(unused_imports)]
-pub use diff_impact::CanvasOverlayContext;
-#[allow(unused_imports)]
-pub use diff_impact::EdgeKinds;
-#[allow(unused_imports)]
-pub use diff_impact::KeyState;
-#[allow(unused_imports)]
-pub use diff_impact::KindsOff;
-#[allow(unused_imports)]
-pub use diff_impact::CONE_REACH;
+pub use finder_commit::Pointed;
 #[allow(unused_imports)]
 pub use finder_commit::agent_options_html;
 #[allow(unused_imports)]
@@ -167,7 +169,29 @@ pub use finder_commit::sought;
 #[allow(unused_imports)]
 pub use finder_commit::wheel_zoom_factor;
 #[allow(unused_imports)]
-pub use finder_commit::Pointed;
+pub use layout::CreatedEntity;
+#[allow(unused_imports)]
+pub use layout::FocusOverlay;
+#[allow(unused_imports)]
+pub use layout::Framed;
+#[allow(unused_imports)]
+pub use layout::Frames;
+#[allow(unused_imports)]
+pub use layout::LiveFocus;
+#[allow(unused_imports)]
+pub use layout::PORTAL_SPAN;
+#[allow(unused_imports)]
+pub use layout::Placed;
+#[allow(unused_imports)]
+pub use layout::PlacedEntity;
+#[allow(unused_imports)]
+pub use layout::Plan;
+#[allow(unused_imports)]
+pub use layout::Routing;
+#[allow(unused_imports)]
+pub(crate) use layout::SystemEmbeddedKind;
+#[allow(unused_imports)]
+pub use layout::Wire;
 #[allow(unused_imports)]
 use layout::apply_pin_overrides_to_plan;
 #[allow(unused_imports)]
@@ -205,29 +229,21 @@ pub use layout::transitive;
 #[allow(unused_imports)]
 pub use layout::zoom_at;
 #[allow(unused_imports)]
-pub use layout::CreatedEntity;
+pub use render::DENSE_GRAPH_EDGE_THRESHOLD;
 #[allow(unused_imports)]
-pub use layout::FocusOverlay;
+pub use render::DENSE_GRAPH_NODE_THRESHOLD;
 #[allow(unused_imports)]
-pub use layout::Framed;
+pub use render::Ends;
 #[allow(unused_imports)]
-pub use layout::Frames;
+pub use render::GraphScaleTier;
 #[allow(unused_imports)]
-pub use layout::LiveFocus;
+pub use render::LARGE_GRAPH_EDGE_THRESHOLD;
 #[allow(unused_imports)]
-pub use layout::Placed;
+pub use render::LARGE_GRAPH_NODE_THRESHOLD;
 #[allow(unused_imports)]
-pub use layout::PlacedEntity;
+pub use render::RenderedCanvas;
 #[allow(unused_imports)]
-pub use layout::Plan;
-#[allow(unused_imports)]
-pub use layout::Routing;
-#[allow(unused_imports)]
-pub(crate) use layout::SystemEmbeddedKind;
-#[allow(unused_imports)]
-pub use layout::Wire;
-#[allow(unused_imports)]
-pub use layout::PORTAL_SPAN;
+pub use render::ViewportBounds;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use render::canvas;
@@ -266,22 +282,6 @@ pub use render::rect_intersects_viewport;
 pub use render::side;
 #[allow(unused_imports)]
 pub use render::visible_viewport_bounds;
-#[allow(unused_imports)]
-pub use render::Ends;
-#[allow(unused_imports)]
-pub use render::GraphScaleTier;
-#[allow(unused_imports)]
-pub use render::RenderedCanvas;
-#[allow(unused_imports)]
-pub use render::ViewportBounds;
-#[allow(unused_imports)]
-pub use render::DENSE_GRAPH_EDGE_THRESHOLD;
-#[allow(unused_imports)]
-pub use render::DENSE_GRAPH_NODE_THRESHOLD;
-#[allow(unused_imports)]
-pub use render::LARGE_GRAPH_EDGE_THRESHOLD;
-#[allow(unused_imports)]
-pub use render::LARGE_GRAPH_NODE_THRESHOLD;
 #[allow(unused_imports)]
 pub use surfaces::append_system_task_draft;
 #[allow(unused_imports)]
@@ -348,6 +348,26 @@ pub use surfaces::sync_embedded;
 #[allow(unused_imports)]
 pub use surfaces::sync_embedded_changes;
 
+#[allow(unused_imports)]
+use diff_impact::CURVE_STEPS;
+#[allow(unused_imports)]
+use diff_impact::ChangedEntityDiff;
+#[allow(unused_imports)]
+use diff_impact::ChangesLookup;
+#[allow(unused_imports)]
+use diff_impact::EDGE_ARROW_SPECS;
+#[allow(unused_imports)]
+use diff_impact::EdgeArrowSpec;
+#[allow(unused_imports)]
+use diff_impact::ImpactLookup;
+#[allow(unused_imports)]
+use diff_impact::KIND_PRESETS;
+#[allow(unused_imports)]
+use diff_impact::LONGER;
+#[allow(unused_imports)]
+use diff_impact::MemberDetailsOpts;
+#[allow(unused_imports)]
+use diff_impact::Piece;
 #[allow(unused_imports)]
 use diff_impact::above;
 #[allow(unused_imports)]
@@ -518,25 +538,43 @@ use diff_impact::weight;
 #[allow(unused_imports)]
 use diff_impact::what;
 #[allow(unused_imports)]
-use diff_impact::ChangedEntityDiff;
+use finder_commit::COMMIT_MEMORY_COUNTS;
 #[allow(unused_imports)]
-use diff_impact::ChangesLookup;
+use finder_commit::COMMIT_MEMORY_ERRORS;
 #[allow(unused_imports)]
-use diff_impact::EdgeArrowSpec;
+use finder_commit::COMMIT_MEMORY_FILES;
 #[allow(unused_imports)]
-use diff_impact::ImpactLookup;
+use finder_commit::CYCLE_BACK;
 #[allow(unused_imports)]
-use diff_impact::MemberDetailsOpts;
+use finder_commit::FAILING;
 #[allow(unused_imports)]
-use diff_impact::Piece;
+use finder_commit::FAILING_NAME;
 #[allow(unused_imports)]
-use diff_impact::CURVE_STEPS;
+use finder_commit::FIT;
 #[allow(unused_imports)]
-use diff_impact::EDGE_ARROW_SPECS;
+use finder_commit::GRAPH_MAP_LOD;
 #[allow(unused_imports)]
-use diff_impact::KIND_PRESETS;
+use finder_commit::HIDE_TRANSITIVE;
 #[allow(unused_imports)]
-use diff_impact::LONGER;
+use finder_commit::LINKS_OFF;
+#[allow(unused_imports)]
+use finder_commit::MONTHS;
+#[allow(unused_imports)]
+use finder_commit::NOTESTS;
+#[allow(unused_imports)]
+use finder_commit::PATTERN_BACK;
+#[allow(unused_imports)]
+use finder_commit::PATTERNS;
+#[allow(unused_imports)]
+use finder_commit::RADAR_DRAG;
+#[allow(unused_imports)]
+use finder_commit::RADAR_LEAST;
+#[allow(unused_imports)]
+use finder_commit::RADAR_ROOM;
+#[allow(unused_imports)]
+use finder_commit::SPREAD;
+#[allow(unused_imports)]
+use finder_commit::TABS;
 #[allow(unused_imports)]
 use finder_commit::active_embedded_surface_for_key;
 #[allow(unused_imports)]
@@ -765,70 +803,6 @@ use finder_commit::zoom_link_camera_at;
 #[allow(unused_imports)]
 use finder_commit::zoom_scroll_canvas;
 #[allow(unused_imports)]
-use finder_commit::COMMIT_MEMORY_COUNTS;
-#[allow(unused_imports)]
-use finder_commit::COMMIT_MEMORY_ERRORS;
-#[allow(unused_imports)]
-use finder_commit::COMMIT_MEMORY_FILES;
-#[allow(unused_imports)]
-use finder_commit::CYCLE_BACK;
-#[allow(unused_imports)]
-use finder_commit::FAILING;
-#[allow(unused_imports)]
-use finder_commit::FAILING_NAME;
-#[allow(unused_imports)]
-use finder_commit::FIT;
-#[allow(unused_imports)]
-use finder_commit::GRAPH_MAP_LOD;
-#[allow(unused_imports)]
-use finder_commit::HIDE_TRANSITIVE;
-#[allow(unused_imports)]
-use finder_commit::LINKS_OFF;
-#[allow(unused_imports)]
-use finder_commit::MONTHS;
-#[allow(unused_imports)]
-use finder_commit::NOTESTS;
-#[allow(unused_imports)]
-use finder_commit::PATTERNS;
-#[allow(unused_imports)]
-use finder_commit::PATTERN_BACK;
-#[allow(unused_imports)]
-use finder_commit::RADAR_DRAG;
-#[allow(unused_imports)]
-use finder_commit::RADAR_LEAST;
-#[allow(unused_imports)]
-use finder_commit::RADAR_ROOM;
-#[allow(unused_imports)]
-use finder_commit::SPREAD;
-#[allow(unused_imports)]
-use finder_commit::TABS;
-#[allow(unused_imports)]
-use layout::best_ancestor_node;
-#[allow(unused_imports)]
-use layout::curve;
-#[allow(unused_imports)]
-use layout::entity_kind_badge;
-#[allow(unused_imports)]
-use layout::find_entity_anchor;
-#[allow(unused_imports)]
-use layout::groups;
-#[allow(unused_imports)]
-use layout::normalize_entity_kind;
-#[allow(unused_imports)]
-use layout::normalize_rel_path;
-#[allow(unused_imports)]
-use layout::order;
-#[allow(unused_imports)]
-use layout::prompt_tokens;
-#[allow(unused_imports)]
-use layout::string_list;
-#[allow(unused_imports)]
-use layout::strip_symbol_suffix;
-#[allow(unused_imports)]
-use layout::union_bbox;
-#[allow(unused_imports)]
-use layout::EntityAnchor;
-#[allow(unused_imports)]
 use layout::ARC_APART;
 #[allow(unused_imports)]
 use layout::ARC_FIRST;
@@ -854,6 +828,8 @@ use layout::COLUMN_GAP;
 use layout::ENTITY_HEIGHT;
 #[allow(unused_imports)]
 use layout::ENTITY_WIDTH;
+#[allow(unused_imports)]
+use layout::EntityAnchor;
 #[allow(unused_imports)]
 use layout::FOCUS_CAMERA_MAX;
 #[allow(unused_imports)]
@@ -881,7 +857,59 @@ use layout::SMALLEST;
 #[allow(unused_imports)]
 use layout::ZOOM_STEP;
 #[allow(unused_imports)]
+use layout::best_ancestor_node;
+#[allow(unused_imports)]
+use layout::curve;
+#[allow(unused_imports)]
+use layout::entity_kind_badge;
+#[allow(unused_imports)]
+use layout::find_entity_anchor;
+#[allow(unused_imports)]
+use layout::groups;
+#[allow(unused_imports)]
+use layout::normalize_entity_kind;
+#[allow(unused_imports)]
+use layout::normalize_rel_path;
+#[allow(unused_imports)]
+use layout::order;
+#[allow(unused_imports)]
+use layout::prompt_tokens;
+#[allow(unused_imports)]
+use layout::string_list;
+#[allow(unused_imports)]
+use layout::strip_symbol_suffix;
+#[allow(unused_imports)]
+use layout::union_bbox;
+#[allow(unused_imports)]
+use render::CanvasSelectionPatch;
+#[allow(unused_imports)]
+use render::DenseNodeExtraSpec;
+#[allow(unused_imports)]
+use render::EdgeSelectionState;
+#[allow(unused_imports)]
+use render::FILE_LEGEND;
+#[allow(unused_imports)]
+use render::FIRST;
+#[allow(unused_imports)]
+use render::HANDLE_GAP;
+#[allow(unused_imports)]
+use render::LAYER_LEGEND;
+#[allow(unused_imports)]
+use render::LEGEND;
+#[allow(unused_imports)]
+use render::LinkDiffInfo;
+#[allow(unused_imports)]
+use render::NAME_LEGEND;
+#[allow(unused_imports)]
+use render::NodeSelectionState;
+#[allow(unused_imports)]
+use render::SelectionContext;
+#[allow(unused_imports)]
+use render::WAY;
+#[allow(unused_imports)]
 use render::apart;
+#[allow(unused_imports)]
+use render::architecture_cut_hints_html;
 #[allow(unused_imports)]
 use render::ask_shared;
 #[allow(unused_imports)]
@@ -905,7 +933,11 @@ use render::compute_canvas_selection_patch;
 #[allow(unused_imports)]
 use render::compute_selected_bbox;
 #[allow(unused_imports)]
+use render::confidence_pill_html;
+#[allow(unused_imports)]
 use render::crumbs;
+#[allow(unused_imports)]
+use render::cycle_cut_hints_html;
 #[allow(unused_imports)]
 use render::diff_badge_sign;
 #[allow(unused_imports)]
@@ -969,35 +1001,41 @@ use render::reached;
 #[allow(unused_imports)]
 use render::refresh_dense_scene_for_patch;
 #[allow(unused_imports)]
+use render::render_dense_node_extras_for_mounted;
+#[allow(unused_imports)]
 use render::role;
 #[allow(unused_imports)]
 use render::rows;
 #[allow(unused_imports)]
 use render::symbol_focus_payload;
 #[allow(unused_imports)]
-use render::CanvasSelectionPatch;
+use surfaces::CachedSurfacePlan;
 #[allow(unused_imports)]
-use render::EdgeSelectionState;
+use surfaces::Camera;
 #[allow(unused_imports)]
-use render::LinkDiffInfo;
+use surfaces::ClickOutcome;
 #[allow(unused_imports)]
-use render::NodeSelectionState;
+use surfaces::MEMORY_LINKS;
 #[allow(unused_imports)]
-use render::SelectionContext;
+use surfaces::MEMORY_LINKS_LOOKING;
 #[allow(unused_imports)]
-use render::FILE_LEGEND;
+use surfaces::MODAL_SURFACE;
 #[allow(unused_imports)]
-use render::FIRST;
+use surfaces::MapSurface;
 #[allow(unused_imports)]
-use render::HANDLE_GAP;
+use surfaces::OwnedOverlayExtras;
 #[allow(unused_imports)]
-use render::LAYER_LEGEND;
+use surfaces::PatchedCanvasMeta;
 #[allow(unused_imports)]
-use render::LEGEND;
+use surfaces::SESSION_SURFACE;
 #[allow(unused_imports)]
-use render::NAME_LEGEND;
+use surfaces::SURFACE_PLAN_CACHE;
 #[allow(unused_imports)]
-use render::WAY;
+use surfaces::SYSTEM_CHANGE_SURFACE;
+#[allow(unused_imports)]
+use surfaces::SYSTEM_EMBEDDED_SURFACE;
+#[allow(unused_imports)]
+use surfaces::SurfaceViewSignature;
 #[allow(unused_imports)]
 use surfaces::active_drag_surface;
 #[allow(unused_imports)]
@@ -1161,6 +1199,8 @@ use surfaces::save_surface_camera;
 #[allow(unused_imports)]
 use surfaces::save_surface_state;
 #[allow(unused_imports)]
+use surfaces::set_dense_hover;
+#[allow(unused_imports)]
 use surfaces::set_surface_attrs;
 #[allow(unused_imports)]
 use surfaces::set_surface_scope;
@@ -1214,31 +1254,3 @@ use surfaces::viewport_size;
 use surfaces::zoom_surface_camera_at;
 #[allow(unused_imports)]
 use surfaces::zoom_surface_camera_to_bbox;
-#[allow(unused_imports)]
-use surfaces::CachedSurfacePlan;
-#[allow(unused_imports)]
-use surfaces::Camera;
-#[allow(unused_imports)]
-use surfaces::ClickOutcome;
-#[allow(unused_imports)]
-use surfaces::MapSurface;
-#[allow(unused_imports)]
-use surfaces::OwnedOverlayExtras;
-#[allow(unused_imports)]
-use surfaces::PatchedCanvasMeta;
-#[allow(unused_imports)]
-use surfaces::SurfaceViewSignature;
-#[allow(unused_imports)]
-use surfaces::MEMORY_LINKS;
-#[allow(unused_imports)]
-use surfaces::MEMORY_LINKS_LOOKING;
-#[allow(unused_imports)]
-use surfaces::MODAL_SURFACE;
-#[allow(unused_imports)]
-use surfaces::SESSION_SURFACE;
-#[allow(unused_imports)]
-use surfaces::SURFACE_PLAN_CACHE;
-#[allow(unused_imports)]
-use surfaces::SYSTEM_CHANGE_SURFACE;
-#[allow(unused_imports)]
-use surfaces::SYSTEM_EMBEDDED_SURFACE;
