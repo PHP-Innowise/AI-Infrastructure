@@ -641,6 +641,147 @@ fn sync_system_radar(surface: SysMapSurface, cam: &Camera) {
     dom::hide(&radar, false);
 }
 
+fn escape_css_attr_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn find_sys_node_el(canvas: &web_sys::Element, nid: &str) -> Option<web_sys::Element> {
+    let escaped = escape_css_attr_value(nid);
+    canvas
+        .query_selector(&format!(".system-map-node[data-n=\"{escaped}\"]"))
+        .ok()
+        .flatten()
+}
+
+fn find_sys_frame_el(canvas: &web_sys::Element, svc_id: &str) -> Option<web_sys::Element> {
+    let escaped = escape_css_attr_value(svc_id);
+    canvas
+        .query_selector(&format!(".system-service-frame[data-of=\"{escaped}\"]"))
+        .ok()
+        .flatten()
+}
+
+fn pan_to_keep_rect_in_view(
+    cam: &mut Camera,
+    rect: (f64, f64, f64, f64),
+    viewport: (f64, f64),
+    margin: f64,
+) -> bool {
+    let scale = cam.scale.max(0.05);
+    let (rx, ry, rw, rh) = rect;
+    let (vw, vh) = viewport;
+    let sx0 = rx * scale + cam.pan_x;
+    let sy0 = ry * scale + cam.pan_y;
+    let sx1 = (rx + rw) * scale + cam.pan_x;
+    let sy1 = (ry + rh) * scale + cam.pan_y;
+    let mut next_x = cam.pan_x;
+    let mut next_y = cam.pan_y;
+    if sx0 < margin {
+        next_x += margin - sx0;
+    } else if sx1 > vw - margin {
+        next_x -= sx1 - (vw - margin);
+    }
+    if sy0 < margin {
+        next_y += margin - sy0;
+    } else if sy1 > vh - margin {
+        next_y -= sy1 - (vh - margin);
+    }
+    if (next_x - cam.pan_x).abs() > 0.5 || (next_y - cam.pan_y).abs() > 0.5 {
+        cam.pan_x = next_x;
+        cam.pan_y = next_y;
+        cam.fit_mode = false;
+        return true;
+    }
+    false
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SysNavEntry {
+    focus: String,
+    selected_edge: V,
+    pan_x: f64,
+    pan_y: f64,
+    scale: f64,
+}
+
+#[derive(Default)]
+struct SysNavHistory {
+    entries: Vec<SysNavEntry>,
+    cursor: usize,
+}
+
+impl SysNavHistory {
+    fn push(&mut self, entry: SysNavEntry) {
+        if let Some(cur) = self.entries.get(self.cursor) {
+            if cur.focus == entry.focus && cur.selected_edge == entry.selected_edge {
+                return;
+            }
+        }
+        if !self.entries.is_empty() && self.cursor + 1 < self.entries.len() {
+            self.entries.truncate(self.cursor + 1);
+        }
+        self.entries.push(entry);
+        if self.entries.len() > 32 {
+            let drain = self.entries.len() - 32;
+            self.entries.drain(0..drain);
+        }
+        self.cursor = self.entries.len().saturating_sub(1);
+    }
+
+    fn can_back(&self) -> bool {
+        self.cursor > 0 && !self.entries.is_empty()
+    }
+
+    fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    fn step_back(&mut self) -> Option<SysNavEntry> {
+        if !self.can_back() {
+            return None;
+        }
+        self.cursor -= 1;
+        self.entries.get(self.cursor).cloned()
+    }
+
+    fn step_forward(&mut self) -> Option<SysNavEntry> {
+        if !self.can_forward() {
+            return None;
+        }
+        self.cursor += 1;
+        self.entries.get(self.cursor).cloned()
+    }
+}
+
+thread_local! {
+    static SYS_WAVE_PLAYING: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    static SYS_HOVER_HIT: RefCell<HashMap<&'static str, Option<(u8, usize)>>> = RefCell::new(HashMap::new());
+    static SYS_NAV_HISTORY: RefCell<HashMap<&'static str, SysNavHistory>> = RefCell::new(HashMap::new());
+}
+
+fn push_sys_nav_history(surface: SysMapSurface, state: &V, cam: &Camera) {
+    let entry = SysNavEntry {
+        focus: m::text(state, "focus"),
+        selected_edge: state["selected_edge"].clone(),
+        pan_x: cam.pan_x,
+        pan_y: cam.pan_y,
+        scale: cam.scale,
+    };
+    SYS_NAV_HISTORY.with(|h| {
+        h.borrow_mut().entry(surface.id).or_default().push(entry);
+    });
+}
+
 fn apply_camera(surface: SysMapSurface, cam: &Camera) {
     let zoom_id = format!("{}-zoom-level", surface.id_prefix);
     let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(220.0));
@@ -663,8 +804,16 @@ fn apply_camera(surface: SysMapSurface, cam: &Camera) {
         }
     }
     sync_system_radar(surface, cam);
-    sync_system_viewport_culling(surface, cam);
-    graph_viewport::canvas2d::paint_scene(surface.canvas_id, cam.viewport_cam(), None, true);
+    let is_dense = SYS_DENSE_CACHE.with(|c| {
+        c.borrow()
+            .get(surface.canvas_id)
+            .is_some_and(|e| e.is_dense)
+    });
+    if is_dense {
+        sync_system_viewport_culling(surface, cam);
+        let hover = SYS_HOVER_HIT.with(|h| h.borrow().get(surface.canvas_id).copied().flatten());
+        graph_viewport::canvas2d::paint_scene(surface.canvas_id, cam.viewport_cam(), hover, true);
+    }
 }
 
 fn fit_surface_camera(surface: SysMapSurface) {
@@ -1353,12 +1502,14 @@ fn expand_unfolded_nodes(doc: &V, state: &V) -> V {
     }
 
     let base_nodes = m::array(&doc["nodes"]);
-    // If server already emitted child contract/capability/source nodes, keep them.
+    // If server already emitted real child contract/capability/source nodes (ignoring synthetic __unmatched__ placeholders), keep them.
     if base_nodes.iter().any(|n| {
-        matches!(
-            n["kind"].as_str(),
-            Some("contract" | "capability" | "source")
-        )
+        !node_id(n).starts_with("__unmatched__:")
+            && !m::yes(&n["unmatched"])
+            && matches!(
+                n["kind"].as_str(),
+                Some("contract" | "capability" | "source")
+            )
     }) {
         return doc.clone();
     }
@@ -1369,7 +1520,11 @@ fn expand_unfolded_nodes(doc: &V, state: &V) -> V {
 
     for svc in &base_nodes {
         let sid = node_id(svc);
-        if sid.is_empty() || (!whole && !spread_set.contains(&sid)) {
+        if sid.is_empty()
+            || sid.starts_with("__unmatched__:")
+            || m::yes(&svc["unmatched"])
+            || (!whole && !spread_set.contains(&sid))
+        {
             continue;
         }
         for cap in m::array(&svc["capabilities"]).into_iter().take(6) {
@@ -1610,10 +1765,18 @@ pub fn wave_scrubber_html(surface: SysMapSurface, blast: &BlastRadius, state: &V
             escape(&told),
         ));
     }
-    html.push_str(&format!(
-        "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-wave-play\" data-payload=\"{}\" title=\"Show the waves one after another\">▶ Play</button></div>",
-        payload_attr(&json!({"surface": surface.id})),
-    ));
+    let playing = SYS_WAVE_PLAYING.with(|w| w.borrow().contains(surface.id));
+    if playing {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-wave-pause\" data-payload=\"{}\" aria-pressed=\"true\" title=\"Pause wave animation\">⏸ Pause</button></div>",
+            payload_attr(&json!({"surface": surface.id})),
+        ));
+    } else {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-wave-play\" data-payload=\"{}\" title=\"Show the waves one after another\">▶ Play</button></div>",
+            payload_attr(&json!({"surface": surface.id})),
+        ));
+    }
     html
 }
 fn plural_services(count: usize) -> String {
@@ -1626,8 +1789,19 @@ fn plural_services(count: usize) -> String {
 /// Shows the change as far as one wave, then the next, until the last.
 fn play_wave(surface: SysMapSurface, wave: usize) {
     let mut state = surface_state(surface);
-    let last = last_wave(&blast_of(&m::data(surface.map_key), &state));
-    state["wave"] = json!(wave.min(last));
+    let view_doc = filtered_doc(&m::data(surface.map_key), &state);
+    let last = last_wave(&blast_of(&view_doc, &state));
+    let clamped = wave.min(last);
+    if clamped < last {
+        SYS_WAVE_PLAYING.with(|w| {
+            w.borrow_mut().insert(surface.id);
+        });
+    } else {
+        SYS_WAVE_PLAYING.with(|w| {
+            w.borrow_mut().remove(surface.id);
+        });
+    }
+    state["wave"] = json!(clamped);
     save_surface_state(surface, &state);
     render_surface(surface, false);
     if wave < last {
@@ -1635,7 +1809,9 @@ fn play_wave(surface: SysMapSurface, wave: usize) {
             &format!("{}-wave-play", surface.id_prefix),
             900,
             move || {
-                play_wave(surface, wave + 1);
+                if SYS_WAVE_PLAYING.with(|w| w.borrow().contains(surface.id)) {
+                    play_wave(surface, wave + 1);
+                }
             },
         );
     }
@@ -1941,6 +2117,12 @@ pub fn layout_system_nodes_with_pins(
     }
 
     let cycles = find_cross_service_cycles(doc);
+    let mut scc_of: HashMap<String, usize> = HashMap::new();
+    for (scc_idx, comp) in cycles.iter().enumerate() {
+        for id in comp {
+            scc_of.insert(id.clone(), scc_idx);
+        }
+    }
     let cycle_members: BTreeSet<String> = cycles.into_iter().flatten().collect();
     let (tiers, _) = assign_service_layers(doc);
 
@@ -1991,7 +2173,7 @@ pub fn layout_system_nodes_with_pins(
                 if u == v {
                     continue;
                 }
-                if cycle_members.contains(&from) && cycle_members.contains(&to) && u > v {
+                if scc_of.contains_key(&from) && scc_of.get(&from) == scc_of.get(&to) && u > v {
                     continue;
                 }
                 dag_adj[u].push(v);
@@ -2248,6 +2430,9 @@ pub fn layout_system_nodes_with_pins(
                 continue;
             }
             if let Some(&(px, py)) = pins.get(&n.id) {
+                let has_frame = frames.iter().any(|f| f.service_id == n.id);
+                let px = px.max(if has_frame { FRAME_PAD + 4.0 } else { 8.0 });
+                let py = py.max(if has_frame { FRAME_HEAD + 4.0 } else { 8.0 });
                 let dx = px - n.x;
                 let dy = py - n.y;
                 n.x = px;
@@ -2259,8 +2444,8 @@ pub fn layout_system_nodes_with_pins(
                 parent_deltas.insert(n.id.clone(), (dx, dy));
                 for f in &mut frames {
                     if f.service_id == n.id {
-                        f.x += dx;
-                        f.y += dy;
+                        f.x = (f.x + dx).max(4.0);
+                        f.y = (f.y + dy).max(4.0);
                         extra_w = extra_w.max(f.x + f.w + MARGIN);
                         extra_h = extra_h.max(f.y + f.h + MARGIN);
                     }
@@ -2275,8 +2460,8 @@ pub fn layout_system_nodes_with_pins(
                 continue;
             };
             if let Some(&(px, py)) = pins.get(&n.id) {
-                n.x = px;
-                n.y = py;
+                n.x = px.max(8.0);
+                n.y = py.max(8.0);
             } else if let Some(&(dx, dy)) = parent_deltas.get(parent_id) {
                 n.x += dx;
                 n.y += dy;
@@ -2286,6 +2471,23 @@ pub fn layout_system_nodes_with_pins(
             if let Some(entry) = pos_by_id.get_mut(&n.id) {
                 entry.0 = n.x;
                 entry.1 = n.y;
+            }
+            if let Some(f) = frames.iter_mut().find(|f| &f.service_id == parent_id) {
+                let right = n.x + n.w + FRAME_PAD;
+                let bottom = n.y + n.h + FRAME_PAD;
+                if n.x - FRAME_PAD < f.x {
+                    let expand = f.x - (n.x - FRAME_PAD).max(4.0);
+                    f.x = (n.x - FRAME_PAD).max(4.0);
+                    f.w += expand;
+                }
+                if right > f.x + f.w {
+                    f.w = right - f.x;
+                }
+                if bottom > f.y + f.h {
+                    f.h = bottom - f.y;
+                }
+                extra_w = extra_w.max(f.x + f.w + MARGIN);
+                extra_h = extra_h.max(f.y + f.h + MARGIN);
             }
             extra_w = extra_w.max(n.x + n.w + MARGIN);
             extra_h = extra_h.max(n.y + n.h + MARGIN);
@@ -2336,10 +2538,15 @@ pub fn layout_system_nodes_with_pins(
         if from == to {
             continue;
         }
-        let back = fcol > tcol || (fcol == tcol && fy > ty);
         let f_mid_x = fx + fw * 0.5;
         let t_mid_x = tx + tw * 0.5;
-        let same_x_col = (f_mid_x - t_mid_x).abs() < (fw.min(tw) * 0.45);
+        let either_pinned = pins.contains_key(&from) || pins.contains_key(&to);
+        let back = if either_pinned {
+            f_mid_x > t_mid_x + 20.0 || ((f_mid_x - t_mid_x).abs() <= 20.0 && fy > ty)
+        } else {
+            fcol > tcol || (fcol == tcol && fy > ty)
+        };
+        let same_x_col = (f_mid_x - t_mid_x).abs() < (fw.min(tw) * 0.25);
         let (src_side, dst_side) = if same_x_col {
             (1u8, 1u8)
         } else if f_mid_x < t_mid_x {
@@ -2414,12 +2621,8 @@ pub fn layout_system_nodes_with_pins(
     for (cw_idx, cw) in candidates.into_iter().enumerate() {
         let f_mid_x = cw.fx + cw.fw * 0.5;
         let t_mid_x = cw.tx + cw.tw * 0.5;
-        let same_x_col = (f_mid_x - t_mid_x).abs() < (cw.fw.min(cw.tw) * 0.45);
-        let base_frac = if !same_x_col && f_mid_x > t_mid_x {
-            0.35
-        } else {
-            0.5
-        };
+        let same_x_col = (f_mid_x - t_mid_x).abs() < (cw.fw.min(cw.tw) * 0.25);
+        let base_frac = 0.5;
         let (s_rank, s_total) = port_ranks.get(&(cw_idx, true)).copied().unwrap_or((0, 1));
         let (d_rank, d_total) = port_ranks.get(&(cw_idx, false)).copied().unwrap_or((0, 1));
         let sx = if cw.src_side == 1 {
@@ -2718,25 +2921,14 @@ pub fn system_structure_digest(doc: &V, state: &V, pins: &BTreeMap<String, (f64,
         .unwrap_or(0)
         .hash(&mut hasher);
     m::text(state, "isolate_seed").hash(&mut hasher);
-    graph_viewport::hash_json_value(&state["overlay"], &mut hasher);
-    state["wave"].as_u64().hash(&mut hasher);
-    m::text(state, "tool").hash(&mut hasher);
-    m::text(state, "path_from").hash(&mut hasher);
-    m::text(state, "path_to").hash(&mut hasher);
-    m::text(state, "shared_a").hash(&mut hasher);
-    m::text(state, "shared_b").hash(&mut hasher);
-    m::text(state, "shared_side").hash(&mut hasher);
-    state["cycle_index"].as_u64().unwrap_or(0).hash(&mut hasher);
-    m::text(state, "follow").hash(&mut hasher);
-    m::text(state, "follow_dir").hash(&mut hasher);
-    graph_viewport::hash_json_value(&state["hidden_kinds"], &mut hasher);
-    graph_viewport::hash_json_value(&state["skip"], &mut hasher);
-    graph_viewport::hash_json_value(&m::data("system-failed-services"), &mut hasher);
+    graph_viewport::hash_json_value(&state["kinds_off"], &mut hasher);
     let nodes = m::array(&doc["nodes"]);
     nodes.len().hash(&mut hasher);
     for n in &nodes {
         let id = node_id(n);
         id.hash(&mut hasher);
+        m::text(n, "name").hash(&mut hasher);
+        n["kind"].as_str().unwrap_or("").hash(&mut hasher);
         if let Some((px, py)) = pins.get(&id) {
             px.to_bits().hash(&mut hasher);
             py.to_bits().hash(&mut hasher);
@@ -2747,6 +2939,10 @@ pub fn system_structure_digest(doc: &V, state: &V, pins: &BTreeMap<String, (f64,
     for e in &edges {
         m::text(e, "from").hash(&mut hasher);
         m::text(e, "to").hash(&mut hasher);
+        primary_edge_kind(e).hash(&mut hasher);
+        m::yes(&e["broken_risk"]).hash(&mut hasher);
+        m::yes(&e["against"]).hash(&mut hasher);
+        m::text(e, "provenance").hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -2863,17 +3059,20 @@ fn filtered_doc(doc: &V, state: &V) -> V {
 
 fn place_sys_edge_label(placed: &mut Vec<(f64, f64)>, candidate: (f64, f64)) -> (f64, f64) {
     let clashes = |x: f64, y: f64, p: &(f64, f64)| (x - p.0).abs() < 56.0 && (y - p.1).abs() < 18.0;
-    for step in 0..8i32 {
-        let offsets: &[f64] = if step == 0 {
-            &[0.0]
-        } else {
-            &[18.0 * step as f64, -18.0 * step as f64]
-        };
-        for &dy in offsets {
-            let y = candidate.1 + dy;
-            if y >= 10.0 && !placed.iter().any(|p| clashes(candidate.0, y, p)) {
-                placed.push((candidate.0, y));
-                return (candidate.0, y);
+    for dx in [0.0, 42.0, -42.0, 84.0, -84.0] {
+        let x = (candidate.0 + dx).max(32.0);
+        for step in 0..8i32 {
+            let offsets: &[f64] = if step == 0 {
+                &[0.0]
+            } else {
+                &[18.0 * step as f64, -18.0 * step as f64]
+            };
+            for &dy in offsets {
+                let y = candidate.1 + dy;
+                if y >= 10.0 && !placed.iter().any(|p| clashes(x, y, p)) {
+                    placed.push((x, y));
+                    return (x, y);
+                }
             }
         }
     }
@@ -3073,20 +3272,9 @@ pub fn system_radar_html(doc: &V, state: &V, layout: &SysLayout) -> String {
     if rw <= 0.0 || layout.nodes.is_empty() {
         return String::new();
     }
-    let focus_id = m::text(state, "focus");
-    let overlay = &state["overlay"];
-    let seeds: BTreeSet<String> = m::array(&overlay["seed_services"])
-        .into_iter()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect();
-    let blast_doc = filtered_doc(doc, state);
-    let seed_vec: Vec<String> = seeds.iter().cloned().collect();
-    let changed_contracts: Vec<String> = m::array(&overlay["changed_contracts"])
-        .into_iter()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect();
-    let depth = overlay["depth"].as_u64().unwrap_or(32) as usize;
-    let blast = compute_blast_radius(&blast_doc, &seed_vec, &changed_contracts, depth);
+    let vis_doc = filtered_doc(doc, state);
+    let vis = compute_sys_visual_state(&vis_doc, state);
+    let focus_id = vis.focus_id.clone();
 
     let mut svg = format!(
         "<svg class=\"graph-radar-picture\" width=\"{rw:.0}\" height=\"{rh:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\" focusable=\"false\">",
@@ -3099,15 +3287,20 @@ pub fn system_radar_html(doc: &V, state: &V, layout: &SysLayout) -> String {
         ));
     }
     for placed in &layout.nodes {
+        let beyond = vis.beyond(&placed.id);
+        let failed =
+            vis.failed_services.contains(&placed.id) || vis.step_state(&placed.id) == "failed";
+        let active_wave = !beyond
+            && (vis.blast.seeds.contains(&placed.id)
+                || vis.blast.direct_consumers.contains(&placed.id)
+                || vis.blast.downstream_consumers.contains(&placed.id)
+                || !vis.step_state(&placed.id).is_empty());
         let state_attr = if placed.id == focus_id {
             " data-state=\"selected\""
-        } else if seeds.contains(&placed.id)
-            || blast.direct_consumers.contains(&placed.id)
-            || blast.downstream_consumers.contains(&placed.id)
-        {
-            " data-state=\"changed\""
-        } else if placed.cycle {
+        } else if failed || placed.cycle {
             " data-state=\"cycle\""
+        } else if active_wave {
+            " data-state=\"changed\""
         } else {
             ""
         };
@@ -3116,8 +3309,10 @@ pub fn system_radar_html(doc: &V, state: &V, layout: &SysLayout) -> String {
         } else {
             ""
         };
+        let failed_attr = if failed { " data-failed=\"true\"" } else { "" };
+        let beyond_attr = if beyond { " data-beyond=\"true\"" } else { "" };
         svg.push_str(&format!(
-            "<rect class=\"graph-radar-box\" data-n=\"{}\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"{cycle_attr}{state_attr}/>",
+            "<rect class=\"graph-radar-box\" data-n=\"{}\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"{cycle_attr}{failed_attr}{beyond_attr}{state_attr}/>",
             escape(&placed.id),
             placed.x,
             placed.y,
@@ -3277,7 +3472,6 @@ fn render_canvas_bundle_with_layout(
         let prov = m::text(edge, "provenance");
         let broken = m::yes(&edge["broken_risk"]);
         let against = m::yes(&edge["against"])
-            || wire.back
             || (layers_mode && violation_set.contains(&(from.clone(), to.clone())));
         let kind_hidden = hidden_kinds[kind_idx] && !against && !broken;
         let hidden_attr = if kind_hidden {
@@ -3359,12 +3553,13 @@ fn render_canvas_bundle_with_layout(
 
         if !m::yes(&edge["child_link"]) {
             let (lx, ly) = place_sys_edge_label(&mut placed_labels, (wire.mid_x, wire.mid_y));
+            let pill_w = (pill_text.chars().count() as f64 * 6.2 + 14.0).max(54.0);
             html.push_str(&format!(
-                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{}{hidden_attr}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
+                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-sys-edge-kind=\"{kind}\" data-from=\"{}\" data-to=\"{}\"{}{hidden_attr}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{pill_w:.1}\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
                 escape(&from),
                 escape(&to),
                 if is_selected || is_highlighted { " data-edge-state=\"on\"" } else { "" },
-                lx - 27.0,
+                lx - pill_w * 0.5,
                 ly - 8.0,
                 lx,
                 ly + 3.5,
@@ -3384,7 +3579,7 @@ fn render_canvas_bundle_with_layout(
         }));
         let aria = format!("{from} to {to} ({} link)", spec.label);
         html.push_str(&format!(
-            "<path class=\"graph-map-hit system-map-hit\" d=\"{}\" tabindex=\"0\" role=\"button\" aria-label=\"{}\" data-action=\"system-map-edge\" data-sys-edge-kind=\"{kind}\" data-payload=\"{hit_payload}\" data-explain-services=\"{}\" data-from=\"{}\" data-to=\"{}\"{hidden_attr}><title>{}</title></path>",
+            "<path class=\"graph-map-hit system-map-hit\" d=\"{}\" role=\"button\" aria-label=\"{}\" data-action=\"system-map-edge\" data-sys-edge-kind=\"{kind}\" data-payload=\"{hit_payload}\" data-explain-services=\"{}\" data-from=\"{}\" data-to=\"{}\"{hidden_attr}><title>{}</title></path>",
             wire.path_d,
             escape(&aria),
             escape(&explain_svcs),
@@ -3496,14 +3691,14 @@ fn render_canvas_bundle_with_layout(
             } else {
                 ""
             },
-            if offscreen && !is_important {
+            if is_dense && offscreen && !is_important {
                 " data-offscreen=\"true\""
             } else {
                 ""
             },
         );
 
-        let node_html = if placed.child_of.is_some() {
+        let node_html = if let Some(parent_id) = placed.child_of.as_deref() {
             let badge = match kind {
                 "contract" => "C",
                 "capability" => "Cap",
@@ -3511,8 +3706,9 @@ fn render_canvas_bundle_with_layout(
                 _ => "•",
             };
             format!(
-                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{}{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
+                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-parent=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{}{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
                 escape(&placed.id),
+                escape(parent_id),
                 escape(kind),
                 if is_selected { "true" } else { "false" },
                 if is_highlighted {
@@ -3598,7 +3794,7 @@ fn render_canvas_bundle_with_layout(
                 } else {
                     ""
                 },
-                if offscreen && !is_important {
+                if is_dense && offscreen && !is_important {
                     " data-offscreen=\"true\""
                 } else {
                     ""
@@ -3674,7 +3870,17 @@ pub fn render_side_html(surface: SysMapSurface, doc: &V, state: &V) -> String {
         .cloned()
         .collect();
 
-    let mut html = String::new();
+    let (can_back, can_fwd) = SYS_NAV_HISTORY.with(|h| {
+        h.borrow()
+            .get(surface.id)
+            .map_or((false, false), |nav| (nav.can_back(), nav.can_forward()))
+    });
+    let nav_p = payload_attr(&json!({ "surface": surface.id }));
+    let mut html = format!(
+        "<div class=\"system-nav-bar\" role=\"toolbar\" aria-label=\"Topology selection history\"><button type=\"button\" class=\"button compact\" data-action=\"system-map-nav-back\" data-payload=\"{nav_p}\"{} aria-label=\"Previous selection\">← Back</button><button type=\"button\" class=\"button compact\" data-action=\"system-map-nav-forward\" data-payload=\"{nav_p}\"{} aria-label=\"Next selection\">Forward →</button></div>",
+        if can_back { "" } else { " disabled" },
+        if can_fwd { "" } else { " disabled" },
+    );
     html.push_str(
         "<div class=\"system-side-tabs\" role=\"tablist\" aria-label=\"Topology inspector views\">",
     );
@@ -3825,9 +4031,14 @@ fn render_node_details_html(surface: SysMapSurface, doc: &V, state: &V, node: &V
     let open_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id }));
     let spread_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id }));
     let changes_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id }));
+    let omni_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id, "id": id }));
+    let pins = graph_viewport::load_pins(&sys_pin_key(surface, state));
     html.push_str("<div class=\"system-side-actions\">");
     html.push_str(&format!(
         "<button type=\"button\" class=\"button compact primary\" data-action=\"system-map-open-service\" data-payload=\"{open_p}\">Open service code map</button>"
+    ));
+    html.push_str(&format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"system-map-open-omnigraph\" data-payload=\"{omni_p}\">Context graph ↗</button>"
     ));
     html.push_str(&format!(
         "<button type=\"button\" class=\"button compact\" data-action=\"system-map-spread\" data-payload=\"{spread_p}\">{}</button>",
@@ -3840,6 +4051,12 @@ fn render_node_details_html(surface: SysMapSurface, doc: &V, state: &V, node: &V
     html.push_str(&format!(
         "<button type=\"button\" class=\"button compact\" data-action=\"system-map-service-changes\" data-payload=\"{changes_p}\">Changes on map</button>"
     ));
+    if pins.contains_key(&id) {
+        let unpin_p = payload_attr(&json!({ "surface": surface.id, "id": id }));
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"system-map-unpin-node\" data-payload=\"{unpin_p}\">Unpin position</button>"
+        ));
+    }
     html.push_str("</div>");
 
     html.push_str("<dl class=\"memory-metrics system-side-metrics\">");
@@ -3984,6 +4201,35 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
         ));
         return html;
     }
+    if bridge["confidence"].is_object() {
+        let certain = bridge["confidence"]["certain_refs"].as_u64().unwrap_or(0);
+        let guessed = bridge["confidence"]["guessed_refs"].as_u64().unwrap_or(0);
+        let pct = (bridge["confidence"]["ratio"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+            * 100.0)
+            .round() as u64;
+        html.push_str(&format!(
+            "<p class=\"system-note system-bridge-confidence\">Link confidence: <strong>{pct}%</strong> ({certain} certain, {guessed} guessed)</p>"
+        ));
+    }
+    if bridge["run_coverage"].is_object() {
+        let rc = &bridge["run_coverage"];
+        let c_open = rc["consumer_opened"].as_u64().unwrap_or(0);
+        let c_tot = rc["consumer_total"].as_u64().unwrap_or(0);
+        let p_open = rc["provider_opened"].as_u64().unwrap_or(0);
+        let p_tot = rc["provider_total"].as_u64().unwrap_or(0);
+        let rid = m::text(rc, "run_id");
+        html.push_str(&format!(
+            "<p class=\"system-note system-bridge-coverage\">Run coverage{}: {c_open}/{c_tot} consumer · {p_open}/{p_tot} provider opened</p>",
+            if rid.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", escape(&rid))
+            }
+        ));
+    }
     for (side, role, none) in [
         ("consumer", "uses it", "No file was found to name it."),
         (
@@ -4034,9 +4280,33 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
                 ),
                 None => String::new(),
             };
+            let opened_note = if m::yes(&site["opened_by_run"]) {
+                " · opened in run"
+            } else {
+                ""
+            };
+            let syms_note = {
+                let syms = m::array(&site["from_symbols"])
+                    .iter()
+                    .filter_map(|s| {
+                        s.as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(escape)
+                    })
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if syms.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · via {syms}")
+                }
+            };
             let open = payload_attr(&json!({"path": path, "service": service}));
             html.push_str(&format!(
-                "<li class=\"system-bridge-site\"><div><code>{}</code><div class=\"system-note\">{how}{}{reach}</div></div><button type=\"button\" class=\"button compact\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" aria-label=\"Show {} on the code map of {}\">Map</button></li>",
+                "<li class=\"system-bridge-site\" data-opened-by-run=\"{}\"><div><code>{}</code><div class=\"system-note\">{how}{}{reach}{syms_note}{opened_note}</div></div><button type=\"button\" class=\"button compact\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" aria-label=\"Show {} on the code map of {}\">Map</button></li>",
+                if m::yes(&site["opened_by_run"]) { "true" } else { "false" },
                 escape(&path),
                 {
                     let named = m::array(&site["contracts"])
@@ -4291,11 +4561,19 @@ async fn fetch_bridge(surface: SysMapSurface, from: String, to: String) {
     if project_id.is_empty() {
         return;
     }
+    let run_id = m::text(&state["overlay"], "run_id");
+    let target = if !run_id.is_empty() {
+        format!("sysrun:{run_id}")
+    } else {
+        String::new()
+    };
     let q = dom::query(&[
         ("project_id", project_id),
         ("config_path", m::text(&state, "config_path")),
         ("from", from),
         ("to", to),
+        ("target", target),
+        ("run_id", run_id),
         (
             "certain",
             if m::yes(&state["certain"]) {
@@ -4305,9 +4583,19 @@ async fn fetch_bridge(surface: SysMapSurface, from: String, to: String) {
             },
         ),
     ]);
-    if let Ok(doc) = api::get(&format!("/api/systems/graph/bridge{q}")).await {
-        m::set(&bridge_key(surface), doc);
-        render_surface(surface, false);
+    match api::get(&format!("/api/systems/graph/bridge{q}")).await {
+        Ok(doc) => {
+            dom::error(surface.error_id, "");
+            m::set(&bridge_key(surface), doc);
+            render_surface(surface, false);
+        }
+        Err(err) if !err.aborted => {
+            dom::error(
+                surface.error_id,
+                &format!("Could not load link bridge: {}", err.message),
+            );
+        }
+        Err(_) => {}
     }
 }
 fn render_edge_details_html(surface: SysMapSurface, doc: &V, edge: &V) -> String {
@@ -4698,6 +4986,13 @@ fn render_changes_tab_html(surface: SysMapSurface, _doc: &V, state: &V) -> Strin
     ));
 
     if impact.is_object() {
+        let impact_err = m::text(&impact, "error");
+        if !impact_err.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"system-error\" role=\"alert\">Contract impact query failed: {}</p>",
+                escape(&impact_err)
+            ));
+        }
         let mut subject = first_non_empty(&impact, &["contract", "path"]);
         if subject.is_empty() {
             if let Some(first_ic) = m::array(&impact["impacted_contracts"]).into_iter().next() {
@@ -4766,6 +5061,14 @@ fn render_changes_tab_html(surface: SysMapSurface, _doc: &V, state: &V) -> Strin
         }
     }
 
+    let changes_err = m::text(&changes, "error");
+    if !changes_err.is_empty() {
+        html.push_str(&format!(
+            "<p class=\"system-error\" role=\"alert\">Failed to load run changes: {}</p>",
+            escape(&changes_err)
+        ));
+    }
+
     let by_service = if changes["services"].is_array() {
         m::array(&changes["services"])
     } else if changes["groups"].is_array() {
@@ -4828,6 +5131,8 @@ fn render_changes_tab_html(surface: SysMapSurface, _doc: &V, state: &V) -> Strin
             }
             html.push_str("</ul>");
         }
+    } else if !changes_err.is_empty() {
+        // Error already displayed above.
     } else if changes["services"].is_array() || changes["groups"].is_array() {
         html.push_str("<p class=\"system-note\">No uncommitted or run-scoped changes reported across member services.</p>");
     } else {
@@ -4914,6 +5219,14 @@ fn sync_toolbar_buttons(surface: SysMapSurface, state: &V) {
     let has_path = m::text(state, "tool") == "path"
         && (!m::text(state, "path_from").is_empty() || !m::text(state, "path_to").is_empty());
     dom::hidden(&format!("{p}-path-clear"), !has_path);
+    dom::set_value(&format!("{p}-path-from"), &m::text(state, "path_from"));
+    dom::set_value(&format!("{p}-path-to"), &m::text(state, "path_to"));
+    let depth_str = state["isolate_depth"]
+        .as_u64()
+        .filter(|&d| d > 0)
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "1".to_owned());
+    dom::set_value(&format!("{p}-isolate-depth"), &depth_str);
 }
 
 thread_local! {
@@ -4924,6 +5237,7 @@ thread_local! {
 #[derive(Clone, Debug)]
 struct SysDenseCacheEntry {
     layout: SysLayout,
+    node_ids: Vec<String>,
     node_index_by_id: HashMap<String, usize>,
     node_htmls: Vec<String>,
     edge_endpoints: Vec<(String, String)>,
@@ -4995,6 +5309,19 @@ fn patch_system_node_el(
                 }
             }
         }
+    } else {
+        let _ = el.remove_attribute("data-beyond");
+        if !el.class_list().contains("system-map-child") {
+            let _ = el.set_attribute("data-blast", "");
+            let _ = el.set_attribute("data-step-state", "");
+            if let Ok(Some(dot)) = el.query_selector(".system-node-dot") {
+                let fallback = el
+                    .get_attribute("data-graph-state")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "idle".to_owned());
+                let _ = dot.set_attribute("data-state", &fallback);
+            }
+        }
     }
 }
 
@@ -5027,8 +5354,8 @@ fn mount_system_dense_node_if_needed(
     nid: &str,
 ) -> Option<web_sys::Element> {
     let canvas = dom::get(surface.canvas_id)?;
-    if let Ok(Some(existing)) = canvas.query_selector(&format!(".system-map-node[data-n='{nid}']"))
-    {
+    if let Some(existing) = find_sys_node_el(&canvas, nid) {
+        let _ = existing.remove_attribute("data-offscreen");
         return Some(existing);
     }
     let plane = canvas.query_selector(".system-map-plane").ok().flatten()?;
@@ -5043,6 +5370,7 @@ fn mount_system_dense_node_if_needed(
     }
     let mut created = graph_viewport::append_html_elements(&plane, html);
     let el = created.pop()?;
+    let _ = el.remove_attribute("data-offscreen");
     patch_system_node_el(
         &el,
         nid,
@@ -5052,6 +5380,7 @@ fn mount_system_dense_node_if_needed(
         &entry.failed_services,
         &entry.blast_roles,
     );
+    invalidate_hover_cache(surface.canvas_id);
     Some(el)
 }
 
@@ -5123,10 +5452,12 @@ fn sync_system_viewport_culling(surface: SysMapSurface, cam: &Camera) {
                 unmount,
                 &force_mount,
             );
+            let mut dom_changed = false;
             for idx in plan.to_unmount {
                 if !entry.node_htmls.get(idx).is_none_or(|s| s.is_empty()) {
                     if let Some(el) = mounted_els.remove(&idx) {
                         el.remove();
+                        dom_changed = true;
                     }
                 }
             }
@@ -5142,8 +5473,10 @@ fn sync_system_viewport_culling(surface: SysMapSurface, cam: &Camera) {
                 }
             }
             if !batch_html.is_empty() {
+                dom_changed = true;
                 let inserted = graph_viewport::append_html_elements(&plane, &batch_html);
                 for (idx, el) in batch_indices.into_iter().zip(inserted) {
+                    let _ = el.remove_attribute("data-offscreen");
                     if let Some(placed) = entry.layout.nodes.get(idx) {
                         patch_system_node_el(
                             &el,
@@ -5157,6 +5490,9 @@ fn sync_system_viewport_culling(surface: SysMapSurface, cam: &Camera) {
                     }
                     mounted_els.insert(idx, el);
                 }
+            }
+            if dom_changed {
+                invalidate_hover_cache(surface.canvas_id);
             }
         }
     }
@@ -5201,6 +5537,7 @@ fn build_blast_roles_map(
 fn refresh_dense_scene_for_system(
     scene: &mut graph_viewport::canvas2d::DenseScene,
     vis: &SysVisualState,
+    node_ids: &[String],
     edge_endpoints: &[(String, String)],
 ) {
     let mut focus_neighbors: HashSet<&str> = HashSet::new();
@@ -5214,14 +5551,25 @@ fn refresh_dense_scene_for_system(
         }
     }
     for node in &mut scene.nodes {
-        let nid = node.label.as_str();
+        let nid = node_ids
+            .get(node.index)
+            .map(String::as_str)
+            .unwrap_or(node.label.as_str());
+        let beyond = vis.beyond(nid);
         node.selected = nid == vis.focus_id;
         let adjacent_to_focus = !vis.focus_id.is_empty() && focus_neighbors.contains(nid);
         node.lit = node.selected || adjacent_to_focus || vis.highlight_nodes.contains(nid);
-        node.dim = (!vis.highlight_nodes.is_empty() && !vis.highlight_nodes.contains(nid))
+        node.dim = beyond
+            || (!vis.highlight_nodes.is_empty() && !vis.highlight_nodes.contains(nid))
             || (vis.highlight_nodes.is_empty() && !vis.focus_id.is_empty() && !node.lit);
-        node.changed = vis.is_changed(nid);
+        node.changed = !beyond
+            && (vis.is_changed(nid)
+                || matches!(
+                    vis.step_state(nid).as_str(),
+                    "seed" | "direct" | "downstream" | "running" | "passed"
+                ));
         node.failed = vis.failed_services.contains(nid)
+            || vis.step_state(nid) == "failed"
             || (!node.role.is_empty()
                 && node.role != "service"
                 && node.role != "system"
@@ -5232,6 +5580,7 @@ fn refresh_dense_scene_for_system(
             .get(edge.index)
             .map(|(f, t)| (f.as_str(), t.as_str()))
             .unwrap_or(("", ""));
+        let beyond_edge = !from.is_empty() && vis.beyond(from);
         let is_hl = !from.is_empty()
             && !to.is_empty()
             && vis
@@ -5243,7 +5592,8 @@ fn refresh_dense_scene_for_system(
         let is_focus_adj = !vis.focus_id.is_empty() && (from == vis.focus_id || to == vis.focus_id);
         edge.on = is_hl || is_sel_edge || is_focus_adj;
         edge.lit = is_hl || is_sel_edge;
-        edge.dim = (!vis.highlight_edges.is_empty() && !is_hl)
+        edge.dim = beyond_edge
+            || (!vis.highlight_edges.is_empty() && !is_hl)
             || (vis.highlight_edges.is_empty() && !vis.focus_id.is_empty() && !edge.on);
     }
 }
@@ -5272,12 +5622,14 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
     };
 
     let mut blast_roles = HashMap::new();
+    let mut node_ids = Vec::new();
     let mut edge_endpoints = Vec::new();
     let mut is_dense = false;
     SYS_DENSE_CACHE.with(|cache| {
         if let Some(entry) = cache.borrow().get(surface.canvas_id) {
             is_dense = entry.is_dense;
             blast_roles = build_blast_roles_map(&entry.layout.nodes, &vis);
+            node_ids = entry.node_ids.clone();
             edge_endpoints = entry.edge_endpoints.clone();
         }
     });
@@ -5334,9 +5686,25 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
             let _ = mount_system_dense_node_if_needed(surface, &target_roving);
         }
         graph_viewport::canvas2d::update_scene(surface.canvas_id, |scene| {
-            refresh_dense_scene_for_system(scene, &vis, &edge_endpoints);
+            refresh_dense_scene_for_system(scene, &vis, &node_ids, &edge_endpoints);
         });
     } else {
+        let hidden_kinds = hidden_contract_kinds(state);
+        let layers_mode = m::yes(&state["layers"]);
+        let (_, layer_violations) = assign_service_layers(view_doc);
+        let violation_set: BTreeSet<(String, String)> = layer_violations.into_iter().collect();
+        let mut edge_flags: HashMap<(String, String, String), (bool, bool)> = HashMap::new();
+        for edge in m::array(&view_doc["edges"]) {
+            let f = m::text(&edge, "from");
+            let t = m::text(&edge, "to");
+            let k = primary_edge_kind(&edge).to_owned();
+            let broken = m::yes(&edge["broken_risk"]);
+            let against = m::yes(&edge["against"])
+                || (layers_mode && violation_set.contains(&(f.clone(), t.clone())));
+            let flags = edge_flags.entry((f, t, k)).or_insert((false, false));
+            flags.0 |= against;
+            flags.1 |= broken;
+        }
         if let Ok(edges) = canvas.query_selector_all(".system-map-edge[data-from][data-to]") {
             for i in 0..edges.length() {
                 let Some(el) = edges
@@ -5347,9 +5715,17 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
                 };
                 let from = el.get_attribute("data-from").unwrap_or_default();
                 let to = el.get_attribute("data-to").unwrap_or_default();
+                let kind = el.get_attribute("data-sys-edge-kind").unwrap_or_default();
+                let against = el.class_list().contains("graph-map-edge-against");
+                let broken = el.get_attribute("data-broken-risk").as_deref() == Some("true");
+                let kind_hidden = hidden_kinds[contract_spec_index(&kind)] && !against && !broken;
+                if kind_hidden {
+                    let _ = el.set_attribute("data-kind-hidden", "true");
+                } else {
+                    let _ = el.remove_attribute("data-kind-hidden");
+                }
                 let is_hl = vis.highlight_edges.contains(&(from.clone(), to.clone()));
-                let is_sel = (!focus_id.is_empty() && (from == focus_id || to == focus_id))
-                    || (!sel_from.is_empty() && from == sel_from && to == sel_to);
+                let is_sel = !sel_from.is_empty() && from == sel_from && to == sel_to;
                 let cl = el.class_list();
                 let _ = if is_hl || is_sel {
                     cl.add_1("graph-map-edge-on")
@@ -5368,7 +5744,12 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
                 }
             }
         }
-        for sel in [".system-map-violation-halo", ".system-map-edge-label"] {
+        for sel in [
+            ".system-map-violation-halo",
+            ".system-map-broken-halo",
+            ".system-map-edge-label",
+            ".system-map-hit",
+        ] {
             if let Ok(els) = canvas.query_selector_all(&format!("{sel}[data-from][data-to]")) {
                 for i in 0..els.length() {
                     let Some(el) = els
@@ -5379,13 +5760,29 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
                     };
                     let from = el.get_attribute("data-from").unwrap_or_default();
                     let to = el.get_attribute("data-to").unwrap_or_default();
-                    let is_hl = vis.highlight_edges.contains(&(from.clone(), to.clone()));
-                    let is_sel =
-                        (!sel_from.is_empty() && from == sel_from && to == sel_to) || is_hl;
-                    if is_sel {
-                        let _ = el.set_attribute("data-edge-state", "on");
-                    } else {
-                        let _ = el.remove_attribute("data-edge-state");
+                    let kind = el.get_attribute("data-sys-edge-kind").unwrap_or_default();
+                    if sel != ".system-map-violation-halo" {
+                        let (against, broken) = edge_flags
+                            .get(&(from.clone(), to.clone(), kind.clone()))
+                            .copied()
+                            .unwrap_or((false, false));
+                        let kind_hidden =
+                            hidden_kinds[contract_spec_index(&kind)] && !against && !broken;
+                        if kind_hidden {
+                            let _ = el.set_attribute("data-kind-hidden", "true");
+                        } else {
+                            let _ = el.remove_attribute("data-kind-hidden");
+                        }
+                    }
+                    if sel == ".system-map-violation-halo" || sel == ".system-map-edge-label" {
+                        let is_hl = vis.highlight_edges.contains(&(from.clone(), to.clone()));
+                        let is_sel =
+                            (!sel_from.is_empty() && from == sel_from && to == sel_to) || is_hl;
+                        if is_sel {
+                            let _ = el.set_attribute("data-edge-state", "on");
+                        } else {
+                            let _ = el.remove_attribute("data-edge-state");
+                        }
                     }
                 }
             }
@@ -5397,15 +5794,19 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
         surface.canvas_id
     )) {
         let nid = box_el.get_attribute("data-n").unwrap_or_default();
+        let beyond = vis.beyond(&nid);
+        let failed = vis.failed_services.contains(&nid) || vis.step_state(&nid) == "failed";
+        let active_wave = !beyond
+            && (vis.blast.seeds.contains(&nid)
+                || vis.blast.direct_consumers.contains(&nid)
+                || vis.blast.downstream_consumers.contains(&nid)
+                || !vis.step_state(&nid).is_empty());
         let next_state = if nid == focus_id {
             Some("selected")
-        } else if vis.blast.seeds.contains(&nid)
-            || vis.blast.direct_consumers.contains(&nid)
-            || vis.blast.downstream_consumers.contains(&nid)
-        {
-            Some("changed")
-        } else if box_el.get_attribute("data-cycle").as_deref() == Some("true") {
+        } else if failed || box_el.get_attribute("data-cycle").as_deref() == Some("true") {
             Some("cycle")
+        } else if active_wave {
+            Some("changed")
         } else {
             None
         };
@@ -5413,6 +5814,16 @@ fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state:
             let _ = box_el.set_attribute("data-state", st);
         } else {
             let _ = box_el.remove_attribute("data-state");
+        }
+        if failed {
+            let _ = box_el.set_attribute("data-failed", "true");
+        } else {
+            let _ = box_el.remove_attribute("data-failed");
+        }
+        if beyond {
+            let _ = box_el.set_attribute("data-beyond", "true");
+        } else {
+            let _ = box_el.remove_attribute("data-beyond");
         }
     }
     true
@@ -5430,6 +5841,19 @@ fn build_dense_scene_for_surface(
     let vis = compute_sys_visual_state(doc, state);
     let edges = m::array(&doc["edges"]);
     let pins = graph_viewport::load_pins(&sys_pin_key(surface, state));
+    let layers_mode = m::yes(&state["layers"]);
+    let hidden_kinds = hidden_contract_kinds(state);
+    let (_, layer_violations) = assign_service_layers(doc);
+    let violation_set: BTreeSet<(String, String)> = layer_violations.into_iter().collect();
+    let mut name_by_id: HashMap<String, String> = HashMap::new();
+    for node in m::array(&doc["nodes"]) {
+        let id = node_id(&node);
+        let name = m::text(&node, "name");
+        if !id.is_empty() && !name.is_empty() {
+            name_by_id.insert(id, name);
+        }
+    }
+    let node_ids: Vec<String> = layout.nodes.iter().map(|n| n.id.clone()).collect();
     let nodes = layout
         .nodes
         .iter()
@@ -5440,7 +5864,10 @@ fn build_dense_scene_for_surface(
             y: n.y,
             w: n.w,
             h: n.h,
-            label: n.id.clone(),
+            label: name_by_id
+                .get(&n.id)
+                .cloned()
+                .unwrap_or_else(|| n.id.clone()),
             role: n.child_of.as_deref().unwrap_or("service").to_owned(),
             selected: n.id == vis.focus_id,
             lit: false,
@@ -5462,10 +5889,25 @@ fn build_dense_scene_for_surface(
             let edge = edges.get(w.edge_index);
             let from = edge.map(|e| m::text(e, "from")).unwrap_or_default();
             let to = edge.map(|e| m::text(e, "to")).unwrap_or_default();
-            edge_endpoints[i] = (from, to);
+            edge_endpoints[i] = (from.clone(), to.clone());
             let kind = edge.map(primary_edge_kind).unwrap_or("other").to_owned();
+            let prov = edge.map(|e| m::text(e, "provenance")).unwrap_or_default();
+            let broken = edge.is_some_and(|e| m::yes(&e["broken_risk"]));
+            let against = edge.is_some_and(|e| m::yes(&e["against"]))
+                || (layers_mode && violation_set.contains(&(from, to)));
+            let kind_hidden = hidden_kinds[contract_spec_index(&kind)] && !against && !broken;
+            let path_for_scene = if kind_hidden { "" } else { w.path_d.as_str() };
             graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
-                i, &w.path_d, 1, false, w.back, kind, false, false, false, false,
+                i,
+                path_for_scene,
+                1,
+                prov == "undeclared_in_code",
+                against || broken,
+                kind,
+                false,
+                false,
+                false,
+                broken,
             )
         })
         .collect();
@@ -5475,7 +5917,7 @@ fn build_dense_scene_for_surface(
         nodes,
         edges: dense_edges,
     };
-    refresh_dense_scene_for_system(&mut scene, &vis, &edge_endpoints);
+    refresh_dense_scene_for_system(&mut scene, &vis, &node_ids, &edge_endpoints);
     Some(scene)
 }
 
@@ -5532,23 +5974,46 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
         SYS_SURFACE_DIGEST.with(|d| d.borrow().get(surface.canvas_id).copied().unwrap_or(0));
     let mut cam = load_camera(surface);
 
-    let (pw, ph) = if !refit
+    let (pw, ph, needs_final_fit) = if !refit
         && digest != 0
         && digest == prev_digest
         && try_patch_system_canvas_in_place(surface, &view_doc, &state)
     {
-        (cam.plane_w, cam.plane_h)
+        (cam.plane_w, cam.plane_h, false)
     } else {
         let layers_mode = m::yes(&state["layers"]);
         let layout = layout_system_nodes_with_pins(&view_doc, layers_mode, &pins);
-        let bundle = render_canvas_bundle_with_layout(surface, &view_doc, &state, &layout);
-        let canvas_html = bundle.html;
-        let radar_svg = system_radar_html(&doc, &state, &layout);
         let pw = layout.width;
         let ph = layout.height;
+        let size_changed = (cam.plane_w - pw).abs() > 1.0 || (cam.plane_h - ph).abs() > 1.0;
+        cam.plane_w = pw;
+        cam.plane_h = ph;
+        if refit || cam.fit_mode || (size_changed && cam.needs_measure) {
+            let (vw, vh, measured) = viewport_size(surface.canvas_id);
+            cam.needs_measure = !measured;
+            if pw > 0.0 && ph > 0.0 {
+                cam.apply_viewport_cam(graph_viewport::fit(
+                    (pw, ph),
+                    (vw, vh),
+                    graph_viewport::FitOptions::for_system_map(),
+                ));
+            }
+            save_camera(surface, &cam);
+        }
+        let bundle = render_canvas_bundle_with_layout(surface, &view_doc, &state, &layout);
+        let canvas_html = bundle.html;
+        let radar_svg = system_radar_html(&view_doc, &state, &layout);
         invalidate_hover_cache(surface.canvas_id);
+        let has_total_nodes = !m::array(&doc["nodes"]).is_empty();
         let combined_html = if canvas_html.is_empty() {
-            String::new()
+            if has_total_nodes {
+                let clear_p = payload_attr(&json!({ "surface": surface.id }));
+                format!(
+                    "<div class=\"system-empty\" role=\"status\"><p>No services match the active filters or isolation scope.</p><button type=\"button\" class=\"button compact primary\" data-action=\"system-map-clear-filters\" data-payload=\"{clear_p}\">Reset filters</button></div>"
+                )
+            } else {
+                "<div class=\"system-empty\" role=\"status\"><p>No services or contracts mapped yet.</p></div>".to_owned()
+            }
         } else if radar_svg.is_empty() {
             canvas_html.clone()
         } else {
@@ -5563,15 +6028,16 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
             d.borrow_mut().insert(surface.canvas_id, digest);
         });
         let vis_for_cache = compute_sys_visual_state(&view_doc, &state);
-        let node_index_by_id: HashMap<String, usize> = layout
-            .nodes
+        let node_ids: Vec<String> = layout.nodes.iter().map(|n| n.id.clone()).collect();
+        let node_index_by_id: HashMap<String, usize> = node_ids
             .iter()
             .enumerate()
-            .map(|(i, n)| (n.id.clone(), i))
+            .map(|(i, id)| (id.clone(), i))
             .collect();
         let blast_roles = build_blast_roles_map(&layout.nodes, &vis_for_cache);
         let cache_entry = SysDenseCacheEntry {
             layout: layout.clone(),
+            node_ids,
             node_index_by_id,
             node_htmls: bundle.node_htmls,
             edge_endpoints: bundle.edge_endpoints,
@@ -5594,31 +6060,42 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
             graph_viewport::canvas2d::clear_scene(surface.canvas_id);
         }
         dom::hidden(surface.legend_id, canvas_html.is_empty());
-        (pw, ph)
+        (pw, ph, false)
     };
     set_html(
         surface.legend_id,
         &format!(
             "{}{}",
-            wave_scrubber_html(surface, &blast_of(&doc, &state), &state),
+            wave_scrubber_html(surface, &blast_of(&view_doc, &state), &state),
             contract_arrow_legend_html_for(surface, &view_doc, &state)
         ),
     );
 
-    let svcs = m::array(&doc["nodes"])
+    let total_svcs = m::array(&doc["nodes"])
         .iter()
         .filter(|n| n["kind"] == "service")
         .count();
-    let links = m::array(&doc["edges"])
+    let total_links = m::array(&doc["edges"])
         .iter()
         .filter(|e| !m::yes(&e["child_link"]))
         .count();
+    let shown_svcs = m::array(&view_doc["nodes"])
+        .iter()
+        .filter(|n| n["kind"] == "service")
+        .count();
+    let shown_links = m::array(&view_doc["edges"])
+        .iter()
+        .filter(|e| !m::yes(&e["child_link"]))
+        .count();
+    let filtered = shown_svcs != total_svcs || shown_links != total_links;
     dom::text(
         surface.summary_id,
-        &if svcs == 0 {
+        &if total_svcs == 0 {
             String::new()
+        } else if filtered {
+            format!("{shown_svcs}/{total_svcs} services · {shown_links}/{total_links} links")
         } else {
-            format!("{svcs} services · {links} links")
+            format!("{total_svcs} services · {total_links} links")
         },
     );
 
@@ -5631,7 +6108,7 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
     let size_changed = (cam.plane_w - pw).abs() > 1.0 || (cam.plane_h - ph).abs() > 1.0;
     cam.plane_w = pw;
     cam.plane_h = ph;
-    if refit || cam.fit_mode || (size_changed && cam.needs_measure) {
+    if needs_final_fit || (size_changed && cam.needs_measure) {
         let (vw, vh, measured) = viewport_size(surface.canvas_id);
         cam.needs_measure = !measured;
         if pw > 0.0 && ph > 0.0 {
@@ -5726,9 +6203,18 @@ async fn fetch_surface_map(surface: SysMapSurface, catalog: V, graph_status: V, 
             m::set(surface.map_key, normalized);
             render_surface(surface, refit);
         }
-        Err(_) => {
+        Err(err) => {
             if !m::current(surface.fetch_epoch, epoch) {
                 return;
+            }
+            if !err.aborted {
+                dom::error(
+                    surface.error_id,
+                    &format!(
+                        "Showing local catalog synthesis — system map request failed: {}",
+                        err.message
+                    ),
+                );
             }
             // Keep synthesized catalog map active if backend graph route is unavailable.
             let cur_state = surface_state(surface);
@@ -5763,10 +6249,23 @@ async fn fetch_surface_changes(surface: SysMapSurface) {
         ("run_id", run_id),
         ("service", m::text(&state, "focus")),
     ]);
-    if let Ok(doc) = api::get(&format!("/api/systems/graph/changes{q}")).await {
-        if m::current(surface.changes_epoch, epoch) {
-            m::set(surface.changes_key, doc);
-            render_surface(surface, false);
+    match api::get(&format!("/api/systems/graph/changes{q}")).await {
+        Ok(doc) => {
+            if m::current(surface.changes_epoch, epoch) {
+                dom::error(surface.error_id, "");
+                m::set(surface.changes_key, doc);
+                render_surface(surface, false);
+            }
+        }
+        Err(err) => {
+            if m::current(surface.changes_epoch, epoch) && !err.aborted {
+                dom::error(
+                    surface.error_id,
+                    &format!("Changes query failed: {}", err.message),
+                );
+                m::set(surface.changes_key, json!({ "error": err.message }));
+                render_surface(surface, false);
+            }
         }
     }
 }
@@ -5787,13 +6286,29 @@ async fn fetch_contract_impact(surface: SysMapSurface, service: String, contract
         ("contract", contract),
         ("run_id", run_id),
     ]);
-    if let Ok(doc) = api::get(&format!("/api/systems/graph/impact{q}")).await {
-        if m::current(surface.impact_epoch, epoch) {
-            m::set(surface.impact_key, doc);
-            let mut next = surface_state(surface);
-            next["side_tab"] = json!("changes");
-            save_surface_state(surface, &next);
-            render_surface(surface, false);
+    match api::get(&format!("/api/systems/graph/impact{q}")).await {
+        Ok(doc) => {
+            if m::current(surface.impact_epoch, epoch) {
+                dom::error(surface.error_id, "");
+                m::set(surface.impact_key, doc);
+                let mut next = surface_state(surface);
+                next["side_tab"] = json!("changes");
+                save_surface_state(surface, &next);
+                render_surface(surface, false);
+            }
+        }
+        Err(err) => {
+            if m::current(surface.impact_epoch, epoch) && !err.aborted {
+                dom::error(
+                    surface.error_id,
+                    &format!("Impact query failed: {}", err.message),
+                );
+                m::set(surface.impact_key, json!({ "error": err.message }));
+                let mut next = surface_state(surface);
+                next["side_tab"] = json!("changes");
+                save_surface_state(surface, &next);
+                render_surface(surface, false);
+            }
         }
     }
 }
@@ -5849,23 +6364,34 @@ async fn run_finder_search(surface: SysMapSurface, query_str: String) {
         }
     }
 
+    let mut remote_err: Option<String> = None;
     if !project_id.is_empty() {
         let q = dom::query(&[
             ("project_id", project_id),
             ("config_path", config_path),
             ("query", q_trim.clone()),
         ]);
-        if let Ok(remote) = api::get(&format!("/api/systems/graph/find{q}")).await {
-            if !m::current(surface.find_epoch, epoch) {
-                return;
+        match api::get(&format!("/api/systems/graph/find{q}")).await {
+            Ok(remote) => {
+                if !m::current(surface.find_epoch, epoch) {
+                    return;
+                }
+                let remote_items = if remote["results"].is_array() {
+                    m::array(&remote["results"])
+                } else {
+                    m::array(&remote["items"])
+                };
+                for r in remote_items {
+                    items.push(r);
+                }
             }
-            let remote_items = if remote["results"].is_array() {
-                m::array(&remote["results"])
-            } else {
-                m::array(&remote["items"])
-            };
-            for r in remote_items {
-                items.push(r);
+            Err(err) => {
+                if !m::current(surface.find_epoch, epoch) {
+                    return;
+                }
+                if !err.aborted {
+                    remote_err = Some(err.message);
+                }
             }
         }
     }
@@ -5876,6 +6402,7 @@ async fn run_finder_search(surface: SysMapSurface, query_str: String) {
 
     let mut seen = BTreeSet::new();
     let mut list_html = String::new();
+    let mut opt_idx = 0usize;
     for item in items.into_iter().take(24) {
         let kind = first_non_empty(&item, &["kind", "type"]);
         let svc = first_non_empty(&item, &["service", "project", "id"]);
@@ -5892,8 +6419,10 @@ async fn run_finder_search(surface: SysMapSurface, query_str: String) {
             "path": path,
             "name": name,
         }));
+        let opt_id = format!("{}-find-opt-{opt_idx}", surface.id_prefix);
+        opt_idx += 1;
         list_html.push_str(&format!(
-            "<li role=\"option\"><button type=\"button\" class=\"system-find-item\" data-action=\"system-map-find-pick\" data-payload=\"{p}\"><span class=\"system-chip\">{}</span><strong>{}</strong><span class=\"system-note\">{}</span></button></li>",
+            "<li role=\"none\"><button type=\"button\" role=\"option\" id=\"{opt_id}\" aria-selected=\"false\" tabindex=\"-1\" class=\"system-find-item\" data-action=\"system-map-find-pick\" data-payload=\"{p}\"><span class=\"system-chip\">{}</span><strong>{}</strong><span class=\"system-note\">{}</span></button></li>",
             escape(if kind.is_empty() { "item" } else { &kind }),
             escape(&name),
             escape(&svc),
@@ -5901,21 +6430,24 @@ async fn run_finder_search(surface: SysMapSurface, query_str: String) {
     }
 
     set_html(surface.find_list_id, &list_html);
-    dom::text(
-        surface.find_note_id,
-        if list_html.is_empty() {
-            "No matching services, contracts, capabilities, or symbols."
-        } else {
-            "Select a service or contract to focus here, or a member symbol/file to open its service code map."
-        },
-    );
+    let note_msg = match (list_html.is_empty(), remote_err) {
+        (true, Some(err)) => format!("No local matches (remote search failed: {err})."),
+        (true, None) => "No matching services, contracts, capabilities, or symbols.".to_owned(),
+        (false, Some(err)) => {
+            format!("Showing cached matches only (remote search failed: {err}).")
+        }
+        (false, None) => "Select a service or contract to focus here, or a member symbol/file to open its service code map.".to_owned(),
+    };
+    dom::text(surface.find_note_id, &note_msg);
     dom::hidden(surface.find_found_id, false);
     dom::attr(surface.find_input_id, "aria-expanded", "true");
+    dom::attr(surface.find_input_id, "aria-activedescendant", "");
 }
 
 fn close_finder(surface: SysMapSurface) {
     dom::hidden(surface.find_found_id, true);
     dom::attr(surface.find_input_id, "aria-expanded", "false");
+    dom::attr(surface.find_input_id, "aria-activedescendant", "");
 }
 
 pub fn refresh_services_map(project_id: &str, config_path: &str, catalog: &V, graph_status: &V) {
@@ -5926,8 +6458,12 @@ pub fn refresh_services_map(project_id: &str, config_path: &str, catalog: &V, gr
     state["config_path"] = json!(config_path);
     if project_changed {
         state["focus"] = json!("");
+        state["roving_focus"] = json!("");
         state["selected_edge"] = V::Null;
         save_camera(SERVICES_SURFACE, &Camera::default());
+        SYS_NAV_HISTORY.with(|h| {
+            h.borrow_mut().remove(SERVICES_SURFACE.id);
+        });
     }
     save_surface_state(SERVICES_SURFACE, &state);
     m::set("system-map-catalog-cache", catalog.clone());
@@ -5971,12 +6507,25 @@ pub fn refresh_changes_map(
     state["project_id"] = json!(project_id);
     state["config_path"] = json!(config_path);
     state["overlay"] = overlay.clone();
+    if prev_run != next_run {
+        state["wave"] = V::Null;
+        dom::cancel_timer(&format!("{}-wave-play", CHANGES_SURFACE.id_prefix));
+        SYS_WAVE_PLAYING.with(|playing| {
+            playing.borrow_mut().remove(CHANGES_SURFACE.id);
+        });
+    }
     if project_changed {
         state["focus"] = json!("");
+        state["roving_focus"] = json!("");
         state["selected_edge"] = V::Null;
         save_camera(CHANGES_SURFACE, &Camera::default());
+        SYS_NAV_HISTORY.with(|h| {
+            h.borrow_mut().remove(CHANGES_SURFACE.id);
+        });
     }
     save_surface_state(CHANGES_SURFACE, &state);
+    m::set("system-map-catalog-cache", catalog.clone());
+    m::set("system-map-status-cache", graph_status.clone());
 
     let cur_doc = m::data(CHANGES_SURFACE.map_key);
     if project_changed || !cur_doc["nodes"].is_array() {
@@ -6099,7 +6648,7 @@ fn build_hover_index(canvas_id: &str) -> HoverIndex {
         }
     }
     index.adjacency = build_edge_adjacency(&pairs);
-    for el in dom::all(&format!("#{canvas_id} [data-n]")) {
+    for el in dom::all(&format!("#{canvas_id} .system-map-node[data-n]")) {
         let nid = el.get_attribute("data-n").unwrap_or_default();
         if !nid.is_empty() {
             index.node_els.entry(nid).or_default().push(el);
@@ -6241,6 +6790,7 @@ fn radar_pointer_event(
             };
             let surf_id = radar.get_attribute("data-surface").unwrap_or_default();
             let surface = surface_by_id(&surf_id);
+            close_finder(surface);
             let cam = load_camera(surface);
             let target = radar_target_element(&radar);
             match graph_viewport::handle_radar_pointer(
@@ -6382,10 +6932,44 @@ fn ensure_legend_hover_watch(surface: SysMapSurface) {
             let Some(canvas) = dom::get(cid) else {
                 return;
             };
-            let _ = match held {
-                Some(kind) => canvas.set_attribute("data-sys-kind-hover", &kind),
-                None => canvas.remove_attribute("data-sys-kind-hover"),
+            let _ = match held.as_deref() {
+                Some(kind) => {
+                    let _ = canvas.set_attribute("data-sys-kind-hover", kind);
+                    canvas.set_attribute("data-kind-hover", kind)
+                }
+                None => {
+                    let _ = canvas.remove_attribute("data-sys-kind-hover");
+                    canvas.remove_attribute("data-kind-hover")
+                }
             };
+            let is_dense =
+                SYS_DENSE_CACHE.with(|c| c.borrow().get(cid).is_some_and(|e| e.is_dense));
+            if is_dense {
+                if let Some(surf) = surface_for_canvas(cid) {
+                    let state = surface_state(surf);
+                    let view_doc = filtered_doc(&m::data(surf.map_key), &state);
+                    let vis = compute_sys_visual_state(&view_doc, &state);
+                    let (node_ids, edge_endpoints) = SYS_DENSE_CACHE.with(|c| {
+                        c.borrow()
+                            .get(cid)
+                            .map(|e| (e.node_ids.clone(), e.edge_endpoints.clone()))
+                            .unwrap_or_default()
+                    });
+                    graph_viewport::canvas2d::update_scene(cid, |scene| {
+                        refresh_dense_scene_for_system(scene, &vis, &node_ids, &edge_endpoints);
+                        if let Some(kind) = held.as_deref() {
+                            for edge in &mut scene.edges {
+                                let match_kind = edge.kind == kind;
+                                edge.lit = match_kind;
+                                edge.dim = !match_kind;
+                            }
+                        }
+                    });
+                    let cam = load_camera(surf);
+                    let hover = SYS_HOVER_HIT.with(|h| h.borrow().get(cid).copied().flatten());
+                    graph_viewport::canvas2d::paint_scene(cid, cam.viewport_cam(), hover, true);
+                }
+            }
         });
         let _ = legend.add_event_listener_with_callback(event_kind, moved.as_ref().unchecked_ref());
         moved.forget();
@@ -6413,7 +6997,7 @@ fn ensure_hover_watch(surface: SysMapSurface) {
             apply_hover_lighting(cid, None, None);
             return;
         }
-        if let Some(node_el) = target.closest("[data-n]").ok().flatten() {
+        if let Some(node_el) = target.closest(".system-map-node[data-n]").ok().flatten() {
             let nid = node_el.get_attribute("data-n").unwrap_or_default();
             apply_hover_lighting(cid, Some(&nid), None);
         } else if let Some(hit_el) = target.closest(".system-map-hit").ok().flatten() {
@@ -6430,9 +7014,253 @@ fn ensure_hover_watch(surface: SysMapSurface) {
 
     let leave = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
         apply_hover_lighting(cid, None, None);
+        SYS_HOVER_HIT.with(|h| {
+            h.borrow_mut().remove(cid);
+        });
+        if let Some(canvas_el) = dom::get(cid) {
+            if let Ok(he) = canvas_el.dyn_into::<web_sys::HtmlElement>() {
+                let _ = he.style().set_property("cursor", "");
+            }
+        }
+        let is_dense = SYS_DENSE_CACHE.with(|c| c.borrow().get(cid).is_some_and(|e| e.is_dense));
+        if is_dense {
+            if let Some(surf) = surface_for_canvas(cid) {
+                let cam = load_camera(surf);
+                graph_viewport::canvas2d::paint_scene(cid, cam.viewport_cam(), None, true);
+            }
+        }
     });
     let _ = canvas.add_event_listener_with_callback("pointerleave", leave.as_ref().unchecked_ref());
     leave.forget();
+}
+
+fn live_drag_wire_path(
+    (fx, fy, fw, fh): (f64, f64, f64, f64),
+    (tx, ty, tw, th): (f64, f64, f64, f64),
+) -> (String, f64, f64) {
+    let f_mid_x = fx + fw * 0.5;
+    let t_mid_x = tx + tw * 0.5;
+    let same_x_col = (f_mid_x - t_mid_x).abs() < (fw.min(tw) * 0.25);
+    let sx = if same_x_col || f_mid_x < t_mid_x {
+        fx + fw
+    } else {
+        fx
+    };
+    let ex = if same_x_col {
+        tx + tw
+    } else if f_mid_x < t_mid_x {
+        tx
+    } else {
+        tx + tw
+    };
+    let sy = fy + fh * 0.5;
+    let ey = ty + th * 0.5;
+    let dx = (ex - sx).abs().max(48.0) * 0.45;
+    let (c1x, c2x) = if same_x_col {
+        (sx + 44.0, ex + 44.0)
+    } else if f_mid_x < t_mid_x {
+        (sx + dx, ex - dx)
+    } else {
+        (sx - dx, ex + dx)
+    };
+    let path_d = format!("M{sx:.1},{sy:.1} C{c1x:.1},{sy:.1} {c2x:.1},{ey:.1} {ex:.1},{ey:.1}");
+    let mid_x = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
+    let mid_y = 0.5 * (sy + ey);
+    (path_d, mid_x, mid_y)
+}
+
+fn update_sys_live_drag(
+    surface: SysMapSurface,
+    nid: &str,
+    orig_x: f64,
+    orig_y: f64,
+    nx: f64,
+    ny: f64,
+    cam: &Camera,
+) {
+    let Some(canvas) = dom::get(surface.canvas_id) else {
+        return;
+    };
+    let dx = nx - orig_x;
+    let dy = ny - orig_y;
+    if let Some(el) = find_sys_node_el(&canvas, nid) {
+        let _ = el.set_attribute("data-pinned", "true");
+        if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
+            let _ = he.style().set_property("left", &format!("{nx:.1}px"));
+            let _ = he.style().set_property("top", &format!("{ny:.1}px"));
+        }
+    }
+
+    let snapshot = SYS_DENSE_CACHE.with(|c| {
+        let g = c.borrow();
+        let entry = g.get(surface.canvas_id)?;
+        let mut rects: HashMap<String, (f64, f64, f64, f64)> = HashMap::new();
+        let mut moved_ids: HashSet<String> = HashSet::new();
+        moved_ids.insert(nid.to_owned());
+        let mut frame_rect: Option<(f64, f64)> = None;
+        for f in &entry.layout.frames {
+            if f.service_id == nid {
+                frame_rect = Some(((f.x + dx).max(4.0), (f.y + dy).max(4.0)));
+                break;
+            }
+        }
+        let mut moved_children: Vec<(String, f64, f64)> = Vec::new();
+        for p in &entry.layout.nodes {
+            let (px, py) = if p.id == nid {
+                (nx, ny)
+            } else if p.child_of.as_deref() == Some(nid) && !entry.pinned_ids.contains(&p.id) {
+                moved_ids.insert(p.id.clone());
+                let cx = (p.x + dx).max(8.0);
+                let cy = (p.y + dy).max(8.0);
+                moved_children.push((p.id.clone(), cx, cy));
+                (cx, cy)
+            } else {
+                (p.x, p.y)
+            };
+            rects.insert(p.id.clone(), (px, py, p.w, p.h));
+        }
+        Some((
+            entry.is_dense,
+            frame_rect,
+            moved_children,
+            moved_ids,
+            rects,
+            entry.edge_endpoints.clone(),
+            entry.node_index_by_id.clone(),
+        ))
+    });
+
+    let Some((is_dense, frame_rect, moved_children, moved_ids, rects, edge_endpoints, idx_by_id)) =
+        snapshot
+    else {
+        return;
+    };
+
+    if let (Some((fx, fy)), Some(frame_g)) = (frame_rect, find_sys_frame_el(&canvas, nid)) {
+        if let Ok(Some(rect)) = frame_g.query_selector("rect.system-frame-rect") {
+            let _ = rect.set_attribute("x", &format!("{fx:.1}"));
+            let _ = rect.set_attribute("y", &format!("{fy:.1}"));
+        }
+        if let Ok(Some(title)) = frame_g.query_selector("text.system-frame-title") {
+            let _ = title.set_attribute("x", &format!("{:.1}", fx + 12.0));
+            let _ = title.set_attribute("y", &format!("{:.1}", fy + 18.0));
+        }
+    }
+    for (cid, cx, cy) in &moved_children {
+        if let Some(el) = find_sys_node_el(&canvas, cid) {
+            if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
+                let _ = he.style().set_property("left", &format!("{cx:.1}px"));
+                let _ = he.style().set_property("top", &format!("{cy:.1}px"));
+            }
+        }
+    }
+
+    if is_dense {
+        graph_viewport::canvas2d::update_scene(surface.canvas_id, |scene| {
+            for id in &moved_ids {
+                if let (Some(&ni), Some(&(px, py, _, _))) = (idx_by_id.get(id), rects.get(id)) {
+                    if let Some(node) = scene.nodes.get_mut(ni) {
+                        node.x = px;
+                        node.y = py;
+                        node.pinned = true;
+                    }
+                }
+            }
+            for edge in &mut scene.edges {
+                let Some((from, to)) = edge_endpoints.get(edge.index) else {
+                    continue;
+                };
+                if !moved_ids.contains(from) && !moved_ids.contains(to) {
+                    continue;
+                }
+                if let (Some(&f_rect), Some(&t_rect)) = (rects.get(from), rects.get(to)) {
+                    let (d, _, _) = live_drag_wire_path(f_rect, t_rect);
+                    let updated = graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
+                        edge.index,
+                        &d,
+                        edge.weight,
+                        edge.guessed,
+                        edge.against,
+                        edge.kind.clone(),
+                        edge.on,
+                        edge.lit,
+                        edge.dim,
+                        edge.portal,
+                    );
+                    edge.cmds = updated.cmds;
+                    edge.pts = updated.pts;
+                }
+            }
+        });
+        graph_viewport::canvas2d::paint_scene(surface.canvas_id, cam.viewport_cam(), None, true);
+        return;
+    }
+
+    let mut path_by_pair: HashMap<(String, String), (String, f64, f64)> = HashMap::new();
+    for (from, to) in &edge_endpoints {
+        if (!moved_ids.contains(from) && !moved_ids.contains(to))
+            || path_by_pair.contains_key(&(from.clone(), to.clone()))
+        {
+            continue;
+        }
+        if let (Some(&f_rect), Some(&t_rect)) = (rects.get(from), rects.get(to)) {
+            path_by_pair.insert(
+                (from.clone(), to.clone()),
+                live_drag_wire_path(f_rect, t_rect),
+            );
+        }
+    }
+    if path_by_pair.is_empty() {
+        return;
+    }
+    for sel in [
+        ".system-map-edge",
+        ".system-map-violation-halo",
+        ".system-map-broken-halo",
+        ".system-map-hit",
+    ] {
+        if let Ok(els) = canvas.query_selector_all(&format!("{sel}[data-from][data-to]")) {
+            for i in 0..els.length() {
+                let Some(el) = els
+                    .item(i)
+                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                else {
+                    continue;
+                };
+                let from = el.get_attribute("data-from").unwrap_or_default();
+                let to = el.get_attribute("data-to").unwrap_or_default();
+                if let Some((d, _, _)) = path_by_pair.get(&(from, to)) {
+                    let _ = el.set_attribute("d", d);
+                }
+            }
+        }
+    }
+    if let Ok(labels) = canvas.query_selector_all(".system-map-edge-label[data-from][data-to]") {
+        for i in 0..labels.length() {
+            let Some(el) = labels
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let from = el.get_attribute("data-from").unwrap_or_default();
+            let to = el.get_attribute("data-to").unwrap_or_default();
+            if let Some((_, mx, my)) = path_by_pair.get(&(from, to)) {
+                if let Ok(Some(rect)) = el.query_selector("rect") {
+                    let w = rect
+                        .get_attribute("width")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(54.0);
+                    let _ = rect.set_attribute("x", &format!("{:.1}", mx - w * 0.5));
+                    let _ = rect.set_attribute("y", &format!("{:.1}", my - 8.0));
+                }
+                if let Ok(Some(text)) = el.query_selector("text") {
+                    let _ = text.set_attribute("x", &format!("{mx:.1}"));
+                    let _ = text.set_attribute("y", &format!("{:.1}", my + 3.5));
+                }
+            }
+        }
+    }
 }
 
 pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
@@ -6547,6 +7375,11 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                                     .map(|p| (p.x, p.y))
                             });
                             if let Some((orig_x, orig_y)) = orig {
+                                let has_frame = SYS_DENSE_CACHE.with(|c| {
+                                    c.borrow().get(surface.canvas_id).is_some_and(|e| {
+                                        e.layout.frames.iter().any(|f| f.service_id == nid)
+                                    })
+                                });
                                 if let Some(cap) = maybe_el.or_else(|| dom::get(surface.canvas_id))
                                 {
                                     graph_viewport::capture_pointer(&cap, pe.pointer_id());
@@ -6560,6 +7393,7 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                                         "start_cy": pe.client_y() as f64,
                                         "orig_x": orig_x,
                                         "orig_y": orig_y,
+                                        "has_frame": has_frame,
                                         "moved": false,
                                     }),
                                 );
@@ -6572,39 +7406,46 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
                     let cam = load_camera(surface);
                     let nid = m::text(&node_drag, "id");
+                    let has_frame = m::yes(&node_drag["has_frame"]);
+                    let orig_x = node_drag["orig_x"].as_f64().unwrap_or(0.0);
+                    let orig_y = node_drag["orig_y"].as_f64().unwrap_or(0.0);
                     let dx = ((pe.client_x() as f64)
                         - node_drag["start_cx"].as_f64().unwrap_or(0.0))
                         / cam.scale.max(0.1);
                     let dy = ((pe.client_y() as f64)
                         - node_drag["start_cy"].as_f64().unwrap_or(0.0))
                         / cam.scale.max(0.1);
-                    let nx = (node_drag["orig_x"].as_f64().unwrap_or(0.0) + dx).max(8.0);
-                    let ny = (node_drag["orig_y"].as_f64().unwrap_or(0.0) + dy).max(8.0);
+                    let nx = (orig_x + dx).max(if has_frame { FRAME_PAD + 4.0 } else { 8.0 });
+                    let ny = (orig_y + dy).max(if has_frame { FRAME_HEAD + 4.0 } else { 8.0 });
                     if kind == "pointermove" {
-                        node_drag["moved"] = json!(dx.abs() > 2.0 || dy.abs() > 2.0);
+                        let moved = m::yes(&node_drag["moved"]) || dx.abs() > 2.0 || dy.abs() > 2.0;
+                        node_drag["moved"] = json!(moved);
                         m::set(&drag_store_key, node_drag);
-                        if let Some(canvas) = dom::get(surface.canvas_id) {
-                            if let Ok(Some(el)) = canvas
-                                .query_selector(&format!(".system-map-node[data-n=\"{nid}\"]"))
-                            {
-                                let _ = el.set_attribute("data-pinned", "true");
-                                if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
-                                    let _ = he.style().set_property("left", &format!("{nx:.1}px"));
-                                    let _ = he.style().set_property("top", &format!("{ny:.1}px"));
-                                }
-                            }
-                        }
+                        update_sys_live_drag(surface, &nid, orig_x, orig_y, nx, ny, &cam);
                         return true;
                     }
                     let moved = m::yes(&node_drag["moved"]);
                     m::set(&drag_store_key, V::Null);
                     if kind == "pointerup" && moved {
+                        let mut drag_meta =
+                            graph_viewport::DragPan::from_json(&m::data(surface.drag_key));
+                        drag_meta.active = false;
+                        drag_meta.suppress_click = true;
+                        m::set(surface.drag_key, drag_meta.to_json());
+                        let dk = surface.drag_key;
+                        dom::later(&format!("{dk}-clear"), 70, move || {
+                            let mut d = graph_viewport::DragPan::from_json(&m::data(dk));
+                            d.clear_suppress();
+                            m::set(dk, d.to_json());
+                        });
                         let state = surface_state(surface);
                         graph_viewport::save_pin(&sys_pin_key(surface, &state), &nid, (nx, ny));
                         graph_viewport::announce_live(
                             &format!("{}-live-announce", surface.id_prefix),
                             &format!("Pinned {nid}"),
                         );
+                        render_surface(surface, false);
+                    } else if kind == "pointercancel" && moved {
                         render_surface(surface, false);
                     }
                     return true;
@@ -6618,7 +7459,7 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         if kind == "dblclick" && in_canvas && !in_radar {
             if let Some(node_el) = target_el
                 .as_ref()
-                .and_then(|el| el.closest("[data-n]").ok().flatten())
+                .and_then(|el| el.closest(".system-map-node[data-n]").ok().flatten())
             {
                 let svc = node_el
                     .get_attribute("data-explain-services")
@@ -6627,6 +7468,36 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 if !sid.is_empty() {
                     systems::drill_down_service_map(surface.id, &sid, None);
                     return true;
+                }
+            }
+            let is_dense = SYS_DENSE_CACHE.with(|c| {
+                c.borrow()
+                    .get(surface.canvas_id)
+                    .is_some_and(|e| e.is_dense)
+            });
+            if is_dense {
+                if let (Ok(me), Some(canvas)) = (
+                    event.clone().dyn_into::<web_sys::MouseEvent>(),
+                    dom::get(surface.canvas_id),
+                ) {
+                    let rect = canvas.get_bounding_client_rect();
+                    let cam = load_camera(surface);
+                    let wx = (me.client_x() as f64 - rect.left() - cam.pan_x) / cam.scale.max(0.05);
+                    let wy = (me.client_y() as f64 - rect.top() - cam.pan_y) / cam.scale.max(0.05);
+                    if let Some((0, idx)) =
+                        graph_viewport::canvas2d::hit_test_scene(surface.canvas_id, wx, wy, 8.0)
+                    {
+                        let sid = SYS_DENSE_CACHE.with(|c| {
+                            let g = c.borrow();
+                            let entry = g.get(surface.canvas_id)?;
+                            let placed = entry.layout.nodes.get(idx)?;
+                            Some(placed.child_of.clone().unwrap_or_else(|| placed.id.clone()))
+                        });
+                        if let Some(sid) = sid.filter(|s| !s.is_empty()) {
+                            systems::drill_down_service_map(surface.id, &sid, None);
+                            return true;
+                        }
+                    }
                 }
             }
             if let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() {
@@ -6661,16 +7532,28 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                     let wy = (pe.client_y() as f64 - rect.top() - cam.pan_y) / cam.scale.max(0.05);
                     let hit =
                         graph_viewport::canvas2d::hit_test_scene(surface.canvas_id, wx, wy, 8.0);
-                    graph_viewport::canvas2d::paint_scene(
-                        surface.canvas_id,
-                        cam.viewport_cam(),
-                        hit,
-                        true,
-                    );
-                    if let Ok(he) = canvas.dyn_into::<web_sys::HtmlElement>() {
-                        let _ = he
-                            .style()
-                            .set_property("cursor", if hit.is_some() { "pointer" } else { "" });
+                    let changed = SYS_HOVER_HIT.with(|h| {
+                        let mut map = h.borrow_mut();
+                        let prev = map.get(surface.canvas_id).copied().flatten();
+                        if prev == hit {
+                            false
+                        } else {
+                            map.insert(surface.canvas_id, hit);
+                            true
+                        }
+                    });
+                    if changed {
+                        graph_viewport::canvas2d::paint_scene(
+                            surface.canvas_id,
+                            cam.viewport_cam(),
+                            hit,
+                            true,
+                        );
+                        if let Ok(he) = canvas.dyn_into::<web_sys::HtmlElement>() {
+                            let _ = he
+                                .style()
+                                .set_property("cursor", if hit.is_some() { "pointer" } else { "" });
+                        }
                     }
                 }
             }
@@ -6711,14 +7594,15 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                             d.clear_suppress();
                             m::set(dk, d.to_json());
                         });
-                    } else if target_el
-                        .as_ref()
-                        .and_then(|el| {
-                            el.closest(".system-map-node, .system-map-hit, button, a")
-                                .ok()
-                                .flatten()
-                        })
-                        .is_none()
+                    } else if kind == "pointerup"
+                        && target_el
+                            .as_ref()
+                            .and_then(|el| {
+                                el.closest(".system-map-node, .system-map-hit, button, a")
+                                    .ok()
+                                    .flatten()
+                            })
+                            .is_none()
                     {
                         let is_dense = SYS_DENSE_CACHE.with(|c| {
                             c.borrow()
@@ -6762,12 +7646,14 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                                         let mut state = surface_state(surface);
                                         if is_node {
                                             state["focus"] = json!(a);
+                                            state["roving_focus"] = json!(a);
                                             state["selected_edge"] = V::Null;
                                         } else {
                                             state["selected_edge"] = json!({"from": a, "to": b});
                                         }
                                         state["side_tab"] = json!("details");
                                         save_surface_state(surface, &state);
+                                        push_sys_nav_history(surface, &state, &cam);
                                         render_surface(surface, false);
                                         return true;
                                     }
@@ -6839,6 +7725,121 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     let target = event
         .target()
         .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+
+    if let Some(tab_el) = target
+        .as_ref()
+        .and_then(|el| el.closest(".system-side-tabs [role='tab']").ok().flatten())
+    {
+        let key_name = event.key();
+        if matches!(
+            key_name.as_str(),
+            "ArrowLeft" | "ArrowRight" | "Home" | "End"
+        ) {
+            event.prevent_default();
+            let tabs = ["details", "analyze", "changes"];
+            let mut state = surface_state(surface);
+            let cur = match m::text(&state, "side_tab").as_str() {
+                "analyze" => 1,
+                "changes" => 2,
+                _ => 0,
+            };
+            let next_idx = match key_name.as_str() {
+                "ArrowRight" => (cur + 1) % tabs.len(),
+                "ArrowLeft" => (cur + tabs.len() - 1) % tabs.len(),
+                "Home" => 0,
+                "End" => tabs.len() - 1,
+                _ => cur,
+            };
+            let next_tab = tabs[next_idx];
+            state["side_tab"] = json!(next_tab);
+            save_surface_state(surface, &state);
+            render_surface(surface, false);
+            if let Some(next_el) = dom::all(&format!(
+                "#{} .system-side-tabs [role='tab'][aria-selected='true']",
+                surface.side_id
+            ))
+            .into_iter()
+            .next()
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = next_el.focus();
+            }
+            if next_tab == "changes" {
+                spawn_local(async move {
+                    fetch_surface_changes(surface).await;
+                });
+            }
+            let _ = tab_el;
+            return true;
+        }
+    }
+
+    let in_finder = target.as_ref().is_some_and(|el| {
+        el.closest(&format!("#{}", surface.find_wrap_id))
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if in_finder && dom::get(surface.find_found_id).is_some_and(|el| !el.has_attribute("hidden")) {
+        let opts = dom::all(&format!("#{} [role='option']", surface.find_list_id));
+        if !opts.is_empty() {
+            match event.key().as_str() {
+                "ArrowDown" | "ArrowUp" | "Home" | "End" => {
+                    event.prevent_default();
+                    let active_id = dom::get(surface.find_input_id)
+                        .and_then(|el| el.get_attribute("aria-activedescendant"))
+                        .unwrap_or_default();
+                    let cur_pos = opts.iter().position(|o| o.id() == active_id).or_else(|| {
+                        opts.iter().position(|o| {
+                            o.get_attribute("aria-selected").as_deref() == Some("true")
+                        })
+                    });
+                    let next_pos = match (event.key().as_str(), cur_pos) {
+                        ("Home", _) => 0,
+                        ("End", _) => opts.len() - 1,
+                        ("ArrowDown", Some(i)) => (i + 1) % opts.len(),
+                        ("ArrowDown", None) => 0,
+                        ("ArrowUp", Some(i)) => (i + opts.len() - 1) % opts.len(),
+                        ("ArrowUp", None) => opts.len() - 1,
+                        _ => 0,
+                    };
+                    for (idx, opt) in opts.iter().enumerate() {
+                        let _ = opt.set_attribute(
+                            "aria-selected",
+                            if idx == next_pos { "true" } else { "false" },
+                        );
+                    }
+                    let chosen = &opts[next_pos];
+                    dom::attr(surface.find_input_id, "aria-activedescendant", &chosen.id());
+                    chosen.scroll_into_view();
+                    return true;
+                }
+                "Enter" => {
+                    let active_id = dom::get(surface.find_input_id)
+                        .and_then(|el| el.get_attribute("aria-activedescendant"))
+                        .unwrap_or_default();
+                    let target_opt = opts
+                        .iter()
+                        .find(|o| o.id() == active_id)
+                        .or_else(|| {
+                            opts.iter().find(|o| {
+                                o.get_attribute("aria-selected").as_deref() == Some("true")
+                            })
+                        })
+                        .or_else(|| opts.first());
+                    if let Some(opt) =
+                        target_opt.and_then(|e| e.clone().dyn_into::<web_sys::HtmlElement>().ok())
+                    {
+                        event.prevent_default();
+                        opt.click();
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     let in_input = target
         .as_ref()
         .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
@@ -6855,6 +7856,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                 "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
             )
         {
+            event.prevent_default();
             let mut state = surface_state(surface);
             let doc = filtered_doc(&m::data(surface.map_key), &state);
             let cached_layout = SYS_DENSE_CACHE
@@ -6905,6 +7907,19 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                     let next_id = next_node.id.clone();
                     state["roving_focus"] = json!(next_id);
                     save_surface_state(surface, &state);
+                    let mut cam = load_camera(surface);
+                    let (vw, vh, measured) = viewport_size(surface.canvas_id);
+                    if measured
+                        && pan_to_keep_rect_in_view(
+                            &mut cam,
+                            (next_node.x, next_node.y, next_node.w, next_node.h),
+                            (vw, vh),
+                            40.0,
+                        )
+                    {
+                        save_camera(surface, &cam);
+                        apply_camera(surface, &cam);
+                    }
                     SYS_DENSE_CACHE.with(|c| {
                         if let Some(entry) = c.borrow_mut().get_mut(surface.canvas_id) {
                             entry.latest_roving_id = next_id.clone();
@@ -6925,6 +7940,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                                         if is_next { "0" } else { "-1" },
                                     );
                                     if is_next {
+                                        let _ = el.remove_attribute("data-offscreen");
                                         if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
                                             let _ = he.focus();
                                         }
@@ -6933,9 +7949,15 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
                             }
                         }
                     }
+                    let label = m::array(&doc["nodes"])
+                        .into_iter()
+                        .find(|n| node_id(n) == next_id)
+                        .map(|n| m::text(&n, "name"))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| next_id.clone());
                     graph_viewport::announce_live(
                         &format!("{}-live-announce", surface.id_prefix),
-                        &format!("Focused {next_id}"),
+                        &format!("Focused {label}"),
                     );
                     return true;
                 }
@@ -7047,16 +8069,35 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             if id == format!("{p}-isolate-toggle") {
                 let mut state = surface_state(surface);
                 let next = !m::yes(&state["isolate_active"]);
-                let seed = m::text(&state, "focus");
+                let seed = {
+                    let f = m::text(&state, "focus");
+                    if !f.is_empty() {
+                        f
+                    } else {
+                        m::text(&state, "isolate_seed")
+                    }
+                };
+                if next && seed.is_empty() {
+                    state["isolate_active"] = json!(false);
+                    save_surface_state(surface, &state);
+                    sync_toolbar_buttons(surface, &state);
+                    graph_viewport::announce_live(
+                        &format!("{p}-live-announce"),
+                        "Select a service first to isolate its neighborhood",
+                    );
+                    return true;
+                }
                 let depth = dom::value(&format!("{p}-isolate-depth"))
                     .trim()
                     .parse::<u64>()
                     .unwrap_or(2)
                     .clamp(1, 3);
-                state["isolate_active"] = json!(next && !seed.is_empty());
+                state["isolate_active"] = json!(next);
                 state["isolate_depth"] = json!(depth);
-                if !seed.is_empty() {
+                if next {
                     state["isolate_seed"] = json!(seed);
+                } else {
+                    state["isolate_seed"] = json!("");
                 }
                 save_surface_state(surface, &state);
                 render_surface(surface, true);
@@ -7079,7 +8120,18 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
                 state["path_to"] = json!(to_q.trim());
                 save_surface_state(surface, &state);
                 render_surface(surface, false);
-                graph_viewport::announce_live(&format!("{p}-live-announce"), "Updated path trace");
+                let view_doc = filtered_doc(&m::data(surface.map_key), &state);
+                let vis = compute_sys_visual_state(&view_doc, &state);
+                let msg = if state["path_from"].as_str().unwrap_or("").is_empty()
+                    || state["path_to"].as_str().unwrap_or("").is_empty()
+                {
+                    "Enter both source and destination services to trace a path"
+                } else if vis.highlight_nodes.is_empty() {
+                    "No contract path found between selected services"
+                } else {
+                    "Highlighted path between selected services"
+                };
+                graph_viewport::announce_live(&format!("{p}-live-announce"), msg);
                 return true;
             }
             if id == format!("{p}-path-clear") {
@@ -7101,7 +8153,26 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
                 .clamp(1, 3);
             let mut state = surface_state(surface);
             state["isolate_depth"] = json!(depth);
-            state["isolate_active"] = json!(!m::text(&state, "focus").is_empty());
+            let seed = {
+                let s = m::text(&state, "isolate_seed");
+                if !s.is_empty() {
+                    s
+                } else {
+                    m::text(&state, "focus")
+                }
+            };
+            if seed.is_empty() {
+                state["isolate_active"] = json!(false);
+                save_surface_state(surface, &state);
+                sync_toolbar_buttons(surface, &state);
+                graph_viewport::announce_live(
+                    &format!("{p}-live-announce"),
+                    "Select a service first to isolate its neighborhood",
+                );
+                return true;
+            }
+            state["isolate_seed"] = json!(seed);
+            state["isolate_active"] = json!(true);
             save_surface_state(surface, &state);
             render_surface(surface, true);
             return true;
@@ -7116,8 +8187,16 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             }
             if id == surface.find_input_id {
                 let q = dom::value(surface.find_input_id);
-                spawn_local(async move {
-                    run_finder_search(surface, q).await;
+                let timer_key = format!("{p}-find-debounce");
+                if q.trim().is_empty() {
+                    dom::cancel_timer(&timer_key);
+                    close_finder(surface);
+                    return true;
+                }
+                dom::later(&timer_key, 160, move || {
+                    spawn_local(async move {
+                        run_finder_search(surface, q).await;
+                    });
                 });
                 return true;
             }
@@ -7183,22 +8262,43 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
     match action {
         "system-map-node" => {
             let nid = first_non_empty(payload, &["path", "id", "service"]);
+            let cam = load_camera(surface);
             let mut state = surface_state(surface);
+            let need_seed = SYS_NAV_HISTORY.with(|h| {
+                h.borrow()
+                    .get(surface.id)
+                    .is_none_or(|nav| nav.entries.is_empty())
+            });
+            if need_seed {
+                push_sys_nav_history(surface, &state, &cam);
+            }
             state["focus"] = json!(nid);
+            state["roving_focus"] = json!(nid);
             state["selected_edge"] = V::Null;
             state["side_tab"] = json!("details");
             save_surface_state(surface, &state);
+            push_sys_nav_history(surface, &state, &cam);
             render_surface(surface, false);
             true
         }
         "system-map-edge" => {
+            let cam = load_camera(surface);
             let mut state = surface_state(surface);
+            let need_seed = SYS_NAV_HISTORY.with(|h| {
+                h.borrow()
+                    .get(surface.id)
+                    .is_none_or(|nav| nav.entries.is_empty())
+            });
+            if need_seed {
+                push_sys_nav_history(surface, &state, &cam);
+            }
             state["selected_edge"] = json!({
                 "from": m::text(payload, "from"),
                 "to": m::text(payload, "to"),
             });
             state["side_tab"] = json!("details");
             save_surface_state(surface, &state);
+            push_sys_nav_history(surface, &state, &cam);
             render_surface(surface, false);
             true
         }
@@ -7265,6 +8365,9 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
         }
         "system-map-wave" => {
             dom::cancel_timer(&format!("{}-wave-play", surface.id_prefix));
+            SYS_WAVE_PLAYING.with(|playing| {
+                playing.borrow_mut().remove(surface.id);
+            });
             let mut state = surface_state(surface);
             state["wave"] = match payload["wave"].as_u64() {
                 Some(wave) => json!(wave),
@@ -7277,6 +8380,88 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
         "system-map-wave-play" => {
             dom::cancel_timer(&format!("{}-wave-play", surface.id_prefix));
             play_wave(surface, 0);
+            true
+        }
+        "system-map-wave-pause" => {
+            dom::cancel_timer(&format!("{}-wave-play", surface.id_prefix));
+            SYS_WAVE_PLAYING.with(|playing| {
+                playing.borrow_mut().remove(surface.id);
+            });
+            render_surface(surface, false);
+            true
+        }
+        "system-map-clear-filters" => {
+            let mut state = surface_state(surface);
+            state["filter"] = json!("");
+            state["certain"] = json!(false);
+            state["isolate_active"] = json!(false);
+            state["isolate_seed"] = json!("");
+            state["tool"] = json!("");
+            state["path_from"] = json!("");
+            state["path_to"] = json!("");
+            state["hidden_kinds"] = json!([]);
+            save_surface_state(surface, &state);
+            dom::set_value(surface.filter_id, "");
+            render_surface(surface, true);
+            graph_viewport::announce_live(
+                &format!("{}-live-announce", surface.id_prefix),
+                "Reset system map filters",
+            );
+            true
+        }
+        "system-map-unpin-node" => {
+            let nid = first_non_empty(payload, &["id", "path", "service"]);
+            if !nid.is_empty() {
+                let state = surface_state(surface);
+                let pin_key = sys_pin_key(surface, &state);
+                let mut pins = graph_viewport::load_pins(&pin_key);
+                if pins.remove(&nid).is_some() {
+                    graph_viewport::clear_pins(&pin_key);
+                    for (k, pos) in pins {
+                        graph_viewport::save_pin(&pin_key, &k, pos);
+                    }
+                    graph_viewport::announce_live(
+                        &format!("{}-live-announce", surface.id_prefix),
+                        &format!("Unpinned {nid}"),
+                    );
+                    render_surface(surface, false);
+                }
+            }
+            true
+        }
+        "system-map-nav-back" | "system-map-nav-forward" => {
+            let back = action == "system-map-nav-back";
+            let entry = SYS_NAV_HISTORY.with(|h| {
+                let mut map = h.borrow_mut();
+                let nav = map.get_mut(surface.id)?;
+                if back {
+                    nav.step_back()
+                } else {
+                    nav.step_forward()
+                }
+            });
+            if let Some(entry) = entry {
+                let mut state = surface_state(surface);
+                state["focus"] = json!(entry.focus);
+                state["roving_focus"] = json!(entry.focus);
+                state["selected_edge"] = entry.selected_edge;
+                state["side_tab"] = json!("details");
+                save_surface_state(surface, &state);
+                let mut cam = load_camera(surface);
+                cam.pan_x = entry.pan_x;
+                cam.pan_y = entry.pan_y;
+                cam.scale = entry.scale;
+                cam.fit_mode = false;
+                save_camera(surface, &cam);
+                render_surface(surface, false);
+            }
+            true
+        }
+        "system-map-open-omnigraph" => {
+            let svc = first_non_empty(payload, &["service", "id"]);
+            spawn_local(async move {
+                crate::omnigraph::open_from_system_service(svc).await;
+            });
             true
         }
         "system-map-bridge" => {
@@ -7906,6 +9091,24 @@ mod tests {
         empty["consumer"]["sites"] = json!([]);
         assert!(bridge_html(SERVICES_SURFACE, "web", "orders", &empty)
             .contains("No file was found to name it."));
+        // Backend #31 additive fields: confidence, run_coverage, opened_by_run, from_symbols.
+        let mut with_cov = bridge;
+        with_cov["confidence"] = json!({"certain_refs": 4, "guessed_refs": 1, "ratio": 0.8});
+        with_cov["run_coverage"] = json!({
+            "run_id": "run-7",
+            "consumer_opened": 1,
+            "consumer_total": 2,
+            "provider_opened": 2,
+            "provider_total": 3,
+        });
+        with_cov["consumer"]["sites"][0]["opened_by_run"] = json!(true);
+        with_cov["consumer"]["sites"][0]["from_symbols"] = json!(["OrdersClient.place"]);
+        let cov_html = bridge_html(SERVICES_SURFACE, "web", "orders", &with_cov);
+        assert!(cov_html.contains("80%"));
+        assert!(cov_html.contains("1/2 consumer · 2/3 provider opened"));
+        assert!(cov_html.contains("data-opened-by-run=\"true\""));
+        assert!(cov_html.contains("via OrdersClient.place"));
+        assert!(cov_html.contains("opened in run"));
     }
 
     #[test]
@@ -8359,7 +9562,8 @@ mod tests {
         });
         let s0 = json!({});
         let d0 = system_structure_digest(&doc, &s0, &BTreeMap::new());
-        assert_ne!(
+        // Visual-only state changes keep structural digest equal so try_patch_system_canvas_in_place handles them.
+        assert_eq!(
             d0,
             system_structure_digest(
                 &doc,
@@ -8367,11 +9571,11 @@ mod tests {
                 &BTreeMap::new()
             )
         );
-        assert_ne!(
+        assert_eq!(
             d0,
             system_structure_digest(&doc, &json!({"wave": 1}), &BTreeMap::new())
         );
-        assert_ne!(
+        assert_eq!(
             d0,
             system_structure_digest(
                 &doc,
@@ -8382,7 +9586,16 @@ mod tests {
         m::set("system-failed-services", json!(["orders"]));
         let d_failed = system_structure_digest(&doc, &s0, &BTreeMap::new());
         m::take("system-failed-services");
-        assert_ne!(d0, d_failed);
+        assert_eq!(d0, d_failed);
+        // Structural toggles (layers, kinds_off, pins) still invalidate the digest.
+        assert_ne!(
+            d0,
+            system_structure_digest(&doc, &json!({"layers": true}), &BTreeMap::new())
+        );
+        assert_ne!(
+            d0,
+            system_structure_digest(&doc, &json!({"kinds_off": ["http"]}), &BTreeMap::new())
+        );
 
         // Pinning parent "api" moves both its frame and unfolded child "api::c1" by delta,
         // and moving "api" to the right of "orders" flips outgoing port/control side geometrically.
@@ -8456,12 +9669,162 @@ mod tests {
 
         // Patch DenseScene when selection changes to svc-2 without tool highlight.
         let vis2 = compute_sys_visual_state(&dense_doc, &json!({"focus": "svc-2"}));
-        refresh_dense_scene_for_system(&mut scene, &vis2, &bundle.edge_endpoints);
+        let node_ids: Vec<String> = dense_layout.nodes.iter().map(|n| n.id.clone()).collect();
+        refresh_dense_scene_for_system(&mut scene, &vis2, &node_ids, &bundle.edge_endpoints);
         let n0_after = scene.nodes.iter().find(|n| n.label == "svc-0").unwrap();
         let n2_after = scene.nodes.iter().find(|n| n.label == "svc-2").unwrap();
         assert!(!n0_after.selected);
         assert!(n2_after.selected);
         assert!(scene.edges[1].on);
         assert!(!scene.edges[0].on);
+    }
+
+    #[test]
+    fn sys_unmatched_unfold_a11y_wiring_and_dense_display_names_work() {
+        // Synthetic __unmatched__:* nodes must not unfold as frame children when spread is active.
+        let doc = json!({
+            "nodes": [
+                {
+                    "id": "api",
+                    "name": "API Gateway",
+                    "kind": "service",
+                    "provides": [{"name": "v1.order.created", "kind": "http"}],
+                    "sources": ["src/api.rs"]
+                },
+                {
+                    "id": "__unmatched__:legacy-queue",
+                    "name": "legacy-queue",
+                    "kind": "service",
+                    "unmatched": true
+                },
+                {
+                    "id": "orders",
+                    "name": "Orders Core",
+                    "kind": "service"
+                }
+            ],
+            "edges": [
+                {"from": "api", "to": "orders", "kind": "http", "contracts": ["a", "b", "c", "d"]},
+                {"from": "orders", "to": "api", "kind": "event"}
+            ]
+        });
+        let spread_state = json!({"spread": ["api"], "focus": "api"});
+        let unfolded = expand_unfolded_nodes(&doc, &spread_state);
+        assert!(
+            !unfolded["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| node_id(n).starts_with("__unmatched__:")
+                    && !m::text(n, "parent_service").is_empty()),
+            "synthetic __unmatched__ nodes must remain independent"
+        );
+
+        // Post-pin geometric back-routing must not emit layer violation halos unless layers/against say so.
+        let mut pins = BTreeMap::new();
+        pins.insert("api".to_owned(), (800.0, 200.0));
+        let layout = layout_system_nodes_with_pins(&doc, false, &pins);
+        let bundle = render_canvas_bundle_with_layout(SERVICES_SURFACE, &doc, &json!({}), &layout);
+        assert!(
+            !bundle.html.contains("system-map-violation-halo"),
+            "geometric wire.back must not fabricate architectural violation halos"
+        );
+        for hit_frag in bundle
+            .html
+            .split("class=\"graph-map-hit system-map-hit\"")
+            .skip(1)
+        {
+            let tag_end = hit_frag.find('>').unwrap_or(hit_frag.len());
+            assert!(
+                !hit_frag[..tag_end].contains("tabindex=\"0\""),
+                "SVG edge hit target must not be a focus trap: {}",
+                &hit_frag[..tag_end]
+            );
+        }
+
+        // Dense scene stores human display name on label while refresh resolves by node_ids.
+        let mut d_nodes = Vec::with_capacity(182);
+        for i in 0..182 {
+            d_nodes.push(json!({
+                "id": format!("svc-{i}"),
+                "name": format!("Display Service {i}"),
+                "kind": "service"
+            }));
+        }
+        let dense_doc = json!({
+            "nodes": d_nodes,
+            "edges": [
+                {"from": "svc-0", "to": "svc-1", "kind": "http"},
+                {"from": "svc-1", "to": "svc-2", "kind": "event"}
+            ]
+        });
+        let dense_layout = layout_system_nodes_with_pins(&dense_doc, false, &BTreeMap::new());
+        let hidden_http_state = json!({"focus": "svc-0", "kinds_off": ["http"]});
+        let scene = build_dense_scene_for_surface(
+            SERVICES_SURFACE,
+            &dense_doc,
+            &hidden_http_state,
+            &dense_layout,
+        )
+        .expect("dense scene");
+        let n0 = scene
+            .nodes
+            .iter()
+            .find(|n| n.label == "Display Service 0")
+            .unwrap();
+        assert!(
+            n0.selected,
+            "selection lookup must use node_ids even when display label differs"
+        );
+        assert!(
+            scene.edges[0].cmds.is_empty(),
+            "hidden http kind must suppress dense wire geometry"
+        );
+        assert!(
+            !scene.edges[1].cmds.is_empty(),
+            "visible event kind remains drawn"
+        );
+
+        // SysNavHistory back/forward & pause wave button coverage.
+        let mut nav = SysNavHistory::default();
+        nav.push(SysNavEntry {
+            focus: "api".to_owned(),
+            selected_edge: V::Null,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            scale: 1.0,
+        });
+        nav.push(SysNavEntry {
+            focus: "orders".to_owned(),
+            selected_edge: V::Null,
+            pan_x: 10.0,
+            pan_y: 20.0,
+            scale: 1.2,
+        });
+        assert!(nav.can_back());
+        assert_eq!(nav.step_back().unwrap().focus, "api");
+        assert!(nav.can_forward());
+        assert_eq!(nav.step_forward().unwrap().focus, "orders");
+
+        SYS_WAVE_PLAYING.with(|w| {
+            w.borrow_mut().insert(CHANGES_SURFACE.id);
+        });
+        let scrubber = wave_scrubber_html(
+            CHANGES_SURFACE,
+            &BlastRadius {
+                seeds: ["api".to_owned()].into_iter().collect(),
+                direct_consumers: ["orders".to_owned()].into_iter().collect(),
+                downstream_consumers: BTreeSet::new(),
+                wave_by_service: [("api".to_owned(), 0), ("orders".to_owned(), 1)]
+                    .into_iter()
+                    .collect(),
+                matched_contracts: BTreeSet::new(),
+            },
+            &json!({"wave": 0}),
+        );
+        SYS_WAVE_PLAYING.with(|w| {
+            w.borrow_mut().remove(CHANGES_SURFACE.id);
+        });
+        assert!(scrubber.contains("system-map-wave-pause"));
     }
 }
