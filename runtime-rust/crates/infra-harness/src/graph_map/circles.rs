@@ -246,6 +246,20 @@ impl Index {
                 })
             })
             .collect::<Vec<_>>();
+        let certain = view["certain"] == true;
+        let remediation = here
+            .iter()
+            .take(LISTED)
+            .filter_map(|(_, files)| {
+                let cuts = scc_cut_candidates(self, files, certain);
+                (!cuts.is_empty()).then(|| {
+                    json!({
+                        "files": files.len(),
+                        "cuts": cuts,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
         view["circles"] = json!({
             "groups": circles.groups.len(),
             "files": circles.groups.iter().map(Vec::len).sum::<usize>(),
@@ -253,7 +267,95 @@ impl Index {
             "here": here.len(),
             "listed": listed,
         });
+        if !remediation.is_empty() {
+            view["circle_remediation"] = json!(remediation);
+        }
     }
+}
+
+/// Computes minimal feedback-edge cut candidates for one strongly connected component.
+fn scc_cut_candidates(index: &Index, group: &[u32], certain: bool) -> Vec<Value> {
+    if group.len() < 2 {
+        return Vec::new();
+    }
+    let pos_of: HashMap<u32, usize> = group
+        .iter()
+        .enumerate()
+        .map(|(idx, &file)| (file, idx))
+        .collect();
+    let mut edges: Vec<(usize, usize, u32, u32, u64, u64)> = Vec::new();
+    for &(from, to, ref pair) in &index.pairs {
+        let weight = pair.weight(certain);
+        if weight == 0 || from == to {
+            continue;
+        }
+        if let (Some(&u), Some(&v)) = (pos_of.get(&from), pos_of.get(&to)) {
+            let guessed = if certain { 0 } else { pair.guessed };
+            edges.push((u, v, from, to, weight, guessed));
+        }
+    }
+    if edges.is_empty() {
+        return Vec::new();
+    }
+
+    let check_breaks = group.len() <= 32 && edges.len() <= 128;
+    let breaks_scc = |skip_idx: usize| -> bool {
+        if !check_breaks {
+            return false;
+        }
+        let mut adj = vec![Vec::new(); group.len()];
+        for (idx, &(u, v, ..)) in edges.iter().enumerate() {
+            if idx != skip_idx {
+                adj[u].push(v as u32);
+            }
+        }
+        let sccs = reaching_each_other(&adj);
+        sccs.iter().all(|comp| comp.len() < group.len())
+    };
+
+    let mut ranked: Vec<(bool, u64, u64, &str, &str)> = edges
+        .iter()
+        .enumerate()
+        .map(|(idx, &(_, _, from, to, links, guessed))| {
+            (
+                breaks_scc(idx),
+                links,
+                guessed,
+                index.files[from as usize].as_str(),
+                index.files[to as usize].as_str(),
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(b.3))
+            .then(a.4.cmp(b.4))
+    });
+    ranked
+        .into_iter()
+        .take(3)
+        .map(|(breaks, links, guessed, from_path, to_path)| {
+            json!({
+                "from": from_path,
+                "to": to_path,
+                "links": links,
+                "weight": links,
+                "guessed": guessed,
+                "breaks_cycle": breaks,
+                "breaks_cycles": breaks,
+                "hint": format!(
+                    "Extract an interface/port from {} or invert {} -> {} ({} link{}) to break this cycle.",
+                    name(to_path),
+                    name(from_path),
+                    name(to_path),
+                    links,
+                    if links == 1 { "" } else { "s" }
+                ),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -477,6 +579,36 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|node| node["circle"].is_null())
+        );
+    }
+
+    #[test]
+    fn circle_remediation_ranks_minimal_breaking_cuts_without_altering_circles() {
+        let graph = json!({
+            "nodes": [
+                {"id": "a", "label": "a()", "source_file": "src/a.php", "source_location": "L1"},
+                {"id": "b", "label": "b()", "source_file": "src/b.php", "source_location": "L1"},
+                {"id": "c", "label": "c()", "source_file": "src/c.php", "source_location": "L1"}
+            ],
+            "links": [
+                {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "b", "target": "c", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "b", "target": "c", "relation": "imports", "confidence": "EXTRACTED"},
+                {"source": "c", "target": "a", "relation": "calls", "confidence": "INFERRED"}
+            ]
+        });
+        let index = Index::read(graph.to_string().as_bytes(), Path::new("/work/shop")).unwrap();
+        let mut view = index.view("shop", "src", None, false, "");
+        index.mark_circles(&mut view);
+        let rem = view["circle_remediation"].as_array().expect("remediation");
+        assert_eq!(rem.len(), 1);
+        let cuts = rem[0]["cuts"].as_array().unwrap();
+        assert!(!cuts.is_empty());
+        assert_eq!(cuts[0]["breaks_cycles"], true);
+        assert_eq!(cuts[0]["weight"], 1);
+        assert!(
+            cuts[0]["hint"].as_str().unwrap().contains("Break")
+                || cuts[0]["hint"].as_str().unwrap().contains("Extract")
         );
     }
 }

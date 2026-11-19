@@ -672,7 +672,7 @@ pub(crate) fn declarations_named_in(
     out
 }
 
-fn names_declaration(text: &str, name: &str) -> bool {
+pub(crate) fn names_declaration(text: &str, name: &str) -> bool {
     let distinctive = name.contains('_')
         || name.chars().any(|c| c.is_ascii_digit())
         || (name.chars().any(|c| c.is_ascii_uppercase())

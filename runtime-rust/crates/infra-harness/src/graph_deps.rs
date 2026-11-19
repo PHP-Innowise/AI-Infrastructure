@@ -1,10 +1,10 @@
 //! Pure static AST-backed source dependency extraction, declaration diffing, re-export propagation, and reference matching.
 use crate::{
-    graph_ast::{AstFileExtraction, AstRef, GRAPH_MANIFEST_FILES, parse_file_ir},
+    graph_ast::{AstFileExtraction, AstRef, is_graph_manifest_path, parse_file_ir},
     graph_crates::CratePackageMap,
     graph_live::{
-        CreatedEntity, ExtractedDecl, Language, clean_rel_key, detect_language,
-        extract_declaration_spans, folder_of, is_ident_char,
+        CreatedEntity, ExtractedDecl, Language, clean_rel_key, detect_language, folder_of,
+        is_ident_char,
     },
     graph_manifests::{ManifestIndex, join_rel},
 };
@@ -55,7 +55,7 @@ fn manifest_stamp_for_root(canon_root: &Path, known_files: &BTreeSet<String>) ->
             let Some(name_str) = name.to_str() else {
                 continue;
             };
-            if !GRAPH_MANIFEST_FILES.contains(&name_str.to_ascii_lowercase().as_str()) {
+            if !is_graph_manifest_path(Path::new(name_str)) {
                 continue;
             }
             if let Ok(meta) = fs::symlink_metadata(entry.path())
@@ -73,7 +73,7 @@ fn manifest_stamp_for_root(canon_root: &Path, known_files: &BTreeSet<String>) ->
     }
     for rel in known_files {
         let leaf = rel.rsplit('/').next().unwrap_or(rel);
-        if GRAPH_MANIFEST_FILES.contains(&leaf.to_ascii_lowercase().as_str())
+        if is_graph_manifest_path(Path::new(leaf))
             && rel.contains('/')
             && let Ok(meta) = fs::symlink_metadata(canon_root.join(rel))
             && !meta.file_type().is_symlink()
@@ -347,6 +347,7 @@ pub(crate) fn extract_declared_members(rel_path: &str, source: &str) -> Vec<Decl
 }
 
 /// Computes created, modified, and deleted declarations between `before` and `after`.
+#[cfg(test)]
 pub(crate) fn diff_entities(
     rel_path: &str,
     before: Option<&str>,
@@ -356,16 +357,27 @@ pub(crate) fn diff_entities(
     if rel.is_empty() || detect_language(&rel).is_none() {
         return Vec::new();
     }
+    let before_ir = before.and_then(|src| parse_file_ir(&rel, src));
+    let after_ir = after.and_then(|src| parse_file_ir(&rel, src));
+    diff_entities_from_ir(&rel, before_ir.as_ref(), after_ir.as_ref())
+}
 
-    let before_decls = before
-        .map(|src| extract_declaration_spans(&rel, src))
-        .unwrap_or_default();
-    let after_decls = after
-        .map(|src| extract_declaration_spans(&rel, src))
-        .unwrap_or_default();
+/// Computes created, modified, and deleted declarations from pre-parsed `AstFileExtraction` records.
+pub(crate) fn diff_entities_from_ir(
+    rel_path: &str,
+    before_ir: Option<&AstFileExtraction>,
+    after_ir: Option<&AstFileExtraction>,
+) -> Vec<EntityChange> {
+    let rel = clean_rel_key(rel_path);
+    if rel.is_empty() || detect_language(&rel).is_none() {
+        return Vec::new();
+    }
+
+    let before_decls: &[ExtractedDecl] = before_ir.map_or(&[], |ir| ir.declarations.as_slice());
+    let after_decls: &[ExtractedDecl] = after_ir.map_or(&[], |ir| ir.declarations.as_slice());
 
     type DeclKey = (String, Option<String>, String);
-    let mut before_by_key: BTreeMap<DeclKey, Vec<ExtractedDecl>> = BTreeMap::new();
+    let mut before_by_key: BTreeMap<DeclKey, Vec<&ExtractedDecl>> = BTreeMap::new();
     for decl in before_decls {
         let key = (
             decl.entity.kind.clone(),
@@ -379,7 +391,7 @@ pub(crate) fn diff_entities(
         .iter()
         .map(|(k, v)| (k.clone(), vec![false; v.len()]))
         .collect();
-    let mut unmatched_after: Vec<(DeclKey, ExtractedDecl)> = Vec::new();
+    let mut unmatched_after: Vec<(DeclKey, &ExtractedDecl)> = Vec::new();
 
     // Match exact unchanged declarations first so overload insertions/reorders do not produce noise.
     for decl in after_decls {
@@ -413,7 +425,7 @@ pub(crate) fn diff_entities(
             && let Some(pos) = used.iter().position(|flag| !*flag)
         {
             used[pos] = true;
-            let prev = &prev_list[pos];
+            let prev = prev_list[pos];
             let sig_changed = prev.params_signature != decl.params_signature;
             let vis_changed = prev.visibility != decl.visibility;
             let vis_narrowed =
@@ -454,11 +466,11 @@ pub(crate) fn diff_entities(
                     "deleted",
                     &prev.entity,
                     false,
-                    prev.visibility,
+                    prev.visibility.clone(),
                     None,
                     false,
                     false,
-                    prev.modifiers,
+                    prev.modifiers.clone(),
                     &mut seen_ids,
                 ));
             }
@@ -835,6 +847,7 @@ pub(crate) fn diff_file_deps(
 }
 
 /// Context-aware version of `diff_file_deps` sharing prebuilt `ManifestIndex`/`ReexportIndex`/`CratePackageMap`.
+#[cfg(test)]
 pub(crate) fn diff_file_deps_with_context(
     rel_path: &str,
     before: Option<&str>,
@@ -844,11 +857,42 @@ pub(crate) fn diff_file_deps_with_context(
     reexports_opt: Option<&ReexportIndex>,
     crate_map_opt: Option<&CratePackageMap>,
 ) -> DepDiff {
-    let before_deps = before
-        .map(|src| {
-            extract_file_deps_with_context(
+    let rel = clean_rel_key(rel_path);
+    if rel.is_empty() {
+        return DepDiff::default();
+    }
+    let before_ir = before
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|src| parse_file_ir(&rel, src));
+    let after_ir = after
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|src| parse_file_ir(&rel, src));
+    diff_file_deps_from_ir(
+        &rel,
+        before_ir.as_ref(),
+        after_ir.as_ref(),
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+    )
+}
+
+/// Computes a file's dependency diff from pre-parsed `AstFileExtraction` records without re-parsing.
+pub(crate) fn diff_file_deps_from_ir(
+    rel_path: &str,
+    before_ir: Option<&AstFileExtraction>,
+    after_ir: Option<&AstFileExtraction>,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> DepDiff {
+    let before_deps = before_ir
+        .map(|ir| {
+            extract_file_deps_from_ir(
                 rel_path,
-                src,
+                ir,
                 known_files,
                 manifests_opt,
                 reexports_opt,
@@ -856,11 +900,11 @@ pub(crate) fn diff_file_deps_with_context(
             )
         })
         .unwrap_or_default();
-    let after_deps = after
-        .map(|src| {
-            extract_file_deps_with_context(
+    let after_deps = after_ir
+        .map(|ir| {
+            extract_file_deps_from_ir(
                 rel_path,
-                src,
+                ir,
                 known_files,
                 manifests_opt,
                 reexports_opt,
@@ -3028,6 +3072,8 @@ fn resolve_python_candidates(base: &str, lookup: &KnownLookup) -> Option<String>
 // 5. Go, Java/Kotlin/Scala, C#, Ruby, Swift AST Resolution
 // =========================================================================
 
+const MAX_GO_PACKAGE_FILES: usize = 8;
+
 fn resolve_go_ir(
     rel_path: &str,
     ir: &AstFileExtraction,
@@ -3036,50 +3082,78 @@ fn resolve_go_ir(
     acc: &mut DepAccumulator,
 ) {
     let dir = folder_of(rel_path);
-    let mut pkg_aliases: BTreeMap<String, String> = BTreeMap::new();
+    let mut pkg_aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for imp in &ir.imports {
-        let resolved = manifests_opt
-            .and_then(|m| m.resolve_go_import(&imp.path, lookup.known_files))
-            .or_else(|| resolve_go_package_suffix(&imp.path, lookup));
+        let mut pkg_files = manifests_opt
+            .map(|m| m.resolve_go_import_files(&imp.path, lookup.known_files))
+            .unwrap_or_default();
+        if pkg_files.is_empty() {
+            pkg_files = resolve_go_package_suffix_files(&imp.path, lookup);
+        }
         let pkg_name = imp
             .alias
             .clone()
             .or_else(|| imp.symbols.first().cloned())
             .unwrap_or_else(|| imp.path.rsplit('/').next().unwrap_or(&imp.path).to_owned());
-        match resolved {
-            Some(t) => {
-                pkg_aliases.insert(pkg_name.clone(), t.clone());
-                acc.add_resolved(t, "imports", &[&pkg_name], imp.line, &imp.evidence);
+        if pkg_files.is_empty() {
+            acc.add_unresolved(&imp.path, "imports", &[&pkg_name], imp.line, &imp.evidence);
+        } else {
+            pkg_files.truncate(MAX_GO_PACKAGE_FILES);
+            for t in &pkg_files {
+                acc.add_resolved(t.clone(), "imports", &[&pkg_name], imp.line, &imp.evidence);
             }
-            None => acc.add_unresolved(&imp.path, "imports", &[&pkg_name], imp.line, &imp.evidence),
+            pkg_aliases.insert(pkg_name, pkg_files);
         }
     }
     for r in &ir.calls_and_refs {
-        let target = pkg_aliases
-            .get(&r.target_name)
-            .cloned()
-            .or_else(|| lookup.resolve_stem_in_dir(&dir, &r.target_name, GO_EXTS));
-        if let Some(t) = target {
+        let targets = if let Some(pkg_files) = pkg_aliases.get(&r.target_name) {
+            if let Some(ref mem) = r.member {
+                let mem_lower = mem.to_ascii_lowercase();
+                let narrowed: Vec<String> = pkg_files
+                    .iter()
+                    .filter(|p| {
+                        let stem = file_stem(p).to_ascii_lowercase();
+                        !stem.is_empty() && (mem_lower.contains(&stem) || stem.contains(&mem_lower))
+                    })
+                    .cloned()
+                    .collect();
+                if narrowed.is_empty() {
+                    pkg_files.clone()
+                } else {
+                    narrowed
+                }
+            } else {
+                pkg_files.clone()
+            }
+        } else {
+            lookup
+                .resolve_stem_in_dir(&dir, &r.target_name, GO_EXTS)
+                .into_iter()
+                .collect()
+        };
+        if !targets.is_empty() {
             let (dep_kind, members) =
                 ref_dep_kind_and_member(r, &r.target_name, "field", None, false);
             let mut syms = vec![r.target_name.as_str()];
             if let Some(ref mem) = r.member {
                 syms.push(mem.as_str());
             }
-            acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+            for t in targets {
+                acc.add_resolved_members(t, dep_kind, &syms, &members, r.line, &r.evidence);
+            }
         }
     }
 }
 
-fn resolve_go_package_suffix(import_path: &str, lookup: &KnownLookup) -> Option<String> {
+fn resolve_go_package_suffix_files(import_path: &str, lookup: &KnownLookup) -> Vec<String> {
     let cleaned = clean_rel_key(import_path);
     if cleaned.is_empty() {
-        return None;
+        return Vec::new();
     }
     let segs: Vec<&str> = cleaned.split('/').filter(|s| !s.is_empty()).collect();
     for start in 0..segs.len() {
         let sub_dir = segs[start..].join("/");
-        let matches: Vec<String> = lookup
+        let mut matches: Vec<String> = lookup
             .all_entries
             .iter()
             .filter(|(_, c, _)| {
@@ -3088,11 +3162,20 @@ fn resolve_go_package_suffix(import_path: &str, lookup: &KnownLookup) -> Option<
             })
             .map(|(orig, _, _)| orig.clone())
             .collect();
-        if let Some(best) = pick_best_candidate(&matches) {
-            return Some(best);
+        matches.sort();
+        let non_test: Vec<String> = matches
+            .iter()
+            .filter(|p| !p.ends_with("_test.go"))
+            .cloned()
+            .collect();
+        if !non_test.is_empty() {
+            return non_test;
+        }
+        if !matches.is_empty() {
+            return matches;
         }
     }
-    None
+    Vec::new()
 }
 
 fn resolve_jvm_ir(
@@ -4376,6 +4459,61 @@ class Caller {
             scala_deps
                 .iter()
                 .any(|d| d.target == "src/main/scala/acme/security/Signer.scala" && d.resolved)
+        );
+    }
+
+    #[test]
+    fn go_package_imports_resolve_all_non_test_files_and_prioritize_member_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("internal/auth")).unwrap();
+        std::fs::create_dir_all(root.join("cmd")).unwrap();
+        std::fs::write(
+            root.join("go.mod"),
+            "module github.com/acme/repo\n\ngo 1.23\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("internal/auth/guard.go"),
+            "package auth\nfunc Guard() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("internal/auth/verify.go"),
+            "package auth\nfunc Verify() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("internal/auth/verify_test.go"),
+            "package auth\nfunc TestVerify() {}\n",
+        )
+        .unwrap();
+
+        let known = BTreeSet::from([
+            "go.mod".to_owned(),
+            "internal/auth/guard.go".to_owned(),
+            "internal/auth/verify.go".to_owned(),
+            "internal/auth/verify_test.go".to_owned(),
+            "cmd/main.go".to_owned(),
+        ]);
+        let manifests = ManifestIndex::from_root(root);
+        let deps = extract_file_deps_with_manifests(
+            "cmd/main.go",
+            "package main\nimport \"github.com/acme/repo/internal/auth\"\nfunc main() { auth.Verify() }\n",
+            &known,
+            Some(&manifests),
+            None,
+        );
+        let targets: BTreeSet<&str> = deps
+            .iter()
+            .filter(|d| d.resolved)
+            .map(|d| d.target.as_str())
+            .collect();
+        assert!(targets.contains("internal/auth/guard.go"), "{deps:?}");
+        assert!(targets.contains("internal/auth/verify.go"), "{deps:?}");
+        assert!(
+            !targets.contains("internal/auth/verify_test.go"),
+            "{deps:?}"
         );
     }
 }

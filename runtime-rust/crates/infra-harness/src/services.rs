@@ -25,29 +25,40 @@ pub trait Services: Send + Sync {
 }
 
 fn ensure_graph_event_bridge(store: &SessionStore) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
     if !store.stream().claim_graph_bridge() {
         return;
     }
     let mut rx = crate::graph::subscribe_graph_events();
     let store = store.clone();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) => {
-                        if ev.state_dir == store.state {
-                            let pid = ev.project_id.clone();
-                            if let Ok(val) = serde_json::to_value(&ev) {
-                                store.publish_event("graph_status", None, Some(pid), val);
-                            }
+    handle.spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if ev.state_dir == store.state {
+                        let pid = ev.project_id.clone();
+                        if let Ok(val) = serde_json::to_value(&ev) {
+                            store.publish_event("graph_status", None, Some(pid), val);
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    store.publish_event(
+                        "resync",
+                        None,
+                        None,
+                        json!({
+                            "reason": "graph_bridge_lagged",
+                            "skipped": skipped,
+                        }),
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
-        });
-    }
+        }
+    });
 }
 pub trait Domain: Send + Sync {
     fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a>;
@@ -522,11 +533,75 @@ impl NativeServices {
                 if ev.get("reason").is_none() {
                     ev["reason"] = json!(body["action"].as_str().unwrap_or("graph_act"));
                 }
-                if ev.get("revision").is_none() {
-                    ev["revision"] = json!(0);
+                if ev.get("revision").is_none()
+                    && let Some(ir_rev) = val.get("ir_revision").and_then(Value::as_u64)
+                {
+                    ev["revision"] = json!(ir_rev);
                 }
                 self.store
                     .publish_event("graph_status", None, Some(project_id), ev);
+            }
+            "system_graph.act" | "system_graph.service_act" => {
+                let project_id = val["project_id"]
+                    .as_str()
+                    .or_else(|| params["project_id"].as_str())
+                    .or_else(|| body["project_id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let action = body["action"].as_str().unwrap_or("updated");
+                let service = val["service"]
+                    .as_str()
+                    .or_else(|| body["service"].as_str())
+                    .filter(|s| !s.is_empty());
+                let state = val["state"].as_str().unwrap_or(action);
+                let mut ev = json!({
+                    "project_id": project_id,
+                    "service": service,
+                    "config_path": val.get("config_path").cloned().unwrap_or_else(|| body["config_path"].clone()),
+                    "state": state,
+                    "action": action,
+                    "reason": action,
+                });
+                if let Some(rev) = val.get("ir_revision").and_then(Value::as_u64) {
+                    ev["ir_revision"] = json!(rev);
+                }
+                self.store
+                    .publish_event("system_graph_status", None, project_id, ev);
+            }
+            "omnigraph.setup"
+            | "omnigraph.branch_act"
+            | "omnigraph.publish"
+            | "omnigraph.import"
+            | "omnigraph.sync_knowledge"
+            | "omnigraph.promote" => {
+                let project_id = val["project_id"]
+                    .as_str()
+                    .or_else(|| params["project_id"].as_str())
+                    .or_else(|| body["project_id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let branch = val["branch"]
+                    .as_str()
+                    .or_else(|| body["branch"].as_str())
+                    .or_else(|| body["target_branch"].as_str())
+                    .filter(|s| !s.is_empty());
+                let state = val["state"].as_str().unwrap_or("updated");
+                let sid = body["session_id"]
+                    .as_str()
+                    .or_else(|| val["session"]["id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                self.store.publish_event(
+                    "omnigraph_status",
+                    sid,
+                    project_id.clone(),
+                    json!({
+                        "project_id": project_id,
+                        "branch": branch,
+                        "operation": operation,
+                        "state": state,
+                    }),
+                );
             }
             _ => {}
         }
@@ -824,6 +899,7 @@ impl Services for NativeServices {
         Some(self.store.stream().subscribe(last_event_id))
     }
     fn request<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
+        ensure_graph_event_bridge(&self.store);
         Box::pin(async move {
             let params = &request["params"];
             let query = &request["query"];
@@ -2575,6 +2651,96 @@ mod tests {
         assert_eq!(f3.event, "results_check");
         assert_eq!(f3.data["check_id"], "chk-legacy");
         assert_eq!(f3.data["status"], "passed");
+
+        services.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn domain_mutation_sse_emits_real_revisions_and_sys_omni_events() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let mut rx = match store.stream().subscribe(None) {
+            crate::store::ReplayStart::Frames { rx, .. } => rx,
+            _ => panic!("expected Frames subscriber"),
+        };
+        let stub: Arc<dyn Domain> = Arc::new(StubDomain);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "knowledge",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "omnigraph",
+            "delivery",
+            "results",
+            "graph",
+            "system_graph",
+        ]
+        .into_iter()
+        .map(|k| (k.to_owned(), Arc::clone(&stub)))
+        .collect();
+        let _ = &mut domains;
+        let services = NativeServices::new(
+            store,
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap();
+
+        services.emit_domain_mutation_sse(
+            "graph.act",
+            &json!({"project_id": "p1"}),
+            &json!({"action": "rebuild"}),
+            &Payload::Json(json!({"state": "building", "ir_revision": 7})),
+        );
+        let f1 = rx.recv().await.unwrap();
+        assert_eq!(f1.event, "graph_status");
+        assert_eq!(f1.data["ir_revision"], 7);
+        assert_eq!(f1.data["revision"], 7);
+
+        services.emit_domain_mutation_sse(
+            "graph.act",
+            &json!({"project_id": "p1"}),
+            &json!({"action": "refresh"}),
+            &Payload::Json(json!({"state": "ready"})),
+        );
+        let f1_norev = rx.recv().await.unwrap();
+        assert_eq!(f1_norev.event, "graph_status");
+        assert!(f1_norev.data.get("revision").is_none());
+
+        services.emit_domain_mutation_sse(
+            "system_graph.act",
+            &json!({"project_id": "p1"}),
+            &json!({"action": "enable"}),
+            &Payload::Json(json!({"state": "ready"})),
+        );
+        let f2 = rx.recv().await.unwrap();
+        assert_eq!(f2.event, "system_graph_status");
+        assert_eq!(f2.project_id.as_deref(), Some("p1"));
+        assert_eq!(f2.data["action"], "enable");
+
+        services.emit_domain_mutation_sse(
+            "omnigraph.publish",
+            &json!({}),
+            &json!({"project_id": "p1", "branch": "main"}),
+            &Payload::Json(json!({"project_id": "p1", "atom_id": "a1"})),
+        );
+        let f3 = rx.recv().await.unwrap();
+        assert_eq!(f3.event, "omnigraph_status");
+        assert_eq!(f3.data["operation"], "omnigraph.publish");
 
         services.close().await.unwrap();
     }

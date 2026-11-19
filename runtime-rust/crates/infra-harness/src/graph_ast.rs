@@ -41,6 +41,10 @@ pub(crate) enum AstGrammar {
 
 impl AstGrammar {
     pub(crate) fn from_rel_path(rel_path: &str) -> Option<Self> {
+        let leaf = rel_path.rsplit('/').next().unwrap_or(rel_path);
+        if leaf.to_ascii_lowercase().ends_with(".blade.php") {
+            return None;
+        }
         let ext = rel_path.rsplit_once('.')?.1.to_ascii_lowercase();
         match ext.as_str() {
             "php" | "phtml" | "inc" => Some(Self::Php),
@@ -321,6 +325,8 @@ pub(crate) fn is_graph_manifest_path(path: &Path) -> bool {
         .is_some_and(|name| {
             let lower = name.to_ascii_lowercase();
             GRAPH_MANIFEST_FILES.contains(&lower.as_str())
+                || ((lower.starts_with("tsconfig.") || lower.starts_with("jsconfig."))
+                    && lower.ends_with(".json"))
         })
 }
 
@@ -331,23 +337,77 @@ pub(crate) fn is_graph_architecture_path(path: &Path) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(GRAPH_ARCHITECTURE_FILE))
 }
 
-/// Filters `notify::Event` paths to code files, dependency manifests, and `.harness-architecture.json`.
+fn path_in_ignored_dir(path: &Path) -> bool {
+    let mut prev = String::new();
+    for comp in path.components() {
+        if let std::path::Component::Normal(raw) = comp
+            && let Some(name) = raw.to_str()
+        {
+            if matches!(
+                name,
+                ".git"
+                    | ".hg"
+                    | ".svn"
+                    | "graphify-out"
+                    | "node_modules"
+                    | "vendor"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+                    | ".next"
+                    | ".nuxt"
+                    | ".cargo"
+                    | ".cache"
+                    | ".pytest_cache"
+                    | ".mypy_cache"
+                    | ".idea"
+                    | ".vscode"
+                    | ".c2p"
+            ) {
+                return true;
+            }
+            if prev == "memory-bank" && name == "local" {
+                return true;
+            }
+            prev = name.to_owned();
+        }
+    }
+    false
+}
+
+/// Filters `notify::Event` paths to code files, dependency manifests, `.harness-architecture.json`,
+/// and non-ignored directory events (create/remove/rename) so directory deletes/renames are tracked.
 pub(crate) fn notify_event_touches_code(event: &notify::Event) -> Vec<PathBuf> {
-    use notify::EventKind;
+    use notify::{EventKind, event::ModifyKind};
     if !matches!(
         event.kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
     ) {
         return Vec::new();
     }
+    let dir_capable = matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+    );
     event
         .paths
         .iter()
         .filter(|path| {
-            path.to_str()
+            if path_in_ignored_dir(path) {
+                return false;
+            }
+            if path
+                .to_str()
                 .is_some_and(|s| AstGrammar::from_rel_path(s).is_some())
                 || is_graph_manifest_path(path)
                 || is_graph_architecture_path(path)
+            {
+                return true;
+            }
+            dir_capable && (path.extension().is_none() || path.is_dir())
         })
         .cloned()
         .collect()
@@ -875,21 +935,120 @@ fn emit_sql_table_edges(
     let has_select = contains_sql_verb(&upper, "SELECT") && contains_sql_verb(&upper, "FROM");
     let has_insert = contains_sql_verb(&upper, "INSERT") && contains_sql_verb(&upper, "INTO");
     let has_replace = contains_sql_verb(&upper, "REPLACE") && contains_sql_verb(&upper, "INTO");
+    let has_merge = contains_sql_verb(&upper, "MERGE") && contains_sql_verb(&upper, "INTO");
     let has_update = contains_sql_verb(&upper, "UPDATE") && contains_sql_verb(&upper, "SET");
     let has_delete = contains_sql_verb(&upper, "DELETE") && contains_sql_verb(&upper, "FROM");
-    if !(has_select || has_insert || has_replace || has_update || has_delete) {
+    let has_truncate = contains_sql_verb(&upper, "TRUNCATE");
+    if !(has_select
+        || has_insert
+        || has_replace
+        || has_merge
+        || has_update
+        || has_delete
+        || has_truncate)
+    {
         return;
     }
 
-    let tokens: Vec<&str> = sql
-        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';'))
-        .filter(|s| !s.is_empty())
-        .collect();
-
+    let tokens = tokenize_sql(sql);
+    let mut cte_names: BTreeSet<String> = BTreeSet::new();
     for i in 0..tokens.len() {
+        let up = tokens[i].to_ascii_uppercase();
+        if up == "WITH" {
+            let mut j = i + 1;
+            if tokens
+                .get(j)
+                .is_some_and(|t| t.eq_ignore_ascii_case("RECURSIVE"))
+            {
+                j += 1;
+            }
+            if let Some(name) = tokens.get(j).and_then(|t| clean_sql_table_name(t))
+                && tokens
+                    .get(j + 1)
+                    .is_some_and(|t| t.eq_ignore_ascii_case("AS"))
+            {
+                cte_names.insert(name.to_ascii_lowercase());
+            }
+        } else if up == ","
+            && let Some(name) = tokens.get(i + 1).and_then(|t| clean_sql_table_name(t))
+            && tokens
+                .get(i + 2)
+                .is_some_and(|t| t.eq_ignore_ascii_case("AS"))
+            && tokens.get(i + 3).is_some_and(|t| *t == "(")
+        {
+            cte_names.insert(name.to_ascii_lowercase());
+        }
+    }
+
+    let mut i = 0;
+    while i < tokens.len() {
         let tok_up = tokens[i].to_ascii_uppercase();
-        if (tok_up == "FROM" && (has_select || has_delete)) || (tok_up == "JOIN" && has_select) {
-            if let Some(tbl) = tokens.get(i + 1).and_then(|t| clean_sql_table_name(t)) {
+        if tok_up == "FROM" && (has_select || has_delete) {
+            let mut j = i + 1;
+            let mut expect_table = true;
+            while j < tokens.len() {
+                let raw = tokens[j];
+                let up = raw.to_ascii_uppercase();
+                if matches!(
+                    up.as_str(),
+                    "WHERE"
+                        | "JOIN"
+                        | "INNER"
+                        | "LEFT"
+                        | "RIGHT"
+                        | "FULL"
+                        | "OUTER"
+                        | "CROSS"
+                        | "NATURAL"
+                        | "ON"
+                        | "USING"
+                        | "GROUP"
+                        | "ORDER"
+                        | "HAVING"
+                        | "LIMIT"
+                        | "OFFSET"
+                        | "UNION"
+                        | "EXCEPT"
+                        | "INTERSECT"
+                        | "SET"
+                        | "VALUES"
+                        | "RETURNING"
+                        | "WINDOW"
+                        | "FOR"
+                        | ")"
+                        | ";"
+                ) {
+                    break;
+                }
+                if raw == "," {
+                    expect_table = true;
+                    j += 1;
+                    continue;
+                }
+                if raw == "(" {
+                    // Derived table subquery `(SELECT ...)`: let outer loop scan inside.
+                    break;
+                }
+                if expect_table && let Some(tbl) = clean_sql_table_name(raw) {
+                    if !cte_names.contains(&tbl.to_ascii_lowercase()) {
+                        ctx.push_semantic(
+                            "reads_table",
+                            format!("table:{tbl}"),
+                            source_symbol.clone(),
+                            line,
+                            sql,
+                        );
+                    }
+                    expect_table = false;
+                }
+                j += 1;
+            }
+            i = j;
+            continue;
+        } else if tok_up == "JOIN" && has_select {
+            if let Some(tbl) = tokens.get(i + 1).and_then(|t| clean_sql_table_name(t))
+                && !cte_names.contains(&tbl.to_ascii_lowercase())
+            {
                 ctx.push_semantic(
                     "reads_table",
                     format!("table:{tbl}"),
@@ -898,9 +1057,10 @@ fn emit_sql_table_edges(
                     sql,
                 );
             }
-        } else if ((tok_up == "INTO" && (has_insert || has_replace))
+        } else if ((tok_up == "INTO" && (has_insert || has_replace || has_merge))
             || (tok_up == "UPDATE" && has_update))
             && let Some(tbl) = tokens.get(i + 1).and_then(|t| clean_sql_table_name(t))
+            && !cte_names.contains(&tbl.to_ascii_lowercase())
         {
             ctx.push_semantic(
                 "writes_table",
@@ -909,8 +1069,54 @@ fn emit_sql_table_edges(
                 line,
                 sql,
             );
+        } else if tok_up == "TRUNCATE" && has_truncate {
+            let next_idx = if tokens
+                .get(i + 1)
+                .is_some_and(|t| t.eq_ignore_ascii_case("TABLE"))
+            {
+                i + 2
+            } else {
+                i + 1
+            };
+            if let Some(tbl) = tokens.get(next_idx).and_then(|t| clean_sql_table_name(t)) {
+                ctx.push_semantic(
+                    "writes_table",
+                    format!("table:{tbl}"),
+                    source_symbol.clone(),
+                    line,
+                    sql,
+                );
+            }
         }
+        i += 1;
     }
+}
+
+fn tokenize_sql(sql: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if matches!(ch, b',' | b'(' | b')' | b';') {
+            out.push(&sql[i..i + 1]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && !matches!(bytes[i], b',' | b'(' | b')' | b';')
+        {
+            i += 1;
+        }
+        out.push(&sql[start..i]);
+    }
+    out
 }
 
 fn contains_sql_verb(upper: &str, verb: &str) -> bool {
@@ -8145,5 +8351,71 @@ mod tests {
             "expected #[cfg(test)] span in {:?}",
             rs_ir.declarations
         );
+    }
+
+    #[test]
+    fn watcher_dir_events_sql_cte_joins_and_blade_exclusion_work() {
+        use notify::{
+            Event, EventKind,
+            event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
+        };
+
+        assert!(AstGrammar::from_rel_path("resources/views/home.blade.php").is_none());
+
+        let ev_dir_rm = Event::new(EventKind::Remove(RemoveKind::Folder))
+            .add_path(PathBuf::from("/proj/src/legacy"))
+            .add_path(PathBuf::from("/proj/target/debug"));
+        let kept_rm = notify_event_touches_code(&ev_dir_rm);
+        assert_eq!(kept_rm, vec![PathBuf::from("/proj/src/legacy")]);
+
+        let ev_dir_rename = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(PathBuf::from("/proj/src/old_mod"))
+            .add_path(PathBuf::from("/proj/src/new_mod"))
+            .add_path(PathBuf::from("/proj/node_modules/pkg"));
+        let kept_mv = notify_event_touches_code(&ev_dir_rename);
+        assert_eq!(
+            kept_mv,
+            vec![
+                PathBuf::from("/proj/src/old_mod"),
+                PathBuf::from("/proj/src/new_mod"),
+            ]
+        );
+
+        let ev_dir_add = Event::new(EventKind::Create(CreateKind::Folder))
+            .add_path(PathBuf::from("/proj/src/feature"));
+        assert_eq!(
+            notify_event_touches_code(&ev_dir_add),
+            vec![PathBuf::from("/proj/src/feature")]
+        );
+
+        let php_sql = r#"<?php
+class ReportRepo {
+    public function run($db) {
+        return $db->query("WITH recent_orders AS (SELECT * FROM invoices) SELECT o.id FROM recent_orders, payments p JOIN customers c ON c.id = o.customer_id; MERGE INTO audit_log t USING invoices s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = 1; TRUNCATE TABLE temp_queue");
+    }
+}
+"#;
+        let ir = parse_file_ir("src/ReportRepo.php", php_sql).expect("php sql ir");
+        let reads: Vec<&str> = ir
+            .semantic_edges
+            .iter()
+            .filter(|e| e.kind == "reads_table")
+            .map(|e| e.target.as_str())
+            .collect();
+        let writes: Vec<&str> = ir
+            .semantic_edges
+            .iter()
+            .filter(|e| e.kind == "writes_table")
+            .map(|e| e.target.as_str())
+            .collect();
+        assert!(reads.contains(&"table:invoices"), "{reads:?}");
+        assert!(reads.contains(&"table:payments"), "{reads:?}");
+        assert!(reads.contains(&"table:customers"), "{reads:?}");
+        assert!(
+            !reads.contains(&"table:recent_orders"),
+            "CTE alias should not emit table read: {reads:?}"
+        );
+        assert!(writes.contains(&"table:audit_log"), "{writes:?}");
+        assert!(writes.contains(&"table:temp_queue"), "{writes:?}");
     }
 }

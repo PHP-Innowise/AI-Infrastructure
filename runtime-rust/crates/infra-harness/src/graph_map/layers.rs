@@ -249,6 +249,40 @@ pub(super) const TELLS: [&str; 2] = [
     "Files filed as entry points, services, data access and model by their names and folders. A layer may use those after it; a link back runs against their order. Counted: calls, inheritance and the types of fields, parameters and results.",
     "Files filed by the ring they lie in: adapters outside, then the application, then the domain at the heart. A ring may use those inside it; a link out of an inner ring runs against their order. Counted: calls, inheritance and the types of fields, parameters and results.",
 ];
+/// Computes minimal cut / decoupling remediation hints for forbidden layer edges.
+fn layer_remediation_hints<'a>(
+    items: impl Iterator<Item = (&'a str, &'a str, &'a str, &'a str, Flow)>,
+) -> Vec<Value> {
+    let mut rows: Vec<_> = items.collect();
+    rows.sort_by(|a, b| {
+        a.4.links
+            .cmp(&b.4.links)
+            .then(a.4.guessed.cmp(&b.4.guessed))
+            .then(a.0.cmp(b.0))
+            .then(a.1.cmp(b.1))
+    });
+    rows.into_iter()
+        .take(6)
+        .map(|(from_path, to_path, from_layer, to_layer, flow)| {
+            json!({
+                "from": from_path,
+                "to": to_path,
+                "from_layer": from_layer,
+                "to_layer": to_layer,
+                "links": flow.links,
+                "weight": flow.links,
+                "guessed": flow.guessed,
+                "hint": format!(
+                    "Invert {from_layer} -> {to_layer}: move {} behind a {from_layer} port/interface consumed by {} ({} link{}).",
+                    name(to_path),
+                    name(from_path),
+                    flow.links,
+                    if flow.links == 1 { "" } else { "s" }
+                ),
+            })
+        })
+        .collect()
+}
 /// Whether a file is code a layer can hold: no test, and no template that
 /// only wears the ending of a language, as `home.blade.php` does.
 /// The layer the project's rules file a file in. As with the layers read
@@ -707,6 +741,7 @@ impl Index {
         let mut violations = Vec::new();
         let mut violation_links = 0;
         let mut marked = HashMap::new();
+        let mut violating_edges: Vec<(&str, &str, &str, &str, Flow)> = Vec::new();
         for &(from, to, ref edge) in &way.cross {
             let flow = edge.flow;
             let (a, b) = (from as usize, to as usize);
@@ -721,6 +756,13 @@ impl Index {
             if forbidden(from_layer, to_layer) {
                 marked.insert((source.as_str(), target.as_str()), flow.links);
                 violation_links += flow.links;
+                violating_edges.push((
+                    source.as_str(),
+                    target.as_str(),
+                    table[from_layer].1,
+                    table[to_layer].1,
+                    flow,
+                ));
                 if violations.len() < LISTED {
                     let end = |path: &str, layer: usize| json!({"path":path, "name":name(path), "layer":table[layer].1});
                     violations.push(json!({"from":end(source, from_layer), "to":end(target, to_layer), "links":flow.links, "guessed":flow.guessed}));
@@ -872,12 +914,14 @@ impl Index {
                 edge["architecture_violation"] = json!(links);
             }
         }
+        let remediation = layer_remediation_hints(violating_edges.into_iter());
         view["architecture"] = json!({
             "declared":rules.is_some(),
             "layers":visible.into_iter().map(layer_json).collect::<Vec<_>>(),
             "kept":kept,
             "violations":{"links":violation_links, "pairs":marked.len(),
                 "more":marked.len().saturating_sub(violations.len()), "rows":violations},
+            "remediation": remediation,
             "reciprocal_total":reciprocal.len(),
             "reciprocal":reciprocal.into_iter().take(LISTED).collect::<Vec<_>>(),
         });
@@ -1023,6 +1067,13 @@ impl Held {
                         .collect::<Vec<_>>(),
                     "more": against.len().saturating_sub(LISTED),
                 },
+                "remediation": layer_remediation_hints(against.iter().map(|&&(from, to, flow)| (
+                    index.files[from as usize].as_str(),
+                    index.files[to as usize].as_str(),
+                    table[of[from as usize] as usize].name,
+                    table[of[to as usize] as usize].name,
+                    flow,
+                ))),
             },
             "nodes": present.iter().map(|layer| node(*layer)).collect::<Vec<_>>(),
             "edges": present
