@@ -519,9 +519,17 @@ pub(super) fn compute_canvas_selection_patch(
             }
         }
         let edge_state = if has_traced_path {
-            if on_traced { "on" } else { "off" }
+            if on_traced {
+                "on"
+            } else {
+                "off"
+            }
         } else if sel.cycle_view || sel.selected {
-            if is_lit { "on" } else { "off" }
+            if is_lit {
+                "on"
+            } else {
+                "off"
+            }
         } else {
             ""
         };
@@ -614,7 +622,11 @@ pub(super) fn refresh_dense_scene_for_patch(
             .is_some_and(|pe| pe.contains(&(from, to)) || pe.contains(&(to, from)));
         if let Some(ep) = patch.edges_by_pair.get(&(from, to)) {
             let edge_state = if has_traced {
-                if on_traced { "on" } else { "off" }
+                if on_traced {
+                    "on"
+                } else {
+                    "off"
+                }
             } else {
                 ep.edge_state
             };
@@ -1220,9 +1232,17 @@ pub fn canvas_with_overlays(
         let added = cycle_view && m::yes(&edge["added"]);
         let has_traced_path = overlay.path_nodes.is_some_and(|pn| !pn.is_empty());
         let edge_state = if has_traced_path {
-            if on_traced_path { "on" } else { "off" }
+            if on_traced_path {
+                "on"
+            } else {
+                "off"
+            }
         } else if cycle_view || selected {
-            if lit((from, to)) { "on" } else { "off" }
+            if lit((from, to)) {
+                "on"
+            } else {
+                "off"
+            }
         } else {
             ""
         };

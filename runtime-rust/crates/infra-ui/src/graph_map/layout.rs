@@ -1664,10 +1664,10 @@ pub fn plan_roomy(
                 stop.1 = index > 0 && straight[straight.len() - index];
             }
         }
-        let mut path = format!("M{:.1} {:.1}", stops[0].0.0, stops[0].0.1);
+        let mut path = format!("M{:.1} {:.1}", stops[0].0 .0, stops[0].0 .1);
         for pair in stops.windows(2) {
             if pair[1].1 {
-                path.push_str(&format!(" L{:.1} {:.1}", pair[1].0.0, pair[1].0.1));
+                path.push_str(&format!(" L{:.1} {:.1}", pair[1].0 .0, pair[1].0 .1));
             } else {
                 curve(&mut path, pair[0].0, pair[1].0);
             }
@@ -1867,7 +1867,11 @@ pub fn plan_row(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
             .iter()
             .filter(
                 |(_, from, to)| {
-                    if back { from > to } else { *to > from + 1 }
+                    if back {
+                        from > to
+                    } else {
+                        *to > from + 1
+                    }
                 },
             )
             .map(|(_, from, to)| (from.abs_diff(*to), *from.min(to), (*from, *to)))

@@ -1355,11 +1355,9 @@ mod tests {
         assert_eq!(layouts[0].rail_width, 38);
         assert!(layouts[0].rail_svg.contains("git-graph-dot-merge"));
         assert!(layouts[0].rail_svg.contains("git-graph-dot-inner"));
-        assert!(
-            layouts[0]
-                .rail_svg
-                .contains("d=\"M 12 18 C 12 27, 26 27, 26 36\"")
-        );
+        assert!(layouts[0]
+            .rail_svg
+            .contains("d=\"M 12 18 C 12 27, 26 27, 26 36\""));
 
         // c4 continues lane 0 while c3 passes through on lane 1.
         assert_eq!(layouts[1].lane, 0);
@@ -1368,11 +1366,9 @@ mod tests {
         // c3 is on lane 1 and curves back into c2 on lane 0.
         assert_eq!(layouts[2].lane, 1);
         assert_ne!(layouts[2].color, layouts[0].color);
-        assert!(
-            layouts[2]
-                .rail_svg
-                .contains("d=\"M 26 18 C 26 27, 12 27, 12 36\"")
-        );
+        assert!(layouts[2]
+            .rail_svg
+            .contains("d=\"M 26 18 C 26 27, 12 27, 12 36\""));
 
         // After lane 1 collapses into lane 0, c2 and c1 drop back to 1-lane width.
         assert_eq!(layouts[3].lane, 0);
@@ -1532,11 +1528,8 @@ mod tests {
         assert!(html.contains("<div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">Add DAG renderer</span><span class=\"git-graph-badges\"><span class=\"graph-pick-badge\" data-kind=\"branch\">feat/dag</span></span></div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">abcdef1</code><span class=\"git-graph-who\">Ada</span><span class=\"git-graph-when\">just now</span></div></div>"));
         assert!(html.contains("<li class=\"git-graph-row\" id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"false\" data-current=\"false\" data-action=\"graph-commit-select\""));
         assert!(html.contains("data-selected=\"true\""));
-        assert!(
-            html.ends_with(
-                "data-action=\"graph-commit-graph-more\">Show older commits</button></li>"
-            )
-        );
+        assert!(html
+            .ends_with("data-action=\"graph-commit-graph-more\">Show older commits</button></li>"));
 
         let empty_no_more =
             render_commit_graph_rows(&[], None, None, false, 0, CommitGraphSurface::Dock);
@@ -1612,10 +1605,8 @@ mod tests {
         );
         assert!(fallback.contains("deadbeef"));
         assert!(fallback.contains("Fix bug"));
-        assert!(
-            fallback
-                .contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>")
-        );
+        assert!(fallback
+            .contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>"));
     }
 
     #[test]

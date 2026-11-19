@@ -2,7 +2,7 @@
 use crate::{
     api, dom, graph::GraphTargetScope, graph_map, graph_viewport, model as m, omnigraph, session,
 };
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast;
@@ -2046,12 +2046,10 @@ mod tests {
                 "workflow"
             ]
         );
-        assert!(
-            request["prompt"]
-                .as_str()
-                .unwrap()
-                .starts_with("Explain a dependency-map node.")
-        );
+        assert!(request["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Explain a dependency-map node."));
         assert!(request["prompt"].as_str().unwrap().contains("src/Cart.php"));
     }
 
@@ -2099,12 +2097,10 @@ mod tests {
                 "services": ["orders", "inventory"],
             })
         );
-        assert!(
-            request["prompt"]
-                .as_str()
-                .unwrap()
-                .starts_with("Explain a dependency-map link.")
-        );
+        assert!(request["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Explain a dependency-map link."));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! left while Graphify builds, what the published graph covers, and a second
 //! switch for telling agents about it.
 use crate::{api, dom, model as m};
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 use wasm_bindgen_futures::spawn_local;
 
 /// Identifies whether a code-graph request targets a single registered project
@@ -1264,10 +1264,9 @@ mod tests {
             off.offer,
             "Agents can be told about the graph once it is on."
         );
-        assert!(
-            off.note
-                .starts_with("Builds a graph of this project's code")
-        );
+        assert!(off
+            .note
+            .starts_with("Builds a graph of this project's code"));
         assert!(!off.note.contains("agents"));
         assert_eq!(graph_view(&V::Null).offer, "");
     }

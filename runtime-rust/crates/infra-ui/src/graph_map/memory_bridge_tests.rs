@@ -329,21 +329,15 @@ fn declutters_secondary_overlays_into_badge_strip_preserving_data_attrs() {
     assert!(rendered.html.contains(
         "<span class=\"graph-map-node-badges\" aria-hidden=\"true\"><span class=\"graph-vis-pill\""
     ));
-    assert!(
-        rendered
-            .html
-            .contains("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>")
-    );
-    assert!(
-        rendered
-            .html
-            .contains("<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆2</span>")
-    );
-    assert!(
-        rendered
-            .html
-            .contains("<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉3</span>")
-    );
+    assert!(rendered
+        .html
+        .contains("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>"));
+    assert!(rendered
+        .html
+        .contains("<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆2</span>"));
+    assert!(rendered
+        .html
+        .contains("<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉3</span>"));
     assert!(rendered.html.contains(
         "<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span></span></button>"
     ));

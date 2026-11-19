@@ -6,11 +6,11 @@
 //! browser DOM while `wasm32-unknown-unknown` shares the exact same math.
 
 use crate::dom;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use wasm_bindgen::{JsCast, prelude::*};
+use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::Element;
 
 pub const DEFAULT_MIN_SCALE: f64 = 0.25;
