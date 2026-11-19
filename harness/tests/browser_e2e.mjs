@@ -2152,7 +2152,11 @@ async function suite6OmnigraphStudio(driver) {
     return input?.value === '' && c?.getAttribute('aria-busy') !== 'true' && count > 0;
   }, 'Omnigraph Reset filters clears query and restores constellation', 10_000);
 
-  // Pause & resume pulse toggle
+  // Pause & resume pulse toggle + Omnigraph navigation history bar present
+  await driver.waitFor(
+    () => Boolean(document.querySelector('#omni-history-bar #omni-history-back') && document.querySelector('#omni-history-bar #omni-history-forward')),
+    'Omnigraph history bar rendered',
+  );
   await driver.click('#omni-toggle-pulse');
   await driver.waitFor(
     () => document.getElementById('omnigraph-view')?.getAttribute('data-pulse-paused') === 'true'
@@ -2257,23 +2261,43 @@ async function suite7SystemMap(driver, opts) {
 
   const waveBefore = await driver.callFn(() => {
     window.__e2eWaveCanvas = document.getElementById('system-change-topology-canvas');
+    window.__e2eWaveChild = window.__e2eWaveCanvas?.firstElementChild || null;
     window.__e2eWaveLegend = document.getElementById('system-change-topology-arrow-legend');
     return Boolean(window.__e2eWaveCanvas && window.__e2eWaveLegend);
   });
   assert(waveBefore, 'Expected #system-change-topology-canvas and legend before wave play');
 
   const playSel = '#system-change-topology-arrow-legend [data-action="system-map-wave-play"]';
+  const pauseSel = '#system-change-topology-arrow-legend [data-action="system-map-wave-pause"][aria-pressed="true"]';
   await driver.click(playSel);
+  await driver.waitFor(
+    (sel) => Boolean(document.querySelector(sel)),
+    'SystemMap wave playback switched to Pause control',
+    5_000,
+    pauseSel,
+  );
   await driver.callFn(() => new Promise((r) => setTimeout(r, 250)));
-  await driver.click(playSel);
+  await driver.click(pauseSel);
+  await driver.waitFor(
+    (sel) => Boolean(document.querySelector(sel)),
+    'SystemMap wave playback paused and restored Play control',
+    5_000,
+    playSel,
+  );
   const waveAfter = await driver.callFn(() => {
-    const sameCanvas = document.getElementById('system-change-topology-canvas') === window.__e2eWaveCanvas;
+    const canvas = document.getElementById('system-change-topology-canvas');
+    const sameCanvas = canvas === window.__e2eWaveCanvas;
+    const sameChild = !window.__e2eWaveChild || canvas?.firstElementChild === window.__e2eWaveChild;
     const sameLegend = document.getElementById('system-change-topology-arrow-legend') === window.__e2eWaveLegend;
     delete window.__e2eWaveCanvas;
+    delete window.__e2eWaveChild;
     delete window.__e2eWaveLegend;
-    return { sameCanvas, sameLegend };
+    return { sameCanvas, sameChild, sameLegend };
   });
-  assert(waveAfter.sameCanvas && waveAfter.sameLegend, `Expected wave play/pause without DOM teardown: ${JSON.stringify(waveAfter)}`);
+  assert(
+    waveAfter.sameCanvas && waveAfter.sameChild && waveAfter.sameLegend,
+    `Expected wave play/pause without DOM teardown: ${JSON.stringify(waveAfter)}`,
+  );
 
   driver.assertNoErrors('Suite 7');
 }
