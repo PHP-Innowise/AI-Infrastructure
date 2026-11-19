@@ -171,7 +171,7 @@ pub(crate) struct AstRef {
 /// Framework or database semantic relation extracted from AST nodes, attributes, or SQL literals.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SemanticEdge {
-    /// `"exposes_route"` | `"di_binds"` | `"publishes_event"` | `"handles_event"` | `"reads_table"` | `"writes_table"`
+    /// `"exposes_route"` | `"calls_route"` | `"di_binds"` | `"publishes_event"` | `"handles_event"` | `"reads_table"` | `"writes_table"`
     pub kind: String,
     /// Canonical target (`route:<METHOD> <PATH>`, `service:<TYPE>`, `event:<NAME>`, `table:<NAME>`).
     pub target: String,
@@ -194,6 +194,8 @@ pub(crate) struct AstFileExtraction {
     pub inheritance: Vec<AstInheritance>,
     pub calls_and_refs: Vec<AstRef>,
     pub semantic_edges: Vec<SemanticEdge>,
+    #[serde(default)]
+    pub test_spans: Vec<(u32, u32)>,
 }
 
 /// Parses a single source file into `AstFileExtraction`, returning `None` if unsupported or oversized.
@@ -298,7 +300,38 @@ pub(crate) fn extract_code_identifiers(rel_path: &str, source: &str) -> BTreeSet
     out
 }
 
-/// Filters `notify::Event` paths to code files supported by AST extraction (used by Wave 5B FS watcher).
+/// Manifest basenames whose edits alter cross-file import / workspace resolution.
+pub(crate) const GRAPH_MANIFEST_FILES: &[&str] = &[
+    "composer.json",
+    "tsconfig.json",
+    "jsconfig.json",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "cargo.toml",
+];
+
+/// Architecture rules file whose edits alter layer classification without code reparsing.
+pub(crate) const GRAPH_ARCHITECTURE_FILE: &str = ".harness-architecture.json";
+
+/// Returns `true` when `path` is a workspace manifest affecting import resolution.
+pub(crate) fn is_graph_manifest_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let lower = name.to_ascii_lowercase();
+            GRAPH_MANIFEST_FILES.contains(&lower.as_str())
+        })
+}
+
+/// Returns `true` when `path` is the repository architecture rules file.
+pub(crate) fn is_graph_architecture_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(GRAPH_ARCHITECTURE_FILE))
+}
+
+/// Filters `notify::Event` paths to code files, dependency manifests, and `.harness-architecture.json`.
 pub(crate) fn notify_event_touches_code(event: &notify::Event) -> Vec<PathBuf> {
     use notify::EventKind;
     if !matches!(
@@ -313,6 +346,8 @@ pub(crate) fn notify_event_touches_code(event: &notify::Event) -> Vec<PathBuf> {
         .filter(|path| {
             path.to_str()
                 .is_some_and(|s| AstGrammar::from_rel_path(s).is_some())
+                || is_graph_manifest_path(path)
+                || is_graph_architecture_path(path)
         })
         .cloned()
         .collect()
@@ -357,6 +392,8 @@ struct ExtractCtx<'a> {
     inheritance: Vec<AstInheritance>,
     calls_and_refs: Vec<AstRef>,
     semantic_edges: Vec<SemanticEdge>,
+    test_spans: Vec<(u32, u32)>,
+    test_lines: BTreeSet<u32>,
     seen_semantic: BTreeSet<(String, String, u32)>,
     seen_decls: BTreeSet<(String, Option<String>, String, u32)>,
 }
@@ -373,6 +410,8 @@ impl<'a> ExtractCtx<'a> {
             inheritance: Vec::new(),
             calls_and_refs: Vec::new(),
             semantic_edges: Vec::new(),
+            test_spans: Vec::new(),
+            test_lines: BTreeSet::new(),
             seen_semantic: BTreeSet::new(),
             seen_decls: BTreeSet::new(),
         }
@@ -513,6 +552,25 @@ impl<'a> ExtractCtx<'a> {
             })
             .collect();
 
+        let mut test_spans = self.test_spans;
+        if !self.test_lines.is_empty() {
+            for decl in &self.declarations {
+                let near_attr = self
+                    .test_lines
+                    .range(decl.start_line.saturating_sub(3)..=decl.start_line)
+                    .next()
+                    .is_some();
+                if near_attr {
+                    test_spans.push((decl.start_line, decl.end_line.max(decl.start_line)));
+                }
+            }
+            for &line in &self.test_lines {
+                test_spans.push((line, line));
+            }
+        }
+        test_spans.sort_unstable();
+        test_spans.dedup();
+
         AstFileExtraction {
             rel_path: self.rel_path,
             language: self.grammar.label().to_owned(),
@@ -523,6 +581,7 @@ impl<'a> ExtractCtx<'a> {
             inheritance: self.inheritance,
             calls_and_refs: self.calls_and_refs,
             semantic_edges: self.semantic_edges,
+            test_spans,
         }
     }
 }
@@ -924,6 +983,7 @@ fn emit_semantic_from_call(
     let evidence = full_chain_text;
 
     // 1. Routes (`Route::get('/x')`, `app.get('/x')`, `.route('/x')`, `HandleFunc('/x')`, `r.GET('/x')`)
+    let mut route_emitted = false;
     let http_verb = match callee_lower.as_str() {
         "get" | "mapget" => Some("GET"),
         "post" | "mappost" => Some("POST"),
@@ -948,7 +1008,8 @@ fn emit_semantic_from_call(
             || recv_lower.contains("chi")
             || recv_lower.contains("gin")
             || recv_lower.contains("echo")
-            || matches!(recv_lower.as_str(), "r" | "e" | "g" | "http" | "web");
+            || matches!(recv_lower.as_str(), "r" | "e" | "g" | "web")
+            || (recv_lower == "http" && matches!(callee_lower.as_str(), "handle" | "handlefunc"));
         if is_route_receiver && let Some(path_arg) = string_args.first() {
             let clean_path = path_arg.trim();
             if !clean_path.is_empty()
@@ -970,6 +1031,7 @@ fn emit_semantic_from_call(
                     line,
                     evidence,
                 );
+                route_emitted = true;
             }
         }
     }
@@ -978,37 +1040,26 @@ fn emit_semantic_from_call(
     let args_inner = args_inner.strip_prefix('(').unwrap_or(args_inner);
     let args_inner = args_inner.strip_suffix(')').unwrap_or(args_inner).trim();
 
-    // 2. DI bindings (`bind`, `singleton`, `scoped`, `AddSingleton`, `AddScoped`, `AddTransient`)
+    if !route_emitted {
+        emit_http_client_route_call(
+            ctx,
+            &recv_lower,
+            &callee_lower,
+            args_inner,
+            string_args,
+            source_symbol.as_deref(),
+            line,
+            evidence,
+        );
+    }
+
+    // 2. DI bindings (`bind`, `singleton`, `scoped`, `AddSingleton`, `AddScoped`, `AddTransient`, `provide`)
     if matches!(
         callee_lower.as_str(),
         "bind" | "singleton" | "scoped" | "addsingleton" | "addscoped" | "addtransient" | "provide"
     ) {
-        let mut bound: Option<String> = None;
-        for part in args_inner.split(',') {
-            if let Some(ty) = extract_class_ref_name(part) {
-                bound = Some(ty);
-                break;
-            }
-        }
-        if bound.is_none()
-            && let Some(s) = string_args.first()
-        {
-            bound = Some(s.clone());
-        }
-        if bound.is_none()
-            && let Some(lt_idx) = full_chain_text.find('<')
-            && let Some(gt_rel) = full_chain_text[lt_idx + 1..].find('>')
-        {
-            let generic_inner = full_chain_text[lt_idx + 1..lt_idx + 1 + gt_rel]
-                .split(',')
-                .next()
-                .unwrap_or("")
-                .trim();
-            if !generic_inner.is_empty() {
-                bound = Some(generic_inner.to_owned());
-            }
-        }
-        if let Some(svc) = bound {
+        let targets = extract_di_targets(args_inner, args_text, string_args, full_chain_text);
+        for svc in targets {
             ctx.push_semantic(
                 "di_binds",
                 format!("service:{svc}"),
@@ -1236,6 +1287,369 @@ fn emit_semantic_from_attribute(
             attr_text,
         );
     }
+
+    // Test attributes across languages (`@Test`, `#[Test]`, `[Fact]`, `[Theory]`, `[TestMethod]`)
+    if matches!(
+        lower.as_str(),
+        "test" | "fact" | "theory" | "testmethod" | "parameterizedtest"
+    ) {
+        ctx.test_lines.insert(line);
+    }
+}
+
+fn split_top_level_commas(raw: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth_paren = 0usize;
+    let mut depth_angle = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_quote: Option<char> = None;
+    let mut escape = false;
+    let mut start = 0usize;
+
+    for (idx, ch) in raw.char_indices() {
+        if let Some(q) = in_quote {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == q {
+                in_quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => in_quote = Some(ch),
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '<' => depth_angle += 1,
+            '>' => {
+                // Skip `=>` closure arrows so they do not decrement angle bracket depth.
+                if !raw[..idx].ends_with('=') {
+                    depth_angle = depth_angle.saturating_sub(1);
+                }
+            }
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            ',' if depth_paren == 0
+                && depth_angle == 0
+                && depth_bracket == 0
+                && depth_brace == 0 =>
+            {
+                parts.push(raw[start..idx].trim());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    if start <= raw.len() {
+        let tail = raw[start..].trim();
+        if !tail.is_empty() {
+            parts.push(tail);
+        }
+    }
+    parts
+}
+
+fn clean_di_type_token(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("typeof")
+        .trim()
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '(' | ')' | '[' | ']' | '{' | '}' | ' ' | '\t' | '\n' | '\r'
+            )
+        })
+        .trim();
+    if cleaned.is_empty() || cleaned.starts_with(['\'', '"', '`', '$', '|']) {
+        return None;
+    }
+    if cleaned.starts_with("fn")
+        || cleaned.starts_with("function")
+        || cleaned.contains("=>")
+        || cleaned.starts_with('{')
+    {
+        return None;
+    }
+    let candidate = cleaned.strip_prefix("dyn ").unwrap_or(cleaned).trim();
+    let short = candidate
+        .rsplit(['\\', ':', '.'])
+        .next()
+        .unwrap_or(candidate)
+        .split('<')
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    if short.is_empty()
+        || !short.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        || matches!(short, "Closure" | "Object" | "Array" | "String")
+    {
+        return None;
+    }
+    Some(short.to_owned())
+}
+
+fn extract_new_type_in_closure(raw: &str) -> Option<String> {
+    let idx = raw.find("new ")?;
+    let after = raw[idx + 4..].trim_start();
+    let tok = after
+        .split(|c: char| {
+            !c.is_ascii_alphanumeric() && c != '_' && c != '\\' && c != ':' && c != '.'
+        })
+        .next()
+        .unwrap_or("");
+    clean_di_type_token(tok)
+}
+
+fn extract_di_targets(
+    args_inner: &str,
+    args_text: &str,
+    string_args: &[String],
+    full_chain_text: &str,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut push_unique = |val: String| {
+        if !val.is_empty() && !targets.contains(&val) {
+            targets.push(val);
+        }
+    };
+
+    for part in split_top_level_commas(args_inner) {
+        let p = part.trim();
+        if let Some(ty) = extract_class_ref_name(p) {
+            push_unique(ty);
+            continue;
+        }
+        if let Some(inner) = p.strip_prefix("typeof(").and_then(|s| s.strip_suffix(')'))
+            && let Some(ty) = clean_di_type_token(inner)
+        {
+            push_unique(ty);
+            continue;
+        }
+        if (p.contains("provide:") || p.contains("useClass:") || p.contains("useExisting:"))
+            && (p.starts_with('{') || p.contains("useClass:"))
+        {
+            let trimmed_obj = p.trim_matches(|c: char| matches!(c, '{' | '}' | ' '));
+            for kv in split_top_level_commas(trimmed_obj) {
+                if let Some((k, v)) = kv.split_once(':') {
+                    let key = k.trim().trim_matches(|c: char| matches!(c, '{' | ' '));
+                    if matches!(key, "provide" | "useClass" | "useExisting")
+                        && let Some(ty) = clean_di_type_token(v)
+                    {
+                        push_unique(ty);
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(ty) = extract_new_type_in_closure(p) {
+            push_unique(ty);
+            continue;
+        }
+        if !p.contains(' ')
+            && let Some(ty) = clean_di_type_token(p)
+        {
+            push_unique(ty);
+        }
+    }
+
+    // Generic type arguments immediately preceding `args_text` (e.g. `AddSingleton<ITokenCache, RedisTokenCache>()`).
+    let chain_prefix = full_chain_text
+        .trim_end()
+        .strip_suffix(args_text.trim())
+        .unwrap_or(full_chain_text)
+        .trim_end();
+    if let Some(without_gt) = chain_prefix.strip_suffix('>')
+        && let Some(lt_idx) = without_gt.rfind('<')
+    {
+        let generic_inner = &without_gt[lt_idx + 1..];
+        for arg in split_top_level_commas(generic_inner) {
+            if let Some(ty) = clean_di_type_token(arg) {
+                push_unique(ty);
+            }
+        }
+    }
+
+    if targets.is_empty()
+        && let Some(s) = string_args.first()
+        && !s.trim().is_empty()
+    {
+        targets.push(s.trim().to_owned());
+    }
+    targets
+}
+
+fn normalize_http_call_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        return None;
+    }
+    let path_part = if let Some(rest) = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+    {
+        match rest.find('/') {
+            Some(slash) => &rest[slash..],
+            None => "/",
+        }
+    } else if trimmed.starts_with('/') {
+        trimmed
+    } else {
+        return None;
+    };
+    let without_query = path_part.split(['?', '#']).next().unwrap_or(path_part);
+    if without_query.is_empty() {
+        Some("/".to_owned())
+    } else {
+        Some(without_query.to_owned())
+    }
+}
+
+fn extract_http_verb_token(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "GET" => Some("GET"),
+        "POST" => Some("POST"),
+        "PUT" => Some("PUT"),
+        "PATCH" => Some("PATCH"),
+        "DELETE" => Some("DELETE"),
+        "HEAD" => Some("HEAD"),
+        "OPTIONS" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+fn extract_explicit_http_verb(args_inner: &str, string_args: &[String]) -> Option<&'static str> {
+    for arg in string_args {
+        if let Some(v) = extract_http_verb_token(arg) {
+            return Some(v);
+        }
+    }
+    let lower = args_inner.to_ascii_lowercase();
+    for (needle, verb) in [
+        ("method:'post'", "POST"),
+        ("method:\"post\"", "POST"),
+        ("method:'put'", "PUT"),
+        ("method:\"put\"", "PUT"),
+        ("method:'patch'", "PATCH"),
+        ("method:\"patch\"", "PATCH"),
+        ("method:'delete'", "DELETE"),
+        ("method:\"delete\"", "DELETE"),
+        ("method:'get'", "GET"),
+        ("method:\"get\"", "GET"),
+    ] {
+        let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.contains(needle) {
+            return Some(verb);
+        }
+    }
+    None
+}
+
+fn is_http_client_receiver(recv_lower: &str) -> bool {
+    matches!(
+        recv_lower,
+        "axios"
+            | "http"
+            | "httpclient"
+            | "requests"
+            | "httpx"
+            | "got"
+            | "ky"
+            | "superagent"
+            | "guzzle"
+            | "resttemplate"
+            | "webclient"
+            | "apiclient"
+            | "restclient"
+            | "client"
+            | "api"
+    ) || [
+        ".axios",
+        ".http",
+        "\\http",
+        "::http",
+        "->http",
+        ".httpclient",
+        "->httpclient",
+        "httpclient",
+        ".apiclient",
+        "apiclient",
+        ".restclient",
+        "restclient",
+        ".client",
+        "->client",
+        ".api",
+        "->api",
+    ]
+    .iter()
+    .any(|suffix| recv_lower.ends_with(suffix))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_http_client_route_call(
+    ctx: &mut ExtractCtx<'_>,
+    recv_lower: &str,
+    callee_lower: &str,
+    args_inner: &str,
+    string_args: &[String],
+    source_symbol: Option<&str>,
+    line: u32,
+    evidence: &str,
+) {
+    let mut verb: Option<&'static str> = None;
+    let is_fetch_or_axios_fn = (callee_lower == "fetch"
+        && (recv_lower.is_empty()
+            || matches!(
+                recv_lower,
+                "window" | "globalthis" | "self" | "this" | "$this"
+            )))
+        || (callee_lower == "axios" && recv_lower.is_empty());
+
+    if is_fetch_or_axios_fn {
+        verb = Some(extract_explicit_http_verb(args_inner, string_args).unwrap_or("GET"));
+    } else if is_http_client_receiver(recv_lower) {
+        verb = match callee_lower {
+            "get" | "getasync" | "getjson" | "getforobject" | "getforentity" => Some("GET"),
+            "post" | "postasync" | "postjson" | "postforobject" | "postforentity" => Some("POST"),
+            "put" | "putasync" => Some("PUT"),
+            "patch" | "patchasync" => Some("PATCH"),
+            "delete" | "deleteasync" => Some("DELETE"),
+            "head" => Some("HEAD"),
+            "options" => Some("OPTIONS"),
+            "request" | "send" | "newrequest" => {
+                Some(extract_explicit_http_verb(args_inner, string_args).unwrap_or("ANY"))
+            }
+            _ => None,
+        };
+    }
+
+    let Some(http_method) = verb else {
+        return;
+    };
+    let Some(route_path) = string_args
+        .iter()
+        .find_map(|arg| normalize_http_call_path(arg))
+    else {
+        return;
+    };
+    let target = if http_method == "ANY" {
+        format!("route:{route_path}")
+    } else {
+        format!("route:{http_method} {route_path}")
+    };
+    ctx.push_semantic(
+        "calls_route",
+        target,
+        source_symbol.map(str::to_owned),
+        line,
+        evidence,
+    );
 }
 
 // =========================================================================
@@ -2439,6 +2853,9 @@ fn walk_rust(
                     evidence: clip_str(ctx.text(node), 160),
                 });
             } else if let Some(b) = body {
+                if let Some(attr_line) = has_preceding_rust_test_attr(node, ctx.source) {
+                    ctx.test_spans.push((attr_line, end_line(node)));
+                }
                 walk_rust(
                     ctx,
                     b,
@@ -2707,6 +3124,9 @@ fn walk_rust(
                 "function"
             };
             if !name.is_empty() {
+                if let Some(attr_line) = has_preceding_rust_test_attr(node, ctx.source) {
+                    ctx.test_spans.push((attr_line, e_line));
+                }
                 ctx.push_decl(
                     decl_kind,
                     &name,
@@ -3288,6 +3708,36 @@ fn find_preceding_rust_path_attr(node: Node<'_>, source: &str) -> Option<String>
         prev = sib.prev_sibling();
     }
     None
+}
+
+fn has_preceding_rust_test_attr(node: Node<'_>, source: &str) -> Option<u32> {
+    let mut prev = node.prev_sibling();
+    let mut earliest_test_line: Option<u32> = None;
+    while let Some(sib) = prev {
+        if is_comment_kind(sib.kind()) {
+            prev = sib.prev_sibling();
+            continue;
+        }
+        if sib.kind() != "attribute_item" {
+            break;
+        }
+        let compact: String = node_text(sib, source)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let is_test_attr = compact == "#[test]"
+            || compact.starts_with("#[test(")
+            || compact.contains("::test]")
+            || compact.contains("::test(")
+            || compact.contains("cfg(test)")
+            || compact == "#[rstest]"
+            || compact.starts_with("#[rstest(");
+        if is_test_attr {
+            earliest_test_line = Some(start_line(sib));
+        }
+        prev = sib.prev_sibling();
+    }
+    earliest_test_line
 }
 
 fn unwrap_rust_type(raw: &str) -> String {
@@ -7566,6 +8016,134 @@ class AuditLog {}
                 .any(|e| e.kind == "reads_table" && e.target == "table:audit_logs"),
             "{:?}",
             php_ir.semantic_edges
+        );
+    }
+
+    #[test]
+    fn notify_event_filter_includes_manifests_and_architecture_config() {
+        let ev = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            paths: vec![
+                PathBuf::from("Cargo.toml"),
+                PathBuf::from("package.json"),
+                PathBuf::from("tsconfig.json"),
+                PathBuf::from("composer.json"),
+                PathBuf::from("pyproject.toml"),
+                PathBuf::from("go.mod"),
+                PathBuf::from(".harness-architecture.json"),
+                PathBuf::from("docs/notes.md"),
+            ],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            notify_event_touches_code(&ev),
+            vec![
+                PathBuf::from("Cargo.toml"),
+                PathBuf::from("package.json"),
+                PathBuf::from("tsconfig.json"),
+                PathBuf::from("composer.json"),
+                PathBuf::from("pyproject.toml"),
+                PathBuf::from("go.mod"),
+                PathBuf::from(".harness-architecture.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_di_concrete_targets_calls_route_and_rust_test_spans() {
+        let php = r#"<?php
+class AppProvider {
+    public function register(): void {
+        $this->app->bind(OrderRepoInterface::class, SqlOrderRepo::class);
+        Http::post('https://billing.internal/v1/charge', ['id' => 1]);
+    }
+}
+"#;
+        let php_ir = parse_file_ir("src/Providers/AppProvider.php", php).expect("php ir");
+        assert!(
+            php_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "di_binds" && e.target == "service:OrderRepoInterface"),
+            "{:?}",
+            php_ir.semantic_edges
+        );
+        assert!(
+            php_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "di_binds" && e.target == "service:SqlOrderRepo"),
+            "{:?}",
+            php_ir.semantic_edges
+        );
+        assert!(
+            php_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "calls_route" && e.target == "route:POST /v1/charge"),
+            "{:?}",
+            php_ir.semantic_edges
+        );
+
+        let cs = r#"
+public class Startup {
+    public void Configure(IServiceCollection services) {
+        services.AddSingleton<ITokenCache, RedisTokenCache>();
+    }
+}
+"#;
+        let cs_ir = parse_file_ir("Startup.cs", cs).expect("cs ir");
+        assert!(
+            cs_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "di_binds" && e.target == "service:RedisTokenCache"),
+            "{:?}",
+            cs_ir.semantic_edges
+        );
+
+        let ts = r#"
+export async function loadBills() {
+    await fetch('/v1/bills');
+    return axios.post('/v1/bills/pay', {});
+}
+"#;
+        let ts_ir = parse_file_ir("src/client.ts", ts).expect("ts ir");
+        assert!(
+            ts_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "calls_route" && e.target == "route:GET /v1/bills"),
+            "{:?}",
+            ts_ir.semantic_edges
+        );
+        assert!(
+            ts_ir
+                .semantic_edges
+                .iter()
+                .any(|e| e.kind == "calls_route" && e.target == "route:POST /v1/bills/pay"),
+            "{:?}",
+            ts_ir.semantic_edges
+        );
+
+        let rs = r#"
+pub fn helper() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn works() {
+        super::helper();
+    }
+}
+"#;
+        let rs_ir = parse_file_ir("src/lib.rs", rs).expect("rs ir");
+        assert!(
+            !rs_ir.test_spans.is_empty(),
+            "expected #[cfg(test)] span in {:?}",
+            rs_ir.declarations
         );
     }
 }

@@ -39,9 +39,30 @@ fn carried(relation: &str) -> (f64, &'static str) {
         "implements" | "uses_trait" => (0.9, "implements"),
         "writes" | "mutates" | "sets" => (0.75, "writes"),
         "reads" | "references_constant" | "uses_const" | "uses_static_prop" => (0.7, "reads"),
+        "references" => (0.75, "references"),
+        "di_binds" | "di_binding" => (0.75, "di_binds"),
+        "calls_route" => (0.75, "calls_route"),
+        "exposes_route" | "route" => (0.7, "exposes_route"),
+        "publishes_event" => (0.7, "publishes_event"),
+        "handles_event" => (0.7, "handles_event"),
+        "writes_table" | "table_write" => (0.7, "writes_table"),
+        "reads_table" | "table_read" => (0.65, "reads_table"),
         "imports" | "imports_from" | "dynamic_import" | "re_exports" => (0.45, "imports"),
         _ => (0.6, "uses"),
     }
+}
+
+fn enters_semantic_anchor(relation: &str) -> bool {
+    matches!(
+        relation,
+        "writes_table"
+            | "table_write"
+            | "publishes_event"
+            | "exposes_route"
+            | "route"
+            | "di_binds"
+            | "di_binding"
+    )
 }
 
 /// A relation by which a type says what it fulfils.
@@ -73,7 +94,7 @@ impl Index {
     /// nothing in the graph.
     pub(crate) fn blast(&self, place: &str, certain: bool) -> Option<Value> {
         let reach = self.reach(place)?;
-        let starts = match reach {
+        let mut starts = match reach {
             Reach::Symbol(at) => vec![at],
             Reach::File(file) => self.range(file).collect(),
             Reach::Folder(folder) => self
@@ -87,6 +108,16 @@ impl Index {
                 .flat_map(|(file, _)| self.range(file as u32))
                 .collect(),
         };
+        if !matches!(reach, Reach::Symbol(_)) {
+            let non_semantic: Vec<u32> = starts
+                .iter()
+                .copied()
+                .filter(|&at| !self.symbols[at as usize].is_semantic)
+                .collect();
+            if !non_semantic.is_empty() {
+                starts = non_semantic;
+            }
+        }
         let own = starts
             .iter()
             .map(|at| self.symbols[*at as usize].file)
@@ -150,6 +181,41 @@ impl Index {
                 // What it fulfils: of a type, or of the type a member is
                 // held by. The users of that are reached a link on.
                 let symbol = &self.symbols[at as usize];
+                if !symbol.is_semantic {
+                    for (_, target, kind, guessed) in self.wired(at, true, certain) {
+                        if !self.symbols[*target as usize].is_semantic {
+                            continue;
+                        }
+                        let rel = &self.kinds[*kind as usize];
+                        if !enters_semantic_anchor(rel) {
+                            continue;
+                        }
+                        walked += 1;
+                        if walked > WALKED {
+                            cut = true;
+                            break 'hops;
+                        }
+                        let (carries, via) = carried(rel);
+                        let left = from.left * carries * if *guessed { GUESSED } else { 1.0 };
+                        if left < FLOOR || best.get(target).is_some_and(|known| known.left >= left)
+                        {
+                            continue;
+                        }
+                        if queued.insert(*target) {
+                            next.push(*target);
+                        }
+                        let hop = best.get(target).map_or(hop, |known| known.hop.min(hop));
+                        best.insert(
+                            *target,
+                            Reached {
+                                hop,
+                                left,
+                                via,
+                                through: from.through,
+                            },
+                        );
+                    }
+                }
                 let holder = match symbol.kind {
                     Kind::Note | Kind::Heading | Kind::File => continue,
                     Kind::Type => at,
@@ -593,5 +659,28 @@ mod tests {
         assert_eq!(blast["marked"].as_array().unwrap().len(), 30);
         // As much reached: in the order of their files.
         assert_eq!(blast["listed"][0]["path"], "src/c00.php");
+    }
+
+    #[test]
+    fn blast_bridges_across_semantic_anchor_nodes() {
+        let graph = json!({
+            "nodes": [
+                {"id": "writer", "label": "OrderRepo.save()", "source_file": "src/OrderRepo.php"},
+                {"id": "reader", "label": "InvoiceReport.run()", "source_file": "src/InvoiceReport.php"},
+                {"id": "sem:table:orders", "label": "table:orders", "source_file": "src/OrderRepo.php", "node_kind": "semantic"}
+            ],
+            "links": [
+                {"source": "writer", "target": "sem:table:orders", "relation": "writes_table", "confidence": "EXTRACTED"},
+                {"source": "reader", "target": "sem:table:orders", "relation": "reads_table", "confidence": "EXTRACTED"}
+            ]
+        });
+        let idx = Index::read(graph.to_string().as_bytes(), Path::new("/work/shop")).unwrap();
+        let blast = idx
+            .blast("src/OrderRepo.php", true)
+            .expect("semantic blast");
+        assert_eq!(blast["files"], 1);
+        assert_eq!(blast["listed"][0]["path"], "src/InvoiceReport.php");
+        assert_eq!(blast["listed"][0]["hop"], 2);
+        assert_eq!(blast["listed"][0]["via"], "reads_table");
     }
 }

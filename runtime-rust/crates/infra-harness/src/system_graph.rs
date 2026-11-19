@@ -2406,6 +2406,7 @@ impl HarnessCodeGraphBridge {
                     scenario: None,
                     pattern: None,
                     whole: false,
+                    ..Default::default()
                 },
             ) && let Some(items) = map_val["run"]["reach"]["rows"].as_array()
                 && !items.is_empty()
@@ -2777,15 +2778,78 @@ impl SystemGraphDomain {
             }
 
             if target.service_id != "__system__" && !provided_tokens.is_empty() {
-                let candidate_files: Vec<String> = match &live_idx {
-                    Some(idx) => idx
+                let ir_data = if crate::graph_ir::GraphIrStore::exists(
+                    self.graphs.state_dir(),
+                    &target.graph_id,
+                ) {
+                    crate::graph_ir::GraphIrStore::open(self.graphs.state_dir(), &target.graph_id)
+                        .ok()
+                        .and_then(|ir| ir.semantic_edges_for_system().ok())
+                } else {
+                    None
+                };
+                if let Some((_, ref sem_edges)) = ir_data {
+                    for (rel_path, _kind, sem_target, from_sym, _line, _ev) in sem_edges {
+                        let stripped = sem_target
+                            .strip_prefix("route:")
+                            .or_else(|| sem_target.strip_prefix("event:"))
+                            .or_else(|| sem_target.strip_prefix("service:"))
+                            .or_else(|| sem_target.strip_prefix("table:"))
+                            .unwrap_or(sem_target);
+                        for (provider_id, cid, ckind, probes) in &provided_tokens {
+                            if provider_id == &target.service_id {
+                                continue;
+                            }
+                            let matched_probe = probes.iter().find(|probe| {
+                                !probe.is_empty()
+                                    && (stripped.contains(probe.as_str())
+                                        || sem_target.contains(probe.as_str()))
+                            });
+                            let service_url_probe = format!("http://{provider_id}");
+                            let matched = matched_probe.cloned().or_else(|| {
+                                (stripped.contains(&service_url_probe)
+                                    || sem_target.contains(&service_url_probe))
+                                .then_some(service_url_probe)
+                            });
+                            if let Some(token) = matched {
+                                let contract_opt = (!cid.is_empty()).then(|| cid.clone());
+                                let already = entry.code_refs.iter().any(|r| {
+                                    r.from_path == *rel_path
+                                        && r.target_service == *provider_id
+                                        && r.contract == contract_opt
+                                });
+                                if !already {
+                                    entry.code_refs.push(CodeReference {
+                                        from_path: rel_path.clone(),
+                                        from_symbol: from_sym.clone(),
+                                        target_service: provider_id.clone(),
+                                        contract: contract_opt,
+                                        kind: ckind.clone(),
+                                        certainty: "EXTRACTED".to_owned(),
+                                        detail: Some(format!("IR edge references `{token}`")),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                let candidate_files: Vec<String> = match (&live_idx, &ir_data) {
+                    (Some(idx), _) => idx
                         .files()
                         .iter()
                         .filter(|p| !graph_map::is_test_path(p))
                         .take(MAX_UNDECLARED_SCAN_FILES)
                         .cloned()
                         .collect(),
-                    None => collect_service_code_files(&target.root, MAX_UNDECLARED_SCAN_FILES),
+                    (None, Some((ir_files, _))) => ir_files
+                        .iter()
+                        .filter(|p| !graph_map::is_test_path(p))
+                        .take(MAX_UNDECLARED_SCAN_FILES)
+                        .cloned()
+                        .collect(),
+                    (None, None) => {
+                        collect_service_code_files(&target.root, MAX_UNDECLARED_SCAN_FILES)
+                    }
                 };
                 for rel_path in candidate_files {
                     if rel_path == "ai-service.json" || rel_path.ends_with(".lock") {
@@ -4255,20 +4319,20 @@ fn semantic_regexes() -> &'static SemanticBridgeRegexes {
     })
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RouteSite {
     display: String,
     methods: BTreeSet<String>,
     files: BTreeSet<String>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct TopicSite {
     display: String,
     files: BTreeSet<String>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct DiSite {
     display: String,
     kinds: BTreeSet<String>,
@@ -4785,6 +4849,75 @@ impl ServiceSemanticSignals {
         }
     }
 
+    fn ingest_semantic_relation(&mut self, relation: &str, target_label: &str, from_file: &str) {
+        match relation {
+            "exposes_route" | "route" => {
+                let raw = target_label.strip_prefix("route:").unwrap_or(target_label);
+                let (method, path) = match raw.trim().split_once(' ') {
+                    Some((m, p)) if p.starts_with('/') => (Some(m), p),
+                    _ => (None, raw),
+                };
+                self.add_exposed_route(path, method, from_file);
+            }
+            "calls_route" => {
+                let raw = target_label.strip_prefix("route:").unwrap_or(target_label);
+                let (method, path) = match raw.trim().split_once(' ') {
+                    Some((m, p)) if p.starts_with('/') => (Some(m), p),
+                    _ => (None, raw),
+                };
+                self.add_called_route(path, method, from_file);
+            }
+            "di_binds" | "di_binding" => {
+                let raw = target_label
+                    .strip_prefix("service:")
+                    .unwrap_or(target_label);
+                self.add_di_binding(raw, "binds", from_file);
+            }
+            "publishes_event" => {
+                let raw = target_label.strip_prefix("event:").unwrap_or(target_label);
+                self.add_published_event(raw, from_file);
+            }
+            "handles_event" => {
+                let raw = target_label.strip_prefix("event:").unwrap_or(target_label);
+                self.add_handled_event(raw, from_file);
+            }
+            "reads_table" | "table_read" => {
+                let raw = target_label.strip_prefix("table:").unwrap_or(target_label);
+                self.add_table_read(raw, from_file);
+            }
+            "writes_table" | "table_write" => {
+                let raw = target_label.strip_prefix("table:").unwrap_or(target_label);
+                self.add_table_write(raw, from_file);
+            }
+            _ => {}
+        }
+    }
+
+    fn ingest_ir_store(
+        &mut self,
+        state_dir: &Path,
+        graph_id: &str,
+        certain: bool,
+    ) -> Option<Vec<String>> {
+        if !crate::graph_ir::GraphIrStore::exists(state_dir, graph_id) {
+            return None;
+        }
+        let store = crate::graph_ir::GraphIrStore::open(state_dir, graph_id).ok()?;
+        let (files, edges) = store.semantic_edges_for_system().ok()?;
+        if files.is_empty() && edges.is_empty() {
+            return None;
+        }
+        for (file_path, kind, target, _source_symbol, _line, evidence) in &edges {
+            let guessed = evidence.eq_ignore_ascii_case("AMBIGUOUS")
+                || evidence.eq_ignore_ascii_case("INFERRED");
+            if certain && guessed {
+                continue;
+            }
+            self.ingest_semantic_relation(kind, target, file_path);
+        }
+        Some(files)
+    }
+
     fn ingest_index(&mut self, index: &Index, certain: bool) {
         let files = index.files();
         let symbols = index.symbol_entries();
@@ -4798,43 +4931,7 @@ impl ServiceSemanticSignals {
                 .map(String::as_str)
                 .unwrap_or("");
             let target_label = index.symbol_label(to);
-            match relation {
-                "exposes_route" | "route" => {
-                    let raw = target_label.strip_prefix("route:").unwrap_or(target_label);
-                    let (method, path) = match raw.trim().split_once(' ') {
-                        Some((m, p)) if p.starts_with('/') => (Some(m), p),
-                        _ => (None, raw),
-                    };
-                    self.add_exposed_route(path, method, from_file);
-                }
-                "calls_route" => {
-                    let raw = target_label.strip_prefix("route:").unwrap_or(target_label);
-                    self.add_called_route(raw, None, from_file);
-                }
-                "di_binds" | "di_binding" => {
-                    let raw = target_label
-                        .strip_prefix("service:")
-                        .unwrap_or(target_label);
-                    self.add_di_binding(raw, "binds", from_file);
-                }
-                "publishes_event" => {
-                    let raw = target_label.strip_prefix("event:").unwrap_or(target_label);
-                    self.add_published_event(raw, from_file);
-                }
-                "handles_event" => {
-                    let raw = target_label.strip_prefix("event:").unwrap_or(target_label);
-                    self.add_handled_event(raw, from_file);
-                }
-                "reads_table" | "table_read" => {
-                    let raw = target_label.strip_prefix("table:").unwrap_or(target_label);
-                    self.add_table_read(raw, from_file);
-                }
-                "writes_table" | "table_write" => {
-                    let raw = target_label.strip_prefix("table:").unwrap_or(target_label);
-                    self.add_table_write(raw, from_file);
-                }
-                _ => {}
-            }
+            self.ingest_semantic_relation(relation, target_label, from_file);
         }
     }
 }
@@ -4878,27 +4975,40 @@ fn read_bounded_service_file(
 }
 
 fn collect_service_semantics_with(
+    state_dir: Option<&Path>,
     target: Option<&ResolvedServiceTarget>,
     index: Option<&Arc<Index>>,
     certain: bool,
+    need_content_probes: bool,
     mut on_file: impl FnMut(&str, &str),
 ) -> (ServiceSemanticSignals, usize, bool) {
     let mut signals = ServiceSemanticSignals::default();
-    if let Some(idx) = index {
+    let ir_files = state_dir
+        .zip(target)
+        .and_then(|(state, target)| signals.ingest_ir_store(state, &target.graph_id, certain));
+    let ir_loaded = ir_files.is_some();
+    if !ir_loaded && let Some(idx) = index {
         signals.ingest_index(idx, certain);
     }
     let Some(target) = target else {
         return (signals, 0, false);
     };
+    if ir_loaded && !need_content_probes {
+        return (signals, 0, false);
+    }
     let canon_root = infra_core::fs::canonicalize(&target.root).ok();
-    let files = match index {
-        Some(idx) => idx
+    let files = match (ir_files, index) {
+        (Some(files), _) => files
+            .into_iter()
+            .filter(|path| !graph_map::is_test_path(path))
+            .collect::<Vec<_>>(),
+        (None, Some(idx)) => idx
             .files()
             .iter()
             .filter(|path| !graph_map::is_test_path(path))
             .cloned()
             .collect::<Vec<_>>(),
-        None => collect_service_code_files(&target.root, BRIDGE_FILES),
+        (None, None) => collect_service_code_files(&target.root, BRIDGE_FILES),
     };
     let mut files_read = 0usize;
     let mut bytes_read = 0u64;
@@ -4918,7 +5028,9 @@ fn collect_service_semantics_with(
         };
         files_read += 1;
         bytes_read += len;
-        signals.scan_source(&rel_path, &content);
+        if !ir_loaded {
+            signals.scan_source(&rel_path, &content);
+        }
         on_file(&rel_path, &content);
     }
     (signals, files_read, cut)
@@ -5232,10 +5344,13 @@ fn bridge_view(
         })
         .filter(|(_, probes)| !probes.is_empty())
         .collect::<Vec<_>>();
+    let state_dir = Some(graphs.state_dir());
     let (provider_semantics, files_read, raw_cut) = collect_service_semantics_with(
+        state_dir,
         provider_target,
         provider_index.as_ref(),
         certain,
+        !probes.is_empty(),
         |rel_path, content| {
             if !probes.is_empty() {
                 for (id, probes) in &probes {
@@ -5253,9 +5368,11 @@ fn bridge_view(
     let scanned = if probes.is_empty() { 0 } else { files_read };
     let cut = !probes.is_empty() && raw_cut;
     let (consumer_semantics, _, _) = collect_service_semantics_with(
+        state_dir,
         consumer_target,
         consumer_index.as_ref(),
         certain,
+        false,
         |_, _| {},
     );
     let semantic_bridges =
@@ -5872,5 +5989,57 @@ export class CheckoutConsumer {
             std::os::unix::fs::symlink(&secret, svc.join("src/escape.php")).unwrap();
             assert!(read_bounded_service_file(&svc, Some(&canon), "src/escape.php").is_none());
         }
+    }
+
+    #[test]
+    fn collect_service_semantics_reads_ir_store_first_without_disk_scan() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        let svc_root = tmp.path().join("svc");
+        fs::create_dir_all(svc_root.join("src")).unwrap();
+        fs::write(
+            svc_root.join("src/Client.ts"),
+            "export function run() {\n  emit('checkout.requested', { id: 1 });\n  return fetch('/api/v1/orders/42');\n}\n",
+        )
+        .unwrap();
+
+        let ir = crate::graph_ir::GraphIrStore::open(&state_dir, "svc-graph").unwrap();
+        ir.sync_workspace(&svc_root).unwrap();
+        // Replace on-disk file with an empty stub without re-syncing IR so only GraphIrStore has the signals.
+        fs::write(svc_root.join("src/Client.ts"), "// stub on disk\n").unwrap();
+
+        let target = ResolvedServiceTarget {
+            project_id: "mono".to_owned(),
+            config_path: "system.json".to_owned(),
+            service_id: "web".to_owned(),
+            graph_id: "svc-graph".to_owned(),
+            root: svc_root,
+            name: "web".to_owned(),
+            reused_project: false,
+        };
+
+        let (signals, files_read, cut) = collect_service_semantics_with(
+            Some(&state_dir),
+            Some(&target),
+            None,
+            true,
+            false,
+            |_, _| {},
+        );
+        assert_eq!(files_read, 0);
+        assert!(!cut);
+        assert!(
+            signals
+                .called_routes
+                .values()
+                .any(|site| site.methods.contains("GET")),
+            "expected GET route from IR: {:?}",
+            signals.called_routes
+        );
+        assert!(
+            signals.published_events.contains_key("checkout.requested"),
+            "expected event from IR: {:?}",
+            signals.published_events
+        );
     }
 }

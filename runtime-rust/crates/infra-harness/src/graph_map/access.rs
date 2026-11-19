@@ -13,7 +13,11 @@
 //! and a link is told whole or not at all: where its sources do not fit,
 //! it stays as the graph gave it and the picture says how many were left.
 use super::*;
-use crate::{graph_deps::extract_file_deps, graph_impact::member_ref_kind};
+use crate::{
+    graph_deps::{cached_manifests_for_root, extract_file_deps_with_context},
+    graph_impact::member_ref_kind,
+    graph_ir::GraphIrStore,
+};
 
 /// Sources one picture reads that were not read for this graph before.
 pub const ACCESS_SOURCES: usize = 160;
@@ -101,30 +105,46 @@ impl Index {
         let path = &self.files[file as usize];
         let (known, ids) = self.known();
         let mut refs = Vec::new();
-        if let Some(source) = text_at(&self.root, path) {
-            for dep in extract_file_deps(path, &source, known) {
-                let write = match dep.kind.as_str() {
-                    "writes" => true,
-                    "reads" => false,
-                    _ => continue,
-                };
-                let Some(&target) = ids.get(&dep.target).filter(|_| dep.resolved) else {
-                    continue;
-                };
-                for member in &dep.member_refs {
-                    if member_ref_kind(member) == Some(dep.kind.as_str()) {
-                        let lines = if member.lines.is_empty() {
-                            member.line.into_iter().collect()
-                        } else {
-                            member.lines.clone()
-                        };
-                        refs.push(AccessRef {
-                            target,
-                            lines: lines.into(),
-                            write,
-                            parent: member.parent.as_deref().map(Box::from),
-                        });
-                    }
+        let deps = if let Some(db_path) = self.ir_db_path.as_deref()
+            && let Ok(ir) = GraphIrStore::open_at(db_path)
+            && let Ok(Some((ir_deps, _))) = ir.file_outgoing_deps_if_fresh(&self.root, path)
+        {
+            ir_deps
+        } else if let Some(source) = text_at(&self.root, path) {
+            let (manifests, crate_map) = cached_manifests_for_root(&self.root, known);
+            extract_file_deps_with_context(
+                path,
+                &source,
+                known,
+                Some(&manifests),
+                None,
+                Some(&crate_map),
+            )
+        } else {
+            Vec::new()
+        };
+        for dep in deps {
+            let write = match dep.kind.as_str() {
+                "writes" => true,
+                "reads" => false,
+                _ => continue,
+            };
+            let Some(&target) = ids.get(&dep.target).filter(|_| dep.resolved) else {
+                continue;
+            };
+            for member in &dep.member_refs {
+                if member_ref_kind(member) == Some(dep.kind.as_str()) {
+                    let lines = if member.lines.is_empty() {
+                        member.line.into_iter().collect()
+                    } else {
+                        member.lines.clone()
+                    };
+                    refs.push(AccessRef {
+                        target,
+                        lines: lines.into(),
+                        write,
+                        parent: member.parent.as_deref().map(Box::from),
+                    });
                 }
             }
         }

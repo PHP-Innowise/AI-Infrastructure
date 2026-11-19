@@ -1,16 +1,32 @@
 use super::*;
-use std::{collections::VecDeque, fs, io::Read};
+use std::{
+    collections::VecDeque,
+    fs,
+    io::Read,
+    sync::{Mutex, OnceLock},
+    time::UNIX_EPOCH,
+};
 
 const LISTED: usize = 8;
 const VISITS: usize = 250_000;
 const MAX_COVERAGE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_COVERAGE_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_COVERAGE_FILES: usize = 4;
+const MAX_COVERAGE_FILES: usize = 16;
+const MAX_MONOREPO_COVERAGE_DIRS: usize = 32;
+const MAX_CACHED_COVERAGE_ROOTS: usize = 8;
 const MAX_COVERAGE_TESTS_PER_FILE: usize = 64;
 const MAX_COVERAGE_FILE_ENTRIES: usize = 20_000;
 const MAX_LCOV_LINES: usize = 500_000;
 const MAX_XML_ATTRS: usize = 64;
 const MAX_XML_TAG_BYTES: usize = 16 * 1024;
+
+const MONOREPO_WORKSPACES: &[&str] = &["packages", "services", "apps", "crates", "modules"];
+const MONOREPO_COVERAGE_REL: &[(&str, CoverageFormat)] = &[
+    ("coverage/lcov.info", CoverageFormat::Lcov),
+    ("lcov.info", CoverageFormat::Lcov),
+    ("coverage/clover.xml", CoverageFormat::Clover),
+    ("clover.xml", CoverageFormat::Clover),
+];
 
 const COVERAGE_CANDIDATES_LCOV: &[&str] = &[
     "lcov.info",
@@ -77,7 +93,7 @@ impl FileCoverage {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct CoverageReport {
     files: BTreeMap<String, FileCoverage>,
     all_tests: BTreeSet<String>,
@@ -146,7 +162,19 @@ fn normalize_coverage_path(raw: &str, root: &Path, canon_root: Option<&Path>) ->
     Some(parts.join("/"))
 }
 
-fn read_bounded_coverage_file(root: &Path, canon_root: &Path, rel: &str) -> Option<(String, u64)> {
+#[derive(Clone)]
+struct CachedCoverageEntry {
+    canon_root: PathBuf,
+    stamps: Vec<(String, u64, u128)>,
+    report: CoverageReport,
+}
+
+fn coverage_report_cache() -> &'static Mutex<Vec<CachedCoverageEntry>> {
+    static CACHE: OnceLock<Mutex<Vec<CachedCoverageEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn stat_bounded_coverage_file(root: &Path, canon_root: &Path, rel: &str) -> Option<(u64, u128)> {
     if rel.is_empty()
         || rel.starts_with('/')
         || rel.contains('\\')
@@ -163,6 +191,18 @@ fn read_bounded_coverage_file(root: &Path, canon_root: &Path, rel: &str) -> Opti
     if !meta.is_file() || meta.len() > MAX_COVERAGE_FILE_BYTES {
         return None;
     }
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0u128, |d| d.as_nanos());
+    Some((meta.len(), mtime_ns))
+}
+
+fn read_bounded_coverage_file(root: &Path, canon_root: &Path, rel: &str) -> Option<(String, u64)> {
+    stat_bounded_coverage_file(root, canon_root, rel)?;
+    let canon_file = infra_core::fs::canonicalize(root.join(rel)).ok()?;
+    let meta = fs::symlink_metadata(&canon_file).ok()?;
     let file = fs::File::open(&canon_file).ok()?;
     let mut buf = Vec::with_capacity(meta.len().min(MAX_COVERAGE_FILE_BYTES) as usize);
     file.take(MAX_COVERAGE_FILE_BYTES + 1)
@@ -656,30 +696,120 @@ fn discover_workspace_coverage(root: &Path) -> Option<CoverageReport> {
         return None;
     }
     let canon_root = infra_core::fs::canonicalize(root).ok()?;
-    let mut report = CoverageReport::default();
-    let mut files_loaded = 0usize;
-    let mut bytes_loaded = 0u64;
 
-    for rel in COVERAGE_CANDIDATES_LCOV {
-        if files_loaded >= MAX_COVERAGE_FILES || bytes_loaded >= MAX_COVERAGE_TOTAL_BYTES {
+    let mut matched: Vec<(String, CoverageFormat, u64, u128)> = Vec::new();
+    let mut seen_rels: BTreeSet<String> = BTreeSet::new();
+    let push_candidate =
+        |rel: String,
+         fmt: CoverageFormat,
+         seen_rels: &mut BTreeSet<String>,
+         matched: &mut Vec<(String, CoverageFormat, u64, u128)>| {
+            if matched.len() >= MAX_COVERAGE_FILES || !seen_rels.insert(rel.clone()) {
+                return;
+            }
+            if let Some((len, mtime_ns)) = stat_bounded_coverage_file(root, &canon_root, &rel) {
+                matched.push((rel, fmt, len, mtime_ns));
+            }
+        };
+
+    for &rel in COVERAGE_CANDIDATES_LCOV {
+        push_candidate(
+            rel.to_owned(),
+            CoverageFormat::Lcov,
+            &mut seen_rels,
+            &mut matched,
+        );
+    }
+    for &rel in COVERAGE_CANDIDATES_CLOVER {
+        push_candidate(
+            rel.to_owned(),
+            CoverageFormat::Clover,
+            &mut seen_rels,
+            &mut matched,
+        );
+    }
+
+    let mut scanned_dirs = 0usize;
+    for &parent in MONOREPO_WORKSPACES {
+        if matched.len() >= MAX_COVERAGE_FILES || scanned_dirs >= MAX_MONOREPO_COVERAGE_DIRS {
+            break;
+        }
+        let parent_dir = root.join(parent);
+        let Ok(entries) = fs::read_dir(&parent_dir) else {
+            continue;
+        };
+        let mut children: Vec<_> = entries.flatten().collect();
+        children.sort_by_key(|e| e.file_name());
+        for entry in children {
+            if matched.len() >= MAX_COVERAGE_FILES || scanned_dirs >= MAX_MONOREPO_COVERAGE_DIRS {
+                break;
+            }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            scanned_dirs += 1;
+            for &(leaf, fmt) in MONOREPO_COVERAGE_REL {
+                push_candidate(
+                    format!("{parent}/{name_str}/{leaf}"),
+                    fmt,
+                    &mut seen_rels,
+                    &mut matched,
+                );
+            }
+        }
+    }
+
+    if matched.is_empty() {
+        return None;
+    }
+
+    let stamps: Vec<(String, u64, u128)> = matched
+        .iter()
+        .map(|(rel, _, len, mtime_ns)| (rel.clone(), *len, *mtime_ns))
+        .collect();
+    if let Ok(mut guard) = coverage_report_cache().lock()
+        && let Some(pos) = guard
+            .iter()
+            .position(|entry| entry.canon_root == canon_root && entry.stamps == stamps)
+    {
+        let hit = guard.remove(pos);
+        let out = hit.report.clone();
+        guard.push(hit);
+        return (!out.files.is_empty() || !out.all_tests.is_empty()).then_some(out);
+    }
+
+    let mut report = CoverageReport::default();
+    let mut bytes_loaded = 0u64;
+    for (rel, fmt, _, _) in &matched {
+        if bytes_loaded >= MAX_COVERAGE_TOTAL_BYTES {
             break;
         }
         if let Some((text, size)) = read_bounded_coverage_file(root, &canon_root, rel) {
-            parse_lcov(&text, root, Some(&canon_root), &mut report);
-            files_loaded += 1;
+            match fmt {
+                CoverageFormat::Lcov => parse_lcov(&text, root, Some(&canon_root), &mut report),
+                CoverageFormat::Clover => parse_clover(&text, root, Some(&canon_root), &mut report),
+            }
             bytes_loaded += size;
         }
     }
 
-    for rel in COVERAGE_CANDIDATES_CLOVER {
-        if files_loaded >= MAX_COVERAGE_FILES || bytes_loaded >= MAX_COVERAGE_TOTAL_BYTES {
-            break;
+    if let Ok(mut guard) = coverage_report_cache().lock() {
+        guard.retain(|entry| entry.canon_root != canon_root);
+        if guard.len() >= MAX_CACHED_COVERAGE_ROOTS {
+            guard.remove(0);
         }
-        if let Some((text, size)) = read_bounded_coverage_file(root, &canon_root, rel) {
-            parse_clover(&text, root, Some(&canon_root), &mut report);
-            files_loaded += 1;
-            bytes_loaded += size;
-        }
+        guard.push(CachedCoverageEntry {
+            canon_root,
+            stamps,
+            report: report.clone(),
+        });
     }
 
     (!report.files.is_empty() || !report.all_tests.is_empty()).then_some(report)
@@ -821,8 +951,9 @@ impl Index {
         let files = Net::new(self, false, certain);
         let symbols = Net::new(self, true, certain);
         let names = Names::new(self, &[], &|_| None);
-        let mut budget = VISITS;
+        let per_file_slice = (VISITS / paths.len().max(1)).clamp(1_024, VISITS);
         let rows: Vec<_> = paths.into_iter().map(|(path, status)| {
+            let mut budget = per_file_slice;
             let cov = coverage.as_ref().and_then(|report| report.files.get(path.as_str()));
             let Some(file) = ids.get(path.as_str()).copied().filter(|_| *status != 'D') else {
                 let mut row = json!({"path": path, "state": if *status == 'D' { "deleted" } else { "missing" }});
@@ -1070,7 +1201,7 @@ impl Index {
             .collect::<Vec<_>>();
         let total = failing_files.len() + failed_virtual_tns.len();
         let net = Net::new(self, false, certain);
-        let mut budget = VISITS;
+        let per_file_slice = (VISITS / changed.len().max(1)).clamp(1_024, VISITS);
         let mut complete = true;
         struct SuspectRow<'a> {
             path: &'a str,
@@ -1095,6 +1226,7 @@ impl Index {
                 continue;
             }
             // Which tests reach it, and from how near the failing ones do.
+            let mut budget = per_file_slice;
             let mut bfs_failing_files = BTreeSet::new();
             let mut bfs_passing_files = BTreeSet::new();
             let (mut nearest, mut far) = (u32::MAX, 0u64);
@@ -1817,5 +1949,42 @@ end_of_record
         assert_eq!(rank_of("src/dynamic.php")["failing"], 1);
         assert_eq!(rank_of("src/dynamic.php")["passing"], 1);
         assert!(rank_of("src/dynamic.php")["coverage"].is_object());
+    }
+
+    #[test]
+    fn discovers_monorepo_coverage_and_invalidates_cache_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("mono");
+        std::fs::create_dir_all(ws.join("packages/billing/coverage")).unwrap();
+        std::fs::create_dir_all(ws.join("packages/billing/src")).unwrap();
+        std::fs::write(
+            ws.join("packages/billing/src/tax.ts"),
+            "export const t = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("packages/billing/coverage/lcov.info"),
+            "SF:packages/billing/src/tax.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\n",
+        )
+        .unwrap();
+
+        let first = discover_workspace_coverage(&ws).expect("monorepo coverage");
+        assert_eq!(first.files["packages/billing/src/tax.ts"].covered_lines, 1);
+
+        // Second call hits cache and preserves report; editing content invalidates via stamp.
+        let cached = discover_workspace_coverage(&ws).expect("cached coverage");
+        assert_eq!(cached.files["packages/billing/src/tax.ts"].covered_lines, 1);
+
+        std::fs::write(
+            ws.join("packages/billing/coverage/lcov.info"),
+            "SF:packages/billing/src/tax.ts\nDA:1,0\nDA:2,0\nLF:2\nLH:0\nend_of_record\n",
+        )
+        .unwrap();
+        let updated = discover_workspace_coverage(&ws).expect("updated coverage");
+        assert_eq!(updated.files["packages/billing/src/tax.ts"].total_lines, 2);
+        assert_eq!(
+            updated.files["packages/billing/src/tax.ts"].covered_lines,
+            0
+        );
     }
 }
