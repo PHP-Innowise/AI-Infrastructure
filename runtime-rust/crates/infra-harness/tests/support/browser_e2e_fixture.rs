@@ -323,7 +323,24 @@ fn handle_stream_json_provider(cwd: &Path, root: &Path) -> Result<()> {
                                 "subtype": "success",
                                 "request_id": req_id,
                                 "response": {
-                                    "commands": [],
+                                    "commands": [
+                                        {
+                                            "name": "model",
+                                            "description": "Choose the model for the next turn",
+                                            "argumentHint": "[model]",
+                                            "builtin": true
+                                        },
+                                        {
+                                            "name": "resume",
+                                            "description": "Open the session list to resume a conversation",
+                                            "builtin": true
+                                        },
+                                        {
+                                            "name": "new",
+                                            "description": "Start a new session",
+                                            "builtin": true
+                                        }
+                                    ],
                                     "output_style": "default"
                                 }
                             }

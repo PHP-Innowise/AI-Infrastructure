@@ -1621,7 +1621,7 @@ async function assertSessionSettingsToggleUnclipped(driver, label) {
   );
 }
 
-async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
+async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   console.log('[Suite 5] Modals, Approvals drawer, Command palette & Mobile drawer');
   // Focus a trigger before opening #command-palette so we can assert focus restoration
   await driver.callFn(() => {
@@ -1815,6 +1815,22 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
   }
 
   // WCAG AA >=4.5:1 contrast on .composer textarea::placeholder & .skill-hint[aria-selected="true"] .skill-hint-argument (Light & Dark)
+  // Switch to idle completed other_session_id so composer slash hints open (#skill-hints-panel suppresses while session is running)
+  const otherSel = opts?.otherSessionId && opts?.sessionId
+    ? `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.otherSessionId).replace(/"/g, '\\"')}"]`
+    : '';
+  const mainSel = opts?.otherSessionId && opts?.sessionId
+    ? `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.sessionId).replace(/"/g, '\\"')}"]`
+    : '';
+  if (otherSel) {
+    await driver.click(otherSel);
+    await driver.waitFor(
+      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+      'switch to idle other_session_id before /model hints WCAG check',
+      10_000,
+      otherSel,
+    );
+  }
   const themeBeforeContrast = await driver.callFn(() => document.documentElement.getAttribute('data-theme') || 'light');
   for (const theme of ['light', 'dark']) {
     await driver.click(`#theme-${theme}`);
@@ -1828,7 +1844,9 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
       const p = document.getElementById('prompt');
       p.value = '/model';
       p.focus();
+      p.setSelectionRange(p.value.length, p.value.length);
       p.dispatchEvent(new Event('input', { bubbles: true }));
+      p.dispatchEvent(new KeyboardEvent('keyup', { key: 'l', code: 'KeyL', bubbles: true }));
     });
     const samples = await driver.waitFor(() => {
       const p = document.getElementById('prompt');
@@ -1879,11 +1897,22 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp) {
     await driver.callFn(() => {
       const p = document.getElementById('prompt');
       p.value = '';
+      p.setSelectionRange(0, 0);
       p.dispatchEvent(new Event('input', { bubbles: true }));
+      p.dispatchEvent(new KeyboardEvent('keyup', { key: 'Backspace', code: 'Backspace', bubbles: true }));
     });
   }
   await driver.click(`#theme-${themeBeforeContrast}`);
   await driver.waitFor((t) => document.documentElement.getAttribute('data-theme') === t, 'restore theme after WCAG checks', 4_000, themeBeforeContrast);
+  if (mainSel) {
+    await driver.click(mainSel);
+    await driver.waitFor(
+      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+      'switch back to primary session_id before /resume and #session-summary checks',
+      10_000,
+      mainSel,
+    );
+  }
 
   // Responsive 761-920px breakpoint check (840x900) + /resume sidebar inert & focus
   await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -2439,7 +2468,7 @@ async function main() {
       await suite2Canvas2dAndMapLayout(driver, pageCdp, opts);
       await suite3MapLenses(driver);
       await suite4LiveSseAndStyling(driver, opts);
-      await suite5ModalsApprovalsPaletteMobile(driver, pageCdp);
+      await suite5ModalsApprovalsPaletteMobile(driver, pageCdp, opts);
       await suite6OmnigraphStudio(driver);
       await suite7SystemMap(driver, opts);
 
