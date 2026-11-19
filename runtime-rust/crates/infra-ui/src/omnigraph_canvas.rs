@@ -2306,13 +2306,19 @@ fn extract_graph_items(
 
     if let Some(arr) = graph.get("symbols").and_then(Value::as_array) {
         for item in arr {
-            let id = str_field(item, &["id", "fqn", "@id"]);
+            let id = str_field(item, &["id", "fqn", "symbol_id", "@id"]);
             if id.is_empty() || !seen_ids.insert(id.clone()) {
                 continue;
             }
-            let fqn = str_field(item, &["fqn", "id"]).if_empty(&id);
+            let fqn = str_field(item, &["fqn", "id", "symbol_id"]).if_empty(&id);
             if fqn != id && !fqn.is_empty() {
                 aliases.entry(fqn.clone()).or_insert_with(|| id.clone());
+            }
+            let symbol_id = str_field(item, &["symbol_id"]);
+            if !symbol_id.is_empty() && symbol_id != id {
+                aliases
+                    .entry(symbol_id.clone())
+                    .or_insert_with(|| id.clone());
             }
             let file_path = str_field(item, &["file_path", "path"])
                 .if_empty_from(|| split_symbol_fqn_file(&fqn));
@@ -2332,9 +2338,10 @@ fn extract_graph_items(
             } else {
                 str_field(item, &["drift_status", "drift", "change_status"])
             };
-            let blob =
-                format!("{id} {fqn} {title} {file_path} {symbol_kind} {owner} {name} {branch} {drift_status}")
-                    .to_ascii_lowercase();
+            let blob = format!(
+                "{id} {fqn} {symbol_id} {title} {file_path} {symbol_kind} {owner} {name} {branch} {drift_status}"
+            )
+            .to_ascii_lowercase();
             let (w, h) = NodeKindGroup::Symbol.size();
             nodes.push(CanvasNode {
                 id,

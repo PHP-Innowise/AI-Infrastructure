@@ -4201,6 +4201,35 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
         ));
         return html;
     }
+    if bridge["confidence"].is_object() {
+        let certain = bridge["confidence"]["certain_refs"].as_u64().unwrap_or(0);
+        let guessed = bridge["confidence"]["guessed_refs"].as_u64().unwrap_or(0);
+        let pct = (bridge["confidence"]["ratio"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+            * 100.0)
+            .round() as u64;
+        html.push_str(&format!(
+            "<p class=\"system-note system-bridge-confidence\">Link confidence: <strong>{pct}%</strong> ({certain} certain, {guessed} guessed)</p>"
+        ));
+    }
+    if bridge["run_coverage"].is_object() {
+        let rc = &bridge["run_coverage"];
+        let c_open = rc["consumer_opened"].as_u64().unwrap_or(0);
+        let c_tot = rc["consumer_total"].as_u64().unwrap_or(0);
+        let p_open = rc["provider_opened"].as_u64().unwrap_or(0);
+        let p_tot = rc["provider_total"].as_u64().unwrap_or(0);
+        let rid = m::text(rc, "run_id");
+        html.push_str(&format!(
+            "<p class=\"system-note system-bridge-coverage\">Run coverage{}: {c_open}/{c_tot} consumer · {p_open}/{p_tot} provider opened</p>",
+            if rid.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", escape(&rid))
+            }
+        ));
+    }
     for (side, role, none) in [
         ("consumer", "uses it", "No file was found to name it."),
         (
@@ -4251,9 +4280,33 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
                 ),
                 None => String::new(),
             };
+            let opened_note = if m::yes(&site["opened_by_run"]) {
+                " · opened in run"
+            } else {
+                ""
+            };
+            let syms_note = {
+                let syms = m::array(&site["from_symbols"])
+                    .iter()
+                    .filter_map(|s| {
+                        s.as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(escape)
+                    })
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if syms.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · via {syms}")
+                }
+            };
             let open = payload_attr(&json!({"path": path, "service": service}));
             html.push_str(&format!(
-                "<li class=\"system-bridge-site\"><div><code>{}</code><div class=\"system-note\">{how}{}{reach}</div></div><button type=\"button\" class=\"button compact\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" aria-label=\"Show {} on the code map of {}\">Map</button></li>",
+                "<li class=\"system-bridge-site\" data-opened-by-run=\"{}\"><div><code>{}</code><div class=\"system-note\">{how}{}{reach}{syms_note}{opened_note}</div></div><button type=\"button\" class=\"button compact\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" aria-label=\"Show {} on the code map of {}\">Map</button></li>",
+                if m::yes(&site["opened_by_run"]) { "true" } else { "false" },
                 escape(&path),
                 {
                     let named = m::array(&site["contracts"])
@@ -4508,11 +4561,19 @@ async fn fetch_bridge(surface: SysMapSurface, from: String, to: String) {
     if project_id.is_empty() {
         return;
     }
+    let run_id = m::text(&state["overlay"], "run_id");
+    let target = if !run_id.is_empty() {
+        format!("sysrun:{run_id}")
+    } else {
+        String::new()
+    };
     let q = dom::query(&[
         ("project_id", project_id),
         ("config_path", m::text(&state, "config_path")),
         ("from", from),
         ("to", to),
+        ("target", target),
+        ("run_id", run_id),
         (
             "certain",
             if m::yes(&state["certain"]) {
@@ -9030,6 +9091,24 @@ mod tests {
         empty["consumer"]["sites"] = json!([]);
         assert!(bridge_html(SERVICES_SURFACE, "web", "orders", &empty)
             .contains("No file was found to name it."));
+        // Backend #31 additive fields: confidence, run_coverage, opened_by_run, from_symbols.
+        let mut with_cov = bridge;
+        with_cov["confidence"] = json!({"certain_refs": 4, "guessed_refs": 1, "ratio": 0.8});
+        with_cov["run_coverage"] = json!({
+            "run_id": "run-7",
+            "consumer_opened": 1,
+            "consumer_total": 2,
+            "provider_opened": 2,
+            "provider_total": 3,
+        });
+        with_cov["consumer"]["sites"][0]["opened_by_run"] = json!(true);
+        with_cov["consumer"]["sites"][0]["from_symbols"] = json!(["OrdersClient.place"]);
+        let cov_html = bridge_html(SERVICES_SURFACE, "web", "orders", &with_cov);
+        assert!(cov_html.contains("80%"));
+        assert!(cov_html.contains("1/2 consumer · 2/3 provider opened"));
+        assert!(cov_html.contains("data-opened-by-run=\"true\""));
+        assert!(cov_html.contains("via OrdersClient.place"));
+        assert!(cov_html.contains("opened in run"));
     }
 
     #[test]
