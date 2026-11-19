@@ -3,7 +3,7 @@
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 
-const ROW_HEIGHT: usize = 36;
+pub const ROW_HEIGHT: usize = 36;
 const MID_Y: usize = ROW_HEIGHT / 2;
 const TOP_CTRL_Y: usize = MID_Y / 2;
 const BOT_CTRL_Y: usize = MID_Y + (ROW_HEIGHT - MID_Y) / 2;
@@ -83,6 +83,78 @@ pub fn next_commit_dock_index(
     }
 }
 
+/// Resolves ordered `(older_base, newer_head)` commit range when Shift+clicking a second commit.
+pub fn resolve_commit_range_selection(
+    commits: &[Value],
+    anchor_sha: Option<&str>,
+    target_sha: &str,
+) -> Option<(String, String)> {
+    let anchor_norm = normalize_commit_sha(anchor_sha.unwrap_or(""));
+    let target_norm = normalize_commit_sha(target_sha);
+    if target_norm.is_empty() {
+        return None;
+    }
+    if anchor_norm.is_empty() || anchor_norm == target_norm {
+        return None;
+    }
+    let anchor_idx = selected_commit_row_index(commits, Some(&anchor_norm));
+    let target_idx = selected_commit_row_index(commits, Some(&target_norm));
+    match (anchor_idx, target_idx) {
+        (Some(ai), Some(ti)) => {
+            // Commits are newest-first: larger row index is older (`base`), smaller is newer (`head`).
+            if ai < ti {
+                Some((target_norm, anchor_norm))
+            } else {
+                Some((anchor_norm, target_norm))
+            }
+        }
+        _ => Some((anchor_norm, target_norm)),
+    }
+}
+
+fn normalize_commit_sha(raw: &str) -> String {
+    raw.trim()
+        .strip_prefix("commit:")
+        .unwrap_or(raw.trim())
+        .to_owned()
+}
+
+pub fn commit_range_state_for_index(
+    index: usize,
+    base_idx: Option<usize>,
+    head_idx: Option<usize>,
+) -> Option<&'static str> {
+    match (base_idx, head_idx) {
+        (Some(b), Some(h)) => {
+            let (lo, hi) = (b.min(h), b.max(h));
+            if index == h {
+                Some("end")
+            } else if index == b {
+                Some("start")
+            } else if index > lo && index < hi {
+                Some("between")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Renders compact range comparison banner bar when two commits `A..B` are compared.
+pub fn render_commit_range_banner(base_sha: &str, head_sha: &str) -> String {
+    let base_short = short_sha(base_sha);
+    let head_short = short_sha(head_sha);
+    if base_short.is_empty() || head_short.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<div class=\"graph-commit-range-bar\"><span>Range diff: <code>{}</code> .. <code>{}</code></span><span class=\"graph-commit-range-hint\">(Shift+click any commit to set range)</span><button type=\"button\" class=\"button compact\" data-action=\"graph-commit-range-clear\">Clear range</button></div>",
+        escape_html(&base_short),
+        escape_html(&head_short),
+    )
+}
+
 /// Renders HTML `<li>` commit rows with inline DAG rail SVGs for either the modal picker or the docked commit graph panel.
 pub fn render_commit_graph_rows(
     commits: &[Value],
@@ -92,10 +164,83 @@ pub fn render_commit_graph_rows(
     now: i64,
     surface: CommitGraphSurface,
 ) -> String {
-    let layouts = build_layouts(commits, selected_commit);
-    let mut html = String::new();
+    render_commit_graph_rows_with_options(
+        commits,
+        active_index,
+        selected_commit,
+        None,
+        None,
+        more,
+        now,
+        surface,
+    )
+}
 
-    for (index, (commit, layout)) in commits.iter().zip(layouts.iter()).enumerate() {
+#[allow(clippy::too_many_arguments)]
+pub fn render_commit_graph_rows_with_range(
+    commits: &[Value],
+    active_index: Option<usize>,
+    selected_commit: Option<&str>,
+    range: Option<(&str, &str)>,
+    window: Option<(f64, f64)>,
+    more: bool,
+    now: i64,
+    surface: CommitGraphSurface,
+) -> String {
+    render_commit_graph_rows_with_options(
+        commits,
+        active_index,
+        selected_commit,
+        range,
+        window,
+        more,
+        now,
+        surface,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_commit_graph_rows_with_options(
+    commits: &[Value],
+    active_index: Option<usize>,
+    selected_commit: Option<&str>,
+    range: Option<(&str, &str)>,
+    window: Option<(f64, f64)>,
+    more: bool,
+    now: i64,
+    surface: CommitGraphSurface,
+) -> String {
+    let layouts = build_layouts(commits, selected_commit);
+    let base_idx = range.and_then(|(b, _)| selected_commit_row_index(commits, Some(b)));
+    let head_idx = range.and_then(|(_, h)| selected_commit_row_index(commits, Some(h)));
+    let total = commits.len();
+
+    let (start_idx, end_idx) = match window {
+        Some((scroll_top, viewport_h)) if total > 80 && viewport_h > 0.0 => {
+            let row_h = ROW_HEIGHT as f64;
+            let first = ((scroll_top / row_h).floor() as isize - 18).max(0) as usize;
+            let visible = (viewport_h / row_h).ceil() as usize + 36;
+            let last = (first + visible).min(total);
+            (first.min(total), last)
+        }
+        _ => (0, total),
+    };
+
+    let mut html = String::new();
+    if start_idx > 0 {
+        let top_h = start_idx * ROW_HEIGHT;
+        html.push_str(&format!(
+            "<li class=\"git-graph-spacer\" style=\"height:{top_h}px\" role=\"presentation\" aria-hidden=\"true\"></li>"
+        ));
+    }
+
+    for (index, (commit, layout)) in commits
+        .iter()
+        .zip(layouts.iter())
+        .enumerate()
+        .skip(start_idx)
+        .take(end_idx.saturating_sub(start_idx))
+    {
         let sha = commit_sha(commit);
         let short = commit_short(commit, &sha);
         let subject = commit["subject"].as_str().unwrap_or("");
@@ -105,6 +250,9 @@ pub fn render_commit_graph_rows(
         let is_selected = is_commit_selected(&sha, &short, selected_commit);
         let payload = commit_target_payload(commit, &sha);
         let badges = render_commit_badges(commit);
+        let range_attr = commit_range_state_for_index(index, base_idx, head_idx)
+            .map(|r| format!(" data-range=\"{r}\""))
+            .unwrap_or_default();
 
         match surface {
             CommitGraphSurface::Picker => {
@@ -144,7 +292,7 @@ pub fn render_commit_graph_rows(
                     ""
                 };
                 html.push_str(&format!(
-                    "<li class=\"graph-pick-row has-git-graph\" id=\"graph-pick-row-{index}\" role=\"option\" aria-selected=\"{is_active}\"{current_attr} data-action=\"graph-pick-choose\" data-payload=\"{payload}\"><span class=\"git-graph-rail\">{}</span><span class=\"graph-pick-main\">{title_html}{badges_html}</span>{who_html}{when_html}<code class=\"graph-pick-code\">{}</code></li>",
+                    "<li class=\"graph-pick-row has-git-graph\" id=\"graph-pick-row-{index}\" role=\"option\" aria-selected=\"{is_active}\"{current_attr}{range_attr} data-action=\"graph-pick-choose\" data-payload=\"{payload}\"><span class=\"git-graph-rail\">{}</span><span class=\"graph-pick-main\">{title_html}{badges_html}</span>{who_html}{when_html}<code class=\"graph-pick-code\">{}</code></li>",
                     layout.rail_svg,
                     escape_html(&short),
                 ));
@@ -189,13 +337,20 @@ pub fn render_commit_graph_rows(
                 };
                 let is_row_selected = active_index.map_or(is_selected, |idx| idx == index);
                 html.push_str(&format!(
-                    "<li class=\"git-graph-row\" id=\"graph-commit-row-{index}\" role=\"option\" aria-selected=\"{is_row_selected}\" data-current=\"{is_selected}\" data-action=\"graph-commit-select\" data-payload=\"{payload}\"><span class=\"git-graph-rail\">{}</span><div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">{}</span>{badges_html}</div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">{}</code>{who_html}{when_html}</div></div></li>",
+                    "<li class=\"git-graph-row\" id=\"graph-commit-row-{index}\" role=\"option\" aria-selected=\"{is_row_selected}\" data-current=\"{is_selected}\"{range_attr} data-action=\"graph-commit-select\" data-payload=\"{payload}\"><span class=\"git-graph-rail\">{}</span><div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">{}</span>{badges_html}</div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">{}</code>{who_html}{when_html}</div></div></li>",
                     layout.rail_svg,
                     escape_html(subject),
                     escape_html(&short),
                 ));
             }
         }
+    }
+
+    if end_idx < total {
+        let bot_h = (total - end_idx) * ROW_HEIGHT;
+        html.push_str(&format!(
+            "<li class=\"git-graph-spacer\" style=\"height:{bot_h}px\" role=\"presentation\" aria-hidden=\"true\"></li>"
+        ));
     }
 
     if more {
@@ -1575,5 +1730,41 @@ mod tests {
             dock_html.contains("id=\"graph-commit-row-0\" role=\"option\" aria-selected=\"false\"")
         );
         assert!(dock_html.contains("id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"true\" data-current=\"true\""));
+
+        let range = resolve_commit_range_selection(&commits, Some("commit:c2"), "c0");
+        assert_eq!(range, Some(("c0".to_owned(), "c2".to_owned())));
+        let ranged_html = render_commit_graph_rows_with_range(
+            &commits,
+            None,
+            Some("commit:c2"),
+            Some(("c0", "c2")),
+            None,
+            false,
+            0,
+            CommitGraphSurface::Dock,
+        );
+        assert!(ranged_html.contains("data-range=\"end\""));
+        assert!(ranged_html.contains("data-range=\"between\""));
+        assert!(ranged_html.contains("data-range=\"start\""));
+        let banner = render_commit_range_banner("c0", "c2");
+        assert!(banner.contains("Range diff:"));
+        assert!(banner.contains("graph-commit-range-clear"));
+
+        let many: Vec<Value> = (0..120)
+            .map(|i| json!({"commit": format!("sha{i}"), "short": format!("s{i}"), "subject": format!("C{i}"), "parents": []}))
+            .collect();
+        let windowed = render_commit_graph_rows_with_range(
+            &many,
+            None,
+            None,
+            None,
+            Some((36.0 * 30.0, 360.0)),
+            false,
+            0,
+            CommitGraphSurface::Dock,
+        );
+        assert!(windowed.contains("class=\"git-graph-spacer\""));
+        assert!(windowed.contains("graph-commit-row-30"));
+        assert!(!windowed.contains("graph-commit-row-0\""));
     }
 }

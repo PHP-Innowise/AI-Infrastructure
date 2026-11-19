@@ -8,8 +8,11 @@
 //! relation, and diff marker pairs iconography or geometry with explicit text
 //! labels for WCAG 1.4.1 compliance.
 
+use crate::graph_viewport;
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 
 const SESSION_W: f64 = 216.0;
 const SESSION_H: f64 = 78.0;
@@ -75,6 +78,15 @@ pub struct ConstellationFilter {
     pub show_sessions: bool,
     pub selected_id: Option<String>,
     pub highlighted_ids: BTreeSet<String>,
+    pub anchored_positions: BTreeMap<String, (f64, f64)>,
+    pub pinned_positions: BTreeMap<String, (f64, f64)>,
+    pub path_nodes: BTreeSet<String>,
+    pub path_edges: BTreeSet<(String, String)>,
+    pub isolate_seed: Option<String>,
+    pub isolate_depth: usize,
+    pub viewport_bounds: Option<(f64, f64, f64, f64)>,
+    pub paged_count: usize,
+    pub focused_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -87,6 +99,11 @@ pub struct RenderedCanvas {
     pub node_count: usize,
     pub edge_count: usize,
     pub positions: BTreeMap<String, (f64, f64)>,
+    pub raw_positions: BTreeMap<String, (f64, f64)>,
+    pub structure_digest: u64,
+    pub dense_scene: Option<graph_viewport::canvas2d::DenseScene>,
+    pub node_rects: Vec<(String, f64, f64, f64, f64)>,
+    pub node_edges: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -280,6 +297,9 @@ struct CanvasNode {
     tags: Vec<String>,
     touch_count: usize,
     search_blob: String,
+    drift_status: String,
+    broken_risk: bool,
+    user_pinned: bool,
     x: f64,
     y: f64,
     w: f64,
@@ -296,16 +316,8 @@ struct CanvasEdge {
     label: String,
 }
 
-#[allow(dead_code)]
-pub fn render_constellation(
-    graph: &Value,
-    filter: &ConstellationFilter,
-    viewport: &CanvasViewport,
-) -> RenderedCanvas {
-    let vp = sanitize_viewport(viewport);
+fn prepare_constellation_graph(graph: &Value) -> (Vec<CanvasNode>, Vec<CanvasEdge>) {
     let (mut nodes, mut edges, aliases) = extract_graph_items(graph);
-
-    // Resolve edge endpoints onto canonical node IDs and compute touch counts.
     let mut resolved_edges = Vec::with_capacity(edges.len());
     let mut touch_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut atom_symbols_from_edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -343,6 +355,231 @@ pub fn render_constellation(
             }
         }
     }
+    (nodes, resolved_edges)
+}
+
+#[allow(dead_code)]
+pub fn compute_constellation_cone(
+    graph: &Value,
+    filter: &ConstellationFilter,
+    seed_id: &str,
+    max_hops: usize,
+) -> BTreeSet<String> {
+    let seed = seed_id.trim();
+    if seed.is_empty() || max_hops == 0 {
+        return BTreeSet::new();
+    }
+    let (nodes, edges) = prepare_constellation_graph(graph);
+    let active_branch = str_field(graph, &["active_branch"]);
+    let base_filter = ConstellationFilter {
+        isolate_seed: None,
+        isolate_depth: 0,
+        ..filter.clone()
+    };
+    let (kept_nodes, kept_edges) =
+        apply_constellation_filter(nodes, edges, &base_filter, &active_branch);
+    let mut id_to_idx: BTreeMap<String, usize> = BTreeMap::new();
+    for (idx, n) in kept_nodes.iter().enumerate() {
+        id_to_idx.insert(n.id.clone(), idx);
+    }
+    let Some(&seed_idx) = id_to_idx.get(seed) else {
+        return BTreeSet::new();
+    };
+    let mut out_adj = vec![Vec::new(); kept_nodes.len()];
+    let mut in_adj = vec![Vec::new(); kept_nodes.len()];
+    for e in &kept_edges {
+        if let (Some(&u), Some(&v)) = (id_to_idx.get(&e.from), id_to_idx.get(&e.to)) {
+            out_adj[u].push(v);
+            in_adj[v].push(u);
+        }
+    }
+    let dist = graph_viewport::hop_cone_distances(
+        kept_nodes.len(),
+        &out_adj,
+        &in_adj,
+        &[seed_idx],
+        max_hops.clamp(1, 3),
+    );
+    kept_nodes
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| dist[*idx].is_some())
+        .map(|(_, n)| n.id)
+        .collect()
+}
+
+pub type ConstellationPath = (Vec<String>, Vec<(String, String)>);
+
+#[allow(dead_code)]
+pub fn compute_constellation_path(
+    graph: &Value,
+    filter: &ConstellationFilter,
+    from_query: &str,
+    to_query: &str,
+) -> Option<ConstellationPath> {
+    let fq = from_query.trim().to_ascii_lowercase();
+    let tq = to_query.trim().to_ascii_lowercase();
+    if fq.is_empty() || tq.is_empty() {
+        return None;
+    }
+    let (nodes, edges) = prepare_constellation_graph(graph);
+    let active_branch = str_field(graph, &["active_branch"]);
+    let (kept_nodes, kept_edges) = apply_constellation_filter(nodes, edges, filter, &active_branch);
+    let resolve = |q: &str| -> Option<usize> {
+        kept_nodes
+            .iter()
+            .position(|n| n.id.eq_ignore_ascii_case(q) || n.title.eq_ignore_ascii_case(q))
+            .or_else(|| {
+                kept_nodes.iter().position(|n| {
+                    n.file_path.eq_ignore_ascii_case(q) || n.symbol_fqn.eq_ignore_ascii_case(q)
+                })
+            })
+            .or_else(|| kept_nodes.iter().position(|n| n.search_blob.contains(q)))
+    };
+    let u_idx = resolve(&fq)?;
+    let v_idx = resolve(&tq)?;
+    let id_to_idx: BTreeMap<&str, usize> = kept_nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+    let mut adj = vec![Vec::new(); kept_nodes.len()];
+    for e in &kept_edges {
+        if let (Some(&u), Some(&v)) = (id_to_idx.get(e.from.as_str()), id_to_idx.get(e.to.as_str()))
+        {
+            adj[u].push(v);
+        }
+    }
+    let path_indices =
+        graph_viewport::shortest_path_bfs(kept_nodes.len(), &adj, false, u_idx, v_idx).or_else(
+            || graph_viewport::shortest_path_bfs(kept_nodes.len(), &adj, true, u_idx, v_idx),
+        )?;
+    let path_ids: Vec<String> = path_indices
+        .iter()
+        .map(|&i| kept_nodes[i].id.clone())
+        .collect();
+    let path_pairs: Vec<(String, String)> = path_ids
+        .windows(2)
+        .map(|w| (w[0].clone(), w[1].clone()))
+        .collect();
+    Some((path_ids, path_pairs))
+}
+
+#[allow(dead_code)]
+pub fn constellation_structure_digest(graph: &Value, filter: &ConstellationFilter) -> u64 {
+    let (nodes, edges) = prepare_constellation_graph(graph);
+    let active_branch = str_field(graph, &["active_branch"]);
+    let (kept_nodes, kept_edges) = apply_constellation_filter(nodes, edges, filter, &active_branch);
+    let mut hasher = DefaultHasher::new();
+    kept_nodes.len().hash(&mut hasher);
+    for n in &kept_nodes {
+        n.id.hash(&mut hasher);
+        n.group.as_str().hash(&mut hasher);
+        n.drift_status.hash(&mut hasher);
+        n.broken_risk.hash(&mut hasher);
+        if let Some((px, py)) = filter.pinned_positions.get(&n.id) {
+            px.to_bits().hash(&mut hasher);
+            py.to_bits().hash(&mut hasher);
+        }
+    }
+    kept_edges.len().hash(&mut hasher);
+    for e in &kept_edges {
+        e.from.hash(&mut hasher);
+        e.to.hash(&mut hasher);
+        e.relation.hash(&mut hasher);
+    }
+    filter.isolate_seed.hash(&mut hasher);
+    filter.isolate_depth.hash(&mut hasher);
+    filter.paged_count.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[allow(dead_code)]
+pub fn inject_workspace_drift(
+    graph: &mut Value,
+    changes_doc: Option<&Value>,
+    impact_doc: Option<&Value>,
+) {
+    let mut file_drift: BTreeMap<String, (&'static str, bool)> = BTreeMap::new();
+    if let Some(changes) = changes_doc {
+        if let Some(arr) = changes["files"]
+            .as_array()
+            .or_else(|| changes["items"].as_array())
+        {
+            for item in arr {
+                let p = item["path"]
+                    .as_str()
+                    .or_else(|| item["file"].as_str())
+                    .unwrap_or("")
+                    .trim();
+                if p.is_empty() {
+                    continue;
+                }
+                let broken = item["broken_risk"].as_bool().unwrap_or(false)
+                    || item["risk"].as_str() == Some("high");
+                let status = if broken {
+                    "broken"
+                } else if item["stale"].as_bool().unwrap_or(false) {
+                    "stale"
+                } else {
+                    "changed"
+                };
+                file_drift.insert(p.to_owned(), (status, broken));
+            }
+        }
+    }
+    if let Some(imp) = impact_doc {
+        for key in ["broken", "risks", "suspects"] {
+            if let Some(arr) = imp[key].as_array() {
+                for item in arr {
+                    let p = item["path"]
+                        .as_str()
+                        .or_else(|| item.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if !p.is_empty() {
+                        file_drift.insert(p.to_owned(), ("broken", true));
+                    }
+                }
+            }
+        }
+    }
+    if file_drift.is_empty() {
+        return;
+    }
+    let apply = |arr_opt: Option<&mut Vec<Value>>| {
+        let Some(arr) = arr_opt else {
+            return;
+        };
+        for item in arr.iter_mut() {
+            let Some(obj) = item.as_object_mut() else {
+                continue;
+            };
+            let p = obj
+                .get("path")
+                .or_else(|| obj.get("file_path"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if let Some(&(status, broken)) = file_drift.get(&p) {
+                obj.insert("drift_status".to_owned(), serde_json::json!(status));
+                obj.insert("broken_risk".to_owned(), serde_json::json!(broken));
+            }
+        }
+    };
+    apply(graph.get_mut("files").and_then(Value::as_array_mut));
+    apply(graph.get_mut("symbols").and_then(Value::as_array_mut));
+}
+
+#[allow(dead_code)]
+pub fn render_constellation(
+    graph: &Value,
+    filter: &ConstellationFilter,
+    viewport: &CanvasViewport,
+) -> RenderedCanvas {
+    let vp = sanitize_viewport(viewport);
+    let (nodes, resolved_edges) = prepare_constellation_graph(graph);
+    let structure_digest = constellation_structure_digest(graph, filter);
 
     let active_branch = str_field(graph, &["active_branch"]);
     let (kept_nodes, kept_edges) =
@@ -357,10 +594,20 @@ pub fn render_constellation(
             node_count: 0,
             edge_count: 0,
             positions: BTreeMap::new(),
+            raw_positions: BTreeMap::new(),
+            structure_digest,
+            dense_scene: None,
+            node_rects: Vec::new(),
+            node_edges: Vec::new(),
         };
     }
 
-    let (mut placed_nodes, width, height) = layout_constellation(kept_nodes, &kept_edges);
+    let (mut placed_nodes, width, height) = layout_constellation_with_anchors(
+        kept_nodes,
+        &kept_edges,
+        &filter.anchored_positions,
+        &filter.pinned_positions,
+    );
     // Deterministic render order by (group, y, x, id)
     placed_nodes.sort_by(|a, b| {
         a.group
@@ -371,10 +618,14 @@ pub fn render_constellation(
     });
 
     let mut positions = BTreeMap::new();
+    let mut raw_positions = BTreeMap::new();
     let mut node_by_id: BTreeMap<String, usize> = BTreeMap::new();
+    let mut node_rects = Vec::with_capacity(placed_nodes.len());
     for (idx, n) in placed_nodes.iter().enumerate() {
         positions.insert(n.id.clone(), (n.x + n.w * 0.5, n.y + n.h * 0.5));
+        raw_positions.insert(n.id.clone(), (n.x, n.y));
         node_by_id.insert(n.id.clone(), idx);
+        node_rects.push((n.id.clone(), n.x, n.y, n.w, n.h));
     }
 
     let selected_id = filter
@@ -394,6 +645,7 @@ pub fn render_constellation(
     }
     let has_selection_focus = selected_id.is_some();
     let has_highlight_focus = !filter.highlighted_ids.is_empty();
+    let has_path_focus = !filter.path_nodes.is_empty();
 
     // Group parallel edges between the same unordered node pair so curves separate cleanly.
     let mut pair_totals: BTreeMap<(String, String), usize> = BTreeMap::new();
@@ -405,20 +657,25 @@ pub fn render_constellation(
 
     struct RoutedEdge {
         p0: (f64, f64),
+        p1: (f64, f64),
+        p2: (f64, f64),
         p3: (f64, f64),
         mid: (f64, f64),
         path_d: String,
         selected: bool,
         lit: bool,
         dimmed: bool,
+        on_path: bool,
     }
 
     let mut routed = Vec::with_capacity(kept_edges.len());
+    let mut node_edges = Vec::with_capacity(kept_edges.len());
     for (idx, edge) in kept_edges.iter().enumerate() {
         let (Some(&u_idx), Some(&v_idx)) = (node_by_id.get(&edge.from), node_by_id.get(&edge.to))
         else {
             continue;
         };
+        node_edges.push((u_idx, v_idx));
         let u = &placed_nodes[u_idx];
         let v = &placed_nodes[v_idx];
         let pair_key = ordered_pair(&edge.from, &edge.to);
@@ -439,15 +696,23 @@ pub fn render_constellation(
             curve.p3.0,
             curve.p3.1
         );
-        let (p0, p3) = (curve.p0, curve.p3);
 
         let is_selected_edge = selected_id.is_some_and(|s| edge.from == s || edge.to == s);
+        let is_path_edge = filter
+            .path_edges
+            .contains(&(edge.from.clone(), edge.to.clone()))
+            || filter
+                .path_edges
+                .contains(&(edge.to.clone(), edge.from.clone()));
         let is_highlighted_edge = filter.highlighted_ids.contains(&edge.from)
             || filter.highlighted_ids.contains(&edge.to);
-        let lit = is_selected_edge
+        let lit = is_path_edge
+            || is_selected_edge
             || (filter.highlighted_ids.contains(&edge.from)
                 && filter.highlighted_ids.contains(&edge.to));
-        let dimmed = if has_selection_focus {
+        let dimmed = if has_path_focus {
+            !is_path_edge
+        } else if has_selection_focus {
             !is_selected_edge && !is_highlighted_edge
         } else if has_highlight_focus {
             !is_highlighted_edge
@@ -458,20 +723,29 @@ pub fn render_constellation(
         routed.push((
             edge,
             RoutedEdge {
-                p0,
-                p3,
+                p0: curve.p0,
+                p1: curve.p1,
+                p2: curve.p2,
+                p3: curve.p3,
                 mid,
                 path_d,
-                selected: is_selected_edge,
+                selected: is_selected_edge || is_path_edge,
                 lit,
                 dimmed,
+                on_path: is_path_edge,
             },
         ));
     }
 
+    let is_dense = placed_nodes.len() >= 180 || routed.len() >= 400 || filter.paged_count > 1;
     let plane_lod = lod(vp.scale);
+    let tier_attr = if is_dense {
+        " data-scale-tier=\"dense\""
+    } else {
+        ""
+    };
     let mut html = format!(
-        "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{:.0}px;height:{:.0}px\" data-lod=\"{plane_lod}\" data-node-count=\"{}\" data-edge-count=\"{}\">",
+        "<div class=\"graph-map-plane omni-plane\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{:.0}px;height:{:.0}px\" data-lod=\"{plane_lod}\"{tier_attr} data-node-count=\"{}\" data-edge-count=\"{}\">",
         vp.pan_x,
         vp.pan_y,
         vp.scale,
@@ -481,7 +755,7 @@ pub fn render_constellation(
         routed.len()
     );
 
-    // SVG plane (orbital guides, arrow markers, shared gradient flows, Bezier paths, mid-edge labels)
+    // SVG plane (orbital guides, arrow markers, shared gradient flows; full paths rendered in SVG for small/normal graphs, offloaded to Canvas2D for Dense tier)
     html.push_str(&format!(
         "<svg class=\"omni-svg\" width=\"{:.0}\" height=\"{:.0}\" viewBox=\"0 0 {:.0} {:.0}\" aria-hidden=\"true\"><defs>",
         width, height, width, height
@@ -492,83 +766,177 @@ pub fn render_constellation(
 
     html.push_str(&render_orbital_guides(&placed_nodes, width, height));
 
-    for (edge, r) in &routed {
-        let spec = edge_spec(&edge.arrow_key);
-        let dash_attr = spec
-            .dash_array
-            .map(|d| format!(" stroke-dasharray=\"{d}\""))
-            .unwrap_or_default();
-        let subkind_attr = if edge.subkind.is_empty() {
-            edge.relation.as_str()
-        } else {
-            edge.subkind.as_str()
-        };
-        let arrow_key = escape_attr_token(&edge.arrow_key);
-        html.push_str(&format!(
-            "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"{dash_attr}><title>{} {} {}</title></path>",
-            r.path_d,
-            escape_attr_token(&edge.relation),
-            escape_attr_token(subkind_attr),
-            esc(&edge.from),
-            esc(&edge.to),
-            bool_str(r.selected),
-            bool_str(r.lit),
-            bool_str(r.dimmed),
-            esc(&edge.from),
-            esc(&edge.label),
-            esc(&edge.to),
-        ));
-        html.push_str(&format!(
-            "<circle class=\"omni-edge-origin\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" data-rel=\"{arrow_key}\" data-lit=\"{}\" data-dimmed=\"{}\"/>",
-            r.p0.0,
-            r.p0.1,
-            bool_str(r.lit),
-            bool_str(r.dimmed),
-        ));
-    }
+    let dense_scene = if is_dense {
+        let dense_edges = routed
+            .iter()
+            .enumerate()
+            .map(|(i, (edge, r))| graph_viewport::canvas2d::DenseEdgeSpec {
+                index: i,
+                pts: vec![r.p0, r.p1, r.p2, r.p3],
+                weight: if r.on_path { 3 } else { 1 },
+                guessed: false,
+                against: false,
+                kind: edge.arrow_key.clone(),
+                on: r.selected || r.on_path,
+                lit: r.lit,
+                dim: r.dimmed,
+                portal: false,
+            })
+            .collect();
+        let dense_nodes = placed_nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let is_selected = selected_id == Some(n.id.as_str());
+                let is_neighbor = !is_selected && neighbor_ids.contains(&n.id);
+                let is_highlighted =
+                    filter.highlighted_ids.contains(&n.id) || filter.path_nodes.contains(&n.id);
+                let is_dimmed = if has_path_focus {
+                    !filter.path_nodes.contains(&n.id)
+                } else if has_selection_focus {
+                    !is_selected && !is_neighbor && !is_highlighted
+                } else if has_highlight_focus {
+                    !is_highlighted
+                } else {
+                    false
+                };
+                graph_viewport::canvas2d::DenseNodeSpec {
+                    index: i,
+                    x: n.x,
+                    y: n.y,
+                    w: n.w,
+                    h: n.h,
+                    label: n.title.clone(),
+                    role: n.group.as_str().to_owned(),
+                    selected: is_selected,
+                    lit: is_neighbor || is_highlighted,
+                    dim: is_dimmed,
+                    changed: !n.drift_status.is_empty(),
+                    pinned: n.pinned || n.user_pinned,
+                    failed: n.broken_risk,
+                }
+            })
+            .collect();
+        Some(graph_viewport::canvas2d::DenseScene {
+            width,
+            height,
+            nodes: dense_nodes,
+            edges: dense_edges,
+        })
+    } else {
+        None
+    };
 
-    // Mid-edge pill labels: always emitted so CSS `[data-lod]` toggles visibility on zoom without re-render.
-    for (edge, r) in &routed {
-        let pill_w = (edge.label.chars().count() as f64 * 6.2 + 16.0).max(52.0);
-        html.push_str(&format!(
-            "<g class=\"omni-edge-label\" data-rel=\"{}\" data-subkind=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"18\" rx=\"9\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
-            escape_attr_token(&edge.arrow_key),
-            escape_attr_token(if edge.subkind.is_empty() {
-                &edge.relation
+    if !is_dense {
+        for (edge, r) in &routed {
+            let spec = edge_spec(&edge.arrow_key);
+            let dash_attr = spec
+                .dash_array
+                .map(|d| format!(" stroke-dasharray=\"{d}\""))
+                .unwrap_or_default();
+            let subkind_attr = if edge.subkind.is_empty() {
+                edge.relation.as_str()
             } else {
-                &edge.subkind
-            }),
-            bool_str(r.lit || r.selected),
-            bool_str(r.dimmed),
-            r.mid.0 - pill_w * 0.5,
-            r.mid.1 - 9.0,
-            pill_w,
-            r.mid.0,
-            r.mid.1 + 3.5,
-            esc(&edge.label),
-        ));
+                edge.subkind.as_str()
+            };
+            let arrow_key = escape_attr_token(&edge.arrow_key);
+            html.push_str(&format!(
+                "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\" data-path=\"{}\"{dash_attr}><title>{} {} {}</title></path>",
+                r.path_d,
+                escape_attr_token(&edge.relation),
+                escape_attr_token(subkind_attr),
+                esc(&edge.from),
+                esc(&edge.to),
+                bool_str(r.selected),
+                bool_str(r.lit),
+                bool_str(r.dimmed),
+                bool_str(r.on_path),
+                esc(&edge.from),
+                esc(&edge.label),
+                esc(&edge.to),
+            ));
+            html.push_str(&format!(
+                "<circle class=\"omni-edge-origin\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" data-rel=\"{arrow_key}\" data-lit=\"{}\" data-dimmed=\"{}\"/>",
+                r.p0.0,
+                r.p0.1,
+                bool_str(r.lit),
+                bool_str(r.dimmed),
+            ));
+        }
+
+        // Mid-edge pill labels: omitted in `far`/`mid` via CSS `[data-lod]` without re-render.
+        for (edge, r) in &routed {
+            let pill_w = (edge.label.chars().count() as f64 * 6.2 + 16.0).max(52.0);
+            html.push_str(&format!(
+                "<g class=\"omni-edge-label\" data-rel=\"{}\" data-subkind=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\"><rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"18\" rx=\"9\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
+                escape_attr_token(&edge.arrow_key),
+                escape_attr_token(if edge.subkind.is_empty() {
+                    &edge.relation
+                } else {
+                    &edge.subkind
+                }),
+                bool_str(r.lit || r.selected),
+                bool_str(r.dimmed),
+                r.mid.0 - pill_w * 0.5,
+                r.mid.1 - 9.0,
+                pill_w,
+                r.mid.0,
+                r.mid.1 + 3.5,
+                esc(&edge.label),
+            ));
+        }
     }
 
     html.push_str("</svg>");
 
-    // Interactive HTML node cards
-    for node in &placed_nodes {
+    let active_roving_id = filter
+        .focused_id
+        .as_deref()
+        .filter(|id| node_by_id.contains_key(*id))
+        .or(selected_id)
+        .or_else(|| placed_nodes.first().map(|n| n.id.as_str()));
+
+    // Interactive HTML node cards (viewport-virtualized in Dense tier when bounds are known).
+    for (idx, node) in placed_nodes.iter().enumerate() {
         let is_selected = selected_id == Some(node.id.as_str());
         let is_neighbor = !is_selected && neighbor_ids.contains(&node.id);
-        let is_highlighted = filter.highlighted_ids.contains(&node.id);
-        let is_dimmed = if has_selection_focus {
+        let is_highlighted =
+            filter.highlighted_ids.contains(&node.id) || filter.path_nodes.contains(&node.id);
+        let is_dimmed = if has_path_focus {
+            !filter.path_nodes.contains(&node.id)
+        } else if has_selection_focus {
             !is_selected && !is_neighbor && !is_highlighted
         } else if has_highlight_focus {
             !is_highlighted
         } else {
             false
         };
+        let offscreen = filter.viewport_bounds.is_some_and(|(vx, vy, vw, vh)| {
+            let pad = 120.0;
+            node.x + node.w < vx - pad
+                || node.x > vx + vw + pad
+                || node.y + node.h < vy - pad
+                || node.y > vy + vh + pad
+        });
+        if is_dense
+            && offscreen
+            && !is_selected
+            && !is_neighbor
+            && !is_highlighted
+            && !node.user_pinned
+        {
+            continue;
+        }
+        let is_roving_active = active_roving_id == Some(node.id.as_str());
         html.push_str(&render_constellation_node(
             node,
+            idx,
             is_selected,
             is_neighbor,
             is_highlighted,
             is_dimmed,
+            offscreen,
+            is_roving_active,
         ));
     }
 
@@ -591,6 +959,11 @@ pub fn render_constellation(
         node_count: placed_nodes.len(),
         edge_count: routed.len(),
         positions,
+        raw_positions,
+        structure_digest,
+        dense_scene,
+        node_rects,
+        node_edges,
     }
 }
 
@@ -1728,6 +2101,9 @@ fn extract_graph_items(
                 tags,
                 touch_count: 0,
                 search_blob: blob,
+                drift_status: String::new(),
+                broken_risk: false,
+                user_pinned: false,
                 x: 0.0,
                 y: 0.0,
                 w,
@@ -1800,6 +2176,9 @@ fn extract_graph_items(
                 tags,
                 touch_count: 0,
                 search_blob: blob,
+                drift_status: String::new(),
+                broken_risk: false,
+                user_pinned: false,
                 x: 0.0,
                 y: 0.0,
                 w,
@@ -1829,8 +2208,14 @@ fn extract_graph_items(
             let touch_count = i64_field(item, &["touch_count", "atom_count"])
                 .unwrap_or(0)
                 .max(0) as usize;
+            let broken_risk = bool_field(item, &["broken_risk"]);
+            let drift_status = if broken_risk {
+                "broken".to_owned()
+            } else {
+                str_field(item, &["drift_status", "drift", "change_status"])
+            };
             let (base_name, dir_hint) = split_file_label(&path);
-            let blob = format!("{id} {path} {branch} {lang}").to_ascii_lowercase();
+            let blob = format!("{id} {path} {branch} {lang} {drift_status}").to_ascii_lowercase();
             let (w, h) = NodeKindGroup::File.size();
             nodes.push(CanvasNode {
                 id,
@@ -1853,6 +2238,9 @@ fn extract_graph_items(
                 tags: Vec::new(),
                 touch_count,
                 search_blob: blob,
+                drift_status,
+                broken_risk,
+                user_pinned: false,
                 x: 0.0,
                 y: 0.0,
                 w,
@@ -1883,8 +2271,14 @@ fn extract_graph_items(
             let mention_count = i64_field(item, &["mention_count", "atom_count"])
                 .unwrap_or(atom_ids.len() as i64)
                 .max(0) as usize;
+            let broken_risk = bool_field(item, &["broken_risk"]);
+            let drift_status = if broken_risk {
+                "broken".to_owned()
+            } else {
+                str_field(item, &["drift_status", "drift", "change_status"])
+            };
             let blob =
-                format!("{id} {fqn} {title} {file_path} {symbol_kind} {owner} {name} {branch}")
+                format!("{id} {fqn} {title} {file_path} {symbol_kind} {owner} {name} {branch} {drift_status}")
                     .to_ascii_lowercase();
             let (w, h) = NodeKindGroup::Symbol.size();
             nodes.push(CanvasNode {
@@ -1908,6 +2302,9 @@ fn extract_graph_items(
                 tags: Vec::new(),
                 touch_count: mention_count,
                 search_blob: blob,
+                drift_status,
+                broken_risk,
+                user_pinned: false,
                 x: 0.0,
                 y: 0.0,
                 w,
@@ -2035,18 +2432,139 @@ fn apply_constellation_filter(
         }
     }
 
-    let kept_edges = edges
+    let kept_edges: Vec<CanvasEdge> = edges
         .into_iter()
         .filter(|e| kept_ids.contains(&e.from) && kept_ids.contains(&e.to))
         .collect();
 
+    if filter.isolate_depth > 0 {
+        if let Some(seed_id) = filter
+            .isolate_seed
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let mut id_to_idx: BTreeMap<&str, usize> = BTreeMap::new();
+            for (i, n) in kept_nodes.iter().enumerate() {
+                id_to_idx.insert(n.id.as_str(), i);
+            }
+            if let Some(&seed_idx) = id_to_idx.get(seed_id) {
+                let mut out_adj = vec![Vec::new(); kept_nodes.len()];
+                let mut in_adj = vec![Vec::new(); kept_nodes.len()];
+                for e in &kept_edges {
+                    if let (Some(&u), Some(&v)) =
+                        (id_to_idx.get(e.from.as_str()), id_to_idx.get(e.to.as_str()))
+                    {
+                        out_adj[u].push(v);
+                        in_adj[v].push(u);
+                    }
+                }
+                let dist = graph_viewport::hop_cone_distances(
+                    kept_nodes.len(),
+                    &out_adj,
+                    &in_adj,
+                    &[seed_idx],
+                    filter.isolate_depth.clamp(1, 3),
+                );
+                let cone_ids: BTreeSet<String> = kept_nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, n)| dist[*i].is_some() || filter.path_nodes.contains(&n.id))
+                    .map(|(_, n)| n.id.clone())
+                    .collect();
+                let isolated_nodes: Vec<CanvasNode> = kept_nodes
+                    .into_iter()
+                    .filter(|n| cone_ids.contains(&n.id))
+                    .collect();
+                let isolated_edges: Vec<CanvasEdge> = kept_edges
+                    .into_iter()
+                    .filter(|e| cone_ids.contains(&e.from) && cone_ids.contains(&e.to))
+                    .collect();
+                return (isolated_nodes, isolated_edges);
+            }
+        }
+    }
+
     (kept_nodes, kept_edges)
 }
 
+#[allow(dead_code)]
 fn layout_constellation(
-    mut nodes: Vec<CanvasNode>,
+    nodes: Vec<CanvasNode>,
     edges: &[CanvasEdge],
 ) -> (Vec<CanvasNode>, f64, f64) {
+    layout_constellation_with_anchors(nodes, edges, &BTreeMap::new(), &BTreeMap::new())
+}
+
+fn layout_constellation_with_anchors(
+    mut nodes: Vec<CanvasNode>,
+    edges: &[CanvasEdge],
+    anchors: &BTreeMap<String, (f64, f64)>,
+    pins: &BTreeMap<String, (f64, f64)>,
+) -> (Vec<CanvasNode>, f64, f64) {
+    // When loading subsequent pages, keep already-placed nodes anchored where they stand
+    // and pack newly added nodes into extension rows per track so cards never jump.
+    if !anchors.is_empty() && nodes.iter().any(|n| anchors.contains_key(&n.id)) {
+        let mut max_y_by_track = [MARGIN_Y; 3];
+        let mut x_by_track = [
+            MARGIN_X,
+            MARGIN_X + SESSION_W + TRACK_GAP_X,
+            MARGIN_X + SESSION_W + ATOM_W + TRACK_GAP_X * 2.0,
+        ];
+        let mut seen_track = [false; 3];
+        let mut new_by_track: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (idx, n) in nodes.iter_mut().enumerate() {
+            let track = match n.group {
+                NodeKindGroup::Session => 0,
+                NodeKindGroup::Atom => 1,
+                NodeKindGroup::File | NodeKindGroup::Symbol => 2,
+            };
+            if let Some(&(px, py)) = pins.get(&n.id) {
+                n.x = px;
+                n.y = py;
+                n.user_pinned = true;
+                max_y_by_track[track] = max_y_by_track[track].max(n.y + n.h + NODE_GAP_Y);
+            } else if let Some(&(ax, ay)) = anchors.get(&n.id) {
+                n.x = ax;
+                n.y = ay;
+                if !seen_track[track] {
+                    x_by_track[track] = ax;
+                    seen_track[track] = true;
+                } else {
+                    x_by_track[track] = x_by_track[track].min(ax);
+                }
+                max_y_by_track[track] = max_y_by_track[track].max(n.y + n.h + NODE_GAP_Y);
+            } else {
+                new_by_track[track].push(idx);
+            }
+        }
+        for track in 0..3 {
+            let col_count = match track {
+                0 => 1,
+                1 => 2,
+                _ => 1,
+            };
+            let base_y = max_y_by_track[track];
+            let base_x = x_by_track[track];
+            for (pos, &idx) in new_by_track[track].iter().enumerate() {
+                let col = pos % col_count;
+                let row = pos / col_count;
+                let step_x = if track == 1 {
+                    ATOM_W + ATOM_COL_GAP_X
+                } else {
+                    FILE_W + 30.0
+                };
+                let step_h = nodes[idx].h + NODE_GAP_Y;
+                nodes[idx].x = base_x + (col as f64) * step_x;
+                nodes[idx].y = base_y + (row as f64) * step_h;
+            }
+        }
+        let max_x = nodes.iter().map(|n| n.x + n.w).fold(0.0, f64::max);
+        let max_y = nodes.iter().map(|n| n.y + n.h).fold(0.0, f64::max);
+        let width = (max_x + MARGIN_X + 44.0).max(MIN_PLANE_W);
+        let height = (max_y + MARGIN_Y).max(MIN_PLANE_H);
+        return (nodes, width, height);
+    }
     let mut session_indices = Vec::new();
     let mut atom_indices = Vec::new();
     let mut file_indices = Vec::new();
@@ -2270,14 +2788,32 @@ fn layout_constellation(
     // 5. Deterministic AABB anti-overlap pass guaranteeing minimum spacing between all cards.
     resolve_node_overlaps(&mut nodes);
 
-    // 6. Normalize coordinates so top/left margins stay crisp.
+    // 6. Apply user pin overrides and normalize coordinates when no pins conflict.
+    if !pins.is_empty() {
+        for n in &mut nodes {
+            if let Some(&(px, py)) = pins.get(&n.id) {
+                n.x = px;
+                n.y = py;
+                n.user_pinned = true;
+            }
+        }
+    }
     let min_x = nodes.iter().map(|n| n.x).fold(f64::INFINITY, f64::min);
     let min_y = nodes.iter().map(|n| n.y).fold(f64::INFINITY, f64::min);
-    let shift_x = MARGIN_X - min_x;
-    let shift_y = MARGIN_Y - min_y;
-    for n in &mut nodes {
-        n.x += shift_x;
-        n.y += shift_y;
+    if pins.is_empty() {
+        let shift_x = MARGIN_X - min_x;
+        let shift_y = MARGIN_Y - min_y;
+        for n in &mut nodes {
+            n.x += shift_x;
+            n.y += shift_y;
+        }
+    } else if min_x < MARGIN_X || min_y < MARGIN_Y {
+        let shift_x = (MARGIN_X - min_x).max(0.0);
+        let shift_y = (MARGIN_Y - min_y).max(0.0);
+        for n in &mut nodes {
+            n.x += shift_x;
+            n.y += shift_y;
+        }
     }
 
     let max_x = nodes.iter().map(|n| n.x + n.w).fold(0.0, f64::max);
@@ -2495,12 +3031,16 @@ fn bezier_midpoint(curve: &CubicCurve) -> (f64, f64) {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_constellation_node(
     node: &CanvasNode,
+    roving_index: usize,
     selected: bool,
     neighbor: bool,
     highlighted: bool,
     dimmed: bool,
+    offscreen: bool,
+    roving_active: bool,
 ) -> String {
     let kind_label = match node.group {
         NodeKindGroup::Session => "Session",
@@ -2561,6 +3101,18 @@ fn render_constellation_node(
                 "<span class=\"omni-file-count\">{} {suffix}</span>",
                 node.touch_count
             ));
+            if !node.drift_status.is_empty() {
+                let drift_label = if node.broken_risk {
+                    "broken risk"
+                } else {
+                    node.drift_status.as_str()
+                };
+                indicators.push_str(&format!(
+                    "<span class=\"omni-node-drift\" data-drift=\"{}\">{}</span>",
+                    escape_attr_token(&node.drift_status),
+                    esc(drift_label)
+                ));
+            }
         }
         NodeKindGroup::Symbol => {
             if !node.symbol_kind.is_empty() {
@@ -2574,6 +3126,18 @@ fn render_constellation_node(
                 "<span class=\"omni-symbol-count\">{} {suffix}</span>",
                 node.touch_count
             ));
+            if !node.drift_status.is_empty() {
+                let drift_label = if node.broken_risk {
+                    "broken risk"
+                } else {
+                    node.drift_status.as_str()
+                };
+                indicators.push_str(&format!(
+                    "<span class=\"omni-node-drift\" data-drift=\"{}\">{}</span>",
+                    escape_attr_token(&node.drift_status),
+                    esc(drift_label)
+                ));
+            }
         }
     }
 
@@ -2666,9 +3230,22 @@ fn render_constellation_node(
     if !node.symbol_kind.is_empty() {
         extra_attrs.push_str(&format!(" data-symbol-kind=\"{}\"", esc(&node.symbol_kind)));
     }
+    if !node.drift_status.is_empty() {
+        extra_attrs.push_str(&format!(
+            " data-drift=\"{}\"",
+            escape_attr_token(&node.drift_status)
+        ));
+    }
+    if node.broken_risk {
+        extra_attrs.push_str(" data-broken-risk=\"true\"");
+    }
+    if offscreen {
+        extra_attrs.push_str(" data-offscreen=\"true\"");
+    }
+    let tabindex = if roving_active { "0" } else { "-1" };
 
     format!(
-        "<button type=\"button\" class=\"omni-node omni-node-{} omni-kind-{kind_key}\" style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\" data-node-type=\"{}\" data-kind=\"{kind_key}\" data-branch=\"{}\"{extra_attrs} data-selected=\"{}\" data-neighbor=\"{}\" data-highlighted=\"{}\" data-dimmed=\"{}\" data-pinned=\"{}\" aria-pressed=\"{}\" aria-label=\"{}\" title=\"{}\"><span class=\"omni-node-head\">{icon}<span class=\"omni-kind-badge\" data-kind=\"{kind_key}\">{kind_label}</span><span class=\"omni-node-indicators\">{indicators}</span></span><span class=\"omni-node-title\">{}</span><span class=\"omni-node-foot\">{foot}</span></button>",
+        "<button type=\"button\" tabindex=\"{tabindex}\" data-roving-index=\"{roving_index}\" class=\"omni-node omni-node-{} omni-kind-{kind_key}\" style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\" data-node-type=\"{}\" data-kind=\"{kind_key}\" data-branch=\"{}\"{extra_attrs} data-selected=\"{}\" data-neighbor=\"{}\" data-highlighted=\"{}\" data-dimmed=\"{}\" data-pinned=\"{}\" aria-pressed=\"{}\" aria-label=\"{}\" title=\"{}\"><span class=\"omni-node-head\">{icon}<span class=\"omni-kind-badge\" data-kind=\"{kind_key}\">{kind_label}</span><span class=\"omni-node-indicators\">{indicators}</span></span><span class=\"omni-node-title\">{}</span><span class=\"omni-node-foot\">{foot}</span></button>",
         node.group.as_str(),
         node.x,
         node.y,
@@ -2681,7 +3258,7 @@ fn render_constellation_node(
         bool_str(neighbor),
         bool_str(highlighted),
         bool_str(dimmed),
-        bool_str(node.pinned),
+        bool_str(node.pinned || node.user_pinned),
         bool_str(selected),
         esc(&aria_label),
         esc(&aria_label),
@@ -4425,5 +5002,93 @@ mod tests {
         assert!(!rendered.html.contains("data-kind=\"symbol\""));
         assert!(!rendered.html.contains("omni-edge-mentions_symbol"));
         assert_no_inline_hex_colors(&rendered.html);
+    }
+
+    #[test]
+    fn anchored_pagination_pinning_path_cone_drift_and_dense_virtualization() {
+        let mut graph = sample_graph();
+        let initial = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        let first_pos = initial
+            .raw_positions
+            .get("atom-1")
+            .copied()
+            .expect("atom-1 pos");
+
+        // Append extra atoms (simulating Load more page 2) with anchored_positions
+        let mut extra_atoms = graph["atoms"].as_array().unwrap().clone();
+        for i in 10..22 {
+            extra_atoms.push(json!({
+                "id": format!("atom-{i}"),
+                "kind": "insight",
+                "title": format!("Extra insight {i}"),
+                "branch": "main"
+            }));
+        }
+        graph["atoms"] = json!(extra_atoms);
+
+        let paged = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                anchored_positions: initial.raw_positions.clone(),
+                paged_count: 2,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert_eq!(paged.raw_positions.get("atom-1").copied(), Some(first_pos));
+        assert!(paged.dense_scene.is_some());
+        assert!(paged.html.contains("data-scale-tier=\"dense\""));
+
+        // Pin override + path + 1-hop isolate cone + drift injection
+        let mut filter = ConstellationFilter {
+            show_files: true,
+            show_sessions: true,
+            ..Default::default()
+        };
+        let path = compute_constellation_path(&graph, &filter, "atom-1", "src/auth/jwt.rs");
+        assert!(path.is_some());
+        let (path_nodes, _) = path.unwrap();
+        assert!(path_nodes.contains(&"atom-1".to_owned()));
+
+        let cone = compute_constellation_cone(&graph, &filter, "atom-1", 1);
+        assert!(cone.contains("atom-1"));
+        assert!(!cone.contains("atom-20"));
+
+        inject_workspace_drift(
+            &mut graph,
+            Some(&json!({ "files": [{ "path": "src/auth/jwt.rs", "broken_risk": true }] })),
+            None,
+        );
+        filter.isolate_seed = Some("atom-1".to_owned());
+        filter.isolate_depth = 1;
+        filter
+            .pinned_positions
+            .insert("atom-1".to_owned(), (333.0, 222.0));
+        let rendered_drift = render_constellation(&graph, &filter, &CanvasViewport::default());
+        assert_eq!(
+            rendered_drift.raw_positions.get("atom-1").copied(),
+            Some((333.0, 222.0))
+        );
+        assert!(rendered_drift.html.contains("data-drift=\"broken\""));
+        assert!(rendered_drift.html.contains("tabindex=\"0\""));
+        assert_no_inline_hex_colors(&rendered_drift.html);
+
+        // Digest stability: selection change alone preserves structure digest.
+        let mut sel_filter = filter.clone();
+        sel_filter.selected_id = Some("atom-1".to_owned());
+        assert_eq!(
+            constellation_structure_digest(&graph, &filter),
+            constellation_structure_digest(&graph, &sel_filter)
+        );
     }
 }
