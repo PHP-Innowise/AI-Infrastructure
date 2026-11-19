@@ -103,7 +103,13 @@ pub fn value(id: &str) -> String {
         if let Some(e) = get(id) {
             return value_of(&e);
         }
-        return crate::model::scoped_project(id);
+        let scoped = crate::model::scoped_project(id);
+        if !scoped.is_empty() {
+            return scoped;
+        }
+        return get("project-switcher")
+            .map(|e| value_of(&e))
+            .unwrap_or_default();
     }
     get(id).map(|e| value_of(&e)).unwrap_or_default()
 }
@@ -527,9 +533,33 @@ pub fn format_hash_str(route: &HashRoute) -> String {
     }
 }
 
-/// Reads and parses the current `location.hash` deep-link route.
+/// Parses a URL search string (`?project=...`) for an optional `project` override.
+pub fn parse_search_project(search: &str) -> String {
+    let query = search.strip_prefix('?').unwrap_or(search);
+    for pair in query.split('&') {
+        if let Some((key, val)) = pair.split_once('=') {
+            if key == "project" {
+                let decoded = percent_decode_bytes(val);
+                if !decoded.is_empty() {
+                    return decoded;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Reads and parses the current `location.hash` deep-link route, falling back to `?project=` search param.
 pub fn hash_route() -> HashRoute {
-    parse_hash_str(&window().location().hash().unwrap_or_default())
+    let mut route = parse_hash_str(&window().location().hash().unwrap_or_default());
+    if route.project.is_empty() {
+        let search_project =
+            parse_search_project(&window().location().search().unwrap_or_default());
+        if !search_project.is_empty() {
+            route.project = search_project;
+        }
+    }
+    route
 }
 
 #[allow(dead_code)]
@@ -1048,7 +1078,34 @@ fn handle_widget_keydown(event: &web_sys::KeyboardEvent) -> bool {
         .ok()
         .flatten()
     else {
-        return false;
+        let Some(nav) = target.closest("nav.navigation").ok().flatten() else {
+            return false;
+        };
+        let key = event.key();
+        let items: Vec<Element> = query_elements(&nav, ".nav-item")
+            .into_iter()
+            .filter(|el| !is_disabled(el) && !element_hidden(el, Some(&nav)))
+            .collect();
+        if items.is_empty() {
+            return false;
+        }
+        let current_el = target
+            .closest(".nav-item")
+            .ok()
+            .flatten()
+            .filter(|el| nav.contains(Some(el)))
+            .unwrap_or_else(|| target.clone());
+        let Some(index) = items.iter().position(|el| el == &current_el) else {
+            return false;
+        };
+        if matches!(key.as_str(), "ArrowLeft" | "ArrowRight") {
+            return false;
+        }
+        let Some(next) = next_roving_index(index, items.len(), &key, true, true) else {
+            return false;
+        };
+        focus_element(&items[next]);
+        return true;
     };
     let role = container.get_attribute("role").unwrap_or_default();
     let key = event.key();
@@ -1237,5 +1294,17 @@ mod tests {
             }),
             "#/systems"
         );
+    }
+
+    #[test]
+    fn parse_search_project_and_vertical_nav_roving_wrap_cleanly() {
+        assert_eq!(
+            parse_search_project("?view=sessions&project=my%20app"),
+            "my app"
+        );
+        assert_eq!(parse_search_project("foo=bar"), "");
+        assert_eq!(next_roving_index(0, 6, "ArrowUp", true, true), Some(5));
+        assert_eq!(next_roving_index(5, 6, "ArrowDown", true, true), Some(0));
+        assert_eq!(next_roving_index(2, 6, "ArrowRight", true, true), None);
     }
 }

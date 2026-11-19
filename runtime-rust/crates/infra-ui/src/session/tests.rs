@@ -1108,4 +1108,29 @@ mod update_tests {
         localize_failure_on_map(&json!({"project_id": "api", "failing_queries": ["phpunit"]}));
         assert!(called.get());
     }
+
+    #[test]
+    fn resolve_initial_project_activates_first_project_without_route_or_saved_pref() {
+        let projects = vec![
+            json!({"id": "harness-e2e-project", "name": "E2E"}),
+            json!({"id": "second-project", "name": "Second"}),
+        ];
+        assert_eq!(
+            super::resolve_initial_project("", "", &projects),
+            "harness-e2e-project"
+        );
+        assert_eq!(
+            super::resolve_initial_project("", "stale-id", &projects),
+            "harness-e2e-project"
+        );
+        assert_eq!(
+            super::resolve_initial_project("", "second-project", &projects),
+            "second-project"
+        );
+        assert_eq!(
+            super::resolve_initial_project("harness-e2e-project", "second-project", &projects),
+            "harness-e2e-project"
+        );
+        assert_eq!(super::resolve_initial_project("", "", &[]), "");
+    }
 }

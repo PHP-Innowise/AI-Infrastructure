@@ -152,6 +152,28 @@ pub fn save_preferences() {
     shared["defaults"][&project] = fields;
     dom::save(PREFS, Some(&shared.to_string()));
 }
+/// Chooses the initial workspace project from URL route, saved preferences, or the first bootstrap project.
+pub(super) fn resolve_initial_project(
+    route_project: &str,
+    saved_project: &str,
+    projects: &[V],
+) -> String {
+    let has = |candidate: &str| {
+        !candidate.is_empty() && projects.iter().any(|p| m::text(p, "id") == candidate)
+    };
+    if has(route_project) {
+        return route_project.to_owned();
+    }
+    if has(saved_project) {
+        return saved_project.to_owned();
+    }
+    projects
+        .iter()
+        .map(|p| m::text(p, "id"))
+        .find(|id| !id.is_empty())
+        .unwrap_or_default()
+}
+
 pub(super) fn restore_preferences() {
     let prefs = dom::json_storage(PREFS);
     if let Some(rt) = prefs["right_tab"]
@@ -163,13 +185,12 @@ pub(super) fn restore_preferences() {
     if let Some(pct) = prefs["split_percent"].as_f64() {
         apply_workspace_split_percent(pct, false);
     }
-    // Authoritative URL hash project takes precedence over localStorage fallback.
+    // Authoritative URL hash project takes precedence over localStorage fallback,
+    // and bootstrap defaults to the first registered project so Code Graph activates cleanly.
     let hash_project = dom::hash_route().project;
-    let project = if !hash_project.is_empty() && !m::project(&hash_project).is_null() {
-        hash_project
-    } else {
-        m::text(&prefs, "project_id")
-    };
+    let saved_project = m::text(&prefs, "project_id");
+    let projects = m::read(|s| m::array(&s.boot["projects"]));
+    let project = resolve_initial_project(&hash_project, &saved_project, &projects);
     if !m::project(&project).is_null() {
         sync_project(&project);
     }
@@ -260,7 +281,13 @@ pub fn sync_project(id: &str) {
         "system-project",
         "omnigraph-project",
     ] {
-        let prev = dom::value(select);
+        let prev = if dom::get(select).is_some()
+            || m::read(|s| s.workspace.scoped_projects.contains_key(select))
+        {
+            dom::value(select)
+        } else {
+            previous_global.clone()
+        };
         let held = select == "system-project"
             && (m::yes(&m::data("editor-dirty"))
                 || m::yes(&m::data("editor-pending"))

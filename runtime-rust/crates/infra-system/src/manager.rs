@@ -641,12 +641,23 @@ impl SystemManager {
             "systems.preview" | "systems.edit.preview" => editor.preview(&self.state, data),
             "systems.apply" | "systems.edit.apply" => editor.apply(&self.state, data),
             "systems.catalog" => {
-                fields(data, &["project_id", "config_path"], &[])?;
-                let system = self.system(
-                    &editor,
-                    string(&data["project_id"]),
-                    string(&data["config_path"]),
-                )?;
+                fields(data, &["project_id", "config_path"], &["optional"])?;
+                let optional = match data.get("optional") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(flag)) => *flag,
+                    _ => return Err(fail("Optional flag must be boolean")),
+                };
+                let project = string(&data["project_id"]);
+                let config = string(&data["config_path"]);
+                if optional {
+                    let (root, _) = editor.location(&self.state, project, config)?;
+                    if crate::editor::snapshot(&root, config)?.body.is_none() {
+                        return Ok(
+                            object!({"missing":true,"catalog":null,"diagram":null,"root":null}),
+                        );
+                    }
+                }
+                let system = self.system(&editor, project, config)?;
                 Ok(
                     object!({"catalog":system.catalog(),"diagram":system.diagram(),"root":system.root}),
                 )

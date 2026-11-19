@@ -115,6 +115,7 @@ pub(super) fn reset_system_target(project: &str, config: &str) {
         "system-run",
         "system-permissions-owner",
         "system-catalog",
+        "system-catalog-probed",
         "system-graph-status",
         "system-graph-monotonic",
         "system-live-focus",

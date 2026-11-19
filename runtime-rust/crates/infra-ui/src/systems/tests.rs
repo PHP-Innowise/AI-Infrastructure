@@ -1069,4 +1069,17 @@ mod display_tests {
         m::take("system-project-sync");
         m::take("system-pending-project-sync");
     }
+
+    #[test]
+    fn optional_missing_catalog_response_is_recognized_without_error() {
+        assert!(crate::systems::catalog_response_is_missing(
+            &json!({"missing": true, "catalog": null})
+        ));
+        assert!(crate::systems::catalog_response_is_missing(
+            &json!({"catalog": null})
+        ));
+        assert!(!crate::systems::catalog_response_is_missing(
+            &json!({"catalog": {"system": "demo", "services": []}})
+        ));
+    }
 }

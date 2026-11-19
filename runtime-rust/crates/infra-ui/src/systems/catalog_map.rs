@@ -665,11 +665,22 @@ pub(super) fn sync_changes_map_workspace() {
 /// Opening Services shows the project's system when its file exists: the
 /// form already names it, so a Load system click on every visit added
 /// nothing. A project without the file keeps the empty state, quietly.
+/// Returns `true` when `/api/systems/catalog` reported a cleanly missing manifest on an optional probe.
+pub(super) fn catalog_response_is_missing(value: &V) -> bool {
+    m::yes(&value["missing"]) || value["catalog"].is_null()
+}
+
 pub async fn catalog_autoload() {
     if !m::data("system-catalog").is_null()
         || m::yes(&m::data("editor-dirty"))
         || dom::value("system-project").is_empty()
     {
+        return;
+    }
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
+    if m::data("system-catalog-probed") == json!([project, config, generation]) {
         return;
     }
     catalog_fetch(true).await;
@@ -685,6 +696,7 @@ pub(super) async fn catalog_load() {
         );
         return;
     }
+    m::take("system-catalog-probed");
     catalog_fetch(false).await;
 }
 pub(super) async fn catalog_fetch(quiet_when_missing: bool) {
@@ -697,7 +709,7 @@ pub(super) async fn catalog_fetch(quiet_when_missing: bool) {
     let epoch = m::next("system-catalog-load");
     match api::post(
         "/api/systems/catalog",
-        json!({"project_id":project,"config_path":config}),
+        json!({"project_id":project,"config_path":config,"optional":quiet_when_missing}),
     )
     .await
     {
@@ -705,6 +717,18 @@ pub(super) async fn catalog_fetch(quiet_when_missing: bool) {
             if editor_current(&project, &config, generation)
                 && m::current("system-catalog-load", epoch) =>
         {
+            if catalog_response_is_missing(&value) {
+                m::take("system-catalog");
+                m::set(
+                    "system-catalog-probed",
+                    json!([project, config, generation]),
+                );
+                dom::hidden("system-catalog", true);
+                dom::error("system-error", "");
+                layout();
+                return;
+            }
+            m::take("system-catalog-probed");
             m::set("system-catalog", value.clone());
             render_catalog(&value);
             poll_system_graph_status(true).await;
