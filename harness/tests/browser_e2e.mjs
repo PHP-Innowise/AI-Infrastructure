@@ -1013,79 +1013,6 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     return btn?.getAttribute('aria-pressed') === 'false' && c?.getAttribute('aria-busy') !== 'true';
   }, 'Isolate toggle cleared');
 
-  // Test A..B commit range UI in commit dock
-  await driver.click('#graph-commit-graph-toggle');
-  await driver.waitFor(() => {
-    const panel = document.getElementById('graph-commit-graph-panel');
-    const rows = document.querySelectorAll('#graph-commit-graph-list .git-graph-row[data-action="graph-commit-select"]');
-    return panel && !panel.hidden && rows.length >= 2;
-  }, 'commit dock open with >= 2 commit rows');
-
-  const commitSelectors = await driver.callFn((commitA, commitB) => {
-    const rows = Array.from(document.querySelectorAll('#graph-commit-graph-list .git-graph-row[data-action="graph-commit-select"]'));
-    const findRow = (sha) => sha ? rows.find((r) => (r.getAttribute('data-payload') || '').includes(sha)) : null;
-    const rowB = findRow(commitB) || rows[0];
-    const rowA = findRow(commitA) || rows.find((r) => r !== rowB) || rows[1];
-    return rowA && rowB ? { aId: `#${rowA.id}`, bId: `#${rowB.id}` } : null;
-  }, opts.commitA, opts.commitB);
-  assert(commitSelectors, 'Expected two commit rows for A..B range test');
-
-  const mapCountBeforeCommit = driver.responsesByUrl.length;
-  await driver.click(commitSelectors.bId);
-  await driver.waitUntil(async () => {
-    const settled = await driver.callFn(() => {
-      return document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true';
-    });
-    const hasCommitMap = driver.responsesByUrl.slice(mapCountBeforeCommit).some((r) => {
-      if (r.status !== 200) return false;
-      try {
-        return decodeURIComponent(r.url).includes('target=commit:');
-      } catch {
-        return r.url.includes('target=commit');
-      }
-    });
-    return settled && hasCommitMap;
-  }, 'single commit selection settled');
-
-  const mapCountBeforeRange = driver.responsesByUrl.length;
-  await driver.click(commitSelectors.aId, { modifiers: 8 /* Shift */ });
-  await driver.waitUntil(async () => {
-    const uiReady = await driver.callFn(() => {
-      const banner = document.getElementById('graph-commit-banner');
-      const c = document.getElementById('graph-map-canvas');
-      return Boolean(banner && !banner.hidden && banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true');
-    });
-    const rangeApiOk = driver.responsesByUrl.slice(mapCountBeforeRange).some((r) => {
-      if (r.status !== 200) return false;
-      try {
-        return decodeURIComponent(r.url).includes('target=range:');
-      } catch {
-        return r.url.includes('target=range');
-      }
-    });
-    return uiReady && rangeApiOk;
-  }, 'A..B commit range banner rendered and target=range: API completed');
-
-  const mapCountBeforeClear = driver.responsesByUrl.length;
-  await driver.click('#graph-commit-banner [data-action="graph-commit-range-clear"]');
-  await driver.waitUntil(async () => {
-    const uiCleared = await driver.callFn(() => {
-      const banner = document.getElementById('graph-commit-banner');
-      const c = document.getElementById('graph-map-canvas');
-      return Boolean(banner && !banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true');
-    });
-    const clearedMapOk = driver.responsesByUrl.slice(mapCountBeforeClear).some((r) => {
-      if (r.status !== 200 || !r.url.includes('/graph/map')) return false;
-      try {
-        return !decodeURIComponent(r.url).includes('target=range:');
-      } catch {
-        return !r.url.includes('target=range');
-      }
-    });
-    return uiCleared && clearedMapOk;
-  }, 'A..B commit range cleared');
-  await driver.click('#graph-commit-graph-close');
-
   // HiDPI deviceScaleFactor=2 while #graph-map Canvas2D is open
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 1440,
@@ -1108,6 +1035,7 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     mobile: false,
   });
   await driver.callFn(() => window.dispatchEvent(new Event('resize')));
+  await driver.waitFor(() => (window.devicePixelRatio || 1) <= 1.05, 'devicePixelRatio restored to 1', 4_000);
 
   // Hover neighbor lighting + right-click Explain on Canvas2D + Shift+drag pin/unpin + Back/Forward
   const pinTarget = await driver.callFn(() => {
@@ -1224,6 +1152,79 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     const g = document.getElementById('graph-map');
     return Boolean(p && p.hidden && !p.hasAttribute('open') && g && g.hasAttribute('open'));
   }, 'Cmd/Ctrl+K Escape closes palette without closing #graph-map');
+
+  // Test A..B commit range UI in commit dock
+  await driver.click('#graph-commit-graph-toggle');
+  await driver.waitFor(() => {
+    const panel = document.getElementById('graph-commit-graph-panel');
+    const rows = document.querySelectorAll('#graph-commit-graph-list .git-graph-row[data-action="graph-commit-select"]');
+    return panel && !panel.hidden && rows.length >= 2;
+  }, 'commit dock open with >= 2 commit rows');
+
+  const commitSelectors = await driver.callFn((commitA, commitB) => {
+    const rows = Array.from(document.querySelectorAll('#graph-commit-graph-list .git-graph-row[data-action="graph-commit-select"]'));
+    const findRow = (sha) => sha ? rows.find((r) => (r.getAttribute('data-payload') || '').includes(sha)) : null;
+    const rowB = findRow(commitB) || rows[0];
+    const rowA = findRow(commitA) || rows.find((r) => r !== rowB) || rows[1];
+    return rowA && rowB ? { aId: `#${rowA.id}`, bId: `#${rowB.id}` } : null;
+  }, opts.commitA, opts.commitB);
+  assert(commitSelectors, 'Expected two commit rows for A..B range test');
+
+  const mapCountBeforeCommit = driver.responsesByUrl.length;
+  await driver.click(commitSelectors.bId);
+  await driver.waitUntil(async () => {
+    const settled = await driver.callFn(() => {
+      return document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true';
+    });
+    const hasCommitMap = driver.responsesByUrl.slice(mapCountBeforeCommit).some((r) => {
+      if (r.status !== 200) return false;
+      try {
+        return decodeURIComponent(r.url).includes('target=commit:');
+      } catch {
+        return r.url.includes('target=commit');
+      }
+    });
+    return settled && hasCommitMap;
+  }, 'single commit selection settled');
+
+  const mapCountBeforeRange = driver.responsesByUrl.length;
+  await driver.click(commitSelectors.aId, { modifiers: 8 /* Shift */ });
+  await driver.waitUntil(async () => {
+    const uiReady = await driver.callFn(() => {
+      const banner = document.getElementById('graph-commit-banner');
+      const c = document.getElementById('graph-map-canvas');
+      return Boolean(banner && !banner.hidden && banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true');
+    });
+    const rangeApiOk = driver.responsesByUrl.slice(mapCountBeforeRange).some((r) => {
+      if (r.status !== 200) return false;
+      try {
+        return decodeURIComponent(r.url).includes('target=range:');
+      } catch {
+        return r.url.includes('target=range');
+      }
+    });
+    return uiReady && rangeApiOk;
+  }, 'A..B commit range banner rendered and target=range: API completed');
+
+  const mapCountBeforeClear = driver.responsesByUrl.length;
+  await driver.click('#graph-commit-banner [data-action="graph-commit-range-clear"]');
+  await driver.waitUntil(async () => {
+    const uiCleared = await driver.callFn(() => {
+      const banner = document.getElementById('graph-commit-banner');
+      const c = document.getElementById('graph-map-canvas');
+      return Boolean(banner && !banner.querySelector('.graph-commit-range-bar') && c?.getAttribute('aria-busy') !== 'true');
+    });
+    const clearedMapOk = driver.responsesByUrl.slice(mapCountBeforeClear).some((r) => {
+      if (r.status !== 200 || !r.url.includes('/graph/map')) return false;
+      try {
+        return !decodeURIComponent(r.url).includes('target=range:');
+      } catch {
+        return !r.url.includes('target=range');
+      }
+    });
+    return uiCleared && clearedMapOk;
+  }, 'A..B commit range cleared');
+  await driver.click('#graph-commit-graph-close');
 
   driver.assertNoErrors('Suite 2');
 }
