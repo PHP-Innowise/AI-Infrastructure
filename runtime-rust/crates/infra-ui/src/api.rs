@@ -114,6 +114,7 @@ pub async fn call(
             .unwrap_or_else(|| format!("The local runner returned HTTP {status}."));
         if status == 401 || status == 403 {
             model::write(|s| s.auth_failed = true);
+            stop_sse();
             dom::error("connection-message","The local connection token is no longer accepted. Reconnect before sending another request.");
             dom::hidden("connection-banner", false);
             crate::session::controls();
@@ -339,7 +340,8 @@ pub fn start_sse() {
     let error_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
         close_sse_source();
         dispatch_sse_payload("sse_error", "{}", None);
-        if SSE.with(|sse| sse.borrow().enabled) && !model::read(|s| s.auth_failed) {
+        let auth_failed = model::read(|s| s.auth_failed);
+        if SSE.with(|sse| should_schedule_sse_reconnect(sse.borrow().enabled, auth_failed)) {
             schedule_sse_reconnect();
         }
     });
@@ -364,10 +366,19 @@ pub fn start_sse() {
     }
 }
 
+pub fn should_schedule_sse_reconnect(enabled: bool, auth_failed: bool) -> bool {
+    enabled && !auth_failed
+}
+
 fn schedule_sse_reconnect() {
+    let auth_failed = model::read(|s| s.auth_failed);
+    if auth_failed {
+        stop_sse();
+        return;
+    }
     let delay = SSE.with(|sse| {
         let mut sse = sse.borrow_mut();
-        if !sse.enabled {
+        if !should_schedule_sse_reconnect(sse.enabled, auth_failed) {
             return None;
         }
         let delay = sse_backoff_ms(sse.attempt);
@@ -382,7 +393,6 @@ fn schedule_sse_reconnect() {
 }
 
 /// Closes `/api/events/stream` cleanly and disables automatic SSE reconnection.
-#[allow(dead_code)]
 pub fn stop_sse() {
     dom::cancel_timer("sse-reconnect");
     SSE.with(|sse| {
@@ -456,5 +466,35 @@ mod sse_contract_tests {
         assert_eq!(seen_session.get(), 1);
         assert_eq!(seen_wild.get(), 2);
         SSE.with(|sse| assert_eq!(sse.borrow().last_event_id, "43"));
+    }
+
+    #[test]
+    fn reconnect_gates_on_auth_failure_and_routes_sse_lifecycle_events() {
+        assert!(should_schedule_sse_reconnect(true, false));
+        assert!(!should_schedule_sse_reconnect(false, false));
+        assert!(!should_schedule_sse_reconnect(true, true));
+        assert!(!should_schedule_sse_reconnect(false, true));
+
+        SSE.with(|sse| {
+            let mut s = sse.borrow_mut();
+            s.handlers.clear();
+            s.last_event_id.clear();
+        });
+        let opened = Rc::new(Cell::new(0));
+        let errored = Rc::new(Cell::new(0));
+        let opened_clone = opened.clone();
+        let errored_clone = errored.clone();
+
+        on_sse("sse_open", move |_| {
+            opened_clone.set(opened_clone.get() + 1)
+        });
+        on_sse("sse_error", move |_| {
+            errored_clone.set(errored_clone.get() + 1)
+        });
+
+        assert_eq!(dispatch_sse_payload("sse_open", "{}", None), "sse_open");
+        assert_eq!(dispatch_sse_payload("sse_error", "{}", None), "sse_error");
+        assert_eq!(opened.get(), 1);
+        assert_eq!(errored.get(), 1);
     }
 }

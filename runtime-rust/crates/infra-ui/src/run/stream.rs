@@ -1,4 +1,147 @@
 use super::*;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StreamMdEntry {
+    settled_bytes: usize,
+    settled_dom_blocks: usize,
+    tail_blocks: Vec<String>,
+}
+
+thread_local! {
+    static NEXT_COPY_SEQ: Cell<u64> = const { Cell::new(1) };
+    static NEXT_STREAM_SEQ: Cell<u64> = const { Cell::new(1) };
+    static STREAM_MD_CACHE: RefCell<BTreeMap<String, StreamMdEntry>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+pub(crate) fn clear_stream_md_cache() {
+    STREAM_MD_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+pub(crate) fn copy_timer_key(existing: Option<&str>, seq: u64) -> String {
+    match existing.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("md-copy-reset-{id}"),
+        None => format!("md-copy-reset-{seq}"),
+    }
+}
+
+/// Finds the furthest safe byte boundary in `markdown` (starting at `start_from`,
+/// which must be outside any code fence) where all preceding blocks are complete
+/// and `render_markdown_html(&markdown[..b]) + render_markdown_html(&markdown[b..])`
+/// equals `render_markdown_html(markdown)`.
+pub(crate) fn find_settled_markdown_boundary(markdown: &str, start_from: usize) -> usize {
+    if start_from >= markdown.len() || !markdown.is_char_boundary(start_from) {
+        return start_from.min(markdown.len());
+    }
+    let mut in_fence = false;
+    let mut best = start_from;
+    let mut pos = start_from;
+    for chunk in markdown[start_from..].split_inclusive('\n') {
+        let ended_with_nl = chunk.ends_with('\n');
+        let line = chunk.trim_end_matches(&['\r', '\n'][..]);
+        let trimmed = line.trim();
+        let next_pos = pos + chunk.len();
+        if trimmed.starts_with("```") {
+            if in_fence {
+                in_fence = false;
+                if ended_with_nl {
+                    best = next_pos;
+                }
+            } else {
+                in_fence = true;
+            }
+        } else if !in_fence && trimmed.is_empty() && ended_with_nl {
+            best = next_pos;
+        }
+        pos = next_pos;
+    }
+    best
+}
+
+fn is_void_html_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+/// Splits top-level HTML block elements emitted by `render_assistant_markdown_html`.
+pub(crate) fn split_top_level_html_blocks(html: &str) -> Vec<String> {
+    let bytes = html.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut block_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut quote: Option<u8> = None;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if let Some(q) = quote {
+                if b == q {
+                    quote = None;
+                }
+            } else if b == b'"' || b == b'\'' {
+                quote = Some(b);
+            } else if b == b'>' {
+                break;
+            }
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break;
+        }
+        let tag_inner = html[i + 1..j].trim();
+        if !tag_inner.starts_with('!') && !tag_inner.starts_with('?') {
+            if tag_inner.starts_with('/') {
+                depth = depth.saturating_sub(1);
+            } else {
+                let name_end = tag_inner
+                    .find(|c: char| c.is_ascii_whitespace() || c == '/')
+                    .unwrap_or(tag_inner.len());
+                let tag_name = tag_inner[..name_end].to_ascii_lowercase();
+                let self_closing = tag_inner.ends_with('/') || is_void_html_tag(&tag_name);
+                if !self_closing {
+                    depth += 1;
+                }
+            }
+        }
+        let end_pos = j + 1;
+        if depth == 0 && end_pos > block_start {
+            let slice = &html[block_start..end_pos];
+            if !slice.is_empty() {
+                out.push(slice.to_owned());
+            }
+            block_start = end_pos;
+        }
+        i = end_pos;
+    }
+    if block_start < html.len() {
+        let rest = &html[block_start..];
+        if !rest.is_empty() {
+            out.push(rest.to_owned());
+        }
+    }
+    out
+}
 
 pub(crate) fn is_near_bottom(scroll_height: i32, scroll_top: i32, client_height: i32) -> bool {
     scroll_height - scroll_top - client_height < 48
@@ -150,13 +293,21 @@ pub(crate) fn failure_localize_payload(v: &V, text: &str) -> V {
     })
 }
 
-fn find_tool_block_by_call_id(call_id: &str) -> Option<web_sys::Element> {
+fn find_tool_block_by_call_id(
+    container: &web_sys::Element,
+    call_id: &str,
+) -> Option<web_sys::Element> {
     if call_id.is_empty() {
         return None;
     }
-    dom::all("#events details.conversation-tool")
-        .into_iter()
-        .find(|el| el.get_attribute("data-call-id").as_deref() == Some(call_id))
+    container
+        .query_selector_all("details.conversation-tool")
+        .ok()
+        .and_then(|list| {
+            (0..list.length())
+                .filter_map(|i| list.item(i)?.dyn_into::<web_sys::Element>().ok())
+                .find(|el| el.get_attribute("data-call-id").as_deref() == Some(call_id))
+        })
 }
 
 fn format_tool_summary(v: &V) -> String {
@@ -268,19 +419,234 @@ pub(crate) fn sync_load_earlier_control() {
     }
 }
 
+fn parse_single_html_node(html: &str) -> Option<web_sys::Element> {
+    let wrapper = dom::el("div", "", "");
+    wrapper.set_inner_html(html);
+    wrapper.first_element_child()
+}
+
+fn try_patch_streaming_code_block(existing: &web_sys::Element, new_html: &str) -> bool {
+    if !existing.class_list().contains("md-code-block") {
+        return false;
+    }
+    let Some(fresh) = parse_single_html_node(new_html) else {
+        return false;
+    };
+    if !fresh.class_list().contains("md-code-block") {
+        return false;
+    }
+    let old_lang = existing
+        .query_selector(".md-code-lang")
+        .ok()
+        .flatten()
+        .and_then(|e| e.text_content());
+    let new_lang = fresh
+        .query_selector(".md-code-lang")
+        .ok()
+        .flatten()
+        .and_then(|e| e.text_content());
+    if old_lang != new_lang {
+        return false;
+    }
+    let (Ok(Some(old_code)), Ok(Some(new_code))) = (
+        existing.query_selector("pre code"),
+        fresh.query_selector("pre code"),
+    ) else {
+        return false;
+    };
+    old_code.set_text_content(new_code.text_content().as_deref());
+    true
+}
+
+fn init_stream_markdown_body(block: &web_sys::Element, body: &web_sys::Element, text: &str) {
+    let seq = NEXT_STREAM_SEQ.with(|c| {
+        let n = c.get();
+        c.set(n.saturating_add(1));
+        n
+    });
+    let stream_key = format!("stream-md-{seq}");
+    let _ = block.set_attribute("data-stream-key", &stream_key);
+
+    let html = render_assistant_markdown_html(text);
+    body.set_inner_html(&html);
+    let settled_bytes = find_settled_markdown_boundary(text, 0);
+    let entry = if settled_bytes > 0 {
+        let settled_count =
+            split_top_level_html_blocks(&render_assistant_markdown_html(&text[..settled_bytes]))
+                .len();
+        let tail_blocks =
+            split_top_level_html_blocks(&render_assistant_markdown_html(&text[settled_bytes..]));
+        StreamMdEntry {
+            settled_bytes,
+            settled_dom_blocks: settled_count,
+            tail_blocks,
+        }
+    } else {
+        StreamMdEntry {
+            settled_bytes: 0,
+            settled_dom_blocks: 0,
+            tail_blocks: split_top_level_html_blocks(&html),
+        }
+    };
+    STREAM_MD_CACHE.with(|cache| {
+        cache.borrow_mut().insert(stream_key, entry);
+    });
+}
+
+fn patch_stream_markdown_body(block: &web_sys::Element, body: &web_sys::Element, combined: &str) {
+    let stream_key = block.get_attribute("data-stream-key").unwrap_or_default();
+    if stream_key.is_empty() {
+        init_stream_markdown_body(block, body, combined);
+        return;
+    }
+    let mut entry = STREAM_MD_CACHE
+        .with(|cache| cache.borrow().get(&stream_key).cloned())
+        .unwrap_or_default();
+    if entry.settled_bytes > combined.len() || !combined.is_char_boundary(entry.settled_bytes) {
+        init_stream_markdown_body(block, body, combined);
+        return;
+    }
+
+    let tail_md = &combined[entry.settled_bytes..];
+    let tail_html = render_assistant_markdown_html(tail_md);
+    let new_tail_blocks = split_top_level_html_blocks(&tail_html);
+    let keep = entry
+        .tail_blocks
+        .iter()
+        .zip(new_tail_blocks.iter())
+        .take_while(|(old_b, new_b)| old_b == new_b)
+        .count();
+
+    let children = body.children();
+    let expected_total = entry.settled_dom_blocks + entry.tail_blocks.len();
+    if (children.length() as usize) != expected_total {
+        // DOM diverged unexpectedly; fall back cleanly and re-seed cache.
+        init_stream_markdown_body(block, body, combined);
+        return;
+    }
+
+    let start_idx = entry.settled_dom_blocks + keep;
+    let existing_replace_end =
+        (entry.settled_dom_blocks + new_tail_blocks.len()).min(expected_total);
+    let mut idx = start_idx;
+    while idx < existing_replace_end {
+        let tail_idx = idx - entry.settled_dom_blocks;
+        if let Some(existing_el) = children.item(idx as u32) {
+            if !try_patch_streaming_code_block(&existing_el, &new_tail_blocks[tail_idx]) {
+                if let Some(fresh_el) = parse_single_html_node(&new_tail_blocks[tail_idx]) {
+                    let _ = existing_el.replace_with_with_node_1(&fresh_el);
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    let target_total = entry.settled_dom_blocks + new_tail_blocks.len();
+    while (body.children().length() as usize) > target_total {
+        if let Some(last_child) = body.last_element_child() {
+            last_child.remove();
+        } else {
+            break;
+        }
+    }
+    for new_block in new_tail_blocks
+        .iter()
+        .skip(existing_replace_end - entry.settled_dom_blocks)
+    {
+        if let Some(fresh_el) = parse_single_html_node(new_block) {
+            let _ = body.append_child(&fresh_el);
+        }
+    }
+
+    let next_settled = find_settled_markdown_boundary(combined, entry.settled_bytes);
+    if next_settled > entry.settled_bytes && combined.is_char_boundary(next_settled) {
+        let newly_settled_count = split_top_level_html_blocks(&render_assistant_markdown_html(
+            &combined[entry.settled_bytes..next_settled],
+        ))
+        .len();
+        if newly_settled_count <= new_tail_blocks.len() {
+            entry.settled_bytes = next_settled;
+            entry.settled_dom_blocks += newly_settled_count;
+            entry.tail_blocks = new_tail_blocks[newly_settled_count..].to_vec();
+        } else {
+            entry.tail_blocks = new_tail_blocks;
+        }
+    } else {
+        entry.tail_blocks = new_tail_blocks;
+    }
+
+    STREAM_MD_CACHE.with(|cache| {
+        cache.borrow_mut().insert(stream_key, entry);
+    });
+}
+
 #[allow(dead_code)]
 pub(crate) fn conversation(v: &V) {
     conversation_with_call(v, None);
 }
 
 pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
+    let Some(events_el) = dom::get("events") else {
+        return;
+    };
+    let was_sticky = dom::get("conversation")
+        .map(|c| {
+            m::read(|s| s.stream.sticky_bottom)
+                || is_near_bottom(c.scroll_height(), c.scroll_top(), c.client_height())
+        })
+        .unwrap_or(true);
+    if !render_event_into(&events_el, v, resolved_call, true) {
+        return;
+    }
+    if let Some(conv) = dom::get("conversation") {
+        if was_sticky {
+            conv.set_scroll_top(conv.scroll_height());
+            m::write(|s| {
+                s.stream.sticky_bottom = true;
+                s.stream.unseen_count = 0;
+            });
+        } else {
+            m::write(|s| {
+                s.stream.sticky_bottom = false;
+                s.stream.unseen_count = s.stream.unseen_count.saturating_add(1);
+            });
+        }
+    }
+    update_scroll_ui();
+    sync_load_earlier_control();
+}
+
+fn render_event_into(
+    container: &web_sys::Element,
+    v: &V,
+    resolved_call: Option<&str>,
+    live_mode: bool,
+) -> bool {
     let kind = m::text(v, "kind");
     if kind == "permission" {
-        permission(v);
-        if v["state"].as_str() == Some("pending") || v["state"].is_null() {
-            dom::announce("run-announcer", &permission_heading(v));
+        if live_mode {
+            permission(v);
+            if v["state"].as_str() == Some("pending") || v["state"].is_null() {
+                dom::announce("run-announcer", &permission_heading(v));
+            }
+        } else {
+            let request = m::text(v, "request_id");
+            let already_in_events = !request.is_empty()
+                && dom::get("events")
+                    .and_then(|ev| {
+                        ev.query_selector(&format!(
+                            "[data-permission-id=\"{}\"]",
+                            request.replace('"', "")
+                        ))
+                        .ok()
+                        .flatten()
+                    })
+                    .is_some();
+            if !request.is_empty() && !already_in_events {
+                super::permissions::upsert_permission_card_in(container, "events", v, false, false);
+            }
         }
-        return;
+        return false;
     }
     let text = clean(&m::text(v, "text"));
     let id = m::string(&v["id"]);
@@ -300,23 +666,16 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
     ]
     .contains(&kind.as_str())
     {
-        return;
+        return false;
     }
     if matches!(kind.as_str(), "text" | "thinking") && text.is_empty() {
-        return;
+        return false;
     }
-
-    let was_sticky = dom::get("conversation")
-        .map(|c| {
-            m::read(|s| s.stream.sticky_bottom)
-                || is_near_bottom(c.scroll_height(), c.scroll_top(), c.client_height())
-        })
-        .unwrap_or(true);
 
     let mut mutated_existing = false;
     if kind == "tool" {
         let call_id = conversation_event_call_id(v, resolved_call);
-        if let Some(block) = find_tool_block_by_call_id(&call_id) {
+        if let Some(block) = find_tool_block_by_call_id(container, &call_id) {
             let is_start = starts(v);
             let failed = !is_start && v["ok"] == false;
             let state_str = if is_start {
@@ -346,8 +705,8 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
             mutated_existing = true;
         }
     } else if matches!(kind.as_str(), "text" | "thinking") {
-        let can_coalesce = dom::get("events")
-            .and_then(|el| el.last_element_child())
+        let can_coalesce = container
+            .last_element_child()
             .filter(|last| last.get_attribute("data-chunk-kind").as_deref() == Some(kind.as_str()));
         if let Some(last) = can_coalesce {
             let prev = last.get_attribute("data-raw-text").unwrap_or_default();
@@ -356,12 +715,20 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
             let _ = last.set_attribute("data-event-id", &id);
             if kind == "text" {
                 if let Ok(Some(body)) = last.query_selector(".md-body") {
-                    body.set_inner_html(&render_assistant_markdown_html(&combined));
+                    if live_mode {
+                        patch_stream_markdown_body(&last, &body, &combined);
+                    } else {
+                        body.set_inner_html(&render_assistant_markdown_html(&combined));
+                    }
                 } else {
-                    last.set_inner_html(&format!(
-                        "<div class=\"md-body\">{}</div>",
-                        render_assistant_markdown_html(&combined)
-                    ));
+                    let body = dom::el("div", "md-body", "");
+                    if live_mode {
+                        init_stream_markdown_body(&last, &body, &combined);
+                    } else {
+                        body.set_inner_html(&render_assistant_markdown_html(&combined));
+                    }
+                    last.set_text_content(None);
+                    dom::add(&last, &body);
                 }
             } else if let Ok(Some(pre)) = last.query_selector("pre.thinking-text") {
                 pre.set_text_content(Some(&combined));
@@ -401,7 +768,11 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
                 let _ = block.set_attribute("data-chunk-kind", "text");
                 let _ = block.set_attribute("data-raw-text", &text);
                 let body = dom::el("div", "md-body", "");
-                body.set_inner_html(&render_assistant_markdown_html(&text));
+                if live_mode {
+                    init_stream_markdown_body(&block, &body, &text);
+                } else {
+                    body.set_inner_html(&render_assistant_markdown_html(&text));
+                }
                 dom::add(&block, &body);
             }
             "thinking" => {
@@ -427,15 +798,18 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
                     let _ = btn.class_list().add_1("compact");
                     dom::add(&block, &btn);
                 }
-                dom::announce("run-announcer", &format!("Error: {text}"));
+                if live_mode {
+                    dom::announce("run-announcer", &format!("Error: {text}"));
+                }
             }
             "status" | "result" => {
                 dom::add(&block, &dom::el("p", "", &text));
-                if kind == "result"
-                    || matches!(
-                        v["status"].as_str(),
-                        Some("completed" | "failed" | "cancelled")
-                    )
+                if live_mode
+                    && (kind == "result"
+                        || matches!(
+                            v["status"].as_str(),
+                            Some("completed" | "failed" | "cancelled")
+                        ))
                 {
                     let msg = if text.is_empty() {
                         format!("Turn {}", m::text(v, "status"))
@@ -449,29 +823,41 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
                 dom::add(&block, &dom::el("p", "", &text));
             }
         }
-        dom::append("events", &block);
+        dom::add(container, &block);
     }
+    true
+}
 
-    if let Some(conv) = dom::get("conversation") {
-        if was_sticky {
-            conv.set_scroll_top(conv.scroll_height());
-            m::write(|s| {
-                s.stream.sticky_bottom = true;
-                s.stream.unseen_count = 0;
-            });
-        } else {
-            m::write(|s| {
-                s.stream.sticky_bottom = false;
-                s.stream.unseen_count = s.stream.unseen_count.saturating_add(1);
-            });
+fn prepend_events_range(start: usize, end: usize) {
+    let Some(events_el) = dom::get("events") else {
+        return;
+    };
+    if start >= end {
+        return;
+    }
+    let events = m::read(|s| s.events.clone());
+    let end = end.min(events.len());
+    if start >= end {
+        return;
+    }
+    let staging = dom::el("div", "", "");
+    let mut scan_run = initial();
+    for (idx, ev) in events.iter().enumerate().take(end) {
+        let (next_run, _, resolved_call) = advance_with_call(scan_run, ev);
+        scan_run = next_run;
+        if idx >= start {
+            render_event_into(&staging, ev, resolved_call.as_deref(), false);
         }
     }
-    update_scroll_ui();
-    sync_load_earlier_control();
+    let anchor = events_el.first_child();
+    while let Some(node) = staging.first_element_child() {
+        let _ = events_el.insert_before(&node, anchor.as_ref());
+    }
 }
 
 /// Re-renders `#events` from `model::events` honoring the current `visible_limit` window.
 pub(crate) fn replay_visible_stream() {
+    clear_stream_md_cache();
     dom::clear("events");
     let (events, limit) = m::read(|s| (s.events.clone(), s.stream.visible_limit));
     let start = events.len().saturating_sub(limit);
@@ -509,8 +895,14 @@ pub(crate) async fn load_earlier_events() {
     let prev_metrics = dom::get("conversation").map(|c| (c.scroll_height(), c.scroll_top()));
     let client_hidden = total.saturating_sub(limit);
     if client_hidden > 0 {
-        m::write(|s| s.stream.visible_limit = s.stream.visible_limit.saturating_add(120));
-        replay_visible_stream();
+        let old_start = total.saturating_sub(limit);
+        let new_limit = m::write(|s| {
+            s.stream.visible_limit = s.stream.visible_limit.saturating_add(120);
+            s.stream.visible_limit
+        });
+        let new_start = total.saturating_sub(new_limit);
+        prepend_events_range(new_start, old_start);
+        sync_load_earlier_control();
         if let (Some((prev_h, prev_top)), Some(conv)) = (prev_metrics, dom::get("conversation")) {
             let new_h = conv.scroll_height();
             conv.set_scroll_top(prev_top + (new_h - prev_h));
@@ -535,27 +927,43 @@ pub(crate) async fn load_earlier_events() {
     if m::read(|s| s.sid != sid || s.epoch != epoch) {
         return;
     }
-    if let Ok(v) = res {
-        let older = m::array(&v["events"]);
-        m::write(|s| {
-            let mut merged = Vec::with_capacity(older.len() + s.events.len());
-            for item in &older {
-                let id = m::string(&item["id"]);
-                if id.is_empty() || s.seen.insert(id) {
-                    merged.push(item.clone());
+    match res {
+        Ok(v) => {
+            dom::error("events-error", "");
+            let older = m::array(&v["events"]);
+            let (new_start, old_start_after) = m::write(|s| {
+                let prev_total = s.events.len();
+                let prev_old_start = prev_total.saturating_sub(s.stream.visible_limit);
+                let mut merged = Vec::with_capacity(older.len() + prev_total);
+                for item in &older {
+                    let id = m::string(&item["id"]);
+                    if id.is_empty() || s.seen.insert(id) {
+                        merged.push(item.clone());
+                    }
                 }
+                let added_len = merged.len();
+                s.stream.visible_limit = s.stream.visible_limit.saturating_add(added_len.max(120));
+                merged.append(&mut s.events);
+                s.events = merged;
+                s.stream.has_older = v["has_older"].as_bool().unwrap_or(false);
+                s.stream.oldest_event_id =
+                    v["oldest_event_id"].as_u64().or(s.stream.oldest_event_id);
+                let total_after = s.events.len();
+                let new_start = total_after.saturating_sub(s.stream.visible_limit);
+                let old_start_after = added_len + prev_old_start;
+                (new_start, old_start_after)
+            });
+            prepend_events_range(new_start, old_start_after);
+            if let (Some((prev_h, prev_top)), Some(conv)) = (prev_metrics, dom::get("conversation"))
+            {
+                let new_h = conv.scroll_height();
+                conv.set_scroll_top(prev_top + (new_h - prev_h));
             }
-            s.stream.visible_limit = s.stream.visible_limit.saturating_add(merged.len().max(120));
-            merged.append(&mut s.events);
-            s.events = merged;
-            s.stream.has_older = v["has_older"].as_bool().unwrap_or(false);
-            s.stream.oldest_event_id = v["oldest_event_id"].as_u64().or(s.stream.oldest_event_id);
-        });
-        replay_visible_stream();
-        if let (Some((prev_h, prev_top)), Some(conv)) = (prev_metrics, dom::get("conversation")) {
-            let new_h = conv.scroll_height();
-            conv.set_scroll_top(prev_top + (new_h - prev_h));
         }
+        Err(e) if !e.aborted => {
+            dom::error("events-error", &e.message);
+        }
+        Err(_) => {}
     }
     sync_load_earlier_control();
 }
@@ -571,8 +979,25 @@ pub(crate) async fn copy_code_block(target: &web_sys::Element) {
     let copying = dom::window().navigator().clipboard().write_text(&code);
     let ok = wasm_bindgen_futures::JsFuture::from(copying).await.is_ok();
     target.set_text_content(Some(if ok { "Copied" } else { "Copy failed" }));
+    let copy_id = match target
+        .get_attribute("data-copy-id")
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => id,
+        None => {
+            let seq = NEXT_COPY_SEQ.with(|c| {
+                let n = c.get();
+                c.set(n.saturating_add(1));
+                n
+            });
+            let id = seq.to_string();
+            let _ = target.set_attribute("data-copy-id", &id);
+            id
+        }
+    };
+    let timer_key = copy_timer_key(Some(&copy_id), 0);
     let btn = target.clone();
-    dom::later("md-copy-reset", 1500, move || {
+    dom::later(&timer_key, 1500, move || {
         btn.set_text_content(Some("Copy"));
     });
 }

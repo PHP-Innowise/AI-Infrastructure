@@ -204,7 +204,7 @@ pub(crate) fn on_global_project_change(project: &str) {
                 false,
             );
             let active_view = m::read(|s| s.view.clone());
-            if matches!(active_view.as_str(), "systems" | "services" | "changes") {
+            if runs::is_systems_view(&active_view) {
                 spawn_local(async {
                     load().await;
                 });

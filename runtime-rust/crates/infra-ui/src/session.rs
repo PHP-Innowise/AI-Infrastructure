@@ -452,7 +452,16 @@ pub fn initialize() {
         c.forget();
     }
     if let Ok(Some(mobile_media)) = dom::window().match_media("(max-width:920px)") {
-        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(|e: web_sys::Event| {
+            let matches = e
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::MediaQueryList>().ok())
+                .map(|m| m.matches())
+                .unwrap_or(false);
+            if !matches {
+                set_sidebar_open(false, false);
+            }
+            dom::sync_overlay_inert();
             if m::read(|s| s.view == "sessions") {
                 crate::graph_map::sync_embedded(false);
             }
@@ -537,6 +546,8 @@ pub async fn bootstrap() {
                 sign_in(false).await;
             });
             m::set("bootstrapping", json!(true));
+            initialize_sse_listeners();
+            api::start_sse();
             let route = dom::hash_route();
             let wanted = dom::json_storage(PREFS);
             let sid = if !route.session.is_empty() {
@@ -549,8 +560,7 @@ pub async fn bootstrap() {
             }
             apply_hash_route().await;
             m::take("bootstrapping");
-            initialize_sse_listeners();
-            api::start_sse();
+            flush_pending_sse_resync();
             run::sync_approvals_badge();
             if m::read(|s| s.view != "sessions") && !dom::value("project").is_empty() {
                 crate::graph_map::sync_embedded(false);
@@ -559,10 +569,13 @@ pub async fn bootstrap() {
                 });
             }
         }
-        Ok(_) => dom::error(
-            "connection-message",
-            "The runner returned incomplete workspace configuration.",
-        ),
+        Ok(_) => {
+            dom::error(
+                "connection-message",
+                "The runner returned incomplete workspace configuration.",
+            );
+            dom::hidden("connection-banner", false);
+        }
         Err(e) => {
             dom::error("connection-message", &e.message);
             dom::hidden("connection-banner", false);
@@ -1407,12 +1420,8 @@ pub async fn event(
         if ["project", "project-switcher"].contains(&id) {
             if value == "__choose-folder__" {
                 management::folder_open("session").await;
-            } else if m::read(|s| s.view == "sessions") {
-                new_session(Some(value));
-                load_git().await;
             } else {
-                set_workspace_project(value);
-                load_git().await;
+                switch_project_from_shell(value).await;
             }
             return true;
         }

@@ -50,6 +50,93 @@ pub fn text(id: &str, value: &str) {
         e.set_text_content(Some(value));
     }
 }
+pub const MODAL_OVERLAY_IDS: [&str; 3] = ["command-palette", "approvals-drawer", "run-file-card"];
+const FALLBACK_RESTORE_SELECTOR: &str = "#view-tabs [aria-selected=\"true\"], #new-session";
+const MODAL_FOCUSABLE_SELECTOR: &str = "button:not([disabled]), a[href], input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled]), details > summary:not([tabindex=\"-1\"]), [tabindex]:not([tabindex=\"-1\"])";
+
+pub fn is_mobile_viewport() -> bool {
+    window()
+        .match_media("(max-width: 920px)")
+        .ok()
+        .flatten()
+        .is_some_and(|list| list.matches())
+}
+
+fn overlay_inert_targets(
+    palette_open: bool,
+    drawer_open: bool,
+    file_card_open: bool,
+    sidebar_open: bool,
+    mobile: bool,
+) -> [(&'static str, bool); 5] {
+    if palette_open {
+        [
+            ("sidebar", true),
+            ("main", true),
+            ("approvals-drawer", true),
+            ("run-file-card", true),
+            ("command-palette", false),
+        ]
+    } else if drawer_open {
+        [
+            ("sidebar", true),
+            ("main", true),
+            ("approvals-drawer", false),
+            ("run-file-card", true),
+            ("command-palette", false),
+        ]
+    } else if file_card_open {
+        [
+            ("sidebar", true),
+            ("main", true),
+            ("approvals-drawer", false),
+            ("run-file-card", false),
+            ("command-palette", false),
+        ]
+    } else if mobile {
+        [
+            ("sidebar", !sidebar_open),
+            ("main", sidebar_open),
+            ("approvals-drawer", false),
+            ("run-file-card", false),
+            ("command-palette", false),
+        ]
+    } else {
+        [
+            ("sidebar", false),
+            ("main", false),
+            ("approvals-drawer", false),
+            ("run-file-card", false),
+            ("command-palette", false),
+        ]
+    }
+}
+
+fn set_inert_attr(id: &str, inert: bool) {
+    if let Some(e) = get(id) {
+        if inert {
+            let _ = e.set_attribute("inert", "");
+        } else {
+            let _ = e.remove_attribute("inert");
+        }
+    }
+}
+
+/// Synchronizes `inert` attributes across the shell, sidebar, and stacked modal overlays.
+pub fn sync_overlay_inert() {
+    let is_open = |id: &str| get(id).is_some_and(|e| !e.has_attribute("hidden"));
+    let sidebar_open = get("sidebar").is_some_and(|e| e.class_list().contains("open"));
+    for (id, inert) in overlay_inert_targets(
+        is_open("command-palette"),
+        is_open("approvals-drawer"),
+        is_open("run-file-card"),
+        sidebar_open,
+        is_mobile_viewport(),
+    ) {
+        set_inert_attr(id, inert);
+    }
+}
+
 pub fn hidden(id: &str, v: bool) {
     if let Some(e) = get(id) {
         hide(&e, v);
@@ -60,6 +147,10 @@ pub fn hide(e: &Element, v: bool) {
         let _ = e.set_attribute("hidden", "");
     } else {
         let _ = e.remove_attribute("hidden");
+    }
+    let id = e.id();
+    if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
+        sync_overlay_inert();
     }
 }
 pub fn disabled(id: &str, v: bool) {
@@ -79,6 +170,9 @@ pub fn attr(id: &str, key: &str, value: &str) {
 pub fn class(id: &str, key: &str, v: bool) {
     if let Some(e) = get(id) {
         let _ = e.class_list().toggle_with_force(key, v);
+        if id == "sidebar" && key == "open" {
+            sync_overlay_inert();
+        }
     }
 }
 pub fn value_of(e: &Element) -> String {
@@ -222,7 +316,7 @@ pub fn restore_focus_for_overlay(overlay_id: &str) {
         }
     }
     if let Some(fallback) = document()
-        .query_selector("#view-tabs [aria-selected=\"true\"], #new-session-button")
+        .query_selector(FALLBACK_RESTORE_SELECTOR)
         .ok()
         .flatten()
     {
@@ -787,7 +881,7 @@ fn element_hidden(e: &Element, stop_at: Option<&Element>) -> bool {
     false
 }
 
-fn tree_item_collapsed(e: &Element, tree: &Element) -> bool {
+fn inside_closed_details(e: &Element, stop_at: &Element) -> bool {
     let mut cur = e.parent_element();
     let mut child = e.clone();
     while let Some(parent) = cur {
@@ -798,13 +892,17 @@ fn tree_item_collapsed(e: &Element, tree: &Element) -> bool {
                 return true;
             }
         }
-        if &parent == tree {
+        if &parent == stop_at {
             break;
         }
         child = parent.clone();
         cur = parent.parent_element();
     }
     false
+}
+
+fn tree_item_collapsed(e: &Element, tree: &Element) -> bool {
+    inside_closed_details(e, tree)
 }
 
 fn query_elements(root: &Element, selector: &str) -> Vec<Element> {
@@ -903,17 +1001,16 @@ fn focus_element(el: &Element) {
 }
 
 fn modal_focusables(card: &Element) -> Vec<Element> {
-    query_elements(
-        card,
-        "button:not([disabled]), a[href], input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex=\"-1\"])",
-    )
-    .into_iter()
-    .filter(|el| !is_disabled(el) && !element_hidden(el, Some(card)))
-    .collect()
+    query_elements(card, MODAL_FOCUSABLE_SELECTOR)
+        .into_iter()
+        .filter(|el| {
+            !is_disabled(el) && !element_hidden(el, Some(card)) && !inside_closed_details(el, card)
+        })
+        .collect()
 }
 
 fn active_overlay_container() -> Option<Element> {
-    for id in ["command-palette", "approvals-drawer", "run-file-card"] {
+    for id in MODAL_OVERLAY_IDS {
         if let Some(el) = get(id) {
             if !el.has_attribute("hidden") {
                 return Some(el);
@@ -923,9 +1020,11 @@ fn active_overlay_container() -> Option<Element> {
     if let Ok(Some(dialog)) = document().query_selector("dialog[open]") {
         return Some(dialog);
     }
-    if let Some(sidebar) = get("sidebar") {
-        if sidebar.class_list().contains("open") {
-            return Some(sidebar);
+    if is_mobile_viewport() {
+        if let Some(sidebar) = get("sidebar") {
+            if sidebar.class_list().contains("open") {
+                return Some(sidebar);
+            }
         }
     }
     None
@@ -1171,6 +1270,7 @@ fn sync_widget_from_target(target: &Element) {
 }
 
 pub fn wire_a11y_widgets() {
+    sync_overlay_inert();
     for widget in all("[role=\"tablist\"],[role=\"toolbar\"],[role=\"radiogroup\"],[role=\"tree\"]")
     {
         sync_roving_widget(&widget);
@@ -1306,5 +1406,68 @@ mod tests {
         assert_eq!(next_roving_index(0, 6, "ArrowUp", true, true), Some(5));
         assert_eq!(next_roving_index(5, 6, "ArrowDown", true, true), Some(0));
         assert_eq!(next_roving_index(2, 6, "ArrowRight", true, true), None);
+    }
+
+    #[test]
+    fn overlay_focus_and_inert_policies_match_viewport_and_stacking() {
+        assert!(FALLBACK_RESTORE_SELECTOR.contains("#new-session"));
+        assert!(!FALLBACK_RESTORE_SELECTOR.contains("#new-session-button"));
+        assert!(MODAL_FOCUSABLE_SELECTOR.contains("details > summary:not([tabindex=\"-1\"])"));
+
+        // Desktop: open sidebar does not inert main or sidebar.
+        assert_eq!(
+            overlay_inert_targets(false, false, false, true, false),
+            [
+                ("sidebar", false),
+                ("main", false),
+                ("approvals-drawer", false),
+                ("run-file-card", false),
+                ("command-palette", false),
+            ]
+        );
+        // Mobile closed sidebar: sidebar inert, main active.
+        assert_eq!(
+            overlay_inert_targets(false, false, false, false, true),
+            [
+                ("sidebar", true),
+                ("main", false),
+                ("approvals-drawer", false),
+                ("run-file-card", false),
+                ("command-palette", false),
+            ]
+        );
+        // Mobile open sidebar: main inert, sidebar active.
+        assert_eq!(
+            overlay_inert_targets(false, false, false, true, true),
+            [
+                ("sidebar", false),
+                ("main", true),
+                ("approvals-drawer", false),
+                ("run-file-card", false),
+                ("command-palette", false),
+            ]
+        );
+        // Command palette sits above drawer and file card, marking lower overlays inert.
+        assert_eq!(
+            overlay_inert_targets(true, true, true, false, false),
+            [
+                ("sidebar", true),
+                ("main", true),
+                ("approvals-drawer", true),
+                ("run-file-card", true),
+                ("command-palette", false),
+            ]
+        );
+        // Approvals drawer leaves itself active and inerts file card + shell.
+        assert_eq!(
+            overlay_inert_targets(false, true, true, false, false),
+            [
+                ("sidebar", true),
+                ("main", true),
+                ("approvals-drawer", false),
+                ("run-file-card", true),
+                ("command-palette", false),
+            ]
+        );
     }
 }
