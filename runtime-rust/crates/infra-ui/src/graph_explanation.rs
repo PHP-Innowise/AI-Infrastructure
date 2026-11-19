@@ -1,10 +1,18 @@
 //! Context actions on the dependency map.
-use crate::{api, dom, graph::GraphTargetScope, graph_map, model as m, omnigraph, session};
-use serde_json::{json, Value as V};
+use crate::{
+    api, dom, graph::GraphTargetScope, graph_map, graph_viewport, model as m, omnigraph, session,
+};
+use serde_json::{Value as V, json};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Element, HtmlElement, KeyboardEvent, MouseEvent};
+
+thread_local! {
+    static MENU_RETURN_FOCUS: RefCell<Option<HtmlElement>> = const { RefCell::new(None) };
+    static DIALOG_RETURN_FOCUS: RefCell<Option<HtmlElement>> = const { RefCell::new(None) };
+}
 
 const DIALOG: &str = "graph-explanation";
 const MENU: &str = "graph-explain-action";
@@ -151,13 +159,41 @@ fn graph_selection(view: &V, map: &V) -> V {
     })
 }
 
-fn find_explainable_hit(target: &Element) -> Option<(Element, String)> {
+enum ExplainHitSource {
+    Dom {
+        hit: Element,
+        canvas_id: String,
+    },
+    Canvas2d {
+        canvas: Element,
+        canvas_id: String,
+        kind: String,
+        data: V,
+    },
+}
+
+fn find_explainable_hit(
+    target: &Element,
+    position: Option<(i32, i32)>,
+) -> Option<ExplainHitSource> {
     let canvas = target.closest(EXPLAINABLE_CANVAS_SELECTOR).ok()??;
-    let hit = target.closest(EXPLAINABLE_HIT_SELECTOR).ok()??;
-    if !canvas.contains(Some(&hit)) {
-        return None;
+    let canvas_id = canvas.id();
+    if let Some(hit) = target.closest(EXPLAINABLE_HIT_SELECTOR).ok().flatten() {
+        if canvas.contains(Some(&hit)) {
+            return Some(ExplainHitSource::Dom { hit, canvas_id });
+        }
     }
-    Some((hit, canvas.id()))
+    let (cx, cy) = position?;
+    let (hit_kind, hit_index) =
+        graph_viewport::canvas2d::hit_test_client(&canvas_id, cx as f64, cy as f64, 12.0)?;
+    let (kind, data) =
+        graph_viewport::canvas2d::explain_target_for_hit(&canvas_id, hit_kind, hit_index)?;
+    Some(ExplainHitSource::Canvas2d {
+        canvas,
+        canvas_id,
+        kind,
+        data,
+    })
 }
 
 fn resolve_surface_view_and_scope(canvas_id: &str) -> (V, V, Option<GraphTargetScope>) {
@@ -652,31 +688,84 @@ pub fn commit_selection_evidence(
     (subject, evidence)
 }
 
+fn capture_return_focus(fallback: &Element) -> Option<HtmlElement> {
+    let active = dom::document().active_element().filter(|el| {
+        let tag = el.tag_name();
+        !tag.eq_ignore_ascii_case("BODY") && !tag.eq_ignore_ascii_case("HTML")
+    });
+    active
+        .and_then(|el| el.dyn_into::<HtmlElement>().ok())
+        .or_else(|| fallback.clone().dyn_into::<HtmlElement>().ok())
+}
+
+fn restore_focus_slot(slot: &RefCell<Option<HtmlElement>>) {
+    let prev = slot.borrow_mut().take();
+    if let Some(el) = prev {
+        if el.is_connected() {
+            let _ = el.focus();
+        }
+    }
+}
+
 fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
-    let (hit, canvas_id) = find_explainable_hit(target)?;
+    let source = find_explainable_hit(target, position)?;
     let menu = dom::get(MENU)?.dyn_into::<HtmlElement>().ok()?;
-    let data = parse_hit_payload(&hit)?;
+    let (dom_ctx, canvas_id, hit_opt, data, dense_kind) = match source {
+        ExplainHitSource::Dom { hit, canvas_id } => {
+            let data = parse_hit_payload(&hit)?;
+            (hit.clone(), canvas_id, Some(hit), data, None)
+        }
+        ExplainHitSource::Canvas2d {
+            canvas,
+            canvas_id,
+            kind,
+            data,
+        } => (canvas, canvas_id, None, data, Some(kind)),
+    };
     let is_omnigraph = canvas_id == "omnigraph-canvas";
     let is_commit_graph = canvas_id == "graph-commit-graph-list";
-    let link = hit.class_list().contains("graph-map-hit")
-        || hit.class_list().contains("system-map-edge")
-        || hit.class_list().contains("system-map-hit")
-        || hit.class_list().contains("omni-edge")
-        || hit.get_attribute("data-explain-kind").as_deref() == Some("link")
-        || (data.is_object() && data["from"].is_string() && data["to"].is_string());
-    let label = hit
-        .get_attribute("aria-label")
-        .or_else(|| hit.get_attribute("title"))
-        .or_else(|| hit.query_selector("title").ok()??.text_content())
-        .or_else(|| {
-            hit.text_content()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
+    let link = dense_kind.as_deref() == Some("link")
+        || hit_opt.as_ref().is_some_and(|hit| {
+            hit.class_list().contains("graph-map-hit")
+                || hit.class_list().contains("system-map-edge")
+                || hit.class_list().contains("system-map-hit")
+                || hit.class_list().contains("omni-edge")
+                || hit.get_attribute("data-explain-kind").as_deref() == Some("link")
         })
-        .or_else(|| {
-            link.then(|| format!("{} → {}", m::text(&data, "from"), m::text(&data, "to")))
-                .filter(|s| s != " → ")
-        })?;
+        || (data.is_object() && data["from"].is_string() && data["to"].is_string());
+    let label = if let Some(hit) = hit_opt.as_ref() {
+        hit.get_attribute("aria-label")
+            .or_else(|| hit.get_attribute("title"))
+            .or_else(|| hit.query_selector("title").ok()??.text_content())
+            .or_else(|| {
+                hit.text_content()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                link.then(|| format!("{} → {}", m::text(&data, "from"), m::text(&data, "to")))
+                    .filter(|s| s != " → ")
+            })?
+    } else if link {
+        let from = m::text(&data, "from");
+        let to = m::text(&data, "to");
+        if from.is_empty() && to.is_empty() {
+            return None;
+        }
+        format!("{from} → {to}")
+    } else {
+        data.as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                data["name"]
+                    .as_str()
+                    .or_else(|| data["label"].as_str())
+                    .or_else(|| data["path"].as_str())
+                    .or_else(|| data["service"].as_str())
+                    .map(str::to_owned)
+            })
+            .filter(|s| !s.trim().is_empty())?
+    };
     let mut subject = if link {
         let (from, to) = (m::text(&data, "from"), m::text(&data, "to"));
         if !from.is_empty() || !to.is_empty() {
@@ -685,10 +774,14 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             label.clone()
         }
     } else {
-        hit.get_attribute("title").unwrap_or_else(|| label.clone())
+        hit_opt
+            .as_ref()
+            .and_then(|hit| hit.get_attribute("title"))
+            .unwrap_or_else(|| label.clone())
     };
     let (view, map, scope_opt) = resolve_surface_view_and_scope(&canvas_id);
-    let system_explain = resolve_system_explain_meta(&canvas_id, &hit, &data, scope_opt.as_ref());
+    let system_explain =
+        resolve_system_explain_meta(&canvas_id, &dom_ctx, &data, scope_opt.as_ref());
 
     let mut selection = if is_omnigraph {
         let (omni_subject, omni_evidence) = omnigraph_selection_evidence(&view, &map, &data, link);
@@ -727,9 +820,10 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             .or_else(|| data["target"].as_str())
             .unwrap_or("")
             .to_owned();
-        let fallback_subj = hit_child_text(&hit, ".git-graph-subject");
-        let fallback_hash = hit_child_text(&hit, ".git-graph-hash");
-        let fallback_who = hit_child_text(&hit, ".git-graph-who");
+        let hit_ref = hit_opt.as_ref().unwrap_or(&dom_ctx);
+        let fallback_subj = hit_child_text(hit_ref, ".git-graph-subject");
+        let fallback_hash = hit_child_text(hit_ref, ".git-graph-hash");
+        let fallback_who = hit_child_text(hit_ref, ".git-graph-who");
         let (commit_subject, commit_evidence) = commit_selection_evidence(
             &m::data("graph-commit-graph"),
             &target_str,
@@ -798,7 +892,7 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             "system_explain": system_explain.unwrap_or(V::Null),
         }),
     );
-    if let Some(dialog) = hit.closest("dialog[open]").ok().flatten() {
+    if let Some(dialog) = dom_ctx.closest("dialog[open]").ok().flatten() {
         dialog.append_child(&menu).ok()?;
     } else if let Some(body) = dom::document().body() {
         body.append_child(&menu).ok()?;
@@ -819,24 +913,36 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
         },
     );
     dom::hidden(MENU, false);
-    let bounds = hit.get_bounding_client_rect();
+    let bounds = dom_ctx.get_bounding_client_rect();
     let (x, y) = position.unwrap_or((bounds.left() as i32, bounds.bottom() as i32));
     let root = dom::document().document_element()?;
     let left = x.clamp(0, (root.client_width() - menu.offset_width() - 8).max(0));
     let top = y.clamp(0, (root.client_height() - menu.offset_height() - 8).max(0));
     let _ = menu.style().set_property("left", &format!("{left}px"));
     let _ = menu.style().set_property("top", &format!("{top}px"));
-    // Keep keyboard focus on the invoking node so Escape can immediately return to it.
+    let captured = capture_return_focus(hit_opt.as_ref().unwrap_or(&dom_ctx));
+    MENU_RETURN_FOCUS.with(|slot| *slot.borrow_mut() = captured);
     if position.is_none() {
         dom::focus(MENU);
     }
     Some(())
 }
 
-fn dismiss_menu() {
+fn dismiss_menu_internal(restore_focus: bool) {
     dom::hidden(MENU, true);
     m::take(SELECTION);
     m::take(SELECTION_META);
+    if restore_focus {
+        MENU_RETURN_FOCUS.with(restore_focus_slot);
+    } else {
+        MENU_RETURN_FOCUS.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+fn dismiss_menu() {
+    dismiss_menu_internal(false);
 }
 
 pub fn context_menu(target: &Element, mouse: &MouseEvent) -> bool {
@@ -850,7 +956,7 @@ pub fn key(key: &KeyboardEvent) -> bool {
         return true;
     }
     if key.key() == "Escape" && dom::get(MENU).is_some_and(|menu| !menu.has_attribute("hidden")) {
-        dismiss_menu();
+        dismiss_menu_internal(true);
         return true;
     }
     if key.key() == "ContextMenu" || key.key() == "F10" && key.shift_key() {
@@ -868,6 +974,10 @@ pub fn click(target: &Element) -> bool {
             let selection = m::take(SELECTION);
             let meta = m::take(SELECTION_META);
             dom::hidden(MENU, true);
+            let saved = MENU_RETURN_FOCUS
+                .with(|slot| slot.borrow_mut().take())
+                .or_else(|| capture_return_focus(target));
+            DIALOG_RETURN_FOCUS.with(|slot| *slot.borrow_mut() = saved);
             spawn_local(explain(selection, meta));
             true
         }
@@ -891,6 +1001,7 @@ fn dialog_open() -> bool {
 fn close() {
     dom::dialog(DIALOG, false);
     stop();
+    DIALOG_RETURN_FOCUS.with(restore_focus_slot);
 }
 
 /// Stops the explanation session that is still running, if there is one.
@@ -1214,6 +1325,95 @@ fn resolve_system_provider_and_model() -> (String, V) {
     (provider, model)
 }
 
+fn truncate_largest_array(val: &mut V, depth: u8) -> bool {
+    match val {
+        V::Object(map) => {
+            let mut best_key: Option<(String, usize)> = None;
+            for (k, v) in map.iter() {
+                if let V::Array(arr) = v {
+                    if arr.len() > 2 && best_key.as_ref().is_none_or(|(_, len)| arr.len() > *len) {
+                        best_key = Some((k.clone(), arr.len()));
+                    }
+                }
+            }
+            if let Some((k, len)) = best_key {
+                let keep = (len / 2).max(2);
+                if let Some(V::Array(arr)) = map.get_mut(&k) {
+                    arr.truncate(keep);
+                }
+                map.insert(format!("{k}_omitted"), json!(len - keep));
+                return true;
+            }
+            if depth < 2 {
+                for (_, child) in map.iter_mut() {
+                    if truncate_largest_array(child, depth + 1) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        V::Array(arr) => {
+            if arr.len() > 2 {
+                let keep = (arr.len() / 2).max(2);
+                arr.truncate(keep);
+                return true;
+            }
+            if depth < 2 {
+                for child in arr.iter_mut() {
+                    if truncate_largest_array(child, depth + 1) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn bound_graph_evidence(mut evidence: V, max_bytes: usize) -> V {
+    if evidence.to_string().len() <= max_bytes {
+        return evidence;
+    }
+    if let Some(obj) = evidence.as_object_mut() {
+        obj.insert("truncated".to_owned(), json!(true));
+    }
+    for _ in 0..32 {
+        if evidence.to_string().len() <= max_bytes {
+            return evidence;
+        }
+        if !truncate_largest_array(&mut evidence, 0) {
+            break;
+        }
+    }
+    if evidence.to_string().len() <= max_bytes {
+        return evidence;
+    }
+    // Trim oversized string values while keeping short structural fields intact.
+    if let Some(obj) = evidence.as_object_mut() {
+        for v in obj.values_mut() {
+            if let V::String(s) = v {
+                if s.len() > 512 {
+                    let mut cut = 512;
+                    while !s.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    s.truncate(cut);
+                    s.push('…');
+                }
+            }
+        }
+    }
+    if evidence.to_string().len() <= max_bytes {
+        return evidence;
+    }
+    json!({
+        "state": "truncated",
+        "truncated": true,
+    })
+}
+
 async fn explain(mut selection: V, meta: V) {
     if !selection.is_object() {
         return;
@@ -1258,9 +1458,8 @@ async fn explain(mut selection: V, meta: V) {
     if let Some(scope) = evidence_scope.as_ref() {
         add_evidence(&mut selection, scope).await;
     }
-    if selection["graph_evidence"].to_string().len() > 16_000 {
-        selection["graph_evidence"] = json!({"state": "too_large"});
-    }
+    let bounded = bound_graph_evidence(selection["graph_evidence"].take(), 16_000);
+    selection["graph_evidence"] = bounded;
     if !visible(epoch) || (!is_system && expected_project_for_canvas(&canvas_id) != project) {
         return;
     }
@@ -1327,7 +1526,11 @@ fn escape_html(raw: &str) -> String {
 
 fn is_safe_markdown_href(url: &str) -> bool {
     let trimmed = url.trim();
-    if trimmed.is_empty() || trimmed.bytes().any(|b| b.is_ascii_control()) {
+    if trimmed.is_empty()
+        || trimmed.bytes().any(|b| b.is_ascii_control())
+        || trimmed.contains(CODE_SPAN_OPEN)
+        || trimmed.contains(CODE_SPAN_CLOSE)
+    {
         return false;
     }
     if trimmed.starts_with('#') || trimmed.starts_with('/') {
@@ -1433,23 +1636,56 @@ fn format_inline_emphasis(escaped: &str) -> String {
     out
 }
 
+const CODE_SPAN_OPEN: char = '\u{E000}';
+const CODE_SPAN_CLOSE: char = '\u{E001}';
+
 fn render_inline_markdown(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
+    let cleaned: String = raw
+        .chars()
+        .filter(|&c| c != CODE_SPAN_OPEN && c != CODE_SPAN_CLOSE)
+        .collect();
+    let mut tokenized = String::with_capacity(cleaned.len());
+    let mut code_spans: Vec<String> = Vec::new();
+    let mut rest = cleaned.as_str();
     while let Some(start) = rest.find('`') {
-        out.push_str(&format_inline_plain_segment(&rest[..start]));
+        tokenized.push_str(&rest[..start]);
         let after = &rest[start + 1..];
         if let Some(end) = after.find('`') {
-            out.push_str("<code>");
-            out.push_str(&escape_html(&after[..end]));
-            out.push_str("</code>");
+            let idx = code_spans.len();
+            code_spans.push(format!("<code>{}</code>", escape_html(&after[..end])));
+            tokenized.push(CODE_SPAN_OPEN);
+            tokenized.push_str(&idx.to_string());
+            tokenized.push(CODE_SPAN_CLOSE);
             rest = &after[end + 1..];
         } else {
-            out.push('`');
+            tokenized.push('`');
             rest = after;
         }
     }
-    out.push_str(&format_inline_plain_segment(rest));
+    tokenized.push_str(rest);
+
+    let formatted = format_inline_plain_segment(&tokenized);
+    if code_spans.is_empty() {
+        return formatted;
+    }
+    let mut out = String::with_capacity(formatted.len() + code_spans.len() * 16);
+    let mut cursor = formatted.as_str();
+    while let Some(start) = cursor.find(CODE_SPAN_OPEN) {
+        out.push_str(&cursor[..start]);
+        let after = &cursor[start + CODE_SPAN_OPEN.len_utf8()..];
+        if let Some(end) = after.find(CODE_SPAN_CLOSE) {
+            if let Ok(idx) = after[..end].parse::<usize>() {
+                if let Some(html) = code_spans.get(idx) {
+                    out.push_str(html);
+                    cursor = &after[end + CODE_SPAN_CLOSE.len_utf8()..];
+                    continue;
+                }
+            }
+        }
+        out.push(CODE_SPAN_OPEN);
+        cursor = after;
+    }
+    out.push_str(cursor);
     out
 }
 
@@ -1810,10 +2046,12 @@ mod tests {
                 "workflow"
             ]
         );
-        assert!(request["prompt"]
-            .as_str()
-            .unwrap()
-            .starts_with("Explain a dependency-map node."));
+        assert!(
+            request["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Explain a dependency-map node.")
+        );
         assert!(request["prompt"].as_str().unwrap().contains("src/Cart.php"));
     }
 
@@ -1861,10 +2099,12 @@ mod tests {
                 "services": ["orders", "inventory"],
             })
         );
-        assert!(request["prompt"]
-            .as_str()
-            .unwrap()
-            .starts_with("Explain a dependency-map link."));
+        assert!(
+            request["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Explain a dependency-map link.")
+        );
     }
 
     #[test]
@@ -2061,6 +2301,45 @@ Streaming <script>alert(1)</script> [bad](javascript:alert(1)) [docs](https://ex
         assert!(
             !html.contains("\n<"),
             "no blank newlines for pre-wrap parent: {html}"
+        );
+    }
+
+    #[test]
+    fn render_inline_markdown_supports_code_inside_bold_italic_and_links() {
+        let html = render_markdown_html(
+            "**bold `code_var`** and *italic `a_b`* and [**`link_fn`**](https://example.com) and **`a*b`**",
+        );
+        assert!(
+            html.contains("<strong>bold <code>code_var</code></strong>"),
+            "{html}"
+        );
+        assert!(html.contains("<em>italic <code>a_b</code></em>"), "{html}");
+        assert!(
+            html.contains("<a href=\"https://example.com\" target=\"_blank\" rel=\"noopener noreferrer\"><strong><code>link_fn</code></strong></a>"),
+            "{html}"
+        );
+        assert!(html.contains("<strong><code>a*b</code></strong>"), "{html}");
+    }
+
+    #[test]
+    fn bound_graph_evidence_trims_oversized_arrays_while_preserving_top_neighbors() {
+        let large: Vec<V> = (0..400)
+            .map(|i| json!({"path": format!("src/mod_{i}/very_long_component_name_{i}.rs"), "weight": 400 - i}))
+            .collect();
+        let evidence = json!({
+            "focus": "src/main.rs",
+            "uses": large.clone(),
+            "used_by": large,
+        });
+        assert!(evidence.to_string().len() > 16_000);
+        let bounded = bound_graph_evidence(evidence, 16_000);
+        assert!(bounded.to_string().len() <= 16_000);
+        assert_eq!(bounded["truncated"], json!(true));
+        assert_eq!(bounded["focus"], json!("src/main.rs"));
+        assert!(!bounded["uses"].as_array().unwrap().is_empty());
+        assert_eq!(
+            bounded["uses"][0]["path"],
+            json!("src/mod_0/very_long_component_name_0.rs")
         );
     }
 }

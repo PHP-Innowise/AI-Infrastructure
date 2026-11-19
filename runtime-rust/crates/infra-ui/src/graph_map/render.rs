@@ -1,5 +1,19 @@
 use super::*;
 
+/// Lightweight metadata required to lazily render handles/portals/spreads when an
+/// offscreen dense node is scrolled into view and mounted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DenseNodeExtraSpec {
+    pub index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub followed: bool,
+    pub portal_out: Vec<usize>,
+    pub portal_in: Vec<usize>,
+    pub folder_spread: bool,
+    pub dim: bool,
+}
+
 /// Canvas markup plus resolved plane size and live focus overlay coordinates.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderedCanvas {
@@ -13,7 +27,9 @@ pub struct RenderedCanvas {
     pub plan_nodes: Vec<Placed>,
     pub plan_frames: Vec<Framed>,
     pub dense_scene: Option<graph_viewport::canvas2d::DenseScene>,
+    pub dense_meta: Option<graph_viewport::canvas2d::DenseSceneMeta>,
     pub dense_node_htmls: Vec<String>,
+    pub dense_extra_specs: Vec<Option<DenseNodeExtraSpec>>,
     pub node_keys: Vec<String>,
     pub pairs: Vec<(usize, usize)>,
     pub node_labels: Vec<String>,
@@ -472,15 +488,28 @@ pub(super) fn compute_canvas_selection_patch(
         impact_lookup.as_ref(),
     );
 
+    let has_traced_path = overlay.path_nodes.is_some_and(|pn| !pn.is_empty())
+        || overlay.path_edges.is_some_and(|pe| !pe.is_empty());
     let mut near_nodes = vec![false; nodes.len()];
     if let Some(chosen) = sel.chosen {
         if chosen < near_nodes.len() {
             near_nodes[chosen] = true;
         }
     }
+    if let Some(path_nodes) = overlay.path_nodes {
+        for &idx in path_nodes {
+            if let Some(slot) = near_nodes.get_mut(idx) {
+                *slot = true;
+            }
+        }
+    }
     let mut edges_by_pair = HashMap::with_capacity(pairs.len());
     for &(from, to) in pairs {
-        let is_lit = sel.lit((from, to));
+        let on_traced = sel.shared_edges.contains(&(from, to))
+            || overlay
+                .path_edges
+                .is_some_and(|pe| pe.contains(&(from, to)) || pe.contains(&(to, from)));
+        let is_lit = sel.lit((from, to)) || on_traced;
         if is_lit {
             if let Some(slot) = near_nodes.get_mut(from) {
                 *slot = true;
@@ -489,12 +518,10 @@ pub(super) fn compute_canvas_selection_patch(
                 *slot = true;
             }
         }
-        let edge_state = if sel.cycle_view || sel.selected {
-            if is_lit {
-                "on"
-            } else {
-                "off"
-            }
+        let edge_state = if has_traced_path {
+            if on_traced { "on" } else { "off" }
+        } else if sel.cycle_view || sel.selected {
+            if is_lit { "on" } else { "off" }
         } else {
             ""
         };
@@ -503,7 +530,7 @@ pub(super) fn compute_canvas_selection_patch(
             EdgeSelectionState {
                 edge_state,
                 lit: is_lit,
-                shared_path: sel.shared_edges.contains(&(from, to)),
+                shared_path: on_traced,
             },
         );
     }
@@ -513,14 +540,15 @@ pub(super) fn compute_canvas_selection_patch(
         .enumerate()
         .map(|(index, node)| {
             let is_lit = near_nodes[index];
+            let on_traced_node = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
             let placed_cycle = plan_nodes.get(index).is_some_and(|p| p.cycle);
             let changed =
                 node["changed"].as_u64().unwrap_or(0) > 0 || node_change_statuses[index].is_some();
             NodeSelectionState {
                 selected: sel.chosen == Some(index),
                 lit: is_lit,
-                dim: sel.selected && !is_lit,
-                shared_path: !sel.shared_edges.is_empty() && is_lit,
+                dim: (sel.selected || has_traced_path) && !is_lit && !on_traced_node,
+                shared_path: (!sel.shared_edges.is_empty() && is_lit) || on_traced_node,
                 focus_target: focus_overlay.nodes.contains(&index),
                 changed,
                 failed: node["suspect"].as_u64().is_some(),
@@ -534,7 +562,7 @@ pub(super) fn compute_canvas_selection_patch(
                     sel.cycles,
                     node_change_statuses[index].is_some(),
                 ),
-                portal_dim: sel.chosen.is_some() && !is_lit,
+                portal_dim: (sel.chosen.is_some() || has_traced_path) && !is_lit,
             }
         })
         .collect();
@@ -586,11 +614,7 @@ pub(super) fn refresh_dense_scene_for_patch(
             .is_some_and(|pe| pe.contains(&(from, to)) || pe.contains(&(to, from)));
         if let Some(ep) = patch.edges_by_pair.get(&(from, to)) {
             let edge_state = if has_traced {
-                if on_traced {
-                    "on"
-                } else {
-                    "off"
-                }
+                if on_traced { "on" } else { "off" }
             } else {
                 ep.edge_state
             };
@@ -1151,6 +1175,10 @@ pub fn canvas_with_overlays(
     let mut hidden_wires = Vec::with_capacity(plan.wires.len());
     let mut dense_edges = Vec::new();
     let is_dense = scale_tier == GraphScaleTier::Dense;
+    let mut dense_meta = graph_viewport::canvas2d::DenseSceneMeta {
+        label_min_scale: Some(GRAPH_MAP_LOD.far_below),
+        ..Default::default()
+    };
     // What each box is joined with by links that are led through no layer:
     // the boxes it uses far away, and the boxes far away that use it.
     let mut far: Vec<(Vec<usize>, Vec<usize>)> = vec![(vec![], vec![]); nodes.len()];
@@ -1192,17 +1220,9 @@ pub fn canvas_with_overlays(
         let added = cycle_view && m::yes(&edge["added"]);
         let has_traced_path = overlay.path_nodes.is_some_and(|pn| !pn.is_empty());
         let edge_state = if has_traced_path {
-            if on_traced_path {
-                "on"
-            } else {
-                "off"
-            }
+            if on_traced_path { "on" } else { "off" }
         } else if cycle_view || selected {
-            if lit((from, to)) {
-                "on"
-            } else {
-                "off"
-            }
+            if lit((from, to)) { "on" } else { "off" }
         } else {
             ""
         };
@@ -1301,6 +1321,15 @@ pub fn canvas_with_overlays(
         // the rules is always drawn.
         let portal = wire.portal && !against;
         if is_dense && !hidden {
+            dense_meta.edges.insert(
+                wire.edge,
+                graph_viewport::canvas2d::DenseEdgeMeta {
+                    explain_kind: "link".to_owned(),
+                    explain_payload: json!({"from": nodes[from]["path"], "to": nodes[to]["path"]}),
+                    from_index: Some(from),
+                    to_index: Some(to),
+                },
+            );
             dense_edges.push(graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
                 wire.edge,
                 &wire.path,
@@ -1561,7 +1590,7 @@ pub fn canvas_with_overlays(
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-hit{}\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\" tabindex=\"0\" role=\"button\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            "<path class=\"graph-map-hit{}\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\" role=\"button\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
             if wire.portal && edge["architecture_violation"].as_u64().unwrap_or(0) == 0 { " graph-map-hit-portal" } else { "" },
             if *hidden { " data-kind-hidden=\"true\"" } else { "" },
             wire.path,
@@ -1589,10 +1618,20 @@ pub fn canvas_with_overlays(
     } else {
         Vec::new()
     };
+    let mut dense_extra_specs = if is_dense {
+        Vec::with_capacity(nodes.len())
+    } else {
+        Vec::new()
+    };
     let active_roving = overlay
         .roving_focus
-        .filter(|i| *i < nodes.len())
-        .or(chosen)
+        .filter(|i| *i < nodes.len() && overlay.isolate_cone.is_none_or(|c| c.contains(i)))
+        .or_else(|| chosen.filter(|i| overlay.isolate_cone.is_none_or(|c| c.contains(i))))
+        .or_else(|| {
+            overlay
+                .isolate_cone
+                .and_then(|c| c.iter().copied().find(|&i| i < nodes.len()))
+        })
         .unwrap_or(0);
     for (index, node) in nodes.iter().enumerate() {
         let placed = &plan.nodes[index];
@@ -1600,6 +1639,7 @@ pub fn canvas_with_overlays(
             if !cone.contains(&index) {
                 if is_dense {
                     dense_node_htmls.push(String::new());
+                    dense_extra_specs.push(None);
                 }
                 continue;
             }
@@ -1607,6 +1647,13 @@ pub fn canvas_with_overlays(
         let is_pinned = pinned_set.contains(&index);
         let mut skip_offscreen_dom = false;
         if is_dense {
+            dense_meta.nodes.insert(
+                index,
+                graph_viewport::canvas2d::DenseNodeMeta {
+                    explain_kind: "node".to_owned(),
+                    explain_payload: node["path"].clone(),
+                },
+            );
             let on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
             let lit_here = near(index);
             dense_nodes.push(graph_viewport::canvas2d::DenseNodeSpec {
@@ -2097,10 +2144,18 @@ pub fn canvas_with_overlays(
             leaning(out, into),
             out > 0,
             into > 0,
-            if lit || is_on_traced_path { " data-lit=\"true\"" } else { "" },
+            if lit || is_on_traced_path {
+                " data-lit=\"true\" data-select-lit=\"true\""
+            } else {
+                ""
+            },
             if end { " data-end=\"true\"" } else { "" },
             if both { " data-shared=\"true\"" } else { "" },
-            if is_on_traced_path { " data-shared-path=\"true\"" } else { "" },
+            if is_on_traced_path {
+                " data-shared-path=\"true\""
+            } else {
+                ""
+            },
             escape(&title),
             escape(&label),
             match letter(kind) {
@@ -2172,69 +2227,40 @@ pub fn canvas_with_overlays(
         node_buf.push_str("</button>");
         if is_dense {
             dense_node_htmls.push(node_buf.clone());
+            let has_extras = followed
+                || !far[index].0.is_empty()
+                || !far[index].1.is_empty()
+                || (folder && spreads(view));
+            dense_extra_specs.push(has_extras.then(|| DenseNodeExtraSpec {
+                index,
+                x: placed.x,
+                y: placed.y,
+                followed,
+                portal_out: far[index].0.clone(),
+                portal_in: far[index].1.clone(),
+                folder_spread: folder && spreads(view),
+                dim: chosen.is_some() && !near(index),
+            }));
         }
         if skip_offscreen_dom {
             continue;
         }
         html.push_str(&node_buf);
-        if followed {
-            html.push_str(&handles(
-                node,
-                index,
-                placed.x,
-                placed.y,
-                chosen.is_some() && !near(index),
-            ));
-        }
-        // The links of this box that are led through no layer: a mark at
-        // the side they leave by, and one at the side they arrive at, each
-        // with how many there are. Resting on a mark draws them.
-        for (side, others, sign) in [("out", &far[index].0, "⇢"), ("in", &far[index].1, "⇠")] {
-            if others.is_empty() {
-                continue;
-            }
-            let names = others
-                .iter()
-                .take(6)
-                .map(|other| m::text(&nodes[*other], "name"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let told = format!(
-                "{} {} {}{} — drawn while this is rested on or the box is selected",
-                m::text(node, "name"),
-                if side == "out" {
-                    "uses, far from here:"
-                } else {
-                    "is used from far away by:"
-                },
-                names,
-                if others.len() > 6 { ", …" } else { "" },
-            );
-            html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-portal\" data-of=\"{index}\" data-side=\"{side}\" data-dim=\"{}\" data-action=\"{node_action}\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{sign}{}</button>",
-                chosen.is_some() && !near(index),
-                payload(&node_payload),
-                if side == "out" { placed.x + BOX_WIDTH } else { placed.x },
-                placed.y + BOX_HEIGHT,
-                escape(&told),
-                escape(&told),
-                count(others.len() as u64),
-            ));
-        }
-        if folder && spreads(view) {
-            // A folder opens here too: + at its corner spreads it out.
-            let told = format!(
-                "Open {} here, among the others",
-                escape(&m::text(node, "name"))
-            );
-            html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-spread\" data-of=\"{index}\" data-dim=\"{}\" data-action=\"graph-map-spread\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{told}\" aria-label=\"{told}\">+</button>",
-                chosen.is_some() && !near(index),
-                payload(&node["path"]),
-                placed.x,
-                placed.y,
-            ));
-        }
+        html.push_str(&node_extras_html_for_node(
+            view,
+            &nodes,
+            node,
+            index,
+            placed.x,
+            placed.y,
+            followed,
+            &far[index].0,
+            &far[index].1,
+            folder && spreads(view),
+            chosen.is_some() && !near(index),
+            node_action,
+            &node_payload,
+        ));
     }
     // The head of a frame: − draws the folder as one box again, then its
     // name, and how much of it is drawn where that is not all.
@@ -2394,11 +2420,112 @@ pub fn canvas_with_overlays(
         plan_nodes: plan.nodes,
         plan_frames: plan.frames,
         dense_scene,
+        dense_meta: is_dense.then_some(dense_meta),
         dense_node_htmls,
+        dense_extra_specs,
         node_keys,
         pairs,
         node_labels,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn node_extras_html_for_node(
+    _view: &V,
+    nodes: &[V],
+    node: &V,
+    index: usize,
+    x: f64,
+    y: f64,
+    followed: bool,
+    portal_out: &[usize],
+    portal_in: &[usize],
+    folder_spread: bool,
+    dim: bool,
+    node_action: &str,
+    node_payload: &V,
+) -> String {
+    let mut out = String::new();
+    if followed {
+        out.push_str(&handles(node, index, x, y, dim));
+    }
+    for (side, others, sign) in [("out", portal_out, "⇢"), ("in", portal_in, "⇠")] {
+        if others.is_empty() {
+            continue;
+        }
+        let names = others
+            .iter()
+            .take(6)
+            .filter_map(|other| nodes.get(*other).map(|n| m::text(n, "name")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let told = format!(
+            "{} {} {}{} — drawn while this is rested on or the box is selected",
+            m::text(node, "name"),
+            if side == "out" {
+                "uses, far from here:"
+            } else {
+                "is used from far away by:"
+            },
+            names,
+            if others.len() > 6 { ", …" } else { "" },
+        );
+        out.push_str(&format!(
+            "<button type=\"button\" class=\"graph-map-portal\" data-of=\"{index}\" data-side=\"{side}\" data-dim=\"{dim}\" data-action=\"{node_action}\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{sign}{}</button>",
+            payload(node_payload),
+            if side == "out" { x + BOX_WIDTH } else { x },
+            y + BOX_HEIGHT,
+            escape(&told),
+            escape(&told),
+            count(others.len() as u64),
+        ));
+    }
+    if folder_spread {
+        let told = format!(
+            "Open {} here, among the others",
+            escape(&m::text(node, "name"))
+        );
+        out.push_str(&format!(
+            "<button type=\"button\" class=\"graph-map-spread\" data-of=\"{index}\" data-dim=\"{dim}\" data-action=\"graph-map-spread\" data-payload=\"{}\" style=\"left:{x:.0}px;top:{y:.0}px\" title=\"{told}\" aria-label=\"{told}\">+</button>",
+            payload(&node["path"]),
+        ));
+    }
+    out
+}
+
+pub(super) fn render_dense_node_extras_for_mounted(
+    view: &V,
+    spec: &DenseNodeExtraSpec,
+    dim_override: Option<bool>,
+) -> String {
+    let nodes = m::array(&view["nodes"]);
+    let Some(node) = nodes.get(spec.index) else {
+        return String::new();
+    };
+    let folder = m::yes(&node["folder"]);
+    let symbol = m::yes(&node["symbol"]);
+    let (node_action, node_payload) = if folder {
+        ("graph-map-open", node["path"].clone())
+    } else if symbol {
+        ("graph-map-symbol", node["path"].clone())
+    } else {
+        ("graph-map-node", node["path"].clone())
+    };
+    node_extras_html_for_node(
+        view,
+        &nodes,
+        node,
+        spec.index,
+        spec.x,
+        spec.y,
+        spec.followed,
+        &spec.portal_out,
+        &spec.portal_in,
+        spec.folder_spread,
+        dim_override.unwrap_or(spec.dim),
+        node_action,
+        &node_payload,
+    )
 }
 /// How far past a corner the second handle of a side hangs.
 pub(super) const HANDLE_GAP: f64 = 11.0;
@@ -2612,7 +2739,180 @@ pub(super) fn circles_side(view: &V) -> String {
             count(here - listed.len() as u64)
         ));
     }
+    html.push_str(&cycle_cut_hints_html(view));
     html
+}
+
+/// Renders an optional confidence badge summarizing extracted vs inferred edge ratios.
+pub(super) fn confidence_pill_html(view: &V) -> String {
+    let conf = if view["confidence"].is_object() {
+        &view["confidence"]
+    } else if view["ir_summary"]["confidence"].is_object() {
+        &view["ir_summary"]["confidence"]
+    } else {
+        return String::new();
+    };
+    let extracted = conf["extracted"]
+        .as_u64()
+        .or_else(|| conf["extracted_links"].as_u64());
+    let inferred = conf["inferred"]
+        .as_u64()
+        .or_else(|| conf["inferred_links"].as_u64());
+    let ratio = conf["extracted_ratio"]
+        .as_f64()
+        .or_else(|| conf["ratio"].as_f64())
+        .or_else(|| match (extracted, inferred) {
+            (Some(e), Some(i)) if e + i > 0 => Some(e as f64 / (e + i) as f64),
+            _ => None,
+        });
+    let Some(r) = ratio.filter(|v| v.is_finite()) else {
+        return String::new();
+    };
+    let pct = (r.clamp(0.0, 1.0) * 100.0).round() as u64;
+    let title = match (extracted, inferred) {
+        (Some(e), Some(i)) => format!("{e} extracted links, {i} inferred links"),
+        _ => format!("{pct}% extracted code confidence"),
+    };
+    format!(
+        "<span class=\"graph-confidence-pill\" title=\"{}\">{pct}% extracted</span>",
+        escape(&title),
+    )
+}
+
+fn flatten_circle_remediation(raw: &V) -> Vec<V> {
+    let mut out = Vec::new();
+    for group in m::array(raw) {
+        if group["cuts"].is_array() {
+            out.extend(m::array(&group["cuts"]));
+        } else if group["from"].is_string() && group["to"].is_string() {
+            out.push(group);
+        }
+    }
+    out
+}
+
+fn cut_hints_list_html(heading: &str, hints: &[V]) -> String {
+    if hints.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "<div class=\"graph-cycle-cut-hint\"><h5>{}</h5><ul class=\"graph-map-rows\">",
+        escape(heading),
+    );
+    for hint in hints.iter().take(6) {
+        let from = m::text(hint, "from");
+        let to = m::text(hint, "to");
+        let note = ["hint", "reason", "remediation", "summary"]
+            .into_iter()
+            .map(|k| m::text(hint, k))
+            .find(|s| !s.is_empty())
+            .unwrap_or_default();
+        let cycles_broken = hint["cycles_broken"]
+            .as_u64()
+            .or_else(|| hint["breaks_cycles"].as_u64())
+            .or_else(|| hint["score"].as_u64());
+        let breaks_flag = hint["breaks_cycles"].as_bool().unwrap_or(false)
+            || hint["breaks_cycle"].as_bool().unwrap_or(false);
+        let links = hint["links"]
+            .as_u64()
+            .or_else(|| hint["weight"].as_u64())
+            .filter(|n| Some(*n) != cycles_broken);
+        let from_layer = m::text(hint, "from_layer");
+        let to_layer = m::text(hint, "to_layer");
+        let label = if !from.is_empty() && !to.is_empty() {
+            format!("{} → {}", escape(base(&from)), escape(base(&to)))
+        } else if !note.is_empty() {
+            escape(&note)
+        } else {
+            continue;
+        };
+        let mut meta_parts: Vec<String> = Vec::new();
+        if let Some(n) = cycles_broken {
+            meta_parts.push(format!("breaks {n}"));
+        } else if breaks_flag {
+            meta_parts.push("breaks cycle".to_owned());
+        }
+        if let Some(l) = links {
+            meta_parts.push(plural(l, "link", "links"));
+        }
+        if m::yes(&hint["guessed"]) {
+            meta_parts.push("inferred".to_owned());
+        }
+        if !note.is_empty() && !from.is_empty() {
+            meta_parts.push(escape(&note));
+        } else if !from_layer.is_empty() && !to_layer.is_empty() {
+            meta_parts.push(format!("{} → {}", escape(&from_layer), escape(&to_layer)));
+        }
+        let meta = meta_parts.join(" · ");
+        if !from.is_empty() && !to.is_empty() {
+            out.push_str(&format!(
+                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"{} → {}\"><span class=\"graph-map-row-name\">{label}</span><span class=\"graph-map-row-links\">{meta}</span></button></li>",
+                payload(&json!({"from": from, "to": to})),
+                escape(&from),
+                escape(&to),
+            ));
+        } else {
+            out.push_str(&format!(
+                "<li><span class=\"graph-map-row-name\">{label}</span></li>"
+            ));
+        }
+    }
+    out.push_str("</ul></div>");
+    out
+}
+
+/// Renders ranked feedback-edge-set cycle cut / remediation hints when supplied by the backend.
+pub(super) fn cycle_cut_hints_html(view: &V) -> String {
+    let hints = [
+        &view["cycle"]["cut_hints"],
+        &view["cycle"]["cuts"],
+        &view["circles"]["cut_hints"],
+    ]
+    .into_iter()
+    .map(m::array)
+    .find(|arr| !arr.is_empty())
+    .unwrap_or_else(|| {
+        let from_circles = flatten_circle_remediation(&view["circle_remediation"]);
+        if !from_circles.is_empty() {
+            return from_circles;
+        }
+        [
+            &view["pattern"]["remediation"],
+            &view["architecture"]["cut_hints"],
+            &view["architecture"]["remediation"],
+        ]
+        .into_iter()
+        .map(m::array)
+        .find(|arr| !arr.is_empty())
+        .unwrap_or_default()
+    });
+    cut_hints_list_html("Suggested cycle breaks", &hints)
+}
+
+/// Renders architecture-specific remediation hints when supplied by the backend.
+pub(super) fn architecture_cut_hints_html(view: &V) -> String {
+    let hints = [
+        &view["architecture"]["remediation"],
+        &view["architecture"]["cut_hints"],
+    ]
+    .into_iter()
+    .map(m::array)
+    .find(|arr| !arr.is_empty())
+    .unwrap_or_default();
+    cut_hints_list_html("Suggested layer breaks", &hints)
+}
+
+/// Renders pattern/layer remediation hints when supplied by the backend.
+pub(super) fn pattern_cut_hints_html(view: &V) -> String {
+    let hints = [
+        &view["pattern"]["remediation"],
+        &view["pattern"]["cut_hints"],
+    ]
+    .into_iter()
+    .map(m::array)
+    .find(|arr| !arr.is_empty())
+    .unwrap_or_default();
+    cut_hints_list_html("Suggested layer breaks", &hints)
 }
 /// The handles at the top corners of a box whose links are followed. The
 /// right corner is for what the box uses and the left one for what uses it,
@@ -2641,7 +2941,7 @@ pub(super) fn handles(node: &V, at: usize, x: f64, y: f64, dim: bool) -> String 
         }
         if more > 0 {
             // Beside a − the + hangs outside the corner, clear of the box.
-            let (at, hang) = if unfolded {
+            let (btn_x, hang) = if unfolded {
                 (corner + outward * HANDLE_GAP, hang)
             } else {
                 (corner, "")
@@ -2652,7 +2952,7 @@ pub(super) fn handles(node: &V, at: usize, x: f64, y: f64, dim: bool) -> String 
                 format!("Show {what}: {} not drawn", count(more))
             };
             html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-more\" data-of=\"{at}\" data-side=\"{side}\" data-hang=\"{hang}\" data-dim=\"{dim}\" data-action=\"graph-map-unfold\" data-payload=\"{asked}\" style=\"left:{at:.0}px;top:{y:.0}px\" title=\"{told}\" aria-label=\"{told}\">+{}</button>",
+                "<button type=\"button\" class=\"graph-map-more\" data-of=\"{at}\" data-side=\"{side}\" data-hang=\"{hang}\" data-dim=\"{dim}\" data-action=\"graph-map-unfold\" data-payload=\"{asked}\" style=\"left:{btn_x:.0}px;top:{y:.0}px\" title=\"{told}\" aria-label=\"{told}\">+{}</button>",
                 count(more)
             ));
         }
@@ -4263,7 +4563,7 @@ pub(super) fn layers_side(view: &V) -> String {
             "A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, or a link to see the pairs of files it is made of. Select it again to let go of it."
         };
         return format!(
-            "<p class=\"knowledge-note\">{intro}</p>{did}{}",
+            "<p class=\"knowledge-note\">{intro}</p>{did}{}{}",
             pair_rows(
                 if declared {
                     "Rule violations"
@@ -4277,7 +4577,8 @@ pub(super) fn layers_side(view: &V) -> String {
                     "No layer here needs one before it."
                 },
                 true
-            )
+            ),
+            pattern_cut_hints_html(view),
         );
     }
     if m::yes(&focus["link"]) {
@@ -4449,8 +4750,9 @@ pub(super) fn pattern_side(view: &V) -> String {
     let focus = &view["focus"];
     if !focus.is_object() {
         return format!(
-            "<p class=\"knowledge-note\">A frame holds the parts that are one thing in the pattern. Select a part to see what joins it to the others, and select it again to let go of it. Select a link to see what makes it up.</p>{}",
+            "<p class=\"knowledge-note\">A frame holds the parts that are one thing in the pattern. Select a part to see what joins it to the others, and select it again to let go of it. Select a link to see what makes it up.</p>{}{}",
             pattern_brief(view),
+            pattern_cut_hints_html(view),
         );
     }
     name_side(
@@ -4663,6 +4965,7 @@ pub fn side(view: &V) -> String {
                 html.push_str("</li>");
             }
             html.push_str("</ol>");
+            html.push_str(&cycle_cut_hints_html(view));
             return html;
         }
         return String::new();
