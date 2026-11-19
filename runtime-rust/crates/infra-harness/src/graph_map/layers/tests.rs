@@ -2361,4 +2361,16 @@ fn an_opened_file_marks_its_links_against_the_order() {
     assert_eq!(marks, [Some(2), None, None], "{map}");
     assert_eq!(map["architecture"]["kept"], 0);
     assert_eq!(map["edges"].as_array().unwrap().len(), 3);
+    let rem = map["architecture"]["remediation"]
+        .as_array()
+        .expect("layer remediation hints");
+    assert_eq!(rem.len(), 1);
+    assert_eq!(rem[0]["weight"], 2);
+    assert!(rem[0]["hint"].as_str().unwrap().contains("port/interface"));
+}
+
+#[test]
+fn code_classifier_aligns_with_graph_ast_on_blade_templates() {
+    assert!(!code("resources/views/home.blade.php"));
+    assert!(code("app/Models/Order.php"));
 }

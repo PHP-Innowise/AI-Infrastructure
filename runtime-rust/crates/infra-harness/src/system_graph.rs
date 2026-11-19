@@ -2581,8 +2581,112 @@ impl SystemGraphDomain {
         (normalized_target, run_id)
     }
 
-    fn extract_run_id(query: &Value) -> Option<String> {
-        Self::normalize_target_and_run_id(query["target"].as_str(), query["run_id"].as_str()).1
+    fn normalize_target_query(query: &Value) -> Result<(Option<String>, Option<String>)> {
+        let raw_target = query["target"].as_str().map(str::trim).unwrap_or("");
+        let raw_from = query["from"].as_str().map(str::trim).unwrap_or("");
+        let raw_to = query["to"].as_str().map(str::trim).unwrap_or("");
+        let effective_target = if !raw_target.is_empty() {
+            if !raw_from.is_empty() || !raw_to.is_empty() {
+                return Err(HarnessError::invalid(
+                    "Specify either target or from/to range parameters, not both.",
+                ));
+            }
+            Some(raw_target.to_owned())
+        } else if !raw_from.is_empty() || !raw_to.is_empty() {
+            if raw_from.is_empty() || raw_to.is_empty() {
+                return Err(HarnessError::invalid(
+                    "Both 'from' and 'to' are required for a range.",
+                ));
+            }
+            let range = format!("range:{raw_from}..{raw_to}");
+            Target::parse(&range)?;
+            Some(range)
+        } else {
+            None
+        };
+        Ok(Self::normalize_target_and_run_id(
+            effective_target.as_deref(),
+            query["run_id"].as_str(),
+        ))
+    }
+
+    fn resolve_service_summaries_for_target(
+        &self,
+        system: &System,
+        targets: &[ResolvedServiceTarget],
+        target_spec: Option<&str>,
+        run_id: Option<&str>,
+        agent_filter: Option<&str>,
+        dispatches: &[DispatchEvidence],
+    ) -> Result<BTreeMap<String, ServiceCodeSummary>> {
+        let explicit_nonwork_target = if run_id.is_none() {
+            match target_spec.filter(|t| !t.is_empty() && *t != "work" && *t != "uncommitted") {
+                Some(tspec) => Some(Target::parse(tspec)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut summaries = if let Some(rid) = run_id {
+            let mut run_summaries = build_run_scoped_summaries(system, dispatches);
+            if dispatches.is_empty()
+                && agent_filter.is_none()
+                && let Ok(record) = load_system_run_record(&self.store, rid)
+            {
+                for target in targets {
+                    if let Some(base_sha) = record["baseline_commits"][&target.service_id].as_str()
+                    {
+                        let entry = run_summaries.entry(target.service_id.clone()).or_default();
+                        for ch in git_changes_since(&target.root, Some(base_sha)) {
+                            let clean = ch
+                                .path
+                                .replace('\\', "/")
+                                .trim_start_matches("./")
+                                .to_owned();
+                            if !clean.is_empty()
+                                && !is_runtime_artifact_path(&clean)
+                                && !entry.changed_files.iter().any(|f| f.path == clean)
+                            {
+                                entry.changed_files.push(ChangedFileEntry {
+                                    is_test: graph_map::is_test_path(&clean),
+                                    path: clean,
+                                    status: ch.status,
+                                    from: ch.from,
+                                    additions: None,
+                                    deletions: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            run_summaries
+        } else if explicit_nonwork_target.is_some() {
+            collect_run_service_summaries(system, &[])
+        } else {
+            collect_git_service_summaries(system, dispatches)
+        };
+
+        if let Some(ref parsed_target) = explicit_nonwork_target {
+            for target in targets {
+                if let Ok(resolved) = graph_changes::resolve(&target.root, parsed_target, &[]) {
+                    let entry = summaries.entry(target.service_id.clone()).or_default();
+                    entry.changed_files = resolved
+                        .files
+                        .into_iter()
+                        .map(|ch| ChangedFileEntry {
+                            is_test: graph_map::is_test_path(&ch.path),
+                            path: ch.path,
+                            status: ch.status.to_string(),
+                            from: ch.from,
+                            additions: None,
+                            deletions: None,
+                        })
+                        .collect();
+                }
+            }
+        }
+        Ok(summaries)
     }
 
     fn load_dispatches_for_run(&self, run_id: &str) -> Vec<DispatchEvidence> {
@@ -2632,53 +2736,14 @@ impl SystemGraphDomain {
                 .collect(),
             None => Vec::new(),
         };
-        let explicit_nonwork_target = if run_id.is_none() {
-            match target_spec.filter(|t| !t.is_empty() && *t != "work" && *t != "uncommitted") {
-                Some(tspec) => Some(Target::parse(tspec)?),
-                None => None,
-            }
-        } else {
-            None
-        };
-        let mut summaries = if let Some(rid) = run_id {
-            let mut run_summaries = build_run_scoped_summaries(system, &dispatches);
-            if dispatches.is_empty()
-                && agent_filter.is_none()
-                && let Ok(record) = load_system_run_record(&self.store, rid)
-            {
-                for target in targets {
-                    if let Some(base_sha) = record["baseline_commits"][&target.service_id].as_str()
-                    {
-                        let entry = run_summaries.entry(target.service_id.clone()).or_default();
-                        for ch in git_changes_since(&target.root, Some(base_sha)) {
-                            let clean = ch
-                                .path
-                                .replace('\\', "/")
-                                .trim_start_matches("./")
-                                .to_owned();
-                            if !clean.is_empty()
-                                && !is_runtime_artifact_path(&clean)
-                                && !entry.changed_files.iter().any(|f| f.path == clean)
-                            {
-                                entry.changed_files.push(ChangedFileEntry {
-                                    is_test: graph_map::is_test_path(&clean),
-                                    path: clean,
-                                    status: ch.status,
-                                    from: ch.from,
-                                    additions: None,
-                                    deletions: None,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            run_summaries
-        } else if explicit_nonwork_target.is_some() {
-            collect_run_service_summaries(system, &[])
-        } else {
-            collect_git_service_summaries(system, &[])
-        };
+        let mut summaries = self.resolve_service_summaries_for_target(
+            system,
+            targets,
+            target_spec,
+            run_id,
+            agent_filter,
+            &dispatches,
+        )?;
 
         let provided_tokens: Vec<(String, String, String, Vec<String>)> = system
             .services
@@ -2711,24 +2776,10 @@ impl SystemGraphDomain {
                 }
             }
 
-            if let Some(ref parsed_target) = explicit_nonwork_target
-                && let Ok(resolved) = graph_changes::resolve(&target.root, parsed_target, &[])
-            {
-                entry.changed_files = resolved
-                    .files
-                    .into_iter()
-                    .map(|ch| ChangedFileEntry {
-                        is_test: graph_map::is_test_path(&ch.path),
-                        path: ch.path,
-                        status: ch.status.to_string(),
-                        from: ch.from,
-                        additions: None,
-                        deletions: None,
-                    })
-                    .collect();
-            }
-
-            let live_idx = self.graphs.live_index(&target.graph_id);
+            let live_idx = self
+                .graphs
+                .index_for_target_or_live(&target.graph_id, target_spec)
+                .map(|(idx, _)| idx);
             if let Some(idx) = &live_idx {
                 let changed_set: BTreeSet<&str> = entry
                     .changed_files
@@ -3486,10 +3537,7 @@ impl SystemGraphDomain {
                     .as_str()
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
-                let (target_spec, run_id) = Self::normalize_target_and_run_id(
-                    query["target"].as_str(),
-                    query["run_id"].as_str(),
-                );
+                let (target_spec, run_id) = Self::normalize_target_query(query)?;
                 let agent_filter = query["agent"]
                     .as_str()
                     .map(str::trim)
@@ -3521,10 +3569,7 @@ impl SystemGraphDomain {
                 let project_id = query["project_id"].as_str().unwrap_or("");
                 let config_path = query["config_path"].as_str();
                 let certain = Self::parse_bool_flag(query, "certain")?;
-                let (target_spec, run_id) = Self::normalize_target_and_run_id(
-                    query["target"].as_str(),
-                    query["run_id"].as_str(),
-                );
+                let (target_spec, run_id) = Self::normalize_target_query(query)?;
                 let agent_filter = query["agent"]
                     .as_str()
                     .map(str::trim)
@@ -3576,7 +3621,10 @@ impl SystemGraphDomain {
                 {
                     let clean_p = p.replace('\\', "/").trim_start_matches("./").to_owned();
                     let mut expanded = vec![clean_p.clone()];
-                    if let Some(idx) = self.graphs.live_index(&svc_target.graph_id) {
+                    if let Some((idx, _)) = self
+                        .graphs
+                        .index_for_target_or_live(&svc_target.graph_id, target_spec.as_deref())
+                    {
                         expanded.extend(intra_service_caller_paths(
                             &idx,
                             std::slice::from_ref(&clean_p),
@@ -3640,6 +3688,14 @@ impl SystemGraphDomain {
                 let project_id = query["project_id"].as_str().unwrap_or("");
                 let config_path = query["config_path"].as_str();
                 let certain = Self::parse_bool_flag(query, "certain")?;
+                let (target_spec, run_id) = Self::normalize_target_and_run_id(
+                    query["target"].as_str(),
+                    query["run_id"].as_str(),
+                );
+                let agent_filter = query["agent"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 let named = |key: &str| -> Result<String> {
                     let value = query[key].as_str().map(str::trim).unwrap_or("");
                     if value.len() > 256 || value.chars().any(char::is_control) {
@@ -3658,9 +3714,24 @@ impl SystemGraphDomain {
                     project_id,
                     config_path,
                 )?;
-                let sys_graph =
-                    self.build_enriched_system_graph(&system, &targets, None, None, None)?;
+                let dispatches = run_id
+                    .as_deref()
+                    .map(|rid| self.load_dispatches_for_run(rid))
+                    .unwrap_or_default();
+                let opened_by_service = self.opened_by_service_for_run(&dispatches, agent_filter);
+                let sys_graph = self.build_enriched_system_graph(
+                    &system,
+                    &targets,
+                    target_spec.as_deref(),
+                    run_id.as_deref(),
+                    agent_filter,
+                )?;
                 let link = sys_graph.link(&from, &to, certain);
+                let ctx = BridgeViewContext {
+                    target_spec: target_spec.as_deref(),
+                    run_id: run_id.as_deref(),
+                    opened_by_service: run_id.is_some().then_some(&opened_by_service),
+                };
                 let mut view = bridge_view(
                     &self.graphs,
                     &system,
@@ -3668,6 +3739,7 @@ impl SystemGraphDomain {
                     &link,
                     (!contract.is_empty()).then_some(contract.as_str()),
                     certain,
+                    &ctx,
                 );
                 view["project_id"] = json!(project_id);
                 view["config_path"] = json!(cfg_rel);
@@ -3723,9 +3795,15 @@ impl Domain for SystemGraphDomain {
 
                     if operation == "system_graph.service_map" && target.service_id != "__system__"
                     {
-                        let run_id = Self::extract_run_id(query);
+                        let (target_spec, run_id) = Self::normalize_target_and_run_id(
+                            query["target"].as_str(),
+                            query["run_id"].as_str(),
+                        );
                         let target_str = out["target"].as_str().unwrap_or("");
-                        if run_id.is_some() || !target_str.is_empty() {
+                        let effective_target = target_spec
+                            .as_deref()
+                            .or_else(|| (!target_str.is_empty()).then_some(target_str));
+                        if run_id.is_some() || effective_target.is_some() {
                             let agent_filter = query["agent"]
                                 .as_str()
                                 .map(str::trim)
@@ -3751,11 +3829,14 @@ impl Domain for SystemGraphDomain {
                                 .filter(|ev| agent_matches(agent_filter, &ev.phase, &ev.service))
                                 .cloned()
                                 .collect();
-                            let mut summaries = if run_id.is_some() {
-                                build_run_scoped_summaries(&system, &filtered_for_edits)
-                            } else {
-                                collect_git_service_summaries(&system, &filtered_for_edits)
-                            };
+                            let mut summaries = self.resolve_service_summaries_for_target(
+                                &system,
+                                std::slice::from_ref(&target),
+                                effective_target,
+                                run_id.as_deref(),
+                                agent_filter,
+                                &filtered_for_edits,
+                            )?;
                             let has_edits = summaries
                                 .get(&target.service_id)
                                 .is_some_and(|s| !s.changed_files.is_empty());
@@ -3796,7 +3877,7 @@ impl Domain for SystemGraphDomain {
                     }
 
                     if operation == "system_graph.service_file_impact" {
-                        let run_id = Self::extract_run_id(query);
+                        let (target_spec, run_id) = Self::normalize_target_query(query)?;
                         let agent_filter = query["agent"]
                             .as_str()
                             .map(str::trim)
@@ -3813,15 +3894,21 @@ impl Domain for SystemGraphDomain {
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
                             .map(str::to_owned);
-                        let mut summaries = if run_id.is_some() {
-                            build_run_scoped_summaries(&system, &dispatches)
-                        } else {
-                            collect_git_service_summaries(&system, &dispatches)
-                        };
+                        let mut summaries = self.resolve_service_summaries_for_target(
+                            &system,
+                            std::slice::from_ref(&target),
+                            target_spec.as_deref(),
+                            run_id.as_deref(),
+                            agent_filter,
+                            &dispatches,
+                        )?;
                         let query_path_for_sys = if let Some(ref p) = path_opt {
                             let clean_p = p.replace('\\', "/").trim_start_matches("./").to_owned();
                             let mut expanded = vec![clean_p.clone()];
-                            if let Some(idx) = self.graphs.live_index(&target.graph_id) {
+                            if let Some((idx, _)) = self
+                                .graphs
+                                .index_for_target_or_live(&target.graph_id, target_spec.as_deref())
+                            {
                                 expanded.extend(intra_service_caller_paths(
                                     &idx,
                                     std::slice::from_ref(&clean_p),
@@ -5232,6 +5319,12 @@ fn build_semantic_bridges(
     })
 }
 
+struct BridgeViewContext<'a> {
+    target_spec: Option<&'a str>,
+    run_id: Option<&'a str>,
+    opened_by_service: Option<&'a BTreeMap<String, BTreeSet<String>>>,
+}
+
 /// The code on the two sides of a link between two services. Of the
 /// consumer, the files that name what it uses of the provider, as the code
 /// references of the system graph found them. Of the provider, the files
@@ -5246,6 +5339,7 @@ fn bridge_view(
     link: &Value,
     contract: Option<&str>,
     certain: bool,
+    ctx: &BridgeViewContext<'_>,
 ) -> Value {
     let (from, to) = (
         link["from"].as_str().unwrap_or(""),
@@ -5264,7 +5358,7 @@ fn bridge_view(
         targets
             .iter()
             .find(|target| target.service_id == service)
-            .and_then(|target| graphs.live_index(&target.graph_id))
+            .and_then(|target| graphs.index_for_target_or_live(&target.graph_id, ctx.target_spec))
     };
     let reach = |index: &Option<Arc<Index>>, path: &str| match index {
         Some(index) => index
@@ -5281,9 +5375,23 @@ fn bridge_view(
             .iter()
             .any(|end| path.ends_with(end))
     };
-    let listed = |sites: BTreeMap<String, (BTreeSet<String>, Value)>,
+    let service_opened = |service: &str, path: &str| -> bool {
+        let clean = path.replace('\\', "/").trim_start_matches("./").to_owned();
+        ctx.opened_by_service
+            .and_then(|map| map.get(service))
+            .is_some_and(|set| set.contains(&clean))
+    };
+    let listed = |service: &str,
+                  sites: BTreeMap<String, (BTreeSet<String>, Value)>,
                   index: &Option<Arc<Index>>| {
-        let more = sites.len().saturating_sub(BRIDGE_LISTED);
+        let total = sites.len();
+        let more = total.saturating_sub(BRIDGE_LISTED);
+        let opened_total = ctx.opened_by_service.map_or(0usize, |_| {
+            sites
+                .keys()
+                .filter(|path| service_opened(service, path))
+                .count()
+        });
         let mut sites = sites.into_iter().collect::<Vec<_>>();
         sites.sort_by_key(|(path, (_, row))| {
             (row["declared"] != true, document(path), path.clone())
@@ -5301,14 +5409,21 @@ fn bridge_view(
                         .is_some_and(|index| index.file_id(&path).is_some())
                 );
                 row["reach"] = reach(index, &path);
+                if ctx.run_id.is_some() {
+                    row["opened_by_run"] = json!(service_opened(service, &path));
+                }
                 row
             })
             .collect::<Vec<_>>();
-        (rows, more)
+        (rows, more, opened_total, total)
     };
     // The consumer: what its code was found to name of the provider.
     let consumer_target = targets.iter().find(|target| target.service_id == from);
-    let consumer_index = index_of(from);
+    let consumer_loaded = index_of(from);
+    let consumer_is_snapshot = consumer_loaded.as_ref().is_some_and(|(_, snap)| *snap);
+    let consumer_index = consumer_loaded.map(|(idx, _)| idx);
+    let mut certain_refs = 0usize;
+    let mut guessed_refs = 0usize;
     let mut consumer: BTreeMap<String, (BTreeSet<String>, Value)> = BTreeMap::new();
     for found in link["code_refs"].as_array().into_iter().flatten() {
         let named = found["contract"].as_str();
@@ -5320,12 +5435,30 @@ fn bridge_view(
         let Some(path) = found["from_path"].as_str() else {
             continue;
         };
+        if matches!(found["certainty"].as_str(), Some("INFERRED" | "guessed")) {
+            guessed_refs += 1;
+        } else {
+            certain_refs += 1;
+        }
         let entry = consumer.entry(path.to_owned()).or_insert_with(|| {
             (
                 BTreeSet::new(),
                 json!({"detail": found["detail"], "certainty": found["certainty"]}),
             )
         });
+        if let Some(sym) = found["from_symbol"].as_str().filter(|s| !s.is_empty()) {
+            let list = entry
+                .1
+                .as_object_mut()
+                .expect("consumer row object")
+                .entry("from_symbols")
+                .or_insert_with(|| json!([]));
+            if let Some(arr) = list.as_array_mut()
+                && !arr.iter().any(|v| v.as_str() == Some(sym))
+            {
+                arr.push(json!(sym));
+            }
+        }
         if let Some(named) = named {
             entry.0.insert(named.to_owned());
         }
@@ -5333,7 +5466,9 @@ fn bridge_view(
     // The provider: where its passport says each contract is made, and
     // what of its code names the contract.
     let provider_target = targets.iter().find(|target| target.service_id == to);
-    let provider_index = index_of(to);
+    let provider_loaded = index_of(to);
+    let provider_is_snapshot = provider_loaded.as_ref().is_some_and(|(_, snap)| *snap);
+    let provider_index = provider_loaded.map(|(idx, _)| idx);
     let provides = system
         .services
         .get(to)
@@ -5371,10 +5506,11 @@ fn bridge_view(
         })
         .filter(|(_, probes)| !probes.is_empty())
         .collect::<Vec<_>>();
-    let state_dir = Some(graphs.state_dir());
+    let provider_state_dir = (!provider_is_snapshot).then(|| graphs.state_dir());
+    let consumer_state_dir = (!consumer_is_snapshot).then(|| graphs.state_dir());
     let (provider_semantics, files_read, raw_cut) = collect_service_semantics_with_graphs(
         Some(graphs),
-        state_dir,
+        provider_state_dir,
         provider_target,
         provider_index.as_ref(),
         certain,
@@ -5397,7 +5533,7 @@ fn bridge_view(
     let cut = !probes.is_empty() && raw_cut;
     let (consumer_semantics, _, _) = collect_service_semantics_with_graphs(
         Some(graphs),
-        state_dir,
+        consumer_state_dir,
         consumer_target,
         consumer_index.as_ref(),
         certain,
@@ -5406,9 +5542,26 @@ fn bridge_view(
     );
     let semantic_bridges =
         build_semantic_bridges(from, to, &consumer_semantics, &provider_semantics);
-    let (consumer_sites, consumer_more) = listed(consumer, &consumer_index);
-    let (provider_sites, provider_more) = listed(provider, &provider_index);
-    json!({
+    let declared_sites = provider
+        .values()
+        .filter(|(_, row)| row["declared"] == true)
+        .count();
+    let discovered_sites = provider
+        .values()
+        .filter(|(_, row)| row["found"] == true && row["declared"] != true)
+        .count();
+    let certain_total = certain_refs + declared_sites;
+    let total_confidence = certain_total + guessed_refs + discovered_sites;
+    let confidence_ratio = if total_confidence == 0 {
+        1.0
+    } else {
+        ((certain_total as f64 / total_confidence as f64) * 1000.0).round() / 1000.0
+    };
+    let (consumer_sites, consumer_more, consumer_opened, consumer_total) =
+        listed(from, consumer, &consumer_index);
+    let (provider_sites, provider_more, provider_opened, provider_total) =
+        listed(to, provider, &provider_index);
+    let mut out = json!({
         "kind": "system_bridge",
         "from": from,
         "to": to,
@@ -5416,6 +5569,13 @@ fn bridge_view(
         "contracts": ids,
         "contract": contract,
         "certain": certain,
+        "confidence": {
+            "certain_refs": certain_refs,
+            "guessed_refs": guessed_refs,
+            "declared_sites": declared_sites,
+            "discovered_sites": discovered_sites,
+            "ratio": confidence_ratio,
+        },
         "consumer": {
             "service": from,
             "graph": consumer_index.is_some(),
@@ -5431,7 +5591,21 @@ fn bridge_view(
             "cut": cut,
         },
         "semantic_bridges": semantic_bridges,
-    })
+    });
+    if let Some(ts) = ctx.target_spec {
+        out["target"] = json!(ts);
+    }
+    if let Some(rid) = ctx.run_id {
+        out["run_id"] = json!(rid);
+        out["run_coverage"] = json!({
+            "run_id": rid,
+            "consumer_opened": consumer_opened,
+            "consumer_total": consumer_total,
+            "provider_opened": provider_opened,
+            "provider_total": provider_total,
+        });
+    }
+    out
 }
 
 fn collect_service_code_files(root: &Path, limit: usize) -> Vec<String> {

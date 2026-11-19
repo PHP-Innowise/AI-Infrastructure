@@ -1606,20 +1606,22 @@ impl Index {
         // open folder shows fewer, though never less than `OWN`.
         let mut shown = HashSet::new();
         let mut beyond = false;
-        if offset > 0 || limit.is_some() {
+        let is_paginated = offset > 0 || limit.is_some();
+        if is_paginated {
             let cap = limit.unwrap_or(limits.spread).max(1);
+            if let Some(focus_path) = focus
+                && let Some(pos) = children.iter().position(|(k, _)| **k == focus_path)
+                && pos >= cap
+            {
+                let item = children.remove(pos);
+                children.insert(0, item);
+                if offset == 0 {
+                    beyond = true;
+                }
+            }
             children = children.into_iter().skip(offset).take(cap).collect();
             for (key, _) in &children {
                 shown.insert(**key);
-            }
-            if offset == 0
-                && let Some(place) = focus.and_then(|path| tallies.get_key_value(path))
-                && place.1.inside
-                && shown.insert(*place.0)
-            {
-                children.push(place);
-                children.sort_by(busiest);
-                beyond = true;
             }
         } else {
             let mut drawn: HashMap<&str, usize> = HashMap::new();
@@ -1673,6 +1675,28 @@ impl Index {
                 frame.0 += 1;
             }
         }
+        let mut cross_page_edges: Vec<Value> = if is_paginated {
+            let mut cross: Vec<(&str, &str, u64)> = flows
+                .iter()
+                .filter_map(|((source, target), edge)| {
+                    let s_in = shown.contains(source);
+                    let t_in = shown.contains(target);
+                    (s_in != t_in
+                        && tallies.get(source).is_some_and(|t| t.inside)
+                        && tallies.get(target).is_some_and(|t| t.inside))
+                    .then_some((*source, *target, edge.flow.links))
+                })
+                .collect();
+            cross.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)).then(a.1.cmp(b.1)));
+            cross
+                .into_iter()
+                .take(64)
+                .map(|(from, to, links)| json!({"from": from, "to": to, "links": links}))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        cross_page_edges.shrink_to_fit();
         let mut edges = flows
             .iter()
             .filter(|((source, target), _)| shown.contains(source) && shown.contains(target))
@@ -1792,6 +1816,7 @@ impl Index {
                 "returned": children.len(),
                 "has_more": offset + children.len() < matching,
                 "next_offset": (offset + children.len() < matching).then_some(offset + children.len()),
+                "cross_page_edges": cross_page_edges,
             },
             "depth": depth,
         });
@@ -3405,25 +3430,49 @@ impl Index {
             }
         }
         let total_shown = shown.len();
-        if offset > 0 || limit.is_some() {
+        let all_seen: HashSet<&str> = seen.clone();
+        let is_paginated = offset > 0 || limit.is_some();
+        if is_paginated {
             let cap = limit.unwrap_or(FOLLOWED).max(1);
             shown = shown.into_iter().skip(offset).take(cap).collect();
             seen = shown.iter().copied().collect();
         }
         // A link between two places drawn is drawn where one of its sides
         // is unfolded: the uses of its user, or the users of what it uses.
-        let linked = |source: &str, target: &str| {
-            seen.contains(source)
-                && seen.contains(target)
+        let linked_in = |scope_set: &HashSet<&str>, source: &str, target: &str| {
+            scope_set.contains(source)
+                && scope_set.contains(target)
                 && (times(out, source) > 0 || times(into, target) > 0 || bfs_depth_cap > 0)
         };
         let among = flows
             .keys()
-            .filter(|(source, target)| seen.contains(source) && seen.contains(target))
+            .filter(|(source, target)| all_seen.contains(source) && all_seen.contains(target))
             .count();
+        let cross_page_edges: Vec<Value> = if is_paginated {
+            let mut cross: Vec<(&str, &str, u64)> = flows
+                .iter()
+                .filter_map(|((source, target), edge)| {
+                    let s_in = seen.contains(source);
+                    let t_in = seen.contains(target);
+                    (s_in != t_in && linked_in(&all_seen, source, target)).then_some((
+                        *source,
+                        *target,
+                        edge.flow.links,
+                    ))
+                })
+                .collect();
+            cross.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)).then(a.1.cmp(b.1)));
+            cross
+                .into_iter()
+                .take(64)
+                .map(|(from, to, links)| json!({"from": from, "to": to, "links": links}))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut edges = flows
             .iter()
-            .filter(|((source, target), _)| linked(source, target))
+            .filter(|((source, target), _)| linked_in(&seen, source, target))
             .collect::<Vec<_>>();
         let between = edges.len();
         edges.sort_by(|((a, b), left), ((c, d), right)| {
@@ -3446,9 +3495,9 @@ impl Index {
                 rows.iter()
                     .filter(|(other, _)| {
                         if outgoing {
-                            !linked(place, other)
+                            !linked_in(&seen, place, other)
                         } else {
-                            !linked(other, place)
+                            !linked_in(&seen, other, place)
                         }
                     })
                     .count()
@@ -3552,6 +3601,7 @@ impl Index {
                 "returned": shown.len(),
                 "has_more": offset + shown.len() < total_shown,
                 "next_offset": (offset + shown.len() < total_shown).then_some(offset + shown.len()),
+                "cross_page_edges": cross_page_edges,
             },
             "depth": depth_limit,
         }))
@@ -4597,6 +4647,47 @@ impl Index {
             focus["used_by"] = json!([row(prior, prior)]);
             view["focus"] = focus;
         }
+        let mut cut_candidates: Vec<(u64, u64, &str, &str)> = route
+            .iter()
+            .enumerate()
+            .map(|(at, (_, _, flow))| {
+                let next = (at + 1) % len;
+                (
+                    flow.links,
+                    flow.guessed,
+                    keys[at].as_str(),
+                    keys[next].as_str(),
+                )
+            })
+            .collect();
+        cut_candidates.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.cmp(&b.1))
+                .then(a.2.cmp(b.2))
+                .then(a.3.cmp(b.3))
+        });
+        view["cycle"]["cut_hints"] = cut_candidates
+            .into_iter()
+            .take(3)
+            .map(|(links, guessed, from_key, to_key)| {
+                json!({
+                    "from": from_key,
+                    "to": to_key,
+                    "links": links,
+                    "weight": links,
+                    "guessed": guessed,
+                    "breaks_cycles": true,
+                    "hint": format!(
+                        "Break cycle by extracting an interface from {} or inverting {} -> {} ({} link{}).",
+                        name(to_key),
+                        name(from_key),
+                        name(to_key),
+                        links,
+                        if links == 1 { "" } else { "s" }
+                    ),
+                })
+            })
+            .collect();
         view
     }
     /// Compare a displayed cycle with the full directed base graph. The
@@ -7057,8 +7148,10 @@ type Kept = (String, u64, Option<SystemTime>, Arc<Index>);
 struct MapsCache {
     kept_live: Vec<Kept>,
     kept_revisions: Vec<Kept>,
-    kept_live_ir: HashMap<String, (u64, Arc<Index>)>,
+    kept_live_ir: Vec<(String, u64, Arc<Index>)>,
+    kept_ir_summaries: HashMap<(PathBuf, String), (u64, Option<crate::graph_ir::IrSummary>)>,
     inflight: HashMap<String, Arc<InFlight>>,
+    ir_inflight: HashMap<String, Arc<IrInFlight>>,
 }
 
 impl MapsCache {
@@ -7069,6 +7162,92 @@ impl MapsCache {
             (&mut self.kept_live, KEPT_LIVE)
         }
     }
+}
+
+struct IrInFlight {
+    ir_revision: u64,
+    state: Mutex<Option<std::result::Result<Arc<Index>, HarnessError>>>,
+    ready: Condvar,
+}
+
+struct IrInFlightGuard<'a> {
+    maps: &'a Maps,
+    project: &'a str,
+    ir_revision: u64,
+    slot: Arc<IrInFlight>,
+    finished: bool,
+}
+
+impl IrInFlightGuard<'_> {
+    fn complete(
+        mut self,
+        result: std::result::Result<Arc<Index>, HarnessError>,
+    ) -> Result<Arc<Index>> {
+        self.finished = true;
+        if let Ok(mut cache) = self.maps.cache.lock() {
+            let still_current = cache
+                .ir_inflight
+                .get(self.project)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.slot));
+            if still_current {
+                cache.ir_inflight.remove(self.project);
+                if let Ok(ref index) = result {
+                    put_live_ir_lru(
+                        &mut cache.kept_live_ir,
+                        self.project,
+                        self.ir_revision,
+                        index.clone(),
+                    );
+                }
+            }
+        }
+        let shared = match &result {
+            Ok(index) => Ok(index.clone()),
+            Err(err) => Err(clone_error(err)),
+        };
+        if let Ok(mut state) = self.slot.state.lock() {
+            *state = Some(shared);
+            self.slot.ready.notify_all();
+        }
+        result
+    }
+}
+
+impl Drop for IrInFlightGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Ok(mut cache) = self.maps.cache.lock()
+            && cache
+                .ir_inflight
+                .get(self.project)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.slot))
+        {
+            cache.ir_inflight.remove(self.project);
+        }
+        if let Ok(mut state) = self.slot.state.lock() {
+            *state = Some(Err(HarnessError::unavailable(
+                "The code graph IR loader stopped.",
+            )));
+            self.slot.ready.notify_all();
+        }
+    }
+}
+
+fn put_live_ir_lru(
+    pool: &mut Vec<(String, u64, Arc<Index>)>,
+    project: &str,
+    ir_revision: u64,
+    index: Arc<Index>,
+) {
+    if let Some(at) = pool.iter().position(|(name, ..)| name == project) {
+        pool.remove(at);
+    }
+    if pool.len() >= KEPT_LIVE {
+        pool.remove(0);
+    }
+    pool.push((project.to_owned(), ir_revision, index));
 }
 
 struct InFlight {
@@ -7291,32 +7470,126 @@ impl Maps {
     /// Stores an in-memory `Index` built directly from SQLite IR without requiring `live/graph.json`.
     pub(crate) fn put_live_ir(&self, project: &str, ir_revision: u64, index: Arc<Index>) {
         if let Ok(mut cache) = self.cache.lock() {
-            if cache.kept_live_ir.len() >= KEPT_LIVE
-                && !cache.kept_live_ir.contains_key(project)
-                && let Some(oldest) = cache.kept_live_ir.keys().next().cloned()
-            {
-                cache.kept_live_ir.remove(&oldest);
-            }
+            put_live_ir_lru(&mut cache.kept_live_ir, project, ir_revision, index);
             cache
-                .kept_live_ir
-                .insert(project.to_owned(), (ir_revision, index));
+                .kept_ir_summaries
+                .retain(|(_, name), _| name != project);
         }
     }
 
-    /// Returns a live in-memory `Index` built from SQLite IR when present.
+    /// Returns a live in-memory `Index` built from SQLite IR when present, updating LRU order.
+    #[cfg(test)]
     pub(crate) fn live_ir(&self, project: &str) -> Option<(u64, Arc<Index>)> {
-        self.cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.kept_live_ir.get(project).cloned())
+        let mut cache = self.cache.lock().ok()?;
+        let pos = cache
+            .kept_live_ir
+            .iter()
+            .position(|(name, ..)| name == project)?;
+        let entry = cache.kept_live_ir.remove(pos);
+        let out = (entry.1, entry.2.clone());
+        cache.kept_live_ir.push(entry);
+        Some(out)
+    }
+
+    /// Loads or returns a cached live in-memory IR `Index` with single-flight deduplication.
+    pub(crate) fn get_or_load_live_ir<F>(
+        &self,
+        project: &str,
+        ir_revision: u64,
+        loader: F,
+    ) -> Result<Option<(Arc<Index>, bool)>>
+    where
+        F: FnOnce() -> Result<Option<Arc<Index>>>,
+    {
+        let mut loader = Some(loader);
+        loop {
+            enum IrAction {
+                Hit(Arc<Index>),
+                Wait(Arc<IrInFlight>),
+                Lead(Arc<IrInFlight>),
+            }
+            let action = {
+                let mut cache = self
+                    .cache
+                    .lock()
+                    .map_err(|_| HarnessError::unavailable("The code graph map is unavailable."))?;
+                if let Some(pos) = cache
+                    .kept_live_ir
+                    .iter()
+                    .position(|(name, ..)| name == project)
+                {
+                    let entry = cache.kept_live_ir.remove(pos);
+                    let idx = entry.2.clone();
+                    cache.kept_live_ir.push(entry);
+                    IrAction::Hit(idx)
+                } else if let Some(existing) = cache.ir_inflight.get(project).cloned() {
+                    IrAction::Wait(existing)
+                } else {
+                    let slot = Arc::new(IrInFlight {
+                        ir_revision,
+                        state: Mutex::new(None),
+                        ready: Condvar::new(),
+                    });
+                    cache.ir_inflight.insert(project.to_owned(), slot.clone());
+                    IrAction::Lead(slot)
+                }
+            };
+            match action {
+                IrAction::Hit(index) => return Ok(Some((index, true))),
+                IrAction::Wait(slot) => {
+                    let outcome = {
+                        let mut guard = slot.state.lock().map_err(|_| {
+                            HarnessError::unavailable("The code graph map is unavailable.")
+                        })?;
+                        while guard.is_none() {
+                            guard = slot.ready.wait(guard).map_err(|_| {
+                                HarnessError::unavailable("The code graph map is unavailable.")
+                            })?;
+                        }
+                        match guard.as_ref().expect("ready state populated") {
+                            Ok(index) => Ok(index.clone()),
+                            Err(err) => Err(clone_error(err)),
+                        }
+                    };
+                    if slot.ir_revision == ir_revision {
+                        return outcome.map(|idx| Some((idx, false)));
+                    }
+                }
+                IrAction::Lead(slot) => {
+                    let guard = IrInFlightGuard {
+                        maps: self,
+                        project,
+                        ir_revision,
+                        slot,
+                        finished: false,
+                    };
+                    match loader.take().expect("single-flight IR loader called once")() {
+                        Ok(Some(idx)) => {
+                            return guard.complete(Ok(idx)).map(|idx| Some((idx, false)));
+                        }
+                        Ok(None) => {
+                            let _ = guard.complete(Err(HarnessError::missing(
+                                "This project has no native IR index.",
+                            )));
+                            return Ok(None);
+                        }
+                        Err(err) => return guard.complete(Err(err)).map(|idx| Some((idx, false))),
+                    }
+                }
+            }
+        }
     }
 
     /// Drops ONLY live cached entries for `project`, preserving immutable `project@commit` entries.
     pub(crate) fn forget_live(&self, project: &str) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.kept_live.retain(|(name, ..)| name != project);
-            cache.kept_live_ir.remove(project);
+            cache.kept_live_ir.retain(|(name, ..)| name != project);
+            cache
+                .kept_ir_summaries
+                .retain(|(_, name), _| name != project);
             cache.inflight.retain(|name, _| name != project);
+            cache.ir_inflight.retain(|name, _| name != project);
         }
     }
 
@@ -7332,8 +7605,12 @@ impl Maps {
             };
             cache.kept_live.retain(|(name, ..)| !matches(name));
             cache.kept_revisions.retain(|(name, ..)| !matches(name));
-            cache.kept_live_ir.retain(|name, _| !matches(name));
+            cache.kept_live_ir.retain(|(name, ..)| !matches(name));
+            cache
+                .kept_ir_summaries
+                .retain(|(_, name), _| !matches(name));
             cache.inflight.retain(|name, _| !matches(name));
+            cache.ir_inflight.retain(|name, _| !matches(name));
         }
     }
 
@@ -7347,6 +7624,31 @@ impl Maps {
             .ok()
             .flatten()
             .and_then(|ir| ir.summary_counts().ok().flatten())
+    }
+
+    /// Reads native SQLite IR summary counters cached by `(state, project, ir_revision)`.
+    pub(crate) fn ir_summary_for_revision(
+        &self,
+        state: &Path,
+        project: &str,
+        ir_revision: u64,
+    ) -> Option<crate::graph_ir::IrSummary> {
+        let key = (state.to_path_buf(), project.to_owned());
+        if let Ok(cache) = self.cache.lock()
+            && let Some((cached_rev, summary)) = cache.kept_ir_summaries.get(&key)
+            && *cached_rev == ir_revision
+        {
+            return summary.clone();
+        }
+        let summary = self.ir_summary(state, project);
+        if summary.is_some()
+            && let Ok(mut cache) = self.cache.lock()
+        {
+            cache
+                .kept_ir_summaries
+                .insert(key, (ir_revision, summary.clone()));
+        }
+        summary
     }
 }
 
@@ -7366,6 +7668,31 @@ pub(crate) fn attach_ir_metadata(
             map.insert("ir_summary".into(), val);
         }
     }
+}
+
+/// Attaches non-breaking `"confidence"` summary (`extracted`, `inferred`, `extracted_ratio`, `ratio`)
+/// onto a `graph.map` view from `index`'s edge flows.
+pub(crate) fn attach_confidence_metadata(index: &Index, view: &mut Value) {
+    if !view.is_object() {
+        return;
+    }
+    let (mut extracted, mut inferred) = (0u64, 0u64);
+    for (_, _, pair) in index.pairs() {
+        extracted += pair.read;
+        inferred += pair.guessed;
+    }
+    let total = extracted + inferred;
+    let ratio = if total == 0 {
+        1.0
+    } else {
+        ((extracted as f64 / total as f64) * 1000.0).round() / 1000.0
+    };
+    view["confidence"] = json!({
+        "extracted": extracted,
+        "inferred": inferred,
+        "extracted_ratio": ratio,
+        "ratio": ratio,
+    });
 }
 
 /// Computes `truncated`, `limited`, `shown`, `drawn`, `cache_hit`, and `elapsed_ms`
@@ -7391,7 +7718,9 @@ pub(crate) fn finalize_telemetry(view: &mut Value, elapsed_ms: u64, cache_hit: b
                 truncated = true;
             }
             if let Some(frames) = view.get("frames").and_then(Value::as_array)
-                && frames.iter().any(|f| u64_at(f, "places") > drawn as u64)
+                && frames
+                    .iter()
+                    .any(|f| u64_at(f, "places") > u64_at(f, "drawn"))
             {
                 truncated = true;
             }
@@ -7496,7 +7825,9 @@ pub(crate) fn finalize_telemetry(view: &mut Value, elapsed_ms: u64, cache_hit: b
                 truncated = true;
             }
             if let Some(frames) = view.get("frames").and_then(Value::as_array)
-                && frames.iter().any(|f| u64_at(f, "places") > drawn as u64)
+                && frames
+                    .iter()
+                    .any(|f| u64_at(f, "places") > u64_at(f, "drawn"))
             {
                 truncated = true;
             }
@@ -14575,5 +14906,117 @@ where
         );
         assert_eq!(page2["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(page2["paging"]["has_more"], json!(false));
+    }
+
+    #[test]
+    fn maps_lru_single_flight_telemetry_confidence_and_paging_fixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = |path: &str| -> Arc<Index> {
+            let graph = json!({
+                "nodes": [{"id": "n", "label": "n()", "source_file": path, "source_location": "L1"}],
+                "links": []
+            });
+            Arc::new(Index::read(graph.to_string().as_bytes(), dir.path()).unwrap())
+        };
+        let maps = Maps::default();
+        for i in 0..(KEPT_LIVE + 4) {
+            let pid = format!("p{i}");
+            maps.put_live_ir(&pid, 1, idx("src/a.rs"));
+        }
+        assert!(
+            maps.live_ir("p0").is_none(),
+            "expected LRU eviction of oldest entry"
+        );
+        assert!(maps.live_ir(&format!("p{}", KEPT_LIVE + 3)).is_some());
+
+        let loads = std::sync::atomic::AtomicUsize::new(0);
+        let first = maps
+            .get_or_load_live_ir("sf", 5, || {
+                loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(idx("src/sf.rs")))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(!first.1);
+        let second = maps
+            .get_or_load_live_ir("sf", 5, || {
+                loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(idx("src/sf2.rs")))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(second.1);
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // `finalize_telemetry` must compare frame.places against frame.drawn, not graph-wide drawn.
+        let mut frame_trunc = json!({
+            "mode": null,
+            "matching": 1,
+            "between": 2,
+            "nodes": [{"path": "src/a.rs"}],
+            "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
+            "frames": [{"places": 5, "drawn": 1}],
+        });
+        finalize_telemetry(&mut frame_trunc, 3, true);
+        assert_eq!(frame_trunc["telemetry"]["truncated"], true);
+
+        // Focus hoisting preserves returned <= limit and populates cross_page_edges & confidence.
+        let cross_graph = json!({
+            "nodes": [
+                {"id": "a", "label": "a()", "source_file": "src/a.rs", "source_location": "L1"},
+                {"id": "b", "label": "b()", "source_file": "src/b.rs", "source_location": "L1"},
+                {"id": "c", "label": "c()", "source_file": "src/c.rs", "source_location": "L1"}
+            ],
+            "links": [
+                {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "b", "target": "c", "relation": "calls", "confidence": "INFERRED"}
+            ]
+        });
+        let cidx = Index::read(cross_graph.to_string().as_bytes(), dir.path()).unwrap();
+        let mut page = cidx.view_with_limits_opts(
+            "cross",
+            "src",
+            &[],
+            None,
+            false,
+            "",
+            NORMAL_LIMITS,
+            0,
+            Some(1),
+            None,
+        );
+        assert_eq!(page["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(page["paging"]["returned"], 1);
+        assert_eq!(page["paging"]["next_offset"], 1);
+        assert!(
+            !page["paging"]["cross_page_edges"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        attach_confidence_metadata(&cidx, &mut page);
+        assert_eq!(page["confidence"]["extracted"], 1);
+        assert_eq!(page["confidence"]["inferred"], 1);
+        assert_eq!(page["confidence"]["ratio"], 0.5);
+
+        // Cycle cut_hints emitted on Index::cycle.
+        let cyc_graph = json!({
+            "nodes": [
+                {"id": "a", "label": "a()", "source_file": "src/a.rs", "source_location": "L1"},
+                {"id": "b", "label": "b()", "source_file": "src/b.rs", "source_location": "L1"}
+            ],
+            "links": [
+                {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "b", "target": "a", "relation": "calls", "confidence": "INFERRED"}
+            ]
+        });
+        let cyc_idx = Index::read(cyc_graph.to_string().as_bytes(), dir.path()).unwrap();
+        let cyc = cyc_idx.cycle("cyc", "src/a.rs", &[], &|_| None, None, false);
+        let hints = cyc["cycle"]["cut_hints"]
+            .as_array()
+            .expect("cycle cut_hints");
+        assert!(!hints.is_empty());
+        assert_eq!(hints[0]["breaks_cycles"], true);
     }
 }
