@@ -24,6 +24,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "infra-harness-browser-e2e-fixture"
+path = "tests/support/browser_e2e_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "infra-harness-ab"
 path = "tools/session_ab/main.rs"
 test = false
