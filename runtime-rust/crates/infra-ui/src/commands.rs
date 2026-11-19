@@ -568,17 +568,492 @@ pub async fn intercept(text: &str) -> bool {
     session::controls();
     true
 }
-pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str) -> bool {
+pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str) -> bool {
     if (kind == "input" || kind == "click") && id == "prompt" {
         m::take("composer-dismissed");
         update().await;
+        return true;
+    }
+    if kind == "input" && id == "command-palette-input" {
+        m::write(|s| {
+            s.workspace.command_palette_query = value.to_owned();
+            s.workspace.command_palette_selected = 0;
+        });
+        render_palette();
         return true;
     }
     if kind == "click" && action == "composer-choose" {
         choose(payload.as_u64().unwrap_or(0) as usize, false).await;
         return true;
     }
+    if kind == "click" && action == "command-palette-open" {
+        open_palette();
+        return true;
+    }
+    if kind == "click" && action == "command-palette-close" {
+        close_palette();
+        return true;
+    }
+    if kind == "click" && action == "palette-run" {
+        let query = m::read(|s| s.workspace.command_palette_query.clone());
+        let entries = collect_palette_entries(&query);
+        let idx = payload.as_u64().unwrap_or(0) as usize;
+        if let Some(entry) = entries.into_iter().nth(idx) {
+            execute_palette_entry(entry).await;
+        }
+        return true;
+    }
     false
+}
+
+/// Global Cmd/Ctrl+K command palette item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub subtitle: String,
+    pub action: String,
+    pub payload: V,
+}
+
+const PALETTE_VIEWS: &[(&str, &str, &str)] = &[
+    (
+        "sessions",
+        "Sessions chat",
+        "Open active session conversation",
+    ),
+    (
+        "changes",
+        "Changes & delivery",
+        "Review diffs, checks, and git delivery",
+    ),
+    (
+        "checks",
+        "Session checks",
+        "Run and inspect verification checks",
+    ),
+    (
+        "usage",
+        "Usage & context",
+        "Inspect token and cost breakdown",
+    ),
+    (
+        "systems",
+        "System Orchestration",
+        "Manage multi-service systems",
+    ),
+    (
+        "system-changes",
+        "System changes",
+        "Inspect orchestrated service changes",
+    ),
+    (
+        "omnigraph",
+        "Context Graph Studio",
+        "Explore cross-session knowledge graph",
+    ),
+    (
+        "creator",
+        "Infrastructure Creator",
+        "Generate target project infrastructure",
+    ),
+    (
+        "setup",
+        "Setup & install",
+        "Install or update target accelerators",
+    ),
+    (
+        "skills",
+        "Skills catalog",
+        "Browse and install agent skills",
+    ),
+    (
+        "create-skill",
+        "Create skill",
+        "Author a custom repository skill",
+    ),
+    (
+        "memory-use",
+        "Memory usage",
+        "Inspect memory bank utilization",
+    ),
+    ("memory", "Memory Bank", "Browse durable knowledge chunks"),
+    (
+        "brain",
+        "Project Brain",
+        "Manage active findings and decisions",
+    ),
+    (
+        "context",
+        "Local Context Engine",
+        "Search indexed repository context",
+    ),
+    (
+        "accelerators",
+        "Accelerators overview",
+        "Inspect installed accelerator packs",
+    ),
+];
+
+pub fn palette_open() -> bool {
+    m::read(|s| s.workspace.command_palette_open)
+}
+
+/// Builds and ranks filtered entries across quick actions, views, workspace projects, and recent sessions.
+pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
+    let q = query.trim().to_ascii_lowercase();
+    let mut candidates = vec![
+        PaletteEntry {
+            id: "act-new-session".into(),
+            category: "Action".into(),
+            title: "New session".into(),
+            subtitle: "Start a fresh chat in the current workspace project".into(),
+            action: "palette-new-session".into(),
+            payload: V::Null,
+        },
+        PaletteEntry {
+            id: "act-approvals".into(),
+            category: "Action".into(),
+            title: "Approvals queue".into(),
+            subtitle: "Review pending permissions and remembered session rules".into(),
+            action: "palette-approvals".into(),
+            payload: V::Null,
+        },
+        PaletteEntry {
+            id: "act-refresh".into(),
+            category: "Action".into(),
+            title: "Refresh sessions".into(),
+            subtitle: "Sync active session list and waiting counts".into(),
+            action: "palette-refresh".into(),
+            payload: V::Null,
+        },
+        PaletteEntry {
+            id: "act-tab-graph".into(),
+            category: "Action".into(),
+            title: "Workspace pane: Code graph".into(),
+            subtitle: "Switch right pane to Code graph".into(),
+            action: "palette-right-tab".into(),
+            payload: json!("graph"),
+        },
+        PaletteEntry {
+            id: "act-tab-diff".into(),
+            category: "Action".into(),
+            title: "Workspace pane: Changes & Diff".into(),
+            subtitle: "Switch right pane to grouped diff viewer".into(),
+            action: "palette-right-tab".into(),
+            payload: json!("diff"),
+        },
+        PaletteEntry {
+            id: "act-tab-checks".into(),
+            category: "Action".into(),
+            title: "Workspace pane: Checks".into(),
+            subtitle: "Switch right pane to verification checks".into(),
+            action: "palette-right-tab".into(),
+            payload: json!("checks"),
+        },
+        PaletteEntry {
+            id: "act-theme".into(),
+            category: "Action".into(),
+            title: "Toggle theme (System / Dark / Light)".into(),
+            subtitle: "Cycle workspace color scheme".into(),
+            action: "palette-theme".into(),
+            payload: V::Null,
+        },
+    ];
+
+    for &(view_id, title, subtitle) in PALETTE_VIEWS {
+        candidates.push(PaletteEntry {
+            id: format!("view-{view_id}"),
+            category: "View".into(),
+            title: title.to_owned(),
+            subtitle: subtitle.to_owned(),
+            action: "palette-view".into(),
+            payload: json!(view_id),
+        });
+    }
+
+    let projects = m::read(|s| m::array(&s.boot["projects"]));
+    for proj in projects {
+        let pid = m::text(&proj, "id");
+        if pid.is_empty() {
+            continue;
+        }
+        let name = m::summary(&proj);
+        candidates.push(PaletteEntry {
+            id: format!("proj-{pid}"),
+            category: "Project".into(),
+            title: format!("Switch project: {name}"),
+            subtitle: m::text(&proj, "path"),
+            action: "palette-project".into(),
+            payload: json!(pid),
+        });
+    }
+
+    let sessions = m::read(|s| s.sessions.clone());
+    for sess in sessions.into_iter().take(30) {
+        let sid = m::text(&sess, "id");
+        if sid.is_empty() {
+            continue;
+        }
+        let title = m::summary(&sess);
+        let status = m::label(&m::text(&sess, "status"));
+        let proj = m::text(&sess, "project_id");
+        candidates.push(PaletteEntry {
+            id: format!("sess-{sid}"),
+            category: "Session".into(),
+            title: if title.is_empty() { sid.clone() } else { title },
+            subtitle: if proj.is_empty() {
+                status
+            } else {
+                format!("{status} · {proj}")
+            },
+            action: "palette-session".into(),
+            payload: json!(sid),
+        });
+    }
+
+    if q.is_empty() {
+        candidates.truncate(40);
+        return candidates;
+    }
+
+    let mut ranked = Vec::<(u8, PaletteEntry)>::new();
+    for item in candidates {
+        let t_low = item.title.to_ascii_lowercase();
+        let s_low = item.subtitle.to_ascii_lowercase();
+        let c_low = item.category.to_ascii_lowercase();
+        if t_low.starts_with(&q) {
+            ranked.push((0, item));
+        } else if t_low.contains(&q) || c_low.contains(&q) {
+            ranked.push((1, item));
+        } else if s_low.contains(&q) {
+            ranked.push((2, item));
+        }
+    }
+    ranked.sort_by_key(|(score, _)| *score);
+    ranked
+        .into_iter()
+        .take(40)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+pub fn open_palette() {
+    dom::save_focus_for_overlay("command-palette");
+    m::write(|s| {
+        s.workspace.command_palette_open = true;
+        s.workspace.command_palette_query.clear();
+        s.workspace.command_palette_selected = 0;
+    });
+    dom::set_value("command-palette-input", "");
+    dom::hidden("command-palette", false);
+    render_palette();
+    dom::focus("command-palette-input");
+}
+
+pub fn close_palette() {
+    if !palette_open() {
+        return;
+    }
+    m::write(|s| {
+        s.workspace.command_palette_open = false;
+        s.workspace.command_palette_query.clear();
+        s.workspace.command_palette_selected = 0;
+    });
+    dom::hidden("command-palette", true);
+    dom::restore_focus_for_overlay("command-palette");
+}
+
+pub fn render_palette() {
+    let Some(list) = dom::get("command-palette-list") else {
+        return;
+    };
+    let (query, selected) = m::read(|s| {
+        (
+            s.workspace.command_palette_query.clone(),
+            s.workspace.command_palette_selected,
+        )
+    });
+    let entries = collect_palette_entries(&query);
+    let active_idx = if entries.is_empty() {
+        0
+    } else {
+        selected.min(entries.len() - 1)
+    };
+    if !entries.is_empty() {
+        m::write(|s| s.workspace.command_palette_selected = active_idx);
+    }
+    list.set_text_content(None);
+    if entries.is_empty() {
+        dom::add(
+            &list,
+            &dom::el(
+                "p",
+                "muted command-palette-empty",
+                "No matching commands, views, projects, or sessions.",
+            ),
+        );
+        dom::attr("command-palette-input", "aria-activedescendant", "");
+        return;
+    }
+    for (idx, item) in entries.iter().enumerate() {
+        let opt_id = format!("command-palette-option-{idx}");
+        let is_selected = idx == active_idx;
+        let btn = dom::button("", "palette-run", json!(idx));
+        btn.set_class_name("command-palette-item");
+        let _ = btn.set_attribute("id", &opt_id);
+        let _ = btn.set_attribute("role", "option");
+        let _ = btn.set_attribute("aria-selected", if is_selected { "true" } else { "false" });
+        let head = dom::el("span", "command-palette-item-head", "");
+        dom::add(
+            &head,
+            &dom::el("span", "command-palette-cat", &item.category),
+        );
+        dom::add(
+            &head,
+            &dom::el("strong", "command-palette-title", &item.title),
+        );
+        dom::add(&btn, &head);
+        if !item.subtitle.is_empty() {
+            dom::add(
+                &btn,
+                &dom::el("span", "command-palette-sub", &item.subtitle),
+            );
+        }
+        dom::add(&list, &btn);
+    }
+    dom::attr(
+        "command-palette-input",
+        "aria-activedescendant",
+        &format!("command-palette-option-{active_idx}"),
+    );
+}
+
+pub async fn execute_palette_entry(entry: PaletteEntry) {
+    close_palette();
+    match entry.action.as_str() {
+        "palette-new-session" => {
+            session::new_session(None);
+            session::open_view("sessions", true).await;
+        }
+        "palette-approvals" => {
+            crate::run::open_approvals_drawer().await;
+        }
+        "palette-refresh" => {
+            session::refresh().await;
+        }
+        "palette-right-tab" => {
+            if m::read(|s| s.view != "sessions") {
+                session::open_view("sessions", true).await;
+            }
+            session::set_workspace_right_tab(entry.payload.as_str().unwrap_or("graph"));
+        }
+        "palette-theme" => {
+            let current = dom::storage("harness.theme.v1").unwrap_or_else(|| "system".into());
+            let next = match current.as_str() {
+                "dark" => "light",
+                "light" => "system",
+                _ => "dark",
+            };
+            dom::save(
+                "harness.theme.v1",
+                if next == "system" { None } else { Some(next) },
+            );
+            session::open_view(&m::read(|s| s.view.clone()), false).await;
+            if let Some(radio) = dom::document()
+                .query_selector(&format!("input[name=\"theme\"][value=\"{next}\"]"))
+                .ok()
+                .flatten()
+                .and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
+            {
+                radio.set_checked(true);
+            }
+            // Also notify settings change cleanly:
+            if let Some(el) = dom::get("theme-control") {
+                let _ = el;
+            }
+            session::apply_theme(next);
+        }
+        "palette-view" => {
+            session::open_view(entry.payload.as_str().unwrap_or("sessions"), true).await;
+        }
+        "palette-project" => {
+            if let Some(pid) = entry.payload.as_str() {
+                session::set_workspace_project(pid);
+                session::load_git().await;
+            }
+        }
+        "palette-session" => {
+            if let Some(sid) = entry.payload.as_str() {
+                session::select(sid).await;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Global keyboard handler for `Cmd/Ctrl+K` Command Palette and palette navigation.
+pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
+    if (event.ctrl_key() || event.meta_key())
+        && !event.alt_key()
+        && event.key().eq_ignore_ascii_case("k")
+        && !event.is_composing()
+    {
+        if palette_open() {
+            close_palette();
+        } else {
+            open_palette();
+        }
+        return true;
+    }
+    if !palette_open() {
+        return false;
+    }
+    match event.key().as_str() {
+        "Escape" => {
+            close_palette();
+            true
+        }
+        "ArrowDown" => {
+            let count =
+                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
+                    .len();
+            m::write(|s| {
+                s.workspace.command_palette_selected =
+                    next_option_index(count, s.workspace.command_palette_selected, true);
+            });
+            render_palette();
+            true
+        }
+        "ArrowUp" => {
+            let count =
+                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
+                    .len();
+            m::write(|s| {
+                s.workspace.command_palette_selected =
+                    next_option_index(count, s.workspace.command_palette_selected, false);
+            });
+            render_palette();
+            true
+        }
+        "Enter" => {
+            let (query, selected) = m::read(|s| {
+                (
+                    s.workspace.command_palette_query.clone(),
+                    s.workspace.command_palette_selected,
+                )
+            });
+            let entries = collect_palette_entries(&query);
+            if let Some(entry) = entries.into_iter().nth(selected) {
+                spawn_local(async move {
+                    execute_palette_entry(entry).await;
+                });
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -607,5 +1082,28 @@ mod tests {
         assert_eq!(next_option_index(3, 0, false), 2);
         assert_eq!(next_option_index(3, 2, false), 1);
         assert_eq!(next_option_index(3, 99, false), 1);
+    }
+
+    #[test]
+    fn command_palette_collects_and_ranks_views_projects_and_sessions() {
+        m::write(|s| {
+            s.boot = json!({
+                "projects": [{"id": "laravel-app", "name": "Laravel API", "path": "/srv/api"}]
+            });
+            s.sessions = vec![
+                json!({"id": "sess-9", "title": "Fix Billing Invoice", "project_id": "laravel-app", "status": "running"}),
+            ];
+        });
+        let all = collect_palette_entries("");
+        assert!(all.iter().any(|e| e.action == "palette-new-session"));
+        assert!(all.iter().any(|e| e.action == "palette-project"));
+        assert!(all.iter().any(|e| e.action == "palette-session"));
+
+        let billing = collect_palette_entries("billing");
+        assert_eq!(billing.len(), 1);
+        assert_eq!(billing[0].payload, json!("sess-9"));
+
+        let laravel = collect_palette_entries("laravel");
+        assert!(laravel.iter().any(|e| e.payload == json!("laravel-app")));
     }
 }

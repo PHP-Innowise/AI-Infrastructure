@@ -1,5 +1,4 @@
 //! Display-only shell check classification. Never executes a command.
-use regex::Regex;
 use serde_json::{json, Value as V};
 #[derive(Clone)]
 struct Word {
@@ -10,10 +9,108 @@ struct Part {
     text: String,
     next: Option<&'static str>,
 }
-fn re(pattern: &str, text: &str) -> bool {
-    Regex::new(pattern)
-        .map(|r| r.is_match(text))
-        .unwrap_or(false)
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+fn is_word_boundary_char(c: char) -> bool {
+    !c.is_ascii_alphanumeric() && c != '_'
+}
+fn starts_with_keyword(s: &str, keyword: &str, require_space: bool) -> bool {
+    let Some(rest) = s.strip_prefix(keyword) else {
+        return false;
+    };
+    if require_space {
+        rest.chars().next().is_some_and(char::is_whitespace)
+    } else {
+        rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
+    }
+}
+fn starts_with_word_boundary(s: &str, keyword: &str) -> bool {
+    let Some(rest) = s.strip_prefix(keyword) else {
+        return false;
+    };
+    rest.chars().next().is_none_or(is_word_boundary_char)
+}
+fn contains_word(s: &str, word: &str) -> bool {
+    s.match_indices(word).any(|(idx, _)| {
+        let before_ok = s[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(is_word_boundary_char);
+        let after_ok = s[idx + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(is_word_boundary_char);
+        before_ok && after_ok
+    })
+}
+fn is_php_executable(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("php") else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    if let Some((major, minor)) = rest.split_once('.') {
+        !major.is_empty()
+            && major.bytes().all(|b| b.is_ascii_digit())
+            && !minor.is_empty()
+            && minor.bytes().all(|b| b.is_ascii_digit())
+    } else {
+        rest.bytes().all(|b| b.is_ascii_digit())
+    }
+}
+fn is_env_assignment_prefix(s: &str) -> bool {
+    let Some((name, _)) = s.split_once('=') else {
+        return false;
+    };
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && is_ident_start(bytes[0])
+        && bytes[1..].iter().copied().all(is_ident_continue)
+}
+fn is_pure_env_assignments(s: &str) -> bool {
+    let trimmed = s.trim();
+    !trimmed.is_empty() && trimmed.split_whitespace().all(is_env_assignment_prefix)
+}
+fn is_redirect_token(raw: &str) -> bool {
+    if raw == "<" {
+        return true;
+    }
+    let rest = raw.trim_start_matches(|c: char| c.is_ascii_digit());
+    let Some(after_gt) = rest.strip_prefix(">>").or_else(|| rest.strip_prefix('>')) else {
+        return false;
+    };
+    if after_gt.is_empty() {
+        return true;
+    }
+    if let Some(fd) = after_gt.strip_prefix('&') {
+        fd.len() == 1 && fd.as_bytes()[0].is_ascii_digit()
+    } else {
+        !after_gt.chars().any(char::is_whitespace)
+    }
+}
+fn redirect_takes_next(raw: &str) -> bool {
+    if raw == "<" {
+        return true;
+    }
+    let rest = raw.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest == ">" || rest == ">>"
+}
+fn is_exit_status_var(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("exit $") else {
+        return false;
+    };
+    if let Some(after) = rest.strip_prefix('?') {
+        after.is_empty() || after.chars().next().is_some_and(char::is_whitespace)
+    } else if let Some(after) = rest.strip_prefix("LASTEXITCODE") {
+        after.chars().next().is_none_or(is_word_boundary_char)
+    } else {
+        false
+    }
 }
 fn words(text: &str) -> Vec<Word> {
     let mut out = vec![];
@@ -213,7 +310,7 @@ fn found(family: &'static str, target: String, default: &str, fixer: bool) -> Op
 fn identify(list: &[Word]) -> Option<Found> {
     let mut i = 0;
     let name = |i: usize| list.get(i).map(exe).unwrap_or_default();
-    if re(r"^php(?:[0-9]+(?:\.[0-9]+)?)?$", &name(0)) {
+    if is_php_executable(&name(0)) {
         if list.get(1).is_some_and(|w| w.value == "-l") && list.len() > 2 {
             return found("PHP lint", list[2].value.replace('\\', "/"), "", false);
         }
@@ -380,19 +477,37 @@ fn identify(list: &[Word]) -> Option<Found> {
     )
 }
 fn assignment(v: &str) -> bool {
-    re(r"^[A-Za-z_][A-Za-z0-9_]*=", v)
+    is_env_assignment_prefix(v)
 }
 fn setup(v: &str) -> bool {
-    re(
-        r"^(?:cd|pushd|popd|export|set|source|\.|Set-Location)(?:\s|$)|^\$env:|^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s*)+$",
-        v,
-    )
+    [
+        "cd",
+        "pushd",
+        "popd",
+        "export",
+        "set",
+        "source",
+        ".",
+        "Set-Location",
+    ]
+    .into_iter()
+    .any(|kw| starts_with_keyword(v, kw, false))
+        || v.starts_with("$env:")
+        || is_pure_env_assignments(v)
 }
 fn harmless(v: &str) -> bool {
-    re(
-        r"^(?:echo|printf|true|:|exit \$(?:\?|LASTEXITCODE))(?:\s|$)",
-        v,
-    )
+    ["echo", "printf", "true", ":"]
+        .into_iter()
+        .any(|kw| starts_with_keyword(v, kw, false))
+        || (is_exit_status_var(v)
+            && v.strip_prefix("exit $")
+                .and_then(|r| {
+                    r.strip_prefix('?')
+                        .or_else(|| r.strip_prefix("LASTEXITCODE"))
+                })
+                .is_some_and(|after| {
+                    after.is_empty() || after.chars().next().is_some_and(char::is_whitespace)
+                }))
 }
 fn strip_outer(value: &str) -> String {
     let value = value.trim();
@@ -597,8 +712,8 @@ pub fn classify(raw: &str) -> V {
         let mut at = list.len();
         while at > 0 {
             at -= 1;
-            if re(r"^\d*>>?(?:&\d)?$|^\d*>>?\S+$|^<$", &list[at].raw) {
-                let skip = if re(r"^\d*>>?$|^<$", &list[at].raw) {
+            if is_redirect_token(&list[at].raw) {
+                let skip = if redirect_takes_next(&list[at].raw) {
                     2
                 } else {
                     1
@@ -618,17 +733,20 @@ pub fn classify(raw: &str) -> V {
     };
     let before = &parts[..index];
     if before.iter().any(|p| {
-        re(
-            r"^(?:export|set|source|\.)\s|^\$env:|^[A-Za-z_][A-Za-z0-9_]*=",
-            &p.text,
-        ) && !p.text.contains("pipefail")
+        (["export", "set", "source", "."]
+            .into_iter()
+            .any(|kw| starts_with_keyword(&p.text, kw, true))
+            || p.text.starts_with("$env:")
+            || is_env_assignment_prefix(&p.text))
+            && !p.text.contains("pipefail")
     }) {
         removed.insert(0, "environment".into());
     }
-    if before
-        .iter()
-        .any(|p| re(r"^(?:cd|pushd|Set-Location)\b", &p.text))
-    {
+    if before.iter().any(|p| {
+        ["cd", "pushd", "Set-Location"]
+            .into_iter()
+            .any(|kw| starts_with_word_boundary(&p.text, kw))
+    }) {
         removed.insert(0, "cd".into());
     }
     let next = parts[index].next;
@@ -643,7 +761,7 @@ pub fn classify(raw: &str) -> V {
         .next()
         .unwrap_or("")
         .to_owned();
-    let pipefail = before.iter().any(|p| re(r"\bpipefail\b", &p.text));
+    let pipefail = before.iter().any(|p| contains_word(&p.text, "pipefail"));
     let masked = match next {
         Some("|") => {
             removed.push(format!("| {shown}"));
@@ -653,11 +771,15 @@ pub fn classify(raw: &str) -> V {
                 Some(format!("piped to {shown}: exit status is {shown}'s"))
             }
         }
-        Some("||") if re(r"^(?:true|:|exit 0|echo)(?:\s|$)", after) => {
+        Some("||")
+            if ["true", ":", "exit 0", "echo"]
+                .into_iter()
+                .any(|kw| starts_with_keyword(after, kw, false)) =>
+        {
             removed.push(format!("|| {word}"));
             Some(format!("|| {word}: a failure is ignored"))
         }
-        Some(";") if !after.is_empty() && !re(r"^exit \$(?:\?|LASTEXITCODE)\b", after) => {
+        Some(";") if !after.is_empty() && !is_exit_status_var(after) => {
             removed.push(format!("; {word}"));
             Some(format!(
                 "followed by {word}: the last command sets the exit status"
@@ -754,5 +876,30 @@ mod contract_tests {
         assert!(!runnable("php -l src/User.php && echo done"));
         assert!(!runnable("vendor/bin/phpunit | tee output.log"));
         assert!(!runnable("php -l \"unfinished"));
+    }
+
+    #[test]
+    fn pure_ascii_helpers_match_former_regex_rules() {
+        assert!(is_php_executable("php"));
+        assert!(is_php_executable("php8"));
+        assert!(is_php_executable("php8.3"));
+        assert!(!is_php_executable("php8."));
+        assert!(!is_php_executable("phpunit"));
+        assert!(is_redirect_token("2>&1"));
+        assert!(is_redirect_token(">>/tmp/log"));
+        assert!(is_redirect_token("<"));
+        assert!(redirect_takes_next("2>>"));
+        assert!(!redirect_takes_next("2>&1"));
+        assert!(setup("FOO=1 BAR=2"));
+        assert!(setup("$env:APP_ENV='test'"));
+        assert!(!setup("vendor/bin/phpunit"));
+        assert!(harmless("exit $?"));
+        assert!(harmless("exit $LASTEXITCODE"));
+        assert!(!harmless("exit 1"));
+        assert_eq!(classify("php8.3 -l src/App.php")["family"], "PHP lint");
+        assert_eq!(
+            classify("vendor/bin/phpunit 2>&1; exit $?")["masked"],
+            V::Null
+        );
     }
 }

@@ -112,8 +112,17 @@ pub fn start() -> Result<(), JsValue> {
                 }
                 return;
             }
-            if k == "click" && graph_explanation::click(&target) {
-                return;
+            if k == "click" {
+                if let Ok(Some(copy_btn)) = target.closest("[data-action=\"copy-code\"]") {
+                    event.prevent_default();
+                    spawn_local(async move {
+                        run::copy_code_block(&copy_btn).await;
+                    });
+                    return;
+                }
+                if graph_explanation::click(&target) {
+                    return;
+                }
             }
             // The keys held with a click, for what reads them: Alt on a
             // kind of link shows that kind alone.
@@ -151,7 +160,9 @@ pub fn start() -> Result<(), JsValue> {
                     });
                     return;
                 }
-                if graph_explanation::key(key)
+                if commands::palette_key(key)
+                    || run::handle_permission_shortcut(key)
+                    || graph_explanation::key(key)
                     || commands::key(key)
                     || knowledge::key_event(key)
                     || graph_map::key(key)
@@ -166,9 +177,7 @@ pub fn start() -> Result<(), JsValue> {
                         event.prevent_default();
                         return;
                     }
-                    dom::class("sidebar", "open", false);
-                    dom::class("scrim", "open", false);
-                    dom::attr("menu-toggle", "aria-expanded", "false");
+                    session::set_sidebar_open(false, true);
                     dom::dialog("folder-picker", false);
                     dom::dialog("merge-picker", false);
                     dom::dialog("omni-settings-dialog", false);
@@ -176,6 +185,7 @@ pub fn start() -> Result<(), JsValue> {
                     dom::dialog("omnigraph-share-dialog", false);
                 }
                 session::resize_key(key);
+                session::workspace_split_key(key);
                 return;
             }
             if [
@@ -196,6 +206,7 @@ pub fn start() -> Result<(), JsValue> {
                     && !omnigraph::pointer_event(&k, &event)
                 {
                     session::resize_event(&k, &event);
+                    session::workspace_split_event(&k, &event);
                 }
                 return;
             }
@@ -284,12 +295,18 @@ pub fn start() -> Result<(), JsValue> {
     omnigraph::attach_wheel_listeners();
     let pop = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
         spawn_local(async {
-            let view = dom::hash_view();
-            session::open_view(&view, false).await;
+            session::apply_hash_route().await;
         })
     });
     dom::window().add_event_listener_with_callback("popstate", pop.as_ref().unchecked_ref())?;
     pop.forget();
+    if let Some(conv) = dom::get("conversation") {
+        let scroll_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+            run::on_conversation_scroll();
+        });
+        let _ = conv.add_event_listener_with_callback("scroll", scroll_cb.as_ref().unchecked_ref());
+        scroll_cb.forget();
+    }
     let save = Closure::<dyn FnMut(web_sys::Event)>::new(|_| session::save_preferences());
     dom::window().add_event_listener_with_callback("pagehide", save.as_ref().unchecked_ref())?;
     save.forget();
@@ -322,6 +339,9 @@ pub fn start() -> Result<(), JsValue> {
     session::initialize();
     knowledge::initialize();
     management::initialize();
+    // INTEGRATOR: uncomment after merging swarm/ui-ops:
+    // systems::initialize();
+    // activity::initialize();
     omnigraph::initialize();
     spawn_local(async {
         session::bootstrap().await;

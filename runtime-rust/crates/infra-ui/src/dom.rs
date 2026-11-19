@@ -93,11 +93,58 @@ pub fn value_of(e: &Element) -> String {
     }
 }
 pub fn value(id: &str) -> String {
+    if crate::model::is_project_field_id(id) {
+        if id == "project-switcher" {
+            if let Some(e) = get(id) {
+                return value_of(&e);
+            }
+            return crate::model::current_project();
+        }
+        if let Some(e) = get(id) {
+            return value_of(&e);
+        }
+        return crate::model::scoped_project(id);
+    }
     get(id).map(|e| value_of(&e)).unwrap_or_default()
 }
 pub fn set_value(id: &str, v: &str) {
+    if crate::model::is_project_field_id(id) {
+        if matches!(id, "project" | "project-switcher") {
+            crate::model::set_current_project(v);
+            if let Some(e) = get("project-switcher") {
+                set_element_value(&e, v);
+            }
+            if id == "project" {
+                if let Some(e) = get(id) {
+                    set_element_value(&e, v);
+                }
+            }
+            sync_workspace_project_badge(v);
+        } else {
+            crate::model::set_scoped_project(id, v);
+            if let Some(e) = get(id) {
+                set_element_value(&e, v);
+            }
+        }
+        return;
+    }
     if let Some(e) = get(id) {
         set_element_value(&e, v);
+    }
+}
+fn sync_workspace_project_badge(project_id: &str) {
+    if let Some(badge) = get("workspace-project-badge") {
+        let project = crate::model::project(project_id);
+        let name = crate::model::text(&project, "name");
+        let label = if !name.is_empty() {
+            name
+        } else if !project_id.is_empty() {
+            project_id.to_owned()
+        } else {
+            "No project".into()
+        };
+        badge.set_text_content(Some(&label));
+        hide(&badge, label == "No project");
     }
 }
 pub fn set_element_value(e: &Element, v: &str) {
@@ -136,12 +183,62 @@ pub fn focus(id: &str) {
         let _ = e.focus();
     }
 }
+
+thread_local! {
+    static FOCUS_RETURN_STACK: std::cell::RefCell<Vec<(String, Element)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn save_focus_for_overlay(overlay_id: &str) {
+    let Some(active) = document().active_element() else {
+        return;
+    };
+    if get(overlay_id).is_some_and(|overlay| overlay.contains(Some(&active))) {
+        return;
+    }
+    FOCUS_RETURN_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        stack.retain(|(id, _)| id != overlay_id);
+        stack.push((overlay_id.to_owned(), active));
+    });
+}
+
+pub fn restore_focus_for_overlay(overlay_id: &str) {
+    let saved = FOCUS_RETURN_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let pos = stack.iter().rposition(|(id, _)| id == overlay_id)?;
+        Some(stack.remove(pos).1)
+    });
+    if let Some(el) = saved {
+        if el.is_connected() {
+            focus_element(&el);
+            return;
+        }
+    }
+    if let Some(fallback) = document()
+        .query_selector("#view-tabs [aria-selected=\"true\"], #new-session-button")
+        .ok()
+        .flatten()
+    {
+        focus_element(&fallback);
+    }
+}
+
 pub fn dialog(id: &str, open: bool) {
     if let Some(d) = get(id).and_then(|e| e.dyn_into::<web_sys::HtmlDialogElement>().ok()) {
         if open {
-            let _ = d.show_modal();
+            if !d.open() {
+                save_focus_for_overlay(id);
+                let _ = d.show_modal();
+                if let Some(el) = modal_focusables(d.as_ref()).first() {
+                    focus_element(el);
+                }
+            }
         } else {
-            d.close();
+            if d.open() {
+                d.close();
+            }
+            restore_focus_for_overlay(id);
         }
     }
 }
@@ -173,6 +270,9 @@ pub fn check(label: &str, id: &str, value: &str, checked: bool) -> Element {
     e
 }
 pub fn options(id: &str, items: &[V], label: impl Fn(&V) -> String, previous: Option<&str>) {
+    if get(id).is_none() {
+        return;
+    }
     let previous = previous.map(str::to_owned).unwrap_or_else(|| value(id));
     clear(id);
     for v in items {
@@ -276,13 +376,181 @@ pub fn json_storage(key: &str) -> V {
         })
         .unwrap_or(json!({}))
 }
-pub fn hash_view() -> String {
+
+/// Reads a per-tab value from `sessionStorage` so drafts stay isolated across tabs.
+pub fn session_storage(key: &str) -> Option<String> {
     window()
-        .location()
-        .hash()
-        .unwrap_or_default()
-        .trim_start_matches("#/")
-        .to_owned()
+        .session_storage()
+        .ok()
+        .flatten()?
+        .get_item(key)
+        .ok()
+        .flatten()
+}
+
+/// Writes or deletes a per-tab value in `sessionStorage`.
+pub fn save_session(key: &str, value: Option<&str>) {
+    if let Ok(Some(s)) = window().session_storage() {
+        if let Some(v) = value {
+            let _ = s.set_item(key, v);
+        } else {
+            let _ = s.remove_item(key);
+        }
+    }
+}
+
+/// Parses JSON from per-tab `sessionStorage` with size guard.
+pub fn json_session_storage(key: &str) -> V {
+    session_storage(key)
+        .and_then(|v| {
+            if v.len() <= 500000 {
+                serde_json::from_str(&v).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(json!({}))
+}
+
+/// Politely announces a status change into an `aria-live` status container.
+pub fn announce(id: &str, message: &str) {
+    if let Some(el) = get(id) {
+        let msg = message.trim();
+        el.set_text_content(Some(""));
+        if !msg.is_empty() {
+            el.set_text_content(Some(msg));
+        }
+    }
+}
+
+/// Parsed URL hash deep-link route (`#/<view>?project=...&session=...&run=...&path=...`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HashRoute {
+    pub view: String,
+    pub project: String,
+    pub session: String,
+    pub run: String,
+    pub path: String,
+}
+
+fn percent_encode_ascii(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0xf) as usize] as char);
+        }
+    }
+    out
+}
+
+fn percent_decode_bytes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parses a `#/<view>?project=...&session=...&run=...&path=...` fragment in pure Rust.
+pub fn parse_hash_str(raw: &str) -> HashRoute {
+    let trimmed = raw.trim().trim_start_matches('#').trim_start_matches('/');
+    let (view_raw, query_raw) = trimmed.split_once('?').unwrap_or((trimmed, ""));
+    let mut route = HashRoute {
+        view: percent_decode_bytes(view_raw),
+        ..Default::default()
+    };
+    for pair in query_raw.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode_bytes(k);
+        let val = percent_decode_bytes(v);
+        match key.as_str() {
+            "project" => route.project = val,
+            "session" => route.session = val,
+            "run" => route.run = val,
+            "path" => route.path = val,
+            _ => {}
+        }
+    }
+    route
+}
+
+/// Formats a `HashRoute` back to `#/<view>?...` preserving only non-empty query fields.
+pub fn format_hash_str(route: &HashRoute) -> String {
+    let view = if route.view.is_empty() {
+        "sessions"
+    } else {
+        route.view.as_str()
+    };
+    let mut params = Vec::new();
+    for (k, v) in [
+        ("project", route.project.as_str()),
+        ("session", route.session.as_str()),
+        ("run", route.run.as_str()),
+        ("path", route.path.as_str()),
+    ] {
+        if !v.is_empty() {
+            params.push(format!("{k}={}", percent_encode_ascii(v)));
+        }
+    }
+    if params.is_empty() {
+        format!("#/{view}")
+    } else {
+        format!("#/{view}?{}", params.join("&"))
+    }
+}
+
+/// Reads and parses the current `location.hash` deep-link route.
+pub fn hash_route() -> HashRoute {
+    parse_hash_str(&window().location().hash().unwrap_or_default())
+}
+
+#[allow(dead_code)]
+pub fn hash_view() -> String {
+    hash_route().view
+}
+
+/// Updates browser history hash without duplicating identical entries.
+pub fn update_hash_route(route: &HashRoute, push: bool) {
+    let target = format_hash_str(route);
+    let current = window().location().hash().unwrap_or_default();
+    if current == target {
+        return;
+    }
+    if let Ok(history) = window().history() {
+        if push {
+            let _ = history.push_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&target));
+        } else {
+            let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&target));
+        }
+    }
 }
 pub fn later(key: &str, ms: i32, callback: impl FnOnce() + 'static) {
     cancel_timer(key);
@@ -614,19 +882,35 @@ fn modal_focusables(card: &Element) -> Vec<Element> {
     .collect()
 }
 
+fn active_overlay_container() -> Option<Element> {
+    for id in ["command-palette", "approvals-drawer", "run-file-card"] {
+        if let Some(el) = get(id) {
+            if !el.has_attribute("hidden") {
+                return Some(el);
+            }
+        }
+    }
+    if let Ok(Some(dialog)) = document().query_selector("dialog[open]") {
+        return Some(dialog);
+    }
+    if let Some(sidebar) = get("sidebar") {
+        if sidebar.class_list().contains("open") {
+            return Some(sidebar);
+        }
+    }
+    None
+}
+
 fn handle_modal_trap(event: &web_sys::KeyboardEvent) -> bool {
     if event.key() != "Tab" || event.ctrl_key() || event.meta_key() || event.alt_key() {
         return false;
     }
-    let Some(card) = get("run-file-card") else {
+    let Some(container) = active_overlay_container() else {
         return false;
     };
-    if card.has_attribute("hidden") {
-        return false;
-    }
-    let items = modal_focusables(&card);
+    let items = modal_focusables(&container);
     if items.is_empty() {
-        focus_element(&card);
+        focus_element(&container);
         return true;
     }
     let current = document()
@@ -881,6 +1165,23 @@ pub fn wire_a11y_widgets() {
         true,
     );
     toggle_cb.forget();
+
+    let close_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+        if let Some(target) = event.target().and_then(|v| v.dyn_into::<Element>().ok()) {
+            if target.tag_name() == "DIALOG" {
+                let id = target.id();
+                if !id.is_empty() {
+                    restore_focus_for_overlay(&id);
+                }
+            }
+        }
+    });
+    let _ = document().add_event_listener_with_callback_and_bool(
+        "close",
+        close_cb.as_ref().unchecked_ref(),
+        true,
+    );
+    close_cb.forget();
 }
 
 #[cfg(test)]
@@ -914,5 +1215,27 @@ mod tests {
         assert_eq!(next_trap_index(Some(2), 3, true), Some(1));
         assert_eq!(next_trap_index(Some(0), 1, false), Some(0));
         assert_eq!(next_trap_index(Some(0), 1, true), Some(0));
+    }
+
+    #[test]
+    fn hash_route_parses_and_formats_all_fields() {
+        let parsed =
+            parse_hash_str("#/sessions?project=proj%201&session=s_2&run=r%2F9&path=src%2Flib.rs");
+        assert_eq!(parsed.view, "sessions");
+        assert_eq!(parsed.project, "proj 1");
+        assert_eq!(parsed.session, "s_2");
+        assert_eq!(parsed.run, "r/9");
+        assert_eq!(parsed.path, "src/lib.rs");
+
+        let encoded = format_hash_str(&parsed);
+        assert_eq!(parse_hash_str(&encoded), parsed);
+
+        assert_eq!(
+            format_hash_str(&HashRoute {
+                view: "systems".into(),
+                ..Default::default()
+            }),
+            "#/systems"
+        );
     }
 }
