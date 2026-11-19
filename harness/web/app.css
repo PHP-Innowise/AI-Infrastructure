@@ -878,7 +878,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 @keyframes pulse { 50% { opacity:.35; } }
 .composer-area { padding:12px var(--page-x) 16px; background:var(--paper); flex:none; }
 .composer-wrap { max-width:796px; margin:auto; }
-.composer { position:relative; border:1px solid var(--field-line); border-radius:var(--radius-xl); padding:16px; background:var(--surface-elevated); box-shadow:0 4px 20px var(--composer-shadow),0 1px 2px var(--shadow-xs); transition:border-color var(--motion-fast) var(--ease-standard),box-shadow var(--motion-base) var(--ease-standard),background-color var(--motion-fast) var(--ease-standard); }
+.composer { position:relative; border:1px solid var(--field-line); border-radius:var(--radius-xl); padding:16px; background:var(--surface-elevated); box-shadow:0 4px 20px var(--composer-shadow),0 1px 2px var(--shadow-xs); transition:border-color var(--motion-fast) var(--ease-standard),box-shadow var(--motion-base) var(--ease-standard); }
 .composer:hover { border-color:var(--field-line-hover); }
 .composer[data-working="true"] { border-color:var(--working-border); box-shadow:0 0 0 1px var(--working-border),0 8px 28px var(--working-glow),0 1px 3px var(--shadow-xs); }
 .composer:focus-within { border-color:var(--focus); box-shadow:0 0 0 3px var(--focus-glow),0 8px 28px var(--shadow-xs); }
@@ -954,7 +954,7 @@ input[type="text"],.field input[type="number"],select { width:100%; }
 .skill-hints-list { list-style:none; margin:0; padding:0; }
 .composer-notice { color:var(--muted); font-size:var(--text-ui); margin:0 0 12px; overflow-wrap:anywhere; }
 .composer-notice code { font-family:var(--font-mono); }
-.skill-hint { display:flex; flex-direction:column; gap:2px; width:100%; padding:8px 12px; border:0; border-radius:var(--radius-sm); background:transparent; color:inherit; text-align:left; cursor:pointer; transition:background-color var(--motion-fast) var(--ease-standard); }
+.skill-hint { display:flex; flex-direction:column; gap:2px; width:100%; padding:8px 12px; border:0; border-radius:var(--radius-sm); background:transparent; color:inherit; text-align:left; cursor:pointer; }
 .skill-hint:hover { background:var(--hover); }
 .skill-hint[aria-selected="true"] { background:var(--purple-soft); }
 .skill-hint-name { color:var(--ink); font-family:var(--font-mono); font-size:var(--text-ui); line-height:var(--leading-ui); overflow-wrap:anywhere; }
