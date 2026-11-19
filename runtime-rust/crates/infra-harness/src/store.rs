@@ -2,16 +2,182 @@ use crate::{HarnessError, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
+
+pub const DEFAULT_EVENT_RING_CAPACITY: usize = 1024;
+pub const DEFAULT_EVENT_PAGE_LIMIT: usize = 250;
+pub const MAX_EVENT_PAGE_LIMIT: usize = 2000;
+
+/// Typed real-time SSE frame emitted by backend mutations.
+#[derive(Clone, Debug)]
+pub struct StreamFrame {
+    pub seq: u64,
+    pub event: &'static str,
+    pub session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub data: Value,
+}
+
+/// Replay/subscription result when connecting to the SSE stream.
+pub enum ReplayStart {
+    Frames {
+        frames: Vec<StreamFrame>,
+        rx: tokio::sync::broadcast::Receiver<StreamFrame>,
+    },
+    Resync {
+        oldest_id: u64,
+        latest_id: u64,
+        reason: &'static str,
+        rx: tokio::sync::broadcast::Receiver<StreamFrame>,
+    },
+}
+
+struct StreamRing {
+    next_seq: u64,
+    capacity: usize,
+    frames: VecDeque<StreamFrame>,
+}
+
+/// Bounded sequence-numbered replay ring + live broadcast hub for SSE clients.
+pub struct StreamHub {
+    inner: Mutex<StreamRing>,
+    tx: tokio::sync::broadcast::Sender<StreamFrame>,
+    graph_bridge_started: std::sync::atomic::AtomicBool,
+}
+
+impl StreamHub {
+    pub fn new(capacity: usize) -> Self {
+        let cap = capacity.max(16);
+        let (tx, _) = tokio::sync::broadcast::channel(cap.max(1024));
+        Self {
+            inner: Mutex::new(StreamRing {
+                next_seq: 1,
+                capacity: cap,
+                frames: VecDeque::with_capacity(cap),
+            }),
+            tx,
+            graph_bridge_started: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn claim_graph_bridge(&self) -> bool {
+        !self
+            .graph_bridge_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    pub fn publish(
+        &self,
+        event: &'static str,
+        session_id: Option<String>,
+        project_id: Option<String>,
+        data: Value,
+    ) -> u64 {
+        let frame = {
+            let Ok(mut guard) = self.inner.lock() else {
+                return 0;
+            };
+            let seq = guard.next_seq;
+            guard.next_seq = seq.saturating_add(1);
+            let frame = StreamFrame {
+                seq,
+                event,
+                session_id,
+                project_id,
+                data,
+            };
+            guard.frames.push_back(frame.clone());
+            while guard.frames.len() > guard.capacity {
+                guard.frames.pop_front();
+            }
+            frame
+        };
+        let seq = frame.seq;
+        let _ = self.tx.send(frame);
+        seq
+    }
+
+    pub fn subscribe(&self, last_event_id: Option<u64>) -> ReplayStart {
+        let Ok(guard) = self.inner.lock() else {
+            return ReplayStart::Frames {
+                frames: Vec::new(),
+                rx: self.tx.subscribe(),
+            };
+        };
+        // Subscribe inside the ring lock so no frame can land between the
+        // replay snapshot and the broadcast receiver cursor.
+        let rx = self.tx.subscribe();
+        let latest_id = guard.next_seq.saturating_sub(1);
+        let Some(cursor) = last_event_id.filter(|&id| id > 0) else {
+            return ReplayStart::Frames {
+                frames: Vec::new(),
+                rx,
+            };
+        };
+        if cursor > latest_id {
+            let oldest_id = guard
+                .frames
+                .front()
+                .map_or(latest_id.saturating_add(1), |f| f.seq);
+            return ReplayStart::Resync {
+                oldest_id,
+                latest_id,
+                reason: "server_restarted",
+                rx,
+            };
+        }
+        if let Some(front) = guard.frames.front()
+            && cursor < front.seq.saturating_sub(1)
+        {
+            return ReplayStart::Resync {
+                oldest_id: front.seq,
+                latest_id,
+                reason: "cursor_expired",
+                rx,
+            };
+        }
+        if guard.frames.is_empty() && cursor < latest_id {
+            return ReplayStart::Resync {
+                oldest_id: latest_id.saturating_add(1),
+                latest_id,
+                reason: "cursor_expired",
+                rx,
+            };
+        }
+        let frames = guard
+            .frames
+            .iter()
+            .filter(|f| f.seq > cursor)
+            .cloned()
+            .collect();
+        ReplayStart::Frames { frames, rx }
+    }
+}
+
+/// Paginated session events window returned by `SessionStore::session_events_page`.
+pub struct EventPage {
+    pub session: Value,
+    pub events: Vec<Value>,
+    pub has_more: bool,
+    pub has_older: bool,
+    pub total_events: usize,
+    pub oldest_event_id: Option<i64>,
+    pub latest_event_id: Option<i64>,
+}
+
+type WaitingCounter = Arc<dyn Fn(&str) -> usize + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SessionStore {
     pub state: PathBuf,
     db: Arc<Mutex<Connection>>,
     _runner: Arc<File>,
+    stream: Arc<StreamHub>,
+    waiting_counter: Arc<Mutex<Option<WaitingCounter>>>,
 }
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -41,7 +207,7 @@ pub fn text(value: &Value, name: &str, max: usize) -> Result<String> {
     }
     Ok(s.into())
 }
-fn generation_event(generation: &str, event: &Value) -> Result<String> {
+fn generation_event_pair(generation: &str, event: &Value) -> Result<(Value, String)> {
     let mut event = event.clone();
     if !event.is_object() {
         return Err(HarnessError::invalid(
@@ -66,7 +232,7 @@ fn generation_event(generation: &str, event: &Value) -> Result<String> {
     if raw.len() > 4 * 1024 * 1024 {
         return Err(HarnessError::invalid("Event byte limit exceeded."));
     }
-    Ok(raw)
+    Ok((event, raw))
 }
 fn confined(state: &Path, name: &str) -> Result<PathBuf> {
     let path = state.join(name);
@@ -178,7 +344,231 @@ impl SessionStore {
             state,
             db: Arc::new(Mutex::new(db)),
             _runner: Arc::new(runner),
+            stream: Arc::new(StreamHub::new(DEFAULT_EVENT_RING_CAPACITY)),
+            waiting_counter: Arc::new(Mutex::new(None)),
         })
+    }
+    /// Shared real-time SSE stream hub for this store.
+    pub fn stream(&self) -> &Arc<StreamHub> {
+        &self.stream
+    }
+    /// Registers a waiting-permission count provider used when enriching
+    /// emitted `session_status`, `system_run`, and `creator_run` SSE frames.
+    pub fn set_waiting_counter(&self, counter: WaitingCounter) {
+        if let Ok(mut slot) = self.waiting_counter.lock() {
+            *slot = Some(counter);
+        }
+    }
+    /// Current waiting-permission count for `sid`, if a provider is installed.
+    pub fn waiting_count(&self, sid: &str) -> usize {
+        self.waiting_counter
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned())
+            .map_or(0, |counter| counter(sid))
+    }
+    /// Publishes an arbitrary typed frame on the SSE stream.
+    pub fn publish_event(
+        &self,
+        event: &'static str,
+        session_id: Option<String>,
+        project_id: Option<String>,
+        data: Value,
+    ) -> u64 {
+        self.stream.publish(event, session_id, project_id, data)
+    }
+    /// Emits `session_status` (plus linked `system_run` / `creator_run`) for `sid`.
+    pub fn emit_session_status(&self, sid: &str) {
+        if let Ok(session) = self.get(sid) {
+            self.emit_session_status_frame(session);
+        }
+    }
+    /// Emits `waiting_counts` plus updated `session_status` / run summaries for
+    /// `sid` after pending permissions change.
+    pub fn emit_waiting_change(&self, sid: &str, counts: BTreeMap<String, usize>) {
+        let total: usize = counts.values().sum();
+        let project_id = self.session_project_id(sid);
+        self.stream.publish(
+            "waiting_counts",
+            Some(sid.to_owned()),
+            project_id,
+            json!({
+                "counts": counts,
+                "total": total,
+                "session_id": sid,
+            }),
+        );
+        if let Ok(session) = self.get(sid) {
+            self.emit_session_status_frame(session);
+        }
+    }
+    pub fn session_project_id(&self, sid: &str) -> Option<String> {
+        let db = self.connection().ok()?;
+        db.query_row("SELECT project_id FROM sessions WHERE id=?1", [sid], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+    }
+    fn emit_session_event_frame(
+        &self,
+        sid: &str,
+        project_id: Option<String>,
+        event_id: i64,
+        mut event: Value,
+    ) {
+        event["id"] = json!(event_id);
+        let project_id = project_id.or_else(|| self.session_project_id(sid));
+        self.stream.publish(
+            "session_event",
+            Some(sid.to_owned()),
+            project_id.clone(),
+            json!({
+                "session_id": sid,
+                "project_id": project_id,
+                "id": event_id,
+                "event": event,
+            }),
+        );
+    }
+    fn emit_session_status_frame(&self, mut session: Value) {
+        let sid = session["id"].as_str().unwrap_or("").to_owned();
+        if sid.is_empty() {
+            return;
+        }
+        let project_id = session["project_id"].as_str().map(str::to_owned);
+        let waiting = self.waiting_count(&sid);
+        session["waiting_permissions"] = json!(waiting);
+        let status = session["status"].as_str().unwrap_or("").to_owned();
+        let active = matches!(status.as_str(), "queued" | "running");
+        if let Some(run_id) = session["creator"]["run_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+        {
+            let run = self
+                .creator_run_record(&run_id)
+                .ok()
+                .flatten()
+                .map(|mut rec| {
+                    if !active
+                        && matches!(
+                            rec["status"].as_str().unwrap_or(""),
+                            "scanning" | "generating" | "applying" | "rolling_back"
+                        )
+                    {
+                        rec["session_status"] = json!(status);
+                    }
+                    rec
+                });
+            let revision = run.as_ref().and_then(|r| r["revision"].as_u64());
+            let mut payload = json!({
+                "run_id": run_id,
+                "id": run_id,
+                "project_id": project_id,
+                "status": run.as_ref().and_then(|r| r["status"].as_str()).unwrap_or(status.as_str()),
+                "active": active,
+                "waiting_permissions": waiting,
+                "session_id": sid,
+            });
+            if let Some(rev) = revision {
+                payload["revision"] = json!(rev);
+            }
+            if let Some(run) = run {
+                payload["run"] = run;
+            }
+            self.stream.publish(
+                "creator_run",
+                Some(sid.clone()),
+                project_id.clone(),
+                payload,
+            );
+        }
+        if let Some(run_id) = session["system_run"]["run_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+        {
+            let run = self.system_run_record(&run_id).ok().flatten();
+            let mut payload = json!({
+                "run_id": run_id,
+                "id": run_id,
+                "project_id": project_id,
+                "status": status,
+                "active": active,
+                "waiting_permissions": waiting,
+                "session_id": sid,
+            });
+            if let Some(run) = run {
+                payload["run"] = run;
+            }
+            self.stream
+                .publish("system_run", Some(sid.clone()), project_id.clone(), payload);
+        }
+        self.stream.publish(
+            "session_status",
+            Some(sid),
+            project_id,
+            json!({ "session": session }),
+        );
+    }
+    /// Reads one stored creator run record if `creator_runs` exists.
+    pub fn creator_run_record(&self, run_id: &str) -> Result<Option<Value>> {
+        let db = self.connection()?;
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='creator_runs')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let raw: Option<String> = db
+            .query_row("SELECT data FROM creator_runs WHERE id=?1", [run_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        raw.map(|s| crate::strict_json::parse(s.as_bytes(), 2 * 1024 * 1024))
+            .transpose()
+    }
+    /// Reads one stored system run record if `system_runs` exists.
+    pub fn system_run_record(&self, run_id: &str) -> Result<Option<Value>> {
+        let db = self.connection()?;
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='system_runs')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let raw: Option<String> = db
+            .query_row("SELECT data FROM system_runs WHERE id=?1", [run_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        raw.map(|s| crate::strict_json::parse(s.as_bytes(), 4 * 1024 * 1024))
+            .transpose()
+    }
+    /// Reads one stored results check record if `checks` exists.
+    pub fn get_check(&self, check_id: &str) -> Result<Option<Value>> {
+        let db = self.connection()?;
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='checks')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let raw: Option<String> = db
+            .query_row("SELECT data FROM checks WHERE id=?1", [check_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        raw.map(|s| crate::strict_json::parse(s.as_bytes(), 4 * 1024 * 1024))
+            .transpose()
     }
     pub fn runner_lock(&self) -> Arc<File> {
         self._runner.clone()
@@ -268,6 +658,105 @@ impl SessionStore {
         let events = session_events(&db, sid, after)?;
         Ok((session, events))
     }
+    /// Reads one paginated window of session events without breaking the
+    /// fixed-250 behavior of [`SessionStore::session_events`].
+    pub fn session_events_page(
+        &self,
+        sid: &str,
+        after: Option<i64>,
+        before: Option<i64>,
+        limit: usize,
+        tail: bool,
+    ) -> Result<EventPage> {
+        let limit = limit.clamp(1, MAX_EVENT_PAGE_LIMIT);
+        let db = self.connection()?;
+        let session = get_session(&db, sid)?;
+        if after.is_some_and(|v| v < 0) || before.is_some_and(|v| v <= 0) {
+            return Err(HarnessError::invalid("Invalid event cursor."));
+        }
+        if after.is_some() && before.is_some() {
+            return Err(HarnessError::invalid(
+                "Pass either 'after' or 'before', not both.",
+            ));
+        }
+        let (total_i64, oldest_event_id, latest_event_id): (i64, Option<i64>, Option<i64>) = db
+            .query_row(
+                "SELECT count(*), min(id), max(id) FROM events WHERE session_id=?1",
+                [sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+        let total_events = usize::try_from(total_i64.max(0)).unwrap_or(0);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        if let Some(before_id) = before {
+            let mut events = decode_event_rows(
+                &db,
+                "SELECT id,data FROM events WHERE session_id=?1 AND id<?2 ORDER BY id DESC LIMIT ?3",
+                params![sid, before_id, fetch_limit],
+            )?;
+            let has_older = events.len() > limit;
+            if has_older {
+                events.truncate(limit);
+            }
+            events.reverse();
+            let has_more = events
+                .last()
+                .and_then(|e| e["id"].as_i64())
+                .is_some_and(|last| latest_event_id.is_some_and(|max_id| last < max_id));
+            return Ok(EventPage {
+                session,
+                events,
+                has_more,
+                has_older,
+                total_events,
+                oldest_event_id,
+                latest_event_id,
+            });
+        }
+        if tail && after.is_none() {
+            let mut events = decode_event_rows(
+                &db,
+                "SELECT id,data FROM events WHERE session_id=?1 ORDER BY id DESC LIMIT ?2",
+                params![sid, fetch_limit],
+            )?;
+            let has_older = events.len() > limit;
+            if has_older {
+                events.truncate(limit);
+            }
+            events.reverse();
+            return Ok(EventPage {
+                session,
+                events,
+                has_more: false,
+                has_older,
+                total_events,
+                oldest_event_id,
+                latest_event_id,
+            });
+        }
+        let after_id = after.unwrap_or(0);
+        let mut events = decode_event_rows(
+            &db,
+            "SELECT id,data FROM events WHERE session_id=?1 AND id>?2 ORDER BY id ASC LIMIT ?3",
+            params![sid, after_id, fetch_limit],
+        )?;
+        let has_more = events.len() > limit;
+        if has_more {
+            events.truncate(limit);
+        }
+        let has_older = events
+            .first()
+            .and_then(|e| e["id"].as_i64())
+            .is_some_and(|first| oldest_event_id.is_some_and(|min_id| first > min_id));
+        Ok(EventPage {
+            session,
+            events,
+            has_more,
+            has_older,
+            total_events,
+            oldest_event_id,
+            latest_event_id,
+        })
+    }
     pub fn events(&self, sid: &str, after: i64) -> Result<Vec<Value>> {
         if after < 0 {
             return Err(HarnessError::invalid("Invalid event cursor."));
@@ -290,12 +779,23 @@ impl SessionStore {
         if raw.len() > 4 * 1024 * 1024 {
             return Err(HarnessError::invalid("Event byte limit exceeded."));
         }
-        let db = self.connection()?;
-        db.execute(
-            "INSERT INTO events(session_id,data)VALUES(?1,?2)",
-            params![sid, raw],
-        )?;
-        Ok(db.last_insert_rowid())
+        let (id, project_id) = {
+            let db = self.connection()?;
+            db.execute(
+                "INSERT INTO events(session_id,data)VALUES(?1,?2)",
+                params![sid, raw],
+            )?;
+            let id = db.last_insert_rowid();
+            let project_id = db
+                .query_row("SELECT project_id FROM sessions WHERE id=?1", [sid], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?
+                .filter(|s| !s.is_empty());
+            (id, project_id)
+        };
+        self.emit_session_event_frame(sid, project_id, id, event);
+        Ok(id)
     }
     pub fn create(&self, options: &Value, prompt: &str, attachments: &[Value]) -> Result<Value> {
         self.create_transaction(options, prompt, attachments, None)
@@ -381,7 +881,18 @@ impl SessionStore {
         tx.commit()?;
         upload_guard.commit();
         drop(db);
-        self.get(&sid)
+        let session = self.get(&sid)?;
+        if let Ok(initial) = self.events(&sid, 0) {
+            let proj = session["project_id"].as_str().map(str::to_owned);
+            for mut ev in initial {
+                if let Some(eid) = ev["id"].as_i64() {
+                    ev.as_object_mut().map(|m| m.remove("id"));
+                    self.emit_session_event_frame(&sid, proj.clone(), eid, ev);
+                }
+            }
+        }
+        self.emit_session_status_frame(session.clone());
+        Ok(session)
     }
     pub fn generation(&self, sid: &str) -> Result<String> {
         self.connection()?
@@ -401,62 +912,105 @@ impl SessionStore {
         generation: &str,
         event: &Value,
     ) -> Result<Option<u64>> {
-        let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT generation FROM harness_generations WHERE session_id=?1",
-                [sid],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if current.as_deref() != Some(generation) {
+        let committed = {
+            let mut db = self.connection()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current: Option<String> = tx
+                .query_row(
+                    "SELECT generation FROM harness_generations WHERE session_id=?1",
+                    [sid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if current.as_deref() != Some(generation) {
+                None
+            } else {
+                let (normalized, raw) = generation_event_pair(generation, event)?;
+                tx.execute(
+                    "INSERT INTO events(session_id,data)VALUES(?1,?2)",
+                    params![sid, raw],
+                )?;
+                let rowid = tx.last_insert_rowid();
+                let project_id = tx
+                    .query_row("SELECT project_id FROM sessions WHERE id=?1", [sid], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()?
+                    .filter(|s| !s.is_empty());
+                tx.commit()?;
+                Some((rowid, normalized, project_id))
+            }
+        };
+        let Some((rowid, normalized, project_id)) = committed else {
             return Ok(None);
-        }
-        let raw = generation_event(generation, event)?;
-        tx.execute(
-            "INSERT INTO events(session_id,data)VALUES(?1,?2)",
-            params![sid, raw],
-        )?;
-        let id = u64::try_from(tx.last_insert_rowid()).unwrap_or(0);
-        tx.commit()?;
-        Ok(Some(id))
+        };
+        self.emit_session_event_frame(sid, project_id, rowid, normalized);
+        Ok(Some(u64::try_from(rowid).unwrap_or(0)))
     }
     pub fn cancel_current(&self, sid: &str) -> Result<Value> {
-        let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let session = get_session(&tx, sid)?;
-        if !["queued", "running"].contains(&session["status"].as_str().unwrap_or("")) {
-            crate::inbox::cancel_session(&tx, sid)?;
-            tx.commit()?;
-            return Ok(session);
+        enum CancelOutcome {
+            NoOp(Value),
+            Cancelled {
+                updated: Value,
+                event_id: i64,
+                event: Value,
+            },
         }
-        if session["creator"]["phase"]
-            .as_str()
-            .is_some_and(|phase| ["apply", "rollback"].contains(&phase))
-        {
-            return Err(HarnessError::conflict(
-                "Publication is completing verification or rollback.",
-            ));
+        let outcome = {
+            let mut db = self.connection()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let session = get_session(&tx, sid)?;
+            if !["queued", "running"].contains(&session["status"].as_str().unwrap_or("")) {
+                crate::inbox::cancel_session(&tx, sid)?;
+                tx.commit()?;
+                CancelOutcome::NoOp(session)
+            } else {
+                if session["creator"]["phase"]
+                    .as_str()
+                    .is_some_and(|phase| ["apply", "rollback"].contains(&phase))
+                {
+                    return Err(HarnessError::conflict(
+                        "Publication is completing verification or rollback.",
+                    ));
+                }
+                let generation: String = tx.query_row(
+                    "SELECT generation FROM harness_generations WHERE session_id=?1",
+                    [sid],
+                    |row| row.get(0),
+                )?;
+                let (event_val, event) = generation_event_pair(
+                    &generation,
+                    &json!({"kind":"status","text":"Cancellation requested."}),
+                )?;
+                tx.execute("UPDATE sessions SET status='cancelled',updated_at=?1 WHERE id=?2 AND status IN ('queued','running')", params![now(),sid])?;
+                crate::inbox::cancel_session(&tx, sid)?;
+                tx.execute(
+                    "INSERT INTO events(session_id,data)VALUES(?1,?2)",
+                    params![sid, event],
+                )?;
+                let event_id = tx.last_insert_rowid();
+                let updated = get_session(&tx, sid)?;
+                tx.commit()?;
+                CancelOutcome::Cancelled {
+                    updated,
+                    event_id,
+                    event: event_val,
+                }
+            }
+        };
+        match outcome {
+            CancelOutcome::NoOp(session) => Ok(session),
+            CancelOutcome::Cancelled {
+                updated,
+                event_id,
+                event,
+            } => {
+                let project_id = updated["project_id"].as_str().map(str::to_owned);
+                self.emit_session_event_frame(sid, project_id, event_id, event);
+                self.emit_session_status_frame(updated.clone());
+                Ok(updated)
+            }
         }
-        let generation: String = tx.query_row(
-            "SELECT generation FROM harness_generations WHERE session_id=?1",
-            [sid],
-            |row| row.get(0),
-        )?;
-        let event = generation_event(
-            &generation,
-            &json!({"kind":"status","text":"Cancellation requested."}),
-        )?;
-        tx.execute("UPDATE sessions SET status='cancelled',updated_at=?1 WHERE id=?2 AND status IN ('queued','running')", params![now(),sid])?;
-        crate::inbox::cancel_session(&tx, sid)?;
-        tx.execute(
-            "INSERT INTO events(session_id,data)VALUES(?1,?2)",
-            params![sid, event],
-        )?;
-        let updated = get_session(&tx, sid)?;
-        tx.commit()?;
-        Ok(updated)
     }
     pub fn finish_generation(
         &self,
@@ -479,62 +1033,73 @@ impl SessionStore {
         {
             return Err(HarnessError::invalid("Invalid terminal session update."));
         }
-        let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<(String,String)> = tx.query_row(
-            "SELECT g.generation,s.status FROM harness_generations g JOIN sessions s ON s.id=g.session_id WHERE s.id=?1",
-            [sid], |row| Ok((row.get(0)?,row.get(1)?)),
-        ).optional()?;
-        let Some((current, status)) = current else {
-            return Ok(None);
-        };
-        if current != generation {
-            return Ok(None);
-        }
-        // Cancellation is durable even when the queued job never acquired a
-        // live token. Its old completion must neither resurrect it nor append
-        // a spurious failure/check-finished event.
-        if status == "cancelled" {
-            return Ok(Some(get_session(&tx, sid)?));
-        }
-        let status = if cancel.load(Ordering::Acquire) {
-            "cancelled"
-        } else {
-            fields
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or(&status)
-        };
-        if fields.contains_key("status") || status == "cancelled" {
-            tx.execute(
-                "UPDATE sessions SET status=?1,updated_at=?2 WHERE id=?3 AND EXISTS(SELECT 1 FROM harness_generations WHERE session_id=?3 AND generation=?4)",
-                params![status,now(),sid,generation],
-            )?;
-        }
-        if let Some(value) = fields.get("fleet_result") {
-            let value = if value.is_null() {
-                None
-            } else {
-                Some(value.to_string())
+        let outcome = {
+            let mut db = self.connection()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current: Option<(String,String)> = tx.query_row(
+                "SELECT g.generation,s.status FROM harness_generations g JOIN sessions s ON s.id=g.session_id WHERE s.id=?1",
+                [sid], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional()?;
+            let Some((current, status)) = current else {
+                return Ok(None);
             };
-            tx.execute(
-                "UPDATE sessions SET fleet_result=?1,updated_at=?2 WHERE id=?3",
-                params![value, now(), sid],
-            )?;
-        }
-        for event in events {
-            let mut event = event.clone();
-            if event.get("status").is_some() {
-                event["status"] = status.into();
+            if current != generation {
+                return Ok(None);
             }
-            let event = generation_event(generation, &event)?;
-            tx.execute(
-                "INSERT INTO events(session_id,data)VALUES(?1,?2)",
-                params![sid, event],
-            )?;
+            // Cancellation is durable even when the queued job never acquired a
+            // live token. Its old completion must neither resurrect it nor append
+            // a spurious failure/check-finished event.
+            if status == "cancelled" {
+                return Ok(Some(get_session(&tx, sid)?));
+            }
+            let status = if cancel.load(Ordering::Acquire) {
+                "cancelled"
+            } else {
+                fields
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&status)
+            };
+            if fields.contains_key("status") || status == "cancelled" {
+                tx.execute(
+                    "UPDATE sessions SET status=?1,updated_at=?2 WHERE id=?3 AND EXISTS(SELECT 1 FROM harness_generations WHERE session_id=?3 AND generation=?4)",
+                    params![status,now(),sid,generation],
+                )?;
+            }
+            if let Some(value) = fields.get("fleet_result") {
+                let value = if value.is_null() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+                tx.execute(
+                    "UPDATE sessions SET fleet_result=?1,updated_at=?2 WHERE id=?3",
+                    params![value, now(), sid],
+                )?;
+            }
+            let mut emitted = Vec::with_capacity(events.len());
+            for event in events {
+                let mut event = event.clone();
+                if event.get("status").is_some() {
+                    event["status"] = status.into();
+                }
+                let (normalized, raw) = generation_event_pair(generation, &event)?;
+                tx.execute(
+                    "INSERT INTO events(session_id,data)VALUES(?1,?2)",
+                    params![sid, raw],
+                )?;
+                emitted.push((tx.last_insert_rowid(), normalized));
+            }
+            let updated = get_session(&tx, sid)?;
+            tx.commit()?;
+            (updated, emitted)
+        };
+        let (updated, emitted) = outcome;
+        let project_id = updated["project_id"].as_str().map(str::to_owned);
+        for (eid, ev) in emitted {
+            self.emit_session_event_frame(sid, project_id.clone(), eid, ev);
         }
-        let updated = get_session(&tx, sid)?;
-        tx.commit()?;
+        self.emit_session_status_frame(updated.clone());
         Ok(Some(updated))
     }
     pub fn patch_guarded(
@@ -582,38 +1147,42 @@ impl SessionStore {
         if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
         }
-        let mut db = self.connection()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current:Option<(String,String)>=tx.query_row("SELECT g.generation,s.status FROM harness_generations g JOIN sessions s ON s.id=g.session_id WHERE s.id=?1",[sid],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if cancel.load(Ordering::Acquire)
-            || current
-                .as_ref()
-                .is_none_or(|(g, status)| g != generation || status == "cancelled")
-        {
-            return Err(HarnessError::conflict(
-                "This session generation is no longer current.",
-            ));
-        }
-        for (key, value) in fields {
-            let value = match value {
-                Value::Null => rusqlite::types::Value::Null,
-                Value::String(s) => rusqlite::types::Value::Text(s.clone()),
-                Value::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
-                Value::Number(n) if n.as_i64().is_some() => {
-                    rusqlite::types::Value::Integer(n.as_i64().unwrap_or_default())
-                }
-                _ => rusqlite::types::Value::Text(value.to_string()),
-            };
-            tx.execute(
-                &format!("UPDATE sessions SET {key}=?1,updated_at=?2 WHERE id=?3"),
-                params![value, now(), sid],
-            )?;
-        }
-        if cancel.load(Ordering::Acquire) {
-            return Err(HarnessError::conflict("Cancellation requested."));
-        }
-        let updated = get_session(&tx, sid)?;
-        tx.commit()?;
+        let updated = {
+            let mut db = self.connection()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current:Option<(String,String)>=tx.query_row("SELECT g.generation,s.status FROM harness_generations g JOIN sessions s ON s.id=g.session_id WHERE s.id=?1",[sid],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if cancel.load(Ordering::Acquire)
+                || current
+                    .as_ref()
+                    .is_none_or(|(g, status)| g != generation || status == "cancelled")
+            {
+                return Err(HarnessError::conflict(
+                    "This session generation is no longer current.",
+                ));
+            }
+            for (key, value) in fields {
+                let value = match value {
+                    Value::Null => rusqlite::types::Value::Null,
+                    Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+                    Value::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
+                    Value::Number(n) if n.as_i64().is_some() => {
+                        rusqlite::types::Value::Integer(n.as_i64().unwrap_or_default())
+                    }
+                    _ => rusqlite::types::Value::Text(value.to_string()),
+                };
+                tx.execute(
+                    &format!("UPDATE sessions SET {key}=?1,updated_at=?2 WHERE id=?3"),
+                    params![value, now(), sid],
+                )?;
+            }
+            if cancel.load(Ordering::Acquire) {
+                return Err(HarnessError::conflict("Cancellation requested."));
+            }
+            let updated = get_session(&tx, sid)?;
+            tx.commit()?;
+            updated
+        };
+        self.emit_session_status_frame(updated.clone());
         Ok(updated)
     }
     pub fn patch(&self, sid: &str, fields: &Value) -> Result<Value> {
@@ -673,7 +1242,9 @@ impl SessionStore {
         }
         tx.commit()?;
         drop(db);
-        self.get(sid)
+        let updated = self.get(sid)?;
+        self.emit_session_status_frame(updated.clone());
+        Ok(updated)
     }
     pub fn requeue(&self, sid: &str, prompt: Option<&str>, settings: &Value) -> Result<Value> {
         self.requeue_uploaded(sid, prompt, settings, &[])
@@ -753,19 +1324,29 @@ impl SessionStore {
             params![now(), sid],
         )?;
         tx.execute("INSERT INTO harness_generations(session_id,generation)VALUES(?1,?2)ON CONFLICT(session_id)DO UPDATE SET generation=excluded.generation",params![sid,hexid()])?;
-        if let Some(prompt) = prompt {
+        let prompt_event = if let Some(prompt) = prompt {
+            let mut ev = json!({"kind":"user","text":prompt,"attachments":attached});
+            ev["at"] = chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                .into();
             tx.execute(
                 "INSERT INTO events(session_id,data)VALUES(?1,?2)",
-                params![
-                    sid,
-                    json!({"kind":"user","text":prompt,"attachments":attached}).to_string()
-                ],
+                params![sid, ev.to_string()],
             )?;
-        }
+            Some((tx.last_insert_rowid(), ev))
+        } else {
+            None
+        };
         tx.commit()?;
         guard.commit();
         drop(db);
-        self.get(sid)
+        let session = self.get(sid)?;
+        if let Some((eid, ev)) = prompt_event {
+            let proj = session["project_id"].as_str().map(str::to_owned);
+            self.emit_session_event_frame(sid, proj, eid, ev);
+        }
+        self.emit_session_status_frame(session.clone());
+        Ok(session)
     }
     pub fn merge_archive(&self, sid: &str) -> Result<Value> {
         crate::chat_merge::ChatMerge::new(self.clone()).archive(sid)
@@ -1008,14 +1589,13 @@ fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
     Ok(result)
 }
 
-fn session_events(db: &Connection, sid: &str, after: i64) -> Result<Vec<Value>> {
-    if after < 0 {
-        return Err(HarnessError::invalid("Invalid event cursor."));
-    }
-    let mut q = db.prepare(
-        "SELECT id,data FROM events WHERE session_id=?1 AND id>?2 ORDER BY id LIMIT 250",
-    )?;
-    let rows = q.query_map(params![sid, after], |r| {
+fn decode_event_rows(
+    db: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<Value>> {
+    let mut q = db.prepare(sql)?;
+    let rows = q.query_map(params, |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
     })?;
     let mut out = Vec::new();
@@ -1026,6 +1606,17 @@ fn session_events(db: &Connection, sid: &str, after: i64) -> Result<Vec<Value>> 
         out.push(v);
     }
     Ok(out)
+}
+
+fn session_events(db: &Connection, sid: &str, after: i64) -> Result<Vec<Value>> {
+    if after < 0 {
+        return Err(HarnessError::invalid("Invalid event cursor."));
+    }
+    decode_event_rows(
+        db,
+        "SELECT id,data FROM events WHERE session_id=?1 AND id>?2 ORDER BY id LIMIT 250",
+        params![sid, after],
+    )
 }
 
 #[cfg(test)]
@@ -1336,5 +1927,100 @@ mod tests {
                     .as_str()
                     .is_some_and(|t| t.contains("Server restarted"))
         }));
+    }
+
+    #[test]
+    fn session_events_page_supports_after_before_and_tail_beyond_250() {
+        let (_dir, store) = fixture();
+        {
+            let db = store.connection().unwrap();
+            insert(&db, "s-page", "t1");
+        }
+        for i in 1..=320 {
+            store
+                .event(
+                    "s-page",
+                    &json!({"kind": "status", "text": format!("e-{i}")}),
+                )
+                .unwrap();
+        }
+        // Existing session_events API stays capped at 250.
+        let (_, legacy) = store.session_events("s-page", 0).unwrap();
+        assert_eq!(legacy.len(), 250);
+        assert_eq!(legacy[0]["text"], "e-1");
+
+        // Tail returns newest 100 events in chronological ascending order.
+        let tail = store
+            .session_events_page("s-page", None, None, 100, true)
+            .unwrap();
+        assert_eq!(tail.total_events, 320);
+        assert_eq!(tail.events.len(), 100);
+        assert!(!tail.has_more);
+        assert!(tail.has_older);
+        assert_eq!(tail.events[0]["text"], "e-221");
+        assert_eq!(tail.events[99]["text"], "e-320");
+
+        // Before cursor paginates backward cleanly in chronological order.
+        let first_tail_id = tail.events[0]["id"].as_i64().unwrap();
+        let older = store
+            .session_events_page("s-page", None, Some(first_tail_id), 150, false)
+            .unwrap();
+        assert_eq!(older.events.len(), 150);
+        assert!(older.has_more);
+        assert!(older.has_older);
+        assert_eq!(older.events[0]["text"], "e-71");
+        assert_eq!(older.events[149]["text"], "e-220");
+
+        // Remaining oldest 70.
+        let oldest_id = older.events[0]["id"].as_i64().unwrap();
+        let earliest = store
+            .session_events_page("s-page", None, Some(oldest_id), 150, false)
+            .unwrap();
+        assert_eq!(earliest.events.len(), 70);
+        assert!(earliest.has_more);
+        assert!(!earliest.has_older);
+        assert_eq!(earliest.events[0]["text"], "e-1");
+        assert_eq!(earliest.events[69]["text"], "e-70");
+    }
+
+    #[test]
+    fn stream_hub_ring_buffer_replays_and_signals_resync() {
+        let hub = StreamHub::new(16);
+        for i in 1..=25 {
+            hub.publish(
+                "session_event",
+                Some("s1".into()),
+                Some("p1".into()),
+                json!({"n": i}),
+            );
+        }
+        // Within ring window [10..=25]
+        match hub.subscribe(Some(22)) {
+            ReplayStart::Frames { frames, .. } => {
+                assert_eq!(frames.len(), 3);
+                assert_eq!(frames[0].seq, 23);
+                assert_eq!(frames[2].seq, 25);
+            }
+            ReplayStart::Resync { .. } => panic!("expected frames inside ring buffer"),
+        }
+        // Evicted cursor < front.seq - 1 (front is 10, cursor 5 < 9)
+        match hub.subscribe(Some(5)) {
+            ReplayStart::Resync {
+                oldest_id,
+                latest_id,
+                reason,
+                ..
+            } => {
+                assert_eq!(oldest_id, 10);
+                assert_eq!(latest_id, 25);
+                assert_eq!(reason, "cursor_expired");
+            }
+            ReplayStart::Frames { .. } => panic!("expected resync on evicted cursor"),
+        }
+        // Cursor ahead of latest (e.g. server restarted)
+        match hub.subscribe(Some(99)) {
+            ReplayStart::Resync { reason, .. } => assert_eq!(reason, "server_restarted"),
+            ReplayStart::Frames { .. } => panic!("expected resync on future cursor"),
+        }
     }
 }

@@ -7,6 +7,9 @@ const STORED_LIMIT: usize = 150000;
 fn key(sid: &str) -> String {
     format!("infra-harness-inbox-v1:{sid}")
 }
+fn tab_draft_key(sid: &str) -> String {
+    format!("infra-harness-inbox-tab-draft-v1:{sid}")
+}
 fn cache(sid: &str) -> String {
     format!("inbox-receipts:{sid}")
 }
@@ -158,18 +161,40 @@ pub fn save_draft() {
     if draft.len() > 32000 {
         return;
     }
-    // A draft too large to read back is dropped rather than restoring an older one.
-    if draft.is_empty() || !persist(&sid, &json!({"draft":draft,"request":null})) {
-        let _ = persist(&sid, &V::Null);
+    if draft.is_empty() {
+        dom::save_session(&tab_draft_key(&sid), None);
+    } else {
+        dom::save_session(
+            &tab_draft_key(&sid),
+            Some(&json!({"draft": draft}).to_string()),
+        );
     }
 }
 pub fn restore(sid: &str) {
     let saved = stored(sid);
-    if let Some(draft) = saved["draft"].as_str().filter(|v| v.len() <= 32000) {
+    if unresolved(&saved) {
+        if let Some(draft) = saved["draft"].as_str().filter(|v| v.len() <= 32000) {
+            dom::set_value("prompt", draft);
+        }
+        return;
+    }
+    let tab_saved = dom::json_session_storage(&tab_draft_key(sid));
+    if let Some(draft) = tab_saved["draft"]
+        .as_str()
+        .or_else(|| saved["draft"].as_str())
+        .filter(|v| v.len() <= 32000)
+    {
         dom::set_value("prompt", draft);
     }
 }
 pub fn clear_draft(sid: &str, prompt: &str) {
+    let tab_saved = dom::json_session_storage(&tab_draft_key(sid));
+    if tab_saved["draft"]
+        .as_str()
+        .is_some_and(|v| v.trim() == prompt.trim())
+    {
+        dom::save_session(&tab_draft_key(sid), None);
+    }
     let saved = stored(sid);
     if !unresolved(&saved)
         && saved["draft"]

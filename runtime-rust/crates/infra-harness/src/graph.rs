@@ -21,8 +21,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex, MutexGuard, Weak,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -598,14 +598,23 @@ fn stream_graph_summary_fields(path: &Path) -> Option<(usize, usize, Option<Stri
     de.deserialize_map(SummaryVisitor).ok()
 }
 
-fn write_live_summary(live_graph: &Path, commit: Option<&str>, fallback: Option<(u64, u64)>) {
+fn write_live_summary(
+    live_graph: &Path,
+    commit: Option<&str>,
+    exact_counts: Option<(u64, u64)>,
+    fallback: Option<(u64, u64)>,
+) {
     let Ok(meta) = std::fs::metadata(live_graph) else {
         return;
     };
-    let streamed = stream_graph_summary_fields(live_graph);
-    let Some((nodes, edges)) = streamed
-        .as_ref()
-        .map(|(n, e, _)| (*n, *e))
+    let streamed = if exact_counts.is_none() {
+        stream_graph_summary_fields(live_graph)
+    } else {
+        None
+    };
+    let Some((nodes, edges)) = exact_counts
+        .map(|(n, e)| (n as usize, e as usize))
+        .or_else(|| streamed.as_ref().map(|(n, e, _)| (*n, *e)))
         .or_else(|| fallback.map(|(n, e)| (n as usize, e as usize)))
     else {
         return;
@@ -1373,6 +1382,85 @@ fn apply_graph_focus(
     Ok(())
 }
 
+/// Server-side paging and neighborhood depth controls for `graph.map`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MapQueryParams {
+    pub offset: usize,
+    pub limit: Option<usize>,
+    pub depth: Option<usize>,
+}
+
+impl MapQueryParams {
+    /// Parses HTTP/domain query parameters for `offset` (`0..=1_000_000`),
+    /// `limit` (`1..=500`), and `depth` (`1..=6`).
+    pub fn parse(
+        offset_raw: Option<&str>,
+        limit_raw: Option<&str>,
+        depth_raw: Option<&str>,
+    ) -> Result<Self> {
+        let offset = match offset_raw {
+            None | Some("") => 0,
+            Some(text) => text
+                .parse::<usize>()
+                .ok()
+                .filter(|v| *v <= 1_000_000)
+                .ok_or_else(|| HarnessError::invalid("Invalid code graph offset."))?,
+        };
+        let limit = match limit_raw {
+            None | Some("") => None,
+            Some(text) => Some(
+                text.parse::<usize>()
+                    .ok()
+                    .filter(|v| (1..=500).contains(v))
+                    .ok_or_else(|| HarnessError::invalid("Invalid code graph limit."))?,
+            ),
+        };
+        let depth = match depth_raw {
+            None | Some("") => None,
+            Some(text) => Some(
+                text.parse::<usize>()
+                    .ok()
+                    .filter(|v| (1..=6).contains(v))
+                    .ok_or_else(|| HarnessError::invalid("Invalid code graph depth."))?,
+            ),
+        };
+        Ok(Self {
+            offset,
+            limit,
+            depth,
+        })
+    }
+}
+
+/// Real-time status / invalidation event published for SSE streaming.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct GraphStatusEvent {
+    pub project_id: String,
+    pub state: String,
+    pub reason: &'static str,
+    pub revision: u64,
+    #[serde(skip_serializing)]
+    pub state_dir: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edges: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn global_graph_events() -> &'static tokio::sync::broadcast::Sender<GraphStatusEvent> {
+    static TX: OnceLock<tokio::sync::broadcast::Sender<GraphStatusEvent>> = OnceLock::new();
+    TX.get_or_init(|| tokio::sync::broadcast::channel(256).0)
+}
+
+/// Subscribes to process-wide `graph_status` events across `Graphs` instances (filter by `state_dir`).
+pub fn subscribe_graph_events() -> tokio::sync::broadcast::Receiver<GraphStatusEvent> {
+    global_graph_events().subscribe()
+}
+
 /// What of a graph a request for the map asks to see.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Shown<'a> {
@@ -1425,6 +1513,12 @@ pub struct Shown<'a> {
     pub pattern: Option<&'a str>,
     /// Unfold all folders to render the entire project graph at once.
     pub whole: bool,
+    /// Zero-based pagination offset into returned nodes.
+    pub offset: usize,
+    /// Optional page size cap (`1..=500`) for returned nodes.
+    pub limit: Option<usize>,
+    /// Optional hierarchy / trace expansion depth (`1..=6`).
+    pub depth: Option<usize>,
 }
 struct ImpactContext {
     root: PathBuf,
@@ -1566,6 +1660,20 @@ pub struct Graphs {
     refused: Mutex<BTreeMap<(String, String), String>>,
     /// Synthetic system service graph targets (`sys-<hash>` -> `(root, name)`).
     targets: Mutex<BTreeMap<String, (PathBuf, String)>>,
+    /// Broadcast channel for real-time `graph_status` SSE updates.
+    events: tokio::sync::broadcast::Sender<GraphStatusEvent>,
+    /// Monotonic per-project revision counter bumped on IR/architecture/build updates.
+    ir_revisions: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
+    /// Per-project coalesced background writer state for `live/graph.json`.
+    live_json_writers: Mutex<BTreeMap<String, Arc<LiveJsonFlush>>>,
+}
+
+#[derive(Default)]
+struct LiveJsonFlush {
+    dirty: AtomicBool,
+    active: AtomicBool,
+    cancel: AtomicBool,
+    done_lock: Mutex<()>,
 }
 
 impl Drop for Graphs {
@@ -1626,7 +1734,203 @@ impl Graphs {
             revisions: Mutex::new(BTreeMap::new()),
             refused: Mutex::new(BTreeMap::new()),
             targets: Mutex::new(BTreeMap::new()),
+            events: tokio::sync::broadcast::channel(256).0,
+            ir_revisions: Mutex::new(BTreeMap::new()),
+            live_json_writers: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Subscribes to real-time `graph_status` events emitted by this `Graphs` instance.
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<GraphStatusEvent> {
+        self.events.subscribe()
+    }
+
+    fn ir_revision_counter(&self, project: &str) -> Arc<AtomicU64> {
+        if let Ok(mut map) = self.ir_revisions.lock() {
+            return map
+                .entry(project.to_owned())
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .clone();
+        }
+        Arc::new(AtomicU64::new(0))
+    }
+
+    fn ir_revision_of(&self, project: &str) -> u64 {
+        self.ir_revision_counter(project).load(Ordering::Acquire)
+    }
+
+    fn bump_ir_revision(&self, project: &str) -> u64 {
+        self.ir_revision_counter(project)
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_status_event(
+        &self,
+        project: &str,
+        state: &str,
+        reason: &'static str,
+        revision: u64,
+        nodes: Option<u64>,
+        edges: Option<u64>,
+        message: Option<String>,
+    ) {
+        let backend = self
+            .setting(project)
+            .ok()
+            .and_then(|s| s["built"]["tool"].as_str().map(str::to_owned));
+        let event = GraphStatusEvent {
+            project_id: project.to_owned(),
+            state: state.to_owned(),
+            reason,
+            revision,
+            state_dir: self.store.state.clone(),
+            backend,
+            nodes,
+            edges,
+            message,
+        };
+        let _ = self.events.send(event.clone());
+        let _ = global_graph_events().send(event);
+    }
+
+    fn build_index_from_ir_store(
+        &self,
+        project: &str,
+        root: &Path,
+        ir: &crate::graph_ir::GraphIrStore,
+    ) -> Result<(Arc<crate::graph_map::Index>, u64, u64)> {
+        let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
+        let index = Arc::new(crate::graph_map::Index::from_ir_parts(
+            root,
+            Some(ir.db_path().to_path_buf()),
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            ir_nodes,
+            ir_links,
+        )?);
+        let rev = self.ir_revision_of(project);
+        self.maps.put_live_ir(project, rev, index.clone());
+        Ok((index, nodes, edges))
+    }
+
+    fn live_index_with_hit(
+        &self,
+        project: &str,
+        root: &Path,
+    ) -> Result<(Arc<crate::graph_map::Index>, bool)> {
+        if let Some((_, cached)) = self.maps.live_ir(project) {
+            return Ok((cached, true));
+        }
+        let published = live(&self.store.state, project);
+        let use_sqlite_ir = crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
+            && (self.force_native
+                || !published.is_file()
+                || self
+                    .setting(project)
+                    .ok()
+                    .and_then(|s| s["built"]["tool"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some(crate::graph_ir::NATIVE_IR_TOOL));
+        if use_sqlite_ir {
+            let ir = self.ir_store(project)?;
+            if ir.summary_counts()?.is_some() {
+                let (idx, ..) = self.build_index_from_ir_store(project, root, &ir)?;
+                return Ok((idx, false));
+            }
+        }
+        self.maps.index_with_cache_hit(project, &published, root)
+    }
+
+    fn live_json_flush_slot(&self, project: &str) -> Arc<LiveJsonFlush> {
+        if let Ok(mut writers) = self.live_json_writers.lock() {
+            return writers
+                .entry(project.to_owned())
+                .or_insert_with(|| Arc::new(LiveJsonFlush::default()))
+                .clone();
+        }
+        Arc::new(LiveJsonFlush::default())
+    }
+
+    fn cancel_live_json_writer(&self, project: &str) {
+        if let Ok(mut writers) = self.live_json_writers.lock()
+            && let Some(slot) = writers.remove(project)
+        {
+            slot.cancel.store(true, Ordering::Release);
+            let _guard = slot.done_lock.lock();
+        }
+    }
+
+    fn schedule_live_json_write(&self, project: &str, root: PathBuf, counts: (u64, u64)) {
+        if self.stopping.load(Ordering::Acquire) {
+            return;
+        }
+        let slot = self.live_json_flush_slot(project);
+        slot.cancel.store(false, Ordering::Release);
+        slot.dirty.store(true, Ordering::Release);
+        if slot
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let Some(me) = self.me.upgrade() else {
+            slot.active.store(false, Ordering::Release);
+            return;
+        };
+        let weak_me = Arc::downgrade(&me);
+        let proj = project.to_owned();
+        let initial_counts = counts;
+        let _ = std::thread::Builder::new()
+            .name("harness-graph-json".into())
+            .spawn(move || {
+                let _done_guard = slot.done_lock.lock();
+                struct ActiveReset<'a>(&'a AtomicBool);
+                impl Drop for ActiveReset<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _reset = ActiveReset(&slot.active);
+                let mut latest_counts;
+                let _ = initial_counts;
+                loop {
+                    if !slot.dirty.swap(false, Ordering::AcqRel) {
+                        break;
+                    }
+                    let Some(graphs) = weak_me.upgrade() else {
+                        break;
+                    };
+                    if graphs.stopping.load(Ordering::Acquire)
+                        || slot.cancel.load(Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    if let Ok(setting) = graphs.setting(&proj)
+                        && setting["enabled"] == true
+                        && let Ok(ir) = graphs.ir_store(&proj)
+                    {
+                        let live_graph = live(&graphs.store.state, &proj);
+                        if let Ok((nodes, edges)) = ir.write_live_graph_atomic(&live_graph) {
+                            latest_counts = (nodes, edges);
+                            let fresh_print = graphs.print(&proj, &root, false);
+                            let commit = fresh_print.as_ref().and_then(|p| p.commit.as_deref());
+                            write_live_summary(&live_graph, commit, Some(latest_counts), None);
+                            let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
+                            let disk = size(&folder(&graphs.store.state, &proj));
+                            let _ = graphs.edit(&proj, |st| {
+                                if st["built"].is_object() {
+                                    st["built"]["bytes"] = json!(bytes);
+                                    st["built"]["disk"] = json!(disk);
+                                    st["built"]["nodes"] = json!(latest_counts.0);
+                                    st["built"]["edges"] = json!(latest_counts.1);
+                                }
+                            });
+                        }
+                    }
+                }
+            });
     }
     /// Registers a synthetic system-service graph workspace (`sys-<hash>`) backed by `root`.
     pub fn register_target(&self, project: &str, root: PathBuf, name: String) -> Result<()> {
@@ -1679,13 +1983,14 @@ impl Graphs {
         let meta = std::fs::metadata(live(&self.store.state, project)).ok()?;
         Some((meta.len(), meta.modified().ok()?))
     }
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.store.state
+    }
     pub fn live_index(&self, project: &str) -> Option<Arc<crate::graph_map::Index>> {
-        let graph = live(&self.store.state, project);
-        if !graph.is_file() {
-            return None;
-        }
         let root = self.root(project).ok()?;
-        self.maps.index(project, &graph, &root).ok()
+        self.live_index_with_hit(project, &root)
+            .ok()
+            .map(|(i, _)| i)
     }
     pub fn auto_start(&self, project: &str) -> Result<()> {
         if self.stopping.load(Ordering::Acquire) {
@@ -1791,6 +2096,53 @@ impl Graphs {
     pub fn map(&self, project: &str, target: Option<&Target>, shown: &Shown) -> Result<Value> {
         let started = Instant::now();
         let (mut view, cache_hit) = self.map_inner(project, target, shown)?;
+        if let Value::Object(obj) = &mut view {
+            if !obj.contains_key("ir_revision") {
+                obj.insert("ir_revision".into(), json!(self.ir_revision_of(project)));
+            }
+            if !obj.contains_key("depth") {
+                obj.insert("depth".into(), json!(shown.depth));
+            }
+            if !obj.get("paging").is_some_and(Value::is_object) {
+                let mut total = obj
+                    .get("matching")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize)
+                    .unwrap_or_else(|| {
+                        obj.get("nodes")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    });
+                if let Some(nodes) = obj.get_mut("nodes").and_then(Value::as_array_mut) {
+                    if total < nodes.len() {
+                        total = nodes.len();
+                    }
+                    if shown.offset > 0 || shown.limit.is_some() {
+                        let start = shown.offset.min(nodes.len());
+                        let end = shown.limit.map_or(nodes.len(), |lim| {
+                            start.saturating_add(lim).min(nodes.len())
+                        });
+                        *nodes = nodes[start..end].to_vec();
+                    }
+                }
+                let returned = obj
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                let has_more = shown.offset.saturating_add(returned) < total;
+                obj.insert(
+                    "paging".into(),
+                    json!({
+                        "offset": shown.offset,
+                        "limit": shown.limit,
+                        "total": total,
+                        "returned": returned,
+                        "has_more": has_more,
+                        "next_offset": has_more.then_some(shown.offset.saturating_add(returned)),
+                    }),
+                );
+            }
+        }
         let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         crate::graph_map::finalize_telemetry(&mut view, elapsed_ms, cache_hit);
         Ok(view)
@@ -1831,6 +2183,9 @@ impl Graphs {
             agent,
             pattern,
             whole,
+            offset,
+            limit,
+            depth,
         } = *shown;
         if base.is_some()
             && (!matches!(target, Some(Target::Pull(_)))
@@ -1919,7 +2274,7 @@ impl Graphs {
                 return Some(view);
             }
             followed.and_then(|asked| {
-                index.follow_with(
+                index.follow_with_depth(
                     name,
                     &asked.root,
                     &asked.out,
@@ -1928,6 +2283,9 @@ impl Graphs {
                     edited,
                     focus,
                     certain,
+                    depth,
+                    offset,
+                    limit,
                 )
             })
         };
@@ -1994,11 +2352,7 @@ impl Graphs {
             }
         };
         let Some(target) = target else {
-            let (raw_index, cache_hit) = self.maps.index_with_cache_hit(
-                project,
-                &live(&self.store.state, project),
-                &root,
-            )?;
+            let (raw_index, cache_hit) = self.live_index_with_hit(project, &root)?;
             let index = asked(raw_index);
             let rules = if reads_rules {
                 Rules::read(&root)
@@ -2006,7 +2360,9 @@ impl Graphs {
                 Ok(None)
             };
             let mut view = follow(&index, &[], &|_| None, &rules).unwrap_or_else(|| {
-                index.view_with_whole(name, scope, spread, focus, certain, filter, whole)
+                index.view_with_whole_options(
+                    name, scope, spread, focus, certain, filter, whole, offset, limit, depth,
+                )
             });
             marked(&index, &mut view, &rules);
             // The sources of the checkout say what the graph does not:
@@ -2138,7 +2494,11 @@ impl Graphs {
         }
         let (mut view, active_index, cache_hit) = match &found.graph {
             Some((kept, graph, base)) => {
-                let (raw, cache_hit) = self.maps.index_with_cache_hit(kept, graph, base)?;
+                let (raw, cache_hit) = if kept == project {
+                    self.live_index_with_hit(project, base)?
+                } else {
+                    self.maps.index_with_cache_hit(kept, graph, base)?
+                };
                 let index = asked(raw.clone());
                 // The symbols a change touched are told by line, and the
                 // lines of a graph older than the files are not the files'
@@ -2420,7 +2780,11 @@ impl Graphs {
         };
         let mut found = match graph {
             Some((kept, graph, base)) => {
-                let index = self.maps.index(&kept, &graph, &base)?;
+                let index = if kept == project {
+                    self.live_index_with_hit(project, &base)?.0
+                } else {
+                    self.maps.index(&kept, &graph, &base)?
+                };
                 if notests {
                     index.without_tests().find(query)
                 } else {
@@ -2508,12 +2872,10 @@ impl Graphs {
             None => None,
         };
         let root = self.root(project)?;
-        let published = live(&self.store.state, project);
         let live_index = || {
-            published
-                .is_file()
-                .then(|| self.maps.index(project, &published, &root).ok())
-                .flatten()
+            self.live_index_with_hit(project, &root)
+                .ok()
+                .map(|(idx, _)| idx)
         };
         match target {
             Some(Target::Run(session)) => {
@@ -2713,9 +3075,17 @@ impl Graphs {
         notests: bool,
     ) -> Result<Value> {
         let ctx = self.impact_context(project, target, focus_session, agent)?;
-        let mut catalog = crate::graph_impact::changed_catalog(
+        let ir = if ctx.resolved.as_ref().is_none_or(|r| r.revision.is_none())
+            && crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
+        {
+            self.ir_store(project).ok()
+        } else {
+            None
+        };
+        let mut catalog = crate::graph_impact::changed_catalog_with_ir(
             &ctx.root,
             ctx.index.as_deref(),
+            ir.as_deref(),
             ctx.resolved.as_deref(),
             ctx.live_focus.as_ref(),
             &ctx.run_edited,
@@ -2752,9 +3122,17 @@ impl Graphs {
             return Err(HarnessError::invalid("Invalid code graph file path."));
         }
         let ctx = self.impact_context(project, target, focus_session, agent)?;
-        let mut report = crate::graph_impact::file_impact(
+        let ir = if ctx.resolved.as_ref().is_none_or(|r| r.revision.is_none())
+            && crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
+        {
+            self.ir_store(project).ok()
+        } else {
+            None
+        };
+        let mut report = crate::graph_impact::file_impact_with_ir(
             &ctx.root,
             ctx.index.as_deref(),
+            ir.as_deref(),
             ctx.resolved.as_deref(),
             ctx.live_focus.as_ref(),
             path,
@@ -3009,12 +3387,30 @@ impl Graphs {
         if self.stopping.load(Ordering::Acquire) || rel_paths.is_empty() || !root.is_dir() {
             return Ok(());
         }
+        let arch_only = rel_paths
+            .iter()
+            .all(|p| crate::graph_ast::is_graph_architecture_path(Path::new(p)));
         let _guard = lock(&self.ir_write)?;
         if self.stopping.load(Ordering::Acquire) {
             return Ok(());
         }
         let setting = self.setting(project)?;
         if setting["enabled"] != true {
+            return Ok(());
+        }
+        if arch_only {
+            let rev = self.bump_ir_revision(project);
+            let nodes = setting["built"]["nodes"].as_u64();
+            let edges = setting["built"]["edges"].as_u64();
+            self.emit_status_event(
+                project,
+                "ready",
+                "architecture_updated",
+                rev,
+                nodes,
+                edges,
+                Some("Architecture rules updated.".to_owned()),
+            );
             return Ok(());
         }
         if let Some(job) = lock(&self.jobs)?.get(project) {
@@ -3039,15 +3435,14 @@ impl Graphs {
         }
         let home = folder(&self.store.state, project);
         let live_graph = live(&self.store.state, project);
-        let (nodes, edges) = ir.write_live_graph_atomic(&live_graph)?;
+        let rev = self.bump_ir_revision(project);
+        self.maps.forget_live(project);
+        let (_idx, nodes, edges) = self.build_index_from_ir_store(project, root, &ir)?;
         let fresh_print = self.print(project, root, true);
-        let commit = fresh_print.as_ref().and_then(|p| p.commit.as_deref());
-        write_live_summary(&live_graph, commit, Some((nodes, edges)));
-        self.maps.forget(project);
-        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
         let elapsed = tenth(started.elapsed().as_secs_f64());
         let hash = fresh_print.as_ref().map(|p| p.hash.clone());
         let commit_owned = fresh_print.and_then(|p| p.commit);
+        let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
         let disk = size(&home);
         self.edit(project, |setting| {
             if setting["enabled"] != true || self.stopping.load(Ordering::Acquire) {
@@ -3070,6 +3465,16 @@ impl Graphs {
                 fields.remove("failure");
             }
         })?;
+        self.schedule_live_json_write(project, root.to_path_buf(), (nodes, edges));
+        self.emit_status_event(
+            project,
+            "ready",
+            "incremental_update",
+            rev,
+            Some(nodes),
+            Some(edges),
+            Some(NATIVE_READY_MESSAGE.to_owned()),
+        );
         Ok(())
     }
     fn print(&self, project: &str, root: &Path, fresh: bool) -> Option<Print> {
@@ -3175,6 +3580,8 @@ impl Graphs {
             }
             jobs.insert(project.to_owned(), job.clone());
         }
+        let rev = self.ir_revision_of(project);
+        self.emit_status_event(project, "building", "build_started", rev, None, None, None);
         let name = project.to_owned();
         let worker = std::thread::Builder::new()
             .name("harness-graph".into())
@@ -3356,8 +3763,9 @@ impl Graphs {
         if std::fs::rename(&ran.fresh, &live_graph).is_err() {
             return Outcome::Failed("The new graph could not be published.".into());
         }
-        write_live_summary(&live_graph, commit, ran.built);
-        self.maps.forget(project);
+        write_live_summary(&live_graph, commit, None, ran.built);
+        self.maps.forget_live(project);
+        self.bump_ir_revision(project);
         Outcome::Built(ran.record(size(&home)))
     }
     fn build_native(
@@ -3405,8 +3813,9 @@ impl Graphs {
         if stopped() {
             return Outcome::Cancelled;
         }
-        write_live_summary(&live_graph, commit, Some((nodes, edges)));
-        self.maps.forget(project);
+        write_live_summary(&live_graph, commit, Some((nodes, edges)), None);
+        self.maps.forget_live(project);
+        self.bump_ir_revision(project);
         let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
         let elapsed = job.started().elapsed().as_secs_f64();
         Outcome::Built(json!({
@@ -3430,10 +3839,19 @@ impl Graphs {
         let purge = job.purge.load(Ordering::Acquire);
         if purge {
             self.stop_watcher(project);
+            self.cancel_live_json_writer(project);
             self.evict_ir_store(project);
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
         }
+        type PendingStatusEvent = (
+            String,
+            &'static str,
+            Option<u64>,
+            Option<u64>,
+            Option<String>,
+        );
         let hash = print.as_ref().map(|print| print.hash.clone());
+        let mut event_payload: Option<PendingStatusEvent> = None;
         let _ = self.edit(project, |setting| {
             if purge {
                 let target_root = setting.get("target_root").cloned();
@@ -3445,10 +3863,13 @@ impl Graphs {
                 if let Some(name) = target_name {
                     setting["target_name"] = name;
                 }
+                event_payload = Some(("off".to_owned(), "deleted", None, None, None));
                 return;
             }
             match outcome {
                 Outcome::Built(mut built) => {
+                    let nodes = built["nodes"].as_u64();
+                    let edges = built["edges"].as_u64();
                     built["print"] = json!(hash);
                     built["commit"] = json!(print.as_ref().and_then(|print| print.commit.clone()));
                     match backend {
@@ -3465,14 +3886,32 @@ impl Graphs {
                     if let Some(fields) = setting.as_object_mut() {
                         fields.remove("failure");
                     }
+                    event_payload = Some((
+                        "ready".to_owned(),
+                        "build_finished",
+                        nodes,
+                        edges,
+                        Some(NATIVE_READY_MESSAGE.to_owned()),
+                    ));
                 }
                 Outcome::Failed(message) => {
+                    event_payload = Some((
+                        "failed".to_owned(),
+                        "build_failed",
+                        None,
+                        None,
+                        Some(message.clone()),
+                    ));
                     setting["failure"] =
                         json!({"at": store::now(), "message": message, "print": hash});
                 }
                 Outcome::Cancelled => {}
             }
         });
+        if let Some((state, reason, nodes, edges, message)) = event_payload {
+            let rev = self.ir_revision_of(project);
+            self.emit_status_event(project, &state, reason, rev, nodes, edges, message);
+        }
         if let Ok(mut finished) = self.finished.lock() {
             finished.insert(project.to_owned(), Instant::now());
         }
@@ -4528,6 +4967,7 @@ impl Graphs {
                         job.cancel.store(true, Ordering::Release);
                     }
                     None => {
+                        self.cancel_live_json_writer(project);
                         let home = folder(&self.store.state, project);
                         // Under a commit's build the folder may not go at
                         // once: what that build still writes goes with it.
@@ -4543,12 +4983,34 @@ impl Graphs {
                 lock(&self.refused)?.retain(|(name, _), _| name != project);
                 self.maps.forget(project);
                 lock(&self.history)?.remove(project);
+                let rev = self.bump_ir_revision(project);
+                self.emit_status_event(project, "off", "deleted", rev, None, None, None);
             }
             _ => {
                 return Err(HarnessError::invalid(
                     "Choose enable, disable, offer, withhold, rebuild or delete.",
                 ));
             }
+        }
+        if matches!(action, "enable" | "disable" | "rebuild") {
+            let status_val = self.status(project, false)?;
+            let state = status_val["state"].as_str().unwrap_or("off");
+            let reason = match action {
+                "enable" => "enabled",
+                "disable" => "disabled",
+                _ => "rebuild",
+            };
+            let rev = self.ir_revision_of(project);
+            self.emit_status_event(
+                project,
+                state,
+                reason,
+                rev,
+                status_val["graph"]["nodes"].as_u64(),
+                status_val["graph"]["edges"].as_u64(),
+                status_val["message"].as_str().map(str::to_owned),
+            );
+            return Ok(status_val);
         }
         self.status(project, false)
     }
@@ -4565,6 +5027,14 @@ impl Graphs {
     pub fn close(&self) {
         self.stopping.store(true, Ordering::Release);
         self.shutdown_watchers();
+        if let Ok(mut writers) = self.live_json_writers.lock() {
+            let entries: Vec<_> = std::mem::take(&mut *writers).into_values().collect();
+            drop(writers);
+            for slot in entries {
+                slot.cancel.store(true, Ordering::Release);
+                let _guard = slot.done_lock.lock();
+            }
+        }
         if let Ok(mut stores) = self.ir_stores.lock() {
             stores.clear();
         }
@@ -4835,6 +5305,11 @@ impl Domain for Graphs {
                             return Err(HarnessError::invalid("Invalid code graph places."));
                         }
                     };
+                    let map_params = MapQueryParams::parse(
+                        query["offset"].as_str(),
+                        query["limit"].as_str(),
+                        query["depth"].as_str(),
+                    )?;
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -4882,6 +5357,9 @@ impl Domain for Graphs {
                                 scenario: (!origin.is_empty()).then_some((origin.as_str(), skip)),
                                 pattern: (!pattern.is_empty()).then_some(pattern.as_str()),
                                 whole,
+                                offset: map_params.offset,
+                                limit: map_params.limit,
+                                depth: map_params.depth,
                             },
                         )
                     })
@@ -8514,6 +8992,88 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .map(&fixture.project, None, &Shown::default())
                 .unwrap();
             assert_eq!(live_second["telemetry"]["cache_hit"], true, "{live_second}");
+        }
+
+        #[test]
+        fn emits_graph_status_events_and_supports_map_query_params() {
+            assert!(MapQueryParams::parse(Some("0"), Some("50"), Some("2")).is_ok());
+            assert!(MapQueryParams::parse(Some("0"), Some("501"), None).is_err());
+            assert!(MapQueryParams::parse(Some("0"), Some("0"), None).is_err());
+            assert!(MapQueryParams::parse(None, None, Some("7")).is_err());
+
+            let dir = tempfile::tempdir().unwrap();
+            let state = dir.path().join("state");
+            let ws = dir.path().join("repo");
+            std::fs::create_dir_all(ws.join("src")).unwrap();
+            std::fs::write(ws.join("src/a.rs"), "pub fn a_fn() -> i32 { 1 }\n").unwrap();
+            std::fs::write(ws.join("src/b.rs"), "pub fn b_fn() -> i32 { 2 }\n").unwrap();
+
+            let store = SessionStore::open(&state).unwrap();
+            let proj = store.register(&ws).unwrap();
+            let proj_id = proj["id"].as_str().unwrap().to_owned();
+            let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+            let mut rx = graphs.subscribe_events();
+            let mut global_rx = subscribe_graph_events();
+
+            graphs.auto_start(&proj_id).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if graphs.status(&proj_id, false).unwrap()["state"] == "ready" {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert_eq!(graphs.status(&proj_id, false).unwrap()["state"], "ready");
+
+            let mut seen_reasons = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                if ev.project_id == proj_id {
+                    seen_reasons.push(ev.reason);
+                }
+            }
+            assert!(
+                seen_reasons.contains(&"build_started") && seen_reasons.contains(&"build_finished"),
+                "expected build lifecycle SSE events: {seen_reasons:?}"
+            );
+
+            // Architecture-only edit bumps revision without reparsing code files.
+            graphs.record_live_paths(&proj_id, &[".harness-architecture.json".to_owned()]);
+            let mut saw_arch = false;
+            while let Ok(ev) = rx.try_recv() {
+                if ev.project_id == proj_id && ev.reason == "architecture_updated" {
+                    saw_arch = true;
+                }
+            }
+            assert!(saw_arch, "expected architecture_updated SSE event");
+
+            let mut saw_global = false;
+            while let Ok(ev) = global_rx.try_recv() {
+                if ev.project_id == proj_id && ev.state_dir == store.state {
+                    saw_global = true;
+                }
+            }
+            assert!(saw_global, "expected global subscriber event");
+
+            // Paging and depth metadata returned cleanly on `graph.map`.
+            let paged = graphs
+                .map(
+                    &proj_id,
+                    None,
+                    &Shown {
+                        scope: "src",
+                        offset: 0,
+                        limit: Some(1),
+                        depth: Some(2),
+                        ..Shown::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(paged["paging"]["limit"], 1);
+            assert_eq!(paged["paging"]["has_more"], true);
+            assert_eq!(paged["depth"], 2);
+            assert!(paged["ir_revision"].as_u64().unwrap_or(0) >= 1);
+
+            graphs.close();
         }
     }
 }

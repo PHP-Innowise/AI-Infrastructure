@@ -1,5 +1,5 @@
 //! Loaded run lists must retain the same durable launch recovery as single reads.
-use infra_core::{Result, RuntimeError};
+use infra_core::{ErrorKind, Result, RuntimeError};
 use infra_system::{Project, SessionBridge, SystemManager, backend::Database};
 use serde_json::{Value, json};
 use std::{
@@ -298,4 +298,27 @@ fn a_stopped_change_can_be_removed_from_the_list_and_still_read() {
         .execute("systems.get", &json!({"params":{"id":id(1)}}))
         .unwrap();
     assert_eq!(read["archived"], true);
+}
+
+#[test]
+fn optional_catalog_probe_returns_missing_without_404_while_strict_catalog_fails() {
+    let root = Root::new();
+    let bridge = Arc::new(Bridge::new(&root));
+    let manager = manager(&root, bridge);
+    let optional_res = manager
+        .execute(
+            "systems.catalog",
+            &json!({"body":{"project_id":"fixture","config_path":"system.json","optional":true}}),
+        )
+        .unwrap();
+    assert_eq!(optional_res["missing"], true);
+    assert!(optional_res["catalog"].is_null());
+
+    let strict_err = manager
+        .execute(
+            "systems.catalog",
+            &json!({"body":{"project_id":"fixture","config_path":"system.json"}}),
+        )
+        .unwrap_err();
+    assert_eq!(strict_err.kind, ErrorKind::NotFound);
 }

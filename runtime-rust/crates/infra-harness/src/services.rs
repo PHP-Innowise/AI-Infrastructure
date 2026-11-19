@@ -17,6 +17,37 @@ pub type CloseFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
 pub trait Services: Send + Sync {
     fn request<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a>;
     fn close<'a>(&'a self) -> CloseFuture<'a>;
+    /// Subscribes to the live multiplexed SSE frame hub, replaying buffered
+    /// frames after `last_event_id` when available.
+    fn subscribe_stream(&self, _last_event_id: Option<u64>) -> Option<crate::store::ReplayStart> {
+        None
+    }
+}
+
+fn ensure_graph_event_bridge(store: &SessionStore) {
+    if !store.stream().claim_graph_bridge() {
+        return;
+    }
+    let mut rx = crate::graph::subscribe_graph_events();
+    let store = store.clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if ev.state_dir == store.state {
+                            let pid = ev.project_id.clone();
+                            if let Ok(val) = serde_json::to_value(&ev) {
+                                store.publish_event("graph_status", None, Some(pid), val);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 }
 pub trait Domain: Send + Sync {
     fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a>;
@@ -212,14 +243,44 @@ impl NativeServices {
         Ok(Payload::Json(json!({"sessions": summaries})))
     }
     async fn handle_sessions_get(&self, sid: &str, query: &Value) -> Result<Payload> {
-        let after = query["after"]
-            .as_str()
-            .unwrap_or("0")
-            .parse::<i64>()
-            .map_err(|_| HarnessError::invalid("Invalid event cursor."))?;
-        let (mut session, events) = self.store.session_events(sid, after)?;
+        let parse_opt_i64 = |key: &str| -> Result<Option<i64>> {
+            match query[key].as_str() {
+                None => Ok(None),
+                Some(raw) => raw
+                    .parse::<i64>()
+                    .map(Some)
+                    .map_err(|_| HarnessError::invalid("Invalid event cursor.")),
+            }
+        };
+        let after = parse_opt_i64("after")?;
+        let before = parse_opt_i64("before")?;
+        let limit = match query["limit"].as_str() {
+            None => crate::store::DEFAULT_EVENT_PAGE_LIMIT,
+            Some(raw) => {
+                let parsed = raw
+                    .parse::<usize>()
+                    .map_err(|_| HarnessError::invalid("Invalid event page limit."))?;
+                if !(1..=crate::store::MAX_EVENT_PAGE_LIMIT).contains(&parsed) {
+                    return Err(HarnessError::invalid(format!(
+                        "Event page limit must be between 1 and {}.",
+                        crate::store::MAX_EVENT_PAGE_LIMIT
+                    )));
+                }
+                parsed
+            }
+        };
+        let tail = match query["tail"].as_str() {
+            None | Some("0" | "false" | "no" | "") => false,
+            Some("1" | "true" | "yes") => true,
+            Some(_) => return Err(HarnessError::invalid("Invalid tail pagination flag.")),
+        };
+        let page = self
+            .store
+            .session_events_page(sid, after, before, limit, tail)?;
+        let mut session = page.session;
         session["graph_focus"] = crate::graph_live::session_focus_value(&self.store, sid)?;
-        if after == 0
+        if after.is_none_or(|v| v == 0)
+            && before.is_none()
             && let Some(project_id) = session["project_id"].as_str()
         {
             self.auto_start_graph(project_id).await;
@@ -227,9 +288,167 @@ impl NativeServices {
         let waiting = self.waiting_permissions_for(sid).await;
         Ok(Payload::Json(json!({
             "session": session,
-            "events": events,
+            "events": page.events,
             "waiting_permissions": waiting,
+            "has_more": page.has_more,
+            "has_older": page.has_older,
+            "total_events": page.total_events,
+            "oldest_event_id": page.oldest_event_id,
+            "latest_event_id": page.latest_event_id,
         })))
+    }
+    fn emit_domain_mutation_sse(
+        &self,
+        operation: &str,
+        params: &Value,
+        body: &Value,
+        payload: &Payload,
+    ) {
+        let Payload::Json(val) = payload else {
+            return;
+        };
+        match operation {
+            "creator.start" | "creator.act" => {
+                let run = val.get("run").filter(|v| v.is_object()).unwrap_or(val);
+                let Some(run_id) = run["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return;
+                };
+                let sid = run["session_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let project_id = run["project_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let status = run["status"].as_str().unwrap_or("new");
+                let active = run["active"].as_bool().unwrap_or(matches!(
+                    status,
+                    "scanning" | "generating" | "applying" | "rolling_back" | "queued" | "running"
+                ));
+                let waiting = run["waiting_permissions"]
+                    .as_u64()
+                    .map(|n| n as usize)
+                    .unwrap_or_else(|| sid.as_deref().map_or(0, |id| self.store.waiting_count(id)));
+                let mut ev = json!({
+                    "run_id": run_id,
+                    "id": run_id,
+                    "project_id": project_id,
+                    "status": status,
+                    "active": active,
+                    "waiting_permissions": waiting,
+                    "session_id": sid,
+                    "run": run,
+                });
+                if let Some(rev) = run["revision"].as_u64() {
+                    ev["revision"] = json!(rev);
+                }
+                self.store.publish_event("creator_run", sid, project_id, ev);
+            }
+            "systems.prepare" | "systems.act" | "systems.apply" | "discovery.start" => {
+                let run = val.get("run").filter(|v| v.is_object()).unwrap_or(val);
+                let run_id = run["id"]
+                    .as_str()
+                    .or_else(|| run["run_id"].as_str())
+                    .or_else(|| params["id"].as_str())
+                    .filter(|s| !s.is_empty());
+                let Some(run_id) = run_id else {
+                    return;
+                };
+                let sid = run["session_id"]
+                    .as_str()
+                    .or_else(|| val["session"]["id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let project_id = run["project_id"]
+                    .as_str()
+                    .or_else(|| body["project_id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let status = run["status"]
+                    .as_str()
+                    .or_else(|| val["status"].as_str())
+                    .unwrap_or("queued");
+                let active = run["active"]
+                    .as_bool()
+                    .unwrap_or(matches!(status, "queued" | "running"));
+                let waiting = run["waiting_permissions"]
+                    .as_u64()
+                    .map(|n| n as usize)
+                    .unwrap_or_else(|| sid.as_deref().map_or(0, |id| self.store.waiting_count(id)));
+                let ev = json!({
+                    "run_id": run_id,
+                    "id": run_id,
+                    "project_id": project_id,
+                    "status": status,
+                    "active": active,
+                    "waiting_permissions": waiting,
+                    "session_id": sid,
+                    "run": run,
+                });
+                self.store.publish_event("system_run", sid, project_id, ev);
+            }
+            "results.start_check" => {
+                let check = val.get("check").filter(|v| v.is_object()).unwrap_or(val);
+                let Some(check_id) = check["id"].as_str().filter(|s| !s.is_empty()) else {
+                    return;
+                };
+                let sid = check["session_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| params["session_id"].as_str().filter(|s| !s.is_empty()))
+                    .unwrap_or("")
+                    .to_owned();
+                let project_id = (!sid.is_empty())
+                    .then(|| self.store.session_project_id(&sid))
+                    .flatten();
+                let status = check["status"].as_str().unwrap_or("queued");
+                self.store.publish_event(
+                    "results_check",
+                    (!sid.is_empty()).then_some(sid.clone()),
+                    project_id.clone(),
+                    json!({
+                        "id": check_id,
+                        "check_id": check_id,
+                        "session_id": sid,
+                        "project_id": project_id,
+                        "status": status,
+                        "check": check,
+                    }),
+                );
+            }
+            "graph.act" => {
+                let project_id = val["project_id"]
+                    .as_str()
+                    .or_else(|| params["project_id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_owned();
+                if project_id.is_empty() {
+                    return;
+                }
+                let state = val["state"]
+                    .as_str()
+                    .or_else(|| body["action"].as_str())
+                    .unwrap_or("updated");
+                let mut ev = val.clone();
+                if ev.get("project_id").is_none() {
+                    ev["project_id"] = json!(project_id);
+                }
+                if ev.get("state").is_none() {
+                    ev["state"] = json!(state);
+                }
+                if ev.get("reason").is_none() {
+                    ev["reason"] = json!(body["action"].as_str().unwrap_or("graph_act"));
+                }
+                if ev.get("revision").is_none() {
+                    ev["revision"] = json!(0);
+                }
+                self.store
+                    .publish_event("graph_status", None, Some(project_id), ev);
+            }
+            _ => {}
+        }
     }
     async fn handle_memory_links(&self, operation: &str, request: &Value) -> Result<Payload> {
         let knowledge = self
@@ -518,6 +737,10 @@ fn collect_unique_contradictions(
 impl Services for NativeServices {
     fn close<'a>(&'a self) -> CloseFuture<'a> {
         (self.closer)()
+    }
+    fn subscribe_stream(&self, last_event_id: Option<u64>) -> Option<crate::store::ReplayStart> {
+        ensure_graph_event_bridge(&self.store);
+        Some(self.store.stream().subscribe(last_event_id))
     }
     fn request<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
         Box::pin(async move {
@@ -1010,6 +1233,7 @@ impl Services for NativeServices {
                     .await;
                 }
             }
+            self.emit_domain_mutation_sse(operation, params, body, &payload);
             Ok(payload)
         })
     }

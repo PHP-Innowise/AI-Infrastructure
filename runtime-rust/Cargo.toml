@@ -21,6 +21,15 @@ inherits = "release"
 lto = "off"
 codegen-units = 16
 
+# Size-optimized release profile used for the browser Wasm UI bundle.
+[profile.wasm-ui]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
 # Integration cases install and fingerprint the actual engine. Keep test
 # artifacts small; symbol-heavy copies otherwise dominate those contracts.
 [profile.test]

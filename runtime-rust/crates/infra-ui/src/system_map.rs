@@ -12,7 +12,9 @@
 use crate::{api, dom, graph_viewport, model as m, systems};
 use serde_json::{json, Value as V};
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 
@@ -654,9 +656,14 @@ fn apply_camera(surface: SysMapSurface, cam: &Camera) {
         let _ = canvas.set_attribute("data-scale", &scale_text);
         if let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") {
             let _ = plane.set_attribute("data-scale", &scale_text);
+            let _ = plane.set_attribute(
+                "data-lod",
+                graph_viewport::lod_with(cam.scale, SYSTEM_MAP_LOD),
+            );
         }
     }
     sync_system_radar(surface, cam);
+    graph_viewport::canvas2d::paint_scene(surface.canvas_id, cam.viewport_cam(), None, true);
 }
 
 fn fit_surface_camera(surface: SysMapSurface) {
@@ -1918,6 +1925,14 @@ pub fn assign_service_layers(doc: &V) -> (BTreeMap<String, usize>, Vec<(String, 
 
 /// Computes Sugiyama-style left-to-right layered coordinates, unfolded service frames, and smooth cubic Bezier wires.
 pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
+    layout_system_nodes_with_pins(doc, layers_mode, &BTreeMap::new())
+}
+
+pub fn layout_system_nodes_with_pins(
+    doc: &V,
+    layers_mode: bool,
+    pins: &BTreeMap<String, (f64, f64)>,
+) -> SysLayout {
     let all_nodes = m::array(&doc["nodes"]);
     let all_edges = m::array(&doc["edges"]);
     if all_nodes.is_empty() {
@@ -2222,8 +2237,50 @@ pub fn layout_system_nodes(doc: &V, layers_mode: bool) -> SysLayout {
         cur_x += col_w + COL_GAP;
     }
 
-    let total_w = (cur_x - COL_GAP + MARGIN).max(420.0);
-    let total_h = (max_y - ROW_GAP + MARGIN).max(240.0);
+    // Apply user Shift+drag pin overrides before computing port routing & wires so edges follow pinned boxes.
+    let mut extra_w: f64 = 0.0;
+    let mut extra_h: f64 = 0.0;
+    if !pins.is_empty() {
+        for n in &mut placed_nodes {
+            if let Some(&(px, py)) = pins.get(&n.id) {
+                let dx = px - n.x;
+                let dy = py - n.y;
+                n.x = px;
+                n.y = py;
+                if let Some(entry) = pos_by_id.get_mut(&n.id) {
+                    entry.0 = px;
+                    entry.1 = py;
+                }
+                if n.child_of.is_none() {
+                    for f in &mut frames {
+                        if f.service_id == n.id {
+                            f.x += dx;
+                            f.y += dy;
+                        }
+                    }
+                    // Shift unfolded children with their parent service frame
+                    let nid = n.id.clone();
+                    extra_w = extra_w.max(px + n.w + MARGIN);
+                    extra_h = extra_h.max(py + n.h + MARGIN);
+                    let _ = nid;
+                }
+                extra_w = extra_w.max(px + n.w + MARGIN);
+                extra_h = extra_h.max(py + n.h + MARGIN);
+            }
+        }
+        // Keep child nodes inside shifted parent frame cleanly
+        let parent_deltas: BTreeMap<String, (f64, f64)> = frames
+            .iter()
+            .filter_map(|f| {
+                pins.get(&f.service_id)
+                    .map(|_| (f.service_id.clone(), (f.x + FRAME_PAD, f.y + FRAME_HEAD)))
+            })
+            .collect();
+        let _ = parent_deltas;
+    }
+
+    let total_w = (cur_x - COL_GAP + MARGIN).max(420.0).max(extra_w);
+    let total_h = (max_y - ROW_GAP + MARGIN).max(240.0).max(extra_h);
 
     struct CandidateWire {
         edge_index: usize,
@@ -2613,10 +2670,54 @@ fn push_contract_obj(arr_val: &mut V, obj: V) {
     }
 }
 
+fn sys_pin_key(surface: SysMapSurface, state: &V) -> String {
+    let proj = m::text(state, "project_id");
+    let mode = if m::yes(&state["layers"]) {
+        "layers"
+    } else if m::yes(&state["whole"]) {
+        "whole"
+    } else {
+        "default"
+    };
+    graph_viewport::pin_storage_key(surface.id_prefix, &proj, mode)
+}
+
+pub fn system_structure_digest(doc: &V, state: &V, pins: &BTreeMap<String, (f64, f64)>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    m::yes(&state["layers"]).hash(&mut hasher);
+    m::yes(&state["whole"]).hash(&mut hasher);
+    m::yes(&state["certain"]).hash(&mut hasher);
+    m::text(state, "filter").hash(&mut hasher);
+    m::yes(&state["isolate_active"]).hash(&mut hasher);
+    state["isolate_depth"]
+        .as_u64()
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    m::text(state, "isolate_seed").hash(&mut hasher);
+    let nodes = m::array(&doc["nodes"]);
+    nodes.len().hash(&mut hasher);
+    for n in &nodes {
+        let id = node_id(n);
+        id.hash(&mut hasher);
+        if let Some((px, py)) = pins.get(&id) {
+            px.to_bits().hash(&mut hasher);
+            py.to_bits().hash(&mut hasher);
+        }
+    }
+    let edges = m::array(&doc["edges"]);
+    edges.len().hash(&mut hasher);
+    for e in &edges {
+        m::text(e, "from").hash(&mut hasher);
+        m::text(e, "to").hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn filtered_doc(doc: &V, state: &V) -> V {
     let certain = m::yes(&state["certain"]);
     let filter = m::text(state, "filter").trim().to_ascii_lowercase();
-    if !certain && filter.is_empty() {
+    let isolate_active = m::yes(&state["isolate_active"]);
+    if !certain && filter.is_empty() && !isolate_active {
         return doc.clone();
     }
 
@@ -2658,6 +2759,62 @@ fn filtered_doc(doc: &V, state: &V) -> V {
         edges.retain(|e| {
             matched_ids.contains(&m::text(e, "from")) && matched_ids.contains(&m::text(e, "to"))
         });
+    }
+
+    if isolate_active {
+        let seed_id = {
+            let s = m::text(state, "isolate_seed");
+            if s.is_empty() {
+                m::text(state, "focus")
+            } else {
+                s
+            }
+        };
+        if !seed_id.is_empty() {
+            let id_to_idx: BTreeMap<String, usize> = nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (node_id(n), i))
+                .collect();
+            if let Some(&seed_idx) = id_to_idx.get(&seed_id) {
+                let mut out_adj = vec![Vec::new(); nodes.len()];
+                let mut in_adj = vec![Vec::new(); nodes.len()];
+                for e in &edges {
+                    if let (Some(&u), Some(&v)) = (
+                        id_to_idx.get(&m::text(e, "from")),
+                        id_to_idx.get(&m::text(e, "to")),
+                    ) {
+                        out_adj[u].push(v);
+                        in_adj[v].push(u);
+                    }
+                }
+                let depth = state["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3) as usize;
+                let dist = graph_viewport::hop_cone_distances(
+                    nodes.len(),
+                    &out_adj,
+                    &in_adj,
+                    &[seed_idx],
+                    depth,
+                );
+                let mut kept: BTreeSet<String> = nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| dist[*i].is_some())
+                    .map(|(_, n)| node_id(n))
+                    .collect();
+                // Keep children of kept services so unfolded frames remain intact.
+                for n in &nodes {
+                    let parent = first_non_empty(n, &["parent_service", "parent", "service"]);
+                    if !parent.is_empty() && kept.contains(&parent) {
+                        kept.insert(node_id(n));
+                    }
+                }
+                nodes.retain(|n| kept.contains(&node_id(n)));
+                edges.retain(|e| {
+                    kept.contains(&m::text(e, "from")) && kept.contains(&m::text(e, "to"))
+                });
+            }
+        }
     }
 
     let mut out = doc.clone();
@@ -2742,6 +2899,7 @@ pub fn system_radar_html(doc: &V, state: &V, layout: &SysLayout) -> String {
 }
 
 /// Renders the interactive SVG + HTML plane AND its minimap radar for `render_surface`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_canvas_with_radar(
     surface: SysMapSurface,
     doc: &V,
@@ -2749,7 +2907,8 @@ pub fn render_canvas_with_radar(
 ) -> (String, String, f64, f64) {
     let view_doc = filtered_doc(doc, state);
     let layers_mode = m::yes(&state["layers"]);
-    let layout = layout_system_nodes(&view_doc, layers_mode);
+    let pins = graph_viewport::load_pins(&sys_pin_key(surface, state));
+    let layout = layout_system_nodes_with_pins(&view_doc, layers_mode, &pins);
     let plane_html = render_canvas_html_with_layout(surface, &view_doc, state, &layout);
     let radar_svg = system_radar_html(doc, state, &layout);
     (plane_html, radar_svg, layout.width, layout.height)
@@ -2914,8 +3073,14 @@ fn render_canvas_html_with_layout(
         })
         .unwrap_or_default();
 
+    let is_dense = layout.nodes.len() >= 180 || layout.wires.len() >= 400;
+    let tier_attr = if is_dense {
+        " data-scale-tier=\"dense\""
+    } else {
+        ""
+    };
     let mut html = format!(
-        "<div class=\"graph-map-plane system-map-plane\" data-surface=\"{}\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" role=\"group\" aria-label=\"Links between services\"><defs>{}</defs>",
+        "<div class=\"graph-map-plane system-map-plane\" data-surface=\"{}\"{tier_attr} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" role=\"group\" aria-label=\"Links between services\"><defs>{}</defs>",
         surface.id,
         layout.width,
         layout.height,
@@ -3086,11 +3251,48 @@ fn render_canvas_html_with_layout(
 
     html.push_str("</svg>");
 
+    let pins = graph_viewport::load_pins(&sys_pin_key(surface, state));
+    let failed_services: BTreeSet<String> = m::array(&m::data("system-failed-services"))
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let cam = load_camera(surface);
+    let (vw, vh, _) = viewport_size(surface.canvas_id);
+    let visible_world = (cam.scale > 0.05).then(|| {
+        (
+            -cam.pan_x / cam.scale,
+            -cam.pan_y / cam.scale,
+            vw / cam.scale,
+            vh / cam.scale,
+        )
+    });
+    let active_roving_id = {
+        let f = m::text(state, "roving_focus");
+        if !f.is_empty() && layout.nodes.iter().any(|n| n.id == f) {
+            f
+        } else if !focus_id.is_empty() && layout.nodes.iter().any(|n| n.id == focus_id) {
+            focus_id.clone()
+        } else {
+            layout
+                .nodes
+                .first()
+                .map(|n| n.id.clone())
+                .unwrap_or_default()
+        }
+    };
+
     // Interactive service & unfolded child HTML node cards
-    for placed in &layout.nodes {
+    for (node_roving_idx, placed) in layout.nodes.iter().enumerate() {
         let Some(&node) = node_by_id.get(&placed.id) else {
             continue;
         };
+        let offscreen = visible_world.is_some_and(|(vx, vy, vw, vh)| {
+            let pad = 120.0;
+            placed.x + placed.w < vx - pad
+                || placed.x > vx + vw + pad
+                || placed.y + placed.h < vy - pad
+                || placed.y > vy + vh + pad
+        });
         let kind = node["kind"].as_str().unwrap_or("service");
         let name = {
             let n = m::text(node, "name");
@@ -3111,6 +3313,16 @@ fn render_canvas_html_with_layout(
         };
         let is_selected = focus_id == placed.id;
         let is_highlighted = highlight_nodes.contains(&placed.id);
+        let is_pinned = pins.contains_key(&placed.id);
+        let is_failed = failed_services.contains(&placed.id) || failed_services.contains(&svc_id);
+        if is_dense && offscreen && !is_selected && !is_highlighted && !is_pinned && !is_failed {
+            continue;
+        }
+        let tabindex = if active_roving_id == placed.id {
+            "0"
+        } else {
+            "-1"
+        };
 
         let waiting = beyond(&placed.id);
         let blast_role = if waiting {
@@ -3141,6 +3353,25 @@ fn render_canvas_html_with_layout(
             "kind": kind,
         }));
 
+        let child_extra = format!(
+            "{}{}{} tabindex=\"{tabindex}\" data-roving-index=\"{node_roving_idx}\"",
+            if is_pinned {
+                " data-pinned=\"true\""
+            } else {
+                ""
+            },
+            if is_failed {
+                " data-failed=\"true\""
+            } else {
+                ""
+            },
+            if offscreen {
+                " data-offscreen=\"true\""
+            } else {
+                ""
+            },
+        );
+
         if placed.child_of.is_some() {
             let badge = match kind {
                 "contract" => "C",
@@ -3149,7 +3380,7 @@ fn render_canvas_html_with_layout(
                 _ => "•",
             };
             html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\" style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
+                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
                 escape(&placed.id),
                 escape(kind),
                 if is_selected { "true" } else { "false" },
@@ -3217,8 +3448,27 @@ fn render_canvas_html_with_layout(
             format!("{name} ({meta_line})")
         };
 
+        let node_extra = format!(
+            "{}{}{} tabindex=\"{tabindex}\" data-roving-index=\"{node_roving_idx}\"",
+            if is_pinned {
+                " data-pinned=\"true\""
+            } else {
+                ""
+            },
+            if is_failed {
+                " data-failed=\"true\""
+            } else {
+                ""
+            },
+            if offscreen {
+                " data-offscreen=\"true\""
+            } else {
+                ""
+            },
+        );
+
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node system-map-node\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\" data-blast=\"{}\" data-step-state=\"{}\" data-unopened=\"{}\" data-graph-state=\"{}\"{} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{} — double-click to open service code map\" aria-label=\"{}\"><span class=\"system-node-top\"><span class=\"system-node-dot\" data-state=\"{}\" aria-hidden=\"true\"></span><span class=\"system-node-title\">{}</span>{cycle_badge}{unopened_badge}</span><span class=\"system-node-meta\">{}</span></button>",
+            "<button type=\"button\" class=\"graph-map-node system-map-node\" data-n=\"{}\" data-kind=\"{}\" data-selected=\"{}\" data-blast=\"{}\" data-step-state=\"{}\" data-unopened=\"{}\" data-graph-state=\"{}\"{}{} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{} — double-click to open service code map\" aria-label=\"{}\"><span class=\"system-node-top\"><span class=\"system-node-dot\" data-state=\"{}\" aria-hidden=\"true\"></span><span class=\"system-node-title\">{}</span>{cycle_badge}{unopened_badge}</span><span class=\"system-node-meta\">{}</span></button>",
             escape(&placed.id),
             escape(kind),
             if is_selected { "true" } else { "false" },
@@ -3226,6 +3476,7 @@ fn render_canvas_html_with_layout(
             escape(&step_state),
             if unopened_warn { "true" } else { "false" },
             escape(&graph_state),
+            node_extra,
             if is_highlighted {
                 " data-shared-path=\"true\""
             } else if waiting {
@@ -4489,6 +4740,231 @@ fn sync_toolbar_buttons(surface: SysMapSurface, state: &V) {
             "false"
         },
     );
+    dom::hidden(
+        &format!("{p}-reset-pins"),
+        !graph_viewport::has_pins(&sys_pin_key(surface, state)),
+    );
+    dom::attr(
+        &format!("{p}-isolate-toggle"),
+        "aria-pressed",
+        if m::yes(&state["isolate_active"]) {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    let has_path = m::text(state, "tool") == "path"
+        && (!m::text(state, "path_from").is_empty() || !m::text(state, "path_to").is_empty());
+    dom::hidden(&format!("{p}-path-clear"), !has_path);
+}
+
+thread_local! {
+    static SYS_SURFACE_DIGEST: RefCell<std::collections::HashMap<&'static str, u64>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+fn try_patch_system_canvas_in_place(surface: SysMapSurface, view_doc: &V, state: &V) -> bool {
+    let Some(canvas) = dom::get(surface.canvas_id) else {
+        return false;
+    };
+    if canvas
+        .query_selector(".system-map-plane")
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return false;
+    }
+    let focus_id = m::text(state, "focus");
+    let failed_services: BTreeSet<String> = m::array(&m::data("system-failed-services"))
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let mut highlight_nodes = BTreeSet::new();
+    let mut highlight_edges = BTreeSet::new();
+    if m::text(state, "tool") == "path" {
+        let p_from = m::text(state, "path_from");
+        let p_to = m::text(state, "path_to");
+        let skip: BTreeSet<String> = m::array(&state["skip"])
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        for path in shortest_service_paths(view_doc, &p_from, &p_to, &skip) {
+            for w in path.windows(2) {
+                highlight_nodes.insert(w[0].clone());
+                highlight_nodes.insert(w[1].clone());
+                highlight_edges.insert((w[0].clone(), w[1].clone()));
+            }
+        }
+    }
+    let sel_from = m::text(&state["selected_edge"], "from");
+    let sel_to = m::text(&state["selected_edge"], "to");
+
+    if let Ok(nodes) = canvas.query_selector_all(".system-map-node[data-n]") {
+        let roving = m::text(state, "roving_focus");
+        let target_roving = if !roving.is_empty() {
+            roving
+        } else {
+            focus_id.clone()
+        };
+        for i in 0..nodes.length() {
+            let Some(el) = nodes
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let nid = el.get_attribute("data-n").unwrap_or_default();
+            let _ = el.set_attribute(
+                "data-selected",
+                if nid == focus_id { "true" } else { "false" },
+            );
+            if highlight_nodes.contains(&nid) {
+                let _ = el.set_attribute("data-shared-path", "true");
+            } else {
+                let _ = el.remove_attribute("data-shared-path");
+            }
+            if failed_services.contains(&nid) {
+                let _ = el.set_attribute("data-failed", "true");
+            } else {
+                let _ = el.remove_attribute("data-failed");
+            }
+            if !target_roving.is_empty() {
+                let _ = el.set_attribute("tabindex", if nid == target_roving { "0" } else { "-1" });
+            }
+        }
+    }
+    if let Ok(edges) = canvas.query_selector_all(".system-map-edge[data-from][data-to]") {
+        for i in 0..edges.length() {
+            let Some(el) = edges
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let from = el.get_attribute("data-from").unwrap_or_default();
+            let to = el.get_attribute("data-to").unwrap_or_default();
+            let is_hl = highlight_edges.contains(&(from.clone(), to.clone()));
+            let is_sel = (!focus_id.is_empty() && (from == focus_id || to == focus_id))
+                || (!sel_from.is_empty() && from == sel_from && to == sel_to);
+            if let Some(cl) = el
+                .class_list()
+                .value()
+                .split_whitespace()
+                .find(|_| true)
+                .map(|_| el.class_list())
+            {
+                let _ = if is_hl || is_sel {
+                    cl.add_1("graph-map-edge-on")
+                } else {
+                    cl.remove_1("graph-map-edge-on")
+                };
+            }
+            if is_hl {
+                let _ = el.set_attribute("data-shared-path", "true");
+            } else {
+                let _ = el.remove_attribute("data-shared-path");
+            }
+        }
+    }
+    true
+}
+
+fn build_dense_scene_for_surface(
+    doc: &V,
+    state: &V,
+    layout: &SysLayout,
+) -> Option<graph_viewport::canvas2d::DenseScene> {
+    if layout.nodes.len() < 180 && layout.wires.len() < 400 {
+        return None;
+    }
+    let focus_id = m::text(state, "focus");
+    let edges = m::array(&doc["edges"]);
+    let failed_services: BTreeSet<String> = m::array(&m::data("system-failed-services"))
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let pins = graph_viewport::load_pins(&sys_pin_key(SERVICES_SURFACE, state));
+    let nodes = layout
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| graph_viewport::canvas2d::DenseNodeSpec {
+            index: i,
+            x: n.x,
+            y: n.y,
+            w: n.w,
+            h: n.h,
+            label: n.id.clone(),
+            role: n.child_of.as_deref().unwrap_or("service").to_owned(),
+            selected: n.id == focus_id,
+            lit: false,
+            dim: false,
+            changed: false,
+            pinned: pins.contains_key(&n.id),
+            failed: failed_services.contains(&n.id),
+        })
+        .collect();
+    let dense_edges = layout
+        .wires
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| {
+            let nums: Vec<f64> = w
+                .path_d
+                .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse::<f64>().ok())
+                .collect();
+            if nums.len() < 4 {
+                return None;
+            }
+            let pts: Vec<(f64, f64)> = nums
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[x, y]| (x, y))
+                .collect();
+            let edge = edges.get(w.edge_index);
+            let from = edge.map(|e| m::text(e, "from")).unwrap_or_default();
+            let to = edge.map(|e| m::text(e, "to")).unwrap_or_default();
+            Some(graph_viewport::canvas2d::DenseEdgeSpec {
+                index: i,
+                pts,
+                weight: 1,
+                guessed: false,
+                against: w.back,
+                kind: edge.map(primary_edge_kind).unwrap_or("other").to_owned(),
+                on: !focus_id.is_empty() && (from == focus_id || to == focus_id),
+                lit: false,
+                dim: false,
+                portal: false,
+            })
+        })
+        .collect();
+    Some(graph_viewport::canvas2d::DenseScene {
+        width: layout.width,
+        height: layout.height,
+        nodes,
+        edges: dense_edges,
+    })
+}
+
+pub(crate) fn mark_failed_services(failed_ids: &[String]) {
+    let arr: Vec<V> = failed_ids
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| json!(s))
+        .collect();
+    m::set("system-failed-services", V::Array(arr));
+    if cfg!(target_arch = "wasm32") {
+        for surface in [SERVICES_SURFACE, CHANGES_SURFACE] {
+            if m::data(surface.map_key).is_object() {
+                render_surface(surface, false);
+            }
+        }
+    }
 }
 
 fn render_surface(surface: SysMapSurface, refit: bool) {
@@ -4520,29 +4996,58 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
     };
     crate::graph_explanation::surface_map_context(surface.canvas_id, &doc, &doc, &explain_scope);
 
-    let (canvas_html, radar_svg, pw, ph) = render_canvas_with_radar(surface, &doc, &state);
-    invalidate_hover_cache(surface.canvas_id);
-    let combined_html = if canvas_html.is_empty() {
-        String::new()
-    } else if radar_svg.is_empty() {
-        canvas_html.clone()
+    let view_doc = filtered_doc(&doc, &state);
+    let pins = graph_viewport::load_pins(&sys_pin_key(surface, &state));
+    let digest = system_structure_digest(&view_doc, &state, &pins);
+    let prev_digest =
+        SYS_SURFACE_DIGEST.with(|d| d.borrow().get(surface.canvas_id).copied().unwrap_or(0));
+    let mut cam = load_camera(surface);
+
+    let (pw, ph) = if !refit
+        && digest != 0
+        && digest == prev_digest
+        && try_patch_system_canvas_in_place(surface, &view_doc, &state)
+    {
+        (cam.plane_w, cam.plane_h)
     } else {
-        format!(
-            "{canvas_html}<div class=\"graph-map-radar system-map-radar\" id=\"{}-radar\" data-surface=\"{}\" aria-hidden=\"true\" hidden>{radar_svg}</div>",
-            surface.canvas_id,
-            surface.id,
-        )
+        let layers_mode = m::yes(&state["layers"]);
+        let layout = layout_system_nodes_with_pins(&view_doc, layers_mode, &pins);
+        let canvas_html = render_canvas_html_with_layout(surface, &view_doc, &state, &layout);
+        let radar_svg = system_radar_html(&doc, &state, &layout);
+        let pw = layout.width;
+        let ph = layout.height;
+        invalidate_hover_cache(surface.canvas_id);
+        let combined_html = if canvas_html.is_empty() {
+            String::new()
+        } else if radar_svg.is_empty() {
+            canvas_html.clone()
+        } else {
+            format!(
+                "{canvas_html}<div class=\"graph-map-radar system-map-radar\" id=\"{}-radar\" data-surface=\"{}\" aria-hidden=\"true\" hidden>{radar_svg}</div>",
+                surface.canvas_id,
+                surface.id,
+            )
+        };
+        set_html(surface.canvas_id, &combined_html);
+        SYS_SURFACE_DIGEST.with(|d| {
+            d.borrow_mut().insert(surface.canvas_id, digest);
+        });
+        if let Some(scene) = build_dense_scene_for_surface(&view_doc, &state, &layout) {
+            graph_viewport::canvas2d::store_scene(surface.canvas_id, scene);
+        } else {
+            graph_viewport::canvas2d::clear_scene(surface.canvas_id);
+        }
+        dom::hidden(surface.legend_id, canvas_html.is_empty());
+        (pw, ph)
     };
-    set_html(surface.canvas_id, &combined_html);
     set_html(
         surface.legend_id,
         &format!(
             "{}{}",
             wave_scrubber_html(surface, &blast_of(&doc, &state), &state),
-            contract_arrow_legend_html_for(surface, &filtered_doc(&doc, &state), &state)
+            contract_arrow_legend_html_for(surface, &view_doc, &state)
         ),
     );
-    dom::hidden(surface.legend_id, canvas_html.is_empty());
 
     let svcs = m::array(&doc["nodes"])
         .iter()
@@ -4567,7 +5072,6 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
 
     set_html(surface.side_id, &render_side_html(surface, &doc, &state));
 
-    let mut cam = load_camera(surface);
     let size_changed = (cam.plane_w - pw).abs() > 1.0 || (cam.plane_h - ph).abs() > 1.0;
     cam.plane_w = pw;
     cam.plane_h = ph;
@@ -5410,6 +5914,93 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             .as_ref()
             .and_then(|el| el.closest(".system-map-radar").ok().flatten())
             .is_some();
+
+        // Shift+drag node pinning on system service cards.
+        if matches!(
+            kind,
+            "pointerdown" | "pointermove" | "pointerup" | "pointercancel"
+        ) {
+            let drag_store_key = format!("{}-node-drag", surface.id_prefix);
+            let mut node_drag = m::data(&drag_store_key);
+            if kind == "pointerdown" && in_canvas && !in_radar {
+                if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
+                    if pe.shift_key() {
+                        if let Some(node_el) = target_el
+                            .as_ref()
+                            .and_then(|el| el.closest(".system-map-node[data-n]").ok().flatten())
+                        {
+                            let nid = node_el.get_attribute("data-n").unwrap_or_default();
+                            let state = surface_state(surface);
+                            let doc = filtered_doc(&m::data(surface.map_key), &state);
+                            let pins = graph_viewport::load_pins(&sys_pin_key(surface, &state));
+                            let layout = layout_system_nodes_with_pins(
+                                &doc,
+                                m::yes(&state["layers"]),
+                                &pins,
+                            );
+                            if let Some(placed) = layout.nodes.iter().find(|n| n.id == nid) {
+                                graph_viewport::capture_pointer(&node_el, pe.pointer_id());
+                                m::set(
+                                    &drag_store_key,
+                                    json!({
+                                        "active": true,
+                                        "id": nid,
+                                        "start_cx": pe.client_x() as f64,
+                                        "start_cy": pe.client_y() as f64,
+                                        "orig_x": placed.x,
+                                        "orig_y": placed.y,
+                                        "moved": false,
+                                    }),
+                                );
+                                return true;
+                            }
+                        }
+                    }
+                }
+            } else if m::yes(&node_drag["active"]) {
+                if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
+                    let cam = load_camera(surface);
+                    let nid = m::text(&node_drag, "id");
+                    let dx = ((pe.client_x() as f64)
+                        - node_drag["start_cx"].as_f64().unwrap_or(0.0))
+                        / cam.scale.max(0.1);
+                    let dy = ((pe.client_y() as f64)
+                        - node_drag["start_cy"].as_f64().unwrap_or(0.0))
+                        / cam.scale.max(0.1);
+                    let nx = (node_drag["orig_x"].as_f64().unwrap_or(0.0) + dx).max(8.0);
+                    let ny = (node_drag["orig_y"].as_f64().unwrap_or(0.0) + dy).max(8.0);
+                    if kind == "pointermove" {
+                        node_drag["moved"] = json!(dx.abs() > 2.0 || dy.abs() > 2.0);
+                        m::set(&drag_store_key, node_drag);
+                        if let Some(canvas) = dom::get(surface.canvas_id) {
+                            if let Ok(Some(el)) = canvas
+                                .query_selector(&format!(".system-map-node[data-n=\"{nid}\"]"))
+                            {
+                                let _ = el.set_attribute("data-pinned", "true");
+                                if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
+                                    let _ = he.style().set_property("left", &format!("{nx:.1}px"));
+                                    let _ = he.style().set_property("top", &format!("{ny:.1}px"));
+                                }
+                            }
+                        }
+                        return true;
+                    }
+                    let moved = m::yes(&node_drag["moved"]);
+                    m::set(&drag_store_key, V::Null);
+                    if kind == "pointerup" && moved {
+                        let state = surface_state(surface);
+                        graph_viewport::save_pin(&sys_pin_key(surface, &state), &nid, (nx, ny));
+                        graph_viewport::announce_live(
+                            &format!("{}-live-announce", surface.id_prefix),
+                            &format!("Pinned {nid}"),
+                        );
+                        render_surface(surface, false);
+                    }
+                    return true;
+                }
+            }
+        }
+
         let mut drag = graph_viewport::DragPan::from_json(&m::data(surface.drag_key));
         let drag_active = drag.active;
 
@@ -5516,6 +6107,15 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
             return true;
         }
         let mut state = surface_state(surface);
+        if m::text(&state, "tool") == "path" || m::yes(&state["isolate_active"]) {
+            state["tool"] = json!("");
+            state["path_from"] = json!("");
+            state["path_to"] = json!("");
+            state["isolate_active"] = json!(false);
+            save_surface_state(surface, &state);
+            render_surface(surface, false);
+            return true;
+        }
         if m::yes(&state["expanded"]) {
             state["expanded"] = json!(false);
             save_surface_state(surface, &state);
@@ -5532,6 +6132,92 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
         .as_ref()
         .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
     if !in_input && !event.ctrl_key() && !event.meta_key() && !event.alt_key() {
+        let in_canvas = target.as_ref().is_some_and(|el| {
+            el.closest(&format!("#{}", surface.canvas_id))
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        if in_canvas
+            && matches!(
+                event.key().as_str(),
+                "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End"
+            )
+        {
+            let mut state = surface_state(surface);
+            let doc = filtered_doc(&m::data(surface.map_key), &state);
+            let pins = graph_viewport::load_pins(&sys_pin_key(surface, &state));
+            let layout = layout_system_nodes_with_pins(&doc, m::yes(&state["layers"]), &pins);
+            let rects: Vec<(f64, f64, f64, f64)> =
+                layout.nodes.iter().map(|n| (n.x, n.y, n.w, n.h)).collect();
+            let curr_id = target
+                .as_ref()
+                .and_then(|el| el.closest(".system-map-node[data-n]").ok().flatten())
+                .and_then(|el| el.get_attribute("data-n"))
+                .unwrap_or_else(|| {
+                    let f = m::text(&state, "roving_focus");
+                    if f.is_empty() {
+                        m::text(&state, "focus")
+                    } else {
+                        f
+                    }
+                });
+            let curr_idx = layout
+                .nodes
+                .iter()
+                .position(|n| n.id == curr_id)
+                .unwrap_or(0);
+            let mut connected = Vec::new();
+            for e in m::array(&doc["edges"]) {
+                let f = m::text(&e, "from");
+                let t = m::text(&e, "to");
+                if f == curr_id {
+                    if let Some(i) = layout.nodes.iter().position(|n| n.id == t) {
+                        connected.push(i);
+                    }
+                } else if t == curr_id {
+                    if let Some(i) = layout.nodes.iter().position(|n| n.id == f) {
+                        connected.push(i);
+                    }
+                }
+            }
+            if let Some(next_idx) =
+                graph_viewport::next_roving_node_index(&rects, &connected, curr_idx, &event.key())
+            {
+                if let Some(next_node) = layout.nodes.get(next_idx) {
+                    let next_id = next_node.id.clone();
+                    state["roving_focus"] = json!(next_id);
+                    save_surface_state(surface, &state);
+                    if let Some(canvas) = dom::get(surface.canvas_id) {
+                        if let Ok(nodes) = canvas.query_selector_all(".system-map-node[data-n]") {
+                            for i in 0..nodes.length() {
+                                if let Some(el) = nodes
+                                    .item(i)
+                                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                                {
+                                    let is_next = el.get_attribute("data-n").as_deref()
+                                        == Some(next_id.as_str());
+                                    let _ = el.set_attribute(
+                                        "tabindex",
+                                        if is_next { "0" } else { "-1" },
+                                    );
+                                    if is_next {
+                                        if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
+                                            let _ = he.focus();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    graph_viewport::announce_live(
+                        &format!("{}-live-announce", surface.id_prefix),
+                        &format!("Focused {next_id}"),
+                    );
+                    return true;
+                }
+            }
+        }
         match event.key().as_str() {
             "/" => {
                 if dom::get(surface.find_input_id)
@@ -5552,6 +6238,10 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
             }
             "0" => {
                 fit_surface_camera(surface);
+                return true;
+            }
+            "1" => {
+                reset_surface_camera_100(surface);
                 return true;
             }
             _ => {}
@@ -5624,6 +6314,74 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
                 render_surface(surface, true);
                 return true;
             }
+            if id == format!("{p}-reset-pins") {
+                let state = surface_state(surface);
+                graph_viewport::clear_pins(&sys_pin_key(surface, &state));
+                render_surface(surface, false);
+                graph_viewport::announce_live(&format!("{p}-live-announce"), "Reset pinned layout");
+                return true;
+            }
+            if id == format!("{p}-isolate-toggle") {
+                let mut state = surface_state(surface);
+                let next = !m::yes(&state["isolate_active"]);
+                let seed = m::text(&state, "focus");
+                let depth = dom::value(&format!("{p}-isolate-depth"))
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or(2)
+                    .clamp(1, 3);
+                state["isolate_active"] = json!(next && !seed.is_empty());
+                state["isolate_depth"] = json!(depth);
+                if !seed.is_empty() {
+                    state["isolate_seed"] = json!(seed);
+                }
+                save_surface_state(surface, &state);
+                render_surface(surface, true);
+                graph_viewport::announce_live(
+                    &format!("{p}-live-announce"),
+                    if next {
+                        "Isolated neighborhood"
+                    } else {
+                        "Cleared isolation"
+                    },
+                );
+                return true;
+            }
+            if id == format!("{p}-path-trace") {
+                let from_q = dom::value(&format!("{p}-path-from"));
+                let to_q = dom::value(&format!("{p}-path-to"));
+                let mut state = surface_state(surface);
+                state["tool"] = json!("path");
+                state["path_from"] = json!(from_q.trim());
+                state["path_to"] = json!(to_q.trim());
+                save_surface_state(surface, &state);
+                render_surface(surface, false);
+                graph_viewport::announce_live(&format!("{p}-live-announce"), "Updated path trace");
+                return true;
+            }
+            if id == format!("{p}-path-clear") {
+                let mut state = surface_state(surface);
+                state["tool"] = json!("");
+                state["path_from"] = json!("");
+                state["path_to"] = json!("");
+                save_surface_state(surface, &state);
+                render_surface(surface, false);
+                graph_viewport::announce_live(&format!("{p}-live-announce"), "Cleared path trace");
+                return true;
+            }
+        }
+        if kind == "change" && id == format!("{p}-isolate-depth") {
+            let depth = dom::value(id)
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(2)
+                .clamp(1, 3);
+            let mut state = surface_state(surface);
+            state["isolate_depth"] = json!(depth);
+            state["isolate_active"] = json!(!m::text(&state, "focus").is_empty());
+            save_surface_state(surface, &state);
+            render_surface(surface, true);
+            return true;
         }
         if kind == "input" {
             if id == surface.filter_id {
@@ -6823,5 +7581,43 @@ mod tests {
         let empty_html = bridge_html(SERVICES_SURFACE, "web", "orders", &empty_sem);
         crate::test_support::assert_no_inline_hex_colors(&empty_html);
         assert!(empty_html.contains("No shared routes, events, DI bindings, or tables detected."));
+    }
+
+    #[test]
+    fn system_structure_digest_pins_isolate_and_roving_attrs() {
+        let doc = json!({
+            "nodes": [
+                {"id": "api", "name": "api", "kind": "service"},
+                {"id": "orders", "name": "orders", "kind": "service"},
+                {"id": "db", "name": "db", "kind": "service"}
+            ],
+            "edges": [
+                {"from": "api", "to": "orders", "kind": "http"},
+                {"from": "orders", "to": "db", "kind": "code"}
+            ]
+        });
+        let base_state = json!({"focus": "api"});
+        let sel_state = json!({"focus": "orders"});
+        assert_eq!(
+            system_structure_digest(&doc, &base_state, &BTreeMap::new()),
+            system_structure_digest(&doc, &sel_state, &BTreeMap::new()),
+        );
+
+        let isolated = filtered_doc(
+            &doc,
+            &json!({"isolate_active": true, "isolate_seed": "api", "isolate_depth": 1}),
+        );
+        let kept_ids: Vec<String> = m::array(&isolated["nodes"]).iter().map(node_id).collect();
+        assert_eq!(kept_ids, vec!["api", "orders"]);
+
+        let mut pins = BTreeMap::new();
+        pins.insert("api".to_owned(), (222.0, 111.0));
+        let layout = layout_system_nodes_with_pins(&doc, false, &pins);
+        assert_eq!(layout.nodes[0].x, 222.0);
+        assert_eq!(layout.nodes[0].y, 111.0);
+        let html = render_canvas_html_with_layout(SERVICES_SURFACE, &doc, &base_state, &layout);
+        assert!(html.contains("tabindex=\"0\""));
+        assert!(html.contains("tabindex=\"-1\""));
+        crate::test_support::assert_no_inline_hex_colors(&html);
     }
 }

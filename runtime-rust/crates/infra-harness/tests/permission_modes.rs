@@ -1593,6 +1593,132 @@ done
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_permission_rules_api_lists_enforces_csrf_and_revokes_session_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+    let unused = root.join("unused");
+
+    let cursor = write_fake_host(
+        &root,
+        "fake-cursor-revoke",
+        r#"#!/bin/sh
+prompt=0
+turn=0
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}" ;;
+    *'"method":"session/new"'*|*'"method":"session/load"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"chat-rev-1\"}}" ;;
+    *'"method":"session/prompt"'*)
+      prompt=$id
+      turn=$((turn + 1))
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-rev-1","update":{"sessionUpdate":"tool_call","toolCallId":"r1","title":"touch probe.txt","kind":"execute","status":"pending","rawInput":{"command":"touch probe.txt"}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":201,"method":"session/request_permission","params":{"sessionId":"chat-rev-1","toolCall":{"toolCallId":"r1","title":"touch probe.txt","kind":"execute","rawInput":{"command":"touch probe.txt"}},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}' ;;
+    *'"id":201,'*|*'"id":201}'*)
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-rev-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"r1","status":"completed"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"chat-rev-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}}}'
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$prompt,\"result\":{\"stopReason\":\"end_turn\"}}" ;;
+  esac
+done
+"#
+        .to_string(),
+    );
+
+    let fx = Fixture::with_hosts(
+        dir,
+        [unused.clone(), unused.clone(), cursor],
+        [unused.clone(), unused.clone(), unused],
+        Duration::from_secs(20),
+    )
+    .await;
+
+    let sid = fx.start_task("cursor", "manual", None, "turn1").await;
+    let events = fx
+        .until(&sid, "initial permission ask", |_, events| {
+            !permission_events(events, "pending").is_empty()
+        })
+        .await;
+    let req1 = permission_events(&events, "pending")[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(fx.answer(&sid, &req1, "allow_session").await.0, 200);
+    fx.until(&sid, "turn 1 done", |session, _| finished(session))
+        .await;
+
+    // Inspect active session rules over HTTP.
+    let (status, listed) = fx
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/permission-rules"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let rules = listed["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1, "{listed}");
+    let rule_id = rules[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(rules[0]["provider"], "cursor");
+
+    // DELETE without X-Harness-Token must return 403.
+    let unauth = fx
+        .client
+        .delete(format!(
+            "http://127.0.0.1:{}/api/sessions/{sid}/permission-rules/{rule_id}",
+            fx.port
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status().as_u16(), 403);
+
+    // DELETE with token revokes the remembered rule cleanly.
+    let (del_status, del_body) = fx
+        .http(
+            Method::DELETE,
+            &format!("/api/sessions/{sid}/permission-rules/{rule_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(del_status, 200);
+    assert_eq!(del_body["ok"], true);
+    assert_eq!(del_body["removed"], 1);
+    assert_eq!(del_body["rules"], json!([]));
+
+    // Sending identical command on Turn 2 must prompt again rather than auto-approving.
+    let turn2_start = fx.events(&sid).len();
+    fx.send(&sid, "manual", "turn2").await;
+    let events = fx
+        .until(&sid, "re-prompt after revocation", |_, events| {
+            !permission_events(&events[turn2_start..], "pending").is_empty()
+        })
+        .await;
+    let req2 = permission_events(&events[turn2_start..], "pending")[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(fx.answer(&sid, &req2, "allow").await.0, 200);
+    fx.until(&sid, "turn 2 done", |session, events| {
+        finished(session)
+            && events
+                .iter()
+                .filter(|event| event["kind"] == "result")
+                .count()
+                >= 2
+    })
+    .await;
+    assert!(completed(&fx.store.get(&sid).unwrap()));
+    assert!(
+        permission_events(&fx.events(&sid)[turn2_start..], "allowed_session").is_empty(),
+        "revoked rule must not auto-approve"
+    );
+
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_structured_questions_route_answers_for_claude_codex_and_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let root = infra_core::fs::canonicalize(dir.path()).unwrap();

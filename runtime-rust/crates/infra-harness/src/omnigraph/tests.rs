@@ -2184,17 +2184,9 @@ pub(crate) async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<(
     (base_url, handle)
 }
 
-/// The fake Omnigraph and its state, for a test that inspects what it served.
-async fn spawn_mock_omnigraph_with_state() -> (
-    String,
-    tokio::task::JoinHandle<()>,
-    Arc<Mutex<MockGraphState>>,
-) {
-    let state = Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID)));
-    let srv = MockServer {
-        state: state.clone(),
-    };
-    let app = Router::new()
+fn mock_router(state: Arc<Mutex<MockGraphState>>) -> Router {
+    let srv = MockServer { state };
+    Router::new()
         .route("/healthz", get(mock_healthz))
         .route("/readyz", get(mock_readyz))
         .route("/graphs", get(mock_graphs))
@@ -2233,7 +2225,17 @@ async fn spawn_mock_omnigraph_with_state() -> (
         .route("/graphs/{graph_id}/export", post(mock_export))
         .route("/graphs/{graph_id}/load", post(mock_load_json))
         .route("/graphs/{graph_id}/load/ndjson", post(mock_load_ndjson))
-        .with_state(srv);
+        .with_state(srv)
+}
+
+/// The fake Omnigraph and its state, for a test that inspects what it served.
+async fn spawn_mock_omnigraph_with_state() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<MockGraphState>>,
+) {
+    let state = Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID)));
+    let app = mock_router(state.clone());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -2781,6 +2783,10 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     assert_eq!(share_json["target_branch"], "session/target-sessi");
 
     // 6b. Publish with session provenance and mixed `relates_to` formats (string ID, `rel:id`, and object)
+    let fallback_target_id = out["published_atom_ids"][0]
+        .as_str()
+        .expect("published session atom id")
+        .to_string();
     let pub_rel = domain
         .execute(
             "omnigraph.publish",
@@ -2797,7 +2803,7 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
                     "relates_to": [
                         published_atom_id,
                         format!("refines:{published_atom_id}"),
-                        { "target_id": "atom-relates-fallback", "relation": "relates_to" },
+                        { "target_id": fallback_target_id, "relation": "relates_to" },
                         { "target_id": published_atom_id, "relation": "depends_on" }
                     ]
                 }
@@ -2851,7 +2857,7 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|e| e["to"] == "atom-relates-fallback" && e["relation"] == "supports")
+            .any(|e| e["to"] == fallback_target_id && e["relation"] == "supports")
     );
     assert!(!graph_json["branches"].as_array().unwrap().is_empty());
     assert_eq!(
@@ -6709,4 +6715,276 @@ async fn real_omnigraph_binary_graph_view_exposes_symbols_and_lifted_limit() {
     assert!(view["telemetry"]["symbol_count"].as_u64().unwrap_or(0) >= 2);
 
     mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn graph_view_scopes_subqueries_batches_sessions_and_requires_both_relates_to_endpoints() {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, _dir) = symbol_project(state_dir.path());
+    let sess = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "codex",
+                "workflow": "native",
+                "title": "Scoped Graph Session"
+            }),
+            "check omnigraph scoping",
+            &[],
+        )
+        .unwrap();
+    let sid = sess["id"].as_str().unwrap().to_string();
+    store
+        .patch(
+            &sid,
+            &json!({
+                "omnigraph": {
+                    "enabled": true,
+                    "branch": "main",
+                    "shared_space": "space-alpha",
+                    "linked_session_ids": ["peer-1"]
+                }
+            }),
+        )
+        .unwrap();
+    let other_sess = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "codex",
+                "workflow": "native",
+                "title": "Other Session"
+            }),
+            "unrelated work",
+            &[],
+        )
+        .unwrap();
+    let other_sid = other_sess["id"].as_str().unwrap().to_string();
+    store
+        .patch(
+            &other_sid,
+            &json!({
+                "omnigraph": {
+                    "enabled": true,
+                    "branch": "main"
+                }
+            }),
+        )
+        .unwrap();
+
+    let (_, _, mock) = connected_mock().await;
+    let recorded_queries: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let app = mock_router(mock).layer(axum::middleware::from_fn({
+        let recorded_queries = Arc::clone(&recorded_queries);
+        move |req: Request<Body>, next: axum::middleware::Next| {
+            let recorded_queries = Arc::clone(&recorded_queries);
+            async move {
+                let (parts, body) = req.into_parts();
+                let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                if parts.uri.path().ends_with("/query")
+                    && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+                {
+                    let name = v["query_name"]
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            v["query"]
+                                .as_str()
+                                .and_then(|q| q.split_whitespace().nth(1))
+                                .and_then(|sig| sig.split('(').next())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        recorded_queries.lock().unwrap().push(name);
+                    }
+                }
+                next.run(Request::from_parts(parts, Body::from(bytes)))
+                    .await
+            }
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.save_config(OmnigraphConfig {
+        mode: OmnigraphMode::External,
+        endpoint: Some(format!("http://{addr}")),
+        token: Some("tok-harness".into()),
+        graph_id: schema::HARNESS_GRAPH_ID.into(),
+        actor_id: "harness".into(),
+        ..OmnigraphConfig::default()
+    })
+    .await
+    .unwrap();
+
+    mgr.prepare_session_context(&store.get(&sid).unwrap(), state_dir.path())
+        .await
+        .unwrap();
+    mgr.prepare_session_context(&store.get(&other_sid).unwrap(), state_dir.path())
+        .await
+        .unwrap();
+
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "session_id": sid,
+        "atom_id": "atom-dec-1",
+        "kind": "decision",
+        "title": "Decision touching TokenGuard::check",
+        "body": "Call TokenGuard::check on entry.",
+        "files": ["src/Auth/TokenGuard.php"],
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-warn-2",
+        "kind": "warning",
+        "title": "Warning touching backoff_delay",
+        "body": "Respect backoff_delay in retry.",
+        "files": ["src/retry.rs"],
+        "relates_to": [{ "target_id": "atom-dec-1", "relation": "supports" }]
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "session_id": sid,
+        "atom_id": "atom-dec-2",
+        "kind": "decision",
+        "title": "Second decision referencing first decision",
+        "body": "Builds on atom-dec-1 without new files.",
+        "relates_to": [
+            { "target_id": "atom-dec-1", "relation": "depends_on" },
+            { "target_id": "atom-warn-2", "relation": "refines" },
+            { "target_id": "nonexistent-atom-99", "relation": "supports" }
+        ]
+    }))
+    .await
+    .unwrap();
+
+    // 1. Filtering to kind=question returns 0 atoms and skips edge/file/symbol subqueries.
+    recorded_queries.lock().unwrap().clear();
+    let empty_kind = mgr
+        .graph_view_json(
+            &project_id,
+            Some("main"),
+            None,
+            Some("question"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty_kind["total_atoms"], 0);
+    assert_eq!(empty_kind["files"], json!([]));
+    assert_eq!(empty_kind["symbols"], json!([]));
+    assert!(
+        empty_kind["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] == "session_follows"),
+        "{}",
+        empty_kind["edges"]
+    );
+    let empty_queries = recorded_queries.lock().unwrap().clone();
+    for skipped in [
+        "list_files",
+        "list_symbols",
+        "list_file_edges",
+        "list_symbol_edges",
+        "list_atom_relations",
+        "list_published_edges",
+        "list_consumed_edges",
+    ] {
+        assert!(
+            !empty_queries.iter().any(|q| q == skipped),
+            "expected {skipped} skipped when 0 atoms matched: {empty_queries:?}"
+        );
+    }
+
+    // 2. Filtering to kind=decision scopes FileRef, skips list_symbols, keeps only relates_to with BOTH endpoints kept, and attaches batched session metadata.
+    recorded_queries.lock().unwrap().clear();
+    let decisions = mgr
+        .graph_view_json(
+            &project_id,
+            Some("main"),
+            None,
+            Some("decision"),
+            None,
+            Some(&sid),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decisions["total_atoms"], 2);
+    let scoped_queries = recorded_queries.lock().unwrap().clone();
+    assert!(
+        !scoped_queries.iter().any(|q| q == "list_symbols"),
+        "expected list_symbols skipped under scoped filter: {scoped_queries:?}"
+    );
+    let file_paths: Vec<&str> = decisions["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect();
+    assert_eq!(file_paths, vec!["src/Auth/TokenGuard.php"]);
+    let sym_names: Vec<&str> = decisions["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert_eq!(sym_names, vec!["TokenGuard", "check"]);
+
+    let rel_edges: Vec<&Value> = decisions["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "relates_to")
+        .collect();
+    assert!(
+        rel_edges
+            .iter()
+            .any(|e| e["from"] == "atom-dec-2" && e["to"] == "atom-dec-1"),
+        "kept edge missing: {rel_edges:?}"
+    );
+    assert!(
+        !rel_edges
+            .iter()
+            .any(|e| e["to"] == "atom-warn-2" || e["from"] == "atom-warn-2"),
+        "half-filtered relates_to edge leaked: {rel_edges:?}"
+    );
+    assert!(
+        !rel_edges.iter().any(|e| e["to"] == "nonexistent-atom-99"),
+        "dangling relates_to edge leaked: {rel_edges:?}"
+    );
+
+    let session_row = decisions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == sid)
+        .expect("matching session present");
+    assert!(
+        !decisions["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["session_id"] == other_sid),
+        "unrelated session leaked under session_id filter: {}",
+        decisions["sessions"]
+    );
+    assert_eq!(session_row["shared_space"], "space-alpha");
+    assert_eq!(session_row["linked_session_ids"], json!(["peer-1"]));
 }

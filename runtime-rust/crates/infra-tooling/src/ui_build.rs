@@ -13,6 +13,7 @@ use std::{
 type Image = (u64, u64, u32, u64, u64, i128, i128);
 type DirectoryImages = BTreeMap<String, (u64, u64, u32)>;
 const TARGET: &str = "wasm32-unknown-unknown";
+const CARGO_PROFILE: &str = "wasm-ui";
 const UI: &str = "runtime-rust/crates/infra-ui";
 const JS: &str = "runtime-rust/target/wasm-ui/infra_ui.js";
 const WASM: &str = "runtime-rust/target/wasm-ui/infra_ui_bg.wasm";
@@ -134,24 +135,42 @@ impl Tool {
         Ok(tool)
     }
     fn find(root: &Path, request: &Value, key: &str, default: &str) -> Result<Self> {
-        let requested = match request.get(key) {
-            None | Some(Value::Null) => default,
-            Some(value) => value
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    RuntimeError::invalid(format!("{key} must name one native executable"))
-                })?,
-        };
-        let requested = Path::new(requested);
-        if requested.is_absolute() || requested.components().count() > 1 {
-            return Self::open(&root.join(requested));
-        }
-        let search = std::env::var_os("PATH").ok_or_else(|| {
+        Self::find_optional(root, request, key, default)?.ok_or_else(|| {
             RuntimeError::unavailable(format!(
                 "Native {default} executable is unavailable; provide --{key}"
             ))
-        })?;
+        })
+    }
+    fn find_optional(
+        root: &Path,
+        request: &Value,
+        key: &str,
+        default: &str,
+    ) -> Result<Option<Self>> {
+        let explicit = match request.get(key) {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        RuntimeError::invalid(format!("{key} must name one native executable"))
+                    })?,
+            ),
+        };
+        let requested = Path::new(explicit.unwrap_or(default));
+        if requested.is_absolute() || requested.components().count() > 1 {
+            return Self::open(&root.join(requested)).map(Some);
+        }
+        let Some(search) = std::env::var_os("PATH") else {
+            return if explicit.is_some() {
+                Err(RuntimeError::unavailable(format!(
+                    "Native {default} executable is unavailable; provide --{key}"
+                )))
+            } else {
+                Ok(None)
+            };
+        };
         #[cfg(windows)]
         let names = if requested.extension().is_some() {
             vec![requested.as_os_str().to_os_string()]
@@ -170,13 +189,16 @@ impl Tool {
             for name in &names {
                 let candidate = directory.join(name);
                 if candidate.is_file() {
-                    return Self::open(&candidate);
+                    return Self::open(&candidate).map(Some);
                 }
             }
         }
-        Err(RuntimeError::unavailable(format!(
-            "Native {default} executable is unavailable; provide --{key}"
-        )))
+        if explicit.is_some() {
+            return Err(RuntimeError::unavailable(format!(
+                "Native {default} executable is unavailable; provide --{key}"
+            )));
+        }
+        Ok(None)
     }
     fn check(&self) -> Result<()> {
         self.files.check()?;
@@ -605,6 +627,7 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
     let version = wasm_bindgen_version(&source)?;
     let mut cargo = Tool::find(&root, request, "cargo", "cargo")?;
     let mut bindgen = Tool::find(&root, request, "wasm_bindgen", "wasm-bindgen")?;
+    let mut wasm_opt = Tool::find_optional(&root, request, "wasm_opt", "wasm-opt")?;
     let mut environment = BTreeMap::<OsString, Option<OsString>>::new();
     environment.insert("CARGO_TARGET_DIR".into(), None);
     for key in [
@@ -646,7 +669,8 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
             OsString::from("infra-ui"),
             OsString::from("--target"),
             OsString::from(TARGET),
-            OsString::from("--release"),
+            OsString::from("--profile"),
+            OsString::from(CARGO_PROFILE),
             OsString::from("--locked"),
             OsString::from("--target-dir"),
             target_directory.clone().into_os_string(),
@@ -665,7 +689,7 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
         )?;
         source.verify()?;
         stage.verify()?;
-        let compiled = format!("cargo-target/{TARGET}/release/infra_ui.wasm");
+        let compiled = format!("cargo-target/{TARGET}/{CARGO_PROFILE}/infra_ui.wasm");
         let (raw, _) = stage
             .files
             .capture_source(&compiled, WASM_LIMIT)?
@@ -743,6 +767,46 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
                 "Generated Wasm ABI pair changed during capture",
             ));
         }
+        let mut wasm = wasm;
+        let mut wasm_opt_applied = false;
+        let wasm_opt_selected = wasm_opt.as_ref().map(|tool| tool.selected.clone());
+        if let Some(optimizer) = wasm_opt.as_mut() {
+            let optimized_rel = "bindgen/infra_ui_bg.opt.wasm";
+            let opt_args = vec![
+                OsString::from("-Oz"),
+                OsString::from("-o"),
+                stage.path.join(optimized_rel).into_os_string(),
+                stage.path.join("bindgen/infra_ui_bg.wasm").into_os_string(),
+            ];
+            optimizer.run(
+                &opt_args,
+                &root,
+                deadline,
+                &environment,
+                "Wasm size optimization (wasm-opt -Oz)",
+            )?;
+            source.verify()?;
+            stage.verify()?;
+            let (opt_wasm, opt_image) = stage
+                .files
+                .capture_source(optimized_rel, WASM_LIMIT)?
+                .ok_or_else(|| {
+                    RuntimeError::unavailable("wasm-opt -Oz produced no output module")
+                })?;
+            if opt_wasm.get(..8) != Some(&b"\0asm\x01\0\0\0"[..]) {
+                return Err(RuntimeError::invalid(
+                    "wasm-opt output is not a Wasm version 1 module",
+                ));
+            }
+            if stage.files.image_identity(optimized_rel)? != Some(opt_image) {
+                return Err(RuntimeError::conflict(
+                    "Optimized Wasm module changed during capture",
+                ));
+            }
+            optimizer.verify()?;
+            wasm = opt_wasm;
+            wasm_opt_applied = true;
+        }
         let js_hash = common::sha256(&javascript);
         let wasm_hash = common::sha256(&wasm);
         // The source digest lets a Harness update tell whether this pair was
@@ -757,7 +821,7 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
         source.verify()?;
         stage.verify()?;
         Ok(
-            json!({"ok":true,"target":TARGET,"profile":"release","offline":offline,"jobs":jobs,"wasm_bindgen_version":version,"cargo":cargo.selected,"wasm_bindgen":bindgen.selected,"source_sha256":source.digest(),"source_files":source.images.len(),"artifacts":[{"path":JS,"bytes":javascript.len(),"sha256":js_hash},{"path":WASM,"bytes":wasm.len(),"sha256":wasm_hash},{"path":MANIFEST,"bytes":manifest.len(),"sha256":common::sha256(&manifest)}],"manifest_published_last":true,"elapsed_seconds":seconds as f64-remaining(deadline).map(|remaining|remaining.as_secs_f64()).unwrap_or(0.)}),
+            json!({"ok":true,"target":TARGET,"profile":CARGO_PROFILE,"wasm_opt_applied":wasm_opt_applied,"wasm_opt":wasm_opt_selected,"offline":offline,"jobs":jobs,"wasm_bindgen_version":version,"cargo":cargo.selected,"wasm_bindgen":bindgen.selected,"source_sha256":source.digest(),"source_files":source.images.len(),"artifacts":[{"path":JS,"bytes":javascript.len(),"sha256":js_hash},{"path":WASM,"bytes":wasm.len(),"sha256":wasm_hash},{"path":MANIFEST,"bytes":manifest.len(),"sha256":common::sha256(&manifest)}],"manifest_published_last":true,"elapsed_seconds":seconds as f64-remaining(deadline).map(|remaining|remaining.as_secs_f64()).unwrap_or(0.)}),
         )
     })();
     let cleanup = stage.cleanup();
@@ -771,5 +835,40 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
             Ok(report)
         }
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_ui_profile_and_optional_wasm_opt_lookup() {
+        assert_eq!(CARGO_PROFILE, "wasm-ui");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("workspace root");
+        let cargo_toml = std::fs::read_to_string(root.join("runtime-rust/Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("[profile.wasm-ui]"),
+            "workspace Cargo.toml must define [profile.wasm-ui]"
+        );
+        let missing = Tool::find_optional(
+            &root,
+            &json!({}),
+            "wasm_opt",
+            "definitely-missing-wasm-opt-binary-17d0858c",
+        )
+        .unwrap();
+        assert!(missing.is_none());
+
+        let explicit_missing = Tool::find_optional(
+            &root,
+            &json!({"wasm_opt": "/nonexistent/wasm-opt-bin"}),
+            "wasm_opt",
+            "wasm-opt",
+        );
+        assert!(explicit_missing.is_err());
     }
 }

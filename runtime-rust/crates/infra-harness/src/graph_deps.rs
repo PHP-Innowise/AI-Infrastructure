@@ -1,6 +1,6 @@
 //! Pure static AST-backed source dependency extraction, declaration diffing, re-export propagation, and reference matching.
 use crate::{
-    graph_ast::{AstFileExtraction, AstRef, parse_file_ir},
+    graph_ast::{AstFileExtraction, AstRef, GRAPH_MANIFEST_FILES, parse_file_ir},
     graph_crates::CratePackageMap,
     graph_live::{
         CreatedEntity, ExtractedDecl, Language, clean_rel_key, detect_language,
@@ -9,7 +9,14 @@ use crate::{
     graph_manifests::{ManifestIndex, join_rel},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::UNIX_EPOCH,
+};
 
 const PHP_EXTS: &[&str] = &["php", "phtml", "inc"];
 const RUST_EXTS: &[&str] = &["rs"];
@@ -24,6 +31,131 @@ const SWIFT_EXTS: &[&str] = &["swift"];
 const SCALA_EXTS: &[&str] = &["scala", "sc"];
 const MAX_REEXPORT_HOPS: usize = 8;
 const MAX_REEXPORT_VISITS: usize = 64;
+const MAX_CACHED_MANIFEST_ROOTS: usize = 16;
+const MAX_MANIFEST_CACHE_BYTES: u64 = 512 * 1024;
+
+#[derive(Clone)]
+struct CachedResolutionBundles {
+    stamp: String,
+    known_len: usize,
+    manifests: Arc<ManifestIndex>,
+    crate_map: Arc<CratePackageMap>,
+}
+
+fn manifest_cache() -> &'static Mutex<Vec<(PathBuf, CachedResolutionBundles)>> {
+    static CACHE: OnceLock<Mutex<Vec<(PathBuf, CachedResolutionBundles)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn manifest_stamp_for_root(canon_root: &Path, known_files: &BTreeSet<String>) -> String {
+    let mut parts = Vec::new();
+    if let Ok(entries) = fs::read_dir(canon_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if !GRAPH_MANIFEST_FILES.contains(&name_str.to_ascii_lowercase().as_str()) {
+                continue;
+            }
+            if let Ok(meta) = fs::symlink_metadata(entry.path())
+                && !meta.file_type().is_symlink()
+                && meta.is_file()
+            {
+                let nanos = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0u128, |d| d.as_nanos());
+                parts.push(format!("{name_str}:{}:{nanos}", meta.len()));
+            }
+        }
+    }
+    for rel in known_files {
+        let leaf = rel.rsplit('/').next().unwrap_or(rel);
+        if GRAPH_MANIFEST_FILES.contains(&leaf.to_ascii_lowercase().as_str())
+            && rel.contains('/')
+            && let Ok(meta) = fs::symlink_metadata(canon_root.join(rel))
+            && !meta.file_type().is_symlink()
+            && meta.is_file()
+        {
+            let nanos = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0u128, |d| d.as_nanos());
+            parts.push(format!("{rel}:{}:{nanos}", meta.len()));
+        }
+    }
+    parts.sort();
+    parts.dedup();
+    parts.join("|")
+}
+
+/// Returns cached `(ManifestIndex, CratePackageMap)` keyed by `(canonical_root, manifest_stamp, known_len)`.
+pub(crate) fn cached_manifests_for_root(
+    root: &Path,
+    known_files: &BTreeSet<String>,
+) -> (Arc<ManifestIndex>, Arc<CratePackageMap>) {
+    if root.as_os_str().is_empty() || !root.is_dir() {
+        return (
+            Arc::new(ManifestIndex::default()),
+            Arc::new(CratePackageMap::default()),
+        );
+    }
+    let canon_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let stamp = manifest_stamp_for_root(&canon_root, known_files);
+    let known_len = known_files.len();
+
+    if let Ok(mut guard) = manifest_cache().lock()
+        && let Some(pos) = guard.iter().position(|(p, entry)| {
+            *p == canon_root && entry.stamp == stamp && entry.known_len == known_len
+        })
+    {
+        let item = guard.remove(pos);
+        let res = (item.1.manifests.clone(), item.1.crate_map.clone());
+        guard.push(item);
+        return res;
+    }
+
+    let manifests = Arc::new(ManifestIndex::from_root(&canon_root));
+    let known_vec: Vec<String> = known_files.iter().cloned().collect();
+    let crate_map = Arc::new(CratePackageMap::from_reader(&known_vec, &|rel| {
+        let path = canon_root.join(rel);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_MANIFEST_CACHE_BYTES
+        {
+            return None;
+        }
+        let mut buf = Vec::new();
+        let file = fs::File::open(&path).ok()?;
+        file.take(MAX_MANIFEST_CACHE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .ok()?;
+        if buf.len() as u64 > MAX_MANIFEST_CACHE_BYTES {
+            return None;
+        }
+        String::from_utf8(buf).ok()
+    }));
+
+    if let Ok(mut guard) = manifest_cache().lock() {
+        guard.retain(|(p, _)| *p != canon_root);
+        if guard.len() >= MAX_CACHED_MANIFEST_ROOTS {
+            guard.remove(0);
+        }
+        guard.push((
+            canon_root,
+            CachedResolutionBundles {
+                stamp,
+                known_len,
+                manifests: manifests.clone(),
+                crate_map: crate_map.clone(),
+            },
+        ));
+    }
+
+    (manifests, crate_map)
+}
 
 fn is_false(v: &bool) -> bool {
     !*v
@@ -596,6 +728,7 @@ impl ReexportIndex {
 }
 
 /// Extracts imports, inheritance, includes, and symbol references from `source`, resolving against `known_files`.
+#[cfg(test)]
 pub(crate) fn extract_file_deps(
     rel_path: &str,
     source: &str,
@@ -606,6 +739,7 @@ pub(crate) fn extract_file_deps(
 
 /// Extracts dependencies using tree-sitter AST, optional workspace manifests (`composer.json`,
 /// `tsconfig.json`, `package.json`, `pyproject.toml`, `go.mod`), and optional re-export propagation.
+#[cfg(test)]
 pub(crate) fn extract_file_deps_with_manifests(
     rel_path: &str,
     source: &str,
@@ -636,48 +770,103 @@ pub(crate) fn extract_file_deps_with_context(
     if rel.is_empty() || source.trim().is_empty() {
         return Vec::new();
     }
-    let Some(lang) = detect_language(&rel) else {
+    let Some(ir) = parse_file_ir(&rel, source) else {
         return Vec::new();
     };
-    let Some(ir) = parse_file_ir(&rel, source) else {
+    extract_file_deps_from_ir(
+        &rel,
+        &ir,
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+    )
+}
+
+/// Resolves dependencies directly from an already-parsed `AstFileExtraction` without re-parsing.
+pub(crate) fn extract_file_deps_from_ir(
+    rel_path: &str,
+    ir: &AstFileExtraction,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Vec<DepRef> {
+    let rel = clean_rel_key(rel_path);
+    if rel.is_empty() {
+        return Vec::new();
+    }
+    let Some(lang) = detect_language(&rel) else {
         return Vec::new();
     };
     let lookup = KnownLookup::new(known_files);
     let mut acc = DepAccumulator::new(&rel, known_files);
 
     match lang {
-        Language::Php => resolve_php_ir(&rel, &ir, &lookup, manifests_opt, &mut acc),
+        Language::Php => resolve_php_ir(&rel, ir, &lookup, manifests_opt, &mut acc),
         Language::Rust => {
-            resolve_rust_ir(&rel, &ir, &lookup, reexports_opt, crate_map_opt, &mut acc)
+            resolve_rust_ir(&rel, ir, &lookup, reexports_opt, crate_map_opt, &mut acc)
         }
         Language::TsJs => {
-            resolve_ts_js_ir(&rel, &ir, &lookup, manifests_opt, reexports_opt, &mut acc)
+            resolve_ts_js_ir(&rel, ir, &lookup, manifests_opt, reexports_opt, &mut acc)
         }
-        Language::Python => resolve_python_ir(&rel, &ir, &lookup, manifests_opt, &mut acc),
-        Language::Go => resolve_go_ir(&rel, &ir, &lookup, manifests_opt, &mut acc),
+        Language::Python => resolve_python_ir(&rel, ir, &lookup, manifests_opt, &mut acc),
+        Language::Go => resolve_go_ir(&rel, ir, &lookup, manifests_opt, &mut acc),
         Language::Java | Language::Kotlin | Language::Scala => {
-            resolve_jvm_ir(&rel, &ir, lang, &lookup, &mut acc)
+            resolve_jvm_ir(&rel, ir, lang, &lookup, &mut acc)
         }
-        Language::CSharp => resolve_csharp_ir(&rel, &ir, &lookup, &mut acc),
-        Language::Ruby => resolve_ruby_ir(&rel, &ir, &lookup, &mut acc),
-        Language::Swift => resolve_swift_ir(&rel, &ir, &lookup, &mut acc),
+        Language::CSharp => resolve_csharp_ir(&rel, ir, &lookup, &mut acc),
+        Language::Ruby => resolve_ruby_ir(&rel, ir, &lookup, &mut acc),
+        Language::Swift => resolve_swift_ir(&rel, ir, &lookup, &mut acc),
     }
 
     acc.into_sorted_vec()
 }
 
-/// Compares dependencies before and after an edit by canonical `(target, kind)`.
+/// Compares dependencies before and after an edit using optional manifest/reexport/crate indices.
+#[cfg(test)]
 pub(crate) fn diff_file_deps(
     rel_path: &str,
     before: Option<&str>,
     after: Option<&str>,
     known_files: &BTreeSet<String>,
 ) -> DepDiff {
+    diff_file_deps_with_context(rel_path, before, after, known_files, None, None, None)
+}
+
+/// Context-aware version of `diff_file_deps` sharing prebuilt `ManifestIndex`/`ReexportIndex`/`CratePackageMap`.
+pub(crate) fn diff_file_deps_with_context(
+    rel_path: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> DepDiff {
     let before_deps = before
-        .map(|src| extract_file_deps(rel_path, src, known_files))
+        .map(|src| {
+            extract_file_deps_with_context(
+                rel_path,
+                src,
+                known_files,
+                manifests_opt,
+                reexports_opt,
+                crate_map_opt,
+            )
+        })
         .unwrap_or_default();
     let after_deps = after
-        .map(|src| extract_file_deps(rel_path, src, known_files))
+        .map(|src| {
+            extract_file_deps_with_context(
+                rel_path,
+                src,
+                known_files,
+                manifests_opt,
+                reexports_opt,
+                crate_map_opt,
+            )
+        })
         .unwrap_or_default();
 
     let mut before_map: BTreeMap<(String, String), DepRef> = BTreeMap::new();
@@ -722,12 +911,37 @@ pub(crate) fn diff_file_deps(
 }
 
 /// Finds which `target_symbols` (or file/module stem) `caller_source` references in `target_path`.
+#[cfg(test)]
 pub(crate) fn find_matching_references(
     caller_path: &str,
     caller_source: &str,
     target_path: &str,
     target_symbols: &[String],
     known_files: &BTreeSet<String>,
+) -> Vec<String> {
+    find_matching_references_with_context(
+        caller_path,
+        caller_source,
+        target_path,
+        target_symbols,
+        known_files,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Context-aware version of `find_matching_references` reusing cached manifests/reexports/crates.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_matching_references_with_context(
+    caller_path: &str,
+    caller_source: &str,
+    target_path: &str,
+    target_symbols: &[String],
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
 ) -> Vec<String> {
     let caller = clean_rel_key(caller_path);
     let target = clean_rel_key(target_path);
@@ -740,7 +954,14 @@ pub(crate) fn find_matching_references(
     if !known_files.contains(&target) {
         augmented_known.insert(target.clone());
     }
-    let deps = extract_file_deps(&caller, caller_source, &augmented_known);
+    let deps = extract_file_deps_with_context(
+        &caller,
+        caller_source,
+        &augmented_known,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+    );
     let mut matched_deps = Vec::new();
     for dep in &deps {
         if dep.resolved && clean_rel_key(&dep.target) == target {
@@ -898,6 +1119,30 @@ pub(crate) fn find_matching_member_references(
     target_members: &[DeclaredMember],
     known_files: &BTreeSet<String>,
 ) -> Vec<DepMemberRef> {
+    find_matching_member_references_with_context(
+        caller_path,
+        caller_source,
+        target_path,
+        target_members,
+        known_files,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Context-aware version of `find_matching_member_references`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_matching_member_references_with_context(
+    caller_path: &str,
+    caller_source: &str,
+    target_path: &str,
+    target_members: &[DeclaredMember],
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Vec<DepMemberRef> {
     let caller = clean_rel_key(caller_path);
     let target = clean_rel_key(target_path);
     if caller.is_empty() || target.is_empty() || caller == target || caller_source.trim().is_empty()
@@ -909,7 +1154,14 @@ pub(crate) fn find_matching_member_references(
     if !known_files.contains(&target) {
         augmented_known.insert(target.clone());
     }
-    let deps = extract_file_deps(&caller, caller_source, &augmented_known);
+    let deps = extract_file_deps_with_context(
+        &caller,
+        caller_source,
+        &augmented_known,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+    );
     let mut matched_deps = Vec::new();
     for dep in &deps {
         if dep.resolved && clean_rel_key(&dep.target) == target {

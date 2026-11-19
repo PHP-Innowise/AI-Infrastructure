@@ -7,6 +7,7 @@
 //! or the run ends.
 use crate::{HarnessError, Result, sessions::Event};
 use infra_host::permission::{Answer, Approvals, Decision, PermissionAsk, PermissionMode};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -54,12 +55,48 @@ pub fn mode(session: &Value) -> Option<PermissionMode> {
         .and_then(PermissionMode::parse)
 }
 
+/// Callback notified after pending permission state changes for a session.
+pub type ChangeNotifier = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Inspectable metadata for one remembered session permission rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionRuleInfo {
+    pub id: String,
+    pub rule_key: String,
+    pub rule_summary: Option<String>,
+    pub tool: String,
+    pub provider: String,
+    pub created_at: String,
+}
+
+/// Stable URL-safe identifier for one session rule key.
+pub fn rule_id_for_key(rule_key: &str) -> String {
+    crate::store::sha(rule_key.as_bytes())[..16].to_owned()
+}
+
+fn timeout_metadata(timeout: Option<Duration>) -> (Option<u64>, Option<String>) {
+    let Some(ttl) = timeout else {
+        return (None, None);
+    };
+    let timeout_seconds = ttl
+        .as_secs()
+        .saturating_add(u64::from(ttl.subsec_nanos() > 0));
+    let delta = chrono::TimeDelta::from_std(ttl).unwrap_or_else(|_| {
+        chrono::TimeDelta::seconds(i64::try_from(timeout_seconds).unwrap_or(86_400))
+    });
+    let expires_at =
+        (chrono::Utc::now() + delta).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    (Some(timeout_seconds), Some(expires_at))
+}
+
 struct Pending {
     nonce: u64,
     sender: tokio::sync::oneshot::Sender<Answer>,
     emit: Event,
     ask: PermissionAsk,
     timeout_task: Option<tokio::task::AbortHandle>,
+    timeout_seconds: Option<u64>,
+    expires_at: Option<String>,
 }
 impl Pending {
     fn cancel_timeout(&mut self) {
@@ -73,6 +110,8 @@ impl Pending {
 pub struct PermissionDesk {
     pending: Mutex<BTreeMap<(String, String), Pending>>,
     session_rules: Mutex<BTreeMap<String, BTreeSet<String>>>,
+    session_rule_meta: Mutex<BTreeMap<String, BTreeMap<String, SessionRuleInfo>>>,
+    change_notifier: Mutex<Option<ChangeNotifier>>,
     timeout: Option<Duration>,
     next_nonce: AtomicU64,
 }
@@ -92,8 +131,27 @@ impl PermissionDesk {
         Self {
             pending: Mutex::new(BTreeMap::new()),
             session_rules: Mutex::new(BTreeMap::new()),
+            session_rule_meta: Mutex::new(BTreeMap::new()),
+            change_notifier: Mutex::new(None),
             timeout,
             next_nonce: AtomicU64::new(1),
+        }
+    }
+    /// Registers a callback invoked after releasing locks whenever a session's
+    /// pending permissions change.
+    pub fn set_change_notifier(&self, notifier: ChangeNotifier) {
+        if let Ok(mut slot) = self.change_notifier.lock() {
+            *slot = Some(notifier);
+        }
+    }
+    fn notify_changed(&self, session: &str) {
+        let notifier = self
+            .change_notifier
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(cb) = notifier {
+            cb(session);
         }
     }
     /// Where one run of a session puts its requests; its events go to `emit`.
@@ -137,7 +195,7 @@ impl PermissionDesk {
         if answer.decision == Decision::AllowSession
             && let Some(rule_key) = request.ask.session_rule_key.as_deref()
         {
-            self.remember_session_rule(session, rule_key)?;
+            self.remember_session_rule_with_ask(session, rule_key, Some(&request.ask))?;
         }
         let state = answer.decision.state();
         let mut event = request.ask.resolved_event(state, "person");
@@ -147,6 +205,7 @@ impl PermissionDesk {
             event["answers"] = answers.clone();
         }
         (request.emit)(event)?;
+        self.notify_changed(session);
         // The host may have stopped while the person decided.
         let delivered = request.sender.send(answer).is_ok();
         Ok(json!({"id": id, "state": state, "delivered": delivered}))
@@ -157,20 +216,121 @@ impl PermissionDesk {
             .get(session)
             .is_some_and(|session_set| session_set.contains(rule_key)))
     }
+    #[cfg(test)]
     fn remember_session_rule(&self, session: &str, rule_key: &str) -> Result<()> {
+        self.remember_session_rule_with_ask(session, rule_key, None)
+    }
+    fn remember_session_rule_with_ask(
+        &self,
+        session: &str,
+        rule_key: &str,
+        ask: Option<&PermissionAsk>,
+    ) -> Result<()> {
         if rule_key.is_empty() || rule_key.len() > MAX_SESSION_RULE_KEY_BYTES {
             return Ok(());
         }
         let mut all_rules = lock(&self.session_rules)?;
-        if !all_rules.contains_key(session) && all_rules.len() >= MAX_RULE_SESSIONS {
-            all_rules.pop_first();
+        let mut all_meta = lock(&self.session_rule_meta)?;
+        if !all_rules.contains_key(session)
+            && all_rules.len() >= MAX_RULE_SESSIONS
+            && let Some((evicted_session, _)) = all_rules.pop_first()
+        {
+            all_meta.remove(&evicted_session);
         }
         let rules = all_rules.entry(session.to_owned()).or_default();
-        if !rules.contains(rule_key) && rules.len() >= MAX_SESSION_RULES_PER_SESSION {
-            rules.pop_first();
+        let meta = all_meta.entry(session.to_owned()).or_default();
+        if !rules.contains(rule_key)
+            && rules.len() >= MAX_SESSION_RULES_PER_SESSION
+            && let Some(evicted_key) = rules.pop_first()
+        {
+            meta.remove(&evicted_key);
         }
         rules.insert(rule_key.to_owned());
+        meta.insert(
+            rule_key.to_owned(),
+            SessionRuleInfo {
+                id: rule_id_for_key(rule_key),
+                rule_key: rule_key.to_owned(),
+                rule_summary: ask.and_then(|item| item.rule_summary.clone()),
+                tool: ask.map(|item| item.tool.clone()).unwrap_or_default(),
+                provider: ask.map(|item| item.provider.clone()).unwrap_or_default(),
+                created_at: crate::store::now(),
+            },
+        );
         Ok(())
+    }
+    /// Lists all active remembered session permission rules for `session`.
+    pub fn list_session_rules(&self, session: &str) -> Result<Vec<SessionRuleInfo>> {
+        let all_rules = lock(&self.session_rules)?;
+        let all_meta = lock(&self.session_rule_meta)?;
+        let Some(keys) = all_rules.get(session) else {
+            return Ok(vec![]);
+        };
+        let meta = all_meta.get(session);
+        Ok(keys
+            .iter()
+            .map(|rule_key| {
+                meta.and_then(|m| m.get(rule_key).cloned())
+                    .unwrap_or_else(|| SessionRuleInfo {
+                        id: rule_id_for_key(rule_key),
+                        rule_key: rule_key.clone(),
+                        rule_summary: None,
+                        tool: String::new(),
+                        provider: String::new(),
+                        created_at: String::new(),
+                    })
+            })
+            .collect())
+    }
+    /// Revokes one remembered session rule (matching `rule_key` or `rule_id`),
+    /// or all remembered rules for `session` when `all` is true.
+    pub fn revoke_session_rule(
+        &self,
+        session: &str,
+        rule_key: Option<&str>,
+        rule_id: Option<&str>,
+        all: bool,
+    ) -> Result<(usize, Vec<SessionRuleInfo>)> {
+        let removed = {
+            let mut all_rules = lock(&self.session_rules)?;
+            let mut all_meta = lock(&self.session_rule_meta)?;
+            if all {
+                let count = all_rules.remove(session).map_or(0, |set| set.len());
+                all_meta.remove(session);
+                count
+            } else {
+                let target_key =
+                    if let Some(key) = rule_key.map(str::trim).filter(|s| !s.is_empty()) {
+                        Some(key.to_owned())
+                    } else if let Some(id) = rule_id.map(str::trim).filter(|s| !s.is_empty()) {
+                        all_rules.get(session).and_then(|keys| {
+                            keys.iter()
+                                .find(|k| *k == id || rule_id_for_key(k) == id)
+                                .cloned()
+                        })
+                    } else {
+                        return Err(HarnessError::invalid(
+                            "Provide a rule key, rule id, or all=true to revoke session rules.",
+                        ));
+                    };
+                if let Some(key) = target_key
+                    && let Some(keys) = all_rules.get_mut(session)
+                    && keys.remove(&key)
+                {
+                    if let Some(meta) = all_meta.get_mut(session) {
+                        meta.remove(&key);
+                    }
+                    if keys.is_empty() {
+                        all_rules.remove(session);
+                        all_meta.remove(session);
+                    }
+                    1
+                } else {
+                    0
+                }
+            }
+        };
+        Ok((removed, self.list_session_rules(session)?))
     }
     fn spawn_timeout(
         self: &Arc<Self>,
@@ -205,6 +365,7 @@ impl PermissionDesk {
             return;
         };
         let _ = (request.emit)(request.ask.resolved_event("expired", "timeout"));
+        self.notify_changed(session);
         let _ = request.sender.send(Answer::from_decision(Decision::Deny));
     }
     /// Answers no to whatever a session's finished or stopped run left
@@ -223,9 +384,13 @@ impl PermissionDesk {
             }
             Err(_) => vec![],
         };
+        let had_left = !left.is_empty();
         for mut request in left {
             request.cancel_timeout();
             let _ = (request.emit)(request.ask.resolved_event("expired", "harness"));
+        }
+        if had_left {
+            self.notify_changed(session);
         }
     }
     /// The requests a session's run waits on now.
@@ -235,7 +400,12 @@ impl PermissionDesk {
                 pending
                     .iter()
                     .filter(|((owner, _), _)| owner == session)
-                    .map(|(_, request)| request.ask.pending_event())
+                    .map(|(_, request)| {
+                        request.ask.pending_event_with_timeout(
+                            request.timeout_seconds,
+                            request.expires_at.as_deref(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -321,8 +491,9 @@ impl Approvals for SessionApprovals {
                 "The host asked the same request twice.",
             ));
         }
+        let (timeout_seconds, expires_at) = timeout_metadata(self.desk.timeout);
         // The page sees the request before anyone can answer it.
-        (self.emit)(ask.pending_event())?;
+        (self.emit)(ask.pending_event_with_timeout(timeout_seconds, expires_at.as_deref()))?;
         let nonce = self.desk.next_nonce.fetch_add(1, Ordering::Relaxed);
         let timeout_task = self.desk.spawn_timeout(&self.session, &ask.id, nonce);
         pending.insert(
@@ -333,8 +504,12 @@ impl Approvals for SessionApprovals {
                 emit: self.emit.clone(),
                 ask,
                 timeout_task,
+                timeout_seconds,
+                expires_at,
             },
         );
+        drop(pending);
+        self.desk.notify_changed(&self.session);
         Ok(receiver)
     }
     fn withdraw(&self, id: &str) -> Result<()> {
@@ -342,6 +517,7 @@ impl Approvals for SessionApprovals {
         if let Some(mut request) = request {
             request.cancel_timeout();
             (request.emit)(request.ask.resolved_event("withdrawn", "host"))?;
+            self.desk.notify_changed(&self.session);
         }
         Ok(())
     }
@@ -721,5 +897,53 @@ mod tests {
             parse_timeout_seconds(Some("999999999999")),
             Some(Duration::from_secs(MAX_TIMEOUT_SECONDS))
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_metadata_session_rule_listing_revocation_and_notifier_work() {
+        let desk = Arc::new(PermissionDesk::new_with_timeout(Some(Duration::from_secs(
+            30,
+        ))));
+        let changed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let changed_hook = changed.clone();
+        desk.set_change_notifier(Arc::new(move |sid| {
+            changed_hook.lock().unwrap().push(sid.to_owned());
+        }));
+        let (emit, events) = recorder();
+        let approvals = desk.approvals("s-rules", emit);
+
+        let mut req = ask("codex-rule", true);
+        req.rule_summary = Some("Allow running cargo test in this session".into());
+        req.session_rule_key = Some("codex:cmd:cargo-test".into());
+        let rx = approvals.ask_answer(&req).unwrap();
+        let waiting = desk.waiting("s-rules");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0]["timeout_seconds"], 30);
+        let exp = waiting[0]["expires_at"].as_str().expect("expires_at");
+        chrono::DateTime::parse_from_rfc3339(exp).expect("valid RFC3339 expires_at");
+
+        let recorded = events.lock().unwrap().clone();
+        assert_eq!(recorded[0]["timeout_seconds"], 30);
+        assert_eq!(recorded[0]["expires_at"], exp);
+
+        let id = seen(&events, 0);
+        desk.decide("s-rules", &id, Decision::AllowSession).unwrap();
+        assert_eq!(rx.await.unwrap().decision, Decision::AllowSession);
+
+        let rules = desk.list_session_rules("s-rules").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_key, "codex:cmd:cargo-test");
+        assert_eq!(
+            rules[0].rule_summary.as_deref(),
+            Some("Allow running cargo test in this session")
+        );
+        assert_eq!(rules[0].id, rule_id_for_key("codex:cmd:cargo-test"));
+
+        let (removed, left) = desk
+            .revoke_session_rule("s-rules", None, Some(&rules[0].id), false)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(left.is_empty());
+        assert_eq!(changed.lock().unwrap().len(), 2);
     }
 }

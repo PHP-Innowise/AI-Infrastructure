@@ -4,6 +4,180 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 use web_sys::AbortController;
+
+/// Typed workspace navigation, global project, filter, and layout state.
+#[derive(Clone, Debug)]
+pub struct WorkspaceState {
+    pub project_id: String,
+    pub scoped_projects: BTreeMap<String, String>,
+    pub right_tab: String,
+    pub split_percent: Option<f64>,
+    pub history_query: String,
+    pub history_waiting_only: bool,
+    pub command_palette_open: bool,
+    pub command_palette_selected: usize,
+    pub command_palette_query: String,
+    pub sidebar_open: bool,
+}
+
+impl Default for WorkspaceState {
+    fn default() -> Self {
+        Self {
+            project_id: String::new(),
+            scoped_projects: BTreeMap::new(),
+            right_tab: "graph".into(),
+            split_percent: None,
+            history_query: String::new(),
+            history_waiting_only: false,
+            command_palette_open: false,
+            command_palette_selected: 0,
+            command_palette_query: String::new(),
+            sidebar_open: false,
+        }
+    }
+}
+
+/// Typed live-stream, scrollback window, and SSE/fallback transport state.
+#[derive(Clone, Debug)]
+pub struct SessionStreamState {
+    pub sticky_bottom: bool,
+    pub unseen_count: usize,
+    pub visible_limit: usize,
+    pub oldest_event_id: Option<u64>,
+    pub latest_event_id: Option<u64>,
+    pub has_older: bool,
+    pub loading_older: bool,
+    pub total_events: usize,
+    pub consecutive_poll_errors: u32,
+    pub sse_connected: bool,
+}
+
+impl Default for SessionStreamState {
+    fn default() -> Self {
+        Self {
+            sticky_bottom: true,
+            unseen_count: 0,
+            visible_limit: 120,
+            oldest_event_id: None,
+            latest_event_id: None,
+            has_older: false,
+            loading_older: false,
+            total_events: 0,
+            consecutive_poll_errors: 0,
+            sse_connected: false,
+        }
+    }
+}
+
+/// Typed file-grouped diff viewer and delivery/checks retry state.
+#[derive(Clone, Debug, Default)]
+pub struct DiffViewState {
+    pub collapsed_files: BTreeSet<String>,
+    pub focused_file: String,
+    pub results_retry_count: u32,
+}
+
+/// Remembered session-level permission rule fetched from the runner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalRule {
+    pub id: String,
+    pub key: String,
+    pub tool: String,
+    pub pattern: String,
+    pub provider: String,
+    pub scope: String,
+    pub created_at: String,
+}
+
+impl ApprovalRule {
+    /// Parses either a raw rule key string or an object returned by `/permission-rules`.
+    pub fn from_json(v: &V) -> Option<Self> {
+        if let Some(raw) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            let (tool, pattern) = if let Some((head, tail)) = raw.split_once('(') {
+                (
+                    head.trim().to_owned(),
+                    tail.trim_end_matches(')').trim().to_owned(),
+                )
+            } else if let Some((head, tail)) = raw.split_once(':') {
+                (head.trim().to_owned(), tail.trim().to_owned())
+            } else {
+                (raw.to_owned(), String::new())
+            };
+            return Some(Self {
+                id: raw.to_owned(),
+                key: raw.to_owned(),
+                tool,
+                pattern,
+                provider: String::new(),
+                scope: "session".into(),
+                created_at: String::new(),
+            });
+        }
+        let id = ["id", "rule_key", "key", "rule"]
+            .iter()
+            .find_map(|field| v[*field].as_str().map(str::trim).filter(|s| !s.is_empty()))?
+            .to_owned();
+        let key = ["rule_key", "key", "id", "rule", "pattern"]
+            .iter()
+            .find_map(|field| v[*field].as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .unwrap_or(&id)
+            .to_owned();
+        let tool = ["tool", "tool_name", "kind"]
+            .iter()
+            .find_map(|field| v[*field].as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .unwrap_or("")
+            .to_owned();
+        let pattern = [
+            "rule_summary",
+            "pattern",
+            "target",
+            "command",
+            "summary",
+            "rule",
+        ]
+        .iter()
+        .find_map(|field| v[*field].as_str().map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or(&key)
+        .to_owned();
+        let provider = v["provider"]
+            .as_str()
+            .map(str::trim)
+            .unwrap_or("")
+            .to_owned();
+        let scope = v["scope"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("session")
+            .to_owned();
+        let created_at = v["created_at"]
+            .as_str()
+            .map(str::trim)
+            .unwrap_or("")
+            .to_owned();
+        Some(Self {
+            id,
+            key,
+            tool,
+            pattern,
+            provider,
+            scope,
+            created_at,
+        })
+    }
+}
+
+/// Typed state for pending approvals queue drawer and active session rules.
+#[derive(Clone, Debug, Default)]
+pub struct ApprovalQueueState {
+    pub drawer_open: bool,
+    pub rules: Vec<ApprovalRule>,
+    pub rules_sid: String,
+    pub rules_loading: bool,
+    pub rules_error: String,
+    pub waiting_counts: BTreeMap<String, usize>,
+}
+
 pub struct State {
     pub boot: V,
     pub sessions: Vec<V>,
@@ -21,6 +195,10 @@ pub struct State {
     pub aborts: BTreeMap<String, AbortController>,
     pub timers: BTreeMap<String, i32>,
     pub restoring: bool,
+    pub workspace: WorkspaceState,
+    pub stream: SessionStreamState,
+    pub diff_view: DiffViewState,
+    pub approvals: ApprovalQueueState,
 }
 impl Default for State {
     fn default() -> Self {
@@ -41,8 +219,81 @@ impl Default for State {
             aborts: BTreeMap::new(),
             timers: BTreeMap::new(),
             restoring: false,
+            workspace: WorkspaceState::default(),
+            stream: SessionStreamState::default(),
+            diff_view: DiffViewState::default(),
+            approvals: ApprovalQueueState::default(),
         }
     }
+}
+
+/// Returns true if `id` names the unified workspace project selector or a consolidated legacy `*-project` field.
+pub fn is_project_field_id(id: &str) -> bool {
+    matches!(
+        id,
+        "project"
+            | "project-switcher"
+            | "system-project"
+            | "creator-project"
+            | "setup-project"
+            | "skills-project"
+            | "create-skill-project"
+            | "accelerator-project"
+            | "context-project"
+            | "memory-use-project"
+            | "memory-project"
+            | "brain-project"
+            | "omnigraph-project"
+    )
+}
+
+/// Returns the active global workspace project ID.
+pub fn current_project() -> String {
+    read(|s| s.workspace.project_id.clone())
+}
+
+/// Updates the active global workspace project ID and mirrors it into legacy `data["workspace-project"]`.
+pub fn set_current_project(id: &str) {
+    write(|s| {
+        s.workspace.project_id = id.to_owned();
+        s.data
+            .insert("workspace-project".into(), serde_json::json!(id));
+    });
+}
+
+/// Returns the project ID for a view scope, falling back to `current_project()` unless overridden.
+pub fn scoped_project(scope_id: &str) -> String {
+    if matches!(scope_id, "project" | "project-switcher") {
+        return current_project();
+    }
+    read(|s| {
+        s.workspace
+            .scoped_projects
+            .get(scope_id)
+            .cloned()
+            .unwrap_or_else(|| s.workspace.project_id.clone())
+    })
+}
+
+/// Records an explicit project ID for a scoped view (e.g., `"system-project"`, `"creator-project"`).
+pub fn set_scoped_project(scope_id: &str, id: &str) {
+    if matches!(scope_id, "project" | "project-switcher") {
+        set_current_project(id);
+        return;
+    }
+    write(|s| {
+        s.workspace
+            .scoped_projects
+            .insert(scope_id.into(), id.into());
+    });
+}
+
+/// Clears any per-view scoped override so `scope_id` inherits `current_project()`.
+#[allow(dead_code)]
+pub fn clear_scoped_project(scope_id: &str) {
+    write(|s| {
+        s.workspace.scoped_projects.remove(scope_id);
+    });
 }
 thread_local! {pub static STATE:RefCell<State>=RefCell::new(State::default());}
 pub fn read<T>(f: impl FnOnce(&State) -> T) -> T {
@@ -639,5 +890,36 @@ mod omnigraph_model_tests {
                 "Updated"
             );
         });
+    }
+
+    #[test]
+    fn workspace_project_helpers_and_approval_rules_parse_cleanly() {
+        set_current_project("proj-alpha");
+        assert_eq!(current_project(), "proj-alpha");
+        assert_eq!(scoped_project("project"), "proj-alpha");
+        assert_eq!(scoped_project("system-project"), "proj-alpha");
+
+        set_scoped_project("system-project", "proj-beta");
+        assert_eq!(scoped_project("system-project"), "proj-beta");
+        assert_eq!(scoped_project("skills-project"), "proj-alpha");
+
+        clear_scoped_project("system-project");
+        assert_eq!(scoped_project("system-project"), "proj-alpha");
+
+        let from_str = ApprovalRule::from_json(&serde_json::json!("Bash(php -l)")).unwrap();
+        assert_eq!(from_str.tool, "Bash");
+        assert_eq!(from_str.pattern, "php -l");
+        assert_eq!(from_str.key, "Bash(php -l)");
+
+        let from_obj = ApprovalRule::from_json(&serde_json::json!({
+            "key": "write:src/*",
+            "tool": "Write",
+            "pattern": "src/*",
+            "scope": "session"
+        }))
+        .unwrap();
+        assert_eq!(from_obj.key, "write:src/*");
+        assert_eq!(from_obj.tool, "Write");
+        assert_eq!(from_obj.pattern, "src/*");
     }
 }

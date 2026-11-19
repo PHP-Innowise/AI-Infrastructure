@@ -170,6 +170,16 @@ impl PermissionAsk {
     /// stored event's `id` is its place in the session, so the request goes
     /// by `request_id`.
     pub fn pending_event(&self) -> Value {
+        self.pending_event_with_timeout(None, None)
+    }
+    /// Variant of [`PermissionAsk::pending_event`] that attaches optional
+    /// server-configured deadline metadata (`timeout_seconds` and RFC3339 UTC
+    /// `expires_at`).
+    pub fn pending_event_with_timeout(
+        &self,
+        timeout_seconds: Option<u64>,
+        expires_at: Option<&str>,
+    ) -> Value {
         let ask_kind = self.ask_kind();
         let diff_preview = self.diff_preview.as_deref().and_then(bound_diff_preview);
         let text = if ask_kind == "question" {
@@ -196,6 +206,8 @@ impl PermissionAsk {
             "rule_summary": self.rule_summary,
             "has_session_rule": self.session_rule_key.is_some(),
             "questions": self.questions,
+            "timeout_seconds": timeout_seconds,
+            "expires_at": expires_at,
             "text": text,
         })
     }
@@ -387,6 +399,24 @@ mod tests {
             resolved["diff_preview"].as_str().unwrap().chars().count(),
             DIFF_PREVIEW_LIMIT
         );
+    }
+
+    #[test]
+    fn pending_event_with_timeout_emits_deadline_fields() {
+        let ask = PermissionAsk {
+            id: "codex-9".into(),
+            provider: "codex".into(),
+            tool: "command".into(),
+            summary: "cargo test".into(),
+            ..Default::default()
+        };
+        let without = ask.pending_event();
+        assert_eq!(without["timeout_seconds"], Value::Null);
+        assert_eq!(without["expires_at"], Value::Null);
+
+        let with = ask.pending_event_with_timeout(Some(45), Some("2026-11-19T12:00:45.000Z"));
+        assert_eq!(with["timeout_seconds"], 45);
+        assert_eq!(with["expires_at"], "2026-11-19T12:00:45.000Z");
     }
 
     #[tokio::test]

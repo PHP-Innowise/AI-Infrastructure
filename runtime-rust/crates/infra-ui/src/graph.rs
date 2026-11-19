@@ -632,7 +632,161 @@ fn render() {
     dom::hidden("graph-changes", !status["graph"].is_object());
     dom::hidden("graph-rebuild", !view.rebuild);
     dom::hidden("graph-delete", !view.delete);
+    sync_freshness_pill("graph-map", &status, &V::Null);
+    sync_freshness_pill("session-graph", &status, &V::Null);
     crate::session::sync_working_indicator();
+}
+
+/// Computes `(data-tone, label)` for graph freshness pills in modal & embedded toolbars.
+pub fn freshness_badge_info(status: &V, view: &V) -> (&'static str, String) {
+    let state = status["state"].as_str().unwrap_or("").trim();
+    if state == "building" || status["build"].is_object() {
+        let pct = status["build"]["percent"].as_u64();
+        let label = match pct {
+            Some(p) => format!("Rebuilding ({p}%)"),
+            None => "Rebuilding…".to_owned(),
+        };
+        return ("building", label);
+    }
+    if state == "failed" || status["failure"].is_object() {
+        return ("error", "Build failed".to_owned());
+    }
+    let ir_rev = status["ir_revision"]
+        .as_u64()
+        .or_else(|| status["revision"].as_u64());
+    let view_rev = view["ir_revision"].as_u64();
+    let stale_rev =
+        matches!((ir_rev, view_rev), (Some(sr), Some(vr)) if sr > 0 && vr > 0 && sr > vr);
+    let truncated =
+        status["ir_summary"]["truncated"] == true || view["ir_summary"]["truncated"] == true;
+    let backend = status["backend"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| view["backend"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            status["graph"]["backend"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("");
+    let is_native_ir = backend.contains("tree") || backend.contains("native");
+
+    if state == "stale" || status["stale"] == true || stale_rev {
+        let msg = if truncated {
+            "Stale · Truncated IR"
+        } else {
+            "Stale"
+        };
+        return ("stale", msg.to_owned());
+    }
+    if truncated {
+        return ("stale", "Native tree-sitter IR (truncated)".to_owned());
+    }
+    if is_native_ir {
+        return ("ir", "Native tree-sitter IR".to_owned());
+    }
+    if state == "ready" || status["graph"].is_object() || view.is_object() {
+        return ("ready", "Ready".to_owned());
+    }
+    ("off", String::new())
+}
+
+pub(crate) fn sync_freshness_pill(prefix: &str, status: &V, view: &V) {
+    let pill_id = format!("{prefix}-freshness");
+    let (tone, label) = freshness_badge_info(status, view);
+    dom::attr(&pill_id, "data-tone", tone);
+    dom::text(&pill_id, &label);
+    dom::hidden(&pill_id, label.is_empty());
+}
+
+/// Processes SSE `event: "graph_status"` updates without destroying user camera or selection.
+pub(crate) fn on_graph_status_sse(event: &V) {
+    if !event.is_object() {
+        return;
+    }
+    m::set("graph-sse-status", event.clone());
+    let event_project = m::text(event, "project_id");
+    let current_project = dom::value("project");
+    if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project
+    {
+        return;
+    }
+    let state = m::text(event, "state");
+    let reason = m::text(event, "reason");
+    let message = m::text(event, "message");
+    if state == "building" {
+        let mut status = m::data("graph");
+        if status.is_object() {
+            status["state"] = json!("building");
+            m::set("graph", status.clone());
+        }
+        sync_embedded_progress_for_surface("session-graph", &status);
+        sync_freshness_pill("graph-map", &status, &V::Null);
+        sync_freshness_pill("session-graph", &status, &V::Null);
+        return;
+    }
+    let is_refresh_candidate = matches!(state.as_str(), "ready" | "stale" | "updated" | "rebuilt")
+        || matches!(
+            reason.as_str(),
+            "watcher" | "rebuild" | "completed" | "stale" | "ir_updated"
+        );
+    if is_refresh_candidate {
+        let banner_text = if !message.is_empty() {
+            message
+        } else if state == "stale" {
+            "Code changed on disk — Graph may be stale".to_owned()
+        } else {
+            "Graph updated — Refresh".to_owned()
+        };
+        let mut synth_status = m::data("graph");
+        if !synth_status.is_object() {
+            synth_status = json!({});
+        }
+        synth_status["state"] = json!(if state.is_empty() {
+            "ready"
+        } else {
+            state.as_str()
+        });
+        if let Some(rev) = event["revision"].as_u64() {
+            synth_status["ir_revision"] = json!(rev);
+        }
+        if !event["backend"].is_null() {
+            synth_status["backend"] = event["backend"].clone();
+        }
+        m::set("graph", synth_status.clone());
+        sync_freshness_pill("graph-map", &synth_status, &V::Null);
+        sync_freshness_pill("session-graph", &synth_status, &V::Null);
+        crate::graph_map::show_non_destructive_stale_banner(&event_project, &banner_text);
+    }
+}
+
+/// Triggers an inline rebuild for the active modal or embedded surface scope.
+#[allow(dead_code)]
+pub(crate) async fn trigger_rebuild_for_scope(
+    scope: GraphTargetScope,
+    prefix: &str,
+) -> Result<V, api::Error> {
+    let busy_pill = format!("{prefix}-freshness");
+    dom::attr(&busy_pill, "data-tone", "building");
+    dom::text(&busy_pill, "Rebuilding…");
+    dom::hidden(&busy_pill, false);
+    let res = act_for_scope(&scope, "rebuild").await;
+    match &res {
+        Ok(status) => {
+            if matches!(scope, GraphTargetScope::SingleProject { .. }) {
+                apply_status(scope.project_id(), status.clone());
+            } else {
+                sync_embedded_progress_for_surface(prefix, status);
+                sync_freshness_pill(prefix, status, &V::Null);
+            }
+        }
+        Err(err) => {
+            dom::attr(&busy_pill, "data-tone", "error");
+            dom::text(&busy_pill, "Rebuild failed");
+            dom::error(&format!("{prefix}-error"), &err.message);
+        }
+    }
+    res
 }
 
 /// Updates the embedded surface build progress strip (`#{prefix}-progress*`) from a service/project status payload.
@@ -1316,6 +1470,32 @@ mod tests {
         assert_eq!(
             system_sidebar_status(&failed_agg).1,
             "Service graphs failed (2/4)"
+        );
+    }
+    #[test]
+    fn freshness_badge_info_reports_ready_stale_building_and_native_ir() {
+        let ready = status(
+            "ready",
+            json!({ "backend": "tree_sitter_ir", "ir_revision": 4 }),
+        );
+        assert_eq!(
+            freshness_badge_info(&ready, &V::Null),
+            ("ir", "Native tree-sitter IR".to_owned())
+        );
+
+        let stale_rev = freshness_badge_info(&ready, &json!({ "ir_revision": 2 }));
+        assert_eq!(stale_rev, ("stale", "Stale".to_owned()));
+
+        let trunc = freshness_badge_info(&ready, &json!({ "ir_summary": { "truncated": true } }));
+        assert_eq!(
+            trunc,
+            ("stale", "Native tree-sitter IR (truncated)".to_owned())
+        );
+
+        let building = status("building", json!({ "build": { "percent": 55 } }));
+        assert_eq!(
+            freshness_badge_info(&building, &V::Null),
+            ("building", "Rebuilding (55%)".to_owned())
         );
     }
 }
