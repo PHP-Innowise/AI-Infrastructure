@@ -1256,4 +1256,24 @@ mod update_tests {
         );
         assert_eq!(last, Some(false));
     }
+
+    #[test]
+    fn select_target_view_needed_respects_explicit_caller_view_and_boot() {
+        assert_eq!(
+            super::poll::select_target_view_needed("changes", Some("changes"), false),
+            None
+        );
+        assert_eq!(
+            super::poll::select_target_view_needed("systems", Some("changes"), false),
+            Some("changes")
+        );
+        assert_eq!(
+            super::poll::select_target_view_needed("systems", Some("sessions"), true),
+            None
+        );
+        assert_eq!(
+            super::poll::select_target_view_needed("systems", None, false),
+            None
+        );
+    }
 }

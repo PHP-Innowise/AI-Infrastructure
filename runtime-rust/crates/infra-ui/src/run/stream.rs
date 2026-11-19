@@ -9,14 +9,21 @@ struct StreamMdEntry {
     tail_blocks: Vec<String>,
 }
 
+const TOOL_OUTPUT_PREVIEW_CHARS: usize = 8_000;
+const TOOL_OUTPUT_MAX_STORED_CHARS: usize = 512_000;
+
 thread_local! {
     static NEXT_COPY_SEQ: Cell<u64> = const { Cell::new(1) };
     static NEXT_STREAM_SEQ: Cell<u64> = const { Cell::new(1) };
     static STREAM_MD_CACHE: RefCell<BTreeMap<String, StreamMdEntry>> = const { RefCell::new(BTreeMap::new()) };
+    static CALL_BLOCK_CACHE: RefCell<BTreeMap<String, web_sys::Element>> = const { RefCell::new(BTreeMap::new()) };
+    static TOOL_FULL_OUTPUTS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 pub(crate) fn clear_stream_md_cache() {
     STREAM_MD_CACHE.with(|cache| cache.borrow_mut().clear());
+    CALL_BLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
+    TOOL_FULL_OUTPUTS.with(|cache| cache.borrow_mut().clear());
 }
 
 pub(crate) fn copy_timer_key(existing: Option<&str>, seq: u64) -> String {
@@ -24,6 +31,34 @@ pub(crate) fn copy_timer_key(existing: Option<&str>, seq: u64) -> String {
         Some(id) => format!("md-copy-reset-{id}"),
         None => format!("md-copy-reset-{seq}"),
     }
+}
+
+fn parse_fence_opener(trimmed: &str) -> Option<(char, usize)> {
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let count = trimmed.chars().take_while(|c| *c == first).count();
+    if count >= 3 {
+        if first == '`' && trimmed[count..].contains('`') {
+            return None;
+        }
+        Some((first, count))
+    } else {
+        None
+    }
+}
+
+fn is_matching_fence_closer(trimmed: &str, open_ch: char, open_len: usize) -> bool {
+    let count = trimmed.chars().take_while(|c| *c == open_ch).count();
+    count >= open_len && trimmed[count * open_ch.len_utf8()..].trim().is_empty()
+}
+
+fn is_setext_underline(trimmed: &str) -> bool {
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    (first == '=' || first == '-') && trimmed.len() >= 2 && trimmed.chars().all(|c| c == first)
 }
 
 /// Finds the furthest safe byte boundary in `markdown` (starting at `start_from`,
@@ -34,7 +69,7 @@ pub(crate) fn find_settled_markdown_boundary(markdown: &str, start_from: usize) 
     if start_from >= markdown.len() || !markdown.is_char_boundary(start_from) {
         return start_from.min(markdown.len());
     }
-    let mut in_fence = false;
+    let mut fence: Option<(char, usize)> = None;
     let mut best = start_from;
     let mut pos = start_from;
     for chunk in markdown[start_from..].split_inclusive('\n') {
@@ -42,17 +77,24 @@ pub(crate) fn find_settled_markdown_boundary(markdown: &str, start_from: usize) 
         let line = chunk.trim_end_matches(&['\r', '\n'][..]);
         let trimmed = line.trim();
         let next_pos = pos + chunk.len();
-        if trimmed.starts_with("```") {
-            if in_fence {
-                in_fence = false;
+        if let Some((open_ch, open_len)) = fence {
+            if is_matching_fence_closer(trimmed, open_ch, open_len) {
+                fence = None;
                 if ended_with_nl {
                     best = next_pos;
                 }
-            } else {
-                in_fence = true;
             }
-        } else if !in_fence && trimmed.is_empty() && ended_with_nl {
-            best = next_pos;
+        } else if let Some((open_ch, open_len)) = parse_fence_opener(trimmed) {
+            fence = Some((open_ch, open_len));
+        } else if trimmed.is_empty() && ended_with_nl {
+            let rest = &markdown[next_pos..];
+            let next_line = rest.split('\n').next().unwrap_or("");
+            let next_trimmed = next_line.trim();
+            let indented_continuation = next_line.starts_with("  ") || next_line.starts_with('\t');
+            let looks_like_setext = !next_trimmed.is_empty() && is_setext_underline(next_trimmed);
+            if !indented_continuation && !looks_like_setext {
+                best = next_pos;
+            }
         }
         pos = next_pos;
     }
@@ -147,7 +189,7 @@ pub(crate) fn is_near_bottom(scroll_height: i32, scroll_top: i32, client_height:
     scroll_height - scroll_top - client_height < 48
 }
 
-/// Joins consecutive streaming `text`/`thinking` chunks without splitting words or collapsing markdown blocks.
+/// Joins consecutive streaming `text`/`thinking` chunks verbatim without injecting spurious newlines mid-word.
 pub(crate) fn coalesce_chunk_text(existing: &str, incoming: &str) -> String {
     if existing.is_empty() {
         return incoming.to_owned();
@@ -155,17 +197,45 @@ pub(crate) fn coalesce_chunk_text(existing: &str, incoming: &str) -> String {
     if incoming.is_empty() {
         return existing.to_owned();
     }
-    if existing.ends_with('\n')
-        || existing.ends_with(' ')
-        || existing.ends_with('\t')
-        || incoming.starts_with('\n')
-        || incoming.starts_with(' ')
-        || incoming.starts_with('\t')
-    {
-        format!("{existing}{incoming}")
-    } else {
-        format!("{existing}\n{incoming}")
+    format!("{existing}{incoming}")
+}
+
+pub(crate) fn escape_css_attr_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\r' => {}
+            '\n' => out.push_str("\\A "),
+            _ => out.push(ch),
+        }
     }
+    out
+}
+
+pub(crate) fn bounded_tool_output_preview(
+    full: &str,
+    max_chars: usize,
+) -> (String, Option<(usize, usize)>) {
+    let total_chars = full.chars().count();
+    if total_chars <= max_chars || max_chars == 0 {
+        return (full.to_owned(), None);
+    }
+    let skip_chars = total_chars - max_chars;
+    let mut byte_idx = full
+        .char_indices()
+        .nth(skip_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(full.len());
+    let snap_window = (full.len() - byte_idx).min(max_chars / 4);
+    if let Some(rel_nl) = full[byte_idx..byte_idx + snap_window].find('\n') {
+        byte_idx += rel_nl + 1;
+    }
+    let tail = &full[byte_idx..];
+    let total_lines = full.lines().count().max(1);
+    let shown_lines = tail.lines().count().max(1);
+    (tail.to_owned(), Some((shown_lines, total_lines)))
 }
 
 /// Wraps fenced code blocks produced by `render_markdown_html` with a Copy button header.
@@ -300,14 +370,132 @@ fn find_tool_block_by_call_id(
     if call_id.is_empty() {
         return None;
     }
-    container
-        .query_selector_all("details.conversation-tool")
-        .ok()
-        .and_then(|list| {
-            (0..list.length())
-                .filter_map(|i| list.item(i)?.dyn_into::<web_sys::Element>().ok())
-                .find(|el| el.get_attribute("data-call-id").as_deref() == Some(call_id))
-        })
+    if container.id() == "events" {
+        if let Some(cached) = CALL_BLOCK_CACHE.with(|c| c.borrow().get(call_id).cloned()) {
+            if cached.is_connected()
+                && container.contains(Some(&cached))
+                && cached.get_attribute("data-call-id").as_deref() == Some(call_id)
+            {
+                return Some(cached);
+            }
+        }
+    }
+    let selector = format!(
+        "details.conversation-tool[data-call-id=\"{}\"]",
+        escape_css_attr_value(call_id)
+    );
+    let found = container.query_selector(&selector).ok().flatten();
+    if container.id() == "events" {
+        if let Some(el) = &found {
+            CALL_BLOCK_CACHE.with(|c| {
+                c.borrow_mut().insert(call_id.to_owned(), el.clone());
+            });
+        }
+    }
+    found
+}
+
+fn store_tool_output(key: &str, incoming: &str, reset: bool) -> String {
+    TOOL_FULL_OUTPUTS.with(|map| {
+        let mut map = map.borrow_mut();
+        let combined = if reset {
+            incoming.to_owned()
+        } else if let Some(prev) = map.get(key) {
+            if prev.is_empty() {
+                incoming.to_owned()
+            } else if prev == incoming {
+                prev.clone()
+            } else {
+                format!("{prev}\n{incoming}")
+            }
+        } else {
+            incoming.to_owned()
+        };
+        let char_count = combined.chars().count();
+        let bounded = if char_count > TOOL_OUTPUT_MAX_STORED_CHARS {
+            let skip = char_count - TOOL_OUTPUT_MAX_STORED_CHARS;
+            let byte_idx = combined
+                .char_indices()
+                .nth(skip)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            format!("[… earlier output omitted …]\n{}", &combined[byte_idx..])
+        } else {
+            combined
+        };
+        map.insert(key.to_owned(), bounded.clone());
+        bounded
+    })
+}
+
+fn apply_tool_output_dom(block: &web_sys::Element, output_key: &str, full_text: &str) {
+    let expanded = block.get_attribute("data-output-expanded").as_deref() == Some("true");
+    let (preview, trunc_info) = bounded_tool_output_preview(full_text, TOOL_OUTPUT_PREVIEW_CHARS);
+    if let Ok(Some(pre)) = block.query_selector("pre.tool-output") {
+        let shown = if expanded || trunc_info.is_none() {
+            full_text
+        } else {
+            preview.as_str()
+        };
+        if pre.text_content().as_deref() != Some(shown) {
+            pre.set_text_content(Some(shown));
+        }
+    }
+    let existing_trunc = block.query_selector(".tool-output-trunc").ok().flatten();
+    if let Some((shown_lines, total_lines)) = trunc_info {
+        let bar = existing_trunc.unwrap_or_else(|| {
+            let b = dom::el("div", "tool-output-trunc", "");
+            let _ = block.set_attribute("data-output-key", output_key);
+            if let Ok(Some(pre)) = block.query_selector("pre.tool-output") {
+                let _ = pre.after_with_node_1(&b);
+            } else {
+                dom::add(block, &b);
+            }
+            b
+        });
+        bar.set_text_content(None);
+        let note_text = if expanded {
+            format!("Showing full output ({total_lines} lines)")
+        } else {
+            format!("Showing last {shown_lines} of {total_lines} lines")
+        };
+        dom::add(&bar, &dom::el("span", "muted", &note_text));
+        let btn = dom::button(
+            if expanded {
+                "Show tail only"
+            } else {
+                "Show full output"
+            },
+            "tool-output-expand",
+            json!(output_key),
+        );
+        let _ = btn.class_list().add_1("compact");
+        dom::add(&bar, &btn);
+    } else if let Some(bar) = existing_trunc {
+        bar.remove();
+    }
+}
+
+pub(crate) fn toggle_tool_output_expand(output_key: &str) {
+    if output_key.is_empty() {
+        return;
+    }
+    let selector = format!(
+        "details.conversation-tool[data-output-key=\"{}\"]",
+        escape_css_attr_value(output_key)
+    );
+    let Ok(Some(block)) = dom::document().query_selector(&selector) else {
+        return;
+    };
+    let expanded = block.get_attribute("data-output-expanded").as_deref() == Some("true");
+    let _ = block.set_attribute(
+        "data-output-expanded",
+        if expanded { "false" } else { "true" },
+    );
+    let full_text = TOOL_FULL_OUTPUTS.with(|map| map.borrow().get(output_key).cloned());
+    if let Some(full) = full_text {
+        apply_tool_output_dom(&block, output_key, &full);
+    }
 }
 
 fn format_tool_summary(v: &V) -> String {
@@ -690,18 +878,15 @@ fn render_event_into(
             if let Ok(Some(summary)) = block.query_selector("summary") {
                 summary.set_text_content(Some(&format_tool_summary(v)));
             }
-            if let Ok(Some(pre)) = block.query_selector("pre") {
-                let prev = pre.text_content().unwrap_or_default();
-                let next_text = if prev.is_empty() || is_start {
-                    text.clone()
-                } else if prev == text {
-                    prev
-                } else {
-                    format!("{prev}\n{text}")
-                };
-                pre.set_text_content(Some(&next_text));
-            }
-            sync_tool_failure_button(&block, v, &text, failed);
+            let output_key = if !call_id.is_empty() {
+                call_id.clone()
+            } else {
+                format!("ev:{id}")
+            };
+            let _ = block.set_attribute("data-output-key", &output_key);
+            let full_text = store_tool_output(&output_key, &text, is_start);
+            apply_tool_output_dom(&block, &output_key, &full_text);
+            sync_tool_failure_button(&block, v, &full_text, failed);
             mutated_existing = true;
         }
     } else if matches!(kind.as_str(), "text" | "thinking") {
@@ -749,6 +934,11 @@ fn render_event_into(
                 let call_id = conversation_event_call_id(v, resolved_call);
                 if !call_id.is_empty() {
                     let _ = block.set_attribute("data-call-id", &call_id);
+                    if container.id() == "events" {
+                        CALL_BLOCK_CACHE.with(|c| {
+                            c.borrow_mut().insert(call_id.clone(), block.clone());
+                        });
+                    }
                 }
                 let is_start = starts(v);
                 let failed = !is_start && v["ok"] == false;
@@ -759,10 +949,18 @@ fn render_event_into(
                 } else {
                     "completed"
                 };
+                let output_key = if !call_id.is_empty() {
+                    call_id.clone()
+                } else {
+                    format!("ev:{id}")
+                };
                 let _ = block.set_attribute("data-tool-state", state_str);
+                let _ = block.set_attribute("data-output-key", &output_key);
                 dom::add(&block, &dom::el("summary", "", &format_tool_summary(v)));
-                dom::add(&block, &dom::el("pre", "tool-output", &text));
-                sync_tool_failure_button(&block, v, &text, failed);
+                dom::add(&block, &dom::el("pre", "tool-output", ""));
+                let full_text = store_tool_output(&output_key, &text, true);
+                apply_tool_output_dom(&block, &output_key, &full_text);
+                sync_tool_failure_button(&block, v, &full_text, failed);
             }
             "text" => {
                 let _ = block.set_attribute("data-chunk-kind", "text");
@@ -802,14 +1000,28 @@ fn render_event_into(
                     dom::announce("run-announcer", &format!("Error: {text}"));
                 }
             }
-            "status" | "result" => {
+            "result" => {
+                if !text.trim().is_empty() {
+                    let body = dom::el("div", "md-body", "");
+                    body.set_inner_html(&render_assistant_markdown_html(&text));
+                    dom::add(&block, &body);
+                }
+                if live_mode {
+                    let msg = if text.is_empty() {
+                        format!("Turn {}", m::text(v, "status"))
+                    } else {
+                        text.clone()
+                    };
+                    dom::announce("run-announcer", &msg);
+                }
+            }
+            "status" => {
                 dom::add(&block, &dom::el("p", "", &text));
                 if live_mode
-                    && (kind == "result"
-                        || matches!(
-                            v["status"].as_str(),
-                            Some("completed" | "failed" | "cancelled")
-                        ))
+                    && matches!(
+                        v["status"].as_str(),
+                        Some("completed" | "failed" | "cancelled")
+                    )
                 {
                     let msg = if text.is_empty() {
                         format!("Turn {}", m::text(v, "status"))
@@ -817,6 +1029,13 @@ fn render_event_into(
                         text.clone()
                     };
                     dom::announce("run-announcer", &msg);
+                }
+            }
+            "user" => {
+                if !text.trim().is_empty() {
+                    let body = dom::el("div", "md-body", "");
+                    body.set_inner_html(&render_assistant_markdown_html(&text));
+                    dom::add(&block, &body);
                 }
             }
             _ => {

@@ -335,12 +335,15 @@ pub fn start_sse() {
             sse.attempt = 0;
         });
         model::write(|s| s.stream.sse_connected = true);
+        sync_sse_status_dom(true, false, 0);
         dispatch_sse_payload("sse_open", "{}", None);
     });
     let error_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let attempt = SSE.with(|sse| sse.borrow().attempt.saturating_add(1));
         close_sse_source();
-        dispatch_sse_payload("sse_error", "{}", None);
         let auth_failed = model::read(|s| s.auth_failed);
+        sync_sse_status_dom(false, auth_failed, attempt);
+        dispatch_sse_payload("sse_error", &format!("{{\"attempt\":{attempt}}}"), None);
         if SSE.with(|sse| should_schedule_sse_reconnect(sse.borrow().enabled, auth_failed)) {
             schedule_sse_reconnect();
         }
@@ -392,6 +395,46 @@ fn schedule_sse_reconnect() {
     }
 }
 
+/// Computes state, visible label, and title tooltip for the `#sse-status` indicator.
+pub fn sse_status_badge(
+    connected: bool,
+    auth_failed: bool,
+    attempt: u32,
+) -> (&'static str, String, &'static str) {
+    if auth_failed {
+        (
+            "offline",
+            "Offline".into(),
+            "Session authentication required; live updates paused",
+        )
+    } else if connected {
+        ("live", "Live".into(), "Live event stream connected")
+    } else if attempt > 0 {
+        (
+            "reconnecting",
+            format!("Reconnecting ({attempt}) · 1s poll"),
+            "Event stream disconnected — polling every 1s while reconnecting",
+        )
+    } else {
+        (
+            "connecting",
+            "Connecting…".into(),
+            "Connecting to real-time event stream",
+        )
+    }
+}
+
+fn sync_sse_status_dom(connected: bool, auth_failed: bool, attempt: u32) {
+    if dom::get("sse-status").is_none() {
+        return;
+    }
+    let (state, label, title) = sse_status_badge(connected, auth_failed, attempt);
+    dom::attr("sse-status", "data-state", state);
+    dom::attr("sse-status", "title", title);
+    dom::text("sse-status", &label);
+    dom::hidden("sse-status", false);
+}
+
 /// Closes `/api/events/stream` cleanly and disables automatic SSE reconnection.
 pub fn stop_sse() {
     dom::cancel_timer("sse-reconnect");
@@ -401,6 +444,8 @@ pub fn stop_sse() {
         sse.attempt = 0;
     });
     close_sse_source();
+    let auth_failed = model::read(|s| s.auth_failed);
+    sync_sse_status_dom(false, auth_failed, 0);
 }
 
 #[cfg(test)]
@@ -496,5 +541,15 @@ mod sse_contract_tests {
         assert_eq!(dispatch_sse_payload("sse_error", "{}", None), "sse_error");
         assert_eq!(opened.get(), 1);
         assert_eq!(errored.get(), 1);
+    }
+
+    #[test]
+    fn sse_status_badge_tracks_live_reconnect_and_offline_states() {
+        assert_eq!(sse_status_badge(true, false, 0).0, "live");
+        let reconnect = sse_status_badge(false, false, 2);
+        assert_eq!(reconnect.0, "reconnecting");
+        assert!(reconnect.1.contains("2"));
+        assert_eq!(sse_status_badge(false, true, 0).0, "offline");
+        assert_eq!(sse_status_badge(false, false, 0).0, "connecting");
     }
 }

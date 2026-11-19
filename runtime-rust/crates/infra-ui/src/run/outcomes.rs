@@ -517,7 +517,7 @@ pub(super) fn focus(id: &str) {
 /// The Calm/Detailed switch that is on screen: a narrow window shows only the compact chip.
 pub(super) fn detail_switch() -> &'static str {
     let narrow = dom::window()
-        .match_media("(max-width:760px)")
+        .match_media("(max-width:640px)")
         .ok()
         .flatten()
         .is_some_and(|media| media.matches());
@@ -559,6 +559,10 @@ pub(super) fn reveal(mode: Mode, detailed: bool) {
     dom::hidden("waiting", mode != Mode::Waiting);
     dom::hidden("run-now", !strip);
     dom::hidden("run-line2", !strip);
+    dom::hidden(
+        "run-notify",
+        mode != Mode::Now || !super::can_prompt_notifications(),
+    );
     dom::hidden("run-close", mode != Mode::After);
     dom::attr(
         "run-dot",

@@ -24,7 +24,7 @@ use usage::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 
-const MOBILE_BREAKPOINT_QUERY: &str = "(max-width:760px)";
+const MOBILE_BREAKPOINT_QUERY: &str = "(max-width: 920px)";
 
 pub(super) fn viewport_is_mobile() -> bool {
     dom::window()
@@ -260,6 +260,25 @@ pub(crate) fn on_global_project_change(project: &str) {
             load("memory", true).await;
         }),
         _ => {}
+    }
+}
+
+pub(crate) fn hover(element: &web_sys::Element) -> bool {
+    let action = element.get_attribute("data-action").unwrap_or_default();
+    let payload = element
+        .get_attribute("data-payload")
+        .and_then(|v| serde_json::from_str::<V>(&v).ok())
+        .unwrap_or(V::Null);
+    match action.as_str() {
+        "memory-retrieval" => {
+            retrieval_detail(payload.as_u64().unwrap_or(0) as usize);
+            true
+        }
+        "memory-horizon-chunk" => {
+            chunk_detail(&payload);
+            true
+        }
+        _ => false,
     }
 }
 

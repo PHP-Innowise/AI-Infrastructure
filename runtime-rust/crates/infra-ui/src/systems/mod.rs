@@ -12,6 +12,7 @@ pub use catalog_map::{
     switch_services_to_topology,
 };
 pub use editor::{add_service, edit_field, editor_open};
+pub(crate) use runs::read as read_system_run;
 #[allow(unused_imports)]
 pub(crate) use runs::{on_sse_system_resync, on_sse_system_run};
 #[allow(unused_imports)]
@@ -798,7 +799,6 @@ pub async fn event(
         "system-open-session" => {
             let sid = m::text(&m::data("system-run"), "session_id");
             session::select(&sid).await;
-            session::open_view("sessions", true).await;
         }
         "system-discovery-start" => discovery_start().await,
         "system-discovery-cancel" => {

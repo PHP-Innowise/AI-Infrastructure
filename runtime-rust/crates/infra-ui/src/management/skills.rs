@@ -1,6 +1,7 @@
 use super::setup::{file_list, invalidate};
 use crate::{api, dom, model as m};
 use serde_json::{json, Value as V};
+use wasm_bindgen::JsCast;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CreateSkillValidation {
@@ -453,26 +454,42 @@ pub(super) fn render_skills() {
     dom::clear("skills-list");
     let mut count = 0;
     for skill in &items {
-        let text = format!(
-            "{} {} {}",
-            m::text(skill, "id"),
-            m::text(skill, "name"),
-            m::text(skill, "description")
-        );
+        let id = m::text(skill, "id");
+        let name = {
+            let n = m::text(skill, "name");
+            if n.is_empty() {
+                id.clone()
+            } else {
+                n
+            }
+        };
+        let description = m::text(skill, "description");
+        let text = format!("{id} {name} {description}");
         if !text.to_lowercase().contains(&query) {
             continue;
         }
         count += 1;
-        let id = m::text(skill, "id");
-        dom::append(
-            "skills-list",
-            &dom::check(
-                &text,
-                "skills-select",
-                &id,
-                selected.iter().any(|v| v == &id),
-            ),
-        );
+        let row = dom::el("label", "skill-choice", "");
+        let input = dom::el("input", "", "");
+        let _ = input.set_attribute("type", "checkbox");
+        let _ = input.set_attribute("data-action", "skills-select");
+        let _ = input.set_attribute("value", &id);
+        if let Some(el) = input.dyn_ref::<web_sys::HtmlInputElement>() {
+            el.set_value(&id);
+            el.set_checked(selected.iter().any(|v| v == &id));
+        }
+        let copy = dom::el("span", "skill-choice-copy", "");
+        dom::add(&copy, &dom::el("span", "skill-choice-name", &name));
+        dom::add(&copy, &dom::el("span", "skill-choice-id", &id));
+        if !description.is_empty() {
+            dom::add(
+                &copy,
+                &dom::el("span", "skill-choice-description", &description),
+            );
+        }
+        dom::add(&row, &input);
+        dom::add(&row, &copy);
+        dom::append("skills-list", &row);
     }
     dom::text("skills-visible-count", &format!("{count} matching"));
     dom::text(
@@ -515,37 +532,60 @@ pub(super) fn render_installed() {
             continue;
         }
         count += 1;
-        let e = dom::el(
-            "div",
-            "skills-file installed-skill",
-            &format!(
-                "{} · {} · {} · {}",
-                m::text(&skill, "name"),
-                m::text(&skill, "agent"),
-                m::text(&skill, "path"),
-                m::text(&skill, "state")
-            ),
-        );
+        let e = dom::el("div", "skills-file installed-skill", "");
+        let meta = dom::el("div", "", "");
+        let title_row = dom::el("div", "skills-installed-name", "");
+        let name_text = {
+            let n = m::text(&skill, "name");
+            if n.is_empty() {
+                m::text(&skill, "id")
+            } else {
+                n
+            }
+        };
+        dom::add(&title_row, &dom::el("span", "", &name_text));
+        let chips = dom::el("span", "installed-tools", "");
+        let agent_name = m::text(&skill, "agent");
+        if !agent_name.is_empty() {
+            let chip_cls = if m::yes(&skill["managed"]) {
+                "tool-chip managed"
+            } else {
+                "tool-chip"
+            };
+            dom::add(&chips, &dom::el("span", chip_cls, &agent_name));
+        }
+        let state_label = m::text(&skill, "state");
+        if !state_label.is_empty() {
+            dom::add(&chips, &dom::el("span", "tool-chip", &state_label));
+        }
+        dom::add(&title_row, &chips);
+        dom::add(&meta, &title_row);
+        let path_text = m::text(&skill, "path");
+        if !path_text.is_empty() {
+            dom::add(&meta, &dom::el("div", "skills-installed-path", &path_text));
+        }
+        dom::add(&e, &meta);
         if m::yes(&skill["managed"]) {
+            let actions = dom::el("div", "skills-source-actions", "");
             for operation in ["update", "remove"] {
                 if operation == "update" && skill["source_id"] == "local" {
                     continue;
                 }
                 let mut p = skill.clone();
                 p["operation"] = json!(operation);
-                dom::add(
-                    &e,
-                    &dom::button(
-                        if operation == "update" {
-                            "Check update"
-                        } else {
-                            "Preview removal"
-                        },
-                        "skill-change-preview",
-                        p,
-                    ),
+                let btn = dom::button(
+                    if operation == "update" {
+                        "Check update"
+                    } else {
+                        "Preview removal"
+                    },
+                    "skill-change-preview",
+                    p,
                 );
+                let _ = btn.class_list().add_1("compact");
+                dom::add(&actions, &btn);
             }
+            dom::add(&e, &actions);
         }
         dom::append("skills-installed-list", &e);
     }

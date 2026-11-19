@@ -354,7 +354,22 @@ pub fn new_session(project: Option<&str>) {
         knowledge::load_brain_link().await;
     });
 }
+pub(crate) fn select_target_view_needed<'a>(
+    current_view: &str,
+    target_view: Option<&'a str>,
+    bootstrapping: bool,
+) -> Option<&'a str> {
+    if bootstrapping {
+        return None;
+    }
+    target_view.filter(|view| !view.is_empty() && *view != current_view)
+}
+
 pub async fn select(id: &str) {
+    select_with_view(id, Some("sessions")).await;
+}
+
+pub async fn select_with_view(id: &str, target_view: Option<&str>) {
     if m::read(|s| s.pending) {
         return;
     }
@@ -390,10 +405,10 @@ pub async fn select(id: &str) {
     dom::set_value("prompt", "");
     inbox::restore(id);
     run::reset();
-    if !m::yes(&m::data("bootstrapping")) {
-        spawn_local(async {
-            open_view("sessions", true).await;
-        });
+    let bootstrapping = m::yes(&m::data("bootstrapping"));
+    let current_view = m::read(|s| s.view.clone());
+    if let Some(view) = select_target_view_needed(&current_view, target_view, bootstrapping) {
+        open_view(view, true).await;
     }
     poll(epoch).await;
     if !m::read(|s| m::selection_matches(&s.sid, s.epoch, id, epoch)) {
