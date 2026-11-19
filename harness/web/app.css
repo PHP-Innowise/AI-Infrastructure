@@ -248,7 +248,7 @@ svg { flex:none; }
 .graph-pick-list { position:relative; flex:1; min-height:0; margin:0; padding:0; overflow:auto; list-style:none; border:1px solid var(--line); border-radius:var(--radius); }
 .graph-pick-list:empty { display:none; }
 .graph-pick-list [role="option"][aria-selected="true"] { background:var(--purple-soft); border-color:var(--purple-line); color:var(--purple); font-weight:var(--weight-strong); }
-.graph-history-group { display:inline-flex; align-items:center; gap:2px; }
+.graph-history-group,.system-nav-bar,.omni-history-bar { display:inline-flex; align-items:center; gap:4px; }
 .graph-map-unpin-btn { margin-left:4px; }
 .graph-cycle-cut-hint,.graph-confidence-pill { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border:1px solid var(--line); border-radius:var(--radius-pill); background:var(--soft); color:var(--ink-2); font-size:var(--text-meta); line-height:var(--leading-tight); font-weight:var(--weight-strong); }
 .graph-cycle-cut-hint { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }

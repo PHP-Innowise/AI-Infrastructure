@@ -160,6 +160,15 @@ pub fn initialize() {
     }
     m::set("systems-initialized", json!(true));
     crate::api::on_sse("system_run", crate::systems::on_sse_system_run);
+    crate::api::on_sse("system_graph_status", |payload| {
+        let project = dom::value("system-project");
+        let ev_project = m::text(payload, "project_id");
+        if !project.is_empty() && (ev_project.is_empty() || ev_project == project) {
+            spawn_local(async {
+                poll_system_graph_status(false).await;
+            });
+        }
+    });
     crate::api::on_sse("resync", crate::systems::on_sse_system_resync);
     crate::session::on_project_change(crate::systems::on_global_project_change);
 }
