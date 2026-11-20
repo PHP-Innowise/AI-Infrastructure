@@ -42,18 +42,7 @@ pub(crate) fn localize_failure_payload(req: &V) {
 
 #[cfg(test)]
 pub(crate) fn escape_html(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    crate::dom::escape_html(raw)
 }
 
 fn looks_like_file_path(token: &str) -> bool {

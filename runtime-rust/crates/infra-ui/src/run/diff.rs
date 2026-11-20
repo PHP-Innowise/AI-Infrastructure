@@ -726,7 +726,7 @@ pub(crate) fn render_grouped_diff_into(container_id: &str, diff: &str, scope_id:
 pub(crate) fn toggle_all_diff_groups(scope_id: &str, expand: bool) {
     let selector = format!(
         "details.diff-file-group[data-diff-scope=\"{}\"]",
-        scope_id.replace('"', "")
+        crate::dom::escape_css_attr_value(scope_id)
     );
     let groups = dom::all(&selector);
     for group in &groups {
@@ -751,11 +751,24 @@ pub(crate) fn jump_to_diff_file(scope_id: &str, path: &str) {
     m::write(|s| {
         s.diff_view.focused_file = path.to_owned();
     });
+    if !scope_id.is_empty() {
+        let scope_escaped = crate::dom::escape_css_attr_value(scope_id);
+        let viewer_sel = format!(".diff-viewer[data-diff-scope=\"{scope_escaped}\"]");
+        if let Ok(Some(viewer)) = dom::document().query_selector(&viewer_sel) {
+            if let Ok(Some(filter_input)) = viewer.query_selector(".diff-file-filter") {
+                if !dom::value_of(&filter_input).is_empty() {
+                    dom::set_element_value(&filter_input, "");
+                    filter_diff_files(scope_id, "");
+                }
+            }
+        }
+    }
     for group in dom::all("details.diff-file-group") {
         let same_scope = scope_id.is_empty()
             || group.get_attribute("data-diff-scope").as_deref() == Some(scope_id);
         let same_path = group.get_attribute("data-diff-file").as_deref() == Some(path);
         if same_scope && same_path {
+            dom::hide(&group, false);
             let _ = group.set_attribute("open", "");
             let _ = group.set_attribute("data-focused", "true");
             group.scroll_into_view();

@@ -16,14 +16,47 @@ thread_local! {
     static NEXT_COPY_SEQ: Cell<u64> = const { Cell::new(1) };
     static NEXT_STREAM_SEQ: Cell<u64> = const { Cell::new(1) };
     static STREAM_MD_CACHE: RefCell<BTreeMap<String, StreamMdEntry>> = const { RefCell::new(BTreeMap::new()) };
+    static STREAM_RAW_TEXT: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
     static CALL_BLOCK_CACHE: RefCell<BTreeMap<String, web_sys::Element>> = const { RefCell::new(BTreeMap::new()) };
     static TOOL_FULL_OUTPUTS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 pub(crate) fn clear_stream_md_cache() {
     STREAM_MD_CACHE.with(|cache| cache.borrow_mut().clear());
+    STREAM_RAW_TEXT.with(|raw| raw.borrow_mut().clear());
     CALL_BLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
     TOOL_FULL_OUTPUTS.with(|cache| cache.borrow_mut().clear());
+}
+
+fn ensure_block_stream_key(block: &web_sys::Element) -> String {
+    if let Some(existing) = block
+        .get_attribute("data-stream-key")
+        .filter(|s| !s.is_empty())
+    {
+        return existing;
+    }
+    let seq = NEXT_STREAM_SEQ.with(|c| {
+        let n = c.get();
+        c.set(n.saturating_add(1));
+        n
+    });
+    let key = format!("stream-md-{seq}");
+    let _ = block.set_attribute("data-stream-key", &key);
+    key
+}
+
+fn read_block_raw_text(block: &web_sys::Element) -> String {
+    let Some(key) = block.get_attribute("data-stream-key") else {
+        return String::new();
+    };
+    STREAM_RAW_TEXT.with(|raw| raw.borrow().get(&key).cloned().unwrap_or_default())
+}
+
+fn write_block_raw_text(block: &web_sys::Element, text: &str) {
+    let key = ensure_block_stream_key(block);
+    STREAM_RAW_TEXT.with(|raw| {
+        raw.borrow_mut().insert(key, text.to_owned());
+    });
 }
 
 pub(crate) fn copy_timer_key(existing: Option<&str>, seq: u64) -> String {
@@ -633,13 +666,7 @@ fn try_patch_streaming_code_block(existing: &web_sys::Element, new_html: &str) -
 }
 
 fn init_stream_markdown_body(block: &web_sys::Element, body: &web_sys::Element, text: &str) {
-    let seq = NEXT_STREAM_SEQ.with(|c| {
-        let n = c.get();
-        c.set(n.saturating_add(1));
-        n
-    });
-    let stream_key = format!("stream-md-{seq}");
-    let _ = block.set_attribute("data-stream-key", &stream_key);
+    let stream_key = ensure_block_stream_key(block);
 
     let html = render_assistant_markdown_html(text);
     body.set_inner_html(&html);
@@ -810,7 +837,7 @@ fn render_event_into(
                     .and_then(|ev| {
                         ev.query_selector(&format!(
                             "[data-permission-id=\"{}\"]",
-                            request.replace('"', "")
+                            crate::dom::escape_css_attr_value(&request)
                         ))
                         .ok()
                         .flatten()
@@ -880,9 +907,9 @@ fn render_event_into(
             .last_element_child()
             .filter(|last| last.get_attribute("data-chunk-kind").as_deref() == Some(kind.as_str()));
         if let Some(last) = can_coalesce {
-            let prev = last.get_attribute("data-raw-text").unwrap_or_default();
+            let prev = read_block_raw_text(&last);
             let combined = coalesce_chunk_text(&prev, &text);
-            let _ = last.set_attribute("data-raw-text", &combined);
+            write_block_raw_text(&last, &combined);
             let _ = last.set_attribute("data-event-id", &id);
             if kind == "text" {
                 if let Ok(Some(body)) = last.query_selector(".md-body") {
@@ -950,7 +977,7 @@ fn render_event_into(
             }
             "text" => {
                 let _ = block.set_attribute("data-chunk-kind", "text");
-                let _ = block.set_attribute("data-raw-text", &text);
+                write_block_raw_text(&block, &text);
                 let body = dom::el("div", "md-body", "");
                 if live_mode {
                     init_stream_markdown_body(&block, &body, &text);
@@ -961,7 +988,7 @@ fn render_event_into(
             }
             "thinking" => {
                 let _ = block.set_attribute("data-chunk-kind", "thinking");
-                let _ = block.set_attribute("data-raw-text", &text);
+                write_block_raw_text(&block, &text);
                 let details = dom::el("details", "thinking-details", "");
                 dom::add(
                     &details,
@@ -1060,15 +1087,24 @@ fn prepend_events_range(start: usize, end: usize) {
     }
 }
 
-/// Re-renders `#events` from `model::events` honoring the current `visible_limit` window.
+/// Re-renders `#events` from `model::events` honoring the current `visible_limit` window
+/// with a single scroll-sticky measurement before and after the loop.
 pub(crate) fn replay_visible_stream() {
     clear_stream_md_cache();
     dom::clear("events");
+    let was_sticky = dom::get("conversation")
+        .map(|c| {
+            m::read(|s| s.stream.sticky_bottom)
+                || is_near_bottom(c.scroll_height(), c.scroll_top(), c.client_height())
+        })
+        .unwrap_or(true);
+    let events_el = dom::get("events");
     let (events, limit) = m::read(|s| (s.events.clone(), s.stream.visible_limit));
     let start = events.len().saturating_sub(limit);
     m::take("run");
     m::take("run-before");
     m::take("agents");
+    let mut rendered_any = false;
     for (idx, ev) in events.iter().enumerate() {
         let (run, replaced, resolved_call) = advance_with_call(m::data("run"), ev);
         if let Some(replaced) = replaced {
@@ -1077,8 +1113,29 @@ pub(crate) fn replay_visible_stream() {
         m::set("run", run);
         activity(ev);
         if idx >= start {
-            conversation_with_call(ev, resolved_call.as_deref());
+            if let Some(ref container) = events_el {
+                if render_event_into(container, ev, resolved_call.as_deref(), true) {
+                    rendered_any = true;
+                }
+            }
         }
+    }
+    if rendered_any {
+        if let Some(conv) = dom::get("conversation") {
+            if was_sticky {
+                conv.set_scroll_top(conv.scroll_height());
+                m::write(|s| {
+                    s.stream.sticky_bottom = true;
+                    s.stream.unseen_count = 0;
+                });
+            } else {
+                m::write(|s| {
+                    s.stream.sticky_bottom = false;
+                    s.stream.unseen_count = s.stream.unseen_count.saturating_add(1);
+                });
+            }
+        }
+        update_scroll_ui();
     }
     sync_load_earlier_control();
 }

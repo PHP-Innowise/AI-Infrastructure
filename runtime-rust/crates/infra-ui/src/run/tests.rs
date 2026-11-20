@@ -1765,4 +1765,94 @@ new file mode 100644
         m::take("system-run");
         m::take("creator-detail");
     }
+
+    #[test]
+    fn approvals_waiting_counts_reconcile_back_to_zero_after_approval() {
+        let mut sessions = vec![
+            json!({"id": "s-perm", "waiting_permissions": 1}),
+            json!({"id": "s-other", "waiting_permissions": 2}),
+        ];
+        let mut waiting_counts = std::collections::BTreeMap::new();
+        waiting_counts.insert("s-perm".to_owned(), 1);
+        waiting_counts.insert("s-other".to_owned(), 2);
+
+        assert_eq!(
+            super::super::permissions::compute_total_pending_approvals_count(
+                &sessions,
+                &waiting_counts,
+                "s-perm",
+                0,
+                0,
+            ),
+            3
+        );
+
+        super::super::permissions::apply_session_waiting_count(
+            &mut sessions,
+            &mut waiting_counts,
+            "s-perm",
+            0,
+        );
+        assert_eq!(
+            super::super::permissions::compute_total_pending_approvals_count(
+                &sessions,
+                &waiting_counts,
+                "s-perm",
+                0,
+                0,
+            ),
+            2
+        );
+        assert!(!waiting_counts.contains_key("s-perm"));
+        assert_eq!(sessions[0]["waiting_permissions"], json!(0));
+
+        let snapshot = vec![
+            json!({"id": "s-perm", "waiting_permissions": 0}),
+            json!({"id": "s-other", "waiting_permissions": 0}),
+        ];
+        super::super::permissions::sync_waiting_counts_from_sessions(
+            &snapshot,
+            &mut waiting_counts,
+        );
+        assert_eq!(
+            super::super::permissions::compute_total_pending_approvals_count(
+                &snapshot,
+                &waiting_counts,
+                "s-perm",
+                0,
+                0,
+            ),
+            0
+        );
+        assert!(waiting_counts.is_empty());
+    }
+
+    #[test]
+    fn resolve_permission_expiry_ms_preserves_initial_timeout_deadline() {
+        let mut cache = std::collections::BTreeMap::new();
+        let event = json!({"request_id": "req-1", "timeout_seconds": 30});
+        let first = super::super::permissions::resolve_permission_expiry_ms(
+            &mut cache, "req-1", &event, 1_000.0,
+        );
+        let second = super::super::permissions::resolve_permission_expiry_ms(
+            &mut cache, "req-1", &event, 15_000.0,
+        );
+        assert_eq!(first, Some(31_000.0));
+        assert_eq!(second, Some(31_000.0));
+
+        let updated_timeout = json!({"request_id": "req-1", "timeout_seconds": 60});
+        let third = super::super::permissions::resolve_permission_expiry_ms(
+            &mut cache,
+            "req-1",
+            &updated_timeout,
+            16_000.0,
+        );
+        assert_eq!(third, Some(76_000.0));
+
+        let explicit = json!({"request_id": "req-2", "expires_at": "2026-01-01T00:00:10Z"});
+        let parsed = super::super::permissions::resolve_permission_expiry_ms(
+            &mut cache, "req-2", &explicit, 1_000.0,
+        );
+        assert!(parsed.is_some());
+    }
 }

@@ -1276,4 +1276,80 @@ mod update_tests {
             None
         );
     }
+
+    #[test]
+    fn waiting_approval_history_filter_clears_after_reconciliation() {
+        let mut sessions = vec![
+            json!({"id": "s-1", "title": "Fix auth", "waiting_permissions": 1}),
+            json!({"id": "s-2", "title": "Fix cache", "waiting_permissions": 0}),
+        ];
+        let mut waiting_counts = std::collections::BTreeMap::new();
+        waiting_counts.insert("s-1".to_owned(), 1);
+
+        let initial_waiting = filter_history_sessions(&sessions, "", true, &waiting_counts);
+        assert_eq!(initial_waiting.len(), 1);
+        assert_eq!(initial_waiting[0]["id"], "s-1");
+
+        crate::run::apply_session_waiting_count(&mut sessions, &mut waiting_counts, "s-1", 0);
+        let after_approval = filter_history_sessions(&sessions, "", true, &waiting_counts);
+        assert!(after_approval.is_empty());
+
+        let snapshot = vec![
+            json!({"id": "s-1", "title": "Fix auth", "waiting_permissions": 0}),
+            json!({"id": "s-2", "title": "Fix cache", "waiting_permissions": 2}),
+        ];
+        crate::run::sync_waiting_counts_from_sessions(&snapshot, &mut waiting_counts);
+        let refreshed_waiting = filter_history_sessions(&snapshot, "", true, &waiting_counts);
+        assert_eq!(refreshed_waiting.len(), 1);
+        assert_eq!(refreshed_waiting[0]["id"], "s-2");
+    }
+
+    #[test]
+    fn idle_reconnect_and_results_poll_delays_respect_sse_state() {
+        assert!(super::poll::should_schedule_idle_reconnect_poll(
+            false, false, true, false
+        ));
+        assert!(!super::poll::should_schedule_idle_reconnect_poll(
+            true, false, true, false
+        ));
+        assert!(!super::poll::should_schedule_idle_reconnect_poll(
+            false, true, true, false
+        ));
+        assert!(!super::poll::should_schedule_idle_reconnect_poll(
+            false, false, false, false
+        ));
+        assert!(!super::poll::should_schedule_idle_reconnect_poll(
+            false, false, true, true
+        ));
+
+        assert_eq!(
+            super::results::results_poll_delay_ms(true, true, false),
+            None
+        );
+        assert_eq!(
+            super::results::results_poll_delay_ms(true, true, true),
+            Some(15_000)
+        );
+        assert_eq!(
+            super::results::results_poll_delay_ms(false, true, false),
+            Some(1200)
+        );
+        assert_eq!(
+            super::results::results_poll_delay_ms(false, false, false),
+            None
+        );
+
+        assert_eq!(
+            super::navigation::view_tabs_for_group("sessions", false),
+            vec!["sessions"]
+        );
+        assert_eq!(
+            super::navigation::view_tabs_for_group("sessions", true),
+            vec!["sessions", "changes", "checks", "usage"]
+        );
+        assert_eq!(
+            super::navigation::view_tabs_for_group("systems", false),
+            vec!["systems", "system-changes"]
+        );
+    }
 }

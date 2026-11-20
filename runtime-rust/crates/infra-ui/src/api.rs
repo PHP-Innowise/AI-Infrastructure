@@ -433,6 +433,7 @@ fn sync_sse_status_dom(connected: bool, auth_failed: bool, attempt: u32) {
     let (state, label, title) = sse_status_badge(connected, auth_failed, attempt);
     dom::attr("sse-status", "data-state", state);
     dom::attr("sse-status", "title", title);
+    dom::attr("sse-status", "aria-label", &format!("Connection: {title}"));
     dom::text("sse-status", &label);
     dom::hidden("sse-status", false);
 }

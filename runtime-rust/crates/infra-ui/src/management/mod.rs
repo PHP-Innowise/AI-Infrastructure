@@ -145,7 +145,14 @@ pub async fn event(
             return true;
         }
         if id == "skills-filter" {
-            render_skills();
+            if value.trim().is_empty() {
+                dom::cancel_timer("skills-filter-debounce");
+                render_skills();
+            } else {
+                dom::later("skills-filter-debounce", 80, || {
+                    render_skills();
+                });
+            }
             return true;
         }
         if id == "skills-installed-agent" {
