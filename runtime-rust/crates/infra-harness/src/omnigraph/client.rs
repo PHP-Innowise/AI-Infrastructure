@@ -898,7 +898,16 @@ impl OmnigraphClient {
     ) -> Result<HealthResponse, OmnigraphError> {
         let url = self.root_url("/healthz")?;
         let resp = self
-            .send_raw_with_timeout(Method::GET, url, false, None, None, None, None, Some(timeout))
+            .send_raw_with_timeout(
+                Method::GET,
+                url,
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some(timeout),
+            )
             .await?;
         Self::decode_json(resp).await
     }

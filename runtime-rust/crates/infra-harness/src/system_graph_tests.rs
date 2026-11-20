@@ -2371,7 +2371,11 @@ fn a_link_between_two_services_is_bridged_to_the_code_on_both_sides() {
     );
     assert_eq!(ranged_svc_map["service"], "orders");
 
-    for op in ["system_graph.map", "system_graph.bridge", "system_graph.service_map"] {
+    for op in [
+        "system_graph.map",
+        "system_graph.bridge",
+        "system_graph.service_map",
+    ] {
         let bad = rt
             .block_on(fx.domain.execute(
                 op,
@@ -2389,6 +2393,9 @@ fn a_link_between_two_services_is_bridged_to_the_code_on_both_sides() {
             ))
             .err()
             .unwrap_or_else(|| panic!("{op} should reject malformed range target"));
-        assert_eq!(bad.status, 400, "{op} should reject malformed range target: {bad}");
+        assert_eq!(
+            bad.status, 400,
+            "{op} should reject malformed range target: {bad}"
+        );
     }
 }

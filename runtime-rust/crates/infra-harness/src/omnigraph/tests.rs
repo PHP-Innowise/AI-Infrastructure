@@ -7160,7 +7160,7 @@ async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_sub
                     "body": "issuer noise",
                     "source_branch": "main",
                     "confidence": 0.5,
-                    "pin_priority": 100 - (idx % 50) as i32,
+                    "pin_priority": 100 - (idx % 50),
                     "verified": true,
                     "created_at": "2026-01-01T00:00:00Z",
                     "updated_at": "2026-01-01T00:00:00Z"
@@ -7170,7 +7170,10 @@ async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_sub
         );
         bulk.push('\n');
     }
-    client.load_ndjson("main", None, "merge", &bulk, None).await.unwrap();
+    client
+        .load_ndjson("main", None, "merge", &bulk, None)
+        .await
+        .unwrap();
 
     mgr.publish_atom_json(&json!({
         "project_id": project_id,
@@ -7236,9 +7239,9 @@ async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_sub
     assert!(empty["subgraph"]["atoms"].as_array().unwrap().is_empty());
     let empty_reads = mock_state.lock().unwrap().reads.clone();
     assert!(
-        !empty_reads
-            .iter()
-            .any(|r| r.contains("list_file_edges") || r.contains("list_atom_relations") || r.contains("list_symbol_edges")),
+        !empty_reads.iter().any(|r| r.contains("list_file_edges")
+            || r.contains("list_atom_relations")
+            || r.contains("list_symbol_edges")),
         "empty search must short-circuit before fetching edges: {empty_reads:?}"
     );
 
@@ -7246,12 +7249,20 @@ async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_sub
     //    RelatesTo + MentionsSymbol neighbors, and provides complete page-independent subgraph.
     mock_state.lock().unwrap().reads.clear();
     let res = mgr
-        .search_json(&project_id, "issuer", Some("main"), Some("decision"), Some(5))
+        .search_json(
+            &project_id,
+            "issuer",
+            Some("main"),
+            Some("decision"),
+            Some(5),
+        )
         .await
         .unwrap();
     let reads = mock_state.lock().unwrap().reads.clone();
     assert!(
-        reads.iter().any(|r| r.starts_with("context_search_by_kind@")),
+        reads
+            .iter()
+            .any(|r| r.starts_with("context_search_by_kind@")),
         "expected kind-filtered query pushdown in reads: {reads:?}"
     );
 
@@ -7295,7 +7306,8 @@ async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_sub
             .as_array()
             .unwrap()
             .iter()
-            .any(|s| s["name"] == "check" && s["symbol_id"].as_str().is_some_and(|id| !id.is_empty())),
+            .any(|s| s["name"] == "check"
+                && s["symbol_id"].as_str().is_some_and(|id| !id.is_empty())),
         "expected canonical symbol_id in search subgraph: {}",
         res["subgraph"]["symbols"]
     );
@@ -7304,7 +7316,9 @@ async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_sub
             .as_array()
             .unwrap()
             .iter()
-            .any(|e| e["kind"] == "relates_to" && e["from"] == "atom-in-1" && e["to"] == "atom-dec-target"),
+            .any(|e| e["kind"] == "relates_to"
+                && e["from"] == "atom-in-1"
+                && e["to"] == "atom-dec-target"),
         "expected incoming RelatesTo edge in search subgraph"
     );
 
@@ -7338,7 +7352,10 @@ async fn status_caches_stats_reuses_client_and_respects_short_health_timeout_and
     assert!(st1["platform"]["os"].is_string());
     assert!(st1["platform"]["arch"].is_string());
     let first_poll_reads = mock_state.lock().unwrap().reads.len();
-    assert!(first_poll_reads >= 8, "expected initial stats queries: {first_poll_reads}");
+    assert!(
+        first_poll_reads >= 8,
+        "expected initial stats queries: {first_poll_reads}"
+    );
 
     mock_state.lock().unwrap().reads.clear();
     let st2 = mgr.status_json("proj-1").await.unwrap();
@@ -7542,7 +7559,10 @@ exit 1
     let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
     let tools_dir = mgr.tools_dir();
     std::fs::create_dir_all(&tools_dir).unwrap();
-    for (name, body) in [("omnigraph", cli_script), ("omnigraph-server", crashing_server)] {
+    for (name, body) in [
+        ("omnigraph", cli_script),
+        ("omnigraph-server", crashing_server),
+    ] {
         let p = tools_dir.join(name);
         std::fs::write(&p, body).unwrap();
         #[cfg(unix)]
@@ -7561,7 +7581,8 @@ exit 1
     );
     let tail = mgr.stderr_tail(10);
     assert!(
-        tail.iter().any(|l| l.contains("hint: stop lingering instance")),
+        tail.iter()
+            .any(|l| l.contains("hint: stop lingering instance")),
         "expected captured lines in stderr ring-buffer: {tail:?}"
     );
 }

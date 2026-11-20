@@ -819,10 +819,7 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
                 .filter(|a| match_proj(a))
                 .filter(|a| {
                     kind_wanted.as_ref().is_none_or(|kf| {
-                        a["kind"]
-                            .as_str()
-                            .map(str::to_ascii_lowercase)
-                            .as_deref()
+                        a["kind"].as_str().map(str::to_ascii_lowercase).as_deref()
                             == Some(kf.as_str())
                     })
                 })
@@ -2154,7 +2151,12 @@ async fn http_omnigraph_routes_end_to_end_and_share_via_app_router() {
         .await;
     assert_eq!(status, 200, "{empty_search}");
     assert!(empty_search["hits"].as_array().unwrap().is_empty());
-    assert!(empty_search["subgraph"]["atoms"].as_array().unwrap().is_empty());
+    assert!(
+        empty_search["subgraph"]["atoms"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     let (status, kind_match) = fx
         .http(
