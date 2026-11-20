@@ -343,6 +343,83 @@ pub(crate) fn capsules(
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// The active capsules compiled from the skill at `skill_path`.
+pub(crate) fn active_capsules(
+    db: &Connection,
+    project_id: &str,
+    skill_path: &str,
+) -> Result<Vec<Value>> {
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id=?1 AND skill_path=?2 AND status='active' ORDER BY created_at DESC,rowid DESC"
+    ))?;
+    let rows = query.query_map(params![project_id, skill_path], capsule_row)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub(crate) fn touch_capsule(db: &Connection, capsule_id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE skillcache_capsules SET last_used_at=?2 WHERE capsule_id=?1",
+        params![capsule_id, store::now()],
+    )?;
+    Ok(())
+}
+
+/// One warm turn: which capsule ran, how it ended and how often a step fell
+/// back to the agent. Its tokens and cost are the launch's own, read by
+/// `generation`; they are not copied here.
+pub(crate) struct Run<'a> {
+    pub generation: &'a str,
+    pub session_id: &'a str,
+    pub capsule_id: &'a str,
+    pub provider: &'a str,
+    pub model: Option<&'a str>,
+    pub outcome: &'a str,
+    pub steps: &'a Value,
+    pub deopts: i64,
+}
+
+pub(crate) fn record_run(db: &Connection, run: &Run<'_>) -> Result<()> {
+    db.execute(
+        "INSERT INTO skillcache_runs(generation,session_id,capsule_id,provider,model,outcome,steps,deopts,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(generation) DO UPDATE SET outcome=excluded.outcome,steps=excluded.steps,deopts=excluded.deopts",
+        params![
+            run.generation,
+            run.session_id,
+            run.capsule_id,
+            run.provider,
+            run.model,
+            run.outcome,
+            run.steps.to_string(),
+            run.deopts,
+            store::now()
+        ],
+    )?;
+    Ok(())
+}
+
+/// A session's warm turns, newest first.
+pub(crate) fn session_runs(db: &Connection, session_id: &str) -> Result<Vec<Value>> {
+    let mut query = db.prepare(
+        "SELECT generation,capsule_id,provider,model,outcome,steps,deopts,created_at
+         FROM skillcache_runs WHERE session_id=?1 ORDER BY created_at DESC,rowid DESC",
+    )?;
+    let rows = query.query_map([session_id], |row| {
+        Ok(json!({
+            "generation": row.get::<_, String>(0)?,
+            "capsule_id": row.get::<_, String>(1)?,
+            "provider": row.get::<_, String>(2)?,
+            "model": row.get::<_, Option<String>>(3)?,
+            "outcome": row.get::<_, String>(4)?,
+            "steps": decoded(row.get(5)?),
+            "deopts": row.get::<_, i64>(6)?,
+            "created_at": row.get::<_, String>(7)?,
+        }))
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 /// Removes a capsule's rows. Its files are the caller's to remove.
 pub(crate) fn delete_capsule(db: &Connection, capsule_id: &str) -> Result<bool> {
     db.execute(
@@ -351,6 +428,10 @@ pub(crate) fn delete_capsule(db: &Connection, capsule_id: &str) -> Result<bool> 
     )?;
     db.execute(
         "DELETE FROM skillcache_gates WHERE capsule_id=?1",
+        [capsule_id],
+    )?;
+    db.execute(
+        "DELETE FROM skillcache_runs WHERE capsule_id=?1",
         [capsule_id],
     )?;
     Ok(db.execute(

@@ -88,6 +88,36 @@ esac
 "#,
         project = root.join("project").display(),
     );
+    // Codex also lists its skills over its app server, and in a warm turn it
+    // is the agent that follows the executor's protocol: a test writes that
+    // agent as a shell fragment.
+    let script = if name == "codex" {
+        r#"#!/bin/sh
+dir=$(dirname "$0")
+case " $* " in
+  *" app-server "*)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"initialize"'*) echo '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"fake"}}';;
+        *'"method":"skills/list"'*) cat "$dir/codex-skills.json";;
+      esac
+    done
+    exit 0;;
+esac
+prompt=$(cat)
+printf '%s\n' "$@" > "$dir/codex-arguments.txt"
+printf '%s' "$prompt" > "$dir/codex-prompt.txt"
+env > "$dir/codex-environment.txt"
+if [ -f "$dir/codex-agent.sh" ]; then
+  . "$dir/codex-agent.sh"
+else
+  cat "$dir/codex-events.jsonl"
+fi
+"#
+        .to_string()
+    } else {
+        script
+    };
     fs::write(&program, script).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(bin.join(format!("{name}-events.jsonl")), "").unwrap();
@@ -137,6 +167,18 @@ impl Stand {
         let project = root.join("project");
         let source = root.join("source");
         fs::create_dir_all(project.join(".claude/skills/pdf/scripts")).unwrap();
+        fs::create_dir_all(project.join(".agents/skills/pdf")).unwrap();
+        fs::write(
+            project.join(".agents/skills/pdf/SKILL.md"),
+            "---\nname: pdf\ndescription: Work with PDF files\n---\n# PDF\n\nExtract one row per invoice.\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".agents/skills/other")).unwrap();
+        fs::write(
+            project.join(".agents/skills/other/SKILL.md"),
+            "---\nname: other\ndescription: Another skill\n---\n# Other\n",
+        )
+        .unwrap();
         fs::create_dir_all(project.join("invoices")).unwrap();
         fs::write(project.join("invoices/a.txt"), "Invoice 1\nTotal: 10.00\n").unwrap();
         fs::create_dir_all(&source).unwrap();
@@ -154,6 +196,21 @@ impl Stand {
         git(&project, &["init", "-q"]);
         git(&project, &["add", "-A"]);
         git(&project, &["commit", "-q", "-m", "base"]);
+        // What Codex answers when the Harness asks it for its skills.
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(
+            root.join("bin/codex-skills.json"),
+            format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 2, "result": {"data": [{"skills": [
+                    {"name": "pdf", "description": "Work with PDF files", "enabled": true, "scope": "repo",
+                     "path": project.join(".agents/skills/pdf/SKILL.md")},
+                    {"name": "other", "description": "Another skill", "enabled": true, "scope": "repo",
+                     "path": project.join(".agents/skills/other/SKILL.md")}
+                ]}]}})
+            ),
+        )
+        .unwrap();
         let store = SessionStore::open(&root.join("state")).unwrap();
         let project_id = store.register(&project).unwrap()["id"]
             .as_str()
@@ -274,17 +331,16 @@ impl Stand {
             "results".into(),
             Arc::new(infra_harness::results::ResultService { results }),
         );
-        domains.insert(
-            "skillcache".into(),
-            Arc::new(
-                SkillCacheDomain::new(
-                    store.clone(),
-                    skillcache_providers,
-                    sessions.shutdown_cancel(),
-                )
-                .with_engine(PathBuf::from(FIXTURE)),
-            ),
+        let skillcache = Arc::new(
+            SkillCacheDomain::new(
+                store.clone(),
+                skillcache_providers,
+                sessions.shutdown_cancel(),
+            )
+            .with_engine(PathBuf::from(FIXTURE)),
         );
+        sessions.install_skillcache(skillcache.runtime()).unwrap();
+        domains.insert("skillcache".into(), skillcache);
         let boot = store.clone();
         let closing = sessions.clone();
         let services = Arc::new(
@@ -592,7 +648,18 @@ async fn nothing_is_recorded_when_off_or_warm_only() {
             .await;
         assert_eq!(stand.store.get(&sid).unwrap()["status"], "completed");
         assert!(stand.traces().is_empty(), "{skillcache} recorded a trace");
-        assert!(stand.skillcache_events(&sid).is_empty());
+        // A session that asks for warm turns is told why this one ran cold;
+        // one that asks for nothing hears nothing.
+        let phases = stand
+            .skillcache_events(&sid)
+            .iter()
+            .map(|event| event["phase"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        if skillcache["mode"] == "warm_only" {
+            assert_eq!(phases, ["miss"]);
+        } else {
+            assert!(phases.is_empty(), "{phases:?}");
+        }
         let (_, listed) = stand
             .http(
                 Method::GET,
@@ -641,9 +708,10 @@ async fn a_turn_that_failed_or_used_no_skill_keeps_no_trace() {
     assert_eq!(stand.store.get(&sid).unwrap()["status"], "completed");
     assert!(stand.traces().is_empty());
     let events = stand.skillcache_events(&sid);
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0]["phase"], "not_observed");
-    assert_eq!(events[0]["reason"], "no_skill");
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0]["phase"], "miss");
+    assert_eq!(events[1]["phase"], "not_observed");
+    assert_eq!(events[1]["reason"], "no_skill");
     // No tool at all.
     stand.script(
         "claude",
@@ -1352,5 +1420,582 @@ async fn changing_routes_need_the_token() {
             .unwrap();
         assert_eq!(response.status().as_u16(), 403, "{method} {path}");
     }
+    stand.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Warm turns. Codex is the provider: its `$skill` mention is what routes a
+// message to exactly one skill. The stand-in agent follows the executor's
+// protocol with the staged `skillcache-run`, so the capsule's programs run
+// for real in the session's workspace.
+
+impl Stand {
+    /// A Codex turn of a new session; `agent` is the shell the stand-in runs
+    /// as the agent, or its scripted events when there is none.
+    async fn codex_turn(&self, prompt: &str, options: Value, agent: Option<&str>) -> String {
+        let script = self.root.join("bin/codex-agent.sh");
+        match agent {
+            Some(agent) => fs::write(&script, agent).unwrap(),
+            None => {
+                let _ = fs::remove_file(&script);
+            }
+        }
+        let mut body = json!({
+            "project_id": self.project_id,
+            "provider": "codex",
+            "mode": "edit",
+            "workflow": "native",
+            "project_context": false,
+            "permissions": "auto",
+            "prompt": prompt,
+        });
+        for (key, value) in options.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let (status, created) = self.http(Method::POST, "/api/sessions", Some(body)).await;
+        assert_eq!(status, 201, "{created}");
+        let sid = created["session"]["id"].as_str().unwrap().to_owned();
+        self.finished(&sid, 1).await;
+        sid
+    }
+    fn phases(&self, sid: &str) -> Vec<String> {
+        self.skillcache_events(sid)
+            .iter()
+            .map(|event| event["phase"].as_str().unwrap().to_string())
+            .collect()
+    }
+    fn recorded(&self, name: &str) -> String {
+        fs::read_to_string(self.root.join("bin").join(name)).unwrap_or_default()
+    }
+}
+
+/// A cold Codex turn that loads the project's `pdf` skill and runs a command.
+fn codex_skill_turn() -> Vec<Value> {
+    vec![
+        json!({"type": "thread.started", "thread_id": "0199-cold"}),
+        json!({"type": "turn.started"}),
+        json!({"type": "item.completed", "item": {"id": "i1", "type": "command_execution",
+            "command": "bash -lc 'cat .agents/skills/pdf/SKILL.md'", "aggregated_output": "# PDF\n",
+            "exit_code": 0, "status": "completed"}}),
+        json!({"type": "item.completed", "item": {"id": "i2", "type": "command_execution",
+            "command": "python3 extract.py invoices/", "aggregated_output": "rows written",
+            "exit_code": 0, "status": "completed"}}),
+        json!({"type": "item.completed", "item": {"id": "i3", "type": "agent_message", "text": "Rows extracted."}}),
+        json!({"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}}),
+    ]
+}
+
+/// The agent of a warm turn: it starts the plan with the value the request
+/// states, does the inspection it is handed, and answers.
+fn warm_agent(root: &Path, by_hand: &str) -> String {
+    let fixture = Path::new(FIXTURE).parent().unwrap().display().to_string();
+    let bin = root.join("bin").display().to_string();
+    format!(
+        r#"PATH="{fixture}:$PATH"
+echo '{{"type":"thread.started","thread_id":"0199-warm"}}'
+echo '{{"type":"turn.started"}}'
+call() {{
+  number=$1; shift
+  answer=$("$@")
+  printf '%s\n' "$answer" > "{bin}/warm-answer-$number.json"
+  echo "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"w$number\",\"type\":\"command_execution\",\"command\":\"skillcache-run\",\"aggregated_output\":\"\",\"exit_code\":0,\"status\":\"completed\"}}}}"
+}}
+call 1 skillcache-run run '{{"input_dir":"invoices/"}}'
+{by_hand}
+call 3 skillcache-run continue
+echo '{{"type":"item.completed","item":{{"id":"done","type":"agent_message","text":"Rows extracted."}}}}'
+echo '{{"type":"turn.completed","usage":{{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}}}'
+"#
+    )
+}
+
+impl Stand {
+    /// Observes a cold Codex turn with `$pdf` and compiles it; returns the
+    /// capsule and the session it came from.
+    async fn compiled_capsule(&self, answer: &Value) -> (String, String) {
+        self.script("codex", &codex_skill_turn());
+        let sid = self
+            .codex_turn(
+                "$pdf extract the rows of invoices/",
+                json!({"skillcache": {"mode": "auto"}}),
+                None,
+            )
+            .await;
+        let events = self.skillcache_events(&sid);
+        // No capsule yet: the turn is cold, and in `auto` it is observed.
+        assert_eq!(events[0]["phase"], "miss", "{events:?}");
+        assert_eq!(events[0]["reason"], "no_capsule");
+        assert_eq!(events[1]["phase"], "observed", "{events:?}");
+        let generation = events[1]["generation"].as_str().unwrap().to_string();
+        self.compiler(1, answer);
+        let (_, capsule_id) = self.start_compile(&sid, &generation).await;
+        let capsule = self.settled(&capsule_id, "compiling").await;
+        assert_eq!(capsule["status"], "active", "{capsule}");
+        assert_eq!(capsule["skill_path"], ".agents/skills/pdf/SKILL.md");
+        (capsule_id, sid)
+    }
+}
+
+fn codex_answer() -> Value {
+    let mut answer = hybrid_answer();
+    answer["capsule"]["source"]["skills"][0]["path"] = ".agents/skills/pdf/SKILL.md".into();
+    answer
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_warm_turn_runs_the_capsule_instead_of_reading_the_skill() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (capsule_id, cold) = stand.compiled_capsule(&codex_answer()).await;
+    // The cold turn's prompt asked the agent to load and follow the skill.
+    let cold_prompt = stand.recorded("codex-prompt.txt");
+    assert!(
+        cold_prompt.contains("Harness skill request"),
+        "{cold_prompt}"
+    );
+    let traces = stand.traces().len();
+    // The composer's preflight says what a turn would do before it is sent,
+    // and making that preview prepares nothing.
+    let preview = |skillcache: Value| {
+        let stand = &stand;
+        async move {
+            let (status, preflight) = stand
+                .http(
+                    Method::POST,
+                    &format!("/api/projects/{}/preflight", stand.project_id),
+                    Some(json!({
+                        "prompt": "$pdf extract the rows of invoices/",
+                        "risk_caller_hints": false,
+                        "skillcache": skillcache,
+                    })),
+                )
+                .await;
+            assert_eq!(status, 200, "{preflight}");
+            preflight["skillcache"].clone()
+        }
+    };
+    let composer = |mode: &str, session_mode: &str| json!({"mode": mode, "provider": "codex", "session_mode": session_mode, "permissions": "auto"});
+    let seen = preview(composer("auto", "edit")).await;
+    assert_eq!(seen["decision"], "hit", "{seen}");
+    assert_eq!(seen["capsule"]["capsule_id"], capsule_id.as_str());
+    assert_eq!(seen["capsule"]["mu"], "pdf-invoice-rows");
+    assert_eq!(
+        preview(composer("auto", "plan")).await["reason"],
+        "plan_mode"
+    );
+    assert_eq!(
+        preview(composer("observe", "edit")).await["decision"],
+        "off"
+    );
+    assert!(
+        !stand.root.join("state/skillcache/bin").exists(),
+        "a preview stages nothing"
+    );
+    assert!(!stand.root.join("state/skillcache/sessions").exists());
+    let (_, plain) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{}/preflight", stand.project_id),
+            Some(json!({"prompt": "$pdf extract the rows", "risk_caller_hints": false})),
+        )
+        .await;
+    assert!(
+        plain.get("skillcache").is_none(),
+        "a preflight that does not ask is unchanged"
+    );
+    let sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "auto"}}),
+            Some(&warm_agent(&stand.root, "call 2 skillcache-run status")),
+        )
+        .await;
+    assert_eq!(stand.store.get(&sid).unwrap()["status"], "completed");
+    assert_eq!(
+        stand.phases(&sid),
+        [
+            "hit",
+            "started",
+            "program_completed",
+            "program_completed",
+            "your_steps",
+            "complete"
+        ]
+    );
+    let hit = &stand.skillcache_events(&sid)[0];
+    assert_eq!(hit["capsule_id"], capsule_id.as_str());
+    assert_eq!(hit["mu"], "pdf-invoice-rows");
+    // The prompt carries the capsule's block where the skill request was, and
+    // nothing that was observed, no program and no place of the package.
+    let prompt = stand.recorded("codex-prompt.txt");
+    assert!(
+        prompt.contains("SkillCache capsule for this request: pdf-invoice-rows"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("`input_dir` (path): Folder with the invoices"));
+    assert!(prompt.contains("skillcache-run run"));
+    assert!(!prompt.contains("Harness skill request"), "{prompt}");
+    for withheld in [
+        "invoices-2026/",
+        "observed/rows.json",
+        "programs/extract",
+        "program.json",
+        "skillcache/capsules",
+        &capsule_id,
+    ] {
+        assert!(
+            !prompt.contains(withheld),
+            "the warm prompt shows {withheld:?}:\n{prompt}"
+        );
+    }
+    // The executor answered as its protocol says, and its programs ran in the
+    // session's own workspace.
+    let first: Value = serde_json::from_str(&stand.recorded("warm-answer-1.json")).unwrap();
+    assert_eq!(first["status"], "your_steps", "{first}");
+    assert_eq!(first["steps"][0]["kind"], "inspection");
+    assert_eq!(first["results"]["extract"]["invoices"], 1);
+    assert_eq!(first["results"]["verify"]["rows"], 1);
+    let last: Value = serde_json::from_str(&stand.recorded("warm-answer-3.json")).unwrap();
+    assert_eq!(last["status"], "complete", "{last}");
+    assert_eq!(last["failed"], json!([]));
+    assert!(stand.project().join("out/rows.json").is_file());
+    // What the provider's process was started with.
+    let environment = stand.recorded("codex-environment.txt");
+    let variable = |name: &str| {
+        environment
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let state = stand.root.join("state/skillcache");
+    assert!(
+        variable("PATH").starts_with(state.join("bin").to_str().unwrap()),
+        "{}",
+        variable("PATH")
+    );
+    assert!(variable("SKILLCACHE_PACKAGE").ends_with(&format!("{capsule_id}/1/warm")));
+    assert_eq!(
+        variable("SKILLCACHE_WORKSPACE"),
+        stand.project().to_str().unwrap()
+    );
+    let state_file = variable("SKILLCACHE_STATE_FILE");
+    assert!(
+        state_file.contains(&format!("skillcache/sessions/{sid}/")),
+        "{state_file}"
+    );
+    // Codex writes only where it is told it may: the run's state folder.
+    let arguments = stand.recorded("codex-arguments.txt");
+    let lines = arguments.lines().collect::<Vec<_>>();
+    let at = lines
+        .iter()
+        .position(|line| *line == "--add-dir")
+        .expect("--add-dir");
+    assert_eq!(
+        Path::new(lines[at + 1]),
+        Path::new(&state_file).parent().unwrap()
+    );
+    // The turn is recorded as a run of the capsule, not as a new observation.
+    assert_eq!(
+        stand.traces().len(),
+        traces,
+        "a warm turn is not an observed trace"
+    );
+    let (_, listed) = stand
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/skillcache"),
+            None,
+        )
+        .await;
+    assert_eq!(listed["runs"][0]["capsule_id"], capsule_id.as_str());
+    assert_eq!(listed["runs"][0]["outcome"], "complete");
+    assert_eq!(listed["runs"][0]["deopts"], 0);
+    let capsule = stand.capsule(&capsule_id).await;
+    assert_eq!(capsule["runs"], json!({"count": 1, "deopts": 0}));
+    assert!(capsule["last_used_at"].is_string());
+    let recorded: String = stand
+        .store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT settings FROM launches WHERE session_id=?1",
+            [&sid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let settings: Value = serde_json::from_str(&recorded).unwrap();
+    assert_eq!(settings["skillcache"]["decision"], "hit");
+    assert_eq!(settings["skillcache"]["capsule_id"], capsule_id.as_str());
+    // prompt_hit_ledger: the block is accounted as its own category.
+    let context: Option<String> = stand
+        .store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT context FROM launches WHERE session_id=?1",
+            [&sid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let context: Value = serde_json::from_str(&context.unwrap_or_default()).unwrap_or(Value::Null);
+    assert!(
+        context.to_string().contains("\"skillcache\":"),
+        "the launch's prompt ledger has no skillcache category: {context}"
+    );
+    // The run's working state is gone with the turn.
+    assert!(!Path::new(&state_file).parent().unwrap().exists());
+    // The cold session's launch says it was a miss.
+    let cold_settings: String = stand
+        .store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT settings FROM launches WHERE session_id=?1",
+            [&cold],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        cold_settings.contains("\"decision\":\"miss\""),
+        "{cold_settings}"
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_program_hands_one_step_back_and_the_plan_goes_on() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (capsule_id, _) = stand.compiled_capsule(&codex_answer()).await;
+    // The project drifted since the capsule was qualified: the file its first
+    // program needs is gone. The capsule itself is unchanged and still active.
+    fs::remove_file(stand.project().join("invoices/a.txt")).unwrap();
+    let by_hand = format!(
+        r#"mkdir -p out && echo '[]' > out/rows.json
+refused=$(skillcache-tool extract --input '{{"input_dir":"invoices/"}}' 2>&1 >/dev/null; echo "exit=$?")
+printf '%s\n' "$refused" > "{}/warm-tool.txt"
+call 2 skillcache-run continue '{{"rows_file":"out/rows.json"}}'"#,
+        stand.root.join("bin").display()
+    );
+    let sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            Some(&warm_agent(&stand.root, &by_hand)),
+        )
+        .await;
+    assert_eq!(stand.store.get(&sid).unwrap()["status"], "completed");
+    assert_eq!(
+        stand.phases(&sid),
+        [
+            "hit",
+            "started",
+            "program_failed",
+            "program_completed",
+            "your_steps",
+            "complete"
+        ]
+    );
+    // The first answer hands exactly that step to the agent, with the source
+    // of a plan step and the output the next program reads.
+    let first: Value = serde_json::from_str(&stand.recorded("warm-answer-1.json")).unwrap();
+    assert_eq!(first["status"], "program_failed", "{first}");
+    assert_eq!(first["step_index"], 0);
+    assert_eq!(first["diagnostics"]["reason"], "nonzero_exit");
+    assert_eq!(first["diagnostics"]["attempts"], 2);
+    assert_eq!(first["required_outputs"], json!(["rows_file"]));
+    assert!(
+        first["program_source_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("programs/extract/program.json")
+    );
+    assert!(
+        first["instruction"]
+            .as_str()
+            .unwrap()
+            .contains(".agents/skills/pdf/SKILL.md")
+    );
+    // The failed program is not run again by hand either.
+    let tool = stand.recorded("warm-tool.txt");
+    assert!(
+        tool.contains("refused_failed_program") && tool.contains("exit=2"),
+        "{tool}"
+    );
+    // The rest of the plan stayed compiled: the verification program ran.
+    let second: Value = serde_json::from_str(&stand.recorded("warm-answer-2.json")).unwrap();
+    assert_eq!(second["status"], "your_steps", "{second}");
+    assert_eq!(second["results"]["verify"]["rows"], 1);
+    let last: Value = serde_json::from_str(&stand.recorded("warm-answer-3.json")).unwrap();
+    assert_eq!(
+        last["failed"],
+        json!([{"step_index": 0, "reason": "nonzero_exit"}])
+    );
+    let failed = stand
+        .skillcache_events(&sid)
+        .into_iter()
+        .find(|event| event["phase"] == "program_failed")
+        .unwrap();
+    assert_eq!(failed["program"], "extract");
+    assert_eq!(failed["reason"], "nonzero_exit");
+    assert_eq!(failed["verification"], false);
+    let capsule = stand.capsule(&capsule_id).await;
+    assert_eq!(capsule["runs"], json!({"count": 1, "deopts": 1}));
+    // A deoptimized step is a property of that run; the capsule stays active.
+    assert_eq!(capsule["status"], "active");
+    // warm_only records nothing, hit or not.
+    assert_eq!(stand.traces().len(), 1);
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_outside_what_a_capsule_was_qualified_for_runs_cold() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (capsule_id, _) = stand.compiled_capsule(&codex_answer()).await;
+    stand.script("codex", &codex_skill_turn());
+    let cold = |prompt: &'static str, options: Value| {
+        let stand = &stand;
+        async move {
+            let sid = stand.codex_turn(prompt, options, None).await;
+            assert_eq!(stand.store.get(&sid).unwrap()["status"], "completed");
+            let events = stand.skillcache_events(&sid);
+            let prompt = stand.recorded("codex-prompt.txt");
+            assert!(
+                !prompt.contains("SkillCache capsule"),
+                "a miss changes nothing of the prompt"
+            );
+            (events, prompt)
+        }
+    };
+    // warm_requires_edit_mode
+    let (events, prompt) = cold(
+        "$pdf extract the rows of invoices/",
+        json!({"skillcache": {"mode": "warm_only"}, "mode": "plan"}),
+    )
+    .await;
+    assert_eq!(events[0]["reason"], "plan_mode", "{events:?}");
+    assert!(prompt.contains("Harness skill request"));
+    // warm_single_routed_skill: two skills named, and none.
+    let (events, _) = cold(
+        "$pdf and $other extract the rows",
+        json!({"skillcache": {"mode": "warm_only"}}),
+    )
+    .await;
+    assert_eq!(events[0]["reason"], "no_single_skill", "{events:?}");
+    let (events, _) = cold(
+        "extract the rows of invoices/",
+        json!({"skillcache": {"mode": "warm_only"}}),
+    )
+    .await;
+    assert_eq!(events[0]["reason"], "no_single_skill");
+    // A skill without a capsule.
+    let (events, _) = cold("$other do it", json!({"skillcache": {"mode": "warm_only"}})).await;
+    assert_eq!(events[0]["reason"], "no_capsule");
+    // A session that did not ask for warm turns is not looked at.
+    let (events, untouched) = cold("$pdf extract the rows of invoices/", json!({})).await;
+    assert!(events.is_empty(), "{events:?}");
+    let (events, _) = cold(
+        "$pdf extract the rows of invoices/",
+        json!({"skillcache": {"mode": "observe"}}),
+    )
+    .await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["phase"], "observed");
+    // warm_skips_stale_capsule: the skill's text changed.
+    fs::write(
+        stand.project().join(".agents/skills/pdf/SKILL.md"),
+        "---\nname: pdf\ndescription: Work with PDF files\n---\n# PDF\n\nNow with a new rule.\n",
+    )
+    .unwrap();
+    // A preview notices it and changes nothing: only a turn marks a capsule.
+    let (_, preflight) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{}/preflight", stand.project_id),
+            Some(json!({
+                "prompt": "$pdf extract the rows of invoices/",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "codex", "session_mode": "edit", "permissions": "auto"},
+            })),
+        )
+        .await;
+    assert_eq!(preflight["skillcache"]["reason"], "stale", "{preflight}");
+    assert_eq!(
+        stand.count("SELECT COUNT(*) FROM skillcache_capsules WHERE status='active'"),
+        1
+    );
+    let (events, _) = cold(
+        "$pdf extract the rows of invoices/",
+        json!({"skillcache": {"mode": "warm_only"}}),
+    )
+    .await;
+    assert_eq!(events[0]["phase"], "miss");
+    assert_eq!(events[0]["reason"], "stale", "{events:?}");
+    assert_eq!(stand.capsule(&capsule_id).await["status"], "stale");
+    // Once stale it is no capsule at all for the next turn.
+    let (events, missed) = cold(
+        "$pdf extract the rows of invoices/",
+        json!({"skillcache": {"mode": "warm_only"}}),
+    )
+    .await;
+    assert_eq!(events[0]["reason"], "no_capsule");
+    // A miss sends exactly the prompt a session without SkillCache sends.
+    assert_eq!(missed, untouched);
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn warm_network_capability_mismatch_is_miss() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    // A capsule whose programs declare the network: Gate 3 replays it with
+    // the network, and Codex outside Bypass has none for it.
+    let mut answer = codex_answer();
+    answer["capsule"]["capabilities"]["network"] = "required".into();
+    let (capsule_id, _) = stand.compiled_capsule(&answer).await;
+    let capsule = stand.capsule(&capsule_id).await;
+    assert_eq!(capsule["capabilities"]["network"], "required");
+    assert_eq!(capsule["gates"][2]["report"]["network"], "required");
+    stand.script("codex", &codex_skill_turn());
+    let sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            None,
+        )
+        .await;
+    let events = stand.skillcache_events(&sid);
+    assert_eq!(events[0]["phase"], "miss");
+    assert_eq!(events[0]["reason"], "network", "{events:?}");
+    // With Bypass, Codex runs without its sandbox and the capsule is used.
+    let sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}, "permissions": "bypass"}),
+            Some(&warm_agent(&stand.root, "call 2 skillcache-run status")),
+        )
+        .await;
+    assert_eq!(stand.phases(&sid)[0], "hit");
+    // Without a sandbox there is nothing to add a writable folder to.
+    assert!(
+        !stand
+            .recorded("codex-arguments.txt")
+            .lines()
+            .any(|line| line == "--add-dir")
+    );
     stand.close().await;
 }

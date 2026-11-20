@@ -437,6 +437,14 @@ impl Results {
         self.store.connection()?.execute("INSERT INTO launches(id,session_id,kind,status,started_at,settings,context) VALUES (?,?,?,'running',?,?,?)",params![generation,sid,kind,now(),serde_json::to_string(&settings)?,context.map(serde_json::to_string).transpose()?])?;
         Ok(())
     }
+    /// Records what SkillCache decided for a launch beside its settings.
+    pub fn note_skillcache(&self, generation: &str, decision: &Value) -> Result<()> {
+        self.store.connection()?.execute(
+            "UPDATE launches SET settings=json_set(settings,'$.skillcache',json(?1)) WHERE id=?2",
+            params![serde_json::to_string(decision)?, generation],
+        )?;
+        Ok(())
+    }
     pub fn update_context(&self, generation: &str, context: &Value) -> Result<()> {
         self.store.connection()?.execute(
             "UPDATE launches SET context=? WHERE id=?",

@@ -11,6 +11,7 @@ pub mod gates;
 pub mod settings;
 pub mod snapshot;
 pub mod trace;
+pub mod warm;
 
 use crate::{
     HarnessError, Result,
@@ -491,6 +492,7 @@ impl SkillCacheDomain {
             listed["compiling"] = db::compile_pending(&db, &generation)?.into();
         }
         let compiles = db::session_compiles(&db, session_id)?;
+        let runs = db::session_runs(&db, session_id)?;
         let mut capsules = Vec::new();
         for compiled in &compiles {
             if let Some(id) = compiled["capsule_id"].as_str()
@@ -506,6 +508,7 @@ impl SkillCacheDomain {
             "traces": traces,
             "compiles": compiles,
             "capsules": capsules,
+            "runs": runs,
             "retention": {"days": db::TRACE_DAYS, "per_session": db::TRACES_PER_SESSION},
         }))
     }

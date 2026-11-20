@@ -160,6 +160,23 @@ fn spelled(workspace: &Path, home: Option<&Path>, file: &Path) -> Option<String>
         .map(|relative| format!("~/{relative}"))
 }
 
+/// How the skill whose entry document is `file` is named in a capsule, when
+/// it is a skill folder of the workspace or of the user's home.
+pub fn spelled_skill(workspace: &Path, file: &Path) -> Option<String> {
+    let workspace = infra_core::fs::canonicalize(workspace).ok()?;
+    let home = run_activity::user_home().map(PathBuf::from);
+    let file = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        workspace.join(file)
+    };
+    let file = infra_core::fs::canonicalize(&file).ok()?;
+    if file.file_name()?.to_str()? != "SKILL.md" || !file.is_file() {
+        return None;
+    }
+    spelled(&workspace, home.as_deref(), &file)
+}
+
 /// The skill whose entry document is `file`, when it is an ordinary skill
 /// folder inside the workspace or the user's home.
 fn skill_entry(

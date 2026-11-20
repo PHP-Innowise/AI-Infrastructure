@@ -597,6 +597,72 @@ is the read-only package a session would mount, without any observed value, and
 for Gate 3 alone. Capsule progress is published as `skillcache_capsule` events
 on the project's event stream.
 
+#### Warm turns
+
+In `auto` and `warm_only` a turn runs a capsule only when all of this holds;
+anything else is a **miss**, the turn runs exactly as it would without
+SkillCache (the same prompt, byte for byte), and the session says why in one
+line:
+
+| Condition | Miss reason |
+| --- | --- |
+| the message routes to exactly one skill | `no_single_skill` |
+| the session is in Edit mode (a capsule's programs write) | `plan_mode` |
+| the provider is Claude or Codex | `provider` |
+| the message is not a native Claude Code command, which goes to the CLI as typed | `native_route` |
+| Codex is not in Manual mode, where it would ask before every step of the executor | `codex_manual` |
+| the skill has exactly one active capsule | `no_capsule`, `ambiguous` |
+| the capsule still matches its skill, environment, rules and package | `stale` |
+| the capsule needs no network, or Codex runs in Bypass | `network` |
+
+In this version a message routes to one skill for Codex through a single
+`$skill` mention. A Claude Code `/command` is native, so Claude sessions are
+observed and compiled from but do not run warm yet, and Cursor is observed
+only: writing outside the workspace in its sandbox is not verified.
+
+On a **hit** the request to load and follow the skill is replaced by the
+capsule's block: its name and description, the values to take from the request,
+its opening steps and the executor's protocol. The block never contains an
+observed value, a program's code or where the package is; the launch's prompt
+ledger counts it as its own `skillcache` category. The Harness puts
+`skillcache-run` and `skillcache-tool` (the engine under those names) first on
+the provider's `PATH`, sets where the capsule, the workspace and the run's state
+are, lets Claude Code call the two commands without asking, and gives Codex's
+sandbox the one extra writable folder the executor's state file needs. The
+package is not added to the agent's readable folders: the executor reads it,
+not the model.
+
+The agent then follows the protocol:
+
+- `skillcache-run run '{...}'` starts the plan with the values the request
+  states. Consecutive programs run without returning to the agent.
+- `needs_bindings` asks for values, `your_steps` hands over the steps that need
+  judgment, and both continue with `skillcache-run continue '{...}'`.
+- `program_failed` hands over exactly one step: the agent does it with its
+  normal tools and the source skill, supplies the outputs later programs read,
+  and the rest of the plan stays compiled. A failed program is never started
+  again, neither by the executor nor through `skillcache-tool`. Only a plan
+  step's program source is offered for reading, never a verification program's.
+- `complete` returns the programs' results.
+
+Each phase appears in the conversation as a `skillcache` event (`hit` or `miss`,
+then `started`, `program_completed`, `program_failed`, `your_steps`, `complete`),
+read from the journal the executor writes beside its state. A warm turn is
+recorded in `skillcache_runs` with its outcome and how many steps fell back to
+the agent; its tokens and cost are the launch's own. It is never stored as an
+observed trace. A step that fell back is a property of that run: the capsule
+stays active, and nothing recompiles on its own.
+
+The composer's preflight (`POST /api/projects/{project_id}/preflight`) answers
+with a `skillcache` field when it is given the composer's SkillCache mode: what
+the turn would do, the capsule it would run or the reason it would run cold.
+Making the preview stages nothing and changes no capsule.
+
+When a skill has several active capsules, choosing among them by their
+descriptions is an experiment behind the Harness setting
+`skillcache.retrieval_by_mu`, off until it has its own measurement; without it
+such a turn is a miss.
+
 The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
 --help` describes the plan executor (`skillcache-run`), the program tool
 (`skillcache-tool`) and the structural gate.

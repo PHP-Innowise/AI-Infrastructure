@@ -81,6 +81,7 @@ pub struct Sessions {
     results: Mutex<Option<Arc<crate::results::Results>>>,
     graphs: Mutex<Option<Arc<crate::graph::Graphs>>>,
     omnigraph: Mutex<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
+    skillcache: Mutex<Option<Arc<crate::skillcache::compile::Runtime>>>,
     lifecycle: Arc<crate::lifecycle::RunnerLifecycle>,
     /// Permission requests running sessions wait on.
     permissions: Arc<crate::permissions::PermissionDesk>,
@@ -431,6 +432,7 @@ impl Sessions {
             results: Mutex::new(None),
             graphs: Mutex::new(None),
             omnigraph: Mutex::new(None),
+            skillcache: Mutex::new(None),
             lifecycle,
             permissions: Arc::default(),
             default_seconds: limits.seconds,
@@ -918,6 +920,28 @@ impl Sessions {
     pub fn install_graphs(&self, value: Arc<crate::graph::Graphs>) -> Result<()> {
         *lock(&self.graphs)? = Some(value);
         Ok(())
+    }
+    /// SkillCache is optional: without it a session that asks for warm turns
+    /// still decides them, with this executable as the engine.
+    pub fn install_skillcache(
+        &self,
+        value: Arc<crate::skillcache::compile::Runtime>,
+    ) -> Result<()> {
+        *lock(&self.skillcache)? = Some(value);
+        Ok(())
+    }
+    fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
+        lock(&self.skillcache)
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_else(|| {
+                Arc::new(crate::skillcache::compile::Runtime {
+                    store: self.store.clone(),
+                    providers: self.providers.clone(),
+                    engine: None,
+                    cancel: self.stopping.clone(),
+                })
+            })
     }
     /// Omnigraph cross-session context sharing is optional: a session queue without one runs unchanged.
     pub fn install_omnigraph(&self, value: Arc<crate::omnigraph::OmnigraphManager>) -> Result<()> {
@@ -2012,6 +2036,29 @@ impl Sessions {
         if let Some(notice) = &route.notice {
             emit(json!({"kind":"status","text":notice}))?;
         }
+        // A turn that may run a SkillCache capsule decides it here: the route
+        // is known and nothing of the launch is prepared yet. A session that
+        // did not opt in is not looked at.
+        let warm = {
+            let decision = crate::skillcache::warm::decide(
+                &self.skillcache_runtime(),
+                &session,
+                &route,
+                &job.prompt,
+                &workspace,
+                &job.generation,
+            );
+            if let Some(event) = decision.event() {
+                emit(event)?;
+            }
+            if let Some(record) = decision.record() {
+                let _ = results.note_skillcache(&job.generation, &record);
+            }
+            match decision {
+                crate::skillcache::warm::Decision::Hit(warm) => Some(warm),
+                _ => None,
+            }
+        };
         if session["omnigraph"]["enabled"] == true
             && !omnigraph_prepared
             && !omnigraph_already_reviewed
@@ -2045,12 +2092,13 @@ impl Sessions {
         }
         let configured = (|| -> Result<Launch> {
             let mut launch = self.configure_launch(&session, &route.text)?;
-            let prepared = crate::prompt::build(
+            let prepared = crate::prompt::build_with_skillcache(
                 &self.store,
                 &session,
                 &job.prompt,
                 &route,
                 &binding.instructions,
+                warm.as_ref().map(|warm| warm.block.as_str()),
             )?;
             launch.prompt = if session["system_explain"].is_object() {
                 format!(
@@ -2085,6 +2133,16 @@ impl Sessions {
         };
         launch.approvals = self.approvals(&job.sid, &session, &emit);
         let adapter = self.launch_adapter(&session)?;
+        // The turn's own launch gets the executor when it runs a capsule; a
+        // recovery turn after it does not.
+        let dispatch_adapter: Arc<dyn provider::LaunchAdapter> = match &warm {
+            Some(warm) => Arc::new(crate::skillcache::warm::WarmLaunchAdapter {
+                inner: adapter.clone(),
+                warm: warm.clone(),
+            }),
+            None => adapter.clone(),
+        };
+        let warm_for_stream = warm.clone();
         let previous = launch
             .session
             .as_deref()
@@ -2114,7 +2172,7 @@ impl Sessions {
         let focus_for_stream = live_focus.clone();
         // A session that opted in keeps the trace of this cold turn. The
         // recorder sees the same raw events as the binding and nothing else.
-        let recorder = crate::skillcache::settings::records(&session)
+        let recorder = (crate::skillcache::settings::records(&session) && warm.is_none())
             .then(|| crate::skillcache::trace::TraceRecorder::new(&launch.provider));
         let run_events: Arc<dyn provider::RunEvents> = match &recorder {
             Some(recorder) => Arc::new(crate::skillcache::trace::Tee {
@@ -2148,7 +2206,7 @@ impl Sessions {
             dispatch_cancel,
             previous,
             Some(self.store.runner_lock()),
-            Some(adapter.as_ref()),
+            Some(dispatch_adapter.as_ref()),
             &binding.environment,
             Some(run_events),
             move |event| {
@@ -2190,9 +2248,15 @@ impl Sessions {
                 } else {
                     None
                 };
+                let tool = event["kind"] == "tool";
                 emit_events(event)?;
                 if let Some(delta) = focus_delta {
                     emit_events(delta)?;
+                }
+                // The executor journals each phase beside its state; a tool
+                // event is when a new line can have appeared.
+                if tool && let Some(warm) = &warm_for_stream {
+                    warm.ingest(&|event| emit_events(event));
                 }
                 Ok(())
             },
@@ -2201,6 +2265,9 @@ impl Sessions {
         drop(forwarding);
         // Whatever the run left waiting is answered no.
         self.permissions.expire(&job.sid);
+        if let Some(warm) = &warm {
+            warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
+        }
         let observed = observed.map_err(|error| {
             if error.code == "native-cancelled"
                 && budget_stop.load(Ordering::Acquire)
@@ -2297,6 +2364,61 @@ impl Sessions {
         Ok(
             json!({"kind":"result","ok":true,"text":result.text,"observed_cost_usd":result.cost_usd,"provider_billing":"unknown","memory":memory["memory"],"full_cost":memory["full_cost"]}),
         )
+    }
+    /// What SkillCache would decide for a message of the composer, before it
+    /// is sent. `body["skillcache"]` carries what the composer shows and a
+    /// stored session does not yet have: the mode, and for a new session the
+    /// provider, the session's mode and its permissions.
+    async fn skillcache_preview(&self, project_id: &str, body: &Value) -> Result<Value> {
+        let composer = &body["skillcache"];
+        let prompt = body["prompt"].as_str().unwrap_or("").trim().to_string();
+        let mut session = match body["session_id"].as_str().filter(|sid| !sid.is_empty()) {
+            Some(sid) => self.store.get(sid)?,
+            None => {
+                let project = self.store.project(project_id)?;
+                json!({
+                    "id": "",
+                    "project_id": project_id,
+                    "project_path": project["path"],
+                    "workflow": "native",
+                    "agents_enabled": false,
+                    "agent_count": 3,
+                })
+            }
+        };
+        if session["project_id"] != project_id {
+            return Err(HarnessError::invalid(
+                "Session does not belong to the requested project.",
+            ));
+        }
+        for (field, key) in [
+            ("provider", "provider"),
+            ("session_mode", "mode"),
+            ("permissions", "permissions"),
+        ] {
+            if let Some(value) = composer[field].as_str() {
+                session[key] = value.into();
+            }
+        }
+        if !composer["mode"].is_null() {
+            session["skillcache"] =
+                crate::skillcache::settings::validate(&json!({"mode": composer["mode"]}))?;
+        }
+        if !crate::skillcache::settings::warm(&session) || prompt.is_empty() {
+            return Ok(json!({
+                "mode": crate::skillcache::settings::mode(&session),
+                "decision": "off",
+            }));
+        }
+        let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+        let route = self.commands()?.route(&session, &prompt).await?;
+        Ok(crate::skillcache::warm::preview(
+            &self.skillcache_runtime(),
+            &session,
+            &route,
+            &prompt,
+            &workspace,
+        ))
     }
     /// Stores the observed trace of a turn that completed. A trace that
     /// cannot be kept never fails the turn it observed.
@@ -2459,6 +2581,15 @@ impl Domain for Sessions {
             let sid = request["params"]["session_id"].as_str().unwrap_or("");
             let body = &request["body"];
             let value = match operation {
+                "sessions.skillcache_preview" => {
+                    return Ok(Payload::Json(
+                        self.skillcache_preview(
+                            request["params"]["project_id"].as_str().unwrap_or(""),
+                            body,
+                        )
+                        .await?,
+                    ));
+                }
                 "sessions.inbox_accept" => {
                     if !store::exact(body, &["request_id", "prompt"], &[]) {
                         return Err(HarnessError::invalid(
@@ -4091,6 +4222,7 @@ pub(crate) mod generation_completion_tests {
                 results: Mutex::new(Some(results.clone())),
                 graphs: Mutex::new(None),
                 omnigraph: Mutex::new(None),
+                skillcache: Mutex::new(None),
                 lifecycle: Arc::new(crate::lifecycle::RunnerLifecycle::new(
                     store, knowledge, source,
                 )),

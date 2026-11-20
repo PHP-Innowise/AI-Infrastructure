@@ -8,6 +8,22 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // Staged under one of the executor's names, as the engine is for a warm
+    // session; the guardian's own command passes through.
+    let staged = std::env::args_os()
+        .next()
+        .and_then(|name| Some(Path::new(&name).file_stem()?.to_str()?.to_string()));
+    if arguments.first().map(String::as_str) != Some("internal-guard") {
+        match staged.as_deref() {
+            Some("skillcache-run") => {
+                std::process::exit(infra_skillcache::cli::execute_run(&arguments))
+            }
+            Some("skillcache-tool") => {
+                std::process::exit(infra_skillcache::cli::execute_tool(&arguments))
+            }
+            _ => {}
+        }
+    }
     let code = match arguments.first().map(String::as_str) {
         Some("internal-guard") => infra_host::process::guard_entry(&arguments[1..]).unwrap_or(1),
         // What an engine serves for the sandboxes the gates and the compiler use.

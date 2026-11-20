@@ -900,6 +900,14 @@ pub async fn run(runtime: &Arc<Runtime>, job: &Job) {
     };
     let interrupted = runtime.cancel.load(Ordering::Acquire) && status != "completed";
     let status = if interrupted { "interrupted" } else { status };
+    // Only the capsule's own artifacts outlive a compilation. Its folder,
+    // which holds a copy of the workspace, is gone before the compilation is
+    // recorded as finished: a finished compilation holds nothing.
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = make_removable(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    })
+    .await;
     if let Ok(db) = runtime.store.connection() {
         let _ = db::finish_compile(
             &db,
@@ -914,9 +922,6 @@ pub async fn run(runtime: &Arc<Runtime>, job: &Job) {
             let _ = db::set_capsule_status(&db, &job.capsule_id, "failed", Some(&text));
         }
     }
-    // Only the capsule's own artifacts outlive a compilation.
-    let _ = make_removable(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
     let mut detail = job.detail();
     detail["outcome"] = text.into();
     detail["rounds"] = rounds.into();
@@ -1055,8 +1060,11 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
             None,
         )
         .await;
-        let _ = make_removable(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = make_removable(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .await;
         let qualified = qualified?;
         reports.extend(qualified.reports);
         qualified.passed

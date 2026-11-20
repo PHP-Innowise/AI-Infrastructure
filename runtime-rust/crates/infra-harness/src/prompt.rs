@@ -88,6 +88,19 @@ pub fn build(
     route: &ResolvedCommand,
     draft: &str,
 ) -> Result<PreparedPrompt> {
+    build_with_skillcache(store, session, message, route, draft, None)
+}
+/// As [`build`]. On a warm SkillCache turn `skillcache` is the capsule's
+/// block; it stands where the request to load and follow the skill would be.
+/// Without it the prompt is exactly what [`build`] has always written.
+pub fn build_with_skillcache(
+    store: &SessionStore,
+    session: &Value,
+    message: &str,
+    route: &ResolvedCommand,
+    draft: &str,
+    skillcache: Option<&str>,
+) -> Result<PreparedPrompt> {
     let provider = session["provider"]
         .as_str()
         .ok_or_else(|| HarnessError::invalid("Session provider missing."))?;
@@ -235,12 +248,17 @@ pub fn build(
         add(&mut text, &mut ledger, "instructions", &graph);
     }
     add(&mut text, &mut ledger, "message", &route.text);
-    add(
-        &mut text,
-        &mut ledger,
-        "instructions",
-        &route.skill_request(),
-    );
+    match skillcache {
+        // A warm turn: the capsule's block stands where the request to load
+        // and follow the skill would be.
+        Some(block) => add(&mut text, &mut ledger, "skillcache", block),
+        None => add(
+            &mut text,
+            &mut ledger,
+            "instructions",
+            &route.skill_request(),
+        ),
+    }
     add(&mut text, &mut ledger, "instructions", draft);
     let mut delegation = infra_host::delegation::instructions(
         provider,

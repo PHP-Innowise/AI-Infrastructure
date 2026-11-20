@@ -80,6 +80,11 @@ fn ledger(value: &Value) -> Value {
     if value["attachments"].is_object() {
         result["attachments"] = object!({"characters":count(&value["attachments"]["characters"]),"count":count(&value["attachments"]["count"])});
     }
+    // Only a turn that ran a SkillCache capsule has this category; any other
+    // launch's ledger keeps the shape it always had.
+    if value.get("skillcache").is_some_and(|size| !size.is_null()) {
+        result["skillcache"] = count(&value["skillcache"]).into();
+    }
     result
 }
 impl State {

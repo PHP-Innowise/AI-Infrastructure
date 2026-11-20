@@ -671,6 +671,17 @@ impl NativeServices {
         }
         if preflight.is_object() {
             preflight["contradiction_warnings"] = Value::Array(contradictions);
+            // What SkillCache would decide for this message, when the
+            // composer says the session asks for warm turns. A preview that
+            // cannot be made is left out; it never fails the preflight.
+            if !request["body"]["skillcache"].is_null()
+                && let Some(sessions) = self.domains.get("sessions")
+                && let Ok(Payload::Json(preview)) = sessions
+                    .execute("sessions.skillcache_preview", request.clone())
+                    .await
+            {
+                preflight["skillcache"] = preview;
+            }
         }
         Ok(Payload::Json(preflight))
     }

@@ -2245,6 +2245,8 @@ impl KnowledgeDomain {
                 "task_id",
                 "paths",
                 "risk_caller_hints",
+                // Read by the session domain for the SkillCache preview.
+                "skillcache",
             ],
         )?;
         let prompt = match body.get("prompt") {
