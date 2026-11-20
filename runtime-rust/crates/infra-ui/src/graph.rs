@@ -458,8 +458,8 @@ pub fn graph_view(status: &V) -> GraphView {
             view.rebuild = true;
         }
         "missing" => {
-            view.chip = "Not installed".into();
-            view.note = "Graphify is not installed. Install it with “uv tool install graphifyy” or “pipx install graphifyy”, then rebuild.".into();
+            view.chip = "Parser ready".into();
+            view.note = "Built-in code graph parser is available; optional Graphify enrichment is not installed (“uv tool install graphifyy” or “pipx install graphifyy”). Click Rebuild to build.".into();
             view.rebuild = true;
         }
         "empty" => {
@@ -469,7 +469,7 @@ pub fn graph_view(status: &V) -> GraphView {
         }
         "off" => {
             view.chip = "Off".into();
-            view.note = "Builds a graph of this project's code on this machine with Graphify and draws it as a dependency map: what uses what, down to classes and methods, for the whole project or for a change.".into();
+            view.note = "Builds a graph of this project's code on this machine (built-in native parser with optional Graphify enrichment) and draws it as a dependency map: what uses what, down to classes and methods, for the whole project or for a change.".into();
         }
         // Nothing was read yet, or no project is selected.
         _ => {}
@@ -720,9 +720,7 @@ pub(crate) fn on_graph_status_sse(event: &V) {
             status["state"] = json!("building");
             m::set("graph", status.clone());
         }
-        sync_embedded_progress_for_surface("session-graph", &status);
-        sync_freshness_pill("graph-map", &status, &V::Null);
-        sync_freshness_pill("session-graph", &status, &V::Null);
+        render();
         return;
     }
     let is_refresh_candidate = matches!(state.as_str(), "ready" | "stale" | "updated" | "rebuilt")
@@ -753,11 +751,27 @@ pub(crate) fn on_graph_status_sse(event: &V) {
         if !event["backend"].is_null() {
             synth_status["backend"] = event["backend"].clone();
         }
-        m::set("graph", synth_status.clone());
-        sync_freshness_pill("graph-map", &synth_status, &V::Null);
-        sync_freshness_pill("session-graph", &synth_status, &V::Null);
+        m::set("graph", synth_status);
+        render();
         crate::graph_map::show_non_destructive_stale_banner(&event_project, &banner_text);
     }
+}
+
+/// Processes SSE `event: "resync"` when graph status/bridge events lagged behind.
+pub(crate) fn on_graph_resync_sse(event: &V) {
+    let reason = m::text(event, "reason");
+    if !reason.is_empty() && reason != "graph_bridge_lagged" && !reason.starts_with("graph") {
+        return;
+    }
+    let project = dom::value("project");
+    if project.is_empty() {
+        return;
+    }
+    crate::graph_map::show_non_destructive_stale_banner(&project, "Graph updates lagged — Refresh");
+    #[cfg(target_arch = "wasm32")]
+    spawn_local(async {
+        load(false).await;
+    });
 }
 
 /// Triggers an inline rebuild for the active modal or embedded surface scope.
@@ -976,7 +990,9 @@ pub fn system_sidebar_status(agg_status: &V) -> (&'static str, String, String) {
             return (
                 "stale",
                 format!("Service graphs stale ({ready}/{total})"),
-                format!("{ready} of {total} service graphs published; rebuild needed for recent changes."),
+                format!(
+                    "{ready} of {total} service graphs published; rebuild needed for recent changes."
+                ),
             );
         }
         return (
@@ -1206,7 +1222,7 @@ mod tests {
         assert_eq!((off.chip.as_str(), off.on), ("Off", false));
         assert!(!off.rebuild && !off.delete);
         let missing = graph_view(&status("missing", json!({})));
-        assert_eq!(missing.chip, "Not installed");
+        assert_eq!(missing.chip, "Parser ready");
         assert!(missing.note.contains("uv tool install graphifyy") && missing.rebuild);
         let failed = graph_view(&status(
             "failed",

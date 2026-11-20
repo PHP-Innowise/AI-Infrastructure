@@ -2112,7 +2112,9 @@ fn a_spread_out_folder_is_drawn_as_a_frame_with_its_name_and_a_way_back() {
     assert!(html.contains(
         "title=\"Draw Cart as one box again\" aria-label=\"Draw Cart as one box again\">−</button>"
     ));
-    assert!(html.contains("title=\"src/Cart\">Cart<span class=\"graph-map-frame-count\"> · 2 of 5 drawn</span></span>"));
+    assert!(html.contains(
+        "title=\"src/Cart\">Cart<span class=\"graph-map-frame-count\"> · 2 of 5 drawn</span></span>"
+    ));
     // A folder has + at its corner, in the frame as outside it; a file
     // has none.
     assert_eq!(html.matches("data-action=\"graph-map-spread\"").count(), 2);
@@ -2306,7 +2308,7 @@ fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
     // says which two places it joins.
     let html = canvas(&super::tests::view());
     assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 2);
-    assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" tabindex=\"0\" role=\"button\"><title>Order uses Cart · select to see what makes up this link</title>"));
+    assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" role=\"button\"><title>Order uses Cart · select to see what makes up this link</title>"));
     // They lie over the links that are seen.
     assert!(
         html.rfind("class=\"graph-map-edge").unwrap()
@@ -2323,7 +2325,9 @@ fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
     // direction it runs.
     let side = side(&super::tests::view());
     assert!(side.contains("class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart\">↗</button></li>"));
-    assert!(side.contains("data-payload=\"{&quot;from&quot;:&quot;tests&quot;,&quot;to&quot;:&quot;src/Order&quot;}\""));
+    assert!(side.contains(
+        "data-payload=\"{&quot;from&quot;:&quot;tests&quot;,&quot;to&quot;:&quot;src/Order&quot;}\""
+    ));
     // A row of two symbols is one link, and has no window to open.
     let mut opened = file();
     opened["focus"] = json!({
@@ -4689,7 +4693,7 @@ fn the_layers_of_a_folder_are_drawn_in_their_order_with_what_runs_against_it() {
     // A link between two layers is many links of many files: it is
     // selected like any link, and says what selecting it shows.
     assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 6);
-    assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" tabindex=\"0\" role=\"button\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
+    assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" role=\"button\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
     assert!(!html.contains("select to see what makes up this link"));
     // With nothing selected no link and no layer steps back.
     assert!(!html.contains("graph-map-edge-on") && !html.contains("graph-map-edge-off"));
@@ -5196,7 +5200,9 @@ fn a_selected_link_between_two_layers_lists_the_pairs_of_files_it_is_made_of() {
         html.contains("<path class=\"graph-map-edge graph-map-edge-on\" data-ends=\"1 3\""),
         "{html}"
     );
-    assert!(html.contains("<path class=\"graph-map-edge graph-map-edge-off graph-map-edge-against\" data-ends=\"3 1\""));
+    assert!(html.contains(
+        "<path class=\"graph-map-edge graph-map-edge-off graph-map-edge-against\" data-ends=\"3 1\""
+    ));
     assert_eq!(html.matches("data-selected=\"true\"").count(), 0);
     assert_eq!(html.matches("aria-pressed=\"true\"").count(), 0);
     assert_eq!(html.matches("data-dim=\"true\"").count(), 2);
@@ -7049,7 +7055,7 @@ fn canvas_with_overlays_renders_distinct_markers_attributes_and_breakdowns() {
         "marker-end=\"url(#session-graph-arrow)\"><title>A uses B · 3 links · calls 2, imports 1</title>"
     ));
     assert!(html.contains(
-        "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\" tabindex=\"0\" role=\"button\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
+        "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\" role=\"button\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
     ));
     // calls + instantiates collapse into 1 canonical kind -> not multi
     assert!(html.contains("<title>B uses C · 2 links · calls 1, instantiates 1</title>"));
@@ -7265,7 +7271,12 @@ fn scoped_url_builders_cover_single_project_and_system_service_endpoints() {
         "/api/systems/service-graph/commits?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=__system__&scope=*&query=feat&skip=20"
     );
     assert_eq!(
-        build_scoped_picker_path(&sys, "pulls", &json!({"state": "open", "query": "invoice"}), 0),
+        build_scoped_picker_path(
+            &sys,
+            "pulls",
+            &json!({"state": "open", "query": "invoice"}),
+            0
+        ),
         "/api/systems/service-graph/pulls?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&state=open&query=invoice"
     );
     assert_eq!(
@@ -9413,4 +9424,314 @@ fn compare_base_range_targets_and_open_full_state_transfer_work() {
     assert_eq!(transferred["no_incoming"], json!(true));
     assert_eq!(transferred["lens_tests"], json!(true));
     assert_eq!(transferred["fit"], json!(false));
+
+    // Default isolate_depth is 2 and secondary navigation modes survive modal promotion.
+    let sparse_state = json!({
+        "target": "head_sha",
+        "compare_base": "base_sha",
+        "out": ["src/a.php"],
+        "into": ["src/b.php"],
+        "follow": "src/a.php",
+        "shared": true,
+    });
+    let transferred_sparse = transfer_surface_state_to_modal(&sparse_state, fresh("head_sha"));
+    assert_eq!(transferred_sparse["isolate_depth"], json!(2));
+    assert_eq!(transferred_sparse["out"], json!(["src/a.php"]));
+    assert_eq!(transferred_sparse["into"], json!(["src/b.php"]));
+    assert_eq!(transferred_sparse["follow"], json!("src/a.php"));
+    assert_eq!(transferred_sparse["shared"], json!(true));
+
+    let scoped_map_req =
+        build_scoped_graph_request(&GraphTargetScope::single("proj-1"), vec![], &range_state);
+    assert!(
+        scoped_map_req.contains("target=range%3Abase_sha..head_sha"),
+        "{scoped_map_req}"
+    );
+    let scoped_find_req =
+        build_scoped_find_path(&GraphTargetScope::single("proj-1"), &range_state, "Auth")
+            .expect("find URL");
+    assert!(
+        scoped_find_req.contains("target=range%3Abase_sha..head_sha"),
+        "{scoped_find_req}"
+    );
+}
+
+#[test]
+fn handles_preserve_node_index_hit_paths_skip_tabindex_and_roving_respects_isolate_cone() {
+    let handle_html = handles(
+        &json!({
+            "name": "Service.php",
+            "path": "src/Service.php",
+            "more_out": 3,
+            "unfolded_out": true,
+            "more_in": 2,
+            "unfolded_in": false,
+        }),
+        1,
+        180.0,
+        40.0,
+        false,
+    );
+    assert!(handle_html.contains("data-of=\"1\""), "{handle_html}");
+    assert!(!handle_html.contains("data-of=\"344\""), "{handle_html}");
+    assert!(!handle_html.contains("data-of=\"355\""), "{handle_html}");
+
+    let view = json!({
+        "nodes": [
+            {"path": "src/a.php", "name": "a.php"},
+            {"path": "src/b.php", "name": "b.php"},
+            {"path": "src/c.php", "name": "c.php"},
+            {"path": "src/d.php", "name": "d.php"}
+        ],
+        "edges": [
+            {"from": "src/a.php", "to": "src/b.php", "links": 1},
+            {"from": "src/c.php", "to": "src/d.php", "links": 1}
+        ],
+        "frames": [],
+    });
+    let mut cone = BTreeSet::new();
+    cone.insert(2);
+    cone.insert(3);
+    let rendered = canvas_with_overlays(
+        &view,
+        "graph-map",
+        CanvasOverlayContext {
+            isolate_cone: Some(&cone),
+            roving_focus: Some(0),
+            ..Default::default()
+        },
+    );
+    assert!(
+        rendered.html.contains("class=\"graph-map-hit\"")
+            && rendered.html.contains("data-action=\"graph-map-link\""),
+        "{}",
+        rendered.html
+    );
+    assert!(
+        !rendered
+            .html
+            .contains("tabindex=\"0\" role=\"button\"><title>"),
+        "SVG hit paths must not hold tabindex=\"0\": {}",
+        rendered.html
+    );
+    // Node 0 is outside cone, so node 2 (first node in cone) receives roving tabindex="0".
+    assert!(
+        rendered.html.contains("data-n=\"2\"") && rendered.html.contains("tabindex=\"0\""),
+        "{}",
+        rendered.html
+    );
+}
+
+#[test]
+fn selection_patch_highlights_traced_paths_and_edge_impact_ignores_empty_target_wildcards() {
+    let nodes = vec![
+        json!({"path": "src/a.php", "name": "a.php"}),
+        json!({"path": "src/b.php", "name": "b.php"}),
+        json!({"path": "src/c.php", "name": "c.php"}),
+    ];
+    let pairs = vec![(0, 1), (0, 2)];
+    let mut path_nodes = BTreeSet::new();
+    path_nodes.insert(0);
+    path_nodes.insert(2);
+    let mut path_edges = BTreeSet::new();
+    path_edges.insert((0, 2));
+    let plan_nodes = vec![
+        Placed {
+            x: 10.0,
+            y: 10.0,
+            layer: Some(0),
+            cycle: false,
+        };
+        3
+    ];
+    let patch = compute_canvas_selection_patch(
+        &json!({"nodes": nodes, "edges": [], "frames": []}),
+        &plan_nodes,
+        &[],
+        &pairs,
+        &CanvasOverlayContext {
+            path_nodes: Some(&path_nodes),
+            path_edges: Some(&path_edges),
+            ..Default::default()
+        },
+    );
+    assert_eq!(patch.edges_by_pair[&(0, 2)].edge_state, "on");
+    assert!(patch.edges_by_pair[&(0, 2)].shared_path);
+    assert_eq!(patch.edges_by_pair[&(0, 1)].edge_state, "off");
+    assert!(patch.nodes[0].lit && !patch.nodes[0].dim);
+    assert!(!patch.nodes[1].lit && patch.nodes[1].dim);
+    assert!(patch.nodes[2].lit && !patch.nodes[2].dim);
+
+    // An empty `to` in `risk_callers` must not falsely mark unrelated outgoing edges as `broken_risk`.
+    let changes_doc = json!({
+        "target": "work",
+        "edge_diffs": {
+            "risk_callers": [
+                {"from": "src/a.php", "to": "", "impact": "broken_risk"},
+                {"from": "src/a.php", "to": "src/c.php", "impact": "broken_risk"}
+            ]
+        }
+    });
+    let lookup = ImpactLookup::from_sources(None, Some(&changes_doc), &nodes).expect("lookup");
+    assert_eq!(lookup.edge_impact(&nodes, 0, 1), None);
+    assert_eq!(lookup.edge_impact(&nodes, 0, 2), Some("broken_risk"));
+}
+
+#[test]
+fn pin_overrides_expand_frames_and_confidence_cycle_hints_and_commit_banner_gate_work() {
+    let mut plan = plan_beside(
+        2,
+        &[(0, 1, 1)],
+        &Frames {
+            of: vec![Some(0), None],
+            holder: vec![None],
+        },
+        None,
+    );
+    plan.frames = vec![Framed {
+        x: plan.nodes[0].x - 8.0,
+        y: plan.nodes[0].y - 22.0,
+        width: BOX_WIDTH + 16.0,
+        height: BOX_HEIGHT + 30.0,
+    }];
+    let keys = vec!["src/a.php".to_owned(), "src/b.php".to_owned()];
+    let mut pins = BTreeMap::new();
+    pins.insert("src/a.php".to_owned(), (900.0, 500.0));
+    let moved = apply_pin_overrides_to_plan(&mut plan, &keys, &[(0, 1)], &pins);
+    assert!(moved.contains(&0));
+    assert!(plan.frames[0].x + plan.frames[0].width >= 900.0 + BOX_WIDTH);
+    assert!(plan.frames[0].y + plan.frames[0].height >= 500.0 + BOX_HEIGHT);
+
+    // Non-commit views must not render stale commit range banners.
+    assert_eq!(
+        render_commit_banner_for_view(&json!({"mode": "whole"}), None),
+        ""
+    );
+
+    let view = json!({
+        "confidence": {"extracted": 8, "inferred": 2, "ratio": 0.8},
+        "circles": {
+            "groups": 1,
+            "here": 1,
+            "files": 3,
+            "largest": 3,
+            "listed": [{"start": "src/a.php", "files": 3, "names": ["a.php", "b.php"], "more": 1}]
+        },
+        "circle_remediation": [{
+            "files": 3,
+            "cuts": [{"from": "src/b.php", "to": "src/a.php", "links": 2, "breaks_cycles": true, "hint": "Invert via interface"}]
+        }],
+        "architecture": {
+            "declared": true,
+            "layers": [{"id": "ui", "name": "UI"}],
+            "violations": [],
+            "remediation": [{"from": "src/ui/View.php", "to": "src/infra/Db.php", "from_layer": "ui", "to_layer": "infra", "links": 3, "guessed": true, "hint": "Route through domain port"}]
+        }
+    });
+    let pill = confidence_pill_html(&view);
+    assert!(pill.contains("80% extracted"), "{pill}");
+    let changes_pill =
+        confidence_pill_html(&json!({"confidence": {"extracted_links": 3, "inferred_links": 1}}));
+    assert!(changes_pill.contains("75% extracted"), "{changes_pill}");
+    let circles = circles_side(&view);
+    assert!(circles.contains("Suggested cycle breaks"), "{circles}");
+    assert!(
+        circles.contains("breaks cycle · 2 links · Invert via interface"),
+        "{circles}"
+    );
+    let arch = architecture_side(&view);
+    assert!(arch.contains("80% extracted"), "{arch}");
+    assert!(arch.contains("Suggested layer breaks"), "{arch}");
+    assert!(
+        arch.contains("3 links · inferred · Route through domain port"),
+        "{arch}"
+    );
+    let cycle_view = side(&json!({
+        "mode": "cycle",
+        "cycle": {
+            "places": [{"path": "src/a.php"}, {"path": "src/b.php"}],
+            "cut_hints": [{"from": "src/b.php", "to": "src/a.php", "links": 1, "breaks_cycles": 2, "hint": "Break cycle edge"}]
+        }
+    }));
+    assert!(
+        cycle_view.contains("Suggested cycle breaks"),
+        "{cycle_view}"
+    );
+    assert!(
+        cycle_view.contains("breaks 2 · 1 link · Break cycle edge"),
+        "{cycle_view}"
+    );
+    let layers_view = layers_side(&json!({
+        "pattern": {
+            "declared": true,
+            "against": {"pairs": 0, "listed": []},
+            "remediation": [{"from": "src/x.php", "to": "src/y.php", "from_layer": "ui", "to_layer": "db", "links": 2, "hint": "Decouple db call"}]
+        }
+    }));
+    assert!(
+        layers_view.contains("Suggested layer breaks"),
+        "{layers_view}"
+    );
+    assert!(layers_view.contains("Decouple db call"), "{layers_view}");
+    crate::test_support::assert_no_inline_hex_colors(&format!(
+        "{pill}{changes_pill}{circles}{arch}{cycle_view}{layers_view}"
+    ));
+}
+
+#[test]
+fn dense_graph_skips_offscreen_extras_initially_and_populates_dense_meta() {
+    let nodes: Vec<V> = (0..185)
+        .map(|i| {
+            json!({
+                "path": format!("src/mod_{i}.php"),
+                "name": format!("mod_{i}.php"),
+                "folder": i % 15 == 0,
+                "out": 1,
+                "in": 1,
+            })
+        })
+        .collect();
+    let edges: Vec<V> = (0..184)
+        .map(|i| json!({"from": format!("src/mod_{i}.php"), "to": format!("src/mod_{}.php", i + 1), "links": 2, "kinds": {"calls": 2}}))
+        .collect();
+    let view = json!({
+        "nodes": nodes,
+        "edges": edges,
+        "frames": [],
+        "spread": [],
+    });
+    let rendered = canvas_with_overlays(
+        &view,
+        "graph-map",
+        CanvasOverlayContext {
+            viewport_bounds: Some(ViewportBounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 240.0,
+                max_y: 120.0,
+            }),
+            ..Default::default()
+        },
+    );
+    assert!(rendered.dense_scene.is_some());
+    let meta = rendered.dense_meta.as_ref().expect("dense meta");
+    assert_eq!(meta.edges.len(), 184);
+    assert_eq!(meta.nodes.len(), 185);
+    assert!(meta
+        .edges
+        .get(&0)
+        .is_some_and(|em| em.explain_kind == "link"
+            && em.from_index == Some(0)
+            && em.to_index == Some(1)));
+    assert_eq!(rendered.dense_extra_specs.len(), 185);
+    // Lazily mount extras for an offscreen folder node when revealed by pan.
+    if let Some(Some(folder_spec)) = rendered
+        .dense_extra_specs
+        .iter()
+        .find(|s| s.as_ref().is_some_and(|x| x.folder_spread))
+    {
+        let extra = render_dense_node_extras_for_mounted(&view, folder_spec, None);
+        assert!(extra.contains("data-of="), "{extra}");
+        assert!(extra.contains("graph-map-spread"), "{extra}");
+    }
 }

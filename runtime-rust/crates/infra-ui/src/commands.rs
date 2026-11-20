@@ -319,6 +319,23 @@ fn present(data: &V, files: bool) {
     m::set("composer-active", json!(0));
     render();
 }
+pub(crate) fn composer_hint_parts(item: &V) -> (String, String, String) {
+    let name = item["name"]
+        .as_str()
+        .or_else(|| item["path"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    let hint = item["hint"]
+        .as_str()
+        .or_else(|| item["argumentHint"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    let description = m::text(item, "description");
+    (name, hint, description)
+}
+
 fn render() {
     let items = m::array(&m::data("composer-items"));
     let count = items.len().min(200);
@@ -329,31 +346,33 @@ fn render() {
     };
     dom::clear("skill-hints");
     for (index, item) in items.iter().take(200).enumerate() {
-        let name = item["name"]
-            .as_str()
-            .or_else(|| item["path"].as_str())
-            .unwrap_or("");
-        let e = dom::button(
-            &format!(
-                "{}{}{}",
-                name,
-                if item["description"].is_string() {
-                    " · "
-                } else {
-                    ""
-                },
-                m::text(item, "description")
-            ),
-            "composer-choose",
-            json!(index),
-        );
-        let _ = e.set_attribute("role", "option");
-        let _ = e.set_attribute("id", &format!("composer-option-{index}"));
-        let _ = e.set_attribute(
+        let (name, hint, description) = composer_hint_parts(item);
+        let li = dom::el("li", "", "");
+        let _ = li.set_attribute("role", "none");
+        let btn = dom::button("", "composer-choose", json!(index));
+        btn.set_class_name("skill-hint");
+        let _ = btn.set_attribute("role", "option");
+        let _ = btn.set_attribute("id", &format!("composer-option-{index}"));
+        let _ = btn.set_attribute(
             "aria-selected",
             if index == active { "true" } else { "false" },
         );
-        dom::append("skill-hints", &e);
+        let title = dom::el("span", "skill-hint-name", &name);
+        if !hint.is_empty() {
+            dom::add(
+                &title,
+                &dom::el("span", "skill-hint-argument", &format!(" {hint}")),
+            );
+        }
+        dom::add(&btn, &title);
+        if !description.is_empty() {
+            dom::add(
+                &btn,
+                &dom::el("span", "skill-hint-description", &description),
+            );
+        }
+        dom::add(&li, &btn);
+        dom::append("skill-hints", &li);
     }
     dom::text("skill-hints-status", &format!("{} matches", items.len()));
     if let Some(id) = active_option_id(count, active) {
@@ -545,14 +564,7 @@ pub async fn intercept(text: &str) -> bool {
         }
         "memory" => session::open_view("memory-use", true).await,
         "resume" => {
-            dom::class("sidebar", "open", true);
-            dom::class("scrim", "open", true);
-            dom::attr("menu-toggle", "aria-expanded", "true");
-            if let Some(e) = dom::all("#history button").first() {
-                if let Some(x) = e.dyn_ref::<web_sys::HtmlElement>() {
-                    let _ = x.focus();
-                }
-            }
+            session::set_sidebar_open(true, true);
         }
         _ => {
             if m::read(|s| s.sid.is_empty()) {
@@ -590,7 +602,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         open_palette();
         return true;
     }
-    if kind == "click" && action == "command-palette-close" {
+    if kind == "click" && (id == "command-palette" || action == "command-palette-close") {
         close_palette();
         return true;
     }
@@ -847,20 +859,25 @@ pub fn open_palette() {
         s.workspace.command_palette_selected = 0;
     });
     dom::set_value("command-palette-input", "");
+    dom::attr("command-palette-input", "aria-expanded", "true");
     dom::hidden("command-palette", false);
     render_palette();
     dom::focus("command-palette-input");
 }
 
 pub fn close_palette() {
-    if !palette_open() {
-        return;
-    }
+    let was_open = palette_open()
+        || dom::get("command-palette")
+            .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
     m::write(|s| {
         s.workspace.command_palette_open = false;
         s.workspace.command_palette_query.clear();
         s.workspace.command_palette_selected = 0;
     });
+    dom::attr("command-palette-input", "aria-expanded", "false");
+    if !was_open {
+        return;
+    }
     dom::hidden("command-palette", true);
     dom::restore_focus_for_overlay("command-palette");
 }
@@ -1006,6 +1023,14 @@ fn should_defer_palette_enter(target: &web_sys::Element) -> bool {
     )
 }
 
+pub(crate) fn palette_boundary_index(count: usize, end: bool) -> usize {
+    if end {
+        count.saturating_sub(1)
+    } else {
+        0
+    }
+}
+
 /// Global keyboard handler for `Cmd/Ctrl+K` Command Palette and palette navigation.
 pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
     if (event.ctrl_key() || event.meta_key())
@@ -1046,6 +1071,21 @@ pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
             m::write(|s| {
                 s.workspace.command_palette_selected =
                     next_option_index(count, s.workspace.command_palette_selected, false);
+            });
+            render_palette();
+            true
+        }
+        "Home" => {
+            m::write(|s| s.workspace.command_palette_selected = palette_boundary_index(0, false));
+            render_palette();
+            true
+        }
+        "End" => {
+            let count =
+                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
+                    .len();
+            m::write(|s| {
+                s.workspace.command_palette_selected = palette_boundary_index(count, true);
             });
             render_palette();
             true
@@ -1141,5 +1181,29 @@ mod tests {
             "command-palette-input",
             false
         ));
+    }
+
+    #[test]
+    fn palette_home_end_boundaries_stay_in_range() {
+        assert_eq!(palette_boundary_index(5, false), 0);
+        assert_eq!(palette_boundary_index(5, true), 4);
+        assert_eq!(palette_boundary_index(0, false), 0);
+        assert_eq!(palette_boundary_index(0, true), 0);
+
+        assert_eq!(
+            composer_hint_parts(&json!({
+                "name": "/model",
+                "argumentHint": "[model]",
+                "description": "Choose the model"
+            })),
+            ("/model".into(), "[model]".into(), "Choose the model".into())
+        );
+        assert_eq!(
+            composer_hint_parts(&json!({
+                "path": "src/main.rs",
+                "hint": " line "
+            })),
+            ("src/main.rs".into(), "line".into(), String::new())
+        );
     }
 }

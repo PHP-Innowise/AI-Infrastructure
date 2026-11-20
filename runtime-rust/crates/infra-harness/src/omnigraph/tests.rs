@@ -6987,4 +6987,49 @@ async fn graph_view_scopes_subqueries_batches_sessions_and_requires_both_relates
     );
     assert_eq!(session_row["shared_space"], "space-alpha");
     assert_eq!(session_row["linked_session_ids"], json!(["peer-1"]));
+
+    // 3. Multi-language detection covers Go, Java, Kotlin, C#, Ruby, Swift, Scala.
+    for (path, expected) in [
+        ("cmd/main.go", Some("go")),
+        ("src/App.java", Some("java")),
+        ("src/Service.kt", Some("kotlin")),
+        ("src/Handler.cs", Some("csharp")),
+        ("lib/worker.rb", Some("ruby")),
+        ("Sources/App.swift", Some("swift")),
+        ("src/Main.scala", Some("scala")),
+    ] {
+        assert_eq!(super::sidecar::detect_language(path), expected, "{path}");
+    }
+
+    // 4. Canonical `symbol_id` from GraphIrStore is bridged onto omnigraph symbols while preserving `fqn`.
+    let ir = crate::graph_ir::GraphIrStore::open(state_dir.path(), &project_id).unwrap();
+    ir.sync_workspace(&std::path::PathBuf::from(
+        &store.project(&project_id).unwrap()["path"]
+            .as_str()
+            .unwrap(),
+    ))
+    .unwrap();
+    let sym_view = mgr
+        .graph_view_json(
+            &project_id,
+            Some("main"),
+            None,
+            Some("decision"),
+            None,
+            Some(&sid),
+        )
+        .await
+        .unwrap();
+    let bridged_sym = sym_view["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "check")
+        .expect("TokenGuard::check in symbols");
+    assert!(
+        bridged_sym["symbol_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "expected bridged canonical symbol_id: {bridged_sym}"
+    );
 }

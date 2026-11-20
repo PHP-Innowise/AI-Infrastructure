@@ -435,7 +435,19 @@ fn is_preserved_source_path(path: &Path) -> bool {
     if name.ends_with(".min.js") || name.ends_with(".min.mjs") || name.ends_with(".min.cjs") {
         return false;
     }
-    if matches!(name, "composer.json" | "package.json" | "pyproject.toml") {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "composer.json"
+            | "package.json"
+            | "pyproject.toml"
+            | "cargo.toml"
+            | "go.mod"
+            | "tsconfig.json"
+            | "jsconfig.json"
+    ) || ((lower.starts_with("tsconfig.") || lower.starts_with("jsconfig."))
+        && lower.ends_with(".json"))
+    {
         return true;
     }
     crate::graph_live::detect_language(name).is_some()
@@ -656,6 +668,7 @@ fn chosen(resolved: &Resolved) -> Value {
 /// A run of an agent as a change: the files it changed are what is mapped,
 /// the files it opened are laid over the map, and the rest is what a picture
 /// says of the run beside itself.
+#[derive(Clone)]
 pub(crate) struct RunChange {
     pub(crate) resolved: Arc<Resolved>,
     pub(crate) opened: BTreeSet<String>,
@@ -1013,6 +1026,8 @@ struct Job {
     cancel: AtomicBool,
     purge: AtomicBool,
     again: AtomicBool,
+    /// Deferred watcher relative paths collected while a build job was active.
+    pending_paths: Mutex<Vec<String>>,
     seen: Mutex<Seen>,
     /// Replacement revision jobs share this gate until their work has finished.
     revision_gate: Arc<Mutex<()>>,
@@ -1025,6 +1040,7 @@ impl Job {
             cancel: AtomicBool::new(false),
             purge: AtomicBool::new(false),
             again: AtomicBool::new(false),
+            pending_paths: Mutex::new(Vec::new()),
             seen: Mutex::new(Seen::default()),
             revision_gate: Arc::new(Mutex::new(())),
         }
@@ -1666,16 +1682,49 @@ pub struct Graphs {
     ir_revisions: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     /// Per-project coalesced background writer state for `live/graph.json`.
     live_json_writers: Mutex<BTreeMap<String, Arc<LiveJsonFlush>>>,
+    /// Incremental delta cache for `run_launches` per `(project, session, launch, compare)`.
+    run_caches: Mutex<BTreeMap<RunCacheKey, CachedRunLaunches>>,
 }
 
-type PendingLiveJson = (u64, u64, Arc<Vec<u8>>);
+type RunCacheKey = (String, String, Option<String>, Option<String>);
+
+struct CachedRunLaunches {
+    record_meta: (String, String, String, String),
+    launches: Vec<Value>,
+    known: BTreeSet<String>,
+    last_event_id: i64,
+    primary: (crate::run_activity::RunLedger, BTreeMap<String, u64>),
+    followup: Option<(crate::run_activity::RunLedger, BTreeMap<String, u64>)>,
+    cached: Option<(RunChange, Option<RunChange>)>,
+}
+
+#[derive(Clone)]
+enum PendingLiveJson {
+    Elements {
+        nodes: u64,
+        edges: u64,
+        ir_nodes: Arc<Vec<crate::graph_ir::IrNodeSpec>>,
+        ir_links: Arc<Vec<crate::graph_ir::IrLinkSpec>>,
+    },
+    #[allow(dead_code)]
+    Bytes {
+        nodes: u64,
+        edges: u64,
+        bytes: Arc<Vec<u8>>,
+    },
+}
+
+#[derive(Default)]
+struct LiveJsonState {
+    dirty: bool,
+    active: bool,
+    pending: Option<PendingLiveJson>,
+}
 
 #[derive(Default)]
 struct LiveJsonFlush {
-    dirty: AtomicBool,
-    active: AtomicBool,
     cancel: AtomicBool,
-    pending: Mutex<Option<PendingLiveJson>>,
+    state: Mutex<LiveJsonState>,
     done_lock: Mutex<()>,
 }
 
@@ -1740,6 +1789,7 @@ impl Graphs {
             events: tokio::sync::broadcast::channel(256).0,
             ir_revisions: Mutex::new(BTreeMap::new()),
             live_json_writers: Mutex::new(BTreeMap::new()),
+            run_caches: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -1798,33 +1848,12 @@ impl Graphs {
         let _ = global_graph_events().send(event);
     }
 
-    fn build_index_from_ir_store(
-        &self,
-        project: &str,
-        root: &Path,
-        ir: &crate::graph_ir::GraphIrStore,
-    ) -> Result<(Arc<crate::graph_map::Index>, u64, u64)> {
-        let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
-        let index = Arc::new(crate::graph_map::Index::from_ir_parts(
-            root,
-            Some(ir.db_path().to_path_buf()),
-            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
-            ir_nodes,
-            ir_links,
-        )?);
-        let rev = self.ir_revision_of(project);
-        self.maps.put_live_ir(project, rev, index.clone());
-        Ok((index, nodes, edges))
-    }
-
     fn live_index_with_hit(
         &self,
         project: &str,
         root: &Path,
     ) -> Result<(Arc<crate::graph_map::Index>, bool)> {
-        if let Some((_, cached)) = self.maps.live_ir(project) {
-            return Ok((cached, true));
-        }
+        let rev = self.ir_revision_of(project);
         let published = live(&self.store.state, project);
         let use_sqlite_ir = crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
             && (self.force_native
@@ -1835,12 +1864,26 @@ impl Graphs {
                     .and_then(|s| s["built"]["tool"].as_str().map(str::to_owned))
                     .as_deref()
                     == Some(crate::graph_ir::NATIVE_IR_TOOL));
-        if use_sqlite_ir {
-            let ir = self.ir_store(project)?;
-            if ir.summary_counts()?.is_some() {
-                let (idx, ..) = self.build_index_from_ir_store(project, root, &ir)?;
-                return Ok((idx, false));
-            }
+        if use_sqlite_ir
+            && let Some(hit) = self.maps.get_or_load_live_ir(project, rev, || {
+                let Some(ir) = self.get_ir_store_readonly(project) else {
+                    return Ok(None);
+                };
+                if ir.summary_counts()?.is_none() {
+                    return Ok(None);
+                }
+                let (ir_nodes, ir_links, ..) = ir.export_ir_graph_elements()?;
+                let index = Arc::new(crate::graph_map::Index::from_ir_parts(
+                    root,
+                    Some(ir.db_path().to_path_buf()),
+                    Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+                    ir_nodes,
+                    ir_links,
+                )?);
+                Ok(Some(index))
+            })?
+        {
+            return Ok(hit);
         }
         self.maps.index_with_cache_hit(project, &published, root)
     }
@@ -1860,6 +1903,10 @@ impl Graphs {
             && let Some(slot) = writers.remove(project)
         {
             slot.cancel.store(true, Ordering::Release);
+            if let Ok(mut st) = slot.state.lock() {
+                st.dirty = false;
+                st.pending = None;
+            }
             let _guard = slot.done_lock.lock();
         }
     }
@@ -1868,69 +1915,109 @@ impl Graphs {
         &self,
         project: &str,
         root: PathBuf,
-        snapshot: Option<(u64, u64, Arc<Vec<u8>>)>,
+        snapshot: Option<PendingLiveJson>,
     ) {
         if self.stopping.load(Ordering::Acquire) {
             return;
         }
         let slot = self.live_json_flush_slot(project);
         slot.cancel.store(false, Ordering::Release);
-        if let Some(snap) = snapshot
-            && let Ok(mut pending) = slot.pending.lock()
-        {
-            *pending = Some(snap);
-        }
-        slot.dirty.store(true, Ordering::Release);
-        if slot
-            .active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        let should_spawn = {
+            let Ok(mut st) = slot.state.lock() else {
+                return;
+            };
+            if let Some(snap) = snapshot {
+                st.pending = Some(snap);
+            }
+            st.dirty = true;
+            if st.active {
+                false
+            } else {
+                st.active = true;
+                true
+            }
+        };
+        if !should_spawn {
             return;
         }
         let Some(me) = self.me.upgrade() else {
-            slot.active.store(false, Ordering::Release);
+            if let Ok(mut st) = slot.state.lock() {
+                st.active = false;
+            }
             return;
         };
         let weak_me = Arc::downgrade(&me);
         let proj = project.to_owned();
-        let _ = std::thread::Builder::new()
+        let worker_slot = Arc::clone(&slot);
+        let spawn_res = std::thread::Builder::new()
             .name("harness-graph-json".into())
             .spawn(move || {
-                let _done_guard = slot.done_lock.lock();
-                struct ActiveReset<'a>(&'a AtomicBool);
+                let _done_guard = worker_slot.done_lock.lock();
+                struct ActiveReset<'a>(&'a Mutex<LiveJsonState>);
                 impl Drop for ActiveReset<'_> {
                     fn drop(&mut self) {
-                        self.0.store(false, Ordering::Release);
+                        if let Ok(mut st) = self.0.lock() {
+                            st.active = false;
+                        }
                     }
                 }
-                let _reset = ActiveReset(&slot.active);
+                let _reset = ActiveReset(&worker_slot.state);
                 loop {
-                    if !slot.dirty.swap(false, Ordering::AcqRel) {
-                        break;
-                    }
                     let Some(graphs) = weak_me.upgrade() else {
                         break;
                     };
-                    if graphs.stopping.load(Ordering::Acquire)
-                        || slot.cancel.load(Ordering::Acquire)
-                    {
+                    let (should_run, queued_snapshot) = {
+                        let Ok(mut st) = worker_slot.state.lock() else {
+                            break;
+                        };
+                        if !st.dirty
+                            || graphs.stopping.load(Ordering::Acquire)
+                            || worker_slot.cancel.load(Ordering::Acquire)
+                        {
+                            st.active = false;
+                            break;
+                        }
+                        st.dirty = false;
+                        (true, st.pending.take())
+                    };
+                    if !should_run {
                         break;
                     }
-                    let queued_snapshot =
-                        slot.pending.lock().ok().and_then(|mut guard| guard.take());
                     if let Ok(setting) = graphs.setting(&proj)
                         && setting["enabled"] == true
                     {
                         let live_graph = live(&graphs.store.state, &proj);
-                        let written = if let Some((nodes, edges, bytes)) = queued_snapshot {
-                            crate::graph_ir::write_live_graph_json_bytes_atomic(&live_graph, &bytes)
+                        let written = match queued_snapshot {
+                            Some(PendingLiveJson::Bytes {
+                                nodes,
+                                edges,
+                                bytes,
+                            }) => crate::graph_ir::write_live_graph_json_bytes_atomic(
+                                &live_graph,
+                                &bytes,
+                            )
+                            .ok()
+                            .map(|()| (nodes, edges)),
+                            Some(PendingLiveJson::Elements {
+                                nodes,
+                                edges,
+                                ir_nodes,
+                                ir_links,
+                            }) => crate::graph_ir::encode_node_link_payload_from_elements(
+                                &ir_nodes, &ir_links,
+                            )
+                            .ok()
+                            .and_then(|bytes| {
+                                crate::graph_ir::write_live_graph_json_bytes_atomic(
+                                    &live_graph,
+                                    &bytes,
+                                )
                                 .ok()
                                 .map(|()| (nodes, edges))
-                        } else if let Ok(ir) = graphs.ir_store(&proj) {
-                            ir.write_live_graph_atomic(&live_graph).ok()
-                        } else {
-                            None
+                            }),
+                            None => graphs
+                                .get_ir_store_readonly(&proj)
+                                .and_then(|ir| ir.write_live_graph_atomic(&live_graph).ok()),
                         };
                         if let Some(latest_counts) = written {
                             let fresh_print = graphs.print(&proj, &root, false);
@@ -1950,6 +2037,11 @@ impl Graphs {
                     }
                 }
             });
+        if spawn_res.is_err()
+            && let Ok(mut st) = slot.state.lock()
+        {
+            st.active = false;
+        }
     }
     /// Registers a synthetic system-service graph workspace (`sys-<hash>`) backed by `root`.
     pub fn register_target(&self, project: &str, root: PathBuf, name: String) -> Result<()> {
@@ -2010,6 +2102,33 @@ impl Graphs {
         self.live_index_with_hit(project, &root)
             .ok()
             .map(|(i, _)| i)
+    }
+    /// Returns the built snapshot index for `target_spec` when available (second tuple element `true`),
+    /// otherwise falls back to the project's live index (`false`).
+    pub(crate) fn index_for_target_or_live(
+        &self,
+        project: &str,
+        target_spec: Option<&str>,
+    ) -> Option<(Arc<crate::graph_map::Index>, bool)> {
+        let Some(spec) = target_spec.map(str::trim).filter(|s| !s.is_empty()) else {
+            return self.live_index(project).map(|i| (i, false));
+        };
+        if let Ok(parsed) = Target::parse(spec)
+            && matches!(
+                parsed,
+                Target::Named(_) | Target::Commit(_) | Target::Pull(_) | Target::Range { .. }
+            )
+            && let Ok(root) = self.root(project)
+            && let Ok(resolved) = self.resolve_chosen_or_commit(project, &root, &parsed)
+            && let Ok(Found {
+                graph: Some((kept, graph, base)),
+                ..
+            }) = self.graph_of(project, &root, &resolved)
+            && let Ok(idx) = self.maps.index(&kept, &graph, &base)
+        {
+            return Some((idx, true));
+        }
+        self.live_index(project).map(|i| (i, false))
     }
     pub fn auto_start(&self, project: &str) -> Result<()> {
         if self.stopping.load(Ordering::Acquire) {
@@ -2144,6 +2263,53 @@ impl Graphs {
                         *nodes = nodes[start..end].to_vec();
                     }
                 }
+                let kept_keys: Option<BTreeSet<String>> =
+                    (shown.offset > 0 || shown.limit.is_some()).then(|| {
+                        obj.get("nodes")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|n| {
+                                n.get("path")
+                                    .or_else(|| n.get("id"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .collect()
+                    });
+                let mut cross_page_edges = Vec::new();
+                if let Some(ref kept) = kept_keys
+                    && let Some(edges) = obj.get_mut("edges").and_then(Value::as_array_mut)
+                {
+                    let mut filtered = Vec::with_capacity(edges.len());
+                    for edge in edges.drain(..) {
+                        let from = edge
+                            .get("from")
+                            .or_else(|| edge.get("source"))
+                            .and_then(Value::as_str);
+                        let to = edge
+                            .get("to")
+                            .or_else(|| edge.get("target"))
+                            .and_then(Value::as_str);
+                        match (from, to) {
+                            (Some(f), Some(t)) if kept.contains(f) && kept.contains(t) => {
+                                filtered.push(edge);
+                            }
+                            (Some(f), Some(t))
+                                if (kept.contains(f) || kept.contains(t))
+                                    && cross_page_edges.len() < 64 =>
+                            {
+                                cross_page_edges.push(json!({
+                                    "from": f,
+                                    "to": t,
+                                    "links": edge.get("links").and_then(Value::as_u64).unwrap_or(1),
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    *edges = filtered;
+                }
                 let returned = obj
                     .get("nodes")
                     .and_then(Value::as_array)
@@ -2158,6 +2324,7 @@ impl Graphs {
                         "returned": returned,
                         "has_more": has_more,
                         "next_offset": has_more.then_some(shown.offset.saturating_add(returned)),
+                        "cross_page_edges": cross_page_edges,
                     }),
                 );
             }
@@ -2418,8 +2585,13 @@ impl Graphs {
             let backend_label = native_backend
                 .then_some(crate::graph_ir::NATIVE_IR_TOOL)
                 .or_else(|| index.backend());
-            let ir_summary = self.maps.ir_summary(&self.store.state, project);
+            let ir_summary = self.maps.ir_summary_for_revision(
+                &self.store.state,
+                project,
+                self.ir_revision_of(project),
+            );
             crate::graph_map::attach_ir_metadata(&mut view, backend_label, ir_summary.as_ref());
+            crate::graph_map::attach_confidence_metadata(&index, &mut view);
             apply_graph_focus(
                 &self.store,
                 project,
@@ -2482,9 +2654,24 @@ impl Graphs {
                     })?
                     .commit;
                 let found = self.graph_at(project, &root, Some(commit), &resolved.prefix, true)?;
-                let (key, graph, tree) = found.graph.ok_or_else(|| {
-                    HarnessError::unavailable("The PR base graph is no longer cached. Return to the PR cycle to prepare it again.")
-                })?;
+                let Some((key, graph, tree)) = found.graph else {
+                    if found.state == "missing" {
+                        let _ = self.revise(
+                            project,
+                            &root,
+                            commit,
+                            &resolved.prefix,
+                            RevisionBuild::Normal,
+                        );
+                    }
+                    return Err(HarnessError::unavailable(
+                        if matches!(target, Target::Range { .. }) {
+                            "The range base graph is not ready yet. Retry shortly once its revision build completes."
+                        } else {
+                            "The PR base graph is no longer cached. Return to the PR cycle to prepare it again."
+                        },
+                    ));
+                };
                 let (index, cache_hit) = self.maps.index_with_cache_hit(&key, &graph, &tree)?;
                 if notests && index.has_rust_sources() && !index.has_test_spans() {
                     return Err(HarnessError::unavailable(
@@ -2514,7 +2701,8 @@ impl Graphs {
             Ok(None)
         };
         let found = self.graph_of(project, &root, &resolved)?;
-        let pull_cycle = cycle.is_some() && matches!(target, Target::Pull(_));
+        let pull_cycle =
+            cycle.is_some() && matches!(target, Target::Pull(_) | Target::Range { .. });
         let changed = resolved
             .files
             .iter()
@@ -2694,7 +2882,11 @@ impl Graphs {
         let keep_run = view["run"].is_object();
         view["project_id"] = json!(project);
         view["target"] = json!(target.text());
-        view["chosen"] = chosen(&resolved);
+        let resolved_chosen = chosen(&resolved);
+        if matches!(target, Target::Range { .. }) && base.is_some() {
+            view["base"] = resolved_chosen["base"].clone();
+        }
+        view["chosen"] = resolved_chosen;
         if matches!(target, Target::Commit(_) | Target::Range { .. })
             && let Some(revision) = resolved
                 .revision
@@ -2726,9 +2918,18 @@ impl Graphs {
             .then_some(crate::graph_ir::NATIVE_IR_TOOL)
             .or_else(|| active_index.as_ref().and_then(|idx| idx.backend()));
         let ir_summary = own
-            .then(|| self.maps.ir_summary(&self.store.state, project))
+            .then(|| {
+                self.maps.ir_summary_for_revision(
+                    &self.store.state,
+                    project,
+                    self.ir_revision_of(project),
+                )
+            })
             .flatten();
         crate::graph_map::attach_ir_metadata(&mut view, backend_label, ir_summary.as_ref());
+        if let Some(idx) = active_index.as_deref() {
+            crate::graph_map::attach_confidence_metadata(idx, &mut view);
+        }
         let sysrun_focus_id;
         let focus_sid = match target {
             Target::Run(session) => Some(session.as_str()),
@@ -2854,6 +3055,22 @@ impl Graphs {
         if matches!(target, Target::Commit(_) | Target::Range { .. }) {
             let resolved = Arc::new(graph_changes::resolve(root, target, &[])?);
             lock(&self.chosen)?.insert((project.to_owned(), target.text()), resolved.clone());
+            if matches!(target, Target::Range { .. })
+                && let Some(commit) = &resolved.revision
+                && self
+                    .setting(project)
+                    .ok()
+                    .is_some_and(|s| s["enabled"] == true)
+                && self.resolve_backend(true).is_some()
+            {
+                let _ = self.revise(
+                    project,
+                    root,
+                    commit,
+                    &resolved.prefix,
+                    RevisionBuild::Normal,
+                );
+            }
             return Ok(resolved);
         }
         Err(HarnessError::conflict("Choose the change again."))
@@ -3466,7 +3683,16 @@ impl Graphs {
             return Ok(());
         }
         if let Some(job) = lock(&self.jobs)?.get(project) {
-            job.again.store(true, Ordering::Release);
+            if let Ok(mut pending) = job.pending_paths.lock() {
+                for path in rel_paths {
+                    if pending.len() >= MAX_WATCHER_BATCH * 4 {
+                        break;
+                    }
+                    if !pending.contains(path) {
+                        pending.push(path.clone());
+                    }
+                }
+            }
             return Ok(());
         }
         let started = Instant::now();
@@ -3487,15 +3713,14 @@ impl Graphs {
         }
         let home = folder(&self.store.state, project);
         let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
-        let live_bytes = Arc::new(crate::graph_ir::encode_node_link_payload_from_elements(
-            &ir_nodes, &ir_links,
-        )?);
+        let shared_nodes = Arc::new(ir_nodes);
+        let shared_links = Arc::new(ir_links);
         let index = Arc::new(crate::graph_map::Index::from_ir_parts(
             root,
             Some(ir.db_path().to_path_buf()),
             Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
-            ir_nodes,
-            ir_links,
+            (*shared_nodes).clone(),
+            (*shared_links).clone(),
         )?);
         let rev = self.bump_ir_revision(project);
         self.maps.forget_live(project);
@@ -3504,7 +3729,7 @@ impl Graphs {
         let elapsed = tenth(started.elapsed().as_secs_f64());
         let hash = fresh_print.as_ref().map(|p| p.hash.clone());
         let commit_owned = fresh_print.and_then(|p| p.commit);
-        let bytes = live_bytes.len() as u64;
+        let bytes = setting["built"]["bytes"].as_u64().unwrap_or(0);
         let disk = size(&home);
         self.edit(project, |setting| {
             if setting["enabled"] != true || self.stopping.load(Ordering::Acquire) {
@@ -3530,7 +3755,12 @@ impl Graphs {
         self.schedule_live_json_write(
             project,
             root.to_path_buf(),
-            Some((nodes, edges, live_bytes)),
+            Some(PendingLiveJson::Elements {
+                nodes,
+                edges,
+                ir_nodes: shared_nodes,
+                ir_links: shared_links,
+            }),
         );
         self.emit_status_event(
             project,
@@ -3872,16 +4102,67 @@ impl Graphs {
             false,
         );
         let live_graph = live_dir.join("graph.json");
-        let (nodes, edges) = match ir.write_live_graph_atomic(&live_graph) {
-            Ok(counts) => counts,
+        let (ir_nodes, ir_links, nodes, edges) = match ir.export_ir_graph_elements() {
+            Ok(parts) => parts,
             Err(err) => return Outcome::Failed(err.message),
         };
         if stopped() {
             return Outcome::Cancelled;
         }
-        write_live_summary(&live_graph, commit, Some((nodes, edges)), None);
-        self.maps.forget_live(project);
-        self.bump_ir_revision(project);
+        let shared_nodes = Arc::new(ir_nodes);
+        let shared_links = Arc::new(ir_links);
+        let index = match crate::graph_map::Index::from_ir_parts(
+            root,
+            Some(ir.db_path().to_path_buf()),
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            (*shared_nodes).clone(),
+            (*shared_links).clone(),
+        ) {
+            Ok(idx) => Arc::new(idx),
+            Err(err) => return Outcome::Failed(err.message),
+        };
+        let can_defer_live_json = live_graph.is_file()
+            && self
+                .setting(project)
+                .ok()
+                .and_then(|s| s["built"]["tool"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some(crate::graph_ir::NATIVE_IR_TOOL);
+        if can_defer_live_json {
+            self.maps.forget_live(project);
+            let rev = self.bump_ir_revision(project);
+            self.maps.put_live_ir(project, rev, index);
+            self.schedule_live_json_write(
+                project,
+                root.to_path_buf(),
+                Some(PendingLiveJson::Elements {
+                    nodes,
+                    edges,
+                    ir_nodes: shared_nodes,
+                    ir_links: shared_links,
+                }),
+            );
+        } else {
+            let live_bytes = match crate::graph_ir::encode_node_link_payload_from_elements(
+                &shared_nodes,
+                &shared_links,
+            ) {
+                Ok(b) => b,
+                Err(err) => return Outcome::Failed(err.message),
+            };
+            if let Err(err) =
+                crate::graph_ir::write_live_graph_json_bytes_atomic(&live_graph, &live_bytes)
+            {
+                return Outcome::Failed(err.message);
+            }
+            if stopped() {
+                return Outcome::Cancelled;
+            }
+            write_live_summary(&live_graph, commit, Some((nodes, edges)), None);
+            self.maps.forget_live(project);
+            let rev = self.bump_ir_revision(project);
+            self.maps.put_live_ir(project, rev, index);
+        }
         let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
         let elapsed = job.started().elapsed().as_secs_f64();
         Outcome::Built(json!({
@@ -3983,6 +4264,18 @@ impl Graphs {
         }
         if let Ok(mut jobs) = self.jobs.lock() {
             jobs.remove(project);
+        }
+        let pending_paths = job
+            .pending_paths
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default();
+        if !pending_paths.is_empty()
+            && !purge
+            && !self.stopping.load(Ordering::Acquire)
+            && let Ok(root) = self.root(project)
+        {
+            let _ = self.apply_ir_path_updates(project, &root, &pending_paths);
         }
         if job.again.load(Ordering::Acquire) && !purge {
             if let Ok(mut finished) = self.finished.lock() {
@@ -4182,6 +4475,18 @@ impl Graphs {
         if record["project_id"] != project {
             return Err(HarnessError::missing("This project has no such run."));
         }
+        let record_meta = (
+            record["title"].as_str().unwrap_or("").to_owned(),
+            record["provider"].as_str().unwrap_or("").to_owned(),
+            record["status"].as_str().unwrap_or("").to_owned(),
+            record["project_path"].as_str().unwrap_or("").to_owned(),
+        );
+        let cache_key: RunCacheKey = (
+            project.to_owned(),
+            session.to_owned(),
+            launch.map(str::to_owned),
+            compare.map(str::to_owned),
+        );
         let ledger = || {
             crate::run_activity::RunLedger::new(
                 record["provider"].as_str().unwrap_or(""),
@@ -4189,32 +4494,44 @@ impl Graphs {
                 false,
             )
         };
-        let mut primary = (ledger(), BTreeMap::new());
-        let mut followup = compare.map(|_| (ledger(), BTreeMap::new()));
+        let mut entry = {
+            let mut caches = lock(&self.run_caches)?;
+            caches
+                .remove(&cache_key)
+                .unwrap_or_else(|| CachedRunLaunches {
+                    record_meta: record_meta.clone(),
+                    launches: Vec::new(),
+                    known: BTreeSet::new(),
+                    last_event_id: 0,
+                    primary: (ledger(), BTreeMap::new()),
+                    followup: compare.map(|_| (ledger(), BTreeMap::new())),
+                    cached: None,
+                })
+        };
         let workspace = Path::new(record["project_path"].as_str().unwrap_or(""));
-        let mut launches = Vec::new();
-        let mut known = BTreeSet::new();
-        let mut after = 0;
+        let mut after = entry.last_event_id;
+        let mut new_events = false;
         loop {
             let events = self.store.events(session, after)?;
             let Some(last) = events.last().and_then(|event| event["id"].as_i64()) else {
                 break;
             };
+            new_events = true;
             for event in &events {
                 let id = event["launch_id"]
                     .as_str()
                     .filter(|value| !value.is_empty());
                 if let Some(id) = id
-                    && known.insert(id.to_owned())
+                    && entry.known.insert(id.to_owned())
                 {
-                    launches.push(json!({
-                        "id": id, "number": launches.len() + 1, "at": event["at"],
+                    entry.launches.push(json!({
+                        "id": id, "number": entry.launches.len() + 1, "at": event["at"],
                     }));
                 }
                 let selected = if launch.is_none() || launch == id {
-                    Some(&mut primary)
+                    Some(&mut entry.primary)
                 } else if compare == id {
-                    followup.as_mut()
+                    entry.followup.as_mut()
                 } else {
                     None
                 };
@@ -4232,30 +4549,59 @@ impl Graphs {
             }
             after = last;
         }
+        entry.last_event_id = after;
         if launch
             .into_iter()
             .chain(compare)
-            .any(|id| !known.contains(id))
+            .any(|id| !entry.known.contains(id))
         {
+            if let Ok(mut caches) = lock(&self.run_caches) {
+                if caches.len() >= 64
+                    && let Some(oldest) = caches.keys().next().cloned()
+                {
+                    caches.remove(&oldest);
+                }
+                caches.insert(cache_key, entry);
+            }
             return Err(HarnessError::missing(
                 "This session has no such recorded launch.",
             ));
         }
-        let mut primary = Self::run_change(root, session, &record, primary);
-        primary.told["launches"] = json!(launches);
-        primary.told["launch"] = json!(launch);
-        primary.told["compare_launch"] = json!(compare);
-        Ok((
-            primary,
-            followup.map(|run| Self::run_change(root, session, &record, run)),
-        ))
+        let pair = if !new_events
+            && entry.record_meta == record_meta
+            && let Some(ref cached_pair) = entry.cached
+        {
+            cached_pair.clone()
+        } else {
+            let mut primary = Self::run_change(root, session, &record, &entry.primary);
+            primary.told["launches"] = json!(entry.launches);
+            primary.told["launch"] = json!(launch);
+            primary.told["compare_launch"] = json!(compare);
+            let followup = entry
+                .followup
+                .as_ref()
+                .map(|run| Self::run_change(root, session, &record, run));
+            let pair = (primary, followup);
+            entry.record_meta = record_meta;
+            entry.cached = Some(pair.clone());
+            pair
+        };
+        if let Ok(mut caches) = lock(&self.run_caches) {
+            if caches.len() >= 64
+                && let Some(oldest) = caches.keys().next().cloned()
+            {
+                caches.remove(&oldest);
+            }
+            caches.insert(cache_key, entry);
+        }
+        Ok(pair)
     }
 
     fn run_change(
         root: &Path,
         session: &str,
         record: &Value,
-        (ledger, shell_reads): (crate::run_activity::RunLedger, BTreeMap<String, u64>),
+        (ledger, shell_reads): &(crate::run_activity::RunLedger, BTreeMap<String, u64>),
     ) -> RunChange {
         let plain = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_owned();
         let (opened, edited) = ledger.files();
@@ -4312,7 +4658,7 @@ impl Graphs {
                 notes: Vec::new(),
             }),
             opened,
-            shell_reads,
+            shell_reads: shell_reads.clone(),
             told,
         }
     }
@@ -4907,7 +5253,13 @@ impl Graphs {
             }),
         };
         let ir_summary = published_native
-            .then(|| self.maps.ir_summary(&self.store.state, project))
+            .then(|| {
+                self.maps.ir_summary_for_revision(
+                    &self.store.state,
+                    project,
+                    self.ir_revision_of(project),
+                )
+            })
             .flatten();
         let graph_json = if published {
             let mut g = json!({
@@ -5501,13 +5853,13 @@ impl Domain for Graphs {
                     let raw_from = query["from"].as_str().unwrap_or("");
                     let raw_to = query["to"].as_str().unwrap_or("");
                     let target = if !raw_target.is_empty() {
-                        if !is_impact && (!raw_from.is_empty() || !raw_to.is_empty()) {
+                        if !raw_from.is_empty() || !raw_to.is_empty() {
                             return Err(HarnessError::invalid(
                                 "Specify either target or from/to range parameters, not both.",
                             ));
                         }
                         Some(Target::parse(raw_target)?)
-                    } else if !is_impact && (!raw_from.is_empty() || !raw_to.is_empty()) {
+                    } else if !raw_from.is_empty() || !raw_to.is_empty() {
                         if raw_from.is_empty() || raw_to.is_empty() {
                             return Err(HarnessError::invalid(
                                 "Both 'from' and 'to' are required for a range.",
@@ -5705,7 +6057,15 @@ mod tests {
                 "/api/projects/{project_id}/graph/file-impact",
                 200,
                 false,
-                &["path", "target", "focus_session", "certain"][..]
+                &[
+                    "path",
+                    "target",
+                    "from",
+                    "to",
+                    "focus_session",
+                    "agent",
+                    "certain"
+                ][..]
             )
         );
         // The folders spread out in a picture come as the same kind of list.
@@ -9324,6 +9684,37 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             assert!(wrote_c, "expected live/graph.json to contain src/c.rs");
+
+            // Range map propagates `view["base"]` and `view["confidence"]`.
+            assert_eq!(
+                mapped["base"]["name"]
+                    .as_str()
+                    .map(|s| s.starts_with(&c1[..7])),
+                Some(true)
+            );
+            assert!(mapped["confidence"]["extracted_ratio"].is_number());
+
+            // Manifest preservation & pending_paths queue drain checks.
+            assert!(is_preserved_source_path(Path::new("go.mod")));
+            assert!(is_preserved_source_path(Path::new("tsconfig.app.json")));
+            assert!(is_preserved_source_path(Path::new("jsconfig.json")));
+
+            // Active build queues watcher updates into Job::pending_paths and drains after settle.
+            let busy_job = Arc::new(Job::new());
+            busy_job
+                .pending_paths
+                .lock()
+                .unwrap()
+                .extend(["src/a.rs".to_owned(), "src/b.rs".to_owned()]);
+            let mut lock_jobs = lock(&graphs.jobs).unwrap();
+            lock_jobs.insert(pid.clone(), Arc::clone(&busy_job));
+            drop(lock_jobs);
+            graphs
+                .apply_ir_path_updates(&pid, &ws, &["src/b.rs".to_owned(), "src/c.rs".to_owned()])
+                .unwrap();
+            let drained = std::mem::take(&mut *busy_job.pending_paths.lock().unwrap());
+            assert_eq!(drained, vec!["src/a.rs", "src/b.rs", "src/c.rs"]);
+            lock(&graphs.jobs).unwrap().remove(&pid);
 
             graphs.close();
         }

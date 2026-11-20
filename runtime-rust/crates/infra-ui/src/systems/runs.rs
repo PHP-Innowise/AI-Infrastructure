@@ -529,7 +529,7 @@ pub(crate) fn on_sse_system_run(data: &V) {
     }
 }
 
-pub(super) async fn read(id: &str) {
+pub(crate) async fn read(id: &str) {
     let project = dom::value("system-project");
     let generation = m::bind_scope("system-scope", &project, id);
     read_scoped(id, &project, generation).await;

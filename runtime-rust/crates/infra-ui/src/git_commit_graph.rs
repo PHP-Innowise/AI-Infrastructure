@@ -1,7 +1,53 @@
 #![allow(dead_code)]
 
 use serde_json::Value;
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+thread_local! {
+    static COMMIT_LAYOUT_CACHE: RefCell<Option<(u64, Rc<Vec<CommitRowLayout>>)>> =
+        const { RefCell::new(None) };
+}
+
+fn commit_layouts_cache_key(commits: &[Value], selected_commit: Option<&str>) -> u64 {
+    let mut h = DefaultHasher::new();
+    commits.len().hash(&mut h);
+    selected_commit.hash(&mut h);
+    for commit in commits {
+        commit["commit"].as_str().hash(&mut h);
+        commit["short"].as_str().hash(&mut h);
+        commit["merge"].as_bool().hash(&mut h);
+        if let Some(parents) = commit["parents"].as_array() {
+            parents.len().hash(&mut h);
+            for p in parents {
+                p.as_str().hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+fn build_layouts_cached(
+    commits: &[Value],
+    selected_commit: Option<&str>,
+) -> Rc<Vec<CommitRowLayout>> {
+    let key = commit_layouts_cache_key(commits, selected_commit);
+    if let Some(hit) = COMMIT_LAYOUT_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|(cached_key, layouts)| (*cached_key == key).then(|| Rc::clone(layouts)))
+    }) {
+        return hit;
+    }
+    let built = Rc::new(build_layouts(commits, selected_commit));
+    COMMIT_LAYOUT_CACHE.with(|c| {
+        *c.borrow_mut() = Some((key, Rc::clone(&built)));
+    });
+    built
+}
 
 pub const ROW_HEIGHT: usize = 36;
 const MID_Y: usize = ROW_HEIGHT / 2;
@@ -210,7 +256,7 @@ fn render_commit_graph_rows_with_options(
     now: i64,
     surface: CommitGraphSurface,
 ) -> String {
-    let layouts = build_layouts(commits, selected_commit);
+    let layouts = build_layouts_cached(commits, selected_commit);
     let base_idx = range.and_then(|(b, _)| selected_commit_row_index(commits, Some(b)));
     let head_idx = range.and_then(|(_, h)| selected_commit_row_index(commits, Some(h)));
     let total = commits.len();
@@ -1729,7 +1775,9 @@ mod tests {
         assert!(
             dock_html.contains("id=\"graph-commit-row-0\" role=\"option\" aria-selected=\"false\"")
         );
-        assert!(dock_html.contains("id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"true\" data-current=\"true\""));
+        assert!(dock_html.contains(
+            "id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"true\" data-current=\"true\""
+        ));
 
         let range = resolve_commit_range_selection(&commits, Some("commit:c2"), "c0");
         assert_eq!(range, Some(("c0".to_owned(), "c2".to_owned())));
@@ -1766,5 +1814,11 @@ mod tests {
         assert!(windowed.contains("class=\"git-graph-spacer\""));
         assert!(windowed.contains("graph-commit-row-30"));
         assert!(!windowed.contains("graph-commit-row-0\""));
+
+        let first = build_layouts_cached(&many, Some("sha5"));
+        let second = build_layouts_cached(&many, Some("sha5"));
+        assert!(Rc::ptr_eq(&first, &second));
+        let changed = build_layouts_cached(&many, Some("sha6"));
+        assert!(!Rc::ptr_eq(&first, &changed));
     }
 }

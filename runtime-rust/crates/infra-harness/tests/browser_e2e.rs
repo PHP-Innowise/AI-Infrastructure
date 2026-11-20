@@ -476,6 +476,71 @@ fn browser_e2e_fixture_serves_graph_sse_and_range_contracts() {
     );
 
     drop(sse_reader);
+
+    let omni_status = get_json(&client, &format!("{url}/api/omnigraph/status"));
+    assert_eq!(omni_status["connected"], true, "{omni_status}");
+    let omni_graph = get_json(
+        &client,
+        &format!("{url}/api/omnigraph/graph?project_id={project_id}"),
+    );
+    let omni_atoms = omni_graph["atoms"]
+        .as_array()
+        .expect("omnigraph atoms array");
+    assert!(omni_atoms.len() >= 7, "expected seeded atoms: {omni_graph}");
+    let omni_search = get_json(
+        &client,
+        &format!("{url}/api/omnigraph/search?project_id={project_id}&q=backoff"),
+    );
+    assert!(
+        !omni_search["hits"]
+            .as_array()
+            .expect("omnigraph search hits")
+            .is_empty(),
+        "expected backoff hit: {omni_search}"
+    );
+    let omni_changes = get_json(
+        &client,
+        &format!("{url}/api/omnigraph/changes?project_id={project_id}&branch=main"),
+    );
+    assert!(
+        omni_changes["events"].is_array() && omni_changes["cursor"] == "cur-1",
+        "expected omnigraph changes feed events array: {omni_changes}"
+    );
+
+    let system_run_id = receipt["system_run_id"]
+        .as_str()
+        .expect("receipt system_run_id");
+    let sys_map = get_json(
+        &client,
+        &format!(
+            "{url}/api/systems/graph/map?project_id={project_id}&config_path=system.json&run_id={system_run_id}"
+        ),
+    );
+    assert!(
+        sys_map["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.len() >= 3)
+            || sys_map["services"]
+                .as_array()
+                .is_some_and(|svcs| svcs.len() >= 3),
+        "expected seeded system topology: {sys_map}"
+    );
+
+    let arch_map = get_json(
+        &client,
+        &format!(
+            "{url}/api/projects/{project_id}/graph/map?scope=&patterns=1&focus_session={session_id}"
+        ),
+    );
+    assert!(
+        arch_map["architecture"].is_object(),
+        "expected architecture analysis with patterns=true: {arch_map}"
+    );
+    assert!(
+        range_map["test_reach"].is_array() || range_map["change"].is_object(),
+        "expected range change/test_reach summary: {range_map}"
+    );
+
     let status = guard.shutdown_gracefully(Duration::from_secs(10));
     let stderr = stderr_handle.join().unwrap_or_default();
     assert!(
@@ -540,8 +605,10 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .expect("receipt other_session_id");
     let commit_a = receipt["commit_a"].as_str().expect("receipt commit_a");
     let commit_b = receipt["commit_b"].as_str().expect("receipt commit_b");
+    let system_run_id = receipt["system_run_id"].as_str().unwrap_or("");
 
-    let output = Command::new(&node)
+    let mut command = Command::new(&node);
+    command
         .arg(&script)
         .arg("--url")
         .arg(url)
@@ -554,11 +621,15 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .arg("--commit-a")
         .arg(commit_a)
         .arg("--commit-b")
-        .arg(commit_b)
+        .arg(commit_b);
+    if !system_run_id.is_empty() {
+        command.arg("--system-run-id").arg(system_run_id);
+    }
+    let output = command
         .arg("--chrome")
         .arg(&chrome)
         .arg("--timeout-ms")
-        .arg("45000")
+        .arg("90000")
         .output()
         .expect("execute browser_e2e.mjs");
 

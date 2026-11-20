@@ -2273,4 +2273,38 @@ fn a_link_between_two_services_is_bridged_to_the_code_on_both_sides() {
     assert_eq!(made["in_graph"], true);
     assert_eq!(made["reach"], json!({"files": 1, "tests": 0}));
     assert_eq!(view["contract"], "orders-http-v1");
+    assert!(view["confidence"]["ratio"].is_number(), "{view}");
+
+    // `system_graph.bridge` & `system_graph.changes` honor explicit range/run targets and surface coverage.
+    let ranged = unwrap_json(
+        rt.block_on(fx.domain.execute(
+            "system_graph.changes",
+            json!({
+                "query": {"project_id": fx.monorepo_pid, "from": "HEAD", "to": "HEAD"},
+                "body": {}
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(ranged["target"], "range:HEAD..HEAD");
+
+    let bridged_run = unwrap_json(
+        rt.block_on(fx.domain.execute(
+            "system_graph.bridge",
+            json!({
+                "query": {
+                    "project_id": fx.monorepo_pid,
+                    "from": "web",
+                    "to": "orders",
+                    "contract": "orders-http-v1",
+                    "run_id": "run-empty-cov"
+                },
+                "body": {}
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(bridged_run["run_id"], "run-empty-cov");
+    assert_eq!(bridged_run["run_coverage"]["consumer_opened"], 0);
+    assert!(bridged_run["confidence"]["certain_refs"].as_u64().unwrap() >= 1);
 }

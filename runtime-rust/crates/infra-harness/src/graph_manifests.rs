@@ -589,14 +589,26 @@ impl ManifestIndex {
     }
 
     /// Resolves a Go import path via `go.mod` module prefix against `known_files`.
+    #[cfg(test)]
     pub(crate) fn resolve_go_import(
         &self,
         import_path: &str,
         known_files: &BTreeSet<String>,
     ) -> Option<String> {
+        self.resolve_go_import_files(import_path, known_files)
+            .into_iter()
+            .next()
+    }
+
+    /// Resolves a Go import path via `go.mod` to all `.go` source files in the target package directory.
+    pub(crate) fn resolve_go_import_files(
+        &self,
+        import_path: &str,
+        known_files: &BTreeSet<String>,
+    ) -> Vec<String> {
         let cleaned = import_path.trim().trim_matches('"');
         if cleaned.is_empty() {
-            return None;
+            return Vec::new();
         }
         for gm in &self.gomods {
             let sub = if cleaned == gm.module_path {
@@ -610,11 +622,12 @@ impl ManifestIndex {
                 continue;
             };
             let target_dir = join_rel(&gm.dir, sub);
-            if let Some(found) = pick_go_file_in_dir(&target_dir, known_files) {
-                return Some(found);
+            let files = pick_go_files_in_dir(&target_dir, known_files);
+            if !files.is_empty() {
+                return files;
             }
         }
-        None
+        Vec::new()
     }
 }
 
@@ -1339,20 +1352,26 @@ fn resolve_py_candidates(base: &str, lookup: &KnownFileLookup<'_>) -> Option<Str
     None
 }
 
-fn pick_go_file_in_dir(dir: &str, known_files: &BTreeSet<String>) -> Option<String> {
-    let mut matches: Vec<&String> = known_files
+fn pick_go_files_in_dir(dir: &str, known_files: &BTreeSet<String>) -> Vec<String> {
+    let mut matches: Vec<String> = known_files
         .iter()
         .filter(|path| {
             let clean = clean_rel_key(path);
             clean.ends_with(".go") && dir_of(&clean) == dir
         })
+        .cloned()
         .collect();
     matches.sort();
-    matches
+    let non_test: Vec<String> = matches
         .iter()
-        .find(|p| !p.ends_with("_test.go"))
-        .or_else(|| matches.first())
-        .map(|s| (*s).clone())
+        .filter(|p| !p.ends_with("_test.go"))
+        .cloned()
+        .collect();
+    if non_test.is_empty() {
+        matches
+    } else {
+        non_test
+    }
 }
 
 fn resolve_rel_join(base_dir: &str, spec: &str) -> Option<String> {

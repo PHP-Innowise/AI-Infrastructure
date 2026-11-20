@@ -1490,7 +1490,9 @@ mod permission_tests {
         assert!(md_html.contains(">rust<"));
 
         assert_eq!(coalesce_chunk_text("foo ", "bar"), "foo bar");
-        assert_eq!(coalesce_chunk_text("line1", "line2"), "line1\nline2");
+        assert_eq!(coalesce_chunk_text("Hel", "lo"), "Hello");
+        assert_eq!(coalesce_chunk_text("**bo", "ld**"), "**bold**");
+        assert_eq!(coalesce_chunk_text("line1\n", "line2"), "line1\nline2");
 
         assert!(is_near_bottom(1000, 660, 300));
         assert!(!is_near_bottom(1000, 600, 300));
@@ -1642,5 +1644,125 @@ new file mode 100644
             diff_content_hash("workspace-results", "diff A"),
             diff_content_hash("results-diff", "diff A")
         );
+    }
+
+    #[test]
+    fn strip_now_parts_preserves_verb_target_and_more_slots() {
+        assert_eq!(
+            super::run_strip_now_parts(true, "completed", &[]),
+            ("Run completed".into(), String::new(), String::new(), true)
+        );
+        assert_eq!(
+            super::run_strip_now_parts(false, "", &[]),
+            ("Model’s turn".into(), String::new(), String::new(), true)
+        );
+        let single = [json!({"tool": "Read", "path": "src/main.rs"})];
+        assert_eq!(
+            super::run_strip_now_parts(false, "", &single),
+            ("Read".into(), "src/main.rs".into(), String::new(), false)
+        );
+        let multi = [
+            json!({"tool": "Read", "path": "src/a.rs", "started": 1, "event_id": "1"}),
+            json!({"tool": "Edit", "path": "src/b.rs", "started": 2, "event_id": "2"}),
+        ];
+        assert_eq!(
+            super::run_strip_now_parts(false, "", &multi),
+            ("Edit".into(), "src/b.rs".into(), "+1 more".into(), false)
+        );
+    }
+
+    #[test]
+    fn stream_boundary_tool_output_bounds_and_diff_viewer_enhancements() {
+        // Tilde fences and indented list continuations stay intact.
+        let tilde_open = "Intro.\n\n~~~python\nprint(1)\n\nstill_in_fence";
+        assert_eq!(
+            &tilde_open[..find_settled_markdown_boundary(tilde_open, 0)],
+            "Intro.\n\n"
+        );
+        let tilde_closed = "Intro.\n\n~~~python\nprint(1)\n~~~\n\nAfter";
+        assert_eq!(
+            &tilde_closed[..find_settled_markdown_boundary(tilde_closed, 0)],
+            "Intro.\n\n~~~python\nprint(1)\n~~~\n\n"
+        );
+        let list_cont = "- item 1\n\n  continuation";
+        assert_eq!(find_settled_markdown_boundary(list_cont, 0), 0);
+        let setext = "Title\n\n===";
+        assert_eq!(find_settled_markdown_boundary(setext, 0), 0);
+
+        assert_eq!(crate::dom::escape_css_attr_value(r#"a"b\c"#), r#"a\"b\\c"#);
+        let long_out = (1..=300)
+            .map(|n| format!("line-{n:03}-payload-abcdefghijklmnopqrstuvwxyz"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (tail, trunc) = bounded_tool_output_preview(&long_out, 500);
+        assert!(trunc.is_some());
+        assert!(tail.len() <= 550);
+        assert!(tail.ends_with("line-300-payload-abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(
+            bounded_tool_output_preview("short text", 500),
+            ("short text".into(), None)
+        );
+
+        let numbered = compute_diff_numbered_lines(
+            "diff --git a/src/a.rs b/src/a.rs\n@@ -10,2 +20,3 @@ fn x\n ctx\n-old\n+new1\n+new2",
+        );
+        assert_eq!(numbered[2].old_ln, Some(10));
+        assert_eq!(numbered[2].new_ln, Some(20));
+        assert_eq!(numbered[3].kind, "del");
+        assert_eq!(numbered[3].old_ln, Some(11));
+        assert_eq!(numbered[3].new_ln, None);
+        assert_eq!(numbered[4].kind, "add");
+        assert_eq!(numbered[4].new_ln, Some(21));
+
+        let (diff_html, total_lines, is_trunc) = render_diff_file_lines_html(
+            "diff --git a/src/a.rs b/src/a.rs\n@@ -1,1 +1,1 @@\n-a\n+b",
+            Some(250),
+        );
+        assert!(!is_trunc);
+        assert_eq!(total_lines, 4);
+        assert!(diff_html.contains("data-action=\"diff-copy-hunk\""));
+        assert!(diff_html.contains("class=\"diff-ln diff-ln-old\""));
+        crate::test_support::assert_no_inline_hex_colors(&diff_html);
+
+        assert!(should_default_open_diff_file(4, 2, 120));
+        assert!(!should_default_open_diff_file(12, 2, 120));
+        assert!(!should_default_open_diff_file(4, 2, 500));
+    }
+
+    #[test]
+    fn approvals_queue_reconcile_shortcuts_and_creator_detail_counts() {
+        let existing = vec!["s1:r1".into(), "s2:r2".into(), "sys:r3".into()];
+        let next = vec!["s2:r2".into(), "s3:r4".into()];
+        assert_eq!(
+            approvals_queue_reconcile_plan(&existing, &next),
+            vec!["s1:r1".to_owned(), "sys:r3".to_owned()]
+        );
+
+        assert!(!is_shortcut_text_input("INPUT", Some("radio")));
+        assert!(!is_shortcut_text_input("INPUT", Some("checkbox")));
+        assert!(is_shortcut_text_input("INPUT", Some("text")));
+        assert!(is_shortcut_text_input("TEXTAREA", None));
+        assert!(is_shortcut_text_input("SELECT", None));
+        assert!(!can_target_drawer_shortcut(false, false, false));
+        assert!(can_target_drawer_shortcut(true, false, false));
+        assert!(can_target_drawer_shortcut(false, true, false));
+
+        m::write(|s| {
+            s.sid = "active-sess".into();
+            s.sessions.clear();
+            s.approvals.waiting_counts.clear();
+            s.data.insert(
+                "system-run".into(),
+                json!({"id": "sr-1", "waiting_permissions": [{"request_id": "p1"}]}),
+            );
+            s.data.insert(
+                "creator-detail".into(),
+                json!({"run": {"id": "cr-1"}, "waiting_permissions": [{"request_id": "p2"}, {"request_id": "p3"}]}),
+            );
+        });
+        let total = super::super::permissions::total_pending_approvals_count();
+        assert!(total >= 3);
+        m::take("system-run");
+        m::take("creator-detail");
     }
 }

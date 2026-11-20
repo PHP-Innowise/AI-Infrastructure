@@ -313,8 +313,7 @@ pub async fn event(
         "creator-action" => creator_action(payload.as_str().unwrap_or("")).await,
         "creator-run-budgets-save" => creator_action("budgets").await,
         "creator-session" => {
-            session::select(payload.as_str().unwrap_or("")).await;
-            session::open_view("changes", true).await;
+            session::select_with_view(payload.as_str().unwrap_or(""), Some("changes")).await;
         }
         "accelerator-catalog" => session::open_view("kit3", true).await,
         "accelerator-creator" => {

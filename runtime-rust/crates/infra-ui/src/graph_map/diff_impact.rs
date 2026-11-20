@@ -280,7 +280,9 @@ pub(super) fn member_rows_html(members: &[V], member_filter: &str) -> String {
             String::new()
         } else {
             let access_esc = escape(&access);
-            format!("<span class=\"graph-member-access\" data-access=\"{access_esc}\">{access_esc}</span>")
+            format!(
+                "<span class=\"graph-member-access\" data-access=\"{access_esc}\">{access_esc}</span>"
+            )
         };
         let prev_vis = member["previous_visibility"].as_str();
         let curr_vis = member["visibility"].as_str();
@@ -2769,18 +2771,20 @@ impl ImpactLookup {
         expected_from: &str,
         expected_to: &str,
     ) -> bool {
+        if expected_from.is_empty() || expected_to.is_empty() {
+            return false;
+        }
         let from_node = &nodes[from];
         let to_node = &nodes[to];
         path_matches_node(
             &m::text(from_node, "path"),
             m::yes(&from_node["folder"]),
             expected_from,
-        ) && (expected_to.is_empty()
-            || path_matches_node(
-                &m::text(to_node, "path"),
-                m::yes(&to_node["folder"]),
-                expected_to,
-            ))
+        ) && path_matches_node(
+            &m::text(to_node, "path"),
+            m::yes(&to_node["folder"]),
+            expected_to,
+        )
     }
 
     pub(super) fn edge_diff(&self, nodes: &[V], from: usize, to: usize) -> Option<&'static str> {
@@ -2845,20 +2849,31 @@ impl ImpactLookup {
     }
 
     pub(super) fn edge_impact(&self, nodes: &[V], from: usize, to: usize) -> Option<&'static str> {
-        if !self.selected_path.is_empty() {
-            let from_node = &nodes[from];
-            let to_node = &nodes[to];
-            if path_matches_node(
+        let from_node = &nodes[from];
+        let to_node = &nodes[to];
+        let to_is_selected = !self.selected_path.is_empty()
+            && path_matches_node(
                 &m::text(to_node, "path"),
                 m::yes(&to_node["folder"]),
                 &self.selected_path,
-            ) && self.node_matches_any(from_node, &self.callers_risk)
-            {
-                return Some("broken_risk");
-            }
+            );
+        if to_is_selected && self.node_matches_any(from_node, &self.callers_risk) {
+            return Some("broken_risk");
         }
         if self.commit_risk_callers.iter().any(|(cf, ct, imp)| {
-            imp == "broken_risk" && Self::pair_matches(nodes, from, to, cf, ct)
+            if imp != "broken_risk" {
+                return false;
+            }
+            if ct.is_empty() {
+                to_is_selected
+                    && path_matches_node(
+                        &m::text(from_node, "path"),
+                        m::yes(&from_node["folder"]),
+                        cf,
+                    )
+            } else {
+                Self::pair_matches(nodes, from, to, cf, ct)
+            }
         }) {
             return Some("broken_risk");
         }
@@ -3547,7 +3562,9 @@ pub(super) const LONGER: u64 = 3;
 pub(super) fn longer_ways(view: &V, surface: &str) -> String {
     let path = &view["path"];
     let now = path["longer"].as_u64().unwrap_or(0);
-    let mut html = String::from("<span class=\"graph-arrow-legend-reach\" role=\"group\" aria-label=\"Ways longer than the shortest\"><span class=\"graph-arrow-legend-title\">Longer ways:</span>");
+    let mut html = String::from(
+        "<span class=\"graph-arrow-legend-reach\" role=\"group\" aria-label=\"Ways longer than the shortest\"><span class=\"graph-arrow-legend-title\">Longer ways:</span>",
+    );
     for longer in 0..=LONGER {
         let (word, told) = match longer {
             0 => ("none".to_owned(), "The shortest ways alone".to_owned()),
@@ -3649,11 +3666,25 @@ pub(super) fn plain_map(view: &V) -> bool {
 /// ends are drawn, and that break no rule.
 pub(super) fn said_twice(view: &V) -> Vec<bool> {
     let nodes = m::array(&view["nodes"]);
-    let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
+    let mut index_by_path: HashMap<&str, usize> = HashMap::with_capacity(nodes.len());
+    for (idx, node) in nodes.iter().enumerate() {
+        if let Some(p) = node["path"].as_str() {
+            index_by_path.entry(p).or_insert(idx);
+        }
+    }
     let edges = m::array(&view["edges"]);
     let drawn = edges
         .iter()
-        .map(|edge| at(&edge["from"]).zip(at(&edge["to"])))
+        .map(|edge| {
+            edge["from"]
+                .as_str()
+                .and_then(|f| index_by_path.get(f).copied())
+                .zip(
+                    edge["to"]
+                        .as_str()
+                        .and_then(|t| index_by_path.get(t).copied()),
+                )
+        })
         .collect::<Vec<_>>();
     let pairs = drawn.iter().flatten().copied().collect::<Vec<_>>();
     let mut said = transitive(nodes.len(), &pairs).into_iter();

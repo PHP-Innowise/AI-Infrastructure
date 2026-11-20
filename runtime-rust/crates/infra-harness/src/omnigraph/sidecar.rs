@@ -1223,11 +1223,13 @@ impl OmnigraphManager {
         let need_unlinked_view = !has_filters && !is_paginated_subset;
         let allow_symbol_q_match = kind_filter.is_none() && sid_filter.is_none();
         let need_edges_for_kept = !kept_atom_ids.is_empty();
-        let need_files_query = need_edges_for_kept
-            || need_unlinked_view
-            || (allow_symbol_q_match && q_filter.is_some());
         let need_symbols_query = need_unlinked_view || (allow_symbol_q_match && q_filter.is_some());
-        let need_follows_query = !session_rows.is_empty();
+        let need_follows_query = !session_rows.is_empty()
+            && !(sid_filter.is_some()
+                && kept_atom_ids.is_empty()
+                && !session_rows
+                    .iter()
+                    .any(|s| str_field(s, "session_id").as_deref() == sid_filter));
 
         let (
             pub_edges_stage2,
@@ -1236,7 +1238,6 @@ impl OmnigraphManager {
             symbol_edges_stage2,
             rel_edges,
             follow_edges,
-            file_rows,
             symbol_rows,
         ) = tokio::join!(
             async {
@@ -1330,21 +1331,6 @@ impl OmnigraphManager {
                 }
             },
             async {
-                if need_files_query {
-                    query_edges_safe(
-                        &client,
-                        GQ_LIST_FILES,
-                        "list_files",
-                        &params,
-                        branch_ref,
-                        snap_ref,
-                    )
-                    .await
-                } else {
-                    Vec::new()
-                }
-            },
-            async {
                 if need_symbols_query {
                     query_edges_safe(
                         &client,
@@ -1367,6 +1353,31 @@ impl OmnigraphManager {
         let symbol_edges_fetched = symbol_edges_stage1.is_none();
         let file_edges = file_edges_stage1.unwrap_or(file_edges_stage2);
         let symbol_edge_rows = symbol_edges_stage1.unwrap_or(symbol_edges_stage2);
+
+        let has_kept_edge_files = (need_edges_for_kept
+            && (file_edges
+                .iter()
+                .any(|e| str_field(e, "source_id").is_some_and(|s| kept_atom_ids.contains(&s)))
+                || symbol_edge_rows.iter().any(|e| {
+                    str_field(e, "source_id").is_some_and(|s| kept_atom_ids.contains(&s))
+                })))
+            || !symbol_rows.is_empty();
+        let need_files_query = need_unlinked_view
+            || (allow_symbol_q_match && q_filter.is_some())
+            || has_kept_edge_files;
+        let file_rows = if need_files_query {
+            query_edges_safe(
+                &client,
+                GQ_LIST_FILES,
+                "list_files",
+                &params,
+                branch_ref,
+                snap_ref,
+            )
+            .await
+        } else {
+            Vec::new()
+        };
 
         if file_edges_fetched || symbol_edges_fetched {
             if file_edges_fetched {
@@ -1457,7 +1468,7 @@ impl OmnigraphManager {
             })
             .collect();
 
-        let (symbols, symbol_edges) = build_symbol_graph_entries(
+        let (mut symbols, mut symbol_edges) = build_symbol_graph_entries(
             project_id,
             &symbol_rows,
             &symbol_edge_rows,
@@ -1470,6 +1481,31 @@ impl OmnigraphManager {
             need_unlinked_view,
             allow_symbol_q_match,
         );
+        if !symbols.is_empty()
+            && let Ok(Some(ir)) =
+                crate::graph_ir::GraphIrStore::open_readonly(&self.state_dir, project_id)
+        {
+            let file_paths: BTreeSet<String> = symbols
+                .iter()
+                .filter_map(|s| str_field(s, "file_path"))
+                .collect();
+            if let Ok(id_map) = ir.canonical_symbol_ids_for_files(&file_paths) {
+                for sym in &mut symbols {
+                    if let Some(fqn) = str_field(sym, "fqn")
+                        && let Some(cid) = id_map.get(&fqn)
+                    {
+                        sym["symbol_id"] = json!(cid);
+                    }
+                }
+                for edge in &mut symbol_edges {
+                    if let Some(fqn) = str_field(edge, "fqn")
+                        && let Some(cid) = id_map.get(&fqn)
+                    {
+                        edge["symbol_id"] = json!(cid);
+                    }
+                }
+            }
+        }
 
         let kept_file_paths: BTreeSet<String> = if need_unlinked_view {
             BTreeSet::new()
@@ -2137,7 +2173,13 @@ impl OmnigraphManager {
             last_commit = Some(commit);
         }
 
-        let symbols = atom_symbols(root, &files, &format!("{title}\n{summary}\n{atom_body}"));
+        let symbols = atom_symbols_for_project(
+            Some(&self.state_dir),
+            &project_id,
+            root,
+            &files,
+            &format!("{title}\n{summary}\n{atom_body}"),
+        );
         let previous_symbols = if existing.is_some() {
             list_atom_symbols(&client, &project_id, &branch)
                 .await
@@ -4107,7 +4149,9 @@ impl OmnigraphManager {
                 .await?;
 
             upsert_atom_files(&client, effective_project_id, branch, &atom_id, &files, &ts).await;
-            let symbols = atom_symbols(
+            let symbols = atom_symbols_for_project(
+                Some(&self.state_dir),
+                effective_project_id,
                 root.as_deref(),
                 &files,
                 &format!("{title}\n{summary}\n{body}"),
@@ -5299,38 +5343,96 @@ async fn upsert_atom_files(
 }
 
 /// The declarations `text` names in the files an atom touches, read from the
-/// project at `root`: rows for `SymbolRef`, keyed by file, owner and name.
-fn atom_symbols(root: Option<&Path>, files: &[String], text: &str) -> Vec<Value> {
+/// fresh `GraphIrStore` when available (canonical `symbol_id`), falling back to
+/// `graph_live::declarations_named_in` on `root`.
+fn atom_symbols_for_project(
+    state_dir: Option<&Path>,
+    project_id: &str,
+    root: Option<&Path>,
+    files: &[String],
+    text: &str,
+) -> Vec<Value> {
     let Some(root) = root else {
         return Vec::new();
     };
+    let ir_store = state_dir
+        .filter(|_| !project_id.is_empty())
+        .and_then(|state| {
+            crate::graph_ir::GraphIrStore::open_readonly(state, project_id)
+                .ok()
+                .flatten()
+        });
     let mut symbols = Vec::new();
+    let format_fqn = |rel: &str, owner: Option<&str>, name: &str| -> String {
+        match owner.filter(|o| !o.is_empty() && *o != rel) {
+            Some(owner) => format!("{rel}::{owner}::{name}"),
+            None => format!("{rel}::{name}"),
+        }
+    };
     for file in files.iter().take(MAX_SYMBOL_FILES) {
+        let rel_key = crate::graph_live::clean_rel_key(file.split('#').next().unwrap_or(file));
+        if !rel_key.is_empty()
+            && let Some(ref ir) = ir_store
+            && let Ok(Some(ir_syms)) = ir.fresh_file_symbols(root, &rel_key)
+        {
+            let mut seen_names: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+            for (symbol_id, kind, name, parent_name, start_line) in ir_syms {
+                if symbols.len() >= MAX_ATOM_SYMBOLS {
+                    break;
+                }
+                if kind == "file"
+                    || name.chars().count() < 3
+                    || !crate::graph_live::names_declaration(text, &name)
+                    || !seen_names.insert((parent_name.clone(), name.clone()))
+                {
+                    continue;
+                }
+                let fqn = format_fqn(&rel_key, parent_name.as_deref(), &name);
+                symbols.push(json!({
+                    "fqn": fqn,
+                    "symbol_id": symbol_id,
+                    "file_path": rel_key,
+                    "kind": kind,
+                    "name": name,
+                    "line": start_line,
+                }));
+            }
+            if symbols.len() >= MAX_ATOM_SYMBOLS {
+                break;
+            }
+            continue;
+        }
         let Some((rel, source)) = crate::graph_live::read_workspace_file(root, file) else {
             continue;
         };
         let room = MAX_ATOM_SYMBOLS - symbols.len();
         for entity in crate::graph_live::declarations_named_in(&rel, &source, text, room) {
-            let fqn = match entity
-                .parent
-                .as_deref()
-                .filter(|owner| !owner.is_empty() && *owner != rel)
-            {
-                Some(owner) => format!("{rel}::{owner}::{}", entity.name),
-                None => format!("{rel}::{}", entity.name),
-            };
-            symbols.push(json!({
+            let fqn = format_fqn(&rel, entity.parent.as_deref(), &entity.name);
+            let mut row = json!({
                 "fqn": fqn,
                 "file_path": rel,
                 "kind": entity.kind,
                 "name": entity.name,
-            }));
+            });
+            if !entity.id.is_empty() {
+                row["symbol_id"] = json!(entity.id);
+            }
+            if let Some(line) = entity.line {
+                row["line"] = json!(line);
+            }
+            symbols.push(row);
         }
         if symbols.len() >= MAX_ATOM_SYMBOLS {
             break;
         }
     }
     symbols
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn atom_symbols(root: Option<&Path>, files: &[String], text: &str) -> Vec<Value> {
+    atom_symbols_for_project(None, "", root, files, text)
 }
 
 /// Links `atom_id` to `symbols` on `branch`. The mentions it had
@@ -6983,12 +7085,19 @@ fn format_omnigraph_ts(ts: i64) -> Option<String> {
 
 pub(super) fn detect_language(path: &str) -> Option<&'static str> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
-    match ext {
+    match ext.to_ascii_lowercase().as_str() {
         "rs" => Some("rust"),
-        "php" => Some("php"),
-        "ts" | "tsx" => Some("typescript"),
-        "js" | "jsx" => Some("javascript"),
-        "py" => Some("python"),
+        "php" | "phtml" | "inc" => Some("php"),
+        "ts" | "tsx" | "mts" | "cts" => Some("typescript"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "py" | "pyi" => Some("python"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "kt" | "kts" => Some("kotlin"),
+        "cs" => Some("csharp"),
+        "rb" => Some("ruby"),
+        "swift" => Some("swift"),
+        "scala" | "sc" => Some("scala"),
         "sql" => Some("sql"),
         "md" => Some("markdown"),
         "css" => Some("css"),

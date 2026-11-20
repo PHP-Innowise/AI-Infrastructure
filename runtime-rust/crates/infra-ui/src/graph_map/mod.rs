@@ -883,6 +883,8 @@ use layout::ZOOM_STEP;
 #[allow(unused_imports)]
 use render::apart;
 #[allow(unused_imports)]
+use render::architecture_cut_hints_html;
+#[allow(unused_imports)]
 use render::ask_shared;
 #[allow(unused_imports)]
 use render::asks;
@@ -905,7 +907,11 @@ use render::compute_canvas_selection_patch;
 #[allow(unused_imports)]
 use render::compute_selected_bbox;
 #[allow(unused_imports)]
+use render::confidence_pill_html;
+#[allow(unused_imports)]
 use render::crumbs;
+#[allow(unused_imports)]
+use render::cycle_cut_hints_html;
 #[allow(unused_imports)]
 use render::diff_badge_sign;
 #[allow(unused_imports)]
@@ -969,6 +975,8 @@ use render::reached;
 #[allow(unused_imports)]
 use render::refresh_dense_scene_for_patch;
 #[allow(unused_imports)]
+use render::render_dense_node_extras_for_mounted;
+#[allow(unused_imports)]
 use render::role;
 #[allow(unused_imports)]
 use render::rows;
@@ -976,6 +984,8 @@ use render::rows;
 use render::symbol_focus_payload;
 #[allow(unused_imports)]
 use render::CanvasSelectionPatch;
+#[allow(unused_imports)]
+use render::DenseNodeExtraSpec;
 #[allow(unused_imports)]
 use render::EdgeSelectionState;
 #[allow(unused_imports)]
@@ -1160,6 +1170,8 @@ use surfaces::resolve_system_click_surface;
 use surfaces::save_surface_camera;
 #[allow(unused_imports)]
 use surfaces::save_surface_state;
+#[allow(unused_imports)]
+use surfaces::set_dense_hover;
 #[allow(unused_imports)]
 use surfaces::set_surface_attrs;
 #[allow(unused_imports)]

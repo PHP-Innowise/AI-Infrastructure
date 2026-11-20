@@ -587,7 +587,7 @@ pub fn render_constellation(
     let (kept_nodes, kept_edges) =
         apply_constellation_filter(nodes, resolved_edges, filter, &active_branch);
     if kept_nodes.is_empty() {
-        let html = render_constellation_empty(filter, &vp);
+        let html = render_constellation_empty(filter);
         return RenderedCanvas {
             html,
             radar_html: String::new(),
@@ -666,6 +666,7 @@ pub fn render_constellation(
         p3: (f64, f64),
         mid: (f64, f64),
         path_d: String,
+        flow_suffix: &'static str,
         selected: bool,
         lit: bool,
         dimmed: bool,
@@ -689,6 +690,19 @@ pub fn render_constellation(
 
         let curve = route_bezier_ports(u, v, slot, total, idx);
         let mid = bezier_midpoint(&curve);
+        let dx = curve.p3.0 - curve.p0.0;
+        let dy = curve.p3.1 - curve.p0.1;
+        let flow_suffix = if dx.abs() >= dy.abs() {
+            if dx < -1.0 {
+                "-rtl"
+            } else {
+                ""
+            }
+        } else if dy < -1.0 {
+            "-btt"
+        } else {
+            "-ttb"
+        };
         let path_d = format!(
             "M {:.1} {:.1} C {:.1} {:.1}, {:.1} {:.1}, {:.1} {:.1}",
             curve.p0.0,
@@ -733,6 +747,7 @@ pub fn render_constellation(
                 p3: curve.p3,
                 mid,
                 path_d,
+                flow_suffix,
                 selected: is_selected_edge || is_path_edge,
                 lit,
                 dimmed,
@@ -854,8 +869,9 @@ pub fn render_constellation(
             };
             let arrow_key = escape_attr_token(&edge.arrow_key);
             html.push_str(&format!(
-                "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\" data-path=\"{}\"{dash_attr}><title>{} {} {}</title></path>",
+                "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key}{})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\" data-path=\"{}\"{dash_attr}><title>{} {} {}</title></path>",
                 r.path_d,
+                r.flow_suffix,
                 escape_attr_token(&edge.relation),
                 escape_attr_token(subkind_attr),
                 esc(&edge.from),
@@ -938,6 +954,12 @@ pub fn render_constellation(
                 || node.y > vy + vh + pad
         });
         let is_roving_active = active_roving_id == Some(node.id.as_str());
+        let offscreen_attr = offscreen
+            && !is_roving_active
+            && !is_selected
+            && !is_neighbor
+            && !is_highlighted
+            && !node.user_pinned;
         let node_html = render_constellation_node(
             node,
             idx,
@@ -945,7 +967,7 @@ pub fn render_constellation(
             is_neighbor,
             is_highlighted,
             is_dimmed,
-            offscreen,
+            offscreen_attr,
             is_roving_active,
         );
         if is_dense {
@@ -1736,6 +1758,13 @@ fn render_conflict_keep_html(
             esc(&payload.to_string())
         ));
     }
+    if blocker.is_some() && !entity_id.is_empty() {
+        let focus_payload = serde_json::json!({ "node_id": entity_id });
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-focus-hit\" data-payload=\"{}\">Inspect in Constellation</button>",
+            esc(&focus_payload.to_string())
+        ));
+    }
     html.push_str("</div>");
     html.push_str(&match blocker {
         Some(note) => format!("<p class=\"omni-conflict-note\">{}</p>", esc(note)),
@@ -2277,13 +2306,19 @@ fn extract_graph_items(
 
     if let Some(arr) = graph.get("symbols").and_then(Value::as_array) {
         for item in arr {
-            let id = str_field(item, &["id", "fqn", "@id"]);
+            let id = str_field(item, &["id", "fqn", "symbol_id", "@id"]);
             if id.is_empty() || !seen_ids.insert(id.clone()) {
                 continue;
             }
-            let fqn = str_field(item, &["fqn", "id"]).if_empty(&id);
+            let fqn = str_field(item, &["fqn", "id", "symbol_id"]).if_empty(&id);
             if fqn != id && !fqn.is_empty() {
                 aliases.entry(fqn.clone()).or_insert_with(|| id.clone());
+            }
+            let symbol_id = str_field(item, &["symbol_id"]);
+            if !symbol_id.is_empty() && symbol_id != id {
+                aliases
+                    .entry(symbol_id.clone())
+                    .or_insert_with(|| id.clone());
             }
             let file_path = str_field(item, &["file_path", "path"])
                 .if_empty_from(|| split_symbol_fqn_file(&fqn));
@@ -2303,9 +2338,10 @@ fn extract_graph_items(
             } else {
                 str_field(item, &["drift_status", "drift", "change_status"])
             };
-            let blob =
-                format!("{id} {fqn} {title} {file_path} {symbol_kind} {owner} {name} {branch} {drift_status}")
-                    .to_ascii_lowercase();
+            let blob = format!(
+                "{id} {fqn} {symbol_id} {title} {file_path} {symbol_kind} {owner} {name} {branch} {drift_status}"
+            )
+            .to_ascii_lowercase();
             let (w, h) = NodeKindGroup::Symbol.size();
             nodes.push(CanvasNode {
                 id,
@@ -2370,6 +2406,7 @@ fn apply_constellation_filter(
     active_branch: &str,
 ) -> (Vec<CanvasNode>, Vec<CanvasEdge>) {
     let query = filter.query.trim().to_ascii_lowercase();
+    let query_terms: Vec<&str> = query.split_whitespace().collect();
     let kind_filter = filter.kind.trim().to_ascii_lowercase();
     let branch_filter = filter.branch.trim();
     let branch_active = !branch_filter.is_empty() && branch_filter != "*" && branch_filter != "all";
@@ -2387,7 +2424,11 @@ fn apply_constellation_filter(
             || snapshot_matches_branch
             || node.branch.is_empty()
             || node.branch == branch_filter;
-        let query_ok = query.is_empty() || node.search_blob.contains(&query);
+        let query_ok = query_terms.is_empty()
+            || filter.highlighted_ids.contains(&node.id)
+            || query_terms
+                .iter()
+                .all(|term| node.search_blob.contains(term));
         match node.group {
             NodeKindGroup::Atom => {
                 let kind_ok = !kind_active || node.kind == kind_filter;
@@ -2538,6 +2579,7 @@ fn layout_constellation_with_anchors(
             MARGIN_X + SESSION_W + ATOM_W + TRACK_GAP_X * 2.0,
         ];
         let mut seen_track = [false; 3];
+        let mut locked = vec![false; nodes.len()];
         let mut new_by_track: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (idx, n) in nodes.iter_mut().enumerate() {
             let track = match n.group {
@@ -2549,10 +2591,11 @@ fn layout_constellation_with_anchors(
                 n.x = px;
                 n.y = py;
                 n.user_pinned = true;
-                max_y_by_track[track] = max_y_by_track[track].max(n.y + n.h + NODE_GAP_Y);
+                locked[idx] = true;
             } else if let Some(&(ax, ay)) = anchors.get(&n.id) {
                 n.x = ax;
                 n.y = ay;
+                locked[idx] = true;
                 if !seen_track[track] {
                     x_by_track[track] = ax;
                     seen_track[track] = true;
@@ -2565,10 +2608,23 @@ fn layout_constellation_with_anchors(
             }
         }
         for track in 0..3 {
+            let new_len = new_by_track[track].len();
             let col_count = match track {
-                0 => 1,
-                1 => 2,
-                _ => 1,
+                0 => {
+                    if new_len > 7 {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                1 => ((new_len as f64) / 6.0).sqrt().ceil().clamp(2.0, 6.0) as usize,
+                _ => {
+                    if new_len > 10 {
+                        2
+                    } else {
+                        1
+                    }
+                }
             };
             let base_y = max_y_by_track[track];
             let base_x = x_by_track[track];
@@ -2577,6 +2633,8 @@ fn layout_constellation_with_anchors(
                 let row = pos / col_count;
                 let step_x = if track == 1 {
                     ATOM_W + ATOM_COL_GAP_X
+                } else if track == 0 {
+                    SESSION_W + 30.0
                 } else {
                     FILE_W + 30.0
                 };
@@ -2585,6 +2643,7 @@ fn layout_constellation_with_anchors(
                 nodes[idx].y = base_y + (row as f64) * step_h;
             }
         }
+        resolve_node_overlaps_respecting_locks(&mut nodes, &locked);
         let max_x = nodes.iter().map(|n| n.x + n.w).fold(0.0, f64::max);
         let max_y = nodes.iter().map(|n| n.y + n.h).fold(0.0, f64::max);
         let width = (max_x + MARGIN_X + 44.0).max(MIN_PLANE_W);
@@ -2681,7 +2740,7 @@ fn layout_constellation_with_anchors(
         } else if n_atoms <= 27 {
             3
         } else {
-            ((n_atoms as f64) / 7.5).sqrt().ceil().clamp(3.0, 5.0) as usize
+            ((n_atoms as f64) / 5.5).sqrt().ceil().clamp(3.0, 8.0) as usize
         };
         let a_rows = n_atoms.div_ceil(a_cols);
         let mut max_col_h: f64 = 0.0;
@@ -2756,17 +2815,60 @@ fn layout_constellation_with_anchors(
             },
         );
     }
+    // Group Symbols under their owning File by shared file_path barycenter.
+    let mut group_bary: BTreeMap<String, (f64, usize)> = BTreeMap::new();
+    for &idx in &file_indices {
+        let fid = &nodes[idx].id;
+        let group_key = if nodes[idx].file_path.is_empty() {
+            fid.clone()
+        } else {
+            nodes[idx].file_path.clone()
+        };
+        let bary = file_bary.get(fid).copied().unwrap_or(f64::MAX);
+        if bary < f64::MAX {
+            let entry = group_bary.entry(group_key).or_insert((0.0, 0));
+            entry.0 += bary;
+            entry.1 += 1;
+        }
+    }
     file_indices.sort_by(|&a, &b| {
-        let ba = file_bary.get(&nodes[a].id).copied().unwrap_or(f64::MAX);
-        let bb = file_bary.get(&nodes[b].id).copied().unwrap_or(f64::MAX);
+        let ga = if nodes[a].file_path.is_empty() {
+            &nodes[a].id
+        } else {
+            &nodes[a].file_path
+        };
+        let gb = if nodes[b].file_path.is_empty() {
+            &nodes[b].id
+        } else {
+            &nodes[b].file_path
+        };
+        let ba = group_bary
+            .get(ga)
+            .filter(|(_, c)| *c > 0)
+            .map(|(s, c)| s / (*c as f64))
+            .unwrap_or_else(|| file_bary.get(&nodes[a].id).copied().unwrap_or(f64::MAX));
+        let bb = group_bary
+            .get(gb)
+            .filter(|(_, c)| *c > 0)
+            .map(|(s, c)| s / (*c as f64))
+            .unwrap_or_else(|| file_bary.get(&nodes[b].id).copied().unwrap_or(f64::MAX));
         ba.total_cmp(&bb)
-            .then_with(|| nodes[a].file_path.cmp(&nodes[b].file_path))
+            .then_with(|| ga.cmp(gb))
             .then_with(|| nodes[a].group.cmp(&nodes[b].group))
             .then_with(|| nodes[a].id.cmp(&nodes[b].id))
     });
 
     let file_span_h = if !file_indices.is_empty() {
-        let f_cols = if file_indices.len() > 10 { 2 } else { 1 };
+        let f_cols = if file_indices.len() <= 10 {
+            1
+        } else if file_indices.len() <= 26 {
+            2
+        } else {
+            ((file_indices.len() as f64) / 8.0)
+                .sqrt()
+                .ceil()
+                .clamp(2.0, 5.0) as usize
+        };
         let f_rows = file_indices.len().div_ceil(f_cols);
         let mut max_col_h: f64 = 0.0;
         for col in 0..f_cols {
@@ -2785,9 +2887,23 @@ fn layout_constellation_with_anchors(
                     0.0
                 };
                 let arc_dx = (1.0 - t * t) * 34.0;
-                nodes[idx].x = next_x + (col as f64) * (FILE_W + 30.0) + arc_dx;
+                let sym_indent = if nodes[idx].group == NodeKindGroup::Symbol {
+                    14.0
+                } else {
+                    0.0
+                };
+                nodes[idx].x = next_x + (col as f64) * (FILE_W + 30.0) + arc_dx + sym_indent;
                 nodes[idx].y = y;
-                y += nodes[idx].h + NODE_GAP_Y;
+                let gap = if row + 1 < slice.len()
+                    && nodes[slice[row + 1]].group == NodeKindGroup::Symbol
+                    && !nodes[idx].file_path.is_empty()
+                    && nodes[slice[row + 1]].file_path == nodes[idx].file_path
+                {
+                    8.0
+                } else {
+                    NODE_GAP_Y
+                };
+                y += nodes[idx].h + gap;
             }
             max_col_h = max_col_h.max(y - NODE_GAP_Y - MARGIN_Y);
         }
@@ -2814,31 +2930,48 @@ fn layout_constellation_with_anchors(
     // 5. Deterministic AABB anti-overlap pass guaranteeing minimum spacing between all cards.
     resolve_node_overlaps(&mut nodes);
 
-    // 6. Apply user pin overrides and normalize coordinates when no pins conflict.
+    // 6. Apply user pin overrides without shifting unpinned nodes when pins sit near top-left.
     if !pins.is_empty() {
         for n in &mut nodes {
             if let Some(&(px, py)) = pins.get(&n.id) {
-                n.x = px;
-                n.y = py;
+                n.x = px.max(8.0);
+                n.y = py.max(8.0);
                 n.user_pinned = true;
             }
         }
-    }
-    let min_x = nodes.iter().map(|n| n.x).fold(f64::INFINITY, f64::min);
-    let min_y = nodes.iter().map(|n| n.y).fold(f64::INFINITY, f64::min);
-    if pins.is_empty() {
-        let shift_x = MARGIN_X - min_x;
-        let shift_y = MARGIN_Y - min_y;
-        for n in &mut nodes {
-            n.x += shift_x;
-            n.y += shift_y;
+        let unpinned_min_x = nodes
+            .iter()
+            .filter(|n| !n.user_pinned)
+            .map(|n| n.x)
+            .fold(f64::INFINITY, f64::min);
+        let unpinned_min_y = nodes
+            .iter()
+            .filter(|n| !n.user_pinned)
+            .map(|n| n.y)
+            .fold(f64::INFINITY, f64::min);
+        if unpinned_min_x.is_finite()
+            && unpinned_min_y.is_finite()
+            && (unpinned_min_x < MARGIN_X || unpinned_min_y < MARGIN_Y)
+        {
+            let shift_x = (MARGIN_X - unpinned_min_x).max(0.0);
+            let shift_y = (MARGIN_Y - unpinned_min_y).max(0.0);
+            for n in &mut nodes {
+                if !n.user_pinned {
+                    n.x += shift_x;
+                    n.y += shift_y;
+                }
+            }
         }
-    } else if min_x < MARGIN_X || min_y < MARGIN_Y {
-        let shift_x = (MARGIN_X - min_x).max(0.0);
-        let shift_y = (MARGIN_Y - min_y).max(0.0);
-        for n in &mut nodes {
-            n.x += shift_x;
-            n.y += shift_y;
+    } else {
+        let min_x = nodes.iter().map(|n| n.x).fold(f64::INFINITY, f64::min);
+        let min_y = nodes.iter().map(|n| n.y).fold(f64::INFINITY, f64::min);
+        if min_x.is_finite() && min_y.is_finite() {
+            let shift_x = MARGIN_X - min_x;
+            let shift_y = MARGIN_Y - min_y;
+            for n in &mut nodes {
+                n.x += shift_x;
+                n.y += shift_y;
+            }
         }
     }
 
@@ -2850,7 +2983,7 @@ fn layout_constellation_with_anchors(
     (nodes, width, height)
 }
 
-fn resolve_node_overlaps(nodes: &mut [CanvasNode]) {
+fn resolve_node_overlaps_respecting_locks(nodes: &mut [CanvasNode], locked: &[bool]) {
     let mut order: Vec<usize> = (0..nodes.len()).collect();
     for _pass in 0..8 {
         let mut moved = false;
@@ -2863,23 +2996,32 @@ fn resolve_node_overlaps(nodes: &mut [CanvasNode]) {
         });
         for i_pos in 0..order.len() {
             let i = order[i_pos];
+            let min_y = nodes[i].y + nodes[i].h + NODE_GAP_Y;
             for &j in &order[(i_pos + 1)..] {
+                if nodes[j].y >= min_y {
+                    break;
+                }
+                if locked.get(j).copied().unwrap_or(false) {
+                    continue;
+                }
                 let x_overlap = nodes[i].x < nodes[j].x + nodes[j].w + NODE_GAP_X
                     && nodes[j].x < nodes[i].x + nodes[i].w + NODE_GAP_X;
                 if !x_overlap {
                     continue;
                 }
-                let min_y = nodes[i].y + nodes[i].h + NODE_GAP_Y;
-                if nodes[j].y < min_y {
-                    nodes[j].y = min_y;
-                    moved = true;
-                }
+                nodes[j].y = min_y;
+                moved = true;
             }
         }
         if !moved {
             break;
         }
     }
+}
+
+fn resolve_node_overlaps(nodes: &mut [CanvasNode]) {
+    let empty_locks = vec![false; nodes.len()];
+    resolve_node_overlaps_respecting_locks(nodes, &empty_locks);
 }
 
 fn render_orbital_guides(nodes: &[CanvasNode], width: f64, height: f64) -> String {
@@ -2900,9 +3042,14 @@ fn render_orbital_guides(nodes: &[CanvasNode], width: f64, height: f64) -> Strin
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
         let mut count = 0usize;
-        for n in nodes.iter().filter(|n| {
+        let matches_group = |n: &&CanvasNode| {
             n.group == group || (group == NodeKindGroup::File && n.group == NodeKindGroup::Symbol)
-        }) {
+        };
+        let has_unpinned = nodes.iter().any(|n| matches_group(&n) && !n.user_pinned);
+        for n in nodes
+            .iter()
+            .filter(|n| matches_group(n) && (!has_unpinned || !n.user_pinned))
+        {
             min_x = min_x.min(n.x);
             max_x = max_x.max(n.x + n.w);
             min_y = min_y.min(n.y);
@@ -2955,10 +3102,17 @@ fn render_edge_gradient_defs() -> String {
             }
             _ => (spec.key, ""),
         };
-        defs.push_str(&format!(
-            "<linearGradient id=\"omni-flow-{}\" class=\"omni-flow omni-flow-{}\" data-rel=\"{rel}\" data-subkind=\"{subkind}\" gradientUnits=\"objectBoundingBox\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0\" class=\"omni-flow-from\"/><stop offset=\"0.5\" class=\"omni-flow-mid\"/><stop offset=\"1\" class=\"omni-flow-to\"/></linearGradient>",
-            spec.key, spec.key,
-        ));
+        for (suffix, x1, y1, x2, y2) in [
+            ("", "0%", "0%", "100%", "0%"),
+            ("-rtl", "100%", "0%", "0%", "0%"),
+            ("-ttb", "0%", "0%", "0%", "100%"),
+            ("-btt", "0%", "100%", "0%", "0%"),
+        ] {
+            defs.push_str(&format!(
+                "<linearGradient id=\"omni-flow-{}{suffix}\" class=\"omni-flow omni-flow-{}\" data-rel=\"{rel}\" data-subkind=\"{subkind}\" gradientUnits=\"objectBoundingBox\" x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\"><stop offset=\"0\" class=\"omni-flow-from\"/><stop offset=\"0.5\" class=\"omni-flow-mid\"/><stop offset=\"1\" class=\"omni-flow-to\"/></linearGradient>",
+                spec.key, spec.key,
+            ));
+        }
     }
     defs
 }
@@ -2970,17 +3124,20 @@ struct CubicCurve {
     p3: (f64, f64),
 }
 
-fn route_bezier_ports(
-    u: &CanvasNode,
-    v: &CanvasNode,
+pub(crate) type CubicPoints = ((f64, f64), (f64, f64), (f64, f64), (f64, f64));
+
+pub(crate) fn route_rect_cubic(
+    u: (f64, f64, f64, f64),
+    v: (f64, f64, f64, f64),
+    same_id: bool,
     slot: usize,
     total: usize,
     edge_idx: usize,
-) -> CubicCurve {
-    let ucx = u.x + u.w * 0.5;
-    let ucy = u.y + u.h * 0.5;
-    let vcx = v.x + v.w * 0.5;
-    let vcy = v.y + v.h * 0.5;
+) -> CubicPoints {
+    let ucx = u.0 + u.2 * 0.5;
+    let ucy = u.1 + u.3 * 0.5;
+    let vcx = v.0 + v.2 * 0.5;
+    let vcy = v.1 + v.3 * 0.5;
 
     let lane_offset = if total > 1 {
         let centered = slot as f64 - (total as f64 - 1.0) * 0.5;
@@ -2989,21 +3146,21 @@ fn route_bezier_ports(
         0.0
     };
 
-    if u.id == v.id {
-        let x0 = u.x + u.w;
+    if same_id {
+        let x0 = u.0 + u.2;
         let y0 = ucy - 10.0;
         let y3 = ucy + 10.0;
-        return CubicCurve {
-            p0: (x0, y0),
-            p1: (x0 + 54.0, y0 - 28.0),
-            p2: (x0 + 54.0, y3 + 28.0),
-            p3: (x0, y3),
-        };
+        return (
+            (x0, y0),
+            (x0 + 54.0, y0 - 28.0),
+            (x0 + 54.0, y3 + 28.0),
+            (x0, y3),
+        );
     }
 
-    if vcx > ucx + u.w * 0.48 {
-        let p0 = (u.x + u.w, ucy);
-        let p3 = (v.x, vcy);
+    if vcx > ucx + u.2 * 0.48 {
+        let p0 = (u.0 + u.2, ucy);
+        let p3 = (v.0, vcy);
         let dx = ((p3.0 - p0.0).abs() * 0.46).max(46.0);
         // Ensure a non-zero SVG bounding box height so `objectBoundingBox` gradients render on horizontal links.
         let bow = if (p0.1 - p3.1).abs() < 0.2 && lane_offset == 0.0 {
@@ -3011,43 +3168,57 @@ fn route_bezier_ports(
         } else {
             0.0
         };
-        CubicCurve {
+        (
             p0,
-            p1: (p0.0 + dx, p0.1 + lane_offset - bow),
-            p2: (p3.0 - dx, p3.1 + lane_offset + bow),
+            (p0.0 + dx, p0.1 + lane_offset - bow),
+            (p3.0 - dx, p3.1 + lane_offset + bow),
             p3,
-        }
-    } else if ucx > vcx + v.w * 0.48 {
-        let p0 = (u.x, ucy);
-        let p3 = (v.x + v.w, vcy);
+        )
+    } else if ucx > vcx + v.2 * 0.48 {
+        let p0 = (u.0, ucy);
+        let p3 = (v.0 + v.2, vcy);
         let dx = ((p0.0 - p3.0).abs() * 0.46).max(46.0);
         let bow = if (p0.1 - p3.1).abs() < 0.2 && lane_offset == 0.0 {
             0.4
         } else {
             0.0
         };
-        CubicCurve {
+        (
             p0,
-            p1: (p0.0 - dx, p0.1 + lane_offset - bow),
-            p2: (p3.0 + dx, p3.1 + lane_offset + bow),
+            (p0.0 - dx, p0.1 + lane_offset - bow),
+            (p3.0 + dx, p3.1 + lane_offset + bow),
             p3,
-        }
+        )
     } else {
         let dir = if edge_idx.is_multiple_of(2) {
             1.0
         } else {
             -1.0
         };
-        let x0 = if dir > 0.0 { u.x + u.w } else { u.x };
-        let x3 = if dir > 0.0 { v.x + v.w } else { v.x };
-        let arc = (44.0 + (vcy - ucy).abs() * 0.16 + lane_offset.abs()) * dir;
-        CubicCurve {
-            p0: (x0, ucy),
-            p1: (x0 + arc, ucy),
-            p2: (x3 + arc, vcy),
-            p3: (x3, vcy),
-        }
+        let x0 = if dir > 0.0 { u.0 + u.2 } else { u.0 };
+        let x3 = if dir > 0.0 { v.0 + v.2 } else { v.0 };
+        let max_arc = ATOM_COL_GAP_X * 0.85;
+        let arc = (20.0 + (vcy - ucy).abs() * 0.08 + lane_offset.abs() * 0.35).min(max_arc) * dir;
+        ((x0, ucy), (x0 + arc, ucy), (x3 + arc, vcy), (x3, vcy))
     }
+}
+
+fn route_bezier_ports(
+    u: &CanvasNode,
+    v: &CanvasNode,
+    slot: usize,
+    total: usize,
+    edge_idx: usize,
+) -> CubicCurve {
+    let (p0, p1, p2, p3) = route_rect_cubic(
+        (u.x, u.y, u.w, u.h),
+        (v.x, v.y, v.w, v.h),
+        u.id == v.id,
+        slot,
+        total,
+        edge_idx,
+    );
+    CubicCurve { p0, p1, p2, p3 }
 }
 
 fn bezier_midpoint(curve: &CubicCurve) -> (f64, f64) {
@@ -3308,17 +3479,16 @@ fn render_constellation_radar(
     let rw = (width * scale_fit).round().max(RADAR_MIN_SIDE);
     let rh = (height * scale_fit).round().max(RADAR_MIN_SIDE);
 
-    let vx = (-vp.pan_x / vp.scale).clamp(0.0, width);
-    let vy = (-vp.pan_y / vp.scale).clamp(0.0, height);
-    let vw = (NOMINAL_VIEWPORT_W / vp.scale)
-        .clamp(16.0, width - vx)
-        .max(16.0);
-    let vh = (NOMINAL_VIEWPORT_H / vp.scale)
-        .clamp(16.0, height - vy)
-        .max(16.0);
+    let min_side = 16.0_f64.min(width).min(height).max(1.0);
+    let raw_vw = (NOMINAL_VIEWPORT_W / vp.scale).max(min_side);
+    let raw_vh = (NOMINAL_VIEWPORT_H / vp.scale).max(min_side);
+    let vw = raw_vw.min(width);
+    let vh = raw_vh.min(height);
+    let vx = (-vp.pan_x / vp.scale).clamp(0.0, (width - vw).max(0.0));
+    let vy = (-vp.pan_y / vp.scale).clamp(0.0, (height - vh).max(0.0));
 
     let mut out = format!(
-        "<div class=\"omni-radar\" data-w=\"{width:.0}\" data-h=\"{height:.0}\" role=\"region\" aria-label=\"Constellation minimap\"><svg class=\"omni-radar-svg\" width=\"{rw:.0}\" height=\"{rh:.0}\" viewBox=\"0 0 {width:.0} {height:.0}\" preserveAspectRatio=\"xMidYMid meet\" focusable=\"false\" aria-hidden=\"true\"><rect class=\"omni-radar-frame\" x=\"2\" y=\"2\" width=\"{:.0}\" height=\"{:.0}\" rx=\"10\"/>",
+        "<div class=\"omni-radar\" data-w=\"{width:.0}\" data-h=\"{height:.0}\" tabindex=\"0\" role=\"region\" aria-label=\"Constellation minimap — click, drag, or use arrow keys to pan\"><svg class=\"omni-radar-svg\" width=\"{rw:.0}\" height=\"{rh:.0}\" viewBox=\"0 0 {width:.0} {height:.0}\" preserveAspectRatio=\"xMidYMid meet\" focusable=\"false\" aria-hidden=\"true\"><rect class=\"omni-radar-frame\" x=\"2\" y=\"2\" width=\"{:.0}\" height=\"{:.0}\" rx=\"10\"/>",
         (width - 4.0).max(10.0),
         (height - 4.0).max(10.0),
     );
@@ -3354,14 +3524,19 @@ fn render_constellation_radar(
     out
 }
 
-fn render_constellation_empty(filter: &ConstellationFilter, vp: &CanvasViewport) -> String {
+fn render_constellation_empty(filter: &ConstellationFilter) -> String {
+    let branch = filter.branch.trim();
     let has_filter = !filter.query.trim().is_empty()
         || !filter.kind.trim().is_empty()
-        || (!filter.branch.trim().is_empty() && filter.branch.trim() != "all");
+        || !filter.show_files
+        || !filter.show_sessions
+        || filter.isolate_depth > 0
+        || !filter.path_nodes.is_empty()
+        || (!branch.is_empty() && branch != "all" && branch != "main");
     let (heading, detail, action, action_label) = if has_filter {
         (
             "No context nodes match your filter",
-            "Try clearing the search query, kind pill, or branch filter to see the full constellation.",
+            "Try clearing the search query, kind pill, isolation, or branch filter to see the full constellation.",
             "omnigraph-clear-filters",
             "Reset filters",
         )
@@ -3375,8 +3550,7 @@ fn render_constellation_empty(filter: &ConstellationFilter, vp: &CanvasViewport)
     };
 
     format!(
-        "<div class=\"graph-map-plane omni-plane\" data-empty=\"true\" style=\"--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;--graph-scale:{:.4};width:{MIN_PLANE_W:.0}px;height:400px\"><div class=\"omni-empty-state\" role=\"status\"><svg class=\"omni-empty-illustration\" viewBox=\"0 0 96 64\" width=\"96\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" aria-hidden=\"true\"><circle cx=\"22\" cy=\"36\" r=\"7\"/><circle cx=\"48\" cy=\"18\" r=\"8\"/><circle cx=\"74\" cy=\"42\" r=\"6\"/><path d=\"M28 33 L41 22 M55 22 L69 38\" stroke-dasharray=\"3 3\"/></svg><h3 class=\"omni-empty-title\">{heading}</h3><p class=\"omni-empty-body\">{detail}</p><button type=\"button\" class=\"button compact omni-empty-action\" data-action=\"{action}\">{action_label}</button></div></div>",
-        vp.pan_x, vp.pan_y, vp.scale
+        "<div class=\"graph-map-plane omni-plane\" data-empty=\"true\" style=\"--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;width:100%;height:100%;min-height:360px;transform:none;transition:none\"><div class=\"omni-empty-state\" role=\"status\"><svg class=\"omni-empty-illustration\" viewBox=\"0 0 96 64\" width=\"96\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" aria-hidden=\"true\"><circle cx=\"22\" cy=\"36\" r=\"7\"/><circle cx=\"48\" cy=\"18\" r=\"8\"/><circle cx=\"74\" cy=\"42\" r=\"6\"/><path d=\"M28 33 L41 22 M55 22 L69 38\" stroke-dasharray=\"3 3\"/></svg><h3 class=\"omni-empty-title\">{heading}</h3><p class=\"omni-empty-body\">{detail}</p><button type=\"button\" class=\"button compact omni-empty-action\" data-action=\"{action}\">{action_label}</button></div></div>"
     )
 }
 
@@ -4089,17 +4263,35 @@ mod tests {
         assert!(res.html.contains("<svg class=\"omni-svg\""));
         assert_eq!(
             res.html.matches("<linearGradient ").count(),
-            EDGE_SPECS.len()
+            EDGE_SPECS.len() * 4
         );
         for spec in EDGE_SPECS {
-            assert!(
-                res.html
-                    .contains(&format!("<linearGradient id=\"omni-flow-{}\"", spec.key)),
-                "missing gradient def for {}",
-                spec.key
-            );
+            for suffix in ["", "-rtl", "-ttb", "-btt"] {
+                assert!(
+                    res.html.contains(&format!(
+                        "<linearGradient id=\"omni-flow-{}{suffix}\"",
+                        spec.key
+                    )),
+                    "missing gradient def for {}{suffix}",
+                    spec.key
+                );
+            }
         }
-        assert!(res.html.contains("stroke=\"url(#omni-flow-published_by)\""));
+        assert!(
+            res.html
+                .contains("stroke=\"url(#omni-flow-published_by-ttb)\""),
+            "published_by flows from top atom-1 toward vertically centered sess-1"
+        );
+        assert!(
+            res.html.contains("stroke=\"url(#omni-flow-touches_file)\"")
+                || res
+                    .html
+                    .contains("stroke=\"url(#omni-flow-touches_file-ttb)\"")
+                || res
+                    .html
+                    .contains("stroke=\"url(#omni-flow-touches_file-btt)\""),
+            "atom->file touches_file never gets -rtl"
+        );
         assert!(res.html.contains("data-lod=\"near\""));
 
         // Distinct marker definitions and mid-edge pill labels when zoomed in
@@ -5169,6 +5361,138 @@ mod tests {
             rendered.html.contains("data-node-id=\"a-189\"")
                 && rendered.html.contains("tabindex=\"0\""),
             "offscreen roving focus node must remain mounted in dense constellation"
+        );
+    }
+
+    #[test]
+    fn radar_extreme_pan_empty_state_bm25_filter_and_scale_layout_behave_safely() {
+        let graph = sample_graph();
+
+        // 1. Extreme bottom/right pan on small or large plane must not panic in radar_view clamping.
+        let extreme_vp = CanvasViewport {
+            pan_x: -5000.0,
+            pan_y: -5000.0,
+            scale: 1.0,
+        };
+        let rendered = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &extreme_vp,
+        );
+        assert!(rendered.radar_html.contains("class=\"omni-radar\""));
+        assert!(rendered.radar_html.contains("tabindex=\"0\""));
+
+        // 2. Empty main branch with no active filter shows publish CTA, not Reset filters loop.
+        let empty_graph = json!({
+            "active_branch": "main",
+            "sessions": [],
+            "atoms": [],
+            "files": [],
+            "symbols": [],
+            "links": []
+        });
+        let empty_main = render_constellation(
+            &empty_graph,
+            &ConstellationFilter {
+                branch: "main".to_owned(),
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport {
+                pan_x: -180.0,
+                pan_y: -300.0,
+                scale: 0.48,
+            },
+        );
+        assert!(empty_main.html.contains("omnigraph-open-publish"));
+        assert!(!empty_main.html.contains("omnigraph-clear-filters"));
+        assert!(empty_main
+            .html
+            .contains("width:100%;height:100%;min-height:360px;transform:none;transition:none"));
+        assert!(empty_main
+            .html
+            .contains("--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;"));
+
+        let hidden_toggles = render_constellation(
+            &empty_graph,
+            &ConstellationFilter {
+                branch: "main".to_owned(),
+                show_files: false,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert!(hidden_toggles.html.contains("omnigraph-clear-filters"));
+
+        // 3. Multi-word query and BM25 highlighted_ids keep matches visible.
+        let multi_word = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                query: "atom-1 finding".to_owned(),
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert!(multi_word.node_count > 0);
+        let mut hl_set = BTreeSet::new();
+        hl_set.insert("atom-1".to_owned());
+        let bm25_match = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                query: "synonym query not in blob".to_owned(),
+                highlighted_ids: hl_set,
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert!(bm25_match.positions.contains_key("atom-1"));
+
+        // 4. Pinning one node near (10, 10) does not shift unpinned nodes; File+Symbol cluster stays contiguous.
+        let base_layout = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        let sym_pos_before = base_layout
+            .raw_positions
+            .get("src/auth/jwt.rs::JwtService::verify")
+            .copied();
+        let mut top_left_pins = BTreeMap::new();
+        top_left_pins.insert("atom-1".to_owned(), (10.0, 12.0));
+        let pinned_layout = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                pinned_positions: top_left_pins,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert_eq!(
+            pinned_layout.raw_positions.get("atom-1"),
+            Some(&(10.0, 12.0))
+        );
+        assert_eq!(
+            pinned_layout
+                .raw_positions
+                .get("src/auth/jwt.rs::JwtService::verify")
+                .copied(),
+            sym_pos_before
         );
     }
 }

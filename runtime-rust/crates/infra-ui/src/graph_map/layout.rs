@@ -814,47 +814,68 @@ pub(super) fn order(
     links: &BTreeMap<(usize, usize), u64>,
 ) -> Vec<usize> {
     let mut open = linked.to_vec();
-    let flow = |open: &[bool], node: usize| {
-        let (mut out, mut into) = (0u64, 0u64);
-        for ((from, to), weight) in links {
-            if open[*from] && open[*to] {
-                if *from == node {
-                    out += weight;
-                }
-                if *to == node {
-                    into += weight;
-                }
+    let mut out_adj: Vec<Vec<(usize, u64)>> = vec![vec![]; count];
+    let mut in_adj: Vec<Vec<(usize, u64)>> = vec![vec![]; count];
+    let mut out_w = vec![0u64; count];
+    let mut in_w = vec![0u64; count];
+    for (&(from, to), &weight) in links {
+        if from < count && to < count && open[from] && open[to] {
+            out_adj[from].push((to, weight));
+            in_adj[to].push((from, weight));
+            out_w[from] += weight;
+            in_w[to] += weight;
+        }
+    }
+    let close_node = |node: usize, open: &mut [bool], out_w: &mut [u64], in_w: &mut [u64]| {
+        if !open[node] {
+            return;
+        }
+        open[node] = false;
+        for &(to, w) in &out_adj[node] {
+            if open[to] {
+                in_w[to] = in_w[to].saturating_sub(w);
             }
         }
-        (out, into)
+        for &(from, w) in &in_adj[node] {
+            if open[from] {
+                out_w[from] = out_w[from].saturating_sub(w);
+            }
+        }
     };
+    let mut remaining: Vec<usize> = (0..count).filter(|&n| open[n]).collect();
     let (mut first, mut last) = (vec![], vec![]);
-    while open.iter().any(|open| *open) {
+    while !remaining.is_empty() {
         let mut moved = false;
-        for node in 0..count {
-            if open[node] && flow(&open, node).0 == 0 {
-                open[node] = false;
+        for &node in &remaining {
+            if open[node] && out_w[node] == 0 {
+                close_node(node, &mut open, &mut out_w, &mut in_w);
                 last.push(node);
                 moved = true;
             }
         }
-        for node in 0..count {
-            if open[node] && flow(&open, node).1 == 0 {
-                open[node] = false;
+        for &node in &remaining {
+            if open[node] && in_w[node] == 0 {
+                close_node(node, &mut open, &mut out_w, &mut in_w);
                 first.push(node);
                 moved = true;
             }
         }
         if moved {
+            remaining.retain(|&n| open[n]);
             continue;
         }
-        let best = (0..count).filter(|node| open[*node]).max_by_key(|node| {
-            let (out, into) = flow(&open, *node);
-            (out as i128 - into as i128, std::cmp::Reverse(*node))
+        let best = remaining.iter().copied().max_by_key(|&node| {
+            (
+                out_w[node] as i128 - in_w[node] as i128,
+                std::cmp::Reverse(node),
+            )
         });
         if let Some(best) = best {
-            open[best] = false;
+            close_node(best, &mut open, &mut out_w, &mut in_w);
             first.push(best);
+            remaining.retain(|&n| open[n]);
+        } else {
+            break;
         }
     }
     last.reverse();
@@ -930,17 +951,26 @@ pub fn cone(
     if from >= count {
         return depth;
     }
-    let walk = |outgoing: bool, limit: usize| {
+    let mut out_adj = vec![vec![]; count];
+    let mut in_adj = vec![vec![]; count];
+    for &(a, b) in links {
+        if a < count && b < count {
+            out_adj[a].push(b);
+            in_adj[b].push(a);
+        }
+    }
+    let walk = |adj: &[Vec<usize>], limit: usize| {
         let mut found = vec![None; count];
         found[from] = Some(0usize);
         let mut edge = vec![from];
         for step in 1..=limit {
             let mut further = vec![];
-            for (a, b) in links {
-                let (near, far) = if outgoing { (*a, *b) } else { (*b, *a) };
-                if near < count && far < count && edge.contains(&near) && found[far].is_none() {
-                    found[far] = Some(step);
-                    further.push(far);
+            for &near in &edge {
+                for &far in &adj[near] {
+                    if found[far].is_none() {
+                        found[far] = Some(step);
+                        further.push(far);
+                    }
                 }
             }
             if further.is_empty() {
@@ -950,7 +980,7 @@ pub fn cone(
         }
         found
     };
-    let (after, before) = (walk(true, down), walk(false, up));
+    let (after, before) = (walk(&out_adj, down), walk(&in_adj, up));
     for node in 0..count {
         depth[node] = match (after[node], before[node]) {
             (Some(after), Some(before)) if before < after => Some(-(before as i32)),
@@ -1093,25 +1123,28 @@ pub fn plan_roomy(
             (near, far, back, (*from, *to))
         })
         .collect::<Vec<_>>();
+    let mut wired_out = vec![vec![]; count];
+    let mut has_wired_in = vec![false; count];
+    for &(near, far, ..) in &wired {
+        if near < count && far < count {
+            wired_out[near].push(far);
+            has_wired_in[far] = true;
+        }
+    }
     let mut layer = vec![0usize; count];
-    for node in &order {
-        for (near, far, ..) in &wired {
-            if near == node {
-                layer[*far] = layer[*far].max(layer[*near] + 1);
-            }
+    for &node in &order {
+        let next_layer = layer[node] + 1;
+        for &far in &wired_out[node] {
+            layer[far] = layer[far].max(next_layer);
         }
     }
     // Longest paths put everything nobody uses in the first layer, far from
     // what it uses. Each node moves right, up to the layer before the nearest
     // thing it uses, so its links stay short and cross fewer layers.
-    for node in order.iter().rev() {
-        let nearest = wired
-            .iter()
-            .filter(|(near, ..)| near == node)
-            .map(|(_, far, ..)| layer[*far])
-            .min();
+    for &node in order.iter().rev() {
+        let nearest = wired_out[node].iter().map(|&far| layer[far]).min();
         if let Some(nearest) = nearest {
-            layer[*node] = layer[*node].max(nearest - 1);
+            layer[node] = layer[node].max(nearest - 1);
         }
     }
     // Two places shown side by side stand in one layer: the first where
@@ -1123,15 +1156,12 @@ pub fn plan_roomy(
             0
         };
         for node in pair {
-            let held = wired.iter().any(
-                |(near, far, ..)| {
-                    if last {
-                        *near == node
-                    } else {
-                        *far == node
-                    }
-                },
-            );
+            let held = node < count
+                && if last {
+                    !wired_out[node].is_empty()
+                } else {
+                    has_wired_in[node]
+                };
             if node < count && linked[node] && !held {
                 layer[node] = end;
             }
@@ -1596,12 +1626,13 @@ pub fn plan_roomy(
             }
         }
     }
+    let mut edge_by_pair: HashMap<(usize, usize), usize> = HashMap::with_capacity(edges.len());
+    for (idx, (from, to, _)) in edges.iter().enumerate() {
+        edge_by_pair.entry((*from, *to)).or_insert(idx);
+    }
     let mut wires = vec![];
     for (index, (chain, (_, _, back, pair))) in chains.iter().zip(&wired).enumerate() {
-        let edge = edges
-            .iter()
-            .position(|(from, to, _)| (*from, *to) == *pair)
-            .unwrap_or(0);
+        let edge = edge_by_pair.get(pair).copied().unwrap_or(0);
         // The stops of the link from left to right; a slot is crossed straight.
         let mut stops = vec![];
         let last = chain.len() - 1;
@@ -1672,7 +1703,8 @@ pub fn plan_roomy(
     }
 }
 
-/// Applies persisted `(x, y)` user Shift+drag pins onto `plan.nodes` and re-routes wires touching pinned nodes.
+/// Applies persisted `(x, y)` user Shift+drag pins onto `plan.nodes`, expands
+/// enclosing frames cleanly, and re-routes wires touching pinned nodes.
 pub(super) fn apply_pin_overrides_to_plan(
     plan: &mut Plan,
     node_keys: &[String],
@@ -1683,6 +1715,7 @@ pub(super) fn apply_pin_overrides_to_plan(
     if pins.is_empty() {
         return moved;
     }
+    let orig_pos: Vec<(f64, f64)> = plan.nodes.iter().map(|n| (n.x, n.y)).collect();
     for (idx, key) in node_keys.iter().enumerate() {
         if let (Some(node), Some(&(px, py))) = (plan.nodes.get_mut(idx), pins.get(key)) {
             node.x = px.max(MARGIN);
@@ -1695,7 +1728,42 @@ pub(super) fn apply_pin_overrides_to_plan(
     if moved.is_empty() {
         return moved;
     }
-    for wire in &mut plan.wires {
+    for frame in &mut plan.frames {
+        if frame.width <= 0.0 || frame.height <= 0.0 {
+            continue;
+        }
+        let mut x0 = frame.x;
+        let mut y0 = frame.y;
+        let mut x1 = frame.x + frame.width;
+        let mut y1 = frame.y + frame.height;
+        let mut changed = false;
+        for &idx in &moved {
+            let (ox, oy) = orig_pos[idx];
+            if ox >= frame.x - 1.0
+                && ox + BOX_WIDTH <= frame.x + frame.width + 1.0
+                && oy >= frame.y - 1.0
+                && oy + BOX_HEIGHT <= frame.y + frame.height + 1.0
+            {
+                let moved_node = &plan.nodes[idx];
+                x0 = x0.min((moved_node.x - FRAME_PAD).max(MARGIN * 0.5));
+                y0 = y0.min((moved_node.y - FRAME_HEAD).max(MARGIN * 0.5));
+                x1 = x1.max(moved_node.x + BOX_WIDTH + FRAME_PAD);
+                y1 = y1.max(moved_node.y + BOX_HEIGHT + FRAME_PAD);
+                changed = true;
+            }
+        }
+        if changed {
+            frame.x = x0;
+            frame.y = y0;
+            frame.width = (x1 - x0).max(frame.width);
+            frame.height = (y1 - y0).max(frame.height);
+            plan.width = plan.width.max(frame.x + frame.width + MARGIN);
+            plan.height = plan.height.max(frame.y + frame.height + MARGIN);
+        }
+    }
+    // Distribute port offsets cleanly along touched nodes so multiple pinned wires do not overlap.
+    let mut side_ports: HashMap<(usize, bool), Vec<(f64, usize)>> = HashMap::new();
+    for (wi, wire) in plan.wires.iter().enumerate() {
         let Some(&(from, to)) = pairs.get(wire.edge) else {
             continue;
         };
@@ -1705,26 +1773,63 @@ pub(super) fn apply_pin_overrides_to_plan(
         let (Some(a), Some(b)) = (plan.nodes.get(from), plan.nodes.get(to)) else {
             continue;
         };
+        let from_right = a.x + BOX_WIDTH <= b.x || b.x + BOX_WIDTH > a.x;
+        side_ports
+            .entry((from, from_right))
+            .or_default()
+            .push((b.y, wi));
+        side_ports
+            .entry((to, !from_right))
+            .or_default()
+            .push((a.y, wi));
+    }
+    let mut start_off = vec![0.0f64; plan.wires.len()];
+    let mut end_off = vec![0.0f64; plan.wires.len()];
+    for ((node_idx, is_from_side), mut list) in side_ports {
+        list.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let n = list.len();
+        let spread = PORT_SPREAD.min(PORT_GAP * n.saturating_sub(1) as f64);
+        for (slot, &(_, wi)) in list.iter().enumerate() {
+            let off = if n < 2 {
+                0.0
+            } else {
+                spread * (slot as f64 / (n - 1) as f64 - 0.5)
+            };
+            if let Some(&(f, t)) = pairs.get(plan.wires[wi].edge) {
+                let a = &plan.nodes[f];
+                let b = &plan.nodes[t];
+                let f_right = a.x + BOX_WIDTH <= b.x || b.x + BOX_WIDTH > a.x;
+                if f == node_idx && is_from_side == f_right {
+                    start_off[wi] = off;
+                }
+                if t == node_idx && is_from_side == !f_right {
+                    end_off[wi] = off;
+                }
+            }
+        }
+    }
+    for (wi, wire) in plan.wires.iter_mut().enumerate() {
+        let Some(&(from, to)) = pairs.get(wire.edge) else {
+            continue;
+        };
+        if !moved.contains(&from) && !moved.contains(&to) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (plan.nodes.get(from), plan.nodes.get(to)) else {
+            continue;
+        };
+        let sy_base = a.y + BOX_HEIGHT * 0.5 + start_off[wi];
+        let ey_base = b.y + BOX_HEIGHT * 0.5 + end_off[wi];
         let (sx, sy, ex, ey) = if a.x + BOX_WIDTH <= b.x {
-            (
-                a.x + BOX_WIDTH,
-                a.y + BOX_HEIGHT * 0.5,
-                b.x,
-                b.y + BOX_HEIGHT * 0.5,
-            )
+            (a.x + BOX_WIDTH, sy_base, b.x, ey_base)
         } else if b.x + BOX_WIDTH <= a.x {
-            (
-                a.x,
-                a.y + BOX_HEIGHT * 0.5,
-                b.x + BOX_WIDTH,
-                b.y + BOX_HEIGHT * 0.5,
-            )
+            (a.x, sy_base, b.x + BOX_WIDTH, ey_base)
         } else {
             (
                 a.x + BOX_WIDTH * 0.5,
-                a.y + BOX_HEIGHT * 0.5,
+                sy_base,
                 b.x + BOX_WIDTH * 0.5,
-                b.y + BOX_HEIGHT * 0.5,
+                ey_base,
             )
         };
         let mut path = format!("M{sx:.1} {sy:.1}");

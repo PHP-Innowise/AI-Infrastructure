@@ -79,6 +79,8 @@ pub(super) fn reset_merge_archive() {
     m::take("delete-armed");
     dom::clear("merge-archive-content");
     dom::hidden("merge-archive-content", true);
+    dom::attr("merge-archive", "aria-expanded", "false");
+    dom::text("merge-archive", "View saved context");
     dom::text("merge-delete", "Delete saved context");
     dom::hidden("merge-delete-keep", true);
 }

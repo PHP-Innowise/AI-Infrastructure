@@ -550,9 +550,29 @@ mod display_tests {
         });
         let live_overlay = build_changes_overlay(&run_doc, false, &[], 32, "");
         assert_eq!(live_overlay["stage"], "run");
+        assert_eq!(
+            live_overlay["seed_services"],
+            json!(["orders", "inventory"])
+        );
         assert_eq!(live_overlay["step_states"]["orders"], "completed");
         assert_eq!(live_overlay["step_states"]["inventory"], "running");
         assert_eq!(live_overlay["cross_service_unopened"], json!(["gateway"]));
+
+        let impact_run_doc = json!({
+            "id": "run-43",
+            "active": false,
+            "plan": {
+                "depth": 32,
+                "context": { "services": ["billing", "orders", "gateway"] },
+                "impact": [
+                    { "service": "billing", "reason": "selected", "path": ["billing"] },
+                    { "service": "orders", "reason": "potential_consumer", "path": ["billing", "orders"] },
+                    { "service": "gateway", "reason": "potential_consumer", "path": ["billing", "orders", "gateway"] }
+                ]
+            }
+        });
+        let impact_overlay = build_changes_overlay(&impact_run_doc, false, &[], 32, "");
+        assert_eq!(impact_overlay["seed_services"], json!(["billing"]));
     }
     #[test]
     fn receipt_changed_files_deduplicates_report_and_evidence_paths() {

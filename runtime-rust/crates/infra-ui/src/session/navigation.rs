@@ -82,7 +82,7 @@ pub(crate) async fn apply_hash_route() {
     if !route.path.is_empty() {
         if target_view == "sessions" {
             set_mobile_pane("graph");
-            set_workspace_right_tab("diff");
+            set_workspace_right_tab_inner("diff", false);
             results().await;
             crate::run::jump_to_diff_file("workspace-results", &route.path);
         } else if target_view == "changes" {

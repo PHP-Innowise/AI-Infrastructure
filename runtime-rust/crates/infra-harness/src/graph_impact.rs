@@ -8,13 +8,14 @@
 
 use crate::{
     HarnessError, Result,
+    graph_ast::{AstFileExtraction, is_graph_manifest_path, parse_file_ir},
     graph_changes::Resolved,
     graph_crates::CratePackageMap,
     graph_deps::{
         DeclaredMember, DepDiff, DepMemberRef, DepRef, EntityChange, ReexportIndex, access_kind,
-        cached_manifests_for_root, diff_entities, diff_file_deps_with_context,
-        extract_declared_members, extract_file_deps_with_context,
-        find_matching_member_references_with_context, find_matching_references_with_context,
+        cached_manifests_for_root, diff_entities_from_ir, diff_file_deps_from_ir,
+        extract_file_deps_with_context, find_matching_member_references_with_context,
+        find_matching_references_with_context,
     },
     graph_ir::GraphIrStore,
     graph_live::{GraphFocus, clean_rel_key, folder_of},
@@ -33,7 +34,7 @@ use std::{
     time::Duration,
 };
 
-const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SOURCE_BYTES: usize = crate::graph_map::SOURCE_LIMIT as usize;
 const GIT_TIMEOUT_SECS: u64 = 15;
 const MAX_WALK_FILES: usize = 5000;
 const MAX_WALK_DEPTH: usize = 12;
@@ -47,6 +48,7 @@ const MAX_CYCLE_DEPTH: usize = 6;
 const MAX_CYCLES_REPORTED: usize = 24;
 const MAX_CYCLE_VISITS: usize = 20_000;
 const MAX_EDGE_DIFFS: usize = 500;
+const MAX_AFFECTED_TESTS_REPORTED: usize = 200;
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -62,8 +64,8 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const CODE_EXTENSIONS: &[&str] = &[
-    "php", "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "pyi", "go", "java", "kt", "cs",
-    "rb", "swift", "scala",
+    "php", "phtml", "inc", "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "py", "pyi",
+    "go", "java", "kt", "kts", "cs", "rb", "swift", "scala", "sc",
 ];
 
 enum BlobRead {
@@ -101,6 +103,7 @@ struct TargetContext<'a> {
     ir_store: Option<IrStoreHandle<'a>>,
     ir_fresh: bool,
     dirty_or_unindexed: BTreeSet<String>,
+    post_rev_modified: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -248,19 +251,43 @@ pub(crate) fn changed_catalog_with_ir(
         })
         .collect::<Vec<_>>();
     let mut known_callers = Vec::new();
+    let mut known_caller_seen = HashSet::new();
     let longest = per_file.iter().map(Vec::len).max().unwrap_or(0);
-    for at in 0..longest {
-        known_callers.extend(
-            per_file
-                .iter()
-                .filter_map(|callers| callers.get(at).cloned()),
-        );
-        if known_callers.len() >= MAX_CALLER_SCAN * 2 {
-            break;
+    'gather: for at in 0..longest {
+        for callers in &per_file {
+            if let Some(caller) = callers.get(at)
+                && known_caller_seen.insert(caller.clone())
+            {
+                known_callers.push(caller.clone());
+                if known_callers.len() >= MAX_WALK_FILES {
+                    break 'gather;
+                }
+            }
         }
     }
     let scan_index = CallerScanIndex::build(&ctx, index, &merged, live_focus, &known_callers);
     let index_incoming = build_index_incoming(index);
+
+    let mut batched_after = if let Some(rev) = ctx.revision.as_deref() {
+        let after_paths: Vec<String> = merged
+            .iter()
+            .filter(|(p, e)| e.status != "deleted" && ctx.exists_in_target(p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        read_revision_blobs_batched(ctx.root, rev, &after_paths, MAX_INDEX_SCAN_BYTES)
+    } else {
+        HashMap::new()
+    };
+    let mut batched_before = if let Some(base) = ctx.base_commit.as_deref() {
+        let before_paths: Vec<String> = merged
+            .iter()
+            .filter(|(_, e)| e.status != "created" || e.previous_path.is_some())
+            .map(|(p, e)| e.previous_path.as_deref().unwrap_or(p).to_owned())
+            .collect();
+        read_revision_blobs_batched(ctx.root, base, &before_paths, MAX_INDEX_SCAN_BYTES)
+    } else {
+        HashMap::new()
+    };
 
     let mut existing_files = 0usize;
     let mut created_files = 0usize;
@@ -276,6 +303,8 @@ pub(crate) fn changed_catalog_with_ir(
     let mut risk_callers_map: BTreeMap<(String, String), &'static str> = BTreeMap::new();
     let mut removed_callers_by_target: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut deleted_entries: Vec<(usize, String, Option<String>, BTreeSet<String>)> = Vec::new();
+    let mut confidence = ConfidenceAccum::default();
+    let mut affected_tests: BTreeSet<String> = BTreeSet::new();
 
     for (path, entry) in &merged {
         let exists = if entry.status == "deleted" {
@@ -294,15 +323,30 @@ pub(crate) fn changed_catalog_with_ir(
         }
         let in_graph = index.is_some_and(|idx| idx.file_id(path).is_some());
 
-        let (before, _) =
-            load_before_for_status(&ctx, path, entry.previous_path.as_deref(), &entry.status);
-        let (after, _) = load_after_for_status(&ctx, path, exists, &entry.status);
+        let before = if entry.status == "created" && entry.previous_path.is_none() {
+            None
+        } else {
+            let lookup = entry.previous_path.as_deref().unwrap_or(path);
+            batched_before.remove(lookup).or_else(|| {
+                load_before_for_status(&ctx, path, entry.previous_path.as_deref(), &entry.status).0
+            })
+        };
+        let after = if !exists || entry.status == "deleted" {
+            None
+        } else if ctx.revision.is_some() {
+            batched_after
+                .remove(path)
+                .or_else(|| load_after_for_status(&ctx, path, exists, &entry.status).0)
+        } else {
+            load_after_for_status(&ctx, path, exists, &entry.status).0
+        };
 
-        let entities = compute_changed_entities(
+        let (before_ir, after_ir) = parse_pair_ir(path, before.as_deref(), after.as_deref());
+        let entities = compute_changed_entities_from_ir(
             path,
             &entry.status,
-            before.as_deref(),
-            after.as_deref(),
+            before_ir.as_ref(),
+            after_ir.as_ref(),
             live_focus,
         );
         for entity in &entities {
@@ -314,21 +358,30 @@ pub(crate) fn changed_catalog_with_ir(
             }
         }
 
-        let declared_members =
-            build_declared_members_with_diff(path, before.as_deref(), after.as_deref(), &entities);
+        let declared_members = build_declared_members_with_diff_ir(
+            path,
+            before_ir.as_ref(),
+            after_ir.as_ref(),
+            after.is_some(),
+            &entities,
+        );
 
-        let dep_diff = compute_uses_diff(
+        let dep_diff = compute_uses_diff_from_ir(
             path,
             &entry.status,
             exists,
             before.as_deref(),
             after.as_deref(),
+            before_ir.as_ref(),
+            after_ir.as_ref(),
             &ctx,
             index,
             &merged,
             live_focus,
             false,
         );
+        confidence.add_uses(&dep_diff.added, path, index);
+        confidence.add_uses(&dep_diff.unchanged, path, index);
         record_edge_diffs(path, &dep_diff.added, &mut added_edges, None);
         record_edge_diffs(
             path,
@@ -337,8 +390,13 @@ pub(crate) fn changed_catalog_with_ir(
             Some(&mut removed_callers_by_target),
         );
 
-        let target_symbols =
-            collect_target_symbols(path, &entities, before.as_deref(), after.as_deref(), index);
+        let target_symbols = collect_target_symbols_from_ir(
+            path,
+            &entities,
+            before_ir.as_ref(),
+            after_ir.as_ref(),
+            index,
+        );
         let callers = evaluate_callers_for_file(
             path,
             entry.previous_path.as_deref(),
@@ -354,7 +412,11 @@ pub(crate) fn changed_catalog_with_ir(
             &index_incoming,
             &scan_index,
         );
+        confidence.add_callers(&callers);
         for caller in &callers {
+            if is_test_path(&caller.path) {
+                affected_tests.insert(caller.path.clone());
+            }
             if caller.path != *path
                 && matches!(caller.impact, "broken_risk" | "impacted" | "added_caller")
             {
@@ -418,6 +480,12 @@ pub(crate) fn changed_catalog_with_ir(
         }));
     }
 
+    if let Some(idx) = index {
+        for path in merged.keys().filter(|p| !is_test_path(p)).take(64) {
+            collect_blast_tests(idx, path, &mut affected_tests);
+        }
+    }
+
     for (idx, path, previous_path, mut del_callers) in deleted_entries {
         for key in [Some(path.as_str()), previous_path.as_deref()]
             .into_iter()
@@ -435,6 +503,7 @@ pub(crate) fn changed_catalog_with_ir(
     }
 
     let edge_diffs = build_edge_diffs_json(added_edges, removed_edges, risk_callers_map);
+    let test_reach = build_test_reach_json(&affected_tests, live_focus, resolved);
 
     json!({
         "target": target_label,
@@ -447,6 +516,8 @@ pub(crate) fn changed_catalog_with_ir(
         "created_entities": created_entities,
         "modified_entities": modified_entities,
         "deleted_entities": deleted_entities,
+        "confidence": confidence.to_json(),
+        "test_reach": test_reach,
         "files": files_json,
         "edge_diffs": edge_diffs,
     })
@@ -581,23 +652,31 @@ pub(crate) fn file_impact_with_ir(
     let (after, after_err) = load_after_for_status(&ctx, &rel_path, exists, &status);
 
     let baseline = build_baseline_info(&ctx, &status, before.as_ref(), before_err, after_err);
+    let (before_ir, after_ir) = parse_pair_ir(&rel_path, before.as_deref(), after.as_deref());
 
-    let entities = compute_changed_entities(
+    let entities = compute_changed_entities_from_ir(
         &rel_path,
         &status,
-        before.as_deref(),
-        after.as_deref(),
+        before_ir.as_ref(),
+        after_ir.as_ref(),
         live_focus,
     );
-    let declared_members =
-        build_declared_members_with_diff(&rel_path, before.as_deref(), after.as_deref(), &entities);
+    let declared_members = build_declared_members_with_diff_ir(
+        &rel_path,
+        before_ir.as_ref(),
+        after_ir.as_ref(),
+        after.is_some(),
+        &entities,
+    );
 
-    let dep_diff = compute_uses_diff(
+    let dep_diff = compute_uses_diff_from_ir(
         &rel_path,
         &status,
         exists,
         before.as_deref(),
         after.as_deref(),
+        before_ir.as_ref(),
+        after_ir.as_ref(),
         &ctx,
         index,
         &merged,
@@ -605,11 +684,11 @@ pub(crate) fn file_impact_with_ir(
         certain,
     );
 
-    let target_symbols = collect_target_symbols(
+    let target_symbols = collect_target_symbols_from_ir(
         &rel_path,
         &entities,
-        before.as_deref(),
-        after.as_deref(),
+        before_ir.as_ref(),
+        after_ir.as_ref(),
         index,
     );
     let mut scan_scope = merged.clone();
@@ -674,6 +753,20 @@ pub(crate) fn file_impact_with_ir(
         used_by.iter().map(|c| c.visibility_warnings.len()).sum();
     let uses_total = dep_diff.added.len() + dep_diff.unchanged.len();
 
+    let mut confidence = ConfidenceAccum::default();
+    confidence.add_uses(&dep_diff.added, &rel_path, index);
+    confidence.add_uses(&dep_diff.unchanged, &rel_path, index);
+    confidence.add_callers(&used_by);
+    let mut affected_tests: BTreeSet<String> = used_by
+        .iter()
+        .filter(|c| is_test_path(&c.path))
+        .map(|c| c.path.clone())
+        .collect();
+    if let Some(idx) = index {
+        collect_blast_tests(idx, &rel_path, &mut affected_tests);
+    }
+    let test_reach = build_test_reach_json(&affected_tests, live_focus, resolved);
+
     let (uses_added_json, added_vis_warnings) = serialize_uses_deps(&dep_diff.added, true);
     let (uses_removed_json, _) = serialize_uses_deps(&dep_diff.removed, false);
     let (uses_unchanged_json, unchanged_vis_warnings) =
@@ -707,6 +800,8 @@ pub(crate) fn file_impact_with_ir(
         "status": status,
         "in_graph": in_graph,
         "baseline": baseline.to_json(),
+        "confidence": confidence.to_json(),
+        "test_reach": test_reach,
         "summary": {
             "uses_total": uses_total,
             "uses_added": dep_diff.added.len(),
@@ -754,6 +849,10 @@ impl<'a> TargetContext<'a> {
         let rev_files = revision
             .as_deref()
             .and_then(|rev| git_tree_files(root, rev));
+        let post_rev_modified = match (revision.as_deref(), index) {
+            (Some(rev), Some(_)) if is_git => collect_post_revision_modified(root, rev),
+            _ => BTreeSet::new(),
+        };
         let ir_store = if revision.is_none() {
             if let Some(store) = explicit_ir {
                 Some(IrStoreHandle::Borrowed(store))
@@ -770,6 +869,7 @@ impl<'a> TargetContext<'a> {
         let mut ir_fresh = false;
         let mut ir_known_files: BTreeSet<String> = BTreeSet::new();
         let mut dirty_or_unindexed: BTreeSet<String> = BTreeSet::new();
+        let mut non_git_disk_files: Option<BTreeSet<String>> = None;
         if let Some(handle) = &ir_store {
             let store = handle.as_store();
             let summary = store.summary_counts().ok().flatten();
@@ -805,17 +905,25 @@ impl<'a> TargetContext<'a> {
                                 dirty_or_unindexed.clear();
                             }
                         }
-                    } else {
-                        if stamps.len() <= 500 {
-                            for (p, &(sz, mtime)) in &stamps {
-                                if is_scannable_code(p)
-                                    && file_disk_stamp(root, p) != Some((sz, mtime))
-                                {
-                                    dirty_or_unindexed.insert(p.clone());
-                                }
+                    } else if stamps.len() <= MAX_WALK_FILES {
+                        let current_disk = collect_workspace_files(root, false);
+                        for (p, &(sz, mtime)) in &stamps {
+                            if is_scannable_code(p) && file_disk_stamp(root, p) != Some((sz, mtime))
+                            {
+                                dirty_or_unindexed.insert(p.clone());
                             }
                         }
-                        ir_fresh = true;
+                        for p in &current_disk {
+                            if is_scannable_code(p) && !stamps.contains_key(p) {
+                                dirty_or_unindexed.insert(p.clone());
+                            }
+                        }
+                        non_git_disk_files = Some(current_disk);
+                        if dirty_or_unindexed.len() <= MAX_CALLER_SCAN {
+                            ir_fresh = true;
+                        } else {
+                            dirty_or_unindexed.clear();
+                        }
                     }
                 }
             } else if let Ok(known) = store.known_files() {
@@ -823,7 +931,9 @@ impl<'a> TargetContext<'a> {
             }
         }
 
-        let disk_files = if revision.is_none() && !ir_fresh {
+        let disk_files = if let Some(cached) = non_git_disk_files {
+            cached
+        } else if revision.is_none() && !ir_fresh {
             collect_workspace_files(root, is_git)
         } else {
             BTreeSet::new()
@@ -868,7 +978,11 @@ impl<'a> TargetContext<'a> {
             }
         }
 
-        let (manifests, crate_map) = cached_manifests_for_root(root, &resolution_files);
+        let (manifests, crate_map) = if let Some(rev) = revision.as_deref() {
+            build_revision_resolution_bundles(root, rev, &resolution_files)
+        } else {
+            cached_manifests_for_root(root, &resolution_files)
+        };
         let reexports = ir_store
             .as_ref()
             .and_then(|h| h.as_store().reexport_index().ok())
@@ -889,6 +1003,7 @@ impl<'a> TargetContext<'a> {
             ir_store,
             ir_fresh,
             dirty_or_unindexed,
+            post_rev_modified,
         }
     }
 
@@ -910,11 +1025,16 @@ impl<'a> TargetContext<'a> {
         )
     }
 
-    fn diff_deps(&self, rel_path: &str, before: Option<&str>, after: Option<&str>) -> DepDiff {
-        diff_file_deps_with_context(
+    fn diff_deps_from_ir(
+        &self,
+        rel_path: &str,
+        before_ir: Option<&AstFileExtraction>,
+        after_ir: Option<&AstFileExtraction>,
+    ) -> DepDiff {
+        diff_file_deps_from_ir(
             rel_path,
-            before,
-            after,
+            before_ir,
+            after_ir,
             &self.resolution_files,
             Some(&self.manifests),
             Some(&self.reexports),
@@ -1293,20 +1413,34 @@ fn build_baseline_info(
     }
 }
 
-fn compute_changed_entities(
+fn parse_pair_ir(
     rel_path: &str,
-    status: &str,
     before: Option<&str>,
     after: Option<&str>,
+) -> (Option<AstFileExtraction>, Option<AstFileExtraction>) {
+    let before_ir = before
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|src| parse_file_ir(rel_path, src));
+    let after_ir = after
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|src| parse_file_ir(rel_path, src));
+    (before_ir, after_ir)
+}
+
+fn compute_changed_entities_from_ir(
+    rel_path: &str,
+    status: &str,
+    before_ir: Option<&AstFileExtraction>,
+    after_ir: Option<&AstFileExtraction>,
     live_focus: Option<&GraphFocus>,
 ) -> Vec<EntityChange> {
     match status {
-        "created" => diff_entities(rel_path, None, after),
-        "deleted" => diff_entities(rel_path, before, None),
+        "created" => diff_entities_from_ir(rel_path, None, after_ir),
+        "deleted" => diff_entities_from_ir(rel_path, before_ir, None),
         "unchanged" => Vec::new(),
         _ => {
-            if let Some(before_src) = before {
-                diff_entities(rel_path, Some(before_src), after)
+            if before_ir.is_some() {
+                diff_entities_from_ir(rel_path, before_ir, after_ir)
             } else if let Some(lf) = live_focus {
                 lf.created_entities
                     .iter()
@@ -1392,14 +1526,15 @@ fn find_entity_for_member<'a>(
     })
 }
 
-fn build_declared_members_with_diff(
+fn build_declared_members_with_diff_ir(
     rel_path: &str,
-    before: Option<&str>,
-    after: Option<&str>,
+    before_ir: Option<&AstFileExtraction>,
+    after_ir: Option<&AstFileExtraction>,
+    has_after: bool,
     entities: &[EntityChange],
 ) -> Vec<DeclaredMember> {
-    let mut members = after
-        .map(|src| extract_declared_members(rel_path, src))
+    let mut members = after_ir
+        .map(|ir| ir.declared_members.clone())
         .unwrap_or_default();
 
     for member in &mut members {
@@ -1419,9 +1554,9 @@ fn build_declared_members_with_diff(
         }
     }
 
-    let before_members = before
-        .map(|src| extract_declared_members(rel_path, src))
-        .unwrap_or_default();
+    let before_members: &[DeclaredMember] = before_ir
+        .map(|ir| ir.declared_members.as_slice())
+        .unwrap_or(&[]);
 
     let push_unique = |list: &mut Vec<DeclaredMember>, item: DeclaredMember| {
         let item_norm = norm_member_name(&item.name);
@@ -1479,11 +1614,12 @@ fn build_declared_members_with_diff(
         );
     }
 
-    if after.is_none() && !before_members.is_empty() {
-        for mut bm in before_members {
-            bm.previous_visibility = bm.visibility.clone();
-            bm.change = "removed".to_owned();
-            push_unique(&mut members, bm);
+    if !has_after && !before_members.is_empty() {
+        for bm in before_members {
+            let mut removed = bm.clone();
+            removed.previous_visibility = removed.visibility.clone();
+            removed.change = "removed".to_owned();
+            push_unique(&mut members, removed);
         }
     }
 
@@ -2728,17 +2864,20 @@ fn load_target_member_profile<'a>(
             ctx.exists_in_target(target_path)
         };
         let (t_after, _) = load_after_for_status(ctx, target_path, t_exists, t_status);
-        let t_entities = compute_changed_entities(
+        let (t_before_ir, t_after_ir) =
+            parse_pair_ir(target_path, t_before.as_deref(), t_after.as_deref());
+        let t_entities = compute_changed_entities_from_ir(
             target_path,
             t_status,
-            t_before.as_deref(),
-            t_after.as_deref(),
+            t_before_ir.as_ref(),
+            t_after_ir.as_ref(),
             live_focus,
         );
-        let members = build_declared_members_with_diff(
+        let members = build_declared_members_with_diff_ir(
             target_path,
-            t_before.as_deref(),
-            t_after.as_deref(),
+            t_before_ir.as_ref(),
+            t_after_ir.as_ref(),
+            t_after.is_some(),
             &t_entities,
         );
         profiles.insert(target_path.to_owned(), TargetMemberProfile { members });
@@ -3026,12 +3165,14 @@ fn serialize_uses_deps(deps: &[DepRef], emit_warnings: bool) -> (Vec<Value>, usi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compute_uses_diff(
+fn compute_uses_diff_from_ir(
     rel_path: &str,
     status: &str,
     exists: bool,
     before: Option<&str>,
     after: Option<&str>,
+    before_ir: Option<&AstFileExtraction>,
+    after_ir: Option<&AstFileExtraction>,
     ctx: &TargetContext<'_>,
     index: Option<&Index>,
     merged: &BTreeMap<String, MergedChange>,
@@ -3040,14 +3181,29 @@ fn compute_uses_diff(
 ) -> DepDiff {
     let mut diff = if status == "unchanged" {
         if before.is_some() {
-            ctx.diff_deps(rel_path, before, after)
+            ctx.diff_deps_from_ir(rel_path, before_ir, after_ir)
         } else {
-            ctx.diff_deps(rel_path, after, after)
+            ctx.diff_deps_from_ir(rel_path, after_ir, after_ir)
         }
     } else if status == "modified" && before.is_none() {
         // Non-Git modified file with no baseline: split against Index if available,
         // otherwise report current dependencies as unchanged rather than false added.
-        let current = if after.is_some() {
+        let current = if let Some(ir) = after_ir {
+            if let Some(store) = ctx.ir()
+                && let Ok(Some((deps, _))) = store.file_outgoing_deps_if_fresh(ctx.root, rel_path)
+            {
+                deps
+            } else {
+                crate::graph_deps::extract_file_deps_from_ir(
+                    rel_path,
+                    ir,
+                    &ctx.resolution_files,
+                    Some(&ctx.manifests),
+                    Some(&ctx.reexports),
+                    Some(&ctx.crate_map),
+                )
+            }
+        } else if after.is_some() {
             ctx.extract_live_deps_or_parse(rel_path, after)
         } else {
             Vec::new()
@@ -3078,7 +3234,7 @@ fn compute_uses_diff(
             }
         }
     } else {
-        ctx.diff_deps(rel_path, before, after)
+        ctx.diff_deps_from_ir(rel_path, before_ir, after_ir)
     };
 
     for list in [&mut diff.added, &mut diff.removed, &mut diff.unchanged] {
@@ -3155,6 +3311,12 @@ fn merge_index_outgoing_edges(
             continue;
         }
         let target_path = &idx.files()[*to as usize];
+        if ctx.revision.is_some()
+            && (!ctx.exists_in_target(target_path)
+                || (ctx.post_rev_modified.contains(_rel_path) && after.is_some()))
+        {
+            continue;
+        }
         let (sym_set, first_line) = per_target_syms.get(to).cloned().unwrap_or_default();
 
         if covered.contains(target_path) {
@@ -3242,11 +3404,11 @@ fn sort_dep_refs(refs: &mut [DepRef]) {
     refs.sort_by(|a, b| a.target.cmp(&b.target).then(a.kind.cmp(&b.kind)));
 }
 
-fn collect_target_symbols(
+fn collect_target_symbols_from_ir(
     rel_path: &str,
     entities: &[EntityChange],
-    before: Option<&str>,
-    after: Option<&str>,
+    before_ir: Option<&AstFileExtraction>,
+    after_ir: Option<&AstFileExtraction>,
     index: Option<&Index>,
 ) -> Vec<String> {
     let mut names = BTreeSet::new();
@@ -3255,10 +3417,10 @@ fn collect_target_symbols(
             names.insert(e.name.clone());
         }
     }
-    for src in [before, after].into_iter().flatten() {
-        for e in diff_entities(rel_path, None, Some(src)) {
-            if e.kind != "file" && !e.name.is_empty() {
-                names.insert(e.name);
+    for ir in [before_ir, after_ir].into_iter().flatten() {
+        for decl in &ir.declarations {
+            if decl.entity.kind != "file" && !decl.entity.name.is_empty() {
+                names.insert(decl.entity.name.clone());
             }
         }
     }
@@ -3670,9 +3832,10 @@ impl CallerScanIndex {
         }
 
         let mut initial_seen: HashSet<String> = priority_paths.iter().cloned().collect();
+        let initial_cap = MAX_CALLER_SCAN * 2;
         let mut initial_count = initial_seen.len();
         for caller in known_callers {
-            if initial_count >= MAX_CALLER_SCAN {
+            if initial_count >= initial_cap {
                 break;
             }
             if is_scannable_code(caller) && initial_seen.insert(caller.clone()) {
@@ -3744,6 +3907,7 @@ impl CallerScanIndex {
         previous_path: Option<&str>,
         target_symbols: &[String],
         declared_members: &[DeclaredMember],
+        ctx: &TargetContext<'_>,
         index: Option<&Index>,
         index_incoming: &HashMap<u32, Vec<(u32, String, bool)>>,
         certain: bool,
@@ -3785,6 +3949,15 @@ impl CallerScanIndex {
                         }
                     }
                 }
+            }
+        }
+        let mut ir_added = 0usize;
+        for ir_caller in ctx.ir_callers_for(rel_path, previous_path) {
+            if ir_added >= MAX_CALLER_SCAN {
+                break;
+            }
+            if push_unique(&ir_caller, &mut seen, &mut out) {
+                ir_added += 1;
             }
         }
 
@@ -3907,7 +4080,9 @@ fn evaluate_callers_for_file(
                         continue;
                     }
                     let caller_path = &idx.files()[*from_fid as usize];
-                    if caller_path == rel_path {
+                    if caller_path == rel_path
+                        || (ctx.revision.is_some() && !ctx.exists_in_target(caller_path))
+                    {
                         continue;
                     }
                     let acc = callers.entry(caller_path.clone()).or_default();
@@ -3929,6 +4104,7 @@ fn evaluate_callers_for_file(
         previous_path,
         target_symbols,
         declared_members,
+        ctx,
         index,
         index_incoming,
         certain,
@@ -3962,6 +4138,8 @@ fn evaluate_callers_for_file(
                         acc.symbols.extend(dep.symbols.iter().cloned());
                     }
                     acc.symbols.extend(matched_refs);
+                } else if ctx.revision.is_some() && ctx.post_rev_modified.contains(caller_path) {
+                    callers.remove(caller_path);
                 } else if is_caller_modified_in_resolved(caller_path, resolved) {
                     // Caller was modified and dropped its dependency on this file.
                     let dropped =
@@ -4399,6 +4577,7 @@ fn compute_architecture_impact(
     caller_cache: &HashMap<String, (String, Vec<DepRef>)>,
 ) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
     let mut base_adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let has_indexed_baseline = index.is_some() || ctx.ir_fresh;
 
     if let Some(idx) = index {
         let files = idx.files();
@@ -4410,17 +4589,16 @@ fn compute_architecture_impact(
                     .insert(files[*to as usize].clone());
             }
         }
-    } else {
-        if ctx.ir_fresh
-            && let Some(ir) = ctx.ir()
-            && let Ok(edges) = ir.all_resolved_file_edges()
-        {
-            for (src_path, dst_path) in edges {
-                if src_path != dst_path {
-                    base_adj.entry(src_path).or_default().insert(dst_path);
-                }
+    } else if ctx.ir_fresh
+        && let Some(ir) = ctx.ir()
+        && let Ok(edges) = ir.all_resolved_file_edges()
+    {
+        for (src_path, dst_path) in edges {
+            if src_path != dst_path {
+                base_adj.entry(src_path).or_default().insert(dst_path);
             }
         }
+    } else {
         for (src_path, (_, deps)) in caller_cache {
             for dep in deps {
                 if dep.resolved && dep.target != *src_path {
@@ -4433,39 +4611,13 @@ fn compute_architecture_impact(
         }
     }
 
-    // Ensure direct workspace targets/callers not yet in Index (e.g. newly created files)
-    // contribute their live edges so cycles across new/unindexed files are caught.
-    for dep in &dep_diff.added {
-        if dep.resolved && !base_adj.contains_key(&dep.target) {
-            if let Some((_, target_deps)) = caller_cache.get(&dep.target) {
-                for td in target_deps {
-                    if td.resolved && td.target != dep.target {
-                        base_adj
-                            .entry(dep.target.clone())
-                            .or_default()
-                            .insert(td.target.clone());
-                    }
-                }
-            } else if let BlobRead::Ok(src) = ctx.read_after(&dep.target) {
-                for td in ctx.extract_live_deps_or_parse(&dep.target, Some(&src)) {
-                    if td.resolved && td.target != dep.target {
-                        base_adj
-                            .entry(dep.target.clone())
-                            .or_default()
-                            .insert(td.target);
-                    }
-                }
-            }
-        }
-    }
-
     let mut before_adj = base_adj.clone();
     if status == "created" {
         before_adj.remove(rel_path);
         for targets in before_adj.values_mut() {
             targets.remove(rel_path);
         }
-    } else {
+    } else if ctx.base_commit.is_some() || !has_indexed_baseline {
         let entry = before_adj.entry(rel_path.to_owned()).or_default();
         for dep in &dep_diff.added {
             if dep.resolved {
@@ -4487,6 +4639,55 @@ fn compute_architecture_impact(
     }
 
     let mut after_adj = base_adj;
+    if has_indexed_baseline {
+        for (src_path, (_, deps)) in caller_cache {
+            if index.is_some()
+                && (ctx.dirty_or_unindexed.contains(src_path) || ctx.revision.is_none())
+            {
+                after_adj.remove(src_path);
+            }
+            if index.is_none()
+                || ctx.dirty_or_unindexed.contains(src_path)
+                || index.is_some_and(|idx| idx.file_id(src_path).is_none())
+                || ctx.revision.is_none()
+            {
+                for dep in deps {
+                    if dep.resolved && dep.target != *src_path {
+                        after_adj
+                            .entry(src_path.clone())
+                            .or_default()
+                            .insert(dep.target.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Ensure direct workspace targets/callers not yet in Index (e.g. newly created files)
+    // contribute their live edges so cycles across new/unindexed files are caught.
+    for dep in &dep_diff.added {
+        if dep.resolved && !after_adj.contains_key(&dep.target) {
+            if let Some((_, target_deps)) = caller_cache.get(&dep.target) {
+                for td in target_deps {
+                    if td.resolved && td.target != dep.target {
+                        after_adj
+                            .entry(dep.target.clone())
+                            .or_default()
+                            .insert(td.target.clone());
+                    }
+                }
+            } else if let BlobRead::Ok(src) = ctx.read_after(&dep.target) {
+                for td in ctx.extract_live_deps_or_parse(&dep.target, Some(&src)) {
+                    if td.resolved && td.target != dep.target {
+                        after_adj
+                            .entry(dep.target.clone())
+                            .or_default()
+                            .insert(td.target);
+                    }
+                }
+            }
+        }
+    }
     if !exists || status == "deleted" {
         after_adj.remove(rel_path);
         for targets in after_adj.values_mut() {
@@ -4843,6 +5044,174 @@ impl BlobRead {
     }
 }
 
+#[derive(Default)]
+struct ConfidenceAccum {
+    extracted_links: u64,
+    inferred_links: u64,
+}
+
+impl ConfidenceAccum {
+    fn add_uses(&mut self, deps: &[DepRef], rel_path: &str, index: Option<&Index>) {
+        let fid = index.and_then(|idx| idx.file_id(rel_path));
+        for dep in deps {
+            if !dep.resolved {
+                continue;
+            }
+            if dep
+                .evidence
+                .as_deref()
+                .is_some_and(|ev| ev.starts_with("Graph index"))
+                && let Some((idx, src_fid)) = index.zip(fid)
+                && let Some(dst_fid) = idx.file_id(&dep.target)
+                && let Some((_, _, pair)) = idx
+                    .pairs()
+                    .iter()
+                    .find(|(f, t, _)| *f == src_fid && *t == dst_fid)
+            {
+                let total = pair.weight(false);
+                let certain_w = pair.weight(true);
+                self.extracted_links += certain_w;
+                self.inferred_links += total.saturating_sub(certain_w);
+            } else {
+                self.extracted_links += dep.symbols.len().max(1) as u64;
+            }
+        }
+    }
+
+    fn add_callers(&mut self, callers: &[CallerReport]) {
+        for caller in callers {
+            if caller.links == 0 {
+                self.extracted_links += 1;
+            } else {
+                let certain_links = caller.links.saturating_sub(caller.guessed);
+                self.extracted_links += certain_links;
+                self.inferred_links += caller.guessed;
+            }
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        let total = self.extracted_links + self.inferred_links;
+        let ratio = if total == 0 {
+            1.0
+        } else {
+            ((self.extracted_links as f64 / total as f64) * 1000.0).round() / 1000.0
+        };
+        json!({
+            "extracted_links": self.extracted_links,
+            "inferred_links": self.inferred_links,
+            "ratio": ratio,
+        })
+    }
+}
+
+fn collect_blast_tests(index: &Index, path: &str, out: &mut BTreeSet<String>) {
+    if let Some(blast) = index.blast(path, false)
+        && let Some(listed) = blast["listed"].as_array()
+    {
+        for item in listed {
+            if item["test"] == true
+                && let Some(test_path) = item["path"].as_str().filter(|s| !s.is_empty())
+            {
+                out.insert(test_path.to_owned());
+            }
+        }
+    }
+}
+
+fn build_test_reach_json(
+    affected_tests: &BTreeSet<String>,
+    live_focus: Option<&GraphFocus>,
+    resolved: Option<&Resolved>,
+) -> Value {
+    let total = affected_tests.len();
+    let truncated = total > MAX_AFFECTED_TESTS_REPORTED;
+    let listed: Vec<&String> = affected_tests
+        .iter()
+        .take(MAX_AFFECTED_TESTS_REPORTED)
+        .collect();
+    let has_run = live_focus.is_some() || resolved.is_some_and(|r| r.kind == "run");
+    let opened_by_run = if has_run {
+        affected_tests
+            .iter()
+            .filter(|t| is_opened_by_run(t, live_focus, resolved))
+            .count()
+    } else {
+        0
+    };
+    json!({
+        "affected_tests": listed,
+        "count": total,
+        "opened_by_run": opened_by_run,
+        "uncovered": if has_run { total.saturating_sub(opened_by_run) } else { total },
+        "truncated": truncated,
+    })
+}
+
+fn build_revision_resolution_bundles(
+    root: &Path,
+    rev: &str,
+    resolution_files: &BTreeSet<String>,
+) -> (Arc<ManifestIndex>, Arc<CratePackageMap>) {
+    let manifest_paths: Vec<String> = resolution_files
+        .iter()
+        .filter(|rel| is_graph_manifest_path(Path::new(rel)))
+        .cloned()
+        .collect();
+    if manifest_paths.is_empty() {
+        return (
+            Arc::new(ManifestIndex::default()),
+            Arc::new(CratePackageMap::default()),
+        );
+    }
+    let blobs = read_revision_blobs_batched(root, rev, &manifest_paths, 8 * 1024 * 1024);
+    let known_vec: Vec<String> = resolution_files.iter().cloned().collect();
+    let reader = |rel: &str| blobs.get(rel).cloned();
+    (
+        Arc::new(ManifestIndex::from_reader(&known_vec, &reader)),
+        Arc::new(CratePackageMap::from_reader(&known_vec, &reader)),
+    )
+}
+
+fn collect_post_revision_modified(root: &Path, rev: &str) -> BTreeSet<String> {
+    let mut modified = BTreeSet::new();
+    let args = [
+        "diff".to_owned(),
+        "--name-only".to_owned(),
+        "-z".to_owned(),
+        rev.to_owned(),
+        "HEAD".to_owned(),
+        "--".to_owned(),
+    ];
+    if let Ok(out) = projects::git(root, &args, GIT_TIMEOUT_SECS)
+        && out.code == 0
+    {
+        for chunk in out.stdout.split(|b| *b == 0) {
+            if !chunk.is_empty()
+                && let Some(norm) = normalize_rel_opt(&String::from_utf8_lossy(chunk))
+            {
+                modified.insert(norm);
+            }
+        }
+    }
+    if let Some(dirty) = collect_git_dirty_files(root) {
+        modified.extend(dirty);
+    }
+    modified
+}
+
+fn is_excluded_workspace_path(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    if lower == "memory-bank/local" || lower.starts_with("memory-bank/local/") {
+        return true;
+    }
+    if lower.ends_with(".min.js") || lower.ends_with(".min.mjs") || lower.ends_with(".min.cjs") {
+        return true;
+    }
+    rel.split('/')
+        .any(|comp| !comp.is_empty() && SKIP_DIRS.contains(&comp))
+}
+
 fn git_tree_files(root: &Path, rev: &str) -> Option<BTreeSet<String>> {
     let args = [
         "ls-tree".to_owned(),
@@ -4862,7 +5231,9 @@ fn git_tree_files(root: &Path, rev: &str) -> Option<BTreeSet<String>> {
         if chunk.is_empty() {
             continue;
         }
-        if let Some(norm) = normalize_rel_opt(&String::from_utf8_lossy(chunk)) {
+        if let Some(norm) = normalize_rel_opt(&String::from_utf8_lossy(chunk))
+            && !is_excluded_workspace_path(&norm)
+        {
             set.insert(norm);
             if set.len() >= MAX_WALK_FILES * 4 {
                 break;
@@ -4971,6 +5342,7 @@ fn collect_workspace_files(root: &Path, is_git: bool) -> BTreeSet<String> {
                 }
                 if let Some(norm) = normalize_rel_opt(&String::from_utf8_lossy(chunk))
                     && !deleted.contains(&norm)
+                    && !is_excluded_workspace_path(&norm)
                 {
                     set.insert(norm);
                     if set.len() >= MAX_WALK_FILES * 4 {
@@ -5029,6 +5401,7 @@ fn walk_dir_bounded(root: &Path, dir: &Path, depth: usize, out: &mut BTreeSet<St
         } else if meta.is_file()
             && let Ok(rel) = path.strip_prefix(root)
             && let Some(norm) = normalize_rel_opt(&rel.to_string_lossy())
+            && !is_excluded_workspace_path(&norm)
         {
             out.insert(norm);
         }
@@ -5036,6 +5409,10 @@ fn walk_dir_bounded(root: &Path, dir: &Path, depth: usize, out: &mut BTreeSet<St
 }
 
 fn is_scannable_code(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".blade.php") || is_excluded_workspace_path(path) {
+        return false;
+    }
     path.rsplit_once('.')
         .is_some_and(|(_, ext)| CODE_EXTENSIONS.iter().any(|k| ext.eq_ignore_ascii_case(k)))
 }
@@ -6645,6 +7022,90 @@ mod tests {
             callers.contains(&"app/Controllers/PayController.php")
                 && callers.contains(&"app/Controllers/DirtyController.php"),
             "expected both IR and dirty callers: {callers:?}"
+        );
+    }
+
+    #[test]
+    fn non_git_over_500_files_checks_stamps_and_new_files_and_dirty_cycles() {
+        assert_eq!(MAX_SOURCE_BYTES, crate::graph_map::SOURCE_LIMIT as usize);
+        assert!(is_excluded_workspace_path("vendor/pkg/foo.php"));
+        assert!(is_excluded_workspace_path("public/bundle.min.js"));
+        assert!(!is_scannable_code("resources/views/home.blade.php"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("nongit");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        for i in 0..520 {
+            std::fs::write(
+                root.join(format!("src/m{i:03}.rs")),
+                format!("pub fn f{i}() -> i32 {{ {i} }}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("src/a.rs"),
+            "use crate::b;\npub fn alpha() -> i32 { b::beta() }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub fn beta() -> i32 { 1 }\n").unwrap();
+
+        let ir = GraphIrStore::open(&state, "nongit").unwrap();
+        ir.sync_workspace(&root).unwrap();
+        drop(ir);
+
+        // Create a brand new untracked caller (>500 indexed files, non-git) without re-syncing IR.
+        std::fs::write(
+            root.join("src/new_caller.rs"),
+            "use crate::b;\npub fn call_beta() -> i32 { b::beta() }\n",
+        )
+        .unwrap();
+        let ro_ir = GraphIrStore::open_readonly(&state, "nongit")
+            .unwrap()
+            .expect("ir");
+        let imp =
+            file_impact_with_ir(&root, None, Some(&ro_ir), None, None, "src/b.rs", false).unwrap();
+        let used_by: Vec<&str> = imp["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["path"].as_str())
+            .collect();
+        assert!(used_by.contains(&"src/a.rs"), "{used_by:?}");
+        assert!(
+            used_by.contains(&"src/new_caller.rs"),
+            "expected new non-git file >500 detected as caller: {used_by:?}"
+        );
+        assert!(imp["confidence"]["extracted_links"].as_u64().unwrap() >= 2);
+        assert!(imp["test_reach"].is_object());
+
+        // Dirty cycle edge in a clean Index is still surfaced in architecture_impact.
+        let clean_graph = json!({
+            "nodes": [
+                {"id": "a", "label": "alpha()", "source_file": "src/a.rs", "source_location": "L2"},
+                {"id": "b", "label": "beta()", "source_file": "src/b.rs", "source_location": "L1"}
+            ],
+            "links": [
+                {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"}
+            ]
+        });
+        let idx = Index::read(clean_graph.to_string().as_bytes(), &root).unwrap();
+        std::fs::write(
+            root.join("src/b.rs"),
+            "use crate::a;\npub fn beta() -> i32 { a::alpha() }\n",
+        )
+        .unwrap();
+        let cyc =
+            file_impact_with_ir(&root, Some(&idx), None, None, None, "src/a.rs", false).unwrap();
+        let _ = cyc;
+        let cyc_b =
+            file_impact_with_ir(&root, Some(&idx), None, None, None, "src/b.rs", false).unwrap();
+        assert!(
+            !cyc_b["architecture_impact"]["new_cycles"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "expected dirty cycle between src/a.rs and src/b.rs: {cyc_b}"
         );
     }
 }

@@ -42,28 +42,36 @@ pub struct Asset {
     pub version: String,
 }
 
-fn compress_gzip(raw: &[u8]) -> Option<Arc<[u8]>> {
+fn compress_gzip_level(raw: &[u8], level: Compression) -> Option<Arc<[u8]>> {
     if raw.is_empty() {
         return None;
     }
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    let mut encoder = GzEncoder::new(Vec::new(), level);
     encoder.write_all(raw).ok()?;
     let compressed = encoder.finish().ok()?;
     Some(Arc::from(compressed))
 }
 
-fn compress_brotli(raw: &[u8]) -> Option<Arc<[u8]>> {
+fn compress_gzip(raw: &[u8]) -> Option<Arc<[u8]>> {
+    compress_gzip_level(raw, Compression::best())
+}
+
+fn compress_brotli_quality(raw: &[u8], quality: u32) -> Option<Arc<[u8]>> {
     if raw.is_empty() {
         return None;
     }
     let params = brotli::enc::BrotliEncoderParams {
-        quality: 6,
+        quality: quality as i32,
         lgwin: 22,
         ..Default::default()
     };
     let mut compressed = Vec::new();
     brotli::BrotliCompress(&mut std::io::Cursor::new(raw), &mut compressed, &params).ok()?;
     Some(Arc::from(compressed))
+}
+
+fn compress_brotli(raw: &[u8]) -> Option<Arc<[u8]>> {
+    compress_brotli_quality(raw, 6)
 }
 
 impl Asset {
@@ -423,7 +431,15 @@ pub const ROUTES: &[Route] = &[
         operation: "graph.file_impact",
         status: 200,
         token: false,
-        query: &["path", "target", "focus_session", "certain"],
+        query: &[
+            "path",
+            "target",
+            "from",
+            "to",
+            "focus_session",
+            "agent",
+            "certain",
+        ],
     },
     Route {
         method: "GET",
@@ -584,6 +600,8 @@ pub const ROUTES: &[Route] = &[
             "service",
             "path",
             "target",
+            "from",
+            "to",
             "focus_session",
             "certain",
             "run_id",
@@ -696,6 +714,8 @@ pub const ROUTES: &[Route] = &[
             "project_id",
             "config_path",
             "target",
+            "from",
+            "to",
             "run_id",
             "agent",
             "service",
@@ -715,6 +735,8 @@ pub const ROUTES: &[Route] = &[
             "to",
             "contract",
             "certain",
+            "target",
+            "run_id",
         ],
     },
     Route {
@@ -730,6 +752,8 @@ pub const ROUTES: &[Route] = &[
             "path",
             "contract",
             "target",
+            "from",
+            "to",
             "run_id",
             "agent",
             "certain",
@@ -1797,14 +1821,22 @@ fn asset_response(
     .map_err(|_| HarnessError::unavailable("Could not construct HTTP response."))
 }
 
-fn response(status: u16, payload: Payload, head: bool) -> Result<Response<Body>> {
-    let (bytes, content_type, filename, etag, cache) = match payload {
+const MIN_COMPRESS_JSON_BYTES: usize = 1024;
+
+fn response_with_encoding(
+    status: u16,
+    payload: Payload,
+    encoding: AssetEncoding,
+    head: bool,
+) -> Result<Response<Body>> {
+    let (bytes, content_type, filename, etag, cache, is_json) = match payload {
         Payload::Json(v) => (
             serde_json::to_vec(&v)?,
             "application/json; charset=utf-8".into(),
             None,
             None,
             None,
+            true,
         ),
         Payload::Bytes {
             bytes,
@@ -1812,8 +1844,22 @@ fn response(status: u16, payload: Payload, head: bool) -> Result<Response<Body>>
             filename,
             etag,
             cache,
-        } => (bytes, content_type, filename, etag, cache),
+        } => (bytes, content_type, filename, etag, cache, false),
     };
+    let (body_bytes, content_encoding): (Vec<u8>, Option<&'static str>) =
+        if is_json && bytes.len() >= MIN_COMPRESS_JSON_BYTES {
+            match encoding {
+                AssetEncoding::Brotli => compress_brotli_quality(&bytes, 4)
+                    .filter(|c| c.len() < bytes.len())
+                    .map_or((bytes, None), |c| (c.to_vec(), Some("br"))),
+                AssetEncoding::Gzip => compress_gzip_level(&bytes, Compression::fast())
+                    .filter(|c| c.len() < bytes.len())
+                    .map_or((bytes, None), |c| (c.to_vec(), Some("gzip"))),
+                AssetEncoding::Identity => (bytes, None),
+            }
+        } else {
+            (bytes, None)
+        };
     let mut out = apply_security_headers(
         Response::builder()
             .status(
@@ -1821,9 +1867,15 @@ fn response(status: u16, payload: Payload, head: bool) -> Result<Response<Body>>
                     .map_err(|_| HarnessError::invalid("Invalid response status."))?,
             )
             .header(header::CONTENT_TYPE, content_type)
-            .header(header::CONTENT_LENGTH, bytes.len().to_string())
+            .header(header::CONTENT_LENGTH, body_bytes.len().to_string())
             .header(header::CACHE_CONTROL, cache.unwrap_or("no-store".into())),
     );
+    if is_json {
+        out = out.header(header::VARY, "Accept-Encoding");
+    }
+    if let Some(enc) = content_encoding {
+        out = out.header(header::CONTENT_ENCODING, enc);
+    }
     if let Some(tag) = etag {
         out = out.header(header::ETAG, tag);
     }
@@ -1849,7 +1901,7 @@ fn response(status: u16, payload: Payload, head: bool) -> Result<Response<Body>>
     out.body(if head {
         Body::empty()
     } else {
-        Body::from(bytes)
+        Body::from(body_bytes)
     })
     .map_err(|_| HarnessError::unavailable("Could not construct HTTP response."))
 }
@@ -1893,12 +1945,20 @@ fn matches_sse_filter(
 ) -> bool {
     if let Some(pid) = filter_pid
         && frame.event != "waiting_counts"
+        && !(frame.event == "resync" && frame.project_id.is_none())
         && frame.project_id.as_deref() != Some(pid)
     {
         return false;
     }
     if let Some(sid) = filter_sid
-        && !matches!(frame.event, "waiting_counts" | "graph_status")
+        && !matches!(
+            frame.event,
+            "waiting_counts"
+                | "graph_status"
+                | "system_graph_status"
+                | "omnigraph_status"
+                | "resync"
+        )
         && frame.session_id.as_deref() != Some(sid)
     {
         return false;
@@ -2831,17 +2891,24 @@ fn serve_sse_request(
 
 async fn handle(State(app): State<App>, request: Request<Body>) -> Response<Body> {
     let head = request.method() == axum::http::Method::HEAD;
-    match serve(&app, request, head).await {
+    let encoding = preferred_encoding(request.headers(), true, true);
+    match serve(&app, request, head, encoding).await {
         Ok(response) => response,
-        Err(error) => response(
+        Err(error) => response_with_encoding(
             error.status,
             Payload::Json(json!({"error":error.message})),
+            encoding,
             head,
         )
         .unwrap_or_else(|_| Response::new(Body::empty())),
     }
 }
-async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response<Body>> {
+async fn serve(
+    app: &App,
+    request: Request<Body>,
+    head: bool,
+    encoding: AssetEncoding,
+) -> Result<Response<Body>> {
     trusted(app, &request)?;
     let method = if head {
         "GET"
@@ -2894,9 +2961,10 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
         json!({})
     };
     if route.operation == "health" {
-        return response(
+        return response_with_encoding(
             200,
             Payload::Json(json!({"ok":true,"instance":app.instance})),
+            encoding,
             head,
         );
     }
@@ -2905,7 +2973,7 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
             return Err(HarnessError::invalid("Invalid shutdown request."));
         }
         let _ = app.shutdown.send(true);
-        return response(200, Payload::Json(json!({"ok":true})), head);
+        return response_with_encoding(200, Payload::Json(json!({"ok":true})), encoding, head);
     }
     let mut payload = app
         .services
@@ -2926,7 +2994,7 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
     } else {
         route.status
     };
-    response(status, payload, head)
+    response_with_encoding(status, payload, encoding, head)
 }
 pub async fn serve_listener(listener: tokio::net::TcpListener, app: App) -> Result<()> {
     let mut shutdown = app.shutdown.subscribe();
@@ -3171,5 +3239,118 @@ mod tests {
             asset.gzip_etag.as_deref().unwrap(),
             asset.br_etag.as_deref().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn json_compression_and_sse_filter_routes_behave_consistently() {
+        let small = response_with_encoding(
+            200,
+            Payload::Json(json!({"ok": true})),
+            AssetEncoding::Brotli,
+            false,
+        )
+        .unwrap();
+        assert_eq!(small.headers().get(header::CONTENT_ENCODING), None);
+
+        let large_val = json!({"items": vec!["alpha_beta_gamma_payload"; 120]});
+        let br_resp = response_with_encoding(
+            200,
+            Payload::Json(large_val.clone()),
+            AssetEncoding::Brotli,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            br_resp
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("br")
+        );
+        assert_eq!(
+            br_resp
+                .headers()
+                .get(header::VARY)
+                .and_then(|v| v.to_str().ok()),
+            Some("Accept-Encoding")
+        );
+        let br_bytes = to_bytes(br_resp.into_body(), usize::MAX).await.unwrap();
+        let mut br_decoded = Vec::new();
+        std::io::Read::read_to_end(
+            &mut brotli::Decompressor::new(br_bytes.as_ref(), 4096),
+            &mut br_decoded,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&br_decoded).unwrap(),
+            large_val
+        );
+
+        let gz_resp = response_with_encoding(
+            200,
+            Payload::Json(large_val.clone()),
+            AssetEncoding::Gzip,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            gz_resp
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip")
+        );
+        let gz_bytes = to_bytes(gz_resp.into_body(), usize::MAX).await.unwrap();
+        let mut gz_decoded = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::GzDecoder::new(gz_bytes.as_ref()),
+            &mut gz_decoded,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&gz_decoded).unwrap(),
+            large_val
+        );
+
+        let head_resp =
+            response_with_encoding(200, Payload::Json(large_val), AssetEncoding::Brotli, true)
+                .unwrap();
+        assert!(
+            to_bytes(head_resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        for (op, expected) in [
+            ("graph.file_impact", &["from", "to", "agent"][..]),
+            ("system_graph.service_file_impact", &["from", "to"][..]),
+            ("system_graph.changes", &["from", "to"][..]),
+            ("system_graph.impact", &["from", "to"][..]),
+            ("system_graph.bridge", &["target", "run_id"][..]),
+        ] {
+            let route = ROUTES.iter().find(|r| r.operation == op).unwrap();
+            for q in expected {
+                assert!(route.query.contains(q), "{op} missing query param {q}");
+            }
+        }
+
+        let lag = StreamFrame {
+            seq: 1,
+            event: "resync",
+            session_id: None,
+            project_id: None,
+            data: json!({"reason": "graph_bridge_lagged"}),
+        };
+        assert!(matches_sse_filter(&lag, Some("s1"), Some("p1")));
+        let sys = StreamFrame {
+            seq: 2,
+            event: "system_graph_status",
+            session_id: None,
+            project_id: Some("p1".into()),
+            data: json!({"action": "disable"}),
+        };
+        assert!(matches_sse_filter(&sys, Some("s1"), Some("p1")));
+        assert!(!matches_sse_filter(&sys, Some("s1"), Some("p2")));
     }
 }

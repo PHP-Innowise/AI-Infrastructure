@@ -472,10 +472,25 @@ pub fn build_changes_overlay(
         }
     }
 
-    let seeds: Vec<String> = m::array(&run_doc["plan"]["context"]["services"])
+    // Prefer wave-0 root seeds (`reason` selected/contract_provider or path len 1)
+    // from `plan.impact`; `plan.context.services` lists all downstream participants.
+    let mut seeds: Vec<String> = m::array(&run_doc["plan"]["impact"])
         .into_iter()
-        .filter_map(|v| v.as_str().map(str::to_owned))
+        .filter(|entry| {
+            matches!(
+                entry["reason"].as_str(),
+                Some("selected" | "contract_provider")
+            ) || m::array(&entry["path"]).len() == 1
+        })
+        .map(|entry| m::text(&entry, "service"))
+        .filter(|s| !s.is_empty())
         .collect();
+    if seeds.is_empty() {
+        seeds = m::array(&run_doc["plan"]["context"]["services"])
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+    }
     let unopened = if run_doc["cross_service_unopened"].is_array() {
         run_doc["cross_service_unopened"].clone()
     } else if run_doc["evidence"]["cross_service_unopened"].is_array() {
