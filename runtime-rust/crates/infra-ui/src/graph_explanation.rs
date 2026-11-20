@@ -9,9 +9,15 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Element, HtmlElement, KeyboardEvent, MouseEvent};
 
+#[derive(Clone)]
+struct ReturnFocusTarget {
+    element: HtmlElement,
+    fallback_canvas_id: Option<String>,
+}
+
 thread_local! {
-    static MENU_RETURN_FOCUS: RefCell<Option<HtmlElement>> = const { RefCell::new(None) };
-    static DIALOG_RETURN_FOCUS: RefCell<Option<HtmlElement>> = const { RefCell::new(None) };
+    static MENU_RETURN_FOCUS: RefCell<Option<ReturnFocusTarget>> = const { RefCell::new(None) };
+    static DIALOG_RETURN_FOCUS: RefCell<Option<ReturnFocusTarget>> = const { RefCell::new(None) };
 }
 
 const DIALOG: &str = "graph-explanation";
@@ -183,9 +189,11 @@ fn find_explainable_hit(
             return Some(ExplainHitSource::Dom { hit, canvas_id });
         }
     }
-    let (cx, cy) = position?;
-    let (hit_kind, hit_index) =
-        graph_viewport::canvas2d::hit_test_client(&canvas_id, cx as f64, cy as f64, 12.0)?;
+    let (hit_kind, hit_index) = if let Some((cx, cy)) = position {
+        graph_viewport::canvas2d::hit_test_client(&canvas_id, cx as f64, cy as f64, 12.0)?
+    } else {
+        graph_map::focused_dense_hit_for_canvas(&canvas_id)?
+    };
     let (kind, data) =
         graph_viewport::canvas2d::explain_target_for_hit(&canvas_id, hit_kind, hit_index)?;
     Some(ExplainHitSource::Canvas2d {
@@ -688,21 +696,41 @@ pub fn commit_selection_evidence(
     (subject, evidence)
 }
 
-fn capture_return_focus(fallback: &Element) -> Option<HtmlElement> {
+fn capture_return_focus(fallback: &Element, canvas_id: Option<&str>) -> Option<ReturnFocusTarget> {
     let active = dom::document().active_element().filter(|el| {
         let tag = el.tag_name();
         !tag.eq_ignore_ascii_case("BODY") && !tag.eq_ignore_ascii_case("HTML")
     });
+    let fallback_canvas_id = canvas_id.map(str::to_owned).or_else(|| {
+        fallback
+            .closest(EXPLAINABLE_CANVAS_SELECTOR)
+            .ok()
+            .flatten()
+            .map(|c| c.id())
+            .filter(|id| !id.is_empty())
+    });
     active
         .and_then(|el| el.dyn_into::<HtmlElement>().ok())
         .or_else(|| fallback.clone().dyn_into::<HtmlElement>().ok())
+        .map(|element| ReturnFocusTarget {
+            element,
+            fallback_canvas_id,
+        })
 }
 
-fn restore_focus_slot(slot: &RefCell<Option<HtmlElement>>) {
+fn restore_focus_slot(slot: &RefCell<Option<ReturnFocusTarget>>) {
     let prev = slot.borrow_mut().take();
-    if let Some(el) = prev {
-        if el.is_connected() {
-            let _ = el.focus();
+    if let Some(target) = prev {
+        if target.element.is_connected() {
+            let _ = target.element.focus();
+            return;
+        }
+        if let Some(canvas_id) = target.fallback_canvas_id {
+            if let Some(el) = dom::get(&canvas_id).and_then(|c| c.dyn_into::<HtmlElement>().ok()) {
+                if el.is_connected() {
+                    let _ = el.focus();
+                }
+            }
         }
     }
 }
@@ -766,6 +794,18 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             })
             .filter(|s| !s.trim().is_empty())?
     };
+    let (view, map, scope_opt) = resolve_surface_view_and_scope(&canvas_id);
+    let system_explain =
+        resolve_system_explain_meta(&canvas_id, &dom_ctx, &data, scope_opt.as_ref());
+
+    let node_key = data.as_str().or(data["path"].as_str()).unwrap_or("");
+    let matched_node = (!is_omnigraph && !is_commit_graph && !link && !node_key.is_empty())
+        .then(|| {
+            view["nodes"]
+                .as_array()
+                .and_then(|nodes| nodes.iter().find(|node| node["path"] == node_key))
+        })
+        .flatten();
     let mut subject = if link {
         let (from, to) = (m::text(&data, "from"), m::text(&data, "to"));
         if !from.is_empty() || !to.is_empty() {
@@ -773,15 +813,13 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
         } else {
             label.clone()
         }
+    } else if let Some(title) = hit_opt.as_ref().and_then(|hit| hit.get_attribute("title")) {
+        title
+    } else if let Some(node) = matched_node {
+        format_node_explain_subject(node, &view, &label)
     } else {
-        hit_opt
-            .as_ref()
-            .and_then(|hit| hit.get_attribute("title"))
-            .unwrap_or_else(|| label.clone())
+        label.clone()
     };
-    let (view, map, scope_opt) = resolve_surface_view_and_scope(&canvas_id);
-    let system_explain =
-        resolve_system_explain_meta(&canvas_id, &dom_ctx, &data, scope_opt.as_ref());
 
     let mut selection = if is_omnigraph {
         let (omni_subject, omni_evidence) = omnigraph_selection_evidence(&view, &map, &data, link);
@@ -854,10 +892,8 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             "graph_evidence": commit_evidence,
         })
     } else {
-        let key = data.as_str().or(data["path"].as_str()).unwrap_or("");
-        let node = view["nodes"]
-            .as_array()
-            .and_then(|nodes| nodes.iter().find(|node| node["path"] == key));
+        let key = node_key;
+        let node = matched_node;
         let file = node.and_then(|node| node["file"].as_str()).or_else(|| {
             if node.is_some_and(|node| m::yes(&node["symbol"])) && view["mode"] == "file" {
                 return view["scope"].as_str();
@@ -868,6 +904,13 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
                 .find(|group| rows(group, "names").iter().any(|name| name["key"] == key))
                 .and_then(|group| group["path"].as_str())
         });
+        let line = node.and_then(|n| n["line"].as_u64()).filter(|l| *l > 0);
+        let symbol_kind = node
+            .and_then(|n| n["kind"].as_str())
+            .filter(|s| !s.is_empty());
+        let visibility = node
+            .and_then(|n| n["visibility"].as_str())
+            .filter(|s| !s.is_empty());
         let aggregate = node.is_some_and(|node| m::yes(&node["layer"]) || m::yes(&node["module"]));
         json!({
             "kind": if link { "link" } else { "node" },
@@ -876,6 +919,9 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             "data": data,
             "context": graph_selection(&view, &map),
             "file": file,
+            "line": line,
+            "symbol_kind": symbol_kind,
+            "visibility": visibility,
             "aggregate": aggregate,
             "graph_evidence": if link { V::Null } else { visible_neighbors(&view, key) },
         })
@@ -920,7 +966,7 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
     let top = y.clamp(0, (root.client_height() - menu.offset_height() - 8).max(0));
     let _ = menu.style().set_property("left", &format!("{left}px"));
     let _ = menu.style().set_property("top", &format!("{top}px"));
-    let captured = capture_return_focus(hit_opt.as_ref().unwrap_or(&dom_ctx));
+    let captured = capture_return_focus(hit_opt.as_ref().unwrap_or(&dom_ctx), Some(&canvas_id));
     MENU_RETURN_FOCUS.with(|slot| *slot.borrow_mut() = captured);
     if position.is_none() {
         dom::focus(MENU);
@@ -974,9 +1020,13 @@ pub fn click(target: &Element) -> bool {
             let selection = m::take(SELECTION);
             let meta = m::take(SELECTION_META);
             dom::hidden(MENU, true);
+            let fallback_cid = meta["canvas_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
             let saved = MENU_RETURN_FOCUS
                 .with(|slot| slot.borrow_mut().take())
-                .or_else(|| capture_return_focus(target));
+                .or_else(|| capture_return_focus(target, fallback_cid.as_deref()));
             DIALOG_RETURN_FOCUS.with(|slot| *slot.borrow_mut() = saved);
             spawn_local(explain(selection, meta));
             true
@@ -1300,12 +1350,42 @@ async fn add_evidence(selection: &mut V, scope: &GraphTargetScope) {
     }
 }
 
-fn expected_project_for_canvas(canvas_id: &str) -> String {
+fn expected_project_for_canvas(
+    canvas_id: &str,
+    scope: Option<&GraphTargetScope>,
+    selection: &V,
+) -> String {
     if canvas_id == "omnigraph-canvas" {
-        omnigraph::current_project_id()
-    } else {
-        dom::value("project")
+        return omnigraph::current_project_id();
     }
+    if let Some(pid) = scope
+        .map(GraphTargetScope::project_id)
+        .filter(|s| !s.trim().is_empty())
+    {
+        return pid.to_owned();
+    }
+    if let Some(pid) = selection["context"]["project"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return pid.to_owned();
+    }
+    dom::value("project")
+}
+
+fn show_preflight_error(subject: &str, error: &str) {
+    stop();
+    let _ = m::next(DIALOG);
+    dom::text("graph-explanation-subject", subject);
+    if let Some(el) = dom::get("graph-explanation-answer") {
+        el.set_inner_html("");
+        let _ = el.set_attribute("data-streaming", "false");
+    }
+    dom::hidden("graph-explanation-answer", true);
+    dom::text("graph-explanation-status", "");
+    dom::error("graph-explanation-error", error);
+    dom::dialog(DIALOG, true);
 }
 
 fn resolve_system_provider_and_model() -> (String, V) {
@@ -1416,11 +1496,14 @@ fn bound_graph_evidence(mut evidence: V, max_bytes: usize) -> V {
 
 async fn explain(mut selection: V, meta: V) {
     if !selection.is_object() {
+        show_preflight_error("Explanation", "No graph selection is available to explain.");
         return;
     }
+    let subject = m::text(&selection, "subject");
     let canvas_id = m::text(&meta, "canvas_id");
     let sys_explain = &meta["system_explain"];
     let is_system = sys_explain.is_object();
+    let scope_opt = GraphTargetScope::from_json(&meta["scope"]);
     let (project, config_path, services, evidence_scope) = if is_system {
         let pid = m::text(sys_explain, "project_id");
         let cfg = m::text(sys_explain, "config_path");
@@ -1429,16 +1512,28 @@ async fn explain(mut selection: V, meta: V) {
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect::<Vec<_>>();
         if pid.is_empty() || cfg.is_empty() {
+            show_preflight_error(
+                &subject,
+                "System workspace context is missing project or config path for this explanation.",
+            );
             return;
         }
-        let scope = GraphTargetScope::from_json(&meta["scope"]);
-        (pid, cfg, svcs, scope)
+        (pid, cfg, svcs, scope_opt.clone())
     } else {
-        let pid = expected_project_for_canvas(&canvas_id);
-        if pid.is_empty() || selection["context"]["project"] != pid {
+        let pid = expected_project_for_canvas(&canvas_id, scope_opt.as_ref(), &selection);
+        let sel_pid = selection["context"]["project"]
+            .as_str()
+            .map(str::trim)
+            .unwrap_or("");
+        if pid.is_empty() || sel_pid != pid {
+            show_preflight_error(
+                &subject,
+                "Select a project graph context before starting an explanation.",
+            );
             return;
         }
-        let scope = GraphTargetScope::from_json(&meta["scope"])
+        let scope = scope_opt
+            .clone()
             .unwrap_or_else(|| GraphTargetScope::single(pid.clone()));
         (pid, String::new(), Vec::new(), Some(scope))
     };
@@ -1446,7 +1541,7 @@ async fn explain(mut selection: V, meta: V) {
     // One explanation at a time: the window shows only the newest.
     stop();
     let epoch = m::next(DIALOG);
-    dom::text("graph-explanation-subject", &m::text(&selection, "subject"));
+    dom::text("graph-explanation-subject", &subject);
     if let Some(el) = dom::get("graph-explanation-answer") {
         el.set_inner_html("");
         let _ = el.set_attribute("data-streaming", "false");
@@ -1460,7 +1555,13 @@ async fn explain(mut selection: V, meta: V) {
     }
     let bounded = bound_graph_evidence(selection["graph_evidence"].take(), 16_000);
     selection["graph_evidence"] = bounded;
-    if !visible(epoch) || (!is_system && expected_project_for_canvas(&canvas_id) != project) {
+    if !visible(epoch) {
+        return;
+    }
+    if !is_system
+        && expected_project_for_canvas(&canvas_id, scope_opt.as_ref(), &selection) != project
+    {
+        show_error("The active graph project changed before the explanation could start.");
         return;
     }
     let req_body = if is_system {
@@ -1721,6 +1822,29 @@ fn is_horizontal_rule(line: &str) -> bool {
         && (t.bytes().all(|b| b == b'-')
             || t.bytes().all(|b| b == b'*')
             || t.bytes().all(|b| b == b'_'))
+}
+
+pub(crate) fn format_node_explain_subject(node: &V, view: &V, fallback: &str) -> String {
+    let name = m::text(node, "name");
+    let file = node["file"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            (m::yes(&node["symbol"]) && view["mode"] == "file")
+                .then(|| view["scope"].as_str())
+                .flatten()
+        })
+        .unwrap_or("");
+    let line = node["line"].as_u64().unwrap_or(0);
+    let sym_kind = node["kind"].as_str().filter(|s| !s.is_empty());
+    match (name.is_empty(), file.is_empty(), line > 0, sym_kind) {
+        (false, false, true, Some(k)) => format!("{name} ({k}) · {file}:{line}"),
+        (false, false, true, None) => format!("{name} · {file}:{line}"),
+        (false, false, false, Some(k)) => format!("{name} ({k}) · {file}"),
+        (false, false, false, None) => format!("{name} · {file}"),
+        (false, true, _, Some(k)) => format!("{name} ({k})"),
+        _ => fallback.to_owned(),
+    }
 }
 
 /// Renders assistant Markdown into XSS-safe HTML using `app.css` classes (zero
@@ -2337,5 +2461,43 @@ Streaming <script>alert(1)</script> [bad](javascript:alert(1)) [docs](https://ex
             bounded["uses"][0]["path"],
             json!("src/mod_0/very_long_component_name_0.rs")
         );
+    }
+
+    #[test]
+    fn expected_project_prefers_scoped_service_and_dense_node_evidence_carries_location() {
+        let sys_scope = GraphTargetScope::SystemService {
+            project_id: "svc-b".to_owned(),
+            config_path: "system.yaml".to_owned(),
+            service_id: "svc-b".to_owned(),
+            services: vec![],
+            run_id: None,
+            run_title: None,
+            launches: vec![],
+        };
+        assert_eq!(
+            expected_project_for_canvas("graph-map-canvas", Some(&sys_scope), &json!({})),
+            "svc-b"
+        );
+        assert_eq!(
+            expected_project_for_canvas(
+                "graph-map-canvas",
+                None,
+                &json!({"context": {"project": "svc-c"}})
+            ),
+            "svc-c"
+        );
+
+        let subj = format_node_explain_subject(
+            &json!({"name": "issue", "kind": "method", "file": "src/Auth/Token.php", "line": 42}),
+            &json!({"mode": "map"}),
+            "fallback",
+        );
+        assert_eq!(subj, "issue (method) · src/Auth/Token.php:42");
+        let file_mode_subj = format_node_explain_subject(
+            &json!({"name": "check", "symbol": true, "line": 17}),
+            &json!({"mode": "file", "scope": "src/Auth/Guard.php"}),
+            "fallback",
+        );
+        assert_eq!(file_mode_subj, "check · src/Auth/Guard.php:17");
     }
 }
