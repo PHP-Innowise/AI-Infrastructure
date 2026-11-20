@@ -1058,21 +1058,34 @@ pub(super) fn point(canvas: &str, target: Option<web_sys::Element>) {
     else {
         return;
     };
-    let at = target
-        .and_then(|target| {
-            target
-                .closest("[data-n],[data-of],[data-ends]")
-                .ok()
-                .flatten()
-        })
-        .and_then(|part| {
-            pointed(
-                part.get_attribute("data-n")
-                    .or_else(|| part.get_attribute("data-of"))
-                    .as_deref(),
-                part.get_attribute("data-ends").as_deref(),
-            )
-        });
+    let hovered_part = target.and_then(|target| {
+        target
+            .closest("[data-n],[data-of],[data-ends]")
+            .ok()
+            .flatten()
+    });
+    let at = hovered_part.as_ref().and_then(|part| {
+        pointed(
+            part.get_attribute("data-n")
+                .or_else(|| part.get_attribute("data-of"))
+                .as_deref(),
+            part.get_attribute("data-ends").as_deref(),
+        )
+    });
+    let hovered_node_idx = match at {
+        Some(Pointed::Place(idx)) => Some(idx),
+        _ => None,
+    };
+    let node_el_opt = hovered_part.filter(|el| el.class_list().contains("graph-map-node"));
+    graph_viewport::dense_dom::sync_dom_hover_attr(
+        &plane,
+        hovered_node_idx,
+        node_el_opt.as_ref(),
+        |el| {
+            el.get_attribute("data-n")
+                .and_then(|s| s.parse::<usize>().ok())
+        },
+    );
     let told = at.map(|at| format!("{at:?}")).unwrap_or_default();
     if plane.get_attribute("data-pointed").unwrap_or_default() == told {
         return;
@@ -1143,7 +1156,19 @@ pub(super) fn highlight_layer(canvas_id: &str, layer: Option<&str>) {
     };
     let layer = layer.filter(|id| !id.is_empty());
     let next_attr = layer.unwrap_or("");
-    if plane.get_attribute("data-layer-hover").unwrap_or_default() == next_attr {
+    let changed = plane.get_attribute("data-layer-hover").unwrap_or_default() != next_attr;
+    if graph_viewport::canvas2d::set_active_layer(canvas_id, layer) {
+        if let Some(surface) = pan_surface_for_canvas(canvas_id) {
+            let cam = load_surface_camera(surface);
+            graph_viewport::canvas2d::paint_scene(
+                canvas_id,
+                cam.viewport_cam(),
+                super::surfaces::current_dense_hover(canvas_id),
+                true,
+            );
+        }
+    }
+    if !changed {
         return;
     }
     let nodes = dom::all(&format!("#{canvas_id} .graph-map-node[data-arch-layer-id]"));
@@ -1164,11 +1189,30 @@ pub(super) fn highlight_layer(canvas_id: &str, layer: Option<&str>) {
 /// Spotlights the canvas node whose payload matches a hovered side-panel chip.
 pub(super) fn point_part(canvas_id: &str, path: Option<&str>) {
     let target = path.and_then(|key| {
+        let quoted = json!(key).to_string();
         dom::all(&format!("#{canvas_id} .graph-map-node"))
             .into_iter()
-            .find(|node| node.get_attribute("data-payload").as_deref() == Some(key))
+            .find(|node| {
+                let raw = node.get_attribute("data-payload").unwrap_or_default();
+                raw == key || raw == quoted
+            })
     });
-    point(canvas_id, target);
+    if target.is_some() {
+        point(canvas_id, target);
+        return;
+    }
+    let dense_idx = path.and_then(|key| {
+        SURFACE_PLAN_CACHE.with(|cache| {
+            let guard = cache.borrow();
+            let entry = guard.get(canvas_id).filter(|e| e.is_dense)?;
+            entry.node_keys.iter().position(|k| k == key)
+        })
+    });
+    if let Some(idx) = dense_idx {
+        repaint_dense_hover(canvas_id, Some(Pointed::Place(idx)));
+    } else {
+        point(canvas_id, None);
+    }
 }
 pub(super) fn attach_canvas_hover(canvas_id: &'static str) {
     let Some(element) = dom::get(canvas_id) else {
@@ -1197,6 +1241,18 @@ pub(super) fn attach_canvas_hover(canvas_id: &'static str) {
                     dom::get(canvas_id).and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
                 {
                     let _ = canvas_el.style().set_property("cursor", "");
+                    let _ = canvas_el.remove_attribute("title");
+                }
+                if super::surfaces::set_dense_hover(canvas_id, None) {
+                    if let Some(surface) = pan_surface_for_canvas(canvas_id) {
+                        let cam = load_surface_camera(surface);
+                        graph_viewport::canvas2d::paint_scene(
+                            canvas_id,
+                            cam.viewport_cam(),
+                            None,
+                            true,
+                        );
+                    }
                 }
             }
         });
@@ -2375,7 +2431,26 @@ pub(super) fn commit_dock_note(dock: &V) -> String {
         plural(rows.len() as u64, "commit", "commits")
     )
 }
+#[cfg(test)]
 pub(super) fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String {
+    #[cfg(target_arch = "wasm32")]
+    let window = dom::get("graph-commit-graph-list").map(|list| {
+        (
+            list.scroll_top() as f64,
+            (list.client_height() as f64).max(320.0),
+        )
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let window: Option<(f64, f64)> = None;
+    render_commit_dock_list_with_window(dock, selected_target, now, window)
+}
+
+pub(super) fn render_commit_dock_list_with_window(
+    dock: &V,
+    selected_target: &str,
+    now: i64,
+    window: Option<(f64, f64)>,
+) -> String {
     // A row shows how much memory to review only once its commit's banner
     // has the answers; rows are never asked for a count each.
     let counts = m::data(COMMIT_MEMORY_COUNTS);
@@ -2402,11 +2477,6 @@ pub(super) fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64)
     let range_head = m::text(dock, "range_head");
     let range = (!range_base.is_empty() && !range_head.is_empty())
         .then_some((range_base.as_str(), range_head.as_str()));
-    #[cfg(target_arch = "wasm32")]
-    let window = dom::get("graph-commit-graph-list")
-        .map(|list| (list.scroll_top() as f64, list.client_height() as f64));
-    #[cfg(not(target_arch = "wasm32"))]
-    let window: Option<(f64, f64)> = None;
     crate::git_commit_graph::render_commit_graph_rows_with_range(
         &rows,
         active_index,
@@ -2680,6 +2750,65 @@ pub(super) fn commit_action_target(action: &str, payload: &V) -> Option<String> 
         _ => None,
     }
 }
+thread_local! {
+    static COMMIT_DOCK_LAST_WINDOW: RefCell<Option<(usize, usize, usize, u64)>> =
+        const { RefCell::new(None) };
+    static COMMIT_DOCK_RAF_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COMMIT_DOCK_RAF_CB: RefCell<Option<Closure<dyn FnMut()>>> =
+        const { RefCell::new(None) };
+}
+
+fn commit_dock_data_sig(dock: &V, selected_target: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let rows = m::array(&dock["rows"]);
+    rows.len().hash(&mut h);
+    rows.first().and_then(|r| r["commit"].as_str()).hash(&mut h);
+    rows.last().and_then(|r| r["commit"].as_str()).hash(&mut h);
+    selected_target.hash(&mut h);
+    m::text(dock, "range_base").hash(&mut h);
+    m::text(dock, "range_head").hash(&mut h);
+    m::yes(&dock["more"]).hash(&mut h);
+    h.finish()
+}
+
+fn sync_commit_dock_virtual_window(force: bool) {
+    let dock = commit_dock();
+    if !m::yes(&dock["open"]) {
+        COMMIT_DOCK_LAST_WINDOW.with(|w| *w.borrow_mut() = None);
+        return;
+    }
+    let rows = m::array(&dock["rows"]);
+    let target = m::text(&state(), "target");
+    let list_opt = dom::get("graph-commit-graph-list");
+    let (scroll_top, viewport_h) = list_opt.as_ref().map_or((0.0, 320.0), |l| {
+        (l.scroll_top() as f64, (l.client_height() as f64).max(320.0))
+    });
+    let (start_idx, end_idx) =
+        crate::git_commit_graph::commit_dock_window_range(rows.len(), scroll_top, viewport_h);
+    let sig = commit_dock_data_sig(&dock, &target);
+    if !force
+        && COMMIT_DOCK_LAST_WINDOW
+            .with(|w| *w.borrow() == Some((start_idx, end_idx, rows.len(), sig)))
+    {
+        return;
+    }
+    COMMIT_DOCK_LAST_WINDOW.with(|w| *w.borrow_mut() = Some((start_idx, end_idx, rows.len(), sig)));
+    let now = (js_sys::Date::now() / 1000.0) as i64;
+    let list_html = render_commit_dock_list_with_window(
+        &dock,
+        &target,
+        now,
+        list_opt.as_ref().map(|_| (scroll_top, viewport_h)),
+    );
+    html("graph-commit-graph-list", &list_html);
+    if let Some(list) = list_opt {
+        if rows.len() > 80 && scroll_top > 0.0 {
+            list.set_scroll_top(scroll_top.round() as i32);
+        }
+    }
+}
+
 pub(super) fn ensure_commit_dock_scroll_listener() {
     let Some(list) = dom::get("graph-commit-graph-list") else {
         return;
@@ -2688,14 +2817,33 @@ pub(super) fn ensure_commit_dock_scroll_listener() {
         return;
     }
     let _ = list.set_attribute("data-scroll-watched", "true");
+    COMMIT_DOCK_RAF_CB.with(|cell| {
+        if cell.borrow().is_none() {
+            *cell.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+                COMMIT_DOCK_RAF_PENDING.with(|p| p.set(false));
+                let dock = commit_dock();
+                if m::yes(&dock["open"]) && m::array(&dock["rows"]).len() > 80 {
+                    sync_commit_dock_virtual_window(false);
+                }
+            }) as Box<dyn FnMut()>));
+        }
+    });
     let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
         let dock = commit_dock();
-        if m::yes(&dock["open"]) && m::array(&dock["rows"]).len() > 80 {
-            let target = m::text(&state(), "target");
-            let list_html =
-                render_commit_dock_list(&dock, &target, (js_sys::Date::now() / 1000.0) as i64);
-            html("graph-commit-graph-list", &list_html);
+        if !m::yes(&dock["open"]) || m::array(&dock["rows"]).len() <= 80 {
+            return;
         }
+        let already = COMMIT_DOCK_RAF_PENDING.with(|p| p.replace(true));
+        if already {
+            return;
+        }
+        COMMIT_DOCK_RAF_CB.with(|cell| {
+            if let Some(raf_cb) = cell.borrow().as_ref() {
+                let _ = dom::window().request_animation_frame(raf_cb.as_ref().unchecked_ref());
+            } else {
+                COMMIT_DOCK_RAF_PENDING.with(|p| p.set(false));
+            }
+        });
     });
     if list
         .add_event_listener_with_callback("scroll", cb.as_ref().unchecked_ref())
@@ -2715,12 +2863,11 @@ pub(super) fn show_commit_dock() {
         if opened { "true" } else { "false" },
     );
     if !opened {
+        COMMIT_DOCK_LAST_WINDOW.with(|w| *w.borrow_mut() = None);
         return;
     }
     ensure_commit_dock_scroll_listener();
     let target = m::text(&state(), "target");
-    let list_html = render_commit_dock_list(&dock, &target, (js_sys::Date::now() / 1000.0) as i64);
-    html("graph-commit-graph-list", &list_html);
     let rows = m::array(&dock["rows"]);
     let active = dock["active"]
         .as_u64()
@@ -2732,6 +2879,19 @@ pub(super) fn show_commit_dock() {
                 target.strip_prefix("commit:"),
             )
         });
+    if rows.len() > 80 {
+        if let (Some(idx), Some(list)) = (active, dom::get("graph-commit-graph-list")) {
+            let viewport_h = (list.client_height() as f64).max(320.0);
+            if let Some(next_top) = crate::git_commit_graph::scroll_top_for_commit_row(
+                idx,
+                list.scroll_top() as f64,
+                viewport_h,
+            ) {
+                list.set_scroll_top(next_top.round() as i32);
+            }
+        }
+    }
+    sync_commit_dock_virtual_window(true);
     if let Some(idx) = active {
         dom::attr(
             "graph-commit-graph-list",
@@ -2774,6 +2934,22 @@ pub(super) fn mark_commit_dock(next: usize) {
         });
     dock["active"] = json!(next);
     m::set("graph-commit-graph", dock);
+    let active_id = format!("graph-commit-row-{next}");
+    if rows.len() > 80 {
+        if let Some(list) = dom::get("graph-commit-graph-list") {
+            let viewport_h = (list.client_height() as f64).max(320.0);
+            if let Some(next_top) = crate::git_commit_graph::scroll_top_for_commit_row(
+                next,
+                list.scroll_top() as f64,
+                viewport_h,
+            ) {
+                list.set_scroll_top(next_top.round() as i32);
+            }
+        }
+        if dom::get(&active_id).is_none() {
+            sync_commit_dock_virtual_window(true);
+        }
+    }
     if let Some(before) = prev.filter(|&before| before != next) {
         dom::attr(
             &format!("graph-commit-row-{before}"),
@@ -2781,7 +2957,6 @@ pub(super) fn mark_commit_dock(next: usize) {
             "false",
         );
     }
-    let active_id = format!("graph-commit-row-{next}");
     dom::attr(&active_id, "aria-selected", "true");
     dom::attr(
         "graph-commit-graph-list",
@@ -3275,7 +3450,7 @@ pub(super) fn commit_dock_key(e: &web_sys::KeyboardEvent) -> bool {
             }
             false
         }
-        "Enter" if bare && !e.shift_key() && !on_button => {
+        "Enter" | " " if bare && !on_button => {
             let Some(active) = current.or(selected) else {
                 return false;
             };
@@ -3294,6 +3469,10 @@ pub(super) fn commit_dock_key(e: &web_sys::KeyboardEvent) -> bool {
             let Some(row_target) = row_target else {
                 return false;
             };
+            if e.key() == " " {
+                e.prevent_default();
+            }
+            m::set("graph-commit-shift", json!(e.shift_key()));
             spawn_local(async move {
                 event(
                     "click",
@@ -3411,6 +3590,104 @@ fn embedded_find_key(e: &web_sys::KeyboardEvent) -> bool {
     }
 }
 
+fn handle_surface_canvas_keyboard(surface: MapSurface, e: &web_sys::KeyboardEvent) -> bool {
+    let target_el = e
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    if is_editable_key_target(target_el.as_ref()) {
+        return false;
+    }
+    let key = e.key();
+    let key_str = key.as_str();
+    let radar_id = format!("{}-radar", surface.canvas);
+    let on_radar = target_el
+        .as_ref()
+        .is_some_and(|el| el.closest(&format!("#{radar_id}")).ok().flatten().is_some());
+    if on_radar
+        && matches!(
+            key_str,
+            "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown"
+        )
+    {
+        let step = if e.shift_key() { 120.0 } else { 40.0 };
+        let (dx, dy) = match key_str {
+            "ArrowLeft" => (step, 0.0),
+            "ArrowRight" => (-step, 0.0),
+            "ArrowUp" => (0.0, step),
+            "ArrowDown" => (0.0, -step),
+            _ => (0.0, 0.0),
+        };
+        let mut cam = load_surface_camera(surface);
+        cam.pan_x += dx;
+        cam.pan_y += dy;
+        cam.fit_mode = false;
+        save_surface_camera(surface, &cam);
+        apply_surface_camera(surface, &cam);
+        e.prevent_default();
+        return true;
+    }
+    if e.alt_key() && !e.ctrl_key() && !e.meta_key() {
+        if let Some(node_el) = target_el
+            .as_ref()
+            .and_then(|el| el.closest(".graph-map-node[data-n]").ok().flatten())
+        {
+            if let Some(idx) = node_el
+                .get_attribute("data-n")
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                let step = if e.shift_key() { 60.0 } else { 20.0 };
+                let (dx, dy) = match key_str {
+                    "ArrowLeft" => (-step, 0.0),
+                    "ArrowRight" => (step, 0.0),
+                    "ArrowUp" => (0.0, -step),
+                    "ArrowDown" => (0.0, step),
+                    "Backspace" | "Delete" => {
+                        let key_str_val = node_el
+                            .get_attribute("data-payload")
+                            .and_then(|raw| serde_json::from_str::<V>(&raw).ok())
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_default();
+                        if !key_str_val.is_empty()
+                            && super::surfaces::unpin_surface_node(surface, &key_str_val)
+                        {
+                            e.prevent_default();
+                            return true;
+                        }
+                        return false;
+                    }
+                    _ => return false,
+                };
+                if super::surfaces::nudge_surface_node_pin(surface, idx, dx, dy) {
+                    e.prevent_default();
+                    return true;
+                }
+            }
+        }
+    }
+    let bare = !e.ctrl_key() && !e.meta_key() && !e.alt_key();
+    if bare && matches!(key_str, "Enter" | " ") {
+        if let Some(edge_hit) = target_el
+            .as_ref()
+            .and_then(|el| el.closest(".graph-map-hit[role='button']").ok().flatten())
+        {
+            if let Some(raw) = edge_hit.get_attribute("data-payload") {
+                if let Ok(payload) = serde_json::from_str::<V>(&raw) {
+                    e.prevent_default();
+                    if surface.embedded {
+                        let _ = handle_surface_click(surface, "", "graph-map-link", &payload);
+                    } else {
+                        spawn_local(async move {
+                            event("click", "", "graph-map-link", &payload, "", false).await;
+                        });
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Keys of the map: those of the search of the project, Commit Dock arrows,
 /// the open picker (arrows/Enter/Escape), and zoom/Escape shortcuts across
 /// the modal, link dialog, and embedded graph surfaces.
@@ -3451,6 +3728,9 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
             return false;
         }
         if open() {
+            if handle_surface_canvas_keyboard(MODAL_SURFACE, e) {
+                return true;
+            }
             if e.key() == "Escape" {
                 if dom::get("graph-map-display-popover")
                     .is_some_and(|el| !el.has_attribute("hidden"))
@@ -3521,6 +3801,9 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
             return false;
         }
         if let Some(surface) = active_embedded_surface_for_key() {
+            if handle_surface_canvas_keyboard(surface, e) {
+                return true;
+            }
             let mut cam = load_surface_camera(surface);
             if e.key() == "Escape" {
                 if surface_state(surface)["pick"].is_object() {

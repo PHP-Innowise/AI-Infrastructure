@@ -2308,7 +2308,7 @@ fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
     // says which two places it joins.
     let html = canvas(&super::tests::view());
     assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 2);
-    assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" role=\"button\"><title>Order uses Cart · select to see what makes up this link</title>"));
+    assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" role=\"button\" tabindex=\"0\" focusable=\"true\"><title>Order uses Cart · select to see what makes up this link</title>"));
     // They lie over the links that are seen.
     assert!(
         html.rfind("class=\"graph-map-edge").unwrap()
@@ -4693,7 +4693,7 @@ fn the_layers_of_a_folder_are_drawn_in_their_order_with_what_runs_against_it() {
     // A link between two layers is many links of many files: it is
     // selected like any link, and says what selecting it shows.
     assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 6);
-    assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" role=\"button\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
+    assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" role=\"button\" tabindex=\"0\" focusable=\"true\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
     assert!(!html.contains("select to see what makes up this link"));
     // With nothing selected no link and no layer steps back.
     assert!(!html.contains("graph-map-edge-on") && !html.contains("graph-map-edge-off"));
@@ -7055,7 +7055,7 @@ fn canvas_with_overlays_renders_distinct_markers_attributes_and_breakdowns() {
         "marker-end=\"url(#session-graph-arrow)\"><title>A uses B · 3 links · calls 2, imports 1</title>"
     ));
     assert!(html.contains(
-        "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\" role=\"button\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
+        "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\" role=\"button\" tabindex=\"0\" focusable=\"true\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
     ));
     // calls + instantiates collapse into 1 canonical kind -> not multi
     assert!(html.contains("<title>B uses C · 2 links · calls 1, instantiates 1</title>"));
@@ -7889,9 +7889,9 @@ fn a_dependency_a_change_added_is_drawn_as_the_kind_it_is() {
     .html;
     assert!(html.contains(
         "data-diff=\"added\" d=\"M"
-    ) && html.contains("data-edge-kind=\"writes\" data-kinds=\"writes\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-writes)\"><title>A (added dependency · writes)</title>"), "{html}");
+    ) && html.contains("data-edge-kind=\"writes\" data-kinds=\"writes\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-writes)\"><title>A -> B (added dependency · writes)</title>"), "{html}");
     assert!(html.contains(
-        "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-imports)\"><title>A (removed dependency · imports)</title>"
+        "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-imports)\"><title>A -> C (removed dependency · imports)</title>"
     ));
 }
 #[test]

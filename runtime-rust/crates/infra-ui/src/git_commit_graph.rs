@@ -19,11 +19,19 @@ fn commit_layouts_cache_key(commits: &[Value], selected_commit: Option<&str>) ->
     for commit in commits {
         commit["commit"].as_str().hash(&mut h);
         commit["short"].as_str().hash(&mut h);
+        commit["target"].as_str().hash(&mut h);
         commit["merge"].as_bool().hash(&mut h);
         if let Some(parents) = commit["parents"].as_array() {
             parents.len().hash(&mut h);
             for p in parents {
                 p.as_str().hash(&mut h);
+            }
+        }
+        if let Some(refs) = commit["refs"].as_array() {
+            refs.len().hash(&mut h);
+            for r in refs {
+                r["name"].as_str().hash(&mut h);
+                r["kind"].as_str().hash(&mut h);
             }
         }
     }
@@ -245,6 +253,45 @@ pub fn render_commit_graph_rows_with_range(
     )
 }
 
+/// Computes the virtualized `[start_idx, end_idx)` slice of commit rows when `total > 80`.
+pub fn commit_dock_window_range(total: usize, scroll_top: f64, viewport_h: f64) -> (usize, usize) {
+    if total <= 80 || !(viewport_h.is_finite() && viewport_h > 0.0) {
+        return (0, total);
+    }
+    let row_h = ROW_HEIGHT as f64;
+    let safe_top = if scroll_top.is_finite() && scroll_top > 0.0 {
+        scroll_top
+    } else {
+        0.0
+    };
+    let first = ((safe_top / row_h).floor() as isize - 18).max(0) as usize;
+    let visible = (viewport_h / row_h).ceil() as usize + 36;
+    let last = (first + visible).min(total);
+    (first.min(total), last)
+}
+
+/// Computes the target `scroll_top` required so virtualized row `index` sits inside
+/// `[scroll_top, scroll_top + viewport_h)`. Returns `None` if already within view.
+pub fn scroll_top_for_commit_row(index: usize, scroll_top: f64, viewport_h: f64) -> Option<f64> {
+    if !(viewport_h.is_finite() && viewport_h > 0.0) {
+        return None;
+    }
+    let row_top = (index * ROW_HEIGHT) as f64;
+    let row_bot = ((index + 1) * ROW_HEIGHT) as f64;
+    let cur = if scroll_top.is_finite() && scroll_top >= 0.0 {
+        scroll_top
+    } else {
+        0.0
+    };
+    if row_top < cur {
+        Some(row_top)
+    } else if row_bot > cur + viewport_h {
+        Some((row_bot - viewport_h).max(0.0))
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_commit_graph_rows_with_options(
     commits: &[Value],
@@ -262,13 +309,7 @@ fn render_commit_graph_rows_with_options(
     let total = commits.len();
 
     let (start_idx, end_idx) = match window {
-        Some((scroll_top, viewport_h)) if total > 80 && viewport_h > 0.0 => {
-            let row_h = ROW_HEIGHT as f64;
-            let first = ((scroll_top / row_h).floor() as isize - 18).max(0) as usize;
-            let visible = (viewport_h / row_h).ceil() as usize + 36;
-            let last = (first + visible).min(total);
-            (first.min(total), last)
-        }
+        Some((scroll_top, viewport_h)) => commit_dock_window_range(total, scroll_top, viewport_h),
         _ => (0, total),
     };
 
@@ -933,7 +974,7 @@ fn build_layouts(commits: &[Value], selected_commit: Option<&str>) -> Vec<Commit
             color: row.color,
             rail_width: row.rail_width,
             rail_svg: format!(
-                "<svg class=\"git-graph-svg\" width=\"{max_rail_width}\" height=\"{ROW_HEIGHT}\" viewBox=\"0 0 {max_rail_width} {ROW_HEIGHT}\" preserveAspectRatio=\"none\" aria-hidden=\"true\">{}</svg>",
+                "<svg class=\"git-graph-svg\" width=\"{max_rail_width}\" height=\"{ROW_HEIGHT}\" viewBox=\"0 0 {max_rail_width} {ROW_HEIGHT}\" preserveAspectRatio=\"xMidYMid meet\" aria-hidden=\"true\">{}</svg>",
                 row.body_svg
             ),
         })

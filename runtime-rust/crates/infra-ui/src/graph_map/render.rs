@@ -422,6 +422,9 @@ pub(super) struct EdgeSelectionState {
     pub(super) edge_state: &'static str,
     pub(super) lit: bool,
     pub(super) shared_path: bool,
+    pub(super) diff: Option<String>,
+    pub(super) impact: Option<String>,
+    pub(super) commit_touched: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -503,6 +506,24 @@ pub(super) fn compute_canvas_selection_patch(
             }
         }
     }
+    let node_is_changed: Vec<bool> = nodes
+        .iter()
+        .zip(&node_change_statuses)
+        .map(|(node, status)| {
+            node["changed"].as_u64().unwrap_or(0) > 0
+                || m::yes(&node["changed"])
+                || status.is_some()
+        })
+        .collect();
+    let commit_changes_active = view["chosen"].is_object()
+        || changes(view)
+        || overlay.impact.is_some()
+        || overlay.changes.is_some_and(|doc| {
+            let target = m::text(doc, "target");
+            (!target.is_empty() && target != "work")
+                || doc["edge_diffs"].is_object()
+                || (doc["target"].is_null() && node_change_statuses.iter().any(Option::is_some))
+        });
     let mut edges_by_pair = HashMap::with_capacity(pairs.len());
     for &(from, to) in pairs {
         let on_traced = sel.shared_edges.contains(&(from, to))
@@ -533,12 +554,25 @@ pub(super) fn compute_canvas_selection_patch(
         } else {
             ""
         };
+        let diff = impact_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.edge_diff(&nodes, from, to))
+            .map(str::to_owned);
+        let impact = impact_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.edge_impact(&nodes, from, to))
+            .map(str::to_owned);
+        let commit_touched =
+            commit_changes_active && (node_is_changed[from] || node_is_changed[to]);
         edges_by_pair.insert(
             (from, to),
             EdgeSelectionState {
                 edge_state,
                 lit: is_lit,
                 shared_path: on_traced,
+                diff,
+                impact,
+                commit_touched,
             },
         );
     }
@@ -633,6 +667,13 @@ pub(super) fn refresh_dense_scene_for_patch(
             de.on = edge_state == "on" || ep.shared_path || on_traced;
             de.lit = ep.lit || on_traced;
             de.dim = edge_state == "off";
+            if let Some(ref d) = ep.diff {
+                de.diff = d.clone();
+            }
+            if let Some(ref imp) = ep.impact {
+                de.impact = imp.clone();
+            }
+            de.commit_touched = ep.commit_touched;
         }
     }
 }
@@ -806,33 +847,28 @@ pub(super) fn inject_synthetic_deleted_nodes_and_edges(
     }
 }
 
-/// Renders a dependency map plane with live focus, changed-files markers, and file-impact diff edges.
-pub fn canvas_with_overlays(
+/// Filtered graph arrays extracted from a view for canvas layout, patching, and pair queries.
+pub(super) struct ExtractedViewGraphParts {
+    pub(super) nodes: Vec<V>,
+    pub(super) edges: Vec<V>,
+    pub(super) frames: Vec<V>,
+    pub(super) pairs: Vec<(usize, usize)>,
+}
+
+/// Deduplicates filtered graph extraction across `canvas_with_overlays` and `surfaces::pairs_for_view`.
+pub(super) fn extract_view_graph_parts(
     view: &V,
-    id_prefix: &str,
-    overlay: CanvasOverlayContext<'_>,
-) -> RenderedCanvas {
-    let live_focus = overlay.live_focus;
+    changes: Option<&V>,
+    hide_transitive: bool,
+) -> ExtractedViewGraphParts {
     let mut nodes = m::array(&view["nodes"]);
     let mut edges = m::array(&view["edges"]);
     let frames = m::array(&view["frames"]);
-    inject_synthetic_deleted_nodes_and_edges(
-        view,
-        overlay.changes,
-        &mut nodes,
-        &mut edges,
-        &frames,
-    );
-    let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
-    let impact_lookup = ImpactLookup::from_sources(overlay.impact, overlay.changes, &nodes);
+    inject_synthetic_deleted_nodes_and_edges(view, changes, &mut nodes, &mut edges, &frames);
     let path_index = build_path_index(&nodes);
     let at = |path: &V| lookup_path_index(&nodes, &path_index, path);
-    // A link whose end is not drawn is not drawn either. Nor is, where
-    // that was asked for, a link that a longer way already joins: without
-    // those the picture holds fewer links that pass layers, and every box
-    // still reaches what it reached.
     let plain = plain_map(view);
-    let mut left_out = if overlay.hide_transitive && plain {
+    let mut left_out = if hide_transitive && plain {
         said_twice(view)
     } else {
         vec![false; edges.len()]
@@ -840,16 +876,46 @@ pub fn canvas_with_overlays(
     left_out.resize(edges.len(), false);
     let mut filtered_edges = Vec::with_capacity(edges.len());
     let mut pairs = Vec::with_capacity(edges.len());
-    for (edge, said) in edges.iter().zip(&left_out) {
+    for (edge, said) in edges.into_iter().zip(&left_out) {
         if *said {
             continue;
         }
         if let (Some(u), Some(v)) = (at(&edge["from"]), at(&edge["to"])) {
-            filtered_edges.push(edge);
             pairs.push((u, v));
+            filtered_edges.push(edge);
         }
     }
-    let edges = filtered_edges;
+    ExtractedViewGraphParts {
+        nodes,
+        edges: filtered_edges,
+        frames,
+        pairs,
+    }
+}
+
+/// Renders a dependency map plane with live focus, changed-files markers, and file-impact diff edges.
+pub fn canvas_with_overlays(
+    view: &V,
+    id_prefix: &str,
+    overlay: CanvasOverlayContext<'_>,
+) -> RenderedCanvas {
+    let live_focus = overlay.live_focus;
+    let ExtractedViewGraphParts {
+        nodes,
+        edges: edges_owned,
+        frames,
+        pairs,
+    } = extract_view_graph_parts(view, overlay.changes, overlay.hide_transitive);
+    let path_index = build_path_index(&nodes);
+    let at = |path: &V| lookup_path_index(&nodes, &path_index, path);
+    let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
+    let impact_lookup = ImpactLookup::from_sources(overlay.impact, overlay.changes, &nodes);
+    let plain = plain_map(view);
+    // A link whose end is not drawn is not drawn either. Nor is, where
+    // that was asked for, a link that a longer way already joins: without
+    // those the picture holds fewer links that pass layers, and every box
+    // still reaches what it reached.
+    let edges: Vec<&V> = edges_owned.iter().collect();
     let weighted = pairs
         .iter()
         .zip(&edges)
@@ -1188,7 +1254,8 @@ pub fn canvas_with_overlays(
     let mut dense_edges = Vec::new();
     let is_dense = scale_tier == GraphScaleTier::Dense;
     let mut dense_meta = graph_viewport::canvas2d::DenseSceneMeta {
-        label_min_scale: Some(GRAPH_MAP_LOD.far_below),
+        label_min_scale: Some(0.24),
+        commit_changes_active,
         ..Default::default()
     };
     // What each box is joined with by links that are led through no layer:
@@ -1341,6 +1408,17 @@ pub fn canvas_with_overlays(
         // the rules is always drawn.
         let portal = wire.portal && !against;
         if is_dense && !hidden {
+            let mut summary = format!("{user} -> {used} ({arrow_kind}");
+            if links > 1 {
+                summary.push_str(&format!(", {links}"));
+            }
+            if against {
+                summary.push_str(", violation");
+            }
+            if let Some(d) = edge_diff.filter(|d| *d != "unchanged") {
+                summary.push_str(&format!(", {d}"));
+            }
+            summary.push(')');
             dense_meta.edges.insert(
                 wire.edge,
                 graph_viewport::canvas2d::DenseEdgeMeta {
@@ -1348,21 +1426,31 @@ pub fn canvas_with_overlays(
                     explain_payload: json!({"from": nodes[from]["path"], "to": nodes[to]["path"]}),
                     from_index: Some(from),
                     to_index: Some(to),
-                    ..Default::default()
+                    summary,
                 },
             );
-            dense_edges.push(graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
-                wire.edge,
-                &wire.path,
-                links.max(1),
-                guess,
-                against,
-                arrow_kind.to_owned(),
-                edge_state == "on" || on_path,
-                lit((from, to)),
-                edge_state == "off",
-                portal,
-            ));
+            dense_edges.push(
+                graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
+                    wire.edge,
+                    &wire.path,
+                    links.max(1),
+                    guess,
+                    against,
+                    arrow_kind.to_owned(),
+                    edge_state == "on" || on_path,
+                    lit((from, to)),
+                    edge_state == "off",
+                    portal,
+                )
+                .with_semantics(
+                    edge_diff.unwrap_or(""),
+                    edge_impact.unwrap_or(""),
+                    commit_touched,
+                    back,
+                    m::yes(&edge["detour"]),
+                    kinds.held_vec(),
+                ),
+            );
         }
         if !is_dense {
             html.push_str(&format!(
@@ -1461,12 +1549,18 @@ pub fn canvas_with_overlays(
     if let Some(lookup) = impact_lookup.as_ref() {
         let rendered_pairs: BTreeSet<(usize, usize)> = pairs.iter().copied().collect();
         let mut synthetic_drawn: BTreeSet<(usize, usize, &'static str)> = BTreeSet::new();
+        let mut synthetic_seq = pairs.len();
         let mut add_synthetic = |from_idx: usize,
                                  to_idx: usize,
                                  diff: &'static str,
                                  label: &str,
                                  kind: &'static str,
                                  impact: Option<&'static str>| {
+            if let Some(cone) = overlay.isolate_cone {
+                if !cone.contains(&from_idx) || !cone.contains(&to_idx) {
+                    return;
+                }
+            }
             if from_idx == to_idx
                 || rendered_pairs.contains(&(from_idx, to_idx))
                 || !synthetic_drawn.insert((from_idx, to_idx, diff))
@@ -1474,21 +1568,63 @@ pub fn canvas_with_overlays(
                 return;
             }
             let d = synthetic_edge_path(from_idx, to_idx, &plan.nodes, synthetic_drawn.len());
+            let from_name = m::text(&nodes[from_idx], "name");
+            let to_name = m::text(&nodes[to_idx], "name");
+            let is_touched =
+                commit_changes_active && (node_is_changed[from_idx] || node_is_changed[to_idx]);
+            if is_dense {
+                let syn_idx = synthetic_seq;
+                synthetic_seq += 1;
+                dense_meta.edges.insert(
+                    syn_idx,
+                    graph_viewport::canvas2d::DenseEdgeMeta {
+                        explain_kind: "link".to_owned(),
+                        explain_payload: json!({
+                            "from": nodes[from_idx]["path"],
+                            "to": nodes[to_idx]["path"],
+                        }),
+                        from_index: Some(from_idx),
+                        to_index: Some(to_idx),
+                        summary: format!("{from_name} -> {to_name} ({label} · {kind})"),
+                    },
+                );
+                dense_edges.push(
+                    graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
+                        syn_idx,
+                        &d,
+                        1,
+                        false,
+                        impact == Some("broken_risk"),
+                        kind.to_owned(),
+                        false,
+                        lit((from_idx, to_idx)),
+                        false,
+                        false,
+                    )
+                    .with_semantics(
+                        diff,
+                        impact.unwrap_or(""),
+                        is_touched,
+                        false,
+                        false,
+                        vec![kind.to_owned()],
+                    ),
+                );
+            }
             let mark_symbol = if diff == "added" { "+" } else { "-" };
             let impact_attr = impact
                 .map(|imp| format!(" data-impact=\"{imp}\""))
                 .unwrap_or_default();
-            let touched_attr = if commit_changes_active
-                && (node_is_changed[from_idx] || node_is_changed[to_idx])
-            {
+            let touched_attr = if is_touched {
                 " data-commit-touched=\"true\""
             } else {
                 ""
             };
             html.push_str(&format!(
-                "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
+                "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} -> {} ({label} · {kind})</title></path>",
                 arrow_marker_suffix(kind, false),
-                escape(&m::text(&nodes[from_idx], "name")),
+                escape(&from_name),
+                escape(&to_name),
             ));
             if let Some((mx, my)) = middle(&d) {
                 marks.push_str(&format!(
@@ -1611,11 +1747,12 @@ pub fn canvas_with_overlays(
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-hit{}\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\" role=\"button\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            "<path class=\"graph-map-hit{}\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\" role=\"button\"{}><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
             if wire.portal && edge["architecture_violation"].as_u64().unwrap_or(0) == 0 { " graph-map-hit-portal" } else { "" },
             if *hidden { " data-kind-hidden=\"true\"" } else { "" },
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
+            if *hidden { " aria-hidden=\"true\"" } else { " tabindex=\"0\" focusable=\"true\"" },
             escape(&m::text(&nodes[from], "name")),
             escape(&m::text(&nodes[to], "name")),
             if cycle_view && m::yes(&edge["added"]) { " · added in PR" } else { "" },
@@ -1668,14 +1805,6 @@ pub fn canvas_with_overlays(
         let is_pinned = pinned_set.contains(&index);
         let mut skip_offscreen_dom = false;
         if is_dense {
-            dense_meta.nodes.insert(
-                index,
-                graph_viewport::canvas2d::DenseNodeMeta {
-                    explain_kind: "node".to_owned(),
-                    explain_payload: node["path"].clone(),
-                    ..Default::default()
-                },
-            );
             let on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
             let lit_here = near(index);
             dense_nodes.push(graph_viewport::canvas2d::DenseNodeSpec {
@@ -2154,10 +2283,17 @@ pub fn canvas_with_overlays(
             || (overlay
                 .path_nodes
                 .is_some_and(|pn| !pn.is_empty() && !is_on_traced_path));
+        let is_semantic =
+            m::text(node, "node_kind") == "semantic" || m::text(node, "path").starts_with("sem:");
+        let semantic_attr = if is_semantic {
+            " data-semantic=\"true\""
+        } else {
+            ""
+        };
         let mut node_buf = format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{badge_attrs}{pin_attr}{position}{node_path_attr} tabindex=\"{roving_tabindex}\" data-roving-index=\"{index}\" title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{semantic_attr}{}{}{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{badge_attrs}{pin_attr}{position}{node_path_attr} tabindex=\"{roving_tabindex}\" data-roving-index=\"{index}\" title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node_payload),
-            escape(kind),
+            escape(if is_semantic && kind.is_empty() { "semantic" } else { kind }),
             opened && !symbol,
             changed > 0,
             chosen == Some(index),
@@ -2248,6 +2384,54 @@ pub fn canvas_with_overlays(
         node_buf.push_str(&badges_strip);
         node_buf.push_str("</button>");
         if is_dense {
+            let blast_tag = blast[index]
+                .map(|(hop, _)| format!("{hop}h"))
+                .unwrap_or_default();
+            let badge_text = if is_semantic {
+                "hub".to_owned()
+            } else if let Some(rank) = suspect {
+                format!("#{rank}")
+            } else if !blast_tag.is_empty() {
+                blast_tag.clone()
+            } else if cycle {
+                "cyc".to_owned()
+            } else if let Some(vis) = node_vis {
+                vis.to_owned()
+            } else if folder {
+                format!("{}f", node["files"].as_u64().unwrap_or(0))
+            } else {
+                String::new()
+            };
+            let file_line = match (symbol, line) {
+                (true, 0) if !home.is_empty() => home.clone(),
+                (true, l) if l > 0 && !home.is_empty() => format!("{home}:{l}"),
+                _ => m::text(node, "path"),
+            };
+            if !arch_layer_id.is_empty() {
+                dense_meta
+                    .layer_of_node
+                    .insert(index, arch_layer_id.clone());
+            }
+            dense_meta.nodes.insert(
+                index,
+                graph_viewport::canvas2d::DenseNodeMeta {
+                    explain_kind: "node".to_owned(),
+                    explain_payload: node["path"].clone(),
+                    symbol_kind: if is_semantic {
+                        "contract".to_owned()
+                    } else if symbol {
+                        what(node)
+                    } else {
+                        kind.to_owned()
+                    },
+                    visibility: node_vis.unwrap_or("").to_owned(),
+                    in_cycle: cycle || circle.is_object(),
+                    blast_tag,
+                    badge_text,
+                    tooltip: title.clone(),
+                    file_line,
+                },
+            );
             dense_node_htmls.push(node_buf.clone());
             let has_extras = followed
                 || !far[index].0.is_empty()
@@ -2528,8 +2712,15 @@ pub(super) fn render_dense_node_extras_for_mounted(
     let symbol = m::yes(&node["symbol"]);
     let (node_action, node_payload) = if folder {
         ("graph-map-open", node["path"].clone())
-    } else if symbol {
-        ("graph-map-symbol", node["path"].clone())
+    } else if view["mode"] == "scenario" {
+        (
+            "graph-map-scenario-open",
+            json!({
+                "file": node["file"].as_str().or(node["path"].as_str()),
+                "path": node["path"],
+                "symbol": symbol,
+            }),
+        )
     } else {
         ("graph-map-node", node["path"].clone())
     };
@@ -2885,6 +3076,20 @@ fn cut_hints_list_html(heading: &str, hints: &[V]) -> String {
 
 /// Renders ranked feedback-edge-set cycle cut / remediation hints when supplied by the backend.
 pub(super) fn cycle_cut_hints_html(view: &V) -> String {
+    let witness_chain: Vec<String> = [&view["cycle_witness"], &view["cycle"]["witness"]]
+        .into_iter()
+        .map(m::array)
+        .find(|arr| !arr.is_empty())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            item.as_str().map(str::to_owned).or_else(|| {
+                let from = item["from"].as_str().unwrap_or("");
+                let to = item["to"].as_str().unwrap_or("");
+                (!from.is_empty() && !to.is_empty()).then(|| format!("{from} -> {to}"))
+            })
+        })
+        .collect();
     let hints = [
         &view["cycle"]["cut_hints"],
         &view["cycle"]["cuts"],
@@ -2908,7 +3113,19 @@ pub(super) fn cycle_cut_hints_html(view: &V) -> String {
         .find(|arr| !arr.is_empty())
         .unwrap_or_default()
     });
-    cut_hints_list_html("Suggested cycle breaks", &hints)
+    let mut html = cut_hints_list_html("Suggested cycle breaks", &hints);
+    if !witness_chain.is_empty() {
+        html.push_str("<div class=\"graph-cycle-witness\"><strong>Cycle witness</strong>: ");
+        html.push_str(
+            &witness_chain
+                .iter()
+                .map(|s| format!("<code>{}</code>", escape(s)))
+                .collect::<Vec<_>>()
+                .join(" → "),
+        );
+        html.push_str("</div>");
+    }
+    html
 }
 
 /// Renders architecture-specific remediation hints when supplied by the backend.
