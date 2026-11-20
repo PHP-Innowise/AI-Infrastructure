@@ -1367,6 +1367,11 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 m::set("graph-commit-shift", json!(pe.shift_key()));
             }
         }
+        // Any new pointerdown inside a pan surface ends any stale click-suppression window
+        // from an earlier pan drag before interactive-target early returns run.
+        if let Some(surface) = target_pan_surface(target_el.as_ref()) {
+            clear_surface_drag_suppress(surface);
+        }
     }
     if radar_pointer(kind, event, target_el.as_ref()) {
         return true;

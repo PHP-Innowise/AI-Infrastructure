@@ -1225,6 +1225,10 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
 
         let mut drag = graph_viewport::DragPan::from_json(&m::data(surface.drag_key));
         let drag_active = drag.active;
+        if kind == "pointerdown" && in_canvas && drag.suppress_click {
+            drag.clear_suppress();
+            m::set(surface.drag_key, drag.to_json());
+        }
 
         if should_ignore_canvas_pointer(
             kind,

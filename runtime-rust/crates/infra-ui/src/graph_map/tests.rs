@@ -9952,4 +9952,38 @@ fn pinned_wires_detours_synthetic_gutters_and_clean_modal_lens_selection() {
         active_modal_lens(&json!({}), &json!({"mode": "map"})),
         "dependencies"
     );
+
+    // Backend object witness (`cycle_witness` / `cycle.witness`) + `feedback_arc_cut` fallback + `telemetry.truncated`.
+    let backend_cycle_view = json!({
+        "mode": "cycle",
+        "cycle_witness": {
+            "length": 2,
+            "files": ["src/a.rs", "src/b.rs", "src/a.rs"],
+            "edges": [{"from": "src/a.rs", "to": "src/b.rs", "weight": 1, "provenance": []}]
+        },
+        "circle_remediation": [{
+            "files": 2,
+            "cuts": [],
+            "feedback_arc_cut": [{"from": "src/b.rs", "to": "src/a.rs", "links": 1, "breaks_cycles": 1, "hint": "Cut feedback arc"}]
+        }],
+        "telemetry": {"truncated": true}
+    });
+    let backend_cut_html = cycle_cut_hints_html(&backend_cycle_view);
+    assert!(
+        backend_cut_html.contains("<strong>Cycle witness</strong>:"),
+        "{backend_cut_html}"
+    );
+    assert!(
+        backend_cut_html.contains("src/a.rs") && backend_cut_html.contains("src/b.rs"),
+        "{backend_cut_html}"
+    );
+    assert!(
+        backend_cut_html.contains("Cut feedback arc"),
+        "{backend_cut_html}"
+    );
+    assert!(
+        note(&json!({"mode": "map", "telemetry": {"truncated": true}}))
+            .contains("Progressive LOD (overview)")
+    );
+    assert!(note(&json!({"mode": "map", "lod": "crate"})).contains("Progressive LOD (crate)"));
 }

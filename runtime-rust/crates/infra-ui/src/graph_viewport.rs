@@ -926,7 +926,7 @@ pub fn resize_refit_decision(
     }
 }
 
-/// Registers an idempotent `window` `resize` observer keyed by `guard_key`.
+/// Registers an idempotent `window` `resize` observer keyed by `guard_key` on `dom::on_viewport_resize`.
 /// When `debounce_key` is `Some` and `debounce_ms > 0`, rapid resize events
 /// are coalesced through `dom::later` before calling `on_resize`.
 pub fn ensure_resize_observer(
@@ -935,28 +935,12 @@ pub fn ensure_resize_observer(
     debounce_ms: i32,
     on_resize: impl Fn() + 'static,
 ) {
-    if crate::model::yes(&crate::model::data(guard_key)) {
-        return;
-    }
-    crate::model::set(guard_key, json!(true));
-    let cb: Rc<dyn Fn()> = Rc::new(on_resize);
-    let dkey = debounce_key.map(str::to_owned);
-    let listener = Closure::<dyn FnMut()>::new(move || {
-        if let Some(key) = dkey.as_deref() {
-            if debounce_ms > 0 {
-                let inner = Rc::clone(&cb);
-                dom::later(key, debounce_ms, move || inner());
-                return;
-            }
-        }
-        cb();
-    });
-    if dom::window()
-        .add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref())
-        .is_ok()
-    {
-        listener.forget();
-    }
+    let effective_ms = if debounce_key.is_some() {
+        debounce_ms
+    } else {
+        0
+    };
+    dom::on_viewport_resize(guard_key, effective_ms, on_resize);
 }
 
 // =========================================================================

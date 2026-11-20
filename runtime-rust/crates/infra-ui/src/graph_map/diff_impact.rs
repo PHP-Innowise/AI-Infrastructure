@@ -15,18 +15,7 @@ pub(super) fn plural(value: u64, one: &str, many: &str) -> String {
     format!("{} {}", count(value), if value == 1 { one } else { many })
 }
 pub(super) fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for letter in text.chars() {
-        match letter {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
+    crate::dom::escape_html(text)
 }
 pub(super) fn payload(value: &V) -> String {
     escape(&value.to_string())
@@ -2147,7 +2136,11 @@ pub fn note(view: &V) -> String {
             )
         });
     }
-    if view["lod"].is_string() || view["lod"].is_object() || m::yes(&view["truncated"]) {
+    if view["lod"].is_string()
+        || view["lod"].is_object()
+        || m::yes(&view["truncated"])
+        || m::yes(&view["telemetry"]["truncated"])
+    {
         let lod_label = view["lod"]
             .as_str()
             .or_else(|| view["lod"]["tier"].as_str())

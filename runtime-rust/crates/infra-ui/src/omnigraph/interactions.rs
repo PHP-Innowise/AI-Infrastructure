@@ -278,6 +278,14 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         Some(".omni-empty-state"),
     );
 
+    if kind == "pointerdown" && in_canvas {
+        let mut drag = graph_viewport::DragPan::from_json(&m::data("omnigraph-drag"));
+        if drag.suppress_click {
+            drag.clear_suppress();
+            m::set("omnigraph-drag", drag.to_json());
+        }
+    }
+
     // Shift+drag node pinning on constellation cards.
     if matches!(
         kind,

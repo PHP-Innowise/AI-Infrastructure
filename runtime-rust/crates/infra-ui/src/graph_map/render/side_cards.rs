@@ -253,13 +253,56 @@ pub(in crate::graph_map) fn confidence_pill_html(view: &V) -> String {
 fn flatten_circle_remediation(raw: &V) -> Vec<V> {
     let mut out = Vec::new();
     for group in m::array(raw) {
-        if group["cuts"].is_array() {
-            out.extend(m::array(&group["cuts"]));
-        } else if group["from"].is_string() && group["to"].is_string() {
+        let cuts = m::array(&group["cuts"]);
+        if !cuts.is_empty() {
+            out.extend(cuts);
+            continue;
+        }
+        let feedback = m::array(&group["feedback_arc_cut"]);
+        if !feedback.is_empty() {
+            out.extend(feedback);
+            continue;
+        }
+        if group["from"].is_string() && group["to"].is_string() {
             out.push(group);
         }
     }
     out
+}
+
+fn extract_witness_chain(raw: &V) -> Vec<String> {
+    if let Some(arr) = raw.as_array() {
+        return arr
+            .iter()
+            .filter_map(|item| {
+                item.as_str().map(str::to_owned).or_else(|| {
+                    let from = item["from"].as_str().unwrap_or("");
+                    let to = item["to"].as_str().unwrap_or("");
+                    (!from.is_empty() && !to.is_empty()).then(|| format!("{from} -> {to}"))
+                })
+            })
+            .collect();
+    }
+    if let Some(files) = raw["files"].as_array() {
+        let chain: Vec<String> = files
+            .iter()
+            .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+            .collect();
+        if !chain.is_empty() {
+            return chain;
+        }
+    }
+    if let Some(edges) = raw["edges"].as_array() {
+        return edges
+            .iter()
+            .filter_map(|item| {
+                let from = item["from"].as_str().unwrap_or("");
+                let to = item["to"].as_str().unwrap_or("");
+                (!from.is_empty() && !to.is_empty()).then(|| format!("{from} -> {to}"))
+            })
+            .collect();
+    }
+    Vec::new()
 }
 
 fn cut_hints_list_html(heading: &str, hints: &[V]) -> String {
@@ -334,20 +377,15 @@ fn cut_hints_list_html(heading: &str, hints: &[V]) -> String {
 
 /// Renders ranked feedback-edge-set cycle cut / remediation hints when supplied by the backend.
 pub(in crate::graph_map) fn cycle_cut_hints_html(view: &V) -> String {
-    let witness_chain: Vec<String> = [&view["cycle_witness"], &view["cycle"]["witness"]]
-        .into_iter()
-        .map(m::array)
-        .find(|arr| !arr.is_empty())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| {
-            item.as_str().map(str::to_owned).or_else(|| {
-                let from = item["from"].as_str().unwrap_or("");
-                let to = item["to"].as_str().unwrap_or("");
-                (!from.is_empty() && !to.is_empty()).then(|| format!("{from} -> {to}"))
-            })
-        })
-        .collect();
+    let witness_chain: Vec<String> = [
+        &view["cycle_witness"],
+        &view["cycle"]["witness"],
+        &view["circle_remediation"][0]["witness_cycle"],
+    ]
+    .into_iter()
+    .map(extract_witness_chain)
+    .find(|chain| !chain.is_empty())
+    .unwrap_or_default();
     let hints = [
         &view["cycle"]["cut_hints"],
         &view["cycle"]["cuts"],
