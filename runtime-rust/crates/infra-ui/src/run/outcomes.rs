@@ -143,7 +143,14 @@ pub(super) fn mode(session: &V, run: &V, before: &V, after: &V, idle: &V) -> Mod
     }
 }
 
-pub(super) const TABS: [&str; 5] = ["files", "plan", "commands", "memory", "omnigraph"];
+pub(super) const TABS: [&str; 6] = [
+    "files",
+    "plan",
+    "commands",
+    "memory",
+    "omnigraph",
+    "skillcache",
+];
 
 /// The launch recorded something for this tab.
 pub(super) fn has(run: &V, tab: &str) -> bool {

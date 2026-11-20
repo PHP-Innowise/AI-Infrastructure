@@ -230,6 +230,29 @@ mod mode_tests {
         assert!(omnigraph.contains("Not told &lt;now&gt;."), "{omnigraph}");
         assert_eq!(render_run_memory_pane_html(&json!(null)), "");
     }
+
+    #[test]
+    fn a_turn_s_skillcache_events_get_their_own_tab() {
+        let done = session("completed");
+        let mut run = launch("a", &["tool", "text"]);
+        // A cold turn of a session that never opted in has no such tab.
+        assert_eq!(openers(&done, &run), Vec::<&str>::new());
+        assert_eq!(shown_tab(&run, "skillcache"), "files");
+        for event in [
+            json!({"id": 7, "kind": "skillcache", "phase": "hit", "capsule_id": "c1",
+                   "text": "SkillCache: capsule `pdf-rows` runs this request instead of the skill being read again."}),
+            json!({"id": 8, "kind": "skillcache", "phase": "program_failed", "step_index": 1,
+                   "program": "extract", "reason": "timeout",
+                   "text": "SkillCache: program `extract` failed (timeout); step 2 is the agent's now, the rest of the plan stays compiled."}),
+        ] {
+            run = advance(run, &event).0;
+        }
+        assert_eq!(run["skillcache"].as_array().unwrap().len(), 2);
+        assert_eq!(openers(&done, &run), ["skillcache"]);
+        assert_eq!(shown_tab(&run, "skillcache"), "skillcache");
+        // A new launch starts without the previous one's events.
+        assert_eq!(initial()["skillcache"], json!([]));
+    }
 }
 
 #[cfg(test)]

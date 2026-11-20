@@ -36,6 +36,8 @@ pub(super) const PREF_FIELDS: &[&str] = &[
     "omnigraph-shared-space",
     "omnigraph-auto-publish",
     "omnigraph-auto-merge",
+    "skillcache-mode",
+    "skillcache-compiler-model",
 ];
 
 pub(super) fn preferences_selection(mut prefs: V, project: &str, sid: &str) -> V {
@@ -417,6 +419,7 @@ pub(super) fn mark_dirty_for_id(id: &str) {
         | "clash-model-choice"
         | "clash-model"
         | "clash-thinking-effort" => mark_dirty("clash"),
+        "skillcache-mode" | "skillcache-compiler-model" => mark_dirty("skillcache"),
         _ => {}
     }
 }
@@ -460,6 +463,7 @@ pub(super) fn session_settings_snapshot_fields(v: &V) -> V {
             "phase": v["sdd"]["phase"].as_str().unwrap_or("specify"),
         },
         "clash": clash,
+        "skillcache": crate::skillcache::snapshot(v),
     })
 }
 
@@ -595,6 +599,17 @@ pub fn apply_settings(v: &V) {
             );
         }
         next_fields["clash"] = incoming["clash"].clone();
+    }
+    if should_apply_setting_group(
+        &snapshot,
+        &dirty,
+        epoch,
+        &sid,
+        "skillcache",
+        &incoming["skillcache"],
+    ) {
+        crate::skillcache::apply_session(v);
+        next_fields["skillcache"] = incoming["skillcache"].clone();
     }
     m::set(
         "applied-session-snapshot",

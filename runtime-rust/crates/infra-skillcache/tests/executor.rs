@@ -1,5 +1,7 @@
 //! `skillcache-run` and `skillcache-tool` as the agent meets them: separate
 //! short-lived commands over one state file, with fixture programs.
+#[path = "support/scratch.rs"]
+mod scratch;
 use infra_skillcache::{SkillCapsule, package};
 use serde_json::{Value, json};
 use std::{
@@ -89,7 +91,7 @@ fn examples() -> Value {
 }
 
 struct Stand {
-    root: tempfile::TempDir,
+    root: scratch::Scratch,
     package: PathBuf,
     workspace: PathBuf,
     state_file: PathBuf,
@@ -101,7 +103,7 @@ impl Stand {
     }
     /// The folders of a run, without a capsule yet.
     fn empty() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = scratch::scratch();
         let workspace = root.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let state = root.path().join("state");

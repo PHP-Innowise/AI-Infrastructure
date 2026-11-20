@@ -2,6 +2,8 @@
 //! guardian runs in a minimal root, without the network, on a copy of the
 //! task. This is how Gates 2 and 3 run a capsule.
 #![cfg(target_os = "linux")]
+#[path = "support/scratch.rs"]
+mod scratch;
 use infra_host::sandbox::{self, Spec};
 use infra_skillcache::{SkillCapsule, package};
 use serde_json::{Value, json};
@@ -67,7 +69,7 @@ fn a_replay_runs_inside_the_gate_sandbox() {
         eprintln!("skipped: bubblewrap cannot create a sandbox on this host");
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = scratch::scratch();
     let base = infra_core::fs::canonicalize(root.path()).unwrap();
     let fixture = Path::new(FIXTURE);
     let runtime = fixture.file_stem().unwrap().to_str().unwrap();

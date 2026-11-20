@@ -1,9 +1,11 @@
+mod capsules;
 mod creator;
 mod setup;
 mod skills;
 #[cfg(test)]
 mod tests;
 
+pub use capsules::{capsule_changed, load_capsules};
 pub use creator::{creator_list, creator_models, creator_read, reset_creator_project};
 #[allow(unused_imports)]
 pub(crate) use creator::{on_sse_creator_resync, on_sse_creator_run};
@@ -28,6 +30,7 @@ pub fn initialize() {
         m::set("management-initialized", json!(true));
         crate::api::on_sse("creator_run", crate::management::on_sse_creator_run);
         crate::api::on_sse("resync", crate::management::on_sse_creator_resync);
+        crate::api::on_sse("skillcache_capsule", crate::skillcache::on_sse_capsule);
         crate::session::on_project_change(crate::management::on_global_project_change);
     }
 }
@@ -82,6 +85,13 @@ pub(crate) fn on_global_project_change(project: &str) {
             spawn_local(async {
                 installed_skills().await;
             });
+        } else if active_view == "skill-capsules" {
+            // Another project's capsule is not this project's.
+            m::take("skill-capsule-open");
+            m::take("skill-capsule-detail");
+            spawn_local(async {
+                load_capsules().await;
+            });
         }
     }
 }
@@ -101,6 +111,9 @@ pub async fn event(
     value: &str,
     checked: bool,
 ) -> bool {
+    if capsules::capsules_event(kind, id, action, payload).await {
+        return true;
+    }
     if kind == "change" || kind == "input" {
         if action == "setup-tool" || id == "setup-edition" {
             invalidate("setup");

@@ -21,6 +21,7 @@ use infra_harness::{
     services::{CloseFuture, Domain, NativeServices, Payload, Reply, Services},
     sessions::{BlackboardFactory, Event, RunReply, SessionLimits, Sessions, SpecialWorkflow},
     setup::{Setup, SetupDomain},
+    skillcache::SkillCacheDomain,
     skills::SkillsDomain,
     store::SessionStore,
     system_graph::{HarnessCodeGraphBridge, SystemGraphDomain},
@@ -40,6 +41,7 @@ use std::{
 };
 
 const HOLD_MARKER: &str = "[E2E_HOLD_PERMISSION]";
+const SKILLCACHE_CAPSULE: &str = "e2ecapsule000001";
 const DEFAULT_TIMEOUT_SECS: u64 = 180;
 
 fn require(valid: bool, reason: &str) -> Result<()> {
@@ -873,6 +875,180 @@ fn spawn_shutdown_watchers(
     })
 }
 
+/// What the Skill capsules view and the run view's SkillCache tab show: a
+/// capsule that waits for a person, with its package, gates, compilation and
+/// warm turns, and the SkillCache events of one turn of the finished session.
+/// Nothing is compiled or run here; the rows are written as the Harness
+/// would have left them.
+fn seed_skillcache(store: &SessionStore, project_id: &str, session_id: &str) -> Result<()> {
+    let generation = store
+        .events(session_id, 0)?
+        .iter()
+        .find_map(|event| event["launch_id"].as_str().map(str::to_owned))
+        .ok_or_else(|| HarnessError::invalid("The finished fixture session has no launch."))?;
+    let skill_path = ".agents/skills/pdf/SKILL.md";
+    let zeros = "0".repeat(64);
+    let capsule = json!({
+        "schema_version": 1,
+        "form": "hybrid",
+        "mu": {"name": "pdf-rows", "description": "Rows of every invoice PDF in a folder"},
+        "source": {"skills": [{"name": "pdf", "path": skill_path, "tree_sha256": zeros}]},
+        "capabilities": {"network": "none", "runtimes": ["sh"]},
+        "bindings": [{"name": "input_dir", "type": "path", "origin": "request",
+                      "description": "Folder with the invoices"}],
+        "programs": [
+            {"id": "extract", "description": "Reads every PDF and writes the rows",
+             "entry": ["sh", "programs/extract/main.sh"], "inputs": ["input_dir"],
+             "outputs": ["rows_file"], "check": ["sh", "programs/extract/main.sh", "--check"],
+             "timeout_seconds": 60, "read_only": false},
+            {"id": "verify", "entry": ["sh", "programs/verify/main.sh"], "inputs": ["rows_file"],
+             "outputs": [], "check": ["sh", "programs/verify/main.sh", "--check"],
+             "timeout_seconds": 60, "read_only": true}
+        ],
+        "steps": [
+            {"kind": "program", "program": "extract"},
+            {"kind": "instruction", "text": "Confirm the totals against the invoice headers.",
+             "source": {"path": skill_path, "section": "Totals"}}
+        ],
+        "verification": [{"kind": "program", "program": "verify"}]
+    });
+    let parsed = infra_skillcache::SkillCapsule::parse(&serde_json::to_vec(&capsule)?)
+        .map_err(|_| HarnessError::invalid("The fixture capsule is not a valid capsule."))?;
+    let mut files = infra_skillcache::package::Files::new();
+    for program in ["programs/extract/main.sh", "programs/verify/main.sh"] {
+        files.insert(
+            program,
+            b"printf '{\"status\":\"complete\",\"result\":{}}\\n'\n".to_vec(),
+        );
+    }
+    let artifacts = store
+        .state
+        .join("skillcache/capsules")
+        .join(project_id)
+        .join(SKILLCACHE_CAPSULE)
+        .join("1");
+    let package_sha256 =
+        infra_skillcache::package::write_warm(&artifacts.join("warm"), &parsed, None, &files)
+            .map_err(|error| HarnessError::unavailable(error.to_string()))?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let compile_id = "e2ecompile000001";
+    let reason = "2 of its last 3 warm turns handed a program step back.";
+    {
+        let db = store.connection()?;
+        db.execute(
+            "INSERT INTO skillcache_traces(generation,session_id,provider,model,request,skill_refs,steps,usage,redaction,trace_sha256,created_at)
+             VALUES(?1,?2,'claude',NULL,'Extract the rows of invoices/',?3,'[]',NULL,'{}',?4,?5)",
+            rusqlite::params![
+                generation,
+                session_id,
+                json!([{"name": "pdf", "path": skill_path}]).to_string(),
+                zeros,
+                now
+            ],
+        )?;
+        db.execute(
+            "INSERT INTO skillcache_capsules(capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,reason)
+             VALUES(?1,?2,'pdf',?3,'pdf-rows','Rows of every invoice PDF in a folder','hybrid','needs_recompile',1,?4,?4,?5,'e2e',1,'e2e',?6,?7,?8,?9,?10,?10,?10,?11,?12,?13)",
+            rusqlite::params![
+                SKILLCACHE_CAPSULE,
+                project_id,
+                skill_path,
+                zeros,
+                json!({"skills": [{"name": "pdf", "path": skill_path, "tree_sha256": zeros, "files": []}]}).to_string(),
+                session_id,
+                generation,
+                compile_id,
+                artifacts.to_string_lossy(),
+                now,
+                package_sha256,
+                json!({"network": "none", "runtimes": ["sh"]}).to_string(),
+                reason
+            ],
+        )?;
+        db.execute(
+            "INSERT INTO skillcache_capsules_fts(capsule_id,project_id,skill_name,mu_name,mu_description)
+             VALUES(?1,?2,'pdf','pdf-rows','Rows of every invoice PDF in a folder')",
+            rusqlite::params![SKILLCACHE_CAPSULE, project_id],
+        )?;
+        for (round, gate, passed, report) in [
+            (
+                1,
+                "gate1",
+                false,
+                json!({"gate": "gate1", "passed": false, "violations": [
+                    {"code": "output_unread", "at": "programs[0].outputs[1]", "message": "`pages` is produced and never read."}
+                ]}),
+            ),
+            (
+                2,
+                "gate1",
+                true,
+                json!({"gate": "gate1", "passed": true, "violations": []}),
+            ),
+            (
+                2,
+                "gate2",
+                true,
+                json!({"gate": "gate2", "passed": true, "violations": []}),
+            ),
+            (
+                2,
+                "gate3",
+                true,
+                json!({"gate": "gate3", "passed": true, "violations": [], "completed": [0, 1, 2]}),
+            ),
+        ] {
+            db.execute(
+                "INSERT INTO skillcache_gates(capsule_id,round,gate,passed,report,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![SKILLCACHE_CAPSULE, round, gate, i64::from(passed), report.to_string(), now],
+            )?;
+        }
+        db.execute(
+            "INSERT INTO skillcache_compiles(compile_id,project_id,source_session_id,source_generation,status,provider,model,rounds,outcome,usage,receipt,started_at,finished_at,capsule_id)
+             VALUES(?1,?2,?3,?4,'completed','claude',NULL,2,'Qualified as a hybrid capsule in round 2.',?5,'{}',?6,?6,?7)",
+            rusqlite::params![
+                compile_id,
+                project_id,
+                session_id,
+                generation,
+                json!({"input_tokens": 12000, "output_tokens": 3400, "cost_usd": 0.0512}).to_string(),
+                now,
+                SKILLCACHE_CAPSULE
+            ],
+        )?;
+        for (run, outcome, deopts) in [
+            ("e2e-run-1", "complete", 0),
+            ("e2e-run-2", "complete", 1),
+            ("e2e-run-3", "complete", 1),
+        ] {
+            db.execute(
+                "INSERT INTO skillcache_runs(generation,session_id,capsule_id,provider,model,outcome,steps,deopts,created_at)
+                 VALUES(?1,?2,?3,'codex',NULL,?4,'[]',?5,?6)",
+                rusqlite::params![run, session_id, SKILLCACHE_CAPSULE, outcome, deopts, now],
+            )?;
+        }
+    }
+    for event in [
+        json!({"kind": "skillcache", "phase": "observed", "generation": generation, "steps": 2,
+               "tool_calls": 2, "skills": ["pdf"],
+               "text": "SkillCache kept this turn's trace (2 tool calls; skill: pdf). It can be compiled into a capsule."}),
+        json!({"kind": "skillcache", "phase": "hit", "capsule_id": SKILLCACHE_CAPSULE, "form": "hybrid", "mu": "pdf-rows",
+               "text": "SkillCache: capsule `pdf-rows` runs this request instead of the skill being read again."}),
+        json!({"kind": "skillcache", "phase": "started", "capsule_id": SKILLCACHE_CAPSULE, "seq": 1,
+               "text": "SkillCache: the plan started (3 steps)."}),
+        json!({"kind": "skillcache", "phase": "program_failed", "capsule_id": SKILLCACHE_CAPSULE, "seq": 2,
+               "step_index": 0, "program": "extract", "reason": "nonzero_exit", "verification": false,
+               "text": "SkillCache: program `extract` failed (nonzero_exit); step 1 is the agent's now, the rest of the plan stays compiled."}),
+        json!({"kind": "skillcache", "phase": "complete", "capsule_id": SKILLCACHE_CAPSULE, "seq": 4,
+               "text": "SkillCache: the plan is complete (1 failed)."}),
+    ] {
+        let mut event = event;
+        event["launch_id"] = generation.clone().into();
+        store.event(session_id, &event)?;
+    }
+    Ok(())
+}
+
 async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u64) -> Result<()> {
     let root = infra_core::fs::canonicalize(root)?;
     let ui_root = infra_core::fs::canonicalize(ui_root)?;
@@ -1095,6 +1271,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         || Ok(store.get(&other_session_id)?["status"] == "completed"),
     )
     .await?;
+    seed_skillcache(&store, &project_id, &other_session_id)?;
 
     // Create primary active session holding a real pending permission + initial tool & Markdown events.
     let main_created = json_payload(
@@ -1170,6 +1347,13 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     domains.insert("graph".into(), graphs.clone());
     domains.insert("system_graph".into(), system_graphs);
     domains.insert("omnigraph".into(), omnigraph_domain);
+    let skillcache = Arc::new(SkillCacheDomain::new(
+        store.clone(),
+        providers.clone(),
+        sessions.shutdown_cancel(),
+    ));
+    sessions.install_skillcache(skillcache.runtime())?;
+    domains.insert("skillcache".into(), skillcache);
 
     let inbox_trigger: Arc<dyn Domain> = Arc::new(InboxLiveTrigger {
         sessions: sessions.clone(),
@@ -1300,6 +1484,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         "system_config_path": "system.json",
         "system_run_id": system_run_id,
         "omnigraph_graph_id": HARNESS_GRAPH_ID,
+        "skillcache_capsule_id": SKILLCACHE_CAPSULE,
         "root": root,
     });
     fs::write(root.join("browser-e2e.json"), receipt.to_string())?;
@@ -1316,6 +1501,9 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     deadline.abort();
     let close_result = services.close().await;
     let _ = omni_task.await;
+    // The seeded capsule's package is sealed read-only; whoever made the
+    // state folder removes it, so it is given back first.
+    infra_skillcache::package::release(&root.join("state/skillcache"));
     serve_result.and(close_result)
 }
 

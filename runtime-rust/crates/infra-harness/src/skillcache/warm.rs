@@ -30,6 +30,23 @@ use std::{
 /// The experiment switch for choosing among several capsules of one skill by
 /// their descriptions. Off until it has its own measurement.
 pub const RETRIEVAL_BY_MU: &str = "skillcache.retrieval_by_mu";
+/// The setting that lets a capsule's own warm turns ask for its
+/// recompilation: `{window, failed_runs}`. Absent, the Harness only shows how
+/// the turns went. There are no built-in thresholds, because none has been
+/// measured; whoever sets them names them.
+pub const RECOMPILE_THRESHOLDS: &str = "skillcache.recompile_thresholds";
+
+/// `(window, failed_runs)` when the setting holds usable numbers.
+fn recompile_thresholds(store: &SessionStore) -> Option<(i64, usize)> {
+    let setting = store.setting(RECOMPILE_THRESHOLDS).ok().flatten()?;
+    let window = setting["window"]
+        .as_u64()
+        .filter(|window| (1..=50).contains(window))?;
+    let failed = setting["failed_runs"]
+        .as_u64()
+        .filter(|failed| (1..=window).contains(failed))?;
+    Some((window as i64, failed as usize))
+}
 
 /// A turn that runs a capsule.
 pub struct Warm {
@@ -709,6 +726,10 @@ impl Warm {
                 })
             })
             .collect::<Vec<_>>();
+        // Read before the connection is taken: the store has one, and both a
+        // setting and a session event go through it.
+        let thresholds = recompile_thresholds(store);
+        let mut waits = None;
         if let Ok(db) = store.connection() {
             let _ = db::record_run(
                 &db,
@@ -724,6 +745,39 @@ impl Warm {
                 },
             );
             let _ = db::touch_capsule(&db, &self.capsule_id);
+            // Behind its setting only: enough of the last turns handed a
+            // program step back, so the capsule waits for a person.
+            if let Some((window, failed)) = thresholds
+                && let Ok(recent) = db::capsule_runs(&db, &self.capsule_id, window)
+            {
+                let handed_back = recent
+                    .iter()
+                    .filter(|run| run["deopts"].as_i64().unwrap_or_default() > 0)
+                    .count();
+                let reason = format!(
+                    "{handed_back} of its last {} warm turns handed a program step back.",
+                    recent.len()
+                );
+                if handed_back >= failed
+                    && db::set_capsule_status(
+                        &db,
+                        &self.capsule_id,
+                        "needs_recompile",
+                        Some(&reason),
+                    )
+                    .is_ok()
+                {
+                    waits = Some(reason);
+                }
+            }
+        }
+        if let Some(reason) = waits {
+            let _ = emit(json!({
+                "kind": "skillcache",
+                "phase": "needs_recompile",
+                "capsule_id": self.capsule_id,
+                "text": format!("SkillCache: {reason} The capsule is not used until it is requalified or compiled again."),
+            }));
         }
         if let Some(state_dir) = &self.state_dir {
             let _ = std::fs::remove_dir_all(state_dir);
@@ -784,7 +838,7 @@ mod tests {
 
     #[test]
     fn a_turn_is_warm_only_for_what_a_capsule_was_qualified_for() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         let runtime = runtime(root.path());
         let session = |provider: &str, mode: &str, permissions: &str, skillcache: &str| {
             json!({
@@ -891,7 +945,7 @@ mod tests {
 
     #[test]
     fn prompt_hit_block_excludes_examples_and_sources() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         let stored = stored(root.path());
         let text = block(&stored, ".agents/skills/pdf/SKILL.md");
         // What the agent needs: what the capsule is for, what to take from
@@ -927,7 +981,7 @@ mod tests {
 
     #[test]
     fn textual_hit_prompt_has_capsule_md_only() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         let manifest = json!({
             "schema_version": 1, "form": "textual",
             "mu": {"name": "pdf-totals", "description": "Totals of a folder of invoice PDFs"},
@@ -1084,7 +1138,7 @@ mod tests {
 
     #[test]
     fn run_log_ingest_idempotent_emits_session_events() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         let state_dir = root.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let state_file = state_dir.join("plan-state.json");

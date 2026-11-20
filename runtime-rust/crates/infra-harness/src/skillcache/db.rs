@@ -420,6 +420,26 @@ pub(crate) fn session_runs(db: &Connection, session_id: &str) -> Result<Vec<Valu
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// A capsule's warm turns, newest first.
+pub(crate) fn capsule_runs(db: &Connection, capsule_id: &str, limit: i64) -> Result<Vec<Value>> {
+    let mut query = db.prepare(
+        "SELECT generation,session_id,provider,model,outcome,deopts,created_at
+         FROM skillcache_runs WHERE capsule_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT ?2",
+    )?;
+    let rows = query.query_map(params![capsule_id, limit], |row| {
+        Ok(json!({
+            "generation": row.get::<_, String>(0)?,
+            "session_id": row.get::<_, String>(1)?,
+            "provider": row.get::<_, String>(2)?,
+            "model": row.get::<_, Option<String>>(3)?,
+            "outcome": row.get::<_, String>(4)?,
+            "deopts": row.get::<_, i64>(5)?,
+            "created_at": row.get::<_, String>(6)?,
+        }))
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 /// Removes a capsule's rows. Its files are the caller's to remove.
 pub(crate) fn delete_capsule(db: &Connection, capsule_id: &str) -> Result<bool> {
     db.execute(

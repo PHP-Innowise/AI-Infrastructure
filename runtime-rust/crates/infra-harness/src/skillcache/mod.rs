@@ -284,11 +284,14 @@ impl SkillCacheDomain {
             Some(id) => db::compile(&db, id)?,
             None => None,
         };
-        let (runs, deopts): (i64, i64) = db.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(deopts),0) FROM skillcache_runs WHERE capsule_id=?1",
+        let (runs, complete, handed_back, deopts): (i64, i64, i64, i64) = db.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(outcome='complete'),0),COALESCE(SUM(deopts>0),0),
+                    COALESCE(SUM(deopts),0)
+             FROM skillcache_runs WHERE capsule_id=?1",
             [capsule_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
+        let recent = db::capsule_runs(&db, capsule_id, 20)?;
         let mut detail = summary(&capsule);
         // The plan as a person inspects it. Program sources stay in the package.
         detail["capsule"] = stored
@@ -310,8 +313,23 @@ impl SkillCacheDomain {
             })
             .into();
         detail["gates"] = db::gates(&db, capsule_id)?.into();
+        // What the Harness knows of the capsule's cost: what compiling it cost
+        // and how its warm turns went. What a reuse saves is not known here;
+        // a sealed evaluation measures it, and until then it is not a zero.
+        detail["amortization"] = json!({
+            "compile_usd": compilation.as_ref().and_then(|compile| compile["usage"]["cost_usd"].as_f64()),
+            "warm_turns": runs,
+            "saving_per_reuse_usd": null,
+            "breakeven_reuses": null,
+        });
         detail["compile"] = compilation.unwrap_or(Value::Null);
-        detail["runs"] = json!({"count": runs, "deopts": deopts});
+        detail["runs"] = json!({
+            "count": runs,
+            "complete": complete,
+            "handed_back": handed_back,
+            "deopts": deopts,
+            "recent": recent,
+        });
         detail["skill_files"] = json!({
             "skills": capsule["skill_files"]["skills"].as_array().into_iter().flatten().map(|skill| json!({
                 "name": skill["name"], "path": skill["path"], "tree_sha256": skill["tree_sha256"],
@@ -574,5 +592,25 @@ impl Domain for SkillCacheDomain {
             };
             Ok(Payload::Json(value))
         })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// A temporary folder that is removed although it held sealed packages,
+    /// whose folders are read-only.
+    pub(crate) struct Scratch(tempfile::TempDir);
+    impl Scratch {
+        pub(crate) fn path(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            infra_skillcache::package::release(self.0.path());
+        }
+    }
+    pub(crate) fn scratch() -> Scratch {
+        Scratch(tempfile::tempdir().unwrap())
     }
 }

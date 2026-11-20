@@ -946,22 +946,7 @@ pub fn clear_workspaces(state: &Path) {
 
 /// A read-only package below `root` would keep the folder from being removed.
 fn make_removable(root: &Path) -> Result<()> {
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(folder) = pending.pop() {
-        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
-            let path = entry.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if metadata.is_dir() && !infra_core::fs::linked(&metadata) {
-                if path.file_name().is_some_and(|name| name == "warm") {
-                    let _ = package::remove(&path);
-                } else {
-                    pending.push(path);
-                }
-            }
-        }
-    }
+    package::release(root);
     Ok(())
 }
 
@@ -1115,7 +1100,7 @@ mod tests {
 
     #[test]
     fn a_compiler_is_launched_read_only_without_a_shell() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         let schema = compile_rules::response_schema();
         let prepared = infra_system::native::prepare_launch(
             "claude",
@@ -1180,7 +1165,7 @@ mod tests {
 
     #[test]
     fn the_boundary_sample_is_bounded_and_starts_at_the_root() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         for folder in 0..30 {
             let path = root.path().join(format!("d{folder:02}"));
             std::fs::create_dir_all(path.join("deep/deeper/deepest")).unwrap();
@@ -1197,7 +1182,7 @@ mod tests {
 
     #[test]
     fn a_skill_copy_names_what_it_leaves_out() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::skillcache::test_support::scratch();
         let skill = root.path().join("skill");
         std::fs::create_dir_all(skill.join("scripts")).unwrap();
         std::fs::write(skill.join("SKILL.md"), "# Skill\n").unwrap();

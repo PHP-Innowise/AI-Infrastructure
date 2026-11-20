@@ -70,6 +70,7 @@ pub(super) fn reset_preflight(clear_opt_in: bool) {
     dom::error("preflight-error", "");
     dom::clear("preflight-results");
     dom::hidden("preflight-results", true);
+    dom::hidden("skillcache-preview", true);
     if clear_opt_in {
         dom::set_checked("preflight-risk-callers", false);
     }
@@ -572,13 +573,19 @@ pub(super) async fn run_preflight(manual: bool) {
         return;
     }
     let prompt = dom::value("prompt");
-    if !manual && (prompt.trim().is_empty() || !has_at_file_mention(&prompt)) {
+    if !manual
+        && (prompt.trim().is_empty()
+            || !(has_at_file_mention(&prompt) || crate::skillcache::wants_preview(&prompt)))
+    {
         return;
     }
     let sid = m::read(|s| s.sid.clone());
     let task_id = preflight_task_id();
     let include_callers = dom::checked("preflight-risk-callers");
-    let body = build_preflight_request(&prompt, &sid, &task_id, include_callers);
+    let mut body = build_preflight_request(&prompt, &sid, &task_id, include_callers);
+    if let Some(preview) = crate::skillcache::preflight_request() {
+        body["skillcache"] = preview;
+    }
     let key = "preflight";
     let epoch = m::next(key);
     let Ok(controller) = web_sys::AbortController::new() else {
@@ -604,6 +611,7 @@ pub(super) async fn run_preflight(manual: bool) {
     match response {
         Ok(v) => {
             m::set("preflight", v.clone());
+            crate::skillcache::render_preview(&v["skillcache"]);
             dom::error("preflight-error", "");
             dom::text("preflight-status", &preflight_status_summary(&v));
             let html = render_advisory_panel_html(&project, &v, true);

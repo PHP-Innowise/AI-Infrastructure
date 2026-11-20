@@ -24,6 +24,7 @@ mod omnigraph;
 pub(crate) mod omnigraph_canvas;
 mod run;
 mod session;
+mod skillcache;
 mod system_map;
 mod systems;
 
@@ -484,6 +485,9 @@ async fn dispatch(
         return;
     }
     if omnigraph::event(kind, id, action, &payload, &value, checked).await {
+        return;
+    }
+    if skillcache::event(kind, id, action, &payload).await {
         return;
     }
     if commands::event(kind, id, action, &payload, &value).await {

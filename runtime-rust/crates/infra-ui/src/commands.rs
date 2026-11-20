@@ -766,6 +766,11 @@ const PALETTE_VIEWS: &[(&str, &str, &str)] = &[
         "Browse and install agent skills",
     ),
     (
+        "skill-capsules",
+        "Skill capsules",
+        "Inspect compiled plans of repeated skill runs",
+    ),
+    (
         "create-skill",
         "Create skill",
         "Author a custom repository skill",

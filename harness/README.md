@@ -667,6 +667,77 @@ The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
 --help` describes the plan executor (`skillcache-run`), the program tool
 (`skillcache-tool`) and the structural gate.
 
+#### In the page
+
+- **Composer.** The `SkillCache` chip says the mode of the next turn; it is
+  `Off` until someone chooses otherwise. Its panel has the mode, an optional
+  compiler model, and a sentence that says what the chosen mode keeps and what
+  it runs for the selected provider. The choice is remembered with the draft
+  like the other options, and a selected session shows its own stored option.
+  The option is unavailable in Fleet, Clash, SDD, plan and review workflows.
+- **Preview of the next turn.** With `Auto` or `Warm only`, a prompt that names
+  a skill or a command is previewed beside the risk check: `Warm: <capsule>`,
+  `Miss: cold (<reason>)` or `Stale: cold`. A preview stages nothing.
+- **Conversation.** A SkillCache card appears for what a person may act on: a
+  capsule that was used, a kept trace, values or steps the agent was handed, a
+  program step handed back with its reason, the plan's completion, and a miss
+  whose cause can be fixed. An ordinary turn of an `Auto` session is a miss
+  every time and gets no card.
+- **Run view.** A turn with SkillCache events gets a `SkillCache` tab that lists
+  every phase in order. A kept trace offers **Compile into a capsule** once;
+  after that it shows the compilation's state and links to the capsule. A
+  trace whose starting workspace was not kept (no Git repository) says that it
+  cannot be compiled.
+- **Usage.** A session that used SkillCache gets one line above its launch
+  history: how many turns ran warm, how many ran cold and why, how many
+  compiled steps went back to the agent, how many traces are kept, and what
+  the compilations cost. That cost is the compiler's and is in none of the
+  launches listed below it; a compilation without a reported price is said to
+  be unpriced, not free.
+- **Skills → Skill capsules.** The project's capsules with their status and
+  form, filterable. One capsule shows what it is for, the values it needs, its
+  programs (their commands, never their sources), its plan and verification,
+  the skill it was compiled from, its compilation, its gate history round by
+  round, and how its warm turns went. **Requalify** runs the gates again
+  without a model, **Stop using** marks it stale until someone requalifies
+  it, and **Delete** takes a second click. What a reuse saves is shown as unknown: it is measured by a
+  [sealed evaluation](../docs/SKILLCACHE-EVAL.md), never read off a session.
+
+#### A capsule's status
+
+| Status | Meaning | Used by a warm turn |
+| --- | --- | --- |
+| `compiling` | Its compilation is queued or running. | no |
+| `active` | It passed its gates and still matches its skill, environment, compiler rules and package. | yes |
+| `stale` | Something it was qualified with changed (a file of the skill, the engine or a runtime, the rules), or a person stopped using it. The reason is shown. Requalify it, or compile a new turn. | no |
+| `needs_recompile` | A requalification failed, or the recompile setting below marked it. | no |
+| `failed` | No form qualified. The skill is used as it is. | no |
+| `retired` | Reserved by the schema; nothing sets it in this version. | no |
+
+A step that fell back to the agent is a property of that turn. By default the
+Harness only shows how a capsule's warm turns went. The setting
+`skillcache.recompile_thresholds` lets those turns mark the capsule
+`needs_recompile` by themselves: `{"window": N, "failed_runs": K}` marks it
+when `K` of its last `N` warm turns handed a program step back. It is absent
+by default and the Harness has no thresholds of its own, because none has been
+measured; like `skillcache.retrieval_by_mu`, it stays off until a sealed
+evaluation of its own says what the numbers should be.
+
+#### Measuring it
+
+Whether a capsule pays is a measurement:
+
+```bash
+infra-engine eval skillcache-ab seal --plan plan.json --out protocol.json
+infra-engine eval skillcache-ab run --protocol protocol.json --out result.json
+infra-engine eval skillcache-ab report --protocol protocol.json --result result.json
+```
+
+[docs/SKILLCACHE-EVAL.md](../docs/SKILLCACHE-EVAL.md) describes the sealed
+protocol, the driver that runs one attempt with a real provider (yours to
+write: none ships with the engine), the isolated verifiers, and the verdict.
+A report is evidence for the question that was sealed; it turns nothing on.
+
 ### Starting the server
 
 Supports Linux, macOS and native Windows 10/11 through the platform's native engine and at least one authenticated provider CLI. The server and Fleet runtime are Rust; browser business logic is Rust/Wasm. Install a verified engine and its generated UI assets. A Python virtualenv is not part of the runtime.
@@ -3002,6 +3073,12 @@ Node 22 ESM smoke suite driven over Chrome DevTools Protocol (CDP). It verifies:
     `Create skill` preview, `Accelerators` + `Creator` + `Setup` readiness, and
     `#folder-picker` / `#merge-picker` modal interactions & backdrop-click close.
 11. Fresh-target cold boot at `390x844` mobile with `prefers-reduced-motion: reduce`.
+12. SkillCache: the composer chip and its remembered mode, the conversation's
+    cards (`program_failed` with its reason, no program code), the run view's
+    `SkillCache` tab, the turn-to-capsule link, the `Skill capsules` inspector
+    (plan, gate history, an unknown saving shown as a dash), token colors
+    across themes, a `403` for a change without the page's token, and a delete
+    that takes two clicks.
 
 Build the `wasm-ui` bundle first (`infra-engine repo build-ui --root "$PWD"`),
 then run via Rust integration test (requires Chrome/Chromium and Node 22+):
@@ -3021,6 +3098,7 @@ node harness/tests/browser_e2e.mjs \
   [--other-session-id <other-session-id>] \
   [--commit-a <sha>] [--commit-b <sha>] \
   [--system-run-id <run-id>] \
+  [--skillcache-capsule-id <capsule-id>] \
   [--chrome /opt/google/chrome/chrome] [--timeout-ms 150000]
 ```
 

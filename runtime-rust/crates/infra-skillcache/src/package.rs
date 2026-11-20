@@ -203,6 +203,37 @@ fn seal(root: &Path, read_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// Gives the owner back the right to change everything below `root`, so that
+/// a folder which held sealed packages can be removed as a whole. It follows
+/// no link and reports nothing: what could not be released is left as it is,
+/// and the removal that follows says so.
+pub fn release(root: &Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if infra_core::fs::linked(&metadata) {
+            continue;
+        }
+        let folder = metadata.is_dir();
+        // An entry is removed through its folder on Unix; elsewhere a
+        // read-only file cannot be removed either.
+        if folder || cfg!(not(unix)) {
+            let _ = set_mode(&path, folder, false);
+        }
+        if folder {
+            pending.extend(
+                std::fs::read_dir(&path)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path()),
+            );
+        }
+    }
+}
+
 /// Removes a package tree, read-only or not. A missing tree is not an error.
 pub fn remove(root: &Path) -> Result<()> {
     match std::fs::symlink_metadata(root) {

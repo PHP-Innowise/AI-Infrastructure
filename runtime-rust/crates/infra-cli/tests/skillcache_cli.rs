@@ -45,6 +45,14 @@ struct Stand {
     state_file: PathBuf,
 }
 
+/// The stand's folder holds a sealed package, whose folders are read-only:
+/// it is given back to its owner before the temporary folder removes itself.
+impl Drop for Stand {
+    fn drop(&mut self) {
+        package::release(self._root.path());
+    }
+}
+
 fn staged(bin: &Path, name: &str) -> PathBuf {
     let path = bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     if std::fs::hard_link(ENGINE, &path).is_err() {

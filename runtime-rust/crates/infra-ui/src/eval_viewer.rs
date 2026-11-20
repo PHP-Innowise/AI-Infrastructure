@@ -72,6 +72,42 @@ fn title(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+/// The configurations a run id may name: the skill benchmark's and the
+/// arms of the SkillCache evaluation. A baseline is what the others are
+/// measured against.
+const CONFIGURATIONS: [&str; 10] = [
+    "without_skill",
+    "with_skill",
+    "old_skill",
+    "new_skill",
+    "skillcache_executor",
+    "skillcache_agent",
+    "skillcache_no_replay",
+    "written_procedure",
+    "raw_trace",
+    "cold",
+];
+fn configuration_of(id: &str) -> Option<&'static str> {
+    CONFIGURATIONS.into_iter().find(|name| id.contains(name))
+}
+fn is_baseline(configuration: &str) -> bool {
+    ["without_skill", "old_skill", "cold"].contains(&configuration)
+}
+/// The summary rows of a benchmark: key, label, shown as a percentage, the
+/// delta's suffix, and the decimals of a plain number. A row is shown when
+/// either configuration has it. The rows after `tokens` are the SkillCache
+/// evaluation's: what a turn cost, how often a compiled step was handed
+/// back, and what compiling cost.
+const METRICS: [(&str, &str, bool, &str, usize); 8] = [
+    ("pass_rate", "Pass Rate", true, "", 1),
+    ("time_seconds", "Time (s)", false, "s", 1),
+    ("tokens", "Tokens", false, "", 1),
+    ("model_calls", "Model calls", false, "", 1),
+    ("deopt_rate", "Steps handed back", true, "", 1),
+    ("list_price_usd", "List price (USD)", false, "", 4),
+    ("compile_usd", "Compilation (USD)", false, "", 4),
+    ("breakeven_reuses", "Break-even reuses", false, "", 0),
+];
 fn link_uri(file: &V) -> String {
     let uri = text(file, "data_uri");
     if uri.starts_with("data:") {
@@ -248,14 +284,12 @@ fn show_run(index: usize) {
     dom::text("progress", &format!("{} of {total}", index + 1));
     dom::text("prompt-text", &text(&run, "prompt"));
     let id = text(&run, "id");
-    let config = ["with_skill", "without_skill", "new_skill", "old_skill"]
-        .into_iter()
-        .find(|c| id.contains(c));
+    let config = configuration_of(&id);
     show("config-badge", config.is_some());
     if let Some(c) = config {
         dom::text("config-badge", &c.replace('_', " "));
         if let Some(e) = dom::get("config-badge") {
-            e.set_class_name(if ["without_skill", "old_skill"].contains(&c) {
+            e.set_class_name(if is_baseline(c) {
                 "config-badge config-baseline"
             } else {
                 "config-badge config-primary"
@@ -463,9 +497,17 @@ fn rate_class(n: f64) -> &'static str {
         ""
     }
 }
-fn stat(value: &V, pct: bool) -> String {
+fn stat(value: &V, pct: bool, decimals: usize) -> String {
     if value.is_null() {
         return "—".into();
+    }
+    // One measured number has no spread to show.
+    if let Some(single) = value.as_f64() {
+        return if pct {
+            format!("{:.0}%", single * 100.0)
+        } else {
+            format!("{single:.decimals$}")
+        };
     }
     if pct {
         format!(
@@ -475,7 +517,7 @@ fn stat(value: &V, pct: bool) -> String {
         )
     } else {
         format!(
-            "{:.1} ± {:.1}",
+            "{:.decimals$} ± {:.decimals$}",
             number(value, "mean"),
             number(value, "stddev")
         )
@@ -541,18 +583,14 @@ fn render_benchmark() {
         &root,
         &["Metric".into(), title(a), title(b), "Delta".into()],
     );
-    for (key, label, pct, suffix) in [
-        ("pass_rate", "Pass Rate", true, ""),
-        ("time_seconds", "Time (s)", false, "s"),
-        ("tokens", "Tokens", false, ""),
-    ] {
+    for (key, label, pct, suffix, decimals) in METRICS {
         if key != "pass_rate" && summary[a][key].is_null() && summary[b][key].is_null() {
             continue;
         }
         let tr = add(&body, "tr", "", "");
         add(&tr, "td", "", label);
-        add(&tr, "td", "", &stat(&summary[a][key], pct));
-        add(&tr, "td", "", &stat(&summary[b][key], pct));
+        add(&tr, "td", "", &stat(&summary[a][key], pct, decimals));
+        add(&tr, "td", "", &stat(&summary[b][key], pct, decimals));
         let d = &summary["delta"][key];
         add(
             &tr,
@@ -1205,4 +1243,61 @@ fn start_editor(data: V) -> Result<(), JsValue> {
     dom::document().add_event_listener_with_callback("change", edit.as_ref().unchecked_ref())?;
     edit.forget();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_run_id_names_its_configuration_and_baselines_are_marked() {
+        assert_eq!(
+            configuration_of("eval-1-with_skill-run-2"),
+            Some("with_skill")
+        );
+        assert_eq!(
+            configuration_of("eval-1-without_skill-run-2"),
+            Some("without_skill")
+        );
+        assert_eq!(
+            configuration_of("t1/rename/skillcache_executor"),
+            Some("skillcache_executor")
+        );
+        assert_eq!(configuration_of("t1/exact/cold"), Some("cold"));
+        assert_eq!(configuration_of("t1/exact/raw_trace"), Some("raw_trace"));
+        assert_eq!(configuration_of("eval-7"), None);
+        assert!(is_baseline("cold") && is_baseline("without_skill") && is_baseline("old_skill"));
+        assert!(!is_baseline("skillcache_executor") && !is_baseline("with_skill"));
+    }
+
+    #[test]
+    fn a_statistic_is_a_spread_a_number_or_a_dash() {
+        assert_eq!(stat(&V::Null, false, 4), "—");
+        assert_eq!(
+            stat(&json!({"mean": 0.5, "stddev": 0.1}), true, 1),
+            "50% ± 10%"
+        );
+        assert_eq!(
+            stat(&json!({"mean": 12.34, "stddev": 1.0}), false, 1),
+            "12.3 ± 1.0"
+        );
+        assert_eq!(
+            stat(&json!({"mean": 0.06, "stddev": 0.002}), false, 4),
+            "0.0600 ± 0.0020"
+        );
+        // One measured number has no spread.
+        assert_eq!(stat(&json!(0.2), false, 4), "0.2000");
+        assert_eq!(stat(&json!(3), false, 0), "3");
+        assert_eq!(stat(&json!(0.5), true, 1), "50%");
+        // The SkillCache evaluation's rows are part of the summary table.
+        for key in [
+            "model_calls",
+            "deopt_rate",
+            "list_price_usd",
+            "compile_usd",
+            "breakeven_reuses",
+        ] {
+            assert!(METRICS.iter().any(|(name, ..)| *name == key), "{key}");
+        }
+    }
 }

@@ -142,8 +142,18 @@ fn git(folder: &Path, arguments: &[&str]) {
     assert!(status.success(), "git {arguments:?}");
 }
 
+/// The stand's folder. Capsule packages are sealed read-only, so the folder is
+/// given back to its owner before the temporary folder removes itself;
+/// otherwise every run would leave it behind.
+struct Scratch(tempfile::TempDir);
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        infra_skillcache::package::release(self.0.path());
+    }
+}
+
 struct Stand {
-    _dir: tempfile::TempDir,
+    _dir: Scratch,
     root: PathBuf,
     project_id: String,
     store: SessionStore,
@@ -162,8 +172,8 @@ impl Stand {
         )));
         // Below the build folder, not `/tmp`: the agent sandbox mounts a
         // private `/tmp` over whatever a test would put there.
-        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let dir = Scratch(tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap());
+        let root = infra_core::fs::canonicalize(dir.0.path()).unwrap();
         let project = root.join("project");
         let source = root.join("source");
         fs::create_dir_all(project.join(".claude/skills/pdf/scripts")).unwrap();
@@ -1715,7 +1725,18 @@ async fn a_warm_turn_runs_the_capsule_instead_of_reading_the_skill() {
     assert_eq!(listed["runs"][0]["outcome"], "complete");
     assert_eq!(listed["runs"][0]["deopts"], 0);
     let capsule = stand.capsule(&capsule_id).await;
-    assert_eq!(capsule["runs"], json!({"count": 1, "deopts": 0}));
+    assert_eq!(capsule["runs"]["count"], 1);
+    assert_eq!(capsule["runs"]["complete"], 1);
+    assert_eq!(capsule["runs"]["handed_back"], 0);
+    assert_eq!(capsule["runs"]["deopts"], 0);
+    assert_eq!(capsule["runs"]["recent"][0]["session_id"], sid.as_str());
+    assert_eq!(capsule["runs"]["recent"][0]["outcome"], "complete");
+    // What compiling cost is known; what a reuse saves is not, and is not
+    // shown as a zero.
+    assert_eq!(capsule["amortization"]["compile_usd"], 0.05);
+    assert_eq!(capsule["amortization"]["warm_turns"], 1);
+    assert!(capsule["amortization"]["saving_per_reuse_usd"].is_null());
+    assert!(capsule["amortization"]["breakeven_reuses"].is_null());
     assert!(capsule["last_used_at"].is_string());
     let recorded: String = stand
         .store
@@ -1847,11 +1868,51 @@ call 2 skillcache-run continue '{{"rows_file":"out/rows.json"}}'"#,
     assert_eq!(failed["reason"], "nonzero_exit");
     assert_eq!(failed["verification"], false);
     let capsule = stand.capsule(&capsule_id).await;
-    assert_eq!(capsule["runs"], json!({"count": 1, "deopts": 1}));
+    assert_eq!(capsule["runs"]["count"], 1);
+    assert_eq!(capsule["runs"]["handed_back"], 1);
+    assert_eq!(capsule["runs"]["deopts"], 1);
     // A deoptimized step is a property of that run; the capsule stays active.
     assert_eq!(capsule["status"], "active");
     // warm_only records nothing, hit or not.
     assert_eq!(stand.traces().len(), 1);
+
+    // recompile_thresholds_are_off_until_set: with the setting, enough turns
+    // that handed a step back make the capsule wait for a person. The numbers
+    // are the setting's own; the Harness has none.
+    stand
+        .store
+        .set_setting(
+            "skillcache.recompile_thresholds",
+            &json!({"window": 3, "failed_runs": 2}),
+        )
+        .unwrap();
+    let again = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            Some(&warm_agent(&stand.root, &by_hand)),
+        )
+        .await;
+    assert_eq!(stand.phases(&again).last().unwrap(), "needs_recompile");
+    let capsule = stand.capsule(&capsule_id).await;
+    assert_eq!(capsule["status"], "needs_recompile", "{capsule}");
+    assert_eq!(
+        capsule["reason"],
+        "2 of its last 2 warm turns handed a program step back."
+    );
+    assert_eq!(capsule["runs"]["handed_back"], 2);
+    // It is not used again until someone requalifies it or compiles anew.
+    stand.script("codex", &codex_skill_turn());
+    let cold = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            None,
+        )
+        .await;
+    let events = stand.skillcache_events(&cold);
+    assert_eq!(events[0]["phase"], "miss", "{events:?}");
+    assert_eq!(events[0]["reason"], "no_capsule");
     stand.close().await;
 }
 

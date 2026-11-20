@@ -418,8 +418,13 @@ pub fn run(raw: &[String]) -> Result<Output> {
                         _ => family,
                     };
                     let command = if group == "eval"
-                        && ["memory-eval", "memory-outcome-ab", "memory-native-ab"]
-                            .contains(&family)
+                        && [
+                            "memory-eval",
+                            "memory-outcome-ab",
+                            "memory-native-ab",
+                            "skillcache-ab",
+                        ]
+                        .contains(&family)
                     {
                         rest.get(1).filter(|command| !command.starts_with('-'))
                     } else {
@@ -898,7 +903,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
             let (sub, args) = if group == "eval"
                 && matches!(
                     family,
-                    "memory-eval" | "memory-outcome-ab" | "memory-native-ab"
+                    "memory-eval" | "memory-outcome-ab" | "memory-native-ab" | "skillcache-ab"
                 ) {
                 let (op, args) = operation(args, None)?;
                 (Some(op), args)

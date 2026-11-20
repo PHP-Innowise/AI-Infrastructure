@@ -1,5 +1,7 @@
 //! A warm package holds the capsule and its programs, read-only, and nothing
 //! that was observed; a skill's identity changes with any of its files.
+#[path = "support/scratch.rs"]
+mod scratch;
 mod support;
 use infra_skillcache::{Examples, SkillCapsule, fingerprint, package};
 use std::path::Path;
@@ -15,7 +17,7 @@ fn names(root: &Path) -> Vec<String> {
 
 #[test]
 fn package_warm_has_no_examples() {
-    let state = tempfile::tempdir().unwrap();
+    let state = scratch::scratch();
     let warm = state.path().join("capsules/project/capsule/1/warm");
     let parsed = SkillCapsule::parse(&bytes(&capsule())).unwrap();
     let observed = Examples::from_value(&examples()).unwrap();
@@ -64,7 +66,7 @@ fn package_warm_has_no_examples() {
 #[test]
 fn package_warm_is_read_only_and_examples_are_private() {
     use std::os::unix::fs::PermissionsExt;
-    let state = tempfile::tempdir().unwrap();
+    let state = scratch::scratch();
     let warm = state.path().join("warm");
     let parsed = SkillCapsule::parse(&bytes(&capsule())).unwrap();
     package::write_warm(&warm, &parsed, None, &files()).unwrap();
@@ -81,7 +83,7 @@ fn package_warm_is_read_only_and_examples_are_private() {
 
 #[test]
 fn package_load_refuses_what_a_capsule_does_not_define() {
-    let state = tempfile::tempdir().unwrap();
+    let state = scratch::scratch();
     let parsed = SkillCapsule::parse(&bytes(&capsule())).unwrap();
     let build = |name: &str| {
         let root = state.path().join(name);
@@ -125,7 +127,7 @@ fn package_load_refuses_what_a_capsule_does_not_define() {
 
 #[test]
 fn fingerprint_detects_script_change() {
-    let project = tempfile::tempdir().unwrap();
+    let project = scratch::scratch();
     let skill = project.path().join(".claude/skills/pdf");
     std::fs::create_dir_all(skill.join("scripts")).unwrap();
     std::fs::create_dir_all(skill.join("references")).unwrap();
@@ -223,4 +225,29 @@ fn the_compile_rules_carry_a_version_and_a_schema() {
         assert!(compile_rules::INSTRUCTIONS.contains(rule), "{rule}");
     }
     assert!(compile_rules::TEXTUAL_TEMPLATE.contains("## Steps"));
+}
+
+#[test]
+fn a_folder_that_held_a_sealed_package_can_be_given_back() {
+    // A plain temporary folder on purpose: this is the case `release` is for.
+    let state = tempfile::tempdir().unwrap();
+    let held = state.path().join("capsules");
+    let warm = held.join("project/capsule/1/warm");
+    let parsed = SkillCapsule::parse(&bytes(&capsule())).unwrap();
+    package::write_warm(&warm, &parsed, None, &files()).unwrap();
+    // Sealed, the tree cannot be removed as it is. An administrator is not
+    // held back by a mode, so the refusal is checked only where it applies.
+    let probe = warm.join("probe");
+    if std::fs::write(&probe, b"x").is_err() {
+        assert!(std::fs::remove_dir_all(&held).is_err());
+        assert!(warm.join("capsule.json").is_file(), "nothing was removed");
+    } else {
+        std::fs::remove_file(&probe).unwrap();
+    }
+    package::release(state.path());
+    std::fs::remove_dir_all(&held).unwrap();
+    assert!(!held.exists());
+    // Releasing what is not there, or what is already free, changes nothing.
+    package::release(&held);
+    package::release(state.path());
 }
