@@ -596,7 +596,7 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
     let state_root = temp.path().join("e2e-state");
     fs::create_dir_all(&state_root).expect("create state root");
 
-    let (mut guard, receipt, stderr_handle) = spawn_fixture(&state_root, &ui_root, &repo, 180);
+    let (mut guard, receipt, stderr_handle) = spawn_fixture(&state_root, &ui_root, &repo, 240);
     let url = receipt["url"].as_str().expect("receipt url");
     let project_id = receipt["project_id"].as_str().expect("receipt project_id");
     let session_id = receipt["session_id"].as_str().expect("receipt session_id");
@@ -629,7 +629,7 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .arg("--chrome")
         .arg(&chrome)
         .arg("--timeout-ms")
-        .arg("90000")
+        .arg("150000")
         .output()
         .expect("execute browser_e2e.mjs");
 

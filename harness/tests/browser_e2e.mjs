@@ -590,7 +590,7 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     });
   }
 
-  async function readLatestFinishedJson(urlSubstring) {
+  async function readLatestFinishedJson(urlSubstring, matchFn = null) {
     for (let i = responsesByUrl.length - 1; i >= 0; i -= 1) {
       const rec = responsesByUrl[i];
       if (!rec.url.includes(urlSubstring) || rec.status !== 200) continue;
@@ -598,7 +598,9 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
       try {
         const body = await cdp.send('Network.getResponseBody', { requestId: rec.requestId });
         const raw = body.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : body.body;
-        return JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (matchFn && !matchFn(parsed, rec)) continue;
+        return parsed;
       } catch {
         // try older response if current body unavailable
       }
@@ -757,6 +759,52 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr
   assert(geom.nodeCount > 0, `${label}: expected visible .graph-map-node elements in plane`);
 }
 
+async function withFetchOverride(cdp, patterns, handler, fn) {
+  const unsub = cdp.on('Fetch.requestPaused', async (params) => {
+    try {
+      const handled = await handler(params);
+      if (!handled) {
+        await cdp.send('Fetch.continueRequest', { requestId: params.requestId });
+      }
+    } catch {
+      await cdp.send('Fetch.continueRequest', { requestId: params.requestId }).catch(() => {});
+    }
+  });
+  await cdp.send('Fetch.enable', { patterns });
+  try {
+    return await fn();
+  } finally {
+    unsub();
+    await cdp.send('Fetch.disable').catch(() => {});
+  }
+}
+
+async function closeDialogByBackdropClick(driver, dialogSel, label) {
+  const outsidePt = await driver.waitFor((sel) => {
+    const dlg = document.querySelector(sel);
+    if (!dlg || !dlg.hasAttribute('open')) return null;
+    const r = dlg.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return null;
+    const candidates = [
+      [Math.max(4, Math.floor(r.left / 2)), Math.max(4, Math.floor(r.top / 2))],
+      [4, 4],
+      [Math.min(window.innerWidth - 4, Math.ceil(r.right + 12)), 12],
+      [12, Math.min(window.innerHeight - 4, Math.ceil(r.bottom + 12))],
+    ];
+    for (const [x, y] of candidates) {
+      if (x < r.left - 4 || x > r.right + 4 || y < r.top - 4 || y > r.bottom + 4) {
+        return { x, y, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+      }
+    }
+    return null;
+  }, `${label}: find backdrop point outside ${dialogSel}`, 6_000, dialogSel);
+  await driver.clickAt(outsidePt.x, outsidePt.y);
+  await driver.waitFor((sel) => {
+    const dlg = document.querySelector(sel);
+    return Boolean(dlg && !dlg.hasAttribute('open'));
+  }, `${label}: backdrop click closes ${dialogSel}`, 6_000, dialogSel);
+}
+
 async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   console.log('[Suite 2] Canvas2D & Dependency Map layout');
   // Ensure sessions view and Code graph right tab are active
@@ -858,6 +906,38 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     selectAppearance.project === 'none' && selectAppearance.isolate === 'none',
     `Expected appearance:none on <select> controls: ${JSON.stringify(selectAppearance)}`,
   );
+
+  // Expanded #session-graph-workspace acts as accessible modal (role="dialog", aria-modal="true", inert siblings) and restores on Escape
+  await driver.click('#session-graph-expand');
+  const expandedState = await driver.waitFor(() => {
+    const ws = document.getElementById('session-graph-workspace');
+    if (!ws || ws.getAttribute('data-expanded') !== 'true') return null;
+    return {
+      expanded: ws.getAttribute('data-expanded'),
+      role: ws.getAttribute('role'),
+      ariaModal: ws.getAttribute('aria-modal'),
+      wsInert: ws.hasAttribute('inert'),
+      sidebarInert: document.getElementById('sidebar')?.hasAttribute('inert'),
+      chatColInert: document.getElementById('sessions-chat-column')?.hasAttribute('inert'),
+      expandPressed: document.getElementById('session-graph-expand')?.getAttribute('aria-expanded'),
+    };
+  }, '#session-graph-workspace expands to modal dialog state', 6_000);
+  assert(
+    expandedState.role === 'dialog'
+      && expandedState.ariaModal === 'true'
+      && !expandedState.wsInert
+      && expandedState.sidebarInert
+      && expandedState.chatColInert,
+    `Expanded #session-graph-workspace modal inertness check failed: ${JSON.stringify(expandedState)}`,
+  );
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(() => {
+    const ws = document.getElementById('session-graph-workspace');
+    return ws
+      && ws.getAttribute('data-expanded') === 'false'
+      && !document.getElementById('sidebar')?.hasAttribute('inert')
+      && !document.getElementById('sessions-chat-column')?.hasAttribute('inert');
+  }, '#session-graph-workspace collapses on Escape and clears inert', 6_000);
 
   // Open full #graph-map modal
   await driver.click('#session-graph-open-full');
@@ -1376,7 +1456,7 @@ async function suite3MapLenses(driver) {
   driver.assertNoErrors('Suite 3');
 }
 
-async function suite4LiveSseAndStyling(driver, opts) {
+async function suite4LiveSseAndStyling(driver, cdp, opts) {
   console.log('[Suite 4] Live SSE stream & .conversation-* / .md-body styling');
   assert(driver.sseConnections.length > 0, 'Expected /api/events/stream EventSource connection');
   const sseConn = driver.sseConnections[driver.sseConnections.length - 1];
@@ -1436,21 +1516,52 @@ async function suite4LiveSseAndStyling(driver, opts) {
     return prompt && !prompt.disabled;
   }, '#prompt enabled for live SSE turn');
 
+  // Scroll #conversation to top with constrained height before #send so live SSE surfaces #events-jump-latest
   await driver.callFn(() => {
     const prompt = document.getElementById('prompt');
     prompt.value = 'Run browser E2E live SSE verification turn';
     prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    const conv = document.getElementById('conversation');
+    if (conv) {
+      conv.dataset.e2ePrevMaxHeight = conv.style.maxHeight || '';
+      conv.style.maxHeight = '160px';
+      conv.scrollTop = 0;
+      conv.dispatchEvent(new Event('scroll'));
+    }
   });
-  await driver.waitFor(() => {
-    const send = document.getElementById('send');
-    return send && !send.disabled;
-  }, '#send enabled after typing prompt (check inbox eligibility on running session)');
-  await driver.click('#send');
+  try {
+    await driver.waitFor(() => {
+      const conv = document.getElementById('conversation');
+      const send = document.getElementById('send');
+      return Boolean(conv && conv.scrollHeight > conv.clientHeight + 20 && conv.scrollTop === 0 && send && !send.disabled);
+    }, '#conversation scrollable at top and #send enabled before live SSE turn');
+    await driver.click('#send');
 
-  await driver.waitUntil(
-    () => driver.sseMessages.slice(sseCountBefore).some((m) => m.eventName === 'session_event'),
-    'live SSE session_event received on /api/events/stream after #send',
-  );
+    await driver.waitUntil(
+      () => driver.sseMessages.slice(sseCountBefore).some((m) => m.eventName === 'session_event'),
+      'live SSE session_event received on /api/events/stream after #send',
+    );
+    await driver.waitFor(() => {
+      const btn = document.getElementById('events-jump-latest');
+      return Boolean(btn && !btn.hidden && (btn.textContent || '').includes('Jump to latest ('));
+    }, '#events-jump-latest shows unseen count when scrolled up during live SSE', 8_000);
+    await driver.click('#events-jump-latest');
+    await driver.waitFor(() => {
+      const btn = document.getElementById('events-jump-latest');
+      const conv = document.getElementById('conversation');
+      return Boolean(btn?.hidden && conv && conv.scrollHeight - (conv.scrollTop + conv.clientHeight) <= 32);
+    }, '#events-jump-latest scrolls to bottom and hides', 6_000);
+  } finally {
+    await driver.callFn(() => {
+      const conv = document.getElementById('conversation');
+      if (conv) {
+        conv.style.maxHeight = conv.dataset.e2ePrevMaxHeight || '';
+        delete conv.dataset.e2ePrevMaxHeight;
+        conv.scrollTop = conv.scrollHeight;
+        conv.dispatchEvent(new Event('scroll'));
+      }
+    });
+  }
 
   await driver.waitFor((prevBlocks) => {
     const ev = document.getElementById('events');
@@ -1522,6 +1633,132 @@ async function suite4LiveSseAndStyling(driver, opts) {
   await driver.waitFor((sel) => document.querySelector(sel)?.textContent?.trim() === 'Copy', 'Copy button resets back to "Copy"', 4_000, copySel);
 
   await assertInstantDarkConversationUserContrast(driver);
+
+  // Verify #events-load-earlier handles client slice reveal + ?before=<oldest_event_id> pagination
+  if (opts?.otherSessionId && opts?.sessionId) {
+    const otherSel = `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.otherSessionId).replace(/"/g, '\\"')}"]`;
+    const mainSel = `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.sessionId).replace(/"/g, '\\"')}"]`;
+    await driver.click(otherSel);
+    await driver.waitFor(
+      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+      'switch to other_session_id to snapshot payload for #events-load-earlier',
+      10_000,
+      otherSel,
+    );
+    const otherEnc = encodeURIComponent(opts.otherSessionId);
+    const baseOther = await driver.waitUntil(
+      async () => (
+        await driver.readLatestFinishedJson(`/api/sessions/${otherEnc}?`, (j) => Boolean(j?.session))
+        || await driver.readLatestFinishedJson(`/api/sessions/${opts.otherSessionId}?`, (j) => Boolean(j?.session))
+      ),
+      'capture finished session JSON payload for other_session_id',
+      10_000,
+    );
+    assert(baseOther?.session, 'Expected captured JSON payload for other_session_id');
+    await driver.click(mainSel);
+    await driver.waitFor(
+      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+      'switch back to session_id before Fetch override',
+      10_000,
+      mainSel,
+    );
+
+    const syntheticInitial = {
+      ...baseOther,
+      events: Array.from({ length: 135 }, (_, idx) => ({
+        id: 201 + idx,
+        kind: 'text',
+        text: `Synthetic session history item ${201 + idx}`,
+      })),
+      has_older: true,
+      oldest_event_id: 201,
+    };
+    const syntheticOlder = {
+      events: Array.from({ length: 8 }, (_, idx) => ({
+        id: 193 + idx,
+        kind: 'text',
+        text: `Loaded earlier server history entry ${193 + idx}`,
+      })),
+      has_older: false,
+      oldest_event_id: 193,
+    };
+    let sawBeforeFetch = false;
+
+    await withFetchOverride(
+      cdp,
+      [{ urlPattern: `${driver.origin}/api/sessions/*` }],
+      async (params) => {
+        const reqUrl = params.request?.url || '';
+        const method = (params.request?.method || 'GET').toUpperCase();
+        const parsed = new URL(reqUrl);
+        const matchesOther = parsed.pathname === `/api/sessions/${opts.otherSessionId}`
+          || parsed.pathname === `/api/sessions/${otherEnc}`;
+        if (method === 'GET' && matchesOther) {
+          if (parsed.searchParams.get('before') === '201') {
+            sawBeforeFetch = true;
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(syntheticOlder)).toString('base64'),
+            });
+            return true;
+          }
+          if (!parsed.searchParams.has('before') && !parsed.searchParams.has('after')) {
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(syntheticInitial)).toString('base64'),
+            });
+            return true;
+          }
+          if (parsed.searchParams.has('after')) {
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify({ session: baseOther.session, events: [] })).toString('base64'),
+            });
+            return true;
+          }
+        }
+        return false;
+      },
+      async () => {
+        await driver.click(otherSel);
+        await driver.waitFor(() => {
+          const wrap = document.getElementById('events-load-earlier-wrap');
+          const btn = document.getElementById('events-load-earlier');
+          return Boolean(wrap && !wrap.hidden && btn && (btn.textContent || '').includes('15 loaded'));
+        }, '#events-load-earlier shows client buffered count (15 loaded)', 10_000);
+
+        await driver.click('#events-load-earlier');
+        await driver.waitFor(() => {
+          const evText = document.getElementById('events')?.textContent || '';
+          const btnText = document.getElementById('events-load-earlier')?.textContent || '';
+          return evText.includes('Synthetic session history item 201') && !btnText.includes('15 loaded');
+        }, '#events-load-earlier expands client window first', 8_000);
+
+        await driver.click('#events-load-earlier');
+        await driver.waitFor(() => {
+          const wrap = document.getElementById('events-load-earlier-wrap');
+          const evText = document.getElementById('events')?.textContent || '';
+          return Boolean(wrap?.hidden && evText.includes('Loaded earlier server history entry 193'));
+        }, '#events-load-earlier fetches ?before=201 and hides wrap when has_older is false', 8_000);
+        assert(sawBeforeFetch, 'Expected ?before=201 request on #events-load-earlier click');
+      },
+    );
+
+    await driver.click(mainSel);
+    await driver.waitFor(
+      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+      'restore session_id after #events-load-earlier test',
+      10_000,
+      mainSel,
+    );
+  }
+
   driver.assertNoErrors('Suite 4');
 }
 
@@ -1944,6 +2181,207 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   }
   await driver.click(`#theme-${themeBeforeContrast}`);
   await driver.waitFor((t) => document.documentElement.getAttribute('data-theme') === t, 'restore theme after WCAG checks', 4_000, themeBeforeContrast);
+
+  if (otherSel && mainSel) {
+    // Verify .skill-hint click (composer-choose) fills /model command and closes #skill-hints-panel
+    await driver.callFn(() => {
+      const p = document.getElementById('prompt');
+      p.value = '/mo';
+      p.focus();
+      p.setSelectionRange(p.value.length, p.value.length);
+      p.dispatchEvent(new Event('input', { bubbles: true }));
+      p.dispatchEvent(new KeyboardEvent('keyup', { key: 'o', code: 'KeyO', bubbles: true }));
+    });
+    await driver.waitFor(() => {
+      const panel = document.getElementById('skill-hints-panel');
+      const hint = document.querySelector('#skill-hints button.skill-hint[data-action="composer-choose"]');
+      return Boolean(panel && !panel.hidden && hint);
+    }, '.skill-hint[data-action="composer-choose"] opens for /mo', 5_000);
+    await driver.click('#skill-hints button.skill-hint[data-action="composer-choose"]');
+    await driver.waitFor(() => {
+      const p = document.getElementById('prompt');
+      const panel = document.getElementById('skill-hints-panel');
+      return Boolean(p && p.value.startsWith('/model') && panel?.hidden);
+    }, '.skill-hint click fills composer command and closes #skill-hints-panel', 5_000);
+    await driver.callFn(() => {
+      const p = document.getElementById('prompt');
+      p.value = '';
+      p.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // Verify permission-question-card (radio, multi-select checkbox, Other auto-check + Submit answers) and Alt+D shortcut
+    const otherEnc = encodeURIComponent(opts.otherSessionId);
+    const otherSnapshot = await driver.waitUntil(
+      async () => (
+        await driver.readLatestFinishedJson(`/api/sessions/${otherEnc}?`, (j) => Boolean(j?.session))
+        || await driver.readLatestFinishedJson(`/api/sessions/${opts.otherSessionId}?`, (j) => Boolean(j?.session))
+      ),
+      'capture finished JSON payload for other_session_id before question card test',
+      10_000,
+    );
+    if (otherSnapshot?.session) {
+      await driver.click(mainSel);
+      await driver.waitFor(
+        (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true',
+        'park on session_id before permission-question-card Fetch override',
+        10_000,
+        mainSel,
+      );
+      const qPerm = {
+        id: 90001,
+        kind: 'permission',
+        request_id: 'perm-q-e2e',
+        tool: 'AskUserQuestion',
+        tool_name: 'AskUserQuestion',
+        ask_kind: 'question',
+        state: 'pending',
+        questions: [
+          {
+            question: 'Target stack?',
+            header: 'Stack',
+            multiSelect: false,
+            options: [
+              { label: 'Laravel', description: 'Laravel edition' },
+              { label: 'Symfony', description: 'Symfony edition' },
+            ],
+          },
+          {
+            question: 'Checks to run?',
+            header: 'Checks',
+            multiSelect: true,
+            options: [
+              { label: 'Lint', description: 'Formatting and static checks' },
+              { label: 'Unit', description: 'Fast test suite' },
+            ],
+          },
+        ],
+      };
+      const denyPerm = {
+        id: 90002,
+        kind: 'permission',
+        request_id: 'perm-d-e2e',
+        tool: 'Edit',
+        tool_name: 'Edit',
+        state: 'pending',
+        input: { file_path: 'entry_01.js', old_string: 'a', new_string: 'b' },
+      };
+      const qSessionPayload = {
+        ...otherSnapshot,
+        session: {
+          ...otherSnapshot.session,
+          status: 'running',
+          waiting_permissions: 2,
+        },
+        waiting_permissions: [qPerm, denyPerm],
+        events: [...(otherSnapshot.events || []), qPerm, denyPerm],
+      };
+      const decisionPosts = [];
+      await withFetchOverride(
+        cdp,
+        [{ urlPattern: `${driver.origin}/api/sessions/*` }],
+        async (params) => {
+          const reqUrl = params.request?.url || '';
+          const method = (params.request?.method || 'GET').toUpperCase();
+          const parsed = new URL(reqUrl);
+          const matchesOther = parsed.pathname === `/api/sessions/${opts.otherSessionId}`
+            || parsed.pathname === `/api/sessions/${otherEnc}`;
+          if (method === 'GET' && matchesOther) {
+            const qDone = decisionPosts.some((p) => p.url.includes('perm-q-e2e'));
+            const dDone = decisionPosts.some((p) => p.url.includes('perm-d-e2e'));
+            const remaining = [qDone ? null : qPerm, dDone ? null : denyPerm].filter(Boolean);
+            const payload = parsed.searchParams.has('after')
+              ? {
+                  session: { ...qSessionPayload.session, waiting_permissions: remaining.length },
+                  waiting_permissions: remaining,
+                  events: [],
+                }
+              : qSessionPayload;
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+            });
+            return true;
+          }
+          if (method === 'POST' && (reqUrl.includes('/permissions/perm-q-e2e') || reqUrl.includes('/permissions/perm-d-e2e'))) {
+            let parsedBody = null;
+            try {
+              parsedBody = params.request?.postData ? JSON.parse(params.request.postData) : null;
+            } catch {
+              parsedBody = null;
+            }
+            decisionPosts.push({ url: reqUrl, body: parsedBody });
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify({ ok: true })).toString('base64'),
+            });
+            return true;
+          }
+          return false;
+        },
+        async () => {
+          await driver.click(otherSel);
+          await driver.waitFor(() => {
+            const qCard = document.querySelector('#events [data-permission-id="perm-q-e2e"] .permission-question-card');
+            const dCard = document.querySelector('#events [data-permission-id="perm-d-e2e"] button[data-decision="deny"]');
+            return Boolean(qCard && dCard && qCard.querySelectorAll('fieldset.permission-question').length === 2);
+          }, 'permission-question-card and Alt+D target card render in #events', 10_000);
+
+          // Select radio option first, then type into Other input and assert Other radio auto-checks
+          await driver.callFn(() => {
+            const q0 = document.querySelector('#events [data-permission-id="perm-q-e2e"] fieldset.permission-question[data-question-index="0"]');
+            const firstRadio = q0?.querySelector('input.permission-question-choice[type="radio"]:not(.permission-question-other-radio)');
+            if (firstRadio) firstRadio.click();
+            const otherInput = q0?.querySelector('input.permission-question-other-input');
+            if (otherInput) {
+              otherInput.value = 'PHP Core Custom';
+              otherInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            const q1Checks = document.querySelectorAll('#events [data-permission-id="perm-q-e2e"] fieldset.permission-question[data-question-index="1"] input.permission-question-choice[type="checkbox"]');
+            q1Checks.forEach((cb) => {
+              if (!cb.checked) cb.click();
+            });
+          });
+          await driver.waitFor(() => {
+            const otherRadio = document.querySelector('#events [data-permission-id="perm-q-e2e"] fieldset.permission-question[data-question-index="0"] input.permission-question-other-radio');
+            return Boolean(otherRadio?.checked);
+          }, 'permission-question-other input auto-checks Other radio', 4_000);
+
+          await driver.click('#events [data-permission-id="perm-q-e2e"] button[data-action="permission-decide"][data-decision="allow"]');
+          await driver.waitUntil(
+            () => decisionPosts.some((p) => p.url.includes('perm-q-e2e')),
+            'Submit permission-question-card answers POSTs to server',
+            6_000,
+          );
+          const qPost = decisionPosts.find((p) => p.url.includes('perm-q-e2e'));
+          assert(
+            qPost?.body?.decision === 'allow'
+              && qPost?.body?.answers?.['Target stack?'] === 'PHP Core Custom'
+              && Array.isArray(qPost?.body?.answers?.['Checks to run?'])
+              && qPost.body.answers['Checks to run?'].includes('Lint')
+              && qPost.body.answers['Checks to run?'].includes('Unit'),
+            `Unexpected permission-question-card answers payload: ${JSON.stringify(qPost)}`,
+          );
+
+          // Focus perm-d-e2e button and trigger Alt+D (modifiers: 1) deny shortcut
+          await driver.callFn(() => {
+            document.querySelector('#events [data-permission-id="perm-d-e2e"] button[data-action="permission-decide"][data-decision="deny"]')?.focus();
+          });
+          await driver.pressKey({ key: 'd', code: 'KeyD', keyCode: 68, modifiers: 1 });
+          await driver.waitUntil(
+            () => decisionPosts.some((p) => p.url.includes('perm-d-e2e')),
+            'Alt+D shortcut POSTs deny decision',
+            6_000,
+          );
+          const dPost = decisionPosts.find((p) => p.url.includes('perm-d-e2e'));
+          assert(dPost?.body?.decision === 'deny', `Expected Alt+D deny decision, got ${JSON.stringify(dPost)}`);
+        },
+      );
+    }
+  }
   if (mainSel) {
     await driver.click(mainSel);
     await driver.waitFor(
@@ -1985,31 +2423,72 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     await driver.click('#run-calm');
   }
 
-  // 2. Reopen #approvals-drawer and resolve perm-e2e-1 via Allow (completes session_id so /resume intercepts locally)
+  // 2. Verify #history-filter-waiting lists waiting session before Allow, resolve perm-e2e-1 via Alt+A, then assert immediate clear
+  if (mainSel && otherSel) {
+    await driver.click('#history-filter-waiting');
+    await driver.waitFor((waitingSel, idleSel) => {
+      const btn = document.getElementById('history-filter-waiting');
+      return Boolean(
+        btn?.getAttribute('aria-pressed') === 'true'
+          && document.querySelector(waitingSel)
+          && !document.querySelector(idleSel),
+      );
+    }, '#history-filter-waiting keeps waiting session_id and filters out idle other_session_id', 6_000, mainSel, otherSel);
+    await driver.click('#history-filter-waiting');
+    await driver.waitFor((idleSel) => {
+      const btn = document.getElementById('history-filter-waiting');
+      return btn?.getAttribute('aria-pressed') === 'false' && Boolean(document.querySelector(idleSel));
+    }, 'toggling #history-filter-waiting restores all sessions', 5_000, otherSel);
+  }
+
   await driver.click('#approvals-queue-toggle');
   await driver.waitFor(
     () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
-    '#approvals-drawer reopened for Allow resolution',
+    '#approvals-drawer reopened for Alt+A Allow resolution',
   );
   const sseBeforeAllow = driver.sseMessages.length;
-  await driver.click('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]');
+  await driver.callFn(() => {
+    document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')?.focus();
+  });
+  await driver.pressKey({ key: 'a', code: 'KeyA', keyCode: 65, modifiers: 1 });
   await driver.waitUntil(
     () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
-    'SSE delivers permission resolution event after Allow click',
+    'SSE delivers permission resolution event after Alt+A Allow shortcut',
     15_000,
   );
   await driver.waitFor(() => {
+    const toggle = document.getElementById('approvals-queue-toggle');
     const cnt = document.getElementById('approvals-queue-count');
     const eventsText = document.getElementById('events')?.textContent || '';
-    const cleared = !cnt || cnt.hidden || cnt.textContent.trim() === '0';
+    const cleared = toggle?.getAttribute('data-count') === '0' && (!cnt || cnt.hidden || cnt.textContent.trim() === '0');
     const runClosed = document.getElementById('run-view')?.getAttribute('data-open') === 'false';
     return cleared && eventsText.includes('Permission request handled') && runClosed;
-  }, 'approvals badge clears, #events shows Permission request handled, and session_id completes', 15_000);
+  }, 'approvals count clears immediately, #events shows Permission request handled, and session_id completes', 15_000);
   const drawerStillOpen = await driver.callFn(() => document.getElementById('approvals-drawer')?.hidden === false);
   if (drawerStillOpen) {
     await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
     await driver.waitFor(() => document.getElementById('approvals-drawer')?.hidden === true, '#approvals-drawer closed after Allow');
   }
+
+  // P0 check: #history-filter-waiting must immediately show 0 waiting sessions after approval (before & after #refresh-sessions)
+  await driver.click('#history-filter-waiting');
+  await driver.waitFor(() => {
+    const rows = document.querySelectorAll('#history [data-action="session-open"]').length;
+    const btn = document.getElementById('history-filter-waiting');
+    return btn?.getAttribute('aria-pressed') === 'true' && rows === 0;
+  }, 'Waiting approval filter clears immediately to 0 sessions after approval', 5_000);
+  await driver.click('#refresh-sessions');
+  await driver.waitFor(() => {
+    const rows = document.querySelectorAll('#history [data-action="session-open"]').length;
+    const cnt = document.getElementById('approvals-queue-count');
+    const toggle = document.getElementById('approvals-queue-toggle');
+    return rows === 0 && toggle?.getAttribute('data-count') === '0' && (!cnt || cnt.hidden || cnt.textContent.trim() === '0');
+  }, 'Waiting approval filter stays at 0 sessions after #refresh-sessions', 6_000);
+  await driver.click('#history-filter-waiting');
+  await driver.waitFor(() => {
+    const btn = document.getElementById('history-filter-waiting');
+    return btn?.getAttribute('aria-pressed') === 'false' && document.querySelectorAll('#history [data-action="session-open"]').length >= 2;
+  }, 'toggling #history-filter-waiting off restores sessions after P0 check', 5_000);
 
   // 3. Responsive 761-920px breakpoint check (840x900) + /resume sidebar inert & focus
   await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -2173,7 +2652,7 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   driver.assertNoErrors('Suite 5');
 }
 
-async function suite6OmnigraphStudio(driver) {
+async function suite6OmnigraphStudio(driver, cdp) {
   console.log('[Suite 6] Omnigraph Context Studio (radar, Reset filters, search, pulse)');
   await driver.click('#sidebar-omnigraph-pill');
   await driver.waitFor(() => {
@@ -2295,6 +2774,58 @@ async function suite6OmnigraphStudio(driver) {
     () => document.getElementById('omnigraph-view')?.getAttribute('data-pulse-paused') === 'false',
     'Omnigraph pulse resumed',
   );
+
+  // Exercise #omnigraph-transfer-dialog (Export/Import tabs + preview) and close via backdrop click
+  await withFetchOverride(
+    cdp,
+    [{ urlPattern: `${driver.origin}/api/omnigraph/export*` }],
+    async (params) => {
+      if ((params.request?.url || '').includes('/api/omnigraph/export')) {
+        const exportPayload = {
+          ok: true,
+          filename: 'omnigraph-context.json',
+          source_branch: 'main',
+          counts: { atoms: 1, files: 1, edges: 1, sessions: 1 },
+          bundle: {
+            format: 'harness.omnigraph.bundle.v1',
+            source_branch: 'main',
+            atoms: [{ id: 'atom-finding-backoff', kind: 'finding', title: 'Retry backoff finding' }],
+            files: [{ path: 'entry_00.js' }],
+            edges: [],
+          },
+        };
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify(exportPayload)).toString('base64'),
+        });
+        return true;
+      }
+      return false;
+    },
+    async () => {
+      await driver.click('#omnigraph-export-open');
+      await driver.waitFor(() => Boolean(document.getElementById('omnigraph-transfer-dialog')?.hasAttribute('open')), '#omnigraph-transfer-dialog opens', 5_000);
+      await driver.click('#omni-transfer-tab-import');
+      await driver.waitFor(() => {
+        const pane = document.getElementById('omni-transfer-pane-import');
+        return Boolean(pane && !pane.hidden && document.getElementById('omni-transfer-tab-import')?.getAttribute('aria-selected') === 'true');
+      }, '#omnigraph-transfer-dialog switches to Import tab', 4_000);
+      await driver.click('#omni-transfer-tab-export');
+      await driver.waitFor(() => document.getElementById('omni-transfer-tab-export')?.getAttribute('aria-selected') === 'true', 'restore Export tab', 4_000);
+      await driver.click('#omni-export-preview-btn');
+      await driver.waitFor(() => (document.getElementById('omni-export-preview-code')?.textContent || '').includes('atom-finding-backoff'), '#omni-export-preview-code populated', 8_000);
+      await closeDialogByBackdropClick(driver, '#omnigraph-transfer-dialog', 'Omnigraph transfer dialog');
+    },
+  );
+
+  // Exercise #omnigraph-share-dialog (from sidebar Share button) and close via backdrop click
+  await driver.click('#share-sessions-context');
+  await driver.waitFor(() => Boolean(document.getElementById('omnigraph-share-dialog')?.hasAttribute('open')), '#omnigraph-share-dialog opens', 5_000);
+  await driver.click('#omni-share-mode-broadcast');
+  await driver.waitFor(() => !document.getElementById('omni-share-source-field')?.hidden, '#omnigraph-share-dialog switches to broadcast mode', 4_000);
+  await closeDialogByBackdropClick(driver, '#omnigraph-share-dialog', 'Omnigraph share dialog');
 
   driver.assertNoErrors('Suite 6');
 }
@@ -2438,6 +2969,116 @@ async function suite7SystemMap(driver, opts) {
     `Expected wave play/pause without DOM teardown: ${JSON.stringify(waveAfter)}`,
   );
 
+  // Cross-graph jumps: System Map -> Omnigraph -> System Map -> Dependency Map
+  await driver.click('#view-tabs [data-view="systems"]');
+  await driver.waitFor(() => {
+    const c = document.getElementById('system-map-canvas');
+    const nodes = c?.querySelectorAll('.system-map-node, .graph-map-node, canvas.graph-dense-canvas[data-dense-canvas="true"]').length || 0;
+    return Boolean(c && !document.getElementById('system-catalog')?.hidden && c.getAttribute('aria-busy') !== 'true' && nodes > 0);
+  }, 'restore System Map view before cross-graph jump check', 10_000);
+
+  const openOmniBtn = await driver.waitFor(() => {
+    const btn = document.querySelector('#system-map-side [data-action="system-map-open-omnigraph"]');
+    if (btn) return true;
+    const host = document.getElementById('system-map-canvas');
+    const node = host?.querySelector('.system-map-node, .graph-map-node');
+    if (node) node.click();
+    return Boolean(document.querySelector('#system-map-side [data-action="system-map-open-omnigraph"]'));
+  }, '#system-map-side Context graph jump button ready', 6_000);
+  assert(openOmniBtn, 'Expected [data-action="system-map-open-omnigraph"] in #system-map-side');
+  await driver.click('#system-map-side [data-action="system-map-open-omnigraph"]');
+  await driver.waitFor(() => {
+    const ov = document.getElementById('omnigraph-view');
+    const studio = document.getElementById('omnigraph-studio');
+    const canvas = document.getElementById('omnigraph-canvas');
+    return Boolean(ov && !ov.hidden && studio && !studio.hidden && canvas?.getAttribute('aria-busy') !== 'true');
+  }, 'System -> Omnigraph jump opens Context Graph studio', 10_000);
+  // Allow any post-navigation highlight/search microtask from open_from_system_service to settle cleanly
+  await driver.callFn(() => new Promise((r) => setTimeout(r, 300)));
+
+  const backoffHitSel = '#omnigraph-search-hits button[data-action="omnigraph-focus-hit"][data-node-id="atom-finding-backoff"]';
+  const searchBeforeBackoff = driver.responsesByUrl.length;
+  await driver.callFn(() => {
+    const tab = document.getElementById('omni-drawer-tab-inspector');
+    if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click();
+    const input = document.getElementById('omnigraph-search');
+    input.value = 'backoff';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await driver.waitUntil(
+    () => driver.responsesByUrl.slice(searchBeforeBackoff).some((r) => r.status === 200 && r.url.includes('/api/omnigraph/search') && r.url.includes('backoff')),
+    'Omnigraph /api/omnigraph/search for backoff completes',
+    10_000,
+  );
+  await driver.waitFor(
+    (sel) => Boolean(document.querySelector(sel)),
+    'Omnigraph search hit ready for atom-finding-backoff',
+    10_000,
+    backoffHitSel,
+  );
+  await driver.click(backoffHitSel);
+  await driver.waitFor(() => {
+    const body = document.getElementById('omnigraph-inspector-body');
+    return Boolean(
+      body?.querySelector('[data-action="omnigraph-open-system-map"]')
+        && body?.querySelector('[data-action="omnigraph-open-code-map"]'),
+    );
+  }, 'Omnigraph inspector displays Open in System Map and Open in Code Map jump controls', 8_000);
+
+  await driver.click('#omnigraph-inspector-body [data-action="omnigraph-open-system-map"]');
+  await driver.waitFor(() => {
+    const sv = document.getElementById('systems-view');
+    const cat = document.getElementById('system-catalog');
+    return Boolean(sv && !sv.hidden && cat && !cat.hidden);
+  }, 'Omnigraph -> System Map jump opens Systems workspace', 10_000);
+
+  await driver.click('button.nav-item[data-nav="omnigraph"]');
+  await driver.waitFor(() => {
+    const ov = document.getElementById('omnigraph-view');
+    const studio = document.getElementById('omnigraph-studio');
+    return Boolean(ov && !ov.hidden && studio && !studio.hidden);
+  }, 'return to Omnigraph studio before Code Map jump', 8_000);
+  const alreadyHasCodeBtn = await driver.callFn(() => Boolean(document.querySelector('#omnigraph-inspector-body [data-action="omnigraph-open-code-map"]')));
+  if (!alreadyHasCodeBtn) {
+    const hasHit = await driver.callFn((sel) => Boolean(document.querySelector(sel)), backoffHitSel);
+    if (!hasHit) {
+      await driver.callFn(() => {
+        const input = document.getElementById('omnigraph-search');
+        if (input) {
+          input.value = 'backoff';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+      await driver.waitFor((sel) => Boolean(document.querySelector(sel)), 're-focus backoff hit', 8_000, backoffHitSel);
+    }
+    await driver.click(backoffHitSel);
+  }
+  await driver.waitFor(
+    () => Boolean(document.querySelector('#omnigraph-inspector-body [data-action="omnigraph-open-code-map"]')),
+    'Omnigraph inspector has Open in Code Map button',
+    8_000,
+  );
+  await driver.click('#omnigraph-inspector-body [data-action="omnigraph-open-code-map"]');
+  await driver.waitFor(() => {
+    const modalOpen = Boolean(document.getElementById('graph-map')?.hasAttribute('open'));
+    const embeddedOpen = !document.getElementById('sessions-view')?.hidden && Boolean(document.getElementById('session-graph-canvas'));
+    return modalOpen || embeddedOpen;
+  }, 'Omnigraph -> Dependency Map jump opens code map', 10_000);
+  const fullMapOpen = await driver.callFn(() => Boolean(document.getElementById('graph-map')?.hasAttribute('open')));
+  if (fullMapOpen) {
+    await driver.click('#graph-map-close');
+    await driver.waitFor(() => !document.getElementById('graph-map')?.hasAttribute('open'), 'close #graph-map after Omnigraph jump', 5_000);
+  }
+  await driver.click('button.nav-item[data-nav="omnigraph"]');
+  await driver.waitFor(() => !document.getElementById('omnigraph-view')?.hidden, 'restore omnigraph view before clearing search', 5_000);
+  await driver.callFn(() => {
+    const input = document.getElementById('omnigraph-search');
+    if (input) {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+
   driver.assertNoErrors('Suite 7');
 }
 
@@ -2451,7 +3092,7 @@ async function suite8NegativeNetworkAndSseRecovery(driver, cdp) {
   );
 
   let mode = 'passthrough';
-  cdp.on('Fetch.requestPaused', async (params) => {
+  const unsubFetch = cdp.on('Fetch.requestPaused', async (params) => {
     try {
       const reqUrl = params.request?.url || '';
       if (mode === 'forbid_api' && reqUrl.startsWith(`${driver.origin}/api/`)) {
@@ -2519,11 +3160,388 @@ async function suite8NegativeNetworkAndSseRecovery(driver, cdp) {
       }, '#connection-banner hides and #sse-status returns to live after #reconnect', 12_000);
     } finally {
       mode = 'passthrough';
+      unsubFetch();
       await cdp.send('Fetch.disable').catch(() => {});
     }
   });
 
   driver.assertNoErrors('Suite 8');
+}
+
+async function suite9DiffChecksAndResults(driver, cdp, opts) {
+  console.log('[Suite 9] Right-pane Diff/Checks & #results-view (changes, checks, usage)');
+  await driver.click('button.nav-item[data-nav="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'sessions view open before Suite 9', 8_000);
+
+  if (opts?.sessionId) {
+    const mainSel = `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.sessionId).replace(/"/g, '\\"')}"]`;
+    const current = await driver.callFn((sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true', mainSel);
+    if (!current) {
+      await driver.click(mainSel);
+      await driver.waitFor((sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true', 'select session_id for Suite 9', 8_000, mainSel);
+    }
+  }
+
+  await driver.click('#right-tab-diff');
+  await driver.waitFor(() => {
+    const pane = document.getElementById('workspace-diff-pane');
+    const tab = document.getElementById('right-tab-diff');
+    return Boolean(pane && !pane.hidden && tab?.getAttribute('aria-selected') === 'true' && document.querySelectorAll('#workspace-diff-viewer .diff-file-group').length >= 1);
+  }, '#right-tab-diff renders workspace diff', 10_000);
+
+  const baseResults = await driver.waitUntil(
+    async () => driver.readLatestFinishedJson('/results', (j) => Boolean(j?.snapshot)),
+    'capture finished /results JSON payload',
+    8_000,
+  );
+  assert(baseResults?.snapshot, 'Expected real /results JSON payload');
+  const fillerLines = Array.from({ length: 265 }, (_, i) => `+export const line_${i} = ${i};`).join('\n');
+  const multiFileDiff = [
+    'diff --git a/entry_01.js b/entry_01.js',
+    '--- a/entry_01.js',
+    '+++ b/entry_01.js',
+    '@@ -1,2 +1,267 @@',
+    ' export const keep = 1;',
+    fillerLines,
+    'diff --git a/entry_00.js b/entry_00.js',
+    '--- a/entry_00.js',
+    '+++ b/entry_00.js',
+    '@@ -1 +1,2 @@',
+    ' export function runEntry() {}',
+    '+// synthetic suite9 change',
+  ].join('\n');
+  const augmentedResults = {
+    ...baseResults,
+    snapshot: {
+      ...baseResults.snapshot,
+      available: true,
+      files: [
+        { path: 'entry_01.js', status: 'modified' },
+        { path: 'entry_00.js', status: 'modified' },
+      ],
+      diff: multiFileDiff,
+    },
+  };
+
+  await withFetchOverride(
+    cdp,
+    [{ urlPattern: `${driver.origin}/api/sessions/*/results*` }],
+    async (params) => {
+      if ((params.request?.method || 'GET').toUpperCase() === 'GET' && params.request.url.includes('/results')) {
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify(augmentedResults)).toString('base64'),
+        });
+        return true;
+      }
+      return false;
+    },
+    async () => {
+      await driver.click('#workspace-refresh-diff');
+      await driver.waitFor(() => {
+        return document.querySelectorAll('#workspace-diff-viewer .diff-file-group').length === 2
+          && Boolean(document.querySelector('#workspace-diff-viewer button.diff-show-more[data-action="diff-show-more"]'));
+      }, '#workspace-diff-viewer renders 2 diff groups with Show all N lines truncation', 8_000);
+
+      // Filter diff files by substring then clear
+      await driver.callFn(() => {
+        const filter = document.querySelector('#workspace-diff-viewer .diff-file-filter[data-action="diff-filter"]');
+        filter.value = 'entry_00';
+        filter.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await driver.waitFor(() => {
+        const g1 = document.querySelector('#workspace-diff-viewer .diff-file-group[data-diff-file="entry_01.js"]');
+        const g0 = document.querySelector('#workspace-diff-viewer .diff-file-group[data-diff-file="entry_00.js"]');
+        return Boolean(g1 && g0 && getComputedStyle(g1).display === 'none' && getComputedStyle(g0).display !== 'none');
+      }, '.diff-file-filter hides non-matching file groups', 5_000);
+      await driver.callFn(() => {
+        const filter = document.querySelector('#workspace-diff-viewer .diff-file-filter[data-action="diff-filter"]');
+        filter.value = '';
+        filter.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await driver.waitFor(() => {
+        const g1 = document.querySelector('#workspace-diff-viewer .diff-file-group[data-diff-file="entry_01.js"]');
+        return Boolean(g1 && getComputedStyle(g1).display !== 'none');
+      }, 'clearing .diff-file-filter restores all diff groups', 4_000);
+
+      // Copy path -> Copied, collapse all, expand all, show all lines
+      const copyPathBtn = '#workspace-diff-viewer button[data-action="diff-copy-path"]';
+      await driver.click(copyPathBtn);
+      await driver.waitFor((sel) => document.querySelector(sel)?.textContent?.trim() === 'Copied', 'diff-copy-path transitions to Copied', 5_000, copyPathBtn);
+
+      await driver.click('#workspace-diff-viewer button[data-action="diff-collapse-all"]');
+      await driver.waitFor(() => {
+        const groups = Array.from(document.querySelectorAll('#workspace-diff-viewer details.diff-file-group'));
+        return groups.length === 2 && groups.every((g) => !g.open);
+      }, 'diff-collapse-all collapses every diff file group', 4_000);
+      await driver.click('#workspace-diff-viewer button[data-action="diff-expand-all"]');
+      await driver.waitFor(() => {
+        const groups = Array.from(document.querySelectorAll('#workspace-diff-viewer details.diff-file-group'));
+        return groups.length === 2 && groups.every((g) => g.open);
+      }, 'diff-expand-all expands every diff file group', 4_000);
+
+      await driver.click('#workspace-diff-viewer button.diff-show-more[data-action="diff-show-more"]');
+      await driver.waitFor(() => {
+        const g1 = document.querySelector('#workspace-diff-viewer .diff-file-group[data-diff-file="entry_01.js"]');
+        return Boolean(
+          g1
+            && !g1.querySelector('button.diff-show-more')
+            && (g1.querySelector('.diff-file-lines')?.textContent || '').includes('line_264'),
+        );
+      }, 'diff-show-more expands all 270+ diff lines', 6_000);
+    },
+  );
+
+  // Switch to #right-tab-checks and navigate via #workspace-open-checks to #results-view
+  await driver.click('#right-tab-checks');
+  await driver.waitFor(() => {
+    const pane = document.getElementById('workspace-checks-pane');
+    return Boolean(pane && !pane.hidden && document.getElementById('right-tab-checks')?.getAttribute('aria-selected') === 'true');
+  }, '#right-tab-checks opens #workspace-checks-pane', 5_000);
+  await driver.click('#workspace-open-checks');
+  await driver.waitFor(() => {
+    const rv = document.getElementById('results-view');
+    return Boolean(rv && !rv.hidden && rv.getAttribute('data-tab') === 'checks' && document.getElementById('check-form'));
+  }, '#workspace-open-checks opens #results-view checks tab', 8_000);
+
+  await driver.click('#view-tabs [data-view="changes"]');
+  await driver.waitFor(() => {
+    const rv = document.getElementById('results-view');
+    return Boolean(rv && rv.getAttribute('data-tab') === 'changes' && document.getElementById('results-files'));
+  }, '#results-view changes tab renders #results-files & #results-diff', 8_000);
+
+  await driver.click('#view-tabs [data-view="usage"]');
+  await driver.waitFor(() => {
+    const rv = document.getElementById('results-view');
+    const totals = document.getElementById('results-totals');
+    return Boolean(rv && rv.getAttribute('data-tab') === 'usage' && totals && totals.textContent.trim().length > 0);
+  }, '#results-view usage tab renders #results-totals', 8_000);
+
+  // Restore sessions conversation tab
+  await driver.click('#view-tabs [data-view="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'return to #sessions-view after Suite 9', 6_000);
+
+  driver.assertNoErrors('Suite 9');
+}
+
+async function suite10KnowledgeSkillsManagementDialogs(driver) {
+  console.log('[Suite 10] Knowledge, Skills, Create Skill, Accelerators/Creator/Setup & Pickers');
+
+  // 1. Knowledge tabs: memory-use -> brain -> memory -> context
+  await driver.click('button.nav-item[data-nav="knowledge"]');
+  await driver.waitFor(() => {
+    const view = document.getElementById('memory-use-view');
+    const winBtns = document.querySelectorAll('#memory-use-window button').length;
+    return Boolean(view && !view.hidden && winBtns >= 1);
+  }, 'Knowledge defaults to memory-use view with #memory-use-window controls', 10_000);
+
+  const memWinBtns = await driver.callFn(() => {
+    const btns = Array.from(document.querySelectorAll('#memory-use-window button'));
+    const alt = btns.find((b) => b.getAttribute('aria-checked') === 'false');
+    if (alt) alt.click();
+    return btns.length;
+  });
+  assert(memWinBtns >= 2, `Expected multiple #memory-use-window radio options, got ${memWinBtns}`);
+
+  await driver.click('#view-tabs [data-view="brain"]');
+  await driver.waitFor(() => {
+    const v = document.getElementById('brain-view');
+    return Boolean(v && !v.hidden && document.getElementById('brain-filter'));
+  }, 'Knowledge brain tab visible', 8_000);
+
+  await driver.click('#view-tabs [data-view="memory"]');
+  await driver.waitFor(() => {
+    const v = document.getElementById('memory-view');
+    return Boolean(v && !v.hidden && document.getElementById('memory-filter'));
+  }, 'Knowledge memory tab visible', 8_000);
+
+  await driver.click('#view-tabs [data-view="context"]');
+  await driver.waitFor(() => {
+    const v = document.getElementById('context-view');
+    const summary = document.getElementById('context-summary');
+    return Boolean(v && !v.hidden && summary && summary.textContent.trim().length > 0);
+  }, 'Knowledge context tab visible with #context-summary', 8_000);
+
+  // 2. Skills & Create Skill form validation + byte counter + preview
+  await driver.click('button.nav-item[data-nav="skills"]');
+  await driver.waitFor(() => {
+    const sv = document.getElementById('skills-view');
+    const agentOpts = document.querySelectorAll('#skills-agents input[type="checkbox"]').length;
+    return Boolean(sv && !sv.hidden && document.getElementById('skills-installed-agent') && agentOpts >= 1);
+  }, 'Skills view loaded with tool checkboxes', 10_000);
+
+  await driver.click('#view-tabs [data-view="create-skill"]');
+  await driver.waitFor(() => {
+    const cv = document.getElementById('create-skill-view');
+    const checks = document.querySelectorAll('#create-skill-agents input[type="checkbox"]').length;
+    return Boolean(cv && !cv.hidden && checks >= 1);
+  }, 'Create skill view rendered with tool targets', 8_000);
+
+  await driver.callFn(() => {
+    const name = document.getElementById('create-skill-name');
+    const desc = document.getElementById('create-skill-description');
+    const inst = document.getElementById('create-skill-instructions');
+    const firstAgent = document.querySelector('#create-skill-agents input[type="checkbox"]');
+    if (firstAgent && !firstAgent.checked) firstAgent.click();
+    name.value = 'e2e-check-skill';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    desc.value = 'Use during E2E skill preview checks.';
+    desc.dispatchEvent(new Event('input', { bubbles: true }));
+    inst.value = '## Steps\n1. Inspect diff.\n';
+    inst.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await driver.waitFor(() => {
+    const bytes = document.getElementById('create-skill-bytes')?.textContent || '';
+    const previewBtn = document.getElementById('create-skill-preview-button');
+    return bytes.startsWith('26 ') && previewBtn && !previewBtn.disabled;
+  }, 'Create skill byte counter updates and enables Preview skill', 5_000);
+  await driver.click('#create-skill-preview-button');
+  await driver.waitFor(() => {
+    const sec = document.getElementById('create-skill-preview');
+    const content = document.getElementById('create-skill-content')?.textContent || '';
+    return Boolean(sec && !sec.hidden && content.includes('name:') && content.includes('e2e-check-skill'));
+  }, 'Create skill preview renders generated SKILL.md', 8_000);
+
+  // 3. Accelerators, Creator, and Setup readiness
+  await driver.click('button.nav-item[data-nav="accelerators"]');
+  await driver.waitFor(() => {
+    const av = document.getElementById('accelerators-view');
+    const box = document.getElementById('accelerators');
+    return Boolean(av && !av.hidden && box && box.textContent.trim().length > 0);
+  }, 'Accelerators overview renders catalog content', 8_000);
+
+  await driver.click('#view-tabs [data-view="creator"]');
+  await driver.waitFor(() => {
+    const cv = document.getElementById('creator-view');
+    return Boolean(cv && !cv.hidden && document.getElementById('creator-form'));
+  }, 'Creator view renders form and runs bar', 8_000);
+
+  await driver.click('#view-tabs [data-view="setup"]');
+  await driver.waitFor(() => {
+    const sv = document.getElementById('setup-view');
+    const readiness = document.getElementById('setup-readiness');
+    const cards = document.querySelectorAll('#setup-readiness-grid > *').length;
+    return Boolean(sv && !sv.hidden && readiness && !readiness.hidden && cards >= 1);
+  }, 'Setup view renders #setup-readiness grid', 10_000);
+
+  // 4. Dialogs: #folder-picker and #merge-picker (open, interact, backdrop click close)
+  await driver.click('button.nav-item[data-nav="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'return to #sessions-view before picker checks', 6_000);
+  await driver.click('#new-session');
+  await driver.waitFor(() => {
+    const panel = document.getElementById('panel-project');
+    const chip = document.getElementById('option-project');
+    return Boolean(chip && panel);
+  }, 'New session configuration visible', 5_000);
+  const projectPanelHidden = await driver.callFn(() => Boolean(document.getElementById('panel-project')?.hidden));
+  if (projectPanelHidden) {
+    await driver.click('#option-project');
+    await driver.waitFor(() => !document.getElementById('panel-project')?.hidden, '#panel-project opens', 4_000);
+  }
+  await driver.click('#project-choose-folder');
+  await driver.waitFor(() => {
+    const dlg = document.getElementById('folder-picker');
+    return Boolean(dlg && dlg.hasAttribute('open') && document.querySelectorAll('#folder-picker-list button').length >= 1);
+  }, '#folder-picker dialog opens and lists directories', 8_000);
+  await closeDialogByBackdropClick(driver, '#folder-picker', '#folder-picker');
+
+  await driver.click('#merge-chats');
+  await driver.waitFor(() => {
+    const dlg = document.getElementById('merge-picker');
+    const checks = document.querySelectorAll('#merge-options input[type="checkbox"]').length;
+    return Boolean(dlg && dlg.hasAttribute('open') && checks >= 2);
+  }, '#merge-picker opens with >= 2 finished session checkboxes', 8_000);
+  await driver.callFn(() => {
+    const checks = Array.from(document.querySelectorAll('#merge-options input[type="checkbox"]')).slice(0, 2);
+    checks.forEach((cb) => {
+      if (!cb.checked) cb.click();
+    });
+  });
+  await driver.waitFor(() => {
+    const btn = document.getElementById('merge-picker-continue');
+    const cnt = document.getElementById('merge-selection-count')?.textContent || '';
+    return Boolean(btn && !btn.disabled && cnt.includes('2'));
+  }, '#merge-picker enables continue button with 2 selected sessions', 4_000);
+  await closeDialogByBackdropClick(driver, '#merge-picker', '#merge-picker');
+
+  driver.assertNoErrors('Suite 10');
+}
+
+async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts) {
+  console.log('[Suite 11] Cold-boot 390x844 mobile layout + prefers-reduced-motion: reduce');
+  const { targetId } = await browserCdp.send('Target.createTarget', { url: 'about:blank' });
+  const port = new URL(browserWsUrl).port;
+  let mobileTarget = null;
+  for (let i = 0; i < 40; i += 1) {
+    const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+    if (res.ok) {
+      const targets = await res.json();
+      mobileTarget = targets.find((t) => t.id === targetId && t.webSocketDebuggerUrl);
+      if (mobileTarget) break;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert(mobileTarget?.webSocketDebuggerUrl, 'Could not find fresh CDP page target for Suite 11');
+
+  const mobileCdp = await CdpClient.connect(mobileTarget.webSocketDebuggerUrl, opts.timeoutMs);
+  try {
+    await mobileCdp.send('Runtime.enable');
+    await mobileCdp.send('Page.enable');
+    await mobileCdp.send('DOM.enable');
+    await mobileCdp.send('Network.enable');
+    await mobileCdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 2,
+      mobile: true,
+    });
+    await mobileCdp.send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
+
+    const mobileDriver = createHarnessDriver(mobileCdp, opts.url, opts.timeoutMs);
+    await mobileCdp.send('Page.navigate', { url: opts.url });
+
+    const boot = await mobileDriver.waitFor(() => {
+      const connecting = document.getElementById('connecting');
+      const sse = document.getElementById('sse-status')?.getAttribute('data-state');
+      const sb = document.getElementById('sidebar');
+      const main = document.getElementById('main');
+      const menuBtn = document.getElementById('menu-toggle');
+      const tabs = document.getElementById('session-mobile-tabs');
+      if (!connecting?.hidden || sse !== 'live' || !sb || !main || !menuBtn || !tabs) return null;
+      const working = document.getElementById('composer-working');
+      const runView = document.getElementById('run-view');
+      const csWork = working ? getComputedStyle(working) : null;
+      const csRun = runView ? getComputedStyle(runView) : null;
+      return {
+        innerWidth: window.innerWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        sidebarOpen: sb.classList.contains('open'),
+        sidebarInert: sb.hasAttribute('inert'),
+        mainInert: main.hasAttribute('inert'),
+        menuDisplay: getComputedStyle(menuBtn).display,
+        tabsDisplay: getComputedStyle(tabs).display,
+        reducedMotionMatch: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        workAnim: csWork?.animationName || '',
+        runTrans: csRun?.transitionDuration || '',
+      };
+    }, 'cold-boot mobile 390x844 WASM ready with reduced motion', 30_000);
+
+    assert(boot.innerWidth === 390, `Expected cold-boot mobile width 390, got ${boot.innerWidth}`);
+    assert(boot.scrollWidth <= boot.innerWidth + 1, `Cold-boot horizontal overflow at 390x844: ${JSON.stringify(boot)}`);
+    assert(!boot.sidebarOpen && boot.sidebarInert && !boot.mainInert, `Unexpected mobile cold-boot drawer/inert state: ${JSON.stringify(boot)}`);
+    assert(boot.menuDisplay !== 'none' && boot.tabsDisplay !== 'none', `Expected #menu-toggle and #session-mobile-tabs visible at 390x844: ${JSON.stringify(boot)}`);
+    assert(boot.reducedMotionMatch, 'Expected matchMedia("(prefers-reduced-motion: reduce)").matches === true');
+    assert(boot.workAnim === 'none' && (boot.runTrans === '0s' || boot.runTrans === '0ms'), `Expected reduced-motion animation/transition disabled: ${JSON.stringify(boot)}`);
+
+    mobileDriver.assertNoErrors('Suite 11');
+  } finally {
+    mobileCdp.close();
+    await browserCdp.send('Target.closeTarget', { targetId }).catch(() => {});
+  }
 }
 
 async function main() {
@@ -2568,16 +3586,19 @@ async function main() {
       await suite1BootThemeTransport(driver, opts);
       await suite2Canvas2dAndMapLayout(driver, pageCdp, opts);
       await suite3MapLenses(driver);
-      await suite4LiveSseAndStyling(driver, opts);
+      await suite4LiveSseAndStyling(driver, pageCdp, opts);
       await suite5ModalsApprovalsPaletteMobile(driver, pageCdp, opts);
-      await suite6OmnigraphStudio(driver);
+      await suite6OmnigraphStudio(driver, pageCdp);
       await suite7SystemMap(driver, opts);
+      await suite9DiffChecksAndResults(driver, pageCdp, opts);
+      await suite10KnowledgeSkillsManagementDialogs(driver);
 
-      driver.assertNoErrors('Suites 1-7 check');
+      driver.assertNoErrors('Suites 1-7 & 9-10 check');
       await suite8NegativeNetworkAndSseRecovery(driver, pageCdp);
+      await suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts);
 
       driver.assertNoErrors('final check');
-      console.log('ALL 8 HEADLESS CHROME CDP E2E SUITES PASSED');
+      console.log('ALL 11 HEADLESS CHROME CDP E2E SUITES PASSED');
     })();
 
     await Promise.race([runSuites, timeoutPromise]);
