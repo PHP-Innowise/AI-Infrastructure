@@ -45,6 +45,180 @@ fn boolean(request: &Value, key: &str, default: bool) -> Result<bool> {
             .ok_or_else(|| RuntimeError::invalid(format!("{key} must be boolean"))),
     }
 }
+fn read_leb128_u32(bytes: &[u8], pos: &mut usize) -> Result<u32> {
+    let mut value: u32 = 0;
+    let mut shift = 0u32;
+    for _ in 0..5 {
+        let byte = *bytes
+            .get(*pos)
+            .ok_or_else(|| RuntimeError::invalid("Truncated Wasm LEB128 integer"))?;
+        *pos += 1;
+        let low = u32::from(byte & 0x7f);
+        if shift == 28 && (byte & 0x70) != 0 {
+            return Err(RuntimeError::invalid("Overflow in Wasm LEB128 u32"));
+        }
+        value |= low << shift;
+        if (byte & 0x80) == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+    Err(RuntimeError::invalid("Overlong Wasm LEB128 u32"))
+}
+fn is_debug_custom_section(payload: &[u8]) -> Result<bool> {
+    let mut pos = 0usize;
+    let name_len = read_leb128_u32(payload, &mut pos)? as usize;
+    let end = pos
+        .checked_add(name_len)
+        .filter(|&end| end <= payload.len())
+        .ok_or_else(|| RuntimeError::invalid("Truncated Wasm custom section name"))?;
+    let name = std::str::from_utf8(&payload[pos..end]);
+    Ok(match name {
+        Ok("name" | "sourceMappingURL" | "external_debug_info") => true,
+        Ok(other) => other.starts_with(".debug_"),
+        Err(_) => false,
+    })
+}
+fn strip_wasm_debug_sections(wasm: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if wasm.get(..8) != Some(&b"\0asm\x01\0\0\0"[..]) {
+        return Err(RuntimeError::invalid(
+            "Input is not a Wasm version 1 module",
+        ));
+    }
+    let mut stripped = Vec::with_capacity(wasm.len());
+    stripped.extend_from_slice(&wasm[..8]);
+    let mut removed_bytes = 0usize;
+    let mut pos = 8usize;
+    while pos < wasm.len() {
+        let section_start = pos;
+        let section_id = wasm[pos];
+        pos += 1;
+        let section_len = read_leb128_u32(wasm, &mut pos)? as usize;
+        let section_end = pos
+            .checked_add(section_len)
+            .filter(|&end| end <= wasm.len())
+            .ok_or_else(|| RuntimeError::invalid("Truncated Wasm section payload"))?;
+        if section_id == 0 && is_debug_custom_section(&wasm[pos..section_end])? {
+            removed_bytes += section_end - section_start;
+        } else {
+            stripped.extend_from_slice(&wasm[section_start..section_end]);
+        }
+        pos = section_end;
+    }
+    Ok((stripped, removed_bytes))
+}
+fn wasm_opt_args(output: &Path, input: &Path, with_features: bool) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-Oz"), OsString::from("--strip-debug")];
+    if with_features {
+        for flag in [
+            "--enable-bulk-memory",
+            "--enable-nontrapping-float-to-int",
+            "--enable-sign-ext",
+            "--enable-mutable-globals",
+        ] {
+            args.push(OsString::from(flag));
+        }
+    }
+    args.push(OsString::from("-o"));
+    args.push(output.as_os_str().to_os_string());
+    args.push(input.as_os_str().to_os_string());
+    args
+}
+struct WasmOptimizationOutcome {
+    wasm: Vec<u8>,
+    wasm_opt_applied: bool,
+    wasm_opt_flags: Vec<String>,
+    bytes_before_opt: usize,
+    bytes_after_opt: usize,
+    bytes_saved: usize,
+    debug_bytes_stripped: usize,
+    warnings: Vec<String>,
+}
+fn apply_wasm_optimization(
+    wasm: Vec<u8>,
+    root: &Path,
+    deadline: Instant,
+    environment: &BTreeMap<OsString, Option<OsString>>,
+    stage: &mut Stage,
+    source: Option<&mut SourceSnapshot>,
+    wasm_opt: Option<&mut Tool>,
+) -> Result<WasmOptimizationOutcome> {
+    let bytes_before_opt = wasm.len();
+    let mut wasm = wasm;
+    let mut wasm_opt_applied = false;
+    let mut wasm_opt_flags: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some(optimizer) = wasm_opt {
+        let optimized_rel = "bindgen/infra_ui_bg.opt.wasm";
+        let opt_out = stage.path.join(optimized_rel);
+        let opt_in = stage.path.join("bindgen/infra_ui_bg.wasm");
+        let mut opt_args = wasm_opt_args(&opt_out, &opt_in, true);
+        if optimizer
+            .run(
+                &opt_args,
+                root,
+                deadline,
+                environment,
+                "Wasm size optimization (wasm-opt -Oz --strip-debug)",
+            )
+            .is_err()
+        {
+            let fallback_args = wasm_opt_args(&opt_out, &opt_in, false);
+            optimizer.run(
+                &fallback_args,
+                root,
+                deadline,
+                environment,
+                "Wasm size optimization (wasm-opt -Oz --strip-debug)",
+            )?;
+            opt_args = fallback_args;
+        }
+        wasm_opt_flags = opt_args
+            .iter()
+            .take_while(|arg| arg.as_os_str() != "-o")
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        if let Some(snapshot) = source {
+            snapshot.verify()?;
+        }
+        stage.verify()?;
+        let (opt_wasm, opt_image) = stage
+            .files
+            .capture_source(optimized_rel, WASM_LIMIT)?
+            .ok_or_else(|| RuntimeError::unavailable("wasm-opt -Oz produced no output module"))?;
+        if opt_wasm.get(..8) != Some(&b"\0asm\x01\0\0\0"[..]) {
+            return Err(RuntimeError::invalid(
+                "wasm-opt output is not a Wasm version 1 module",
+            ));
+        }
+        if stage.files.image_identity(optimized_rel)? != Some(opt_image) {
+            return Err(RuntimeError::conflict(
+                "Optimized Wasm module changed during capture",
+            ));
+        }
+        optimizer.verify()?;
+        wasm = opt_wasm;
+        wasm_opt_applied = true;
+    } else {
+        warnings.push(
+            "wasm-opt was not found on PATH; skipped Binaryen -Oz pass and applied custom debug/name section stripping only."
+                .to_owned(),
+        );
+    }
+    let (wasm, debug_bytes_stripped) = strip_wasm_debug_sections(&wasm)?;
+    let bytes_after_opt = wasm.len();
+    let bytes_saved = bytes_before_opt.saturating_sub(bytes_after_opt);
+    Ok(WasmOptimizationOutcome {
+        wasm,
+        wasm_opt_applied,
+        wasm_opt_flags,
+        bytes_before_opt,
+        bytes_after_opt,
+        bytes_saved,
+        debug_bytes_stripped,
+        warnings,
+    })
+}
 fn remaining(deadline: Instant) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -606,6 +780,7 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
     let seconds = bound(request, "timeout_seconds", 1800, 1, 7200)?;
     let jobs = bound(request, "jobs", 2, 1, 32)?;
     let offline = boolean(request, "offline", true)?;
+    let require_wasm_opt = boolean(request, "require_wasm_opt", false)?;
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(seconds))
         .ok_or_else(|| RuntimeError::invalid("UI build deadline cannot be represented"))?;
@@ -627,7 +802,11 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
     let version = wasm_bindgen_version(&source)?;
     let mut cargo = Tool::find(&root, request, "cargo", "cargo")?;
     let mut bindgen = Tool::find(&root, request, "wasm_bindgen", "wasm-bindgen")?;
-    let mut wasm_opt = Tool::find_optional(&root, request, "wasm_opt", "wasm-opt")?;
+    let mut wasm_opt = if require_wasm_opt {
+        Some(Tool::find(&root, request, "wasm_opt", "wasm-opt")?)
+    } else {
+        Tool::find_optional(&root, request, "wasm_opt", "wasm-opt")?
+    };
     let mut environment = BTreeMap::<OsString, Option<OsString>>::new();
     environment.insert("CARGO_TARGET_DIR".into(), None);
     for key in [
@@ -767,46 +946,24 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
                 "Generated Wasm ABI pair changed during capture",
             ));
         }
-        let mut wasm = wasm;
-        let mut wasm_opt_applied = false;
         let wasm_opt_selected = wasm_opt.as_ref().map(|tool| tool.selected.clone());
-        if let Some(optimizer) = wasm_opt.as_mut() {
-            let optimized_rel = "bindgen/infra_ui_bg.opt.wasm";
-            let opt_args = vec![
-                OsString::from("-Oz"),
-                OsString::from("-o"),
-                stage.path.join(optimized_rel).into_os_string(),
-                stage.path.join("bindgen/infra_ui_bg.wasm").into_os_string(),
-            ];
-            optimizer.run(
-                &opt_args,
-                &root,
-                deadline,
-                &environment,
-                "Wasm size optimization (wasm-opt -Oz)",
-            )?;
-            source.verify()?;
-            stage.verify()?;
-            let (opt_wasm, opt_image) = stage
-                .files
-                .capture_source(optimized_rel, WASM_LIMIT)?
-                .ok_or_else(|| {
-                    RuntimeError::unavailable("wasm-opt -Oz produced no output module")
-                })?;
-            if opt_wasm.get(..8) != Some(&b"\0asm\x01\0\0\0"[..]) {
-                return Err(RuntimeError::invalid(
-                    "wasm-opt output is not a Wasm version 1 module",
-                ));
-            }
-            if stage.files.image_identity(optimized_rel)? != Some(opt_image) {
-                return Err(RuntimeError::conflict(
-                    "Optimized Wasm module changed during capture",
-                ));
-            }
-            optimizer.verify()?;
-            wasm = opt_wasm;
-            wasm_opt_applied = true;
-        }
+        let optimization = apply_wasm_optimization(
+            wasm,
+            &root,
+            deadline,
+            &environment,
+            &mut stage,
+            Some(&mut source),
+            wasm_opt.as_mut(),
+        )?;
+        let wasm = optimization.wasm;
+        let wasm_opt_applied = optimization.wasm_opt_applied;
+        let wasm_opt_flags = optimization.wasm_opt_flags;
+        let wasm_bytes_before_opt = optimization.bytes_before_opt;
+        let wasm_bytes_after_opt = optimization.bytes_after_opt;
+        let wasm_bytes_saved = optimization.bytes_saved;
+        let debug_bytes_stripped = optimization.debug_bytes_stripped;
+        let warnings = optimization.warnings;
         let js_hash = common::sha256(&javascript);
         let wasm_hash = common::sha256(&wasm);
         // The source digest lets a Harness update tell whether this pair was
@@ -820,17 +977,51 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
         publish(&mut source.files, &javascript, &wasm, &manifest)?;
         source.verify()?;
         stage.verify()?;
-        Ok(
-            json!({"ok":true,"target":TARGET,"profile":CARGO_PROFILE,"wasm_opt_applied":wasm_opt_applied,"wasm_opt":wasm_opt_selected,"offline":offline,"jobs":jobs,"wasm_bindgen_version":version,"cargo":cargo.selected,"wasm_bindgen":bindgen.selected,"source_sha256":source.digest(),"source_files":source.images.len(),"artifacts":[{"path":JS,"bytes":javascript.len(),"sha256":js_hash},{"path":WASM,"bytes":wasm.len(),"sha256":wasm_hash},{"path":MANIFEST,"bytes":manifest.len(),"sha256":common::sha256(&manifest)}],"manifest_published_last":true,"elapsed_seconds":seconds as f64-remaining(deadline).map(|remaining|remaining.as_secs_f64()).unwrap_or(0.)}),
-        )
+        let mut report = json!({
+            "ok": true,
+            "target": TARGET,
+            "profile": CARGO_PROFILE,
+            "wasm_opt_applied": wasm_opt_applied,
+            "wasm_opt": wasm_opt_selected,
+            "wasm_opt_flags": wasm_opt_flags,
+            "wasm_bytes_before_opt": wasm_bytes_before_opt,
+            "wasm_bytes_after_opt": wasm_bytes_after_opt,
+            "wasm_bytes_saved": wasm_bytes_saved,
+            "wasm_debug_bytes_stripped": debug_bytes_stripped,
+            "offline": offline,
+            "jobs": jobs,
+            "wasm_bindgen_version": version,
+            "cargo": cargo.selected,
+            "wasm_bindgen": bindgen.selected,
+            "source_sha256": source.digest(),
+            "source_files": source.images.len(),
+            "artifacts": [
+                {"path": JS, "bytes": javascript.len(), "sha256": js_hash},
+                {"path": WASM, "bytes": wasm.len(), "sha256": wasm_hash},
+                {"path": MANIFEST, "bytes": manifest.len(), "sha256": common::sha256(&manifest)}
+            ],
+            "manifest_published_last": true,
+            "elapsed_seconds": seconds as f64 - remaining(deadline).map(|remaining| remaining.as_secs_f64()).unwrap_or(0.),
+        });
+        if !warnings.is_empty() {
+            report["warnings"] = json!(warnings);
+        }
+        Ok(report)
     })();
     let cleanup = stage.cleanup();
     match result {
         Ok(mut report) => {
             report["temporary_files_removed"] = json!(cleanup.is_ok());
             if cleanup.is_err() {
-                report["warnings"] =
-                    json!(["Private temporary build files could not be completely removed."]);
+                let mut warnings = report
+                    .get("warnings")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                warnings.push(json!(
+                    "Private temporary build files could not be completely removed."
+                ));
+                report["warnings"] = Value::Array(warnings);
             }
             Ok(report)
         }
@@ -841,6 +1032,32 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encode_leb128_u32(mut value: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn custom_section(name: &str, body: &[u8]) -> Vec<u8> {
+        let mut payload = encode_leb128_u32(name.len() as u32);
+        payload.extend_from_slice(name.as_bytes());
+        payload.extend_from_slice(body);
+        let mut section = vec![0u8];
+        section.extend(encode_leb128_u32(payload.len() as u32));
+        section.extend(payload);
+        section
+    }
 
     #[test]
     fn wasm_ui_profile_and_optional_wasm_opt_lookup() {
@@ -853,6 +1070,10 @@ mod tests {
         assert!(
             cargo_toml.contains("[profile.wasm-ui]"),
             "workspace Cargo.toml must define [profile.wasm-ui]"
+        );
+        assert!(
+            cargo_toml.contains("lto = ") && cargo_toml.contains("strip = "),
+            "workspace [profile.wasm-ui] must configure LTO and symbol stripping"
         );
         let missing = Tool::find_optional(
             &root,
@@ -870,5 +1091,143 @@ mod tests {
             "wasm-opt",
         );
         assert!(explicit_missing.is_err());
+
+        let args = wasm_opt_args(Path::new("/tmp/out.wasm"), Path::new("/tmp/in.wasm"), true);
+        let arg_strs = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arg_strs.contains(&"-Oz".to_string()));
+        assert!(arg_strs.contains(&"--strip-debug".to_string()));
+    }
+
+    #[test]
+    fn strip_wasm_debug_sections_drops_name_and_dwarf_and_preserves_abi_sections() {
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        // Type section (id=1, len=1, body=[0])
+        let type_section = vec![1u8, 1, 0];
+        wasm.extend_from_slice(&type_section);
+        // Preserved non-debug custom section
+        let producers = custom_section("producers", b"rustc");
+        wasm.extend_from_slice(&producers);
+        // Debug custom sections that must be stripped
+        let name_sec = custom_section("name", b"fn_symbols_table");
+        let dwarf_sec = custom_section(".debug_info", b"dwarf_payload");
+        let source_map_sec = custom_section("sourceMappingURL", b"ui.map");
+        wasm.extend_from_slice(&name_sec);
+        wasm.extend_from_slice(&dwarf_sec);
+        wasm.extend_from_slice(&source_map_sec);
+
+        let (stripped, removed) = strip_wasm_debug_sections(&wasm).unwrap();
+        assert_eq!(
+            removed,
+            name_sec.len() + dwarf_sec.len() + source_map_sec.len()
+        );
+        let mut expected = b"\0asm\x01\0\0\0".to_vec();
+        expected.extend_from_slice(&type_section);
+        expected.extend_from_slice(&producers);
+        assert_eq!(stripped, expected);
+    }
+
+    #[test]
+    fn wasm_opt_invocation_invokes_oz_strip_debug_and_updates_manifest_bytes() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let temp = crate::temp::Temporary::new("wasm-opt-mock").unwrap();
+            let root = infra_core::fs::canonicalize(temp.path()).unwrap();
+            let bin = root.join("wasm-opt-mock");
+            let args_log = root.join("args.txt");
+            let script = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nout=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$a\"; fi\n  prev=\"$a\"\ndone\nprintf '\\000asm\\001\\000\\000\\000' > \"$out\"\n",
+                args_log.display()
+            );
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let mut optimizer = Tool::open(&bin).unwrap();
+            let mut stage = Stage::new().unwrap();
+            stage
+                .files
+                .archive_create_directory("bindgen", true)
+                .unwrap();
+            let raw_wasm = [
+                &b"\0asm\x01\0\0\0"[..],
+                &custom_section("name", b"huge_symbol_table_bytes")[..],
+            ]
+            .concat();
+            stage
+                .files
+                .write_expected_mode_checked(
+                    "bindgen/infra_ui_bg.wasm",
+                    &raw_wasm,
+                    None,
+                    None,
+                    0o600,
+                    WASM_LIMIT,
+                )
+                .unwrap();
+
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let env = BTreeMap::new();
+            let outcome = apply_wasm_optimization(
+                raw_wasm.clone(),
+                &root,
+                deadline,
+                &env,
+                &mut stage,
+                None,
+                Some(&mut optimizer),
+            )
+            .unwrap();
+            let recorded_args = std::fs::read_to_string(&args_log).unwrap();
+            assert!(recorded_args.lines().any(|l| l == "-Oz"));
+            assert!(recorded_args.lines().any(|l| l == "--strip-debug"));
+            assert!(outcome.wasm_opt_applied);
+            assert!(outcome.wasm_opt_flags.contains(&"-Oz".to_string()));
+            assert!(
+                outcome
+                    .wasm_opt_flags
+                    .contains(&"--strip-debug".to_string())
+            );
+            assert_eq!(outcome.bytes_before_opt, raw_wasm.len());
+            assert_eq!(outcome.bytes_after_opt, outcome.wasm.len());
+            assert!(outcome.bytes_saved > 0);
+            assert!(outcome.wasm.len() < raw_wasm.len());
+            assert!(outcome.warnings.is_empty());
+
+            // Also verify none-optimizer fallback still strips custom debug/name sections cleanly.
+            let stripped_only = apply_wasm_optimization(
+                raw_wasm.clone(),
+                &root,
+                deadline,
+                &env,
+                &mut stage,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(!stripped_only.wasm_opt_applied);
+            assert_eq!(stripped_only.wasm.len(), b"\0asm\x01\0\0\0".len());
+            assert!(stripped_only.debug_bytes_stripped > 0);
+            assert!(!stripped_only.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn require_wasm_opt_fails_when_missing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("workspace root");
+        let err = build(
+            &root,
+            &json!({
+                "require_wasm_opt": true,
+                "wasm_opt": "/nonexistent/definitely-missing-wasm-opt-bin"
+            }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unavailable") || err.to_string().contains("wasm-opt"));
     }
 }

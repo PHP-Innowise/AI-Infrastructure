@@ -210,7 +210,7 @@ pub fn default_state() -> Result<PathBuf> {
             .join("ai-infrastructure-harness"))
     }
 }
-fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)> {
+fn parse_options(arguments: &[String], source: &Path) -> Result<ParsedOptions> {
     let args = arguments
         .iter()
         .flat_map(|value| {
@@ -235,6 +235,8 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
         providers: BTreeMap::new(),
         path_env: None,
     };
+    let mut explicit_source = false;
+    let mut explicit_projects = vec![];
     let mut i = 0;
     let command = if args.first().is_some_and(|v| !v.starts_with('-')) {
         i = 1;
@@ -251,9 +253,16 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
             .get(i + 1)
             .ok_or_else(|| HarnessError::invalid("Missing server option value."))?;
         match flag.as_str() {
-            "--source" => config.source = infra_core::fs::canonicalize(value)?,
+            "--source" => {
+                config.source = infra_core::fs::canonicalize(value)?;
+                explicit_source = true;
+            }
             "--state-dir" => config.state = PathBuf::from(value),
-            "--project" => config.projects.push(infra_core::fs::canonicalize(value)?),
+            "--project" => {
+                let project = infra_core::fs::canonicalize(value)?;
+                config.projects.push(project.clone());
+                explicit_projects.push(project);
+            }
             "--port" => {
                 config.port = value
                     .parse()
@@ -290,7 +299,18 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
             config.projects.push(current);
         }
     }
-    Ok((command, config))
+    Ok(ParsedOptions {
+        command,
+        config,
+        explicit_source,
+        explicit_projects,
+    })
+}
+struct ParsedOptions {
+    command: String,
+    config: ServerConfig,
+    explicit_source: bool,
+    explicit_projects: Vec<PathBuf>,
 }
 pub fn metadata(state: &Path) -> Result<Option<Value>> {
     let path = state.join("server.json");
@@ -400,14 +420,72 @@ fn private_file(path: &Path) -> Result<File> {
     }
     Ok(file)
 }
+const MAX_LOG_BYTES: u64 = 256 * 1024;
+
+fn rotated_log_path(path: &Path) -> PathBuf {
+    let mut raw = path.as_os_str().to_os_string();
+    raw.push(".1");
+    PathBuf::from(raw)
+}
+
+fn ensure_regular_or_absent(path: &Path, label: &str) -> Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !meta.file_type().is_file() {
+                return Err(HarnessError::forbidden(label));
+            }
+            Ok(Some(meta))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn open_rotated_private_log(path: &Path, label: &str) -> Result<File> {
+    if let Some(meta) = ensure_regular_or_absent(path, label)?
+        && meta.len() > MAX_LOG_BYTES
+    {
+        let backup = rotated_log_path(path);
+        ensure_regular_or_absent(&backup, label)?;
+        std::fs::rename(path, &backup)?;
+    }
+    let file = private_file(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(HarnessError::forbidden(label));
+    }
+    Ok(file)
+}
+
+async fn forward_projects(info: &Value, projects: &[PathBuf]) -> Result<Option<String>> {
+    let mut last_id = None;
+    for project in projects {
+        let response = request(info, "/api/projects", Some(&json!({ "path": project }))).await?;
+        if let Some(id) = response
+            .get("project")
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            let _ = request(
+                info,
+                &format!("/api/projects/{id}/select"),
+                Some(&json!({})),
+            )
+            .await;
+            last_id = Some(id.to_owned());
+        }
+    }
+    Ok(last_id)
+}
+
 fn spawn(config: &ServerConfig) -> Result<()> {
     spawn_engine(config, &std::env::current_exe()?, false)
 }
 pub fn spawn_engine(config: &ServerConfig, executable: &Path, relaunch: bool) -> Result<()> {
-    let log = private_file(&config.state.join("server.log"))?;
-    if log.metadata()?.len() > 256 * 1024 {
-        log.set_len(0)?;
-    }
+    let log = open_rotated_private_log(
+        &config.state.join("server.log"),
+        "Server log must be regular.",
+    )?;
     let mut command = engine_command(config, executable, relaunch);
     command
         .stdin(std::process::Stdio::null())
@@ -474,16 +552,37 @@ pub async fn server(
     source: &Path,
     factory: Arc<dyn ServicesFactory>,
 ) -> Result<i32> {
-    let (command, config) = options(args, source)?;
-    server_with_config(&command, config, factory).await
+    let parsed = parse_options(args, source)?;
+    server_with_parsed(parsed, factory)
+        .await
+        .map(|(code, _)| code)
 }
+#[allow(dead_code)]
 async fn server_with_config(
     command: &str,
-    mut config: ServerConfig,
+    config: ServerConfig,
     factory: Arc<dyn ServicesFactory>,
 ) -> Result<i32> {
-    infra_host::util::private_directory(&config.state)?;
-    config.state = infra_core::fs::python_realpath(&config.state)?;
+    server_with_parsed(
+        ParsedOptions {
+            command: command.to_owned(),
+            config,
+            explicit_source: false,
+            explicit_projects: vec![],
+        },
+        factory,
+    )
+    .await
+    .map(|(code, _)| code)
+}
+async fn server_with_parsed(
+    mut parsed: ParsedOptions,
+    factory: Arc<dyn ServicesFactory>,
+) -> Result<(i32, Option<String>)> {
+    infra_host::util::private_directory(&parsed.config.state)?;
+    parsed.config.state = infra_core::fs::python_realpath(&parsed.config.state)?;
+    let command = parsed.command.as_str();
+    let mut config = parsed.config;
     match command {
         "serve" => {
             let lock = private_file(&config.state.join("server.lock"))?;
@@ -520,15 +619,15 @@ async fn server_with_config(
             drop(lock);
             result?;
             closed?;
-            Ok(0)
+            Ok((0, None))
         }
         "status" => {
             if let Some(info) = running(&config.state).await? {
                 println!("Running: http://127.0.0.1:{}", info["port"]);
-                Ok(0)
+                Ok((0, None))
             } else {
                 println!("Stopped");
-                Ok(1)
+                Ok((1, None))
             }
         }
         "stop" => {
@@ -538,7 +637,7 @@ async fn server_with_config(
             } else {
                 println!("Already stopped");
             }
-            Ok(0)
+            Ok((0, None))
         }
         "update" => {
             let info = running(&config.state).await?.ok_or_else(|| {
@@ -546,7 +645,7 @@ async fn server_with_config(
             })?;
             let result = request(&info, "/api/app/update", Some(&json!({}))).await?;
             println!("{result}");
-            Ok(0)
+            Ok((0, None))
         }
         "start" | "relaunch" => {
             if command == "relaunch" {
@@ -558,14 +657,16 @@ async fn server_with_config(
                 }
             }
             if let Some(info) = running(&config.state).await? {
+                let project_id = forward_projects(&info, &parsed.explicit_projects).await?;
                 println!("Already running: http://127.0.0.1:{}", info["port"]);
-                return Ok(0);
+                return Ok((0, project_id));
             }
             spawn(&config)?;
             for _ in 0..175 {
                 if let Some(info) = running(&config.state).await? {
+                    let project_id = forward_projects(&info, &parsed.explicit_projects).await?;
                     println!("Started: http://127.0.0.1:{}", info["port"]);
-                    return Ok(0);
+                    return Ok((0, project_id));
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -813,16 +914,13 @@ async fn probe_login_shell_path() -> Option<String> {
     None
 }
 
-fn merge_search_paths(
-    preferred: Option<&str>,
-    current: Option<std::ffi::OsString>,
-) -> Option<std::ffi::OsString> {
-    let preferred = preferred.filter(|value| !value.is_empty())?;
+fn collect_unique_paths<I>(segments: I) -> Option<std::ffi::OsString>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
     let mut merged = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for segment in
-        std::env::split_paths(preferred).chain(current.iter().flat_map(std::env::split_paths))
-    {
+    for segment in segments {
         if !segment.as_os_str().is_empty() && seen.insert(segment.clone()) {
             merged.push(segment);
         }
@@ -831,6 +929,28 @@ fn merge_search_paths(
         return None;
     }
     std::env::join_paths(merged).ok()
+}
+
+fn merge_search_paths(
+    preferred: Option<&str>,
+    current: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    let preferred = preferred.filter(|value| !value.is_empty())?;
+    collect_unique_paths(
+        std::env::split_paths(preferred).chain(current.iter().flat_map(std::env::split_paths)),
+    )
+}
+
+fn merge_current_then_fallback(
+    current: Option<std::ffi::OsString>,
+    fallback: Option<&str>,
+) -> Option<std::ffi::OsString> {
+    collect_unique_paths(
+        current
+            .iter()
+            .flat_map(std::env::split_paths)
+            .chain(fallback.into_iter().flat_map(std::env::split_paths)),
+    )
 }
 
 fn read_cached_app_path() -> Option<String> {
@@ -888,45 +1008,54 @@ fn resolve_open_path(probed: Option<&str>, cached: Option<&str>) -> Option<std::
     merge_search_paths(cached, std::env::var_os("PATH"))
 }
 
-fn rebind_moved_clone(source: &Path, path_override: Option<&str>) -> Result<Vec<PathBuf>> {
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    infra_core::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn rebind_moved_clone(
+    source: &Path,
+    path_override: Option<&str>,
+    explicit_source: bool,
+) -> Result<Vec<PathBuf>> {
     let Some((_, record)) = installed_application_record()? else {
         return Ok(vec![]);
     };
     let current_source = infra_core::fs::canonicalize(source)?;
-    if record["clone"] == serde_json::to_value(&current_source)? {
-        return Ok(vec![]);
-    }
-    if let Some(old_clone) = record["clone"].as_str()
-        && resolve_clone_root(Path::new(old_clone))
+    let current_exe = canonical_or_raw(&std::env::current_exe()?);
+    let recorded_clone = record["clone"].as_str().map(PathBuf::from);
+    let same_clone = recorded_clone
+        .as_deref()
+        .is_some_and(|old| canonical_or_raw(old) == current_source);
+    let recorded_exe = record["executable"].as_str().map(PathBuf::from);
+    let old_exe_valid = recorded_exe.as_deref().is_some_and(|path| {
+        ensure_regular_or_absent(path, "Launcher executable invalid.")
             .ok()
             .flatten()
             .is_some()
+    });
+    let same_executable = recorded_exe
+        .as_deref()
+        .is_some_and(|old| canonical_or_raw(old) == current_exe);
+
+    if same_clone && same_executable {
+        return Ok(vec![]);
+    }
+    if !same_clone
+        && !explicit_source
+        && old_exe_valid
+        && let Some(old_clone) = recorded_clone.as_deref()
+        && resolve_clone_root(old_clone).ok().flatten().is_some()
     {
         return Ok(vec![]);
     }
-    install_engine_with_path(&current_source, &std::env::current_exe()?, path_override)
+    install_engine_with_path(&current_source, &current_exe, path_override)
 }
 
 fn append_launcher_log(message: &str) -> Result<()> {
     let directory = config_directory()?;
     infra_host::util::private_directory(&directory)?;
     let log_path = directory.join("launcher.log");
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let mut file = options.open(&log_path)?;
-    if !file.metadata()?.is_file() {
-        return Err(HarnessError::forbidden("Launcher log must be regular."));
-    }
-    if file.metadata()?.len() > 256 * 1024 {
-        file.set_len(0)?;
-    }
+    let mut file = open_rotated_private_log(&log_path, "Launcher log must be regular.")?;
     std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0))?;
     let line = format!(
         "[{}] {}\n",
@@ -1013,50 +1142,181 @@ async fn notify_launch_failure(message: &str, path_env: Option<&std::ffi::OsStr>
     let _ = (message, path_env);
 }
 
+const BROWSER_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(target_os = "linux")]
+const BROWSER_OPENER: &str = "xdg-open";
+#[cfg(target_os = "macos")]
+const BROWSER_OPENER: &str = "open";
+#[cfg(windows)]
+const BROWSER_OPENER: &str = "rundll32.exe";
+
+fn browser_launcher_available(path_env: Option<&std::ffi::OsStr>) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    {
+        let Some(paths) = path_env
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"))
+        else {
+            return false;
+        };
+        std::env::split_paths(&paths)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.join(BROWSER_OPENER))
+            .any(|candidate| candidate.is_file())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = path_env;
+        false
+    }
+}
+
+fn percent_encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn open_url(port: &Value, project_id: Option<&str>) -> String {
+    match project_id.filter(|id| !id.is_empty()) {
+        Some(id) => format!(
+            "http://127.0.0.1:{port}/#/sessions?project={}",
+            percent_encode_component(id)
+        ),
+        None => format!("http://127.0.0.1:{port}/"),
+    }
+}
+
 async fn open_server(
-    args: &[String],
-    source: &Path,
+    mut parsed: ParsedOptions,
     factory: Arc<dyn ServicesFactory>,
     path_env: Option<&std::ffi::OsStr>,
-) -> Result<(ServerConfig, Value)> {
-    let mut server_args = vec!["start".into()];
-    server_args.extend_from_slice(args.get(1..).unwrap_or(&[]));
-    let (command, mut selected) = options(&server_args, source)?;
-    selected.path_env = path_env.map(std::ffi::OsStr::to_os_string);
-    server_with_config(&command, selected.clone(), factory).await?;
+) -> Result<(ServerConfig, Value, Option<String>)> {
+    parsed.config.path_env = path_env.map(std::ffi::OsStr::to_os_string);
+    let selected = parsed.config.clone();
+    let (_, project_id) = server_with_parsed(parsed, factory).await?;
     let info = running(&selected.state)
         .await?
         .ok_or_else(|| HarnessError::unavailable("The application server did not start."))?;
-    Ok((selected, info))
+    Ok((selected, info, project_id))
 }
 
 async fn open_browser(url: &str, path_env: Option<&std::ffi::OsStr>) -> Result<()> {
+    if let Some(message) = try_open_browser(url, path_env, BROWSER_OPEN_TIMEOUT).await {
+        report_launch_error(&message, path_env).await;
+        println!("Open {url} in your browser.");
+    }
+    Ok(())
+}
+
+async fn try_open_browser(
+    url: &str,
+    path_env: Option<&std::ffi::OsStr>,
+    timeout: Duration,
+) -> Option<String> {
     #[cfg(target_os = "linux")]
     let mut command = {
-        let mut command = tokio::process::Command::new("xdg-open");
+        let mut command = tokio::process::Command::new(BROWSER_OPENER);
         command.arg(url);
         command
     };
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = tokio::process::Command::new("open");
+        let mut command = tokio::process::Command::new(BROWSER_OPENER);
         command.arg(url);
         command
     };
     #[cfg(windows)]
     let mut command = {
-        let mut command = tokio::process::Command::new("rundll32.exe");
+        let mut command = tokio::process::Command::new(BROWSER_OPENER);
         command.args(["url.dll,FileProtocolHandler", url]);
         command
     };
-    if let Some(path) = path_env {
-        command.env("PATH", path);
-    }
-    let opened = command.status().await.is_ok_and(|status| status.success());
-    if !opened {
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (url, path_env, timeout);
         println!("Open {url} in your browser.");
+        return None;
     }
-    Ok(())
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(path) = path_env {
+            command.env("PATH", path);
+        }
+        match command.spawn() {
+            Ok(mut child) => {
+                let stderr = child.stderr.take();
+                match tokio::time::timeout(timeout, child.wait()).await {
+                    Ok(Ok(status)) if status.success() => None,
+                    Ok(Ok(status)) => {
+                        let mut detail = String::new();
+                        if let Some(err_stream) = stderr {
+                            let mut buf = Vec::new();
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(150),
+                                err_stream.take(4096).read_to_end(&mut buf),
+                            )
+                            .await;
+                            let text = String::from_utf8_lossy(&buf).trim().to_owned();
+                            if !text.is_empty() {
+                                detail = format!(": {text}");
+                            }
+                        }
+                        Some(format!(
+                            "Could not open {url} in your browser ({BROWSER_OPENER} exited with {status}{detail})."
+                        ))
+                    }
+                    Ok(Err(err)) => Some(format!(
+                        "Could not open {url} in your browser ({BROWSER_OPENER}: {err})."
+                    )),
+                    Err(_) => Some(format!(
+                        "Timed out waiting for {BROWSER_OPENER} to open {url}."
+                    )),
+                }
+            }
+            Err(err) => Some(format!(
+                "Could not launch browser opener ({BROWSER_OPENER}) for {url}: {err}."
+            )),
+        }
+    }
+}
+
+async fn resolve_running_open_path(
+    cached: Option<&str>,
+) -> (Option<std::ffi::OsString>, Option<String>) {
+    let current = std::env::var_os("PATH");
+    if browser_launcher_available(current.as_deref()) {
+        // Caller's live PATH already locates the browser opener; append cached fallback paths after it.
+        return (
+            merge_current_then_fallback(current, cached),
+            cached.map(str::to_owned),
+        );
+    }
+    let cached_resolved = merge_search_paths(cached, current);
+    if browser_launcher_available(cached_resolved.as_deref()) {
+        return (cached_resolved, cached.map(str::to_owned));
+    }
+    let probed = probe_login_shell_path().await;
+    let resolved = resolve_open_path(probed.as_deref(), cached);
+    let record_path = probed.or_else(|| cached.map(str::to_owned));
+    (resolved, record_path)
+}
+
+async fn report_launch_error(message: &str, path_env: Option<&std::ffi::OsStr>) {
+    let _ = append_launcher_log(message);
+    notify_launch_failure(message, path_env).await;
 }
 
 pub async fn app(args: &[String], source: &Path, factory: Arc<dyn ServicesFactory>) -> Result<i32> {
@@ -1082,26 +1342,75 @@ pub async fn app(args: &[String], source: &Path, factory: Arc<dyn ServicesFactor
         }
         "open" => {
             let cached = read_cached_app_path();
-            let probed = probe_login_shell_path().await;
-            let resolved_path = resolve_open_path(probed.as_deref(), cached.as_deref());
-            let record_path = probed.as_deref().or(cached.as_deref());
-            match open_server(args, source, factory, resolved_path.as_deref()).await {
-                Ok((selected, info)) => {
-                    if let Err(error) = rebind_moved_clone(&selected.source, record_path) {
-                        let _ = append_launcher_log(&error.message);
-                        notify_launch_failure(&error.message, resolved_path.as_deref()).await;
+            let cached_fallback = resolve_open_path(None, cached.as_deref());
+            let mut server_args = vec!["start".into()];
+            server_args.extend_from_slice(args.get(1..).unwrap_or(&[]));
+            let mut parsed = match parse_options(&server_args, source) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    report_launch_error(&error.message, cached_fallback.as_deref()).await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = infra_host::util::private_directory(&parsed.config.state) {
+                report_launch_error(&error.message, cached_fallback.as_deref()).await;
+                return Err(error);
+            }
+            parsed.config.state = match infra_core::fs::python_realpath(&parsed.config.state)
+                .map_err(HarnessError::from)
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    report_launch_error(&error.message, cached_fallback.as_deref()).await;
+                    return Err(error);
+                }
+            };
+
+            let explicit_source = parsed.explicit_source;
+            let running_info = match running(&parsed.config.state).await {
+                Ok(info) => info,
+                Err(error) => {
+                    report_launch_error(&error.message, cached_fallback.as_deref()).await;
+                    return Err(error);
+                }
+            };
+
+            let (selected, info, project_id, resolved_path, record_path) = if let Some(info) =
+                running_info
+            {
+                let project_id = match forward_projects(&info, &parsed.explicit_projects).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        report_launch_error(&error.message, cached_fallback.as_deref()).await;
                         return Err(error);
                     }
-                    let url = format!("http://127.0.0.1:{}/", info["port"]);
-                    open_browser(&url, resolved_path.as_deref()).await?;
-                    Ok(0)
+                };
+                let (resolved, record_path) = resolve_running_open_path(cached.as_deref()).await;
+                (parsed.config, info, project_id, resolved, record_path)
+            } else {
+                let probed = probe_login_shell_path().await;
+                let resolved = resolve_open_path(probed.as_deref(), cached.as_deref());
+                let record_path = probed.or_else(|| cached.clone());
+                match open_server(parsed, factory, resolved.as_deref()).await {
+                    Ok((selected, info, project_id)) => {
+                        (selected, info, project_id, resolved, record_path)
+                    }
+                    Err(error) => {
+                        report_launch_error(&error.message, resolved.as_deref()).await;
+                        return Err(error);
+                    }
                 }
-                Err(error) => {
-                    let _ = append_launcher_log(&error.message);
-                    notify_launch_failure(&error.message, resolved_path.as_deref()).await;
-                    Err(error)
-                }
+            };
+
+            if let Err(error) =
+                rebind_moved_clone(&selected.source, record_path.as_deref(), explicit_source)
+            {
+                report_launch_error(&error.message, resolved_path.as_deref()).await;
+                return Err(error);
             }
+            let url = open_url(&info["port"], project_id.as_deref());
+            open_browser(&url, resolved_path.as_deref()).await?;
+            Ok(0)
         }
         _ => Err(HarnessError::invalid("Unknown application command.")),
     }
@@ -1117,7 +1426,7 @@ mod session_concurrency_tests {
             root.to_string_lossy().into_owned(),
         ];
         arguments.extend(extra.iter().map(|s| s.to_string()));
-        options(&arguments, root).map(|(_, config)| config)
+        parse_options(&arguments, root).map(|parsed| parsed.config)
     }
     #[test]
     fn concurrency_is_explicit_bounded_and_preserved_in_background_and_relaunch() {
@@ -1182,5 +1491,76 @@ mod session_concurrency_tests {
             merge_search_paths(Some(""), Some(std::ffi::OsString::from("/bin"))),
             None
         );
+    }
+
+    #[test]
+    fn rotated_private_log_moves_oversized_log_to_dot1_and_refuses_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(temporary.path()).unwrap();
+        let log = root.join("server.log");
+        let rotated = rotated_log_path(&log);
+        assert_eq!(rotated, root.join("server.log.1"));
+
+        let oversized = vec![b'a'; (MAX_LOG_BYTES as usize) + 64];
+        std::fs::write(&log, &oversized).unwrap();
+
+        let opened = open_rotated_private_log(&log, "Server log must be regular.").unwrap();
+        drop(opened);
+        assert!(rotated.is_file());
+        assert_eq!(std::fs::read(&rotated).unwrap().len(), oversized.len());
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = root.join("outside-target");
+            std::fs::write(&outside, b"secret").unwrap();
+            let linked = root.join("launcher.log");
+            symlink(&outside, &linked).unwrap();
+            assert!(open_rotated_private_log(&linked, "Launcher log must be regular.").is_err());
+            assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
+        }
+    }
+
+    #[test]
+    fn open_url_formats_root_or_project_deep_link() {
+        assert_eq!(open_url(&json!(8766), None), "http://127.0.0.1:8766/");
+        assert_eq!(open_url(&json!(8766), Some("")), "http://127.0.0.1:8766/");
+        assert_eq!(
+            open_url(&json!(8766), Some("proj/1")),
+            "http://127.0.0.1:8766/#/sessions?project=proj%2F1"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_browser_timeout_terminates_hung_opener() {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let temporary = tempfile::tempdir().unwrap();
+            let root = infra_core::fs::canonicalize(temporary.path()).unwrap();
+            let bin_dir = root.join("bin");
+            std::fs::create_dir(&bin_dir).unwrap();
+            let opener = bin_dir.join(BROWSER_OPENER);
+            std::fs::write(&opener, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let start = std::time::Instant::now();
+            let err = try_open_browser(
+                "http://127.0.0.1:8766/",
+                Some(bin_dir.as_os_str()),
+                Duration::from_millis(120),
+            )
+            .await;
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "try_open_browser hung for {:?}",
+                start.elapsed()
+            );
+            assert!(
+                err.as_deref()
+                    .is_some_and(|msg| msg.contains("Timed out waiting")),
+                "expected timeout message, got {err:?}"
+            );
+        }
     }
 }
