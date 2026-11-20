@@ -1299,6 +1299,14 @@ pub const ROUTES: &[Route] = &[
         query: &["before"],
     },
     Route {
+        method: "GET",
+        pattern: "/api/sessions/{session_id}/skillcache",
+        operation: "skillcache.session",
+        status: 200,
+        token: false,
+        query: &[],
+    },
+    Route {
         method: "POST",
         pattern: "/api/sessions/{session_id}/inbox/{request_id}/cancel",
         operation: "sessions.inbox_cancel",

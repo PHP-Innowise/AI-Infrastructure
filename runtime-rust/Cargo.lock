@@ -1260,6 +1260,7 @@ dependencies = [
  "infra-core",
  "infra-generator",
  "infra-host",
+ "infra-skillcache",
  "infra-system",
  "infra-tooling",
  "libc",

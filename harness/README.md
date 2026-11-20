@@ -452,6 +452,68 @@ structured question answers were submitted). Codex and Cursor number their
 requests afresh in every process, so `request_id` is the host's id followed by a
 tag of the run (`cursor-0-1c029d06`): each turn's requests stay apart.
 
+### SkillCache: a repeated skill as a compiled plan
+
+SkillCache turns a repeated use of a skill from "the model reads `SKILL.md` and
+works out the steps again" into a short plan whose deterministic parts are
+programs a local executor runs. It is **off by default** and every part of it is
+opt-in per session. Nothing here claims a saving: what a capsule costs to compile
+and what it saves per reuse is something to measure, not a promise.
+
+A session opts in with `skillcache` when it is created, and a follow-up may
+change it for the next turn:
+
+```json
+{"skillcache": {"mode": "observe"}}
+```
+
+| Mode | What a turn does |
+| --- | --- |
+| `off` (default) | Nothing of SkillCache runs. |
+| `observe` | The turn runs as usual with the unchanged skill, and its observed trace is kept. |
+| `auto` | A qualified capsule is used when one matches; otherwise the turn is cold and its trace is kept. |
+| `warm_only` | A matching capsule is used; nothing is recorded. |
+
+SkillCache applies to ordinary sessions. Fleet, Clash, SDD, the Plan and Review
+workflows, System Orchestration and Infrastructure Creator refuse the option.
+
+**Keeping a trace is a deliberate change to what the Harness stores.** Without
+this option the Harness never stores a tool's output: the activity view keeps a
+bounded description of each call and nothing of what came back. In `observe` and
+`auto` a completed cold turn's trace is stored: each tool call with its
+arguments, paired with its result, and the agent's messages. So choose the mode
+per session, for work whose tool output you are content to keep on this machine.
+
+What a kept trace is:
+
+- **Without reasoning.** Provider reasoning (Claude `thinking` and
+  `redacted_thinking`, Codex `reasoning`, Cursor `thinking`) is dropped unread
+  and only counted.
+- **Redacted.** The values of the launch's credential-like environment
+  variables, command-line credentials, and whatever the shared secret policy
+  names are replaced before anything is stored; paths of this machine become
+  workspace-relative (`~/...` for the home folder). The row records how many
+  places were changed.
+- **Bounded.** One result is at most 64 KiB and one call's arguments 16 KiB,
+  with a marker where something was cut; the whole trace is at most 8 MiB, after
+  which results are left out and counted.
+- **Only of a turn worth compiling.** A turn that failed, ran no tool, or used no
+  skill of the project or of your home folder leaves nothing behind; the session
+  says why in one line.
+- **Private.** Traces are rows of `skillcache_traces` in the Harness's own
+  `sessions.sqlite3`, under the private state folder, never in the project, its
+  `memory-bank/` or its `project-brain/`. A session keeps its ten newest traces
+  and a trace is dropped after thirty days.
+
+Each skill the turn used is recorded with the digest of every file of its
+folder, so a later compile can tell that the skill has changed since.
+`GET /api/sessions/{session_id}/skillcache` lists a session's mode and its kept
+traces without their steps.
+
+The pieces a capsule is made of are in the engine already and can be tried by
+hand: `infra-engine skillcache --help` describes the plan executor
+(`skillcache-run`), the program tool (`skillcache-tool`) and the structural gate.
+
 ### Starting the server
 
 Supports Linux, macOS and native Windows 10/11 through the platform's native engine and at least one authenticated provider CLI. The server and Fleet runtime are Rust; browser business logic is Rust/Wasm. Install a verified engine and its generated UI assets. A Python virtualenv is not part of the runtime.

@@ -611,6 +611,7 @@ impl Sessions {
             "system_explain",
             "omnigraph",
             "permissions",
+            "skillcache",
         ];
         if !data.is_object()
             || data
@@ -663,6 +664,8 @@ impl Sessions {
         value["agents_enabled"] = enabled.into();
         value["agent_count"] = count.into();
         value["permissions"] = crate::permissions::validate(&data["permissions"])?;
+        value["skillcache"] = crate::skillcache::settings::validate(&data["skillcache"])?;
+        crate::skillcache::settings::admit(&value)?;
         let fleet = if workflow == "fleet-review" {
             fleet_options(
                 data.get("fleet").unwrap_or(&json!({})),
@@ -2109,6 +2112,17 @@ impl Sessions {
         let generation = job.generation.clone();
         let emit_events = emit.clone();
         let focus_for_stream = live_focus.clone();
+        // A session that opted in keeps the trace of this cold turn. The
+        // recorder sees the same raw events as the binding and nothing else.
+        let recorder = crate::skillcache::settings::records(&session)
+            .then(|| crate::skillcache::trace::TraceRecorder::new(&launch.provider));
+        let run_events: Arc<dyn provider::RunEvents> = match &recorder {
+            Some(recorder) => Arc::new(crate::skillcache::trace::Tee {
+                primary: binding.clone(),
+                recorder: recorder.clone(),
+            }),
+            None => Arc::new(binding.clone()),
+        };
         let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
         let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
         let workspace_for_stream = workspace.clone();
@@ -2123,7 +2137,7 @@ impl Sessions {
             Some(self.store.runner_lock()),
             Some(adapter.as_ref()),
             &binding.environment,
-            Some(Arc::new(binding.clone())),
+            Some(run_events),
             move |event| {
                 if event["kind"] == "usage"
                     && let Some(n) = provider::total_tokens(&event)
@@ -2252,10 +2266,53 @@ impl Sessions {
                     .unwrap_or_else(|| "Native session did not complete.".into()),
             ));
         }
+        if let Some(recorder) = &recorder {
+            self.keep_trace(
+                recorder,
+                &crate::skillcache::trace::ObservedTurn {
+                    session: &session,
+                    generation: &job.generation,
+                    message: &job.prompt,
+                    route: &route,
+                    workspace: &workspace,
+                },
+                &binding.environment,
+                &emit,
+            );
+        }
         *native_proof = result.session_id.clone();
         Ok(
             json!({"kind":"result","ok":true,"text":result.text,"observed_cost_usd":result.cost_usd,"provider_billing":"unknown","memory":memory["memory"],"full_cost":memory["full_cost"]}),
         )
+    }
+    /// Stores the observed trace of a turn that completed. A trace that
+    /// cannot be kept never fails the turn it observed.
+    fn keep_trace(
+        &self,
+        recorder: &crate::skillcache::trace::TraceRecorder,
+        turn: &crate::skillcache::trace::ObservedTurn<'_>,
+        environment: &BTreeMap<String, Option<String>>,
+        emit: &Event,
+    ) {
+        let launched = std::env::vars().chain(
+            environment
+                .iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.clone()?))),
+        );
+        let redactor = crate::skillcache::trace::SessionRedactor::new(turn.workspace, launched);
+        let Some(trace) = recorder.finish(&redactor) else {
+            return;
+        };
+        let event = crate::skillcache::trace::save(&self.store, turn, trace, &redactor)
+            .unwrap_or_else(|error| {
+                json!({
+                    "kind": "skillcache",
+                    "phase": "not_observed",
+                    "reason": "storage",
+                    "text": format!("SkillCache could not keep this turn's trace: {error}"),
+                })
+            });
+        let _ = emit(event);
     }
     pub fn send(&self, sid: &str, prompt: &str, options: &Value) -> Result<Value> {
         let session = self.store.get(sid)?;
@@ -2285,6 +2342,7 @@ impl Sessions {
             "omnigraph",
             "brain",
             "permissions",
+            "skillcache",
         ];
         if !options.is_object()
             || options
@@ -2299,6 +2357,19 @@ impl Sessions {
         let mut fields = followup_settings(&session, options, &self.providers.catalog(provider)?)?;
         if let Some(raw_omni) = options.get("omnigraph") {
             fields["omnigraph"] = merge_omnigraph_followup(&session["omnigraph"], raw_omni, sid)?;
+        }
+        if let Some(raw) = options.get("skillcache") {
+            fields["skillcache"] = crate::skillcache::settings::validate(raw)?;
+        }
+        {
+            // The turn as it would run: SkillCache stays with ordinary turns.
+            let mut next = session.clone();
+            for key in ["skillcache", "clash", "sdd"] {
+                if let Some(value) = fields.get(key) {
+                    next[key] = value.clone();
+                }
+            }
+            crate::skillcache::settings::admit(&next)?;
         }
         if let Some(update) = options.get("brain") {
             fields["brain"] = crate::brain_settings::followup(&session["brain"], update)?;

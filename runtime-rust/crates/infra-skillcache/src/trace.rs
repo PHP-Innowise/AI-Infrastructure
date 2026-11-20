@@ -145,11 +145,58 @@ fn skill_paths(text: &str) -> Vec<String> {
     .collect()
 }
 
-/// Pairs a provider's events into steps as they arrive.
-pub struct Recorder<'a> {
+/// How far past its limit a text is kept until it is redacted, so that a
+/// secret lying across the limit is still seen whole by the redactor.
+const SLACK: usize = 4 * 1024;
+
+/// A text as it arrived, cut to its limit plus [`SLACK`], and its full size.
+#[derive(Clone)]
+struct Held {
+    text: String,
+    bytes: usize,
+}
+fn hold(text: &str, limit: usize) -> Held {
+    let mut end = text.len().min(limit + SLACK);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Held {
+        text: text[..end].to_string(),
+        bytes: text.len(),
+    }
+}
+/// The arguments of a call with every long string cut the same way.
+fn hold_input(value: &Value, limit: usize) -> Value {
+    match value {
+        Value::String(text) => Value::String(hold(text, limit).text),
+        Value::Array(items) => items.iter().map(|item| hold_input(item, limit)).collect(),
+        Value::Object(members) => members
+            .iter()
+            .map(|(key, member)| (key.clone(), hold_input(member, limit)))
+            .collect::<Map<_, _>>()
+            .into(),
+        other => other.clone(),
+    }
+}
+
+struct RawStep {
+    tool: Option<String>,
+    input: Value,
+    /// Per-string limit of `input`.
+    input_limit: usize,
+    text: Option<Held>,
+    output: Option<Held>,
+    omitted: bool,
+    error: Option<bool>,
+    exit_code: Option<i64>,
+    agent: Option<String>,
+}
+
+/// Pairs a provider's events into steps as they arrive. Observing is cheap:
+/// texts are only cut to size. Redaction happens once, in [`Recorder::finish`].
+pub struct Recorder {
     provider: String,
-    redactor: &'a dyn Redactor,
-    steps: Vec<Map<String, Value>>,
+    steps: Vec<RawStep>,
     /// Open tool calls: the provider's call identity to the step's index.
     open: BTreeMap<String, usize>,
     skills: Vec<SkillRef>,
@@ -157,11 +204,55 @@ pub struct Recorder<'a> {
     bytes: usize,
 }
 
-impl<'a> Recorder<'a> {
-    pub fn new(provider: &str, redactor: &'a dyn Redactor) -> Self {
+struct Finisher<'a> {
+    redactor: &'a dyn Redactor,
+    counters: Counters,
+}
+impl Finisher<'_> {
+    fn text(&mut self, held: &Held, limit: usize) -> String {
+        let (clean, changed) = self.redactor.redact(&held.text);
+        self.counters.redacted += changed;
+        if held.bytes <= limit {
+            return clean;
+        }
+        self.counters.truncated += 1;
+        let mut end = clean.len().min(limit);
+        while !clean.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!(
+            "{}\n[truncated: {} of {} bytes omitted]",
+            &clean[..end],
+            held.bytes.saturating_sub(end),
+            held.bytes
+        )
+    }
+    fn input(&mut self, value: &Value, limit: usize) -> Value {
+        match value {
+            Value::String(text) => {
+                // A string that arrived longer than its limit was cut to the
+                // limit plus the slack; that length marks it as cut.
+                let held = Held {
+                    bytes: text.len(),
+                    text: text.clone(),
+                };
+                Value::String(self.text(&held, limit))
+            }
+            Value::Array(items) => items.iter().map(|item| self.input(item, limit)).collect(),
+            Value::Object(members) => members
+                .iter()
+                .map(|(key, member)| (key.clone(), self.input(member, limit)))
+                .collect::<Map<_, _>>()
+                .into(),
+            other => other.clone(),
+        }
+    }
+}
+
+impl Recorder {
+    pub fn new(provider: &str) -> Self {
         Self {
             provider: provider.into(),
-            redactor,
             steps: Vec::new(),
             open: BTreeMap::new(),
             skills: Vec::new(),
@@ -169,54 +260,13 @@ impl<'a> Recorder<'a> {
             bytes: 0,
         }
     }
-    fn text(&mut self, raw: &str, limit: usize) -> String {
-        let (clean, changed) = self.redactor.redact(raw);
-        self.counters.redacted += changed;
-        if clean.len() <= limit {
-            return clean;
-        }
-        self.counters.truncated += 1;
-        let mut end = limit;
-        while !clean.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{}\n[truncated: {} of {} bytes omitted]",
-            &clean[..end],
-            clean.len() - end,
-            clean.len()
-        )
-    }
-    /// Arguments with every string redacted; oversized arguments keep their
-    /// shape and lose the ends of their longest strings.
-    fn input(&mut self, value: &Value) -> Value {
-        let size = serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len());
-        let limit = if size > INPUT_BYTES {
-            INPUT_BYTES / 8
-        } else {
-            INPUT_BYTES
-        };
-        self.walk(value, limit)
-    }
-    fn walk(&mut self, value: &Value, limit: usize) -> Value {
-        match value {
-            Value::String(text) => Value::String(self.text(text, limit)),
-            Value::Array(items) => items.iter().map(|item| self.walk(item, limit)).collect(),
-            Value::Object(members) => members
-                .iter()
-                .map(|(key, member)| (key.clone(), self.walk(member, limit)))
-                .collect::<Map<_, _>>()
-                .into(),
-            other => other.clone(),
-        }
-    }
-    fn push(&mut self, mut step: Map<String, Value>) -> Option<usize> {
+    fn push(&mut self, step: RawStep) -> Option<usize> {
         if self.steps.len() >= STEPS {
             self.counters.omitted += 1;
             return None;
         }
-        step.insert("index".into(), self.steps.len().into());
-        self.bytes += serde_json::to_vec(&step).map_or(0, |bytes| bytes.len());
+        self.bytes += step.text.as_ref().map_or(0, |text| text.text.len())
+            + serde_json::to_vec(&step.input).map_or(0, |bytes| bytes.len());
         self.steps.push(step);
         Some(self.steps.len() - 1)
     }
@@ -224,25 +274,39 @@ impl<'a> Recorder<'a> {
         if text.trim().is_empty() {
             return;
         }
-        let text = self.text(text, MESSAGE_BYTES);
-        let mut step = Map::new();
-        step.insert("kind".into(), "message".into());
-        step.insert("text".into(), text.into());
-        if let Some(agent) = agent {
-            step.insert("agent".into(), agent.into());
-        }
-        self.push(step);
+        self.push(RawStep {
+            tool: None,
+            input: Value::Null,
+            input_limit: 0,
+            text: Some(hold(text, MESSAGE_BYTES)),
+            output: None,
+            omitted: false,
+            error: None,
+            exit_code: None,
+            agent: agent.map(String::from),
+        });
     }
     fn started(&mut self, id: &str, tool: &str, input: &Value, agent: Option<&str>) {
         self.note_skills(tool, input);
-        let input = self.input(input);
-        let mut step = Map::new();
-        step.insert("kind".into(), "tool".into());
-        step.insert("tool".into(), tool.into());
-        step.insert("input".into(), input);
-        if let Some(agent) = agent {
-            step.insert("agent".into(), agent.into());
-        }
+        // Oversized arguments keep their shape and lose the ends of their
+        // longest strings.
+        let size = serde_json::to_vec(input).map_or(usize::MAX, |bytes| bytes.len());
+        let input_limit = if size > INPUT_BYTES {
+            INPUT_BYTES / 8
+        } else {
+            INPUT_BYTES
+        };
+        let step = RawStep {
+            tool: Some(tool.into()),
+            input: hold_input(input, input_limit),
+            input_limit,
+            text: None,
+            output: None,
+            omitted: false,
+            error: None,
+            exit_code: None,
+            agent: agent.map(String::from),
+        };
         if let Some(index) = self.push(step)
             && !id.is_empty()
         {
@@ -253,19 +317,17 @@ impl<'a> Recorder<'a> {
         let Some(index) = self.open.remove(id) else {
             return;
         };
-        let output = if self.bytes >= TRACE_BYTES {
-            self.counters.omitted += 1;
-            "[omitted: the trace reached its size limit]".to_string()
-        } else {
-            self.text(output, OBSERVATION_BYTES)
-        };
-        self.bytes += output.len();
         let step = &mut self.steps[index];
-        step.insert("output".into(), output.into());
-        step.insert("error".into(), error.into());
-        if let Some(code) = exit_code {
-            step.insert("exit_code".into(), code.into());
+        if self.bytes >= TRACE_BYTES {
+            self.counters.omitted += 1;
+            step.omitted = true;
+        } else {
+            let held = hold(output, OBSERVATION_BYTES);
+            self.bytes += held.text.len();
+            step.output = Some(held);
         }
+        step.error = Some(error);
+        step.exit_code = exit_code;
     }
     fn note_skills(&mut self, tool: &str, input: &Value) {
         let mut found = Vec::new();
@@ -478,13 +540,62 @@ impl<'a> Recorder<'a> {
     pub fn steps(&self) -> usize {
         self.steps.len()
     }
-    pub fn finish(self) -> Trace {
+    /// The trace, with every kept text passed through `redactor` and then cut
+    /// to its limit.
+    pub fn finish(self, redactor: &dyn Redactor) -> Trace {
+        let mut finisher = Finisher {
+            redactor,
+            counters: self.counters,
+        };
+        let steps = self
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, raw)| {
+                let mut step = Map::new();
+                match &raw.tool {
+                    Some(tool) => {
+                        step.insert("kind".into(), "tool".into());
+                        step.insert("tool".into(), tool.clone().into());
+                        step.insert("input".into(), finisher.input(&raw.input, raw.input_limit));
+                    }
+                    None => {
+                        step.insert("kind".into(), "message".into());
+                    }
+                }
+                if let Some(text) = &raw.text {
+                    step.insert("text".into(), finisher.text(text, MESSAGE_BYTES).into());
+                }
+                if let Some(agent) = &raw.agent {
+                    step.insert("agent".into(), agent.clone().into());
+                }
+                if raw.omitted {
+                    step.insert(
+                        "output".into(),
+                        "[omitted: the trace reached its size limit]".into(),
+                    );
+                } else if let Some(output) = &raw.output {
+                    step.insert(
+                        "output".into(),
+                        finisher.text(output, OBSERVATION_BYTES).into(),
+                    );
+                }
+                if let Some(error) = raw.error {
+                    step.insert("error".into(), error.into());
+                }
+                if let Some(code) = raw.exit_code {
+                    step.insert("exit_code".into(), code.into());
+                }
+                step.insert("index".into(), index.into());
+                Value::Object(step)
+            })
+            .collect();
         Trace {
             provider: self.provider,
             complete: self.open.is_empty(),
-            steps: self.steps.into_iter().map(Value::Object).collect(),
+            steps,
             skills: self.skills,
-            counters: self.counters,
+            counters: finisher.counters,
         }
     }
 }
@@ -494,11 +605,11 @@ mod tests {
     use super::*;
 
     fn record(provider: &str, events: &[Value]) -> Trace {
-        let mut recorder = Recorder::new(provider, &PolicyRedactor);
+        let mut recorder = Recorder::new(provider);
         for event in events {
             recorder.observe(event);
         }
-        recorder.finish()
+        recorder.finish(&PolicyRedactor)
     }
 
     fn claude_events() -> Vec<Value> {
@@ -712,13 +823,13 @@ mod tests {
     #[test]
     fn trace_stops_growing_at_its_limits() {
         let big = "z".repeat(OBSERVATION_BYTES);
-        let mut recorder = Recorder::new("codex", &PolicyRedactor);
+        let mut recorder = Recorder::new("codex");
         for index in 0..(TRACE_BYTES / OBSERVATION_BYTES + 20) {
             recorder.observe(&json!({"type": "item.completed", "item": {
                 "id": format!("i{index}"), "type": "command_execution", "command": "cat f",
                 "aggregated_output": big, "exit_code": 0, "status": "completed"}}));
         }
-        let trace = recorder.finish();
+        let trace = recorder.finish(&PolicyRedactor);
         assert!(trace.counters.omitted >= 10, "{:?}", trace.counters);
         let size = serde_json::to_vec(&trace.to_value()).unwrap().len();
         assert!(size < TRACE_BYTES + 2 * OBSERVATION_BYTES, "{size}");

@@ -48,6 +48,7 @@ infra-tooling = { path = "../infra-tooling" }
 infra-generator = { path = "../infra-generator" }
 infra-system = { path = "../infra-system" }
 infra-adapters = { path = "../infra-adapters" }
+infra-skillcache = { path = "../infra-skillcache" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order", "arbitrary_precision"] }
 rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite"] }
