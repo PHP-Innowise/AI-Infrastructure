@@ -18,6 +18,26 @@ pub struct Spec {
     pub runtime: Vec<PathBuf>,
     pub codex: Option<PathBuf>,
     pub evidence: Option<PathBuf>,
+    /// Whether the sandboxed process may use the network. Agents need their
+    /// provider's API; a capsule gate that runs only local programs does not.
+    pub network: bool,
+}
+/// What a sandbox is for, which decides how much of the host it shows.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Profile {
+    /// The whole filesystem read-only, the workspace writable.
+    Creator,
+    /// The operating system's runtime and the named folders only; the target
+    /// and the protected sources are denied.
+    Discovery,
+    /// The same minimal root for a process that is not an agent: no target
+    /// and no protected source take part.
+    Gate,
+}
+impl Profile {
+    fn minimal(self) -> bool {
+        self != Self::Creator
+    }
 }
 fn canonical(path: &Path) -> Result<PathBuf> {
     let root = infra_core::fs::canonicalize(path)?;
@@ -63,7 +83,8 @@ fn toml(value: &Value) -> Result<String> {
         _ => Ok(value.to_string()),
     }
 }
-fn prepared(spec: &Spec, discovery: bool) -> Result<Spec> {
+fn prepared(spec: &Spec, kind: Profile) -> Result<Spec> {
+    let discovery = kind.minimal();
     let mut spec = spec.clone();
     spec.runtime.push(
         trusted_helper(&spec.workspace)?
@@ -186,16 +207,26 @@ pub fn trusted_helper(workspace: &Path) -> Result<PathBuf> {
     Ok(control.join(relative))
 }
 pub fn creator(spec: &Spec, argv: &[String]) -> Result<Vec<String>> {
-    command(spec, argv, false)
+    command(spec, argv, Profile::Creator)
 }
 pub fn discovery(spec: &Spec, argv: &[String]) -> Result<Vec<String>> {
-    command(spec, argv, true)
+    command(spec, argv, Profile::Discovery)
 }
-fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>> {
+/// The command that runs `argv` for a capsule gate: the operating system's
+/// runtime, `spec.runtime` and `spec.readable` read-only, `spec.accounts` and
+/// the workspace writable, nothing else of the host, and the network only when
+/// `spec.network` says so. `spec.target` and `spec.protected` are not shown.
+/// The root is deliberately smaller than a session's: a program that needs a
+/// tool outside it fails here, in a gate, rather than later.
+pub fn gate(spec: &Spec, argv: &[String]) -> Result<Vec<String>> {
+    command(spec, argv, Profile::Gate)
+}
+fn command(spec: &Spec, argv: &[String], kind: Profile) -> Result<Vec<String>> {
     if argv.is_empty() {
         return Err(HarnessError::invalid("Sandbox native command is missing."));
     }
-    let spec = prepared(spec, discovery)?;
+    let discovery = kind.minimal();
+    let spec = prepared(spec, kind)?;
     let control = spec
         .workspace
         .parent()
@@ -221,25 +252,30 @@ fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>>
             entries.insert(arg(path)?, "write".into());
         }
         entries.insert(arg(&spec.workspace)?, "write".into());
-        entries.insert(
-            arg(&spec.target)?,
-            if discovery { "deny" } else { "read" }.into(),
-        );
-        for path in &spec.protected {
-            entries.insert(arg(path)?, if discovery { "deny" } else { "read" }.into());
+        if kind != Profile::Gate {
+            entries.insert(
+                arg(&spec.target)?,
+                if discovery { "deny" } else { "read" }.into(),
+            );
+            for path in &spec.protected {
+                entries.insert(arg(path)?, if discovery { "deny" } else { "read" }.into());
+            }
         }
         if let Some(evidence) = &spec.evidence {
             entries.insert(arg(evidence)?, "read".into());
         }
         let name = format!(
             "harness{}{}",
-            if discovery { "discovery" } else { "creator" },
+            match kind {
+                Profile::Creator => "creator",
+                Profile::Discovery => "discovery",
+                Profile::Gate => "gate",
+            },
             store::hexid()
         );
         let mut roots = Map::new();
         roots.insert(arg(&spec.workspace)?, true.into());
-        let profile =
-            json!({"filesystem":entries,"network":{"enabled":true},"workspace_roots":roots});
+        let profile = json!({"filesystem":entries,"network":{"enabled":spec.network},"workspace_roots":roots});
         let mut permissions = Map::new();
         permissions.insert(name.clone(), profile);
         let tmp = spec.workspace.join(".harness-tmp");
@@ -276,6 +312,9 @@ fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>>
                 "--new-session".into(),
                 "--unshare-pid".into(),
             ];
+            if !spec.network {
+                out.push("--unshare-net".into());
+            }
             let public = [
                 "/usr",
                 "/bin",
@@ -306,14 +345,24 @@ fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>>
                         out.extend(["--ro-bind".into(), name.into(), name.into()]);
                     }
                 }
-                for path in spec.runtime.iter().chain(spec.readable.iter()) {
-                    let name = arg(path)?;
-                    out.extend(["--ro-bind".into(), name.clone(), name]);
+                if kind == Profile::Discovery {
+                    for path in spec.runtime.iter().chain(spec.readable.iter()) {
+                        let name = arg(path)?;
+                        out.extend(["--ro-bind".into(), name.clone(), name]);
+                    }
                 }
             } else {
                 out.extend(["--ro-bind", "/", "/"].map(String::from));
             }
             out.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"].map(String::from));
+            if kind == Profile::Gate {
+                // After the private `/tmp`, so that a named folder below the
+                // host's `/tmp` is still the one the gate reads.
+                for path in spec.runtime.iter().chain(spec.readable.iter()) {
+                    let name = arg(path)?;
+                    out.extend(["--ro-bind".into(), name.clone(), name]);
+                }
+            }
             for path in &spec.accounts {
                 let name = arg(path)?;
                 out.extend(["--bind".into(), name.clone(), name]);
@@ -397,6 +446,9 @@ fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>>
                     "(deny file-write* (subpath {}))\n",
                     sbpl(evidence)?
                 ));
+            }
+            if !spec.network {
+                profile.push_str("(deny network*)\n");
             }
             let path = control.join(format!(
                 "sandbox-{}.sb",

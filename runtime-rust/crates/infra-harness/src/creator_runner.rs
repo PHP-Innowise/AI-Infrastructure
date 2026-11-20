@@ -213,6 +213,7 @@ pub fn sandbox_spec(request: &Value) -> Result<Spec> {
         runtime,
         codex: request["sandbox_executable"].as_str().map(PathBuf::from),
         evidence: None,
+        network: true,
     })
 }
 fn prompt(request: &Value) -> String {
@@ -702,6 +703,7 @@ mod tests {
             runtime: vec![],
             codex: None,
             evidence: None,
+            network: true,
         }
     }
 

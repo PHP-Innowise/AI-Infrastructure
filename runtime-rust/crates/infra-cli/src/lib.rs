@@ -37,7 +37,27 @@ const GROUPS: &[&str] = &[
     "skill-tools",
     "routing-eval",
     "release",
+    "skillcache",
 ];
+/// The command an executable name stands for when a warm SkillCache session
+/// staged the engine under it: `skillcache-run` or `skillcache-tool`, with or
+/// without the platform's executable suffix.
+pub fn staged_tool(name: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    match Path::new(name?).file_stem()?.to_str()? {
+        "skillcache-run" => Some("run-command"),
+        "skillcache-tool" => Some("tool"),
+        _ => None,
+    }
+}
+/// Runs one SkillCache command and returns its exit code. `name` is an
+/// operation of the `skillcache` group, or `run-command` for the executor's
+/// own command line (`run`, `continue` or `status` first).
+pub fn skillcache(name: &str, arguments: &[String]) -> i32 {
+    match name {
+        "run-command" => infra_skillcache::cli::execute_run(arguments),
+        other => infra_skillcache::cli::execute(other, arguments),
+    }
+}
 fn input(limit: usize, needed: bool) -> Result<Vec<u8>> {
     if !needed {
         return Ok(vec![]);
@@ -364,6 +384,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
         "app",
         "internal-sandbox-child",
         "internal-discovery-probe",
+        "skillcache",
     ]
     .contains(&group)
         && rest
@@ -924,6 +945,13 @@ pub fn run(raw: &[String]) -> Result<Output> {
             let (command, args) = operation(rest, None)?;
             let code = infra_pilots::run_cli(command, args)?;
             Ok(inherited(code))
+        }
+        "skillcache" => {
+            // The operation owns its arguments: a JSON object is one of them.
+            let (name, args) = rest
+                .split_first()
+                .map_or(("", rest), |(name, args)| (name.as_str(), args));
+            Ok(inherited(skillcache(name, args)))
         }
         "onnx-worker" => {
             let code = infra_pilots::run_cli("onnx-worker", rest)?;

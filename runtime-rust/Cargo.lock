@@ -1184,11 +1184,13 @@ dependencies = [
  "infra-pilots",
  "infra-qa",
  "infra-skill-tools",
+ "infra-skillcache",
  "infra-system",
  "infra-tooling",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -1306,6 +1308,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "uuid",
  "windows-sys 0.61.2",

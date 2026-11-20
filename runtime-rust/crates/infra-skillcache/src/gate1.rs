@@ -509,6 +509,46 @@ fn check_secrets(label: &str, text: &str, violations: &mut Vec<Violation>) {
     }
 }
 
+/// The rules of a hybrid capsule that need only the capsule and its package:
+/// the plan's dataflow, the steps' sources and the programs' commands. An
+/// executor applies them again before it runs anything of a stored package.
+pub fn structure(capsule: &SkillCapsule, files: &Files) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    if capsule.programs.is_empty() {
+        violations.push(Violation::new(
+            "hybrid_without_programs",
+            "programs",
+            "A hybrid capsule runs at least one program; a procedure without programs is the textual form.",
+        ));
+    }
+    if capsule.steps.is_empty() {
+        violations.push(Violation::new(
+            "empty_plan",
+            "steps",
+            "A capsule has at least one step.",
+        ));
+    }
+    check_dataflow(capsule, &mut violations);
+    check_sources(capsule, &mut violations);
+    for (index, program) in capsule.programs.iter().enumerate() {
+        check_arguments(
+            capsule,
+            files,
+            &program.entry,
+            &format!("programs[{index}].entry"),
+            &mut violations,
+        );
+        check_arguments(
+            capsule,
+            files,
+            &program.check,
+            &format!("programs[{index}].check"),
+            &mut violations,
+        );
+    }
+    violations
+}
+
 /// Gate 1 for a hybrid candidate. `capsule` is `capsule.json`, `files` the
 /// package beside it and `examples` the observed values, when there are any.
 pub fn check(
@@ -554,38 +594,7 @@ pub fn check(
         ));
         return Report::of("gate1", violations);
     }
-    if parsed.programs.is_empty() {
-        violations.push(Violation::new(
-            "hybrid_without_programs",
-            "programs",
-            "A hybrid capsule runs at least one program; a procedure without programs is the textual form.",
-        ));
-    }
-    if parsed.steps.is_empty() {
-        violations.push(Violation::new(
-            "empty_plan",
-            "steps",
-            "A capsule has at least one step.",
-        ));
-    }
-    check_dataflow(&parsed, &mut violations);
-    check_sources(&parsed, &mut violations);
-    for (index, program) in parsed.programs.iter().enumerate() {
-        check_arguments(
-            &parsed,
-            files,
-            &program.entry,
-            &format!("programs[{index}].entry"),
-            &mut violations,
-        );
-        check_arguments(
-            &parsed,
-            files,
-            &program.check,
-            &format!("programs[{index}].check"),
-            &mut violations,
-        );
-    }
+    violations.extend(structure(&parsed, files));
     if let Some(examples) = &examples {
         check_examples(&parsed, &text, examples, context, &mut violations);
     }

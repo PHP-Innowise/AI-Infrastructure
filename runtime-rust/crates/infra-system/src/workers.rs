@@ -615,6 +615,7 @@ fn runtime_profile(
         runtime: runtime.into_iter().collect(),
         codex,
         evidence: Some(workspace.join("evidence")),
+        network: true,
     })
 }
 async fn run_discovery_context(
