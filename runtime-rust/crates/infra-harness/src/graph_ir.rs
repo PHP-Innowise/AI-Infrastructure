@@ -7,9 +7,10 @@
 
 use crate::{
     HarnessError, Result,
+    graph::file_types::{IGNORED_CODE_DIRS, is_minified_js},
     graph_ast::{
         self, AstFileExtraction, AstGrammar, AstRef, is_graph_architecture_path,
-        is_graph_manifest_path,
+        is_graph_manifest_path, normalize_route_contract,
     },
     graph_crates::CratePackageMap,
     graph_deps::{self, DeclaredMember, DepMemberRef, DepRef, ReexportEntry, ReexportIndex},
@@ -23,7 +24,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -46,30 +47,6 @@ const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 fn default_max_ir_files() -> usize {
     MAX_IR_FILES
 }
-
-const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "graphify-out",
-    "node_modules",
-    "vendor",
-    "target",
-    "dist",
-    "build",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".next",
-    ".nuxt",
-    ".cargo",
-    ".cache",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".idea",
-    ".vscode",
-    ".c2p",
-];
 
 /// Fast O(1) summary counters stored in `ir_summary`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +88,7 @@ pub(crate) struct IrNodeSpec {
     pub community: Option<u32>,
     pub community_name: Option<String>,
     pub callable_class: bool,
+    pub is_abstract: bool,
     pub is_test: bool,
 }
 
@@ -146,10 +124,13 @@ pub(crate) struct IrSyncStats {
     pub summary: IrSummary,
 }
 
+const MAX_READ_POOL_CONNS: usize = 4;
+
 /// Persistent per-project SQLite Code Graph IR store.
 pub(crate) struct GraphIrStore {
     db_path: PathBuf,
     conn: Mutex<Connection>,
+    read_pool: Mutex<Vec<Connection>>,
     read_only: bool,
     write_epoch: AtomicU64,
 }
@@ -196,6 +177,7 @@ struct StoredSymbolRow {
     name: String,
     parent_name: Option<String>,
     start_line: u32,
+    is_abstract: bool,
     is_test: bool,
 }
 
@@ -354,11 +336,17 @@ impl GraphIrStore {
             "INSERT OR REPLACE INTO ir_meta(key, value) VALUES (?1, ?2)",
             params!["backend", NATIVE_IR_TOOL],
         )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO ir_meta(key, value) VALUES ('write_epoch', '0')",
+            [],
+        )?;
+        let epoch = read_meta_write_epoch(&conn);
         Ok(Self {
             db_path: db_path.to_path_buf(),
             conn: Mutex::new(conn),
+            read_pool: Mutex::new(Vec::new()),
             read_only: false,
-            write_epoch: AtomicU64::new(0),
+            write_epoch: AtomicU64::new(epoch),
         })
     }
 
@@ -393,12 +381,50 @@ impl GraphIrStore {
         if !initialized {
             return Ok(None);
         }
+        let epoch = read_meta_write_epoch(&conn);
         Ok(Some(Self {
             db_path: verified,
             conn: Mutex::new(conn),
+            read_pool: Mutex::new(Vec::new()),
             read_only: true,
-            write_epoch: AtomicU64::new(0),
+            write_epoch: AtomicU64::new(epoch),
         }))
+    }
+
+    /// Returns a pooled read-only connection on WAL mode (falling back to `self.conn`).
+    fn with_read_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let pooled = if let Ok(mut pool) = self.read_pool.lock() {
+            pool.pop()
+        } else {
+            None
+        };
+        let conn = match pooled {
+            Some(c) => c,
+            None => match open_readonly_pooled_conn(&self.db_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    let guard = lock_conn(&self.conn)?;
+                    return f(&guard);
+                }
+            },
+        };
+        let res = f(&conn);
+        if let Ok(mut pool) = self.read_pool.lock()
+            && pool.len() < MAX_READ_POOL_CONNS
+        {
+            pool.push(conn);
+        }
+        res
+    }
+
+    /// Returns the monotonic persisted SQLite write epoch (queried live on read-only stores).
+    pub(crate) fn current_write_epoch(&self) -> u64 {
+        if self.read_only {
+            return self
+                .with_read_conn(|conn| Ok(read_meta_write_epoch(conn)))
+                .unwrap_or_else(|_| self.write_epoch.load(Ordering::Acquire));
+        }
+        self.write_epoch.load(Ordering::Acquire)
     }
 
     /// Returns whether `<state>/graphs/<project>/graph_ir.sqlite3` already exists on disk.
@@ -502,8 +528,9 @@ impl GraphIrStore {
                 } else if prev_git_head.is_some() {
                     tx.execute("DELETE FROM ir_meta WHERE key = 'git_head'", [])?;
                 }
+                let next_epoch = bump_meta_write_epoch(&tx)?;
                 tx.commit()?;
-                self.write_epoch.fetch_add(1, Ordering::AcqRel);
+                self.write_epoch.store(next_epoch, Ordering::Release);
             }
             return Ok(IrSyncStats {
                 files_scanned,
@@ -625,8 +652,9 @@ impl GraphIrStore {
             } else {
                 tx.execute("DELETE FROM ir_meta WHERE key = 'git_head'", [])?;
             }
+            let next_epoch = bump_meta_write_epoch(&tx)?;
             tx.commit()?;
-            self.write_epoch.fetch_add(1, Ordering::AcqRel);
+            self.write_epoch.store(next_epoch, Ordering::Release);
             break summary;
         };
 
@@ -889,8 +917,9 @@ impl GraphIrStore {
             if let Some(ref head) = git_head {
                 upsert_meta(&tx, "git_head", head)?;
             }
+            let next_epoch = bump_meta_write_epoch(&tx)?;
             tx.commit()?;
-            self.write_epoch.fetch_add(1, Ordering::AcqRel);
+            self.write_epoch.store(next_epoch, Ordering::Release);
             break (actually_removed, summary);
         };
 
@@ -905,94 +934,96 @@ impl GraphIrStore {
 
     /// Reads the fast O(1) `ir_summary` counters from SQLite.
     pub(crate) fn summary_counts(&self) -> Result<Option<IrSummary>> {
-        let conn = lock_conn(&self.conn)?;
-        read_summary_from_conn(&conn)
+        self.with_read_conn(read_summary_from_conn)
     }
 
     /// Returns all indexed file paths in `ir_files`.
     pub(crate) fn known_files(&self) -> Result<BTreeSet<String>> {
-        let conn = lock_conn(&self.conn)?;
-        let mut stmt = conn.prepare("SELECT path FROM ir_files")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut set = BTreeSet::new();
-        for row in rows {
-            set.insert(row?);
-        }
-        Ok(set)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT path FROM ir_files")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut set = BTreeSet::new();
+            for row in rows {
+                set.insert(row?);
+            }
+            Ok(set)
+        })
     }
 
     /// Builds a `ReexportIndex` directly from SQLite `ir_reexports` and `ir_symbols`.
     pub(crate) fn reexport_index(&self) -> Result<ReexportIndex> {
-        let mut conn = lock_conn(&self.conn)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        build_reexport_index_from_db(&tx)
+        self.with_read_conn(build_reexport_index_from_db)
     }
 
     /// Queries reverse-caller edges targeting `target_rel` directly from SQLite `ir_edges`.
     pub(crate) fn incoming_caller_files(&self, target_rel: &str) -> Result<Vec<CallerEdgeRow>> {
-        let conn = lock_conn(&self.conn)?;
-        let mut stmt = conn.prepare(
-            "SELECT source_file, target_symbol, relation, context, line
-             FROM ir_edges
-             WHERE target_file = ?1
-             ORDER BY source_file, line, id",
-        )?;
-        let rows = stmt.query_map([target_rel], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?.max(0) as u32,
-            ))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT source_file, target_symbol, relation, context, line
+                 FROM ir_edges
+                 WHERE target_file = ?1
+                 ORDER BY source_file, line, id",
+            )?;
+            let rows = stmt.query_map([target_rel], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?.max(0) as u32,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
     }
 
     /// Returns all indexed file `(size, mtime_ns)` stamps alongside `manifest_stamp` and `git_head`.
     pub(crate) fn file_stamps_and_meta(&self) -> Result<FileStampsSnapshot> {
-        let conn = lock_conn(&self.conn)?;
-        let mut stmt = conn.prepare("SELECT path, size, mtime_ns FROM ir_files")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
-            ))
-        })?;
-        let mut stamps = BTreeMap::new();
-        for row in rows {
-            let (path, stamp) = row?;
-            stamps.insert(path, stamp);
-        }
-        let manifest_stamp: Option<String> = conn
-            .query_row(
-                "SELECT value FROM ir_meta WHERE key = 'manifest_stamp'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let git_head: Option<String> = conn
-            .query_row(
-                "SELECT value FROM ir_meta WHERE key = 'git_head'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok((stamps, manifest_stamp, git_head))
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT path, size, mtime_ns FROM ir_files")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+                ))
+            })?;
+            let mut stamps = BTreeMap::new();
+            for row in rows {
+                let (path, stamp) = row?;
+                stamps.insert(path, stamp);
+            }
+            let manifest_stamp: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM ir_meta WHERE key = 'manifest_stamp'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let git_head: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM ir_meta WHERE key = 'git_head'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok((stamps, manifest_stamp, git_head))
+        })
     }
 
     /// Returns deduplicated `(source_file, target_file)` dependency pairs from `ir_edges`.
     pub(crate) fn all_resolved_file_edges(&self) -> Result<Vec<(String, String)>> {
-        let conn = lock_conn(&self.conn)?;
-        let mut stmt = conn.prepare("SELECT DISTINCT source_file, target_file FROM ir_edges")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        self.with_read_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT DISTINCT source_file, target_file FROM ir_edges")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })
     }
 
     /// Batch-loads fresh outgoing `reads`/`writes` dependencies for `rel_paths` using ONE lock and
-    /// bounded `ir_files` + `ir_edges` SQL queries (zero DDL, zero N+1 `ir_symbols` queries).
+    /// bounded `ir_files` + `ir_edges` SQL queries, validating source, target, and manifest freshness.
     pub(crate) fn batch_access_deps_if_fresh(
         &self,
         root: &Path,
@@ -1022,82 +1053,97 @@ impl GraphIrStore {
         }
 
         let keys: Vec<String> = disk_stamps.keys().cloned().collect();
-        let mut out: BTreeMap<String, Vec<DepRef>> = BTreeMap::new();
-        let conn = lock_conn(&self.conn)?;
-
-        for chunk in keys.chunks(500) {
-            let placeholders = std::iter::repeat_n("?", chunk.len())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT f.path, f.size, f.mtime_ns, e.target_file, e.target_symbol, e.relation, e.context, e.line
-                 FROM ir_files f
-                 LEFT JOIN ir_edges e
-                   ON e.source_file = f.path
-                  AND e.relation IN ('reads', 'writes')
-                 WHERE f.path IN ({placeholders})
-                 ORDER BY f.path, e.id"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let params_vec: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-            let mut grouped_by_source: BTreeMap<String, BTreeMap<(String, String), DepRef>> =
-                BTreeMap::new();
-            let mut fresh_paths: BTreeSet<String> = BTreeSet::new();
-            let rows = stmt.query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                ))
-            })?;
-            for row in rows {
-                let (
-                    source_file,
-                    db_size,
-                    db_mtime,
-                    target_file,
-                    target_symbol,
-                    relation,
-                    context,
-                    line,
-                ) = row?;
-                if disk_stamps.get(&source_file) != Some(&(db_size, db_mtime)) {
-                    continue;
-                }
-                fresh_paths.insert(source_file.clone());
-                let grouped = grouped_by_source.entry(source_file).or_default();
-                if let (Some(target_file), Some(relation)) = (target_file, relation) {
-                    let line_u32 = line.unwrap_or(0).max(0) as u32;
-                    push_stored_edge_into_dep_map(
-                        grouped,
+        self.with_read_conn(|conn| {
+            if !manifests_fresh_against_meta(root, conn) {
+                return Ok(BTreeMap::new());
+            }
+            let mut out: BTreeMap<String, Vec<DepRef>> = BTreeMap::new();
+            let mut target_fresh: HashMap<String, bool> = HashMap::new();
+            for chunk in keys.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT f.path, f.size, f.mtime_ns, e.target_file, e.target_symbol, e.relation, e.context, e.line
+                     FROM ir_files f
+                     LEFT JOIN ir_edges e
+                       ON e.source_file = f.path
+                      AND e.relation IN ('reads', 'writes')
+                     WHERE f.path IN ({placeholders})
+                     ORDER BY f.path, e.id"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params_vec: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                let mut grouped_by_source: BTreeMap<String, BTreeMap<(String, String), DepRef>> =
+                    BTreeMap::new();
+                let mut fresh_paths: BTreeSet<String> = BTreeSet::new();
+                let mut stale_sources: BTreeSet<String> = BTreeSet::new();
+                let rows = stmt.query_map(params_vec.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (
+                        source_file,
+                        db_size,
+                        db_mtime,
                         target_file,
                         target_symbol,
                         relation,
                         context,
-                        line_u32,
-                        None,
-                    );
+                        line,
+                    ) = row?;
+                    if disk_stamps.get(&source_file) != Some(&(db_size, db_mtime))
+                        || stale_sources.contains(&source_file)
+                    {
+                        continue;
+                    }
+                    if let Some(ref tf) = target_file
+                        && !is_ir_file_fresh_cached(conn, root, tf, &mut target_fresh)
+                    {
+                        stale_sources.insert(source_file.clone());
+                        fresh_paths.remove(&source_file);
+                        grouped_by_source.remove(&source_file);
+                        continue;
+                    }
+                    fresh_paths.insert(source_file.clone());
+                    let grouped = grouped_by_source.entry(source_file).or_default();
+                    if let (Some(target_file), Some(relation)) = (target_file, relation) {
+                        let line_u32 = line.unwrap_or(0).max(0) as u32;
+                        push_stored_edge_into_dep_map(
+                            grouped,
+                            target_file,
+                            target_symbol,
+                            relation,
+                            context,
+                            line_u32,
+                            None,
+                        );
+                    }
+                }
+                for path in fresh_paths {
+                    let deps = grouped_by_source
+                        .remove(&path)
+                        .map(|g| g.into_values().collect())
+                        .unwrap_or_default();
+                    out.insert(path, deps);
                 }
             }
-            for path in fresh_paths {
-                let deps = grouped_by_source
-                    .remove(&path)
-                    .map(|g| g.into_values().collect())
-                    .unwrap_or_default();
-                out.insert(path, deps);
-            }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
-    /// Returns stored declarations and outgoing dependencies for `rel_path` when its on-disk
-    /// `(size, mtime_ns)` still matches the indexed record in `ir_files`.
+    /// Returns stored declarations and outgoing dependencies for `rel_path` when source, target
+    /// files, and manifest stamps still match SQLite records.
     pub(crate) fn file_outgoing_deps_if_fresh(
         &self,
         root: &Path,
@@ -1114,101 +1160,110 @@ impl GraphIrStore {
             ),
             _ => return Ok(None),
         };
-        let conn = lock_conn(&self.conn)?;
-        let stored_stamp: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT size, mtime_ns FROM ir_files WHERE path = ?1",
-                [&rel],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if stored_stamp != Some(disk_stamp) {
-            return Ok(None);
-        }
-
-        let declared = read_declared_members_from_conn(&conn, &rel)?;
-
-        let mut target_members_cache: BTreeMap<String, Vec<DeclaredMember>> = BTreeMap::new();
-        let mut grouped: BTreeMap<(String, String), DepRef> = BTreeMap::new();
-
-        {
-            let mut stmt = conn.prepare(
-                "SELECT target_file, target_symbol, relation, context, line
-                 FROM ir_edges
-                 WHERE source_file = ?1
-                 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([&rel], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?.max(0) as u32,
-                ))
-            })?;
-            for row in rows {
-                let (target_file, target_symbol, relation, context, line) = row?;
-                let mut load_members = |target: &str| {
-                    target_members_cache
-                        .entry(target.to_owned())
-                        .or_insert_with(|| {
-                            read_declared_members_from_conn(&conn, target).unwrap_or_default()
-                        })
-                        .clone()
-                };
-                push_stored_edge_into_dep_map(
-                    &mut grouped,
-                    target_file,
-                    target_symbol,
-                    relation,
-                    context,
-                    line,
-                    Some(&mut load_members),
-                );
+        self.with_read_conn(|conn| {
+            if !manifests_fresh_against_meta(root, conn) {
+                return Ok(None);
             }
-        }
+            let stored_stamp: Option<(i64, i64)> = conn
+                .query_row(
+                    "SELECT size, mtime_ns FROM ir_files WHERE path = ?1",
+                    [&rel],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if stored_stamp != Some(disk_stamp) {
+                return Ok(None);
+            }
 
-        {
-            let mut stmt = conn.prepare(
-                "SELECT specifier, kind, symbols_json, line
-                 FROM ir_unresolved_imports
-                 WHERE source_file = ?1
-                 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([&rel], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?.max(0) as u32,
-                ))
-            })?;
-            for row in rows {
-                let (specifier, kind, symbols_json, line) = row?;
-                let symbols: Vec<String> = serde_json::from_str(&symbols_json).unwrap_or_default();
-                let entry = grouped
-                    .entry((specifier.clone(), kind.clone()))
-                    .or_insert_with(|| DepRef {
-                        target: specifier,
-                        resolved: false,
-                        exists: false,
-                        kind,
-                        symbols: Vec::new(),
-                        line: Some(line),
-                        evidence: None,
-                        member_refs: Vec::new(),
-                        target_members: Vec::new(),
-                    });
-                for sym in symbols {
-                    if !entry.symbols.contains(&sym) {
-                        entry.symbols.push(sym);
+            let declared = read_declared_members_from_conn(conn, &rel)?;
+
+            let mut target_members_cache: BTreeMap<String, Vec<DeclaredMember>> = BTreeMap::new();
+            let mut target_fresh: HashMap<String, bool> = HashMap::new();
+            let mut grouped: BTreeMap<(String, String), DepRef> = BTreeMap::new();
+
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT target_file, target_symbol, relation, context, line
+                     FROM ir_edges
+                     WHERE source_file = ?1
+                     ORDER BY id",
+                )?;
+                let rows = stmt.query_map([&rel], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?.max(0) as u32,
+                    ))
+                })?;
+                for row in rows {
+                    let (target_file, target_symbol, relation, context, line) = row?;
+                    if !is_ir_file_fresh_cached(conn, root, &target_file, &mut target_fresh) {
+                        return Ok(None);
+                    }
+                    let mut load_members = |target: &str| {
+                        target_members_cache
+                            .entry(target.to_owned())
+                            .or_insert_with(|| {
+                                read_declared_members_from_conn(conn, target).unwrap_or_default()
+                            })
+                            .clone()
+                    };
+                    push_stored_edge_into_dep_map(
+                        &mut grouped,
+                        target_file,
+                        target_symbol,
+                        relation,
+                        context,
+                        line,
+                        Some(&mut load_members),
+                    );
+                }
+            }
+
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT specifier, kind, symbols_json, line
+                     FROM ir_unresolved_imports
+                     WHERE source_file = ?1
+                     ORDER BY id",
+                )?;
+                let rows = stmt.query_map([&rel], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?.max(0) as u32,
+                    ))
+                })?;
+                for row in rows {
+                    let (specifier, kind, symbols_json, line) = row?;
+                    let symbols: Vec<String> =
+                        serde_json::from_str(&symbols_json).unwrap_or_default();
+                    let entry = grouped
+                        .entry((specifier.clone(), kind.clone()))
+                        .or_insert_with(|| DepRef {
+                            target: specifier,
+                            resolved: false,
+                            exists: false,
+                            kind,
+                            symbols: Vec::new(),
+                            line: Some(line),
+                            evidence: None,
+                            member_refs: Vec::new(),
+                            target_members: Vec::new(),
+                        });
+                    for sym in symbols {
+                        if !entry.symbols.contains(&sym) {
+                            entry.symbols.push(sym);
+                        }
                     }
                 }
             }
-        }
 
-        Ok(Some((grouped.into_values().collect(), declared)))
+            Ok(Some((grouped.into_values().collect(), declared)))
+        })
     }
 
     /// Returns stored `(symbol_id, kind, name, parent_name, start_line)` rows for `rel_path`
@@ -1230,33 +1285,34 @@ impl GraphIrStore {
             ),
             _ => return Ok(None),
         };
-        let conn = lock_conn(&self.conn)?;
-        let stored_stamp: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT size, mtime_ns FROM ir_files WHERE path = ?1",
-                [&rel],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if stored_stamp != Some(disk_stamp) {
-            return Ok(None);
-        }
-        let mut stmt = conn.prepare(
-            "SELECT symbol_id, kind, name, parent_name, start_line
-             FROM ir_symbols
-             WHERE file_path = ?1
-             ORDER BY start_line, id",
-        )?;
-        let rows = stmt.query_map([&rel], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?.max(0) as u32,
-            ))
-        })?;
-        Ok(Some(rows.collect::<std::result::Result<Vec<_>, _>>()?))
+        self.with_read_conn(|conn| {
+            let stored_stamp: Option<(i64, i64)> = conn
+                .query_row(
+                    "SELECT size, mtime_ns FROM ir_files WHERE path = ?1",
+                    [&rel],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if stored_stamp != Some(disk_stamp) {
+                return Ok(None);
+            }
+            let mut stmt = conn.prepare(
+                "SELECT symbol_id, kind, name, parent_name, start_line
+                 FROM ir_symbols
+                 WHERE file_path = ?1
+                 ORDER BY start_line, id",
+            )?;
+            let rows = stmt.query_map([&rel], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?.max(0) as u32,
+                ))
+            })?;
+            Ok(Some(rows.collect::<std::result::Result<Vec<_>, _>>()?))
+        })
     }
 
     /// Maps canonical `{file_path}::{owner}::{name}` / `{file_path}::{name}` keys to
@@ -1269,75 +1325,76 @@ impl GraphIrStore {
         if file_paths.is_empty() {
             return Ok(out);
         }
-        let conn = lock_conn(&self.conn)?;
-        let keys: Vec<&String> = file_paths.iter().collect();
-        for chunk in keys.chunks(200) {
-            let placeholders = std::iter::repeat_n("?", chunk.len())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT file_path, symbol_id, name, parent_name
-                 FROM ir_symbols
-                 WHERE file_path IN ({placeholders})
-                 ORDER BY id"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let params_vec: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|s| *s as &dyn rusqlite::ToSql).collect();
-            let rows = stmt.query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (file_path, symbol_id, name, parent_name) = row?;
-                let owner = parent_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty() && *p != file_path);
-                let fqn = match owner {
-                    Some(o) => format!("{file_path}::{o}::{name}"),
-                    None => format!("{file_path}::{name}"),
-                };
-                out.entry(fqn).or_insert(symbol_id);
+        self.with_read_conn(|conn| {
+            let keys: Vec<&String> = file_paths.iter().collect();
+            for chunk in keys.chunks(200) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT file_path, symbol_id, name, parent_name
+                     FROM ir_symbols
+                     WHERE file_path IN ({placeholders})
+                     ORDER BY id"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params_vec: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|s| *s as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params_vec.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (file_path, symbol_id, name, parent_name) = row?;
+                    let owner = parent_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty() && *p != file_path);
+                    let fqn = match owner {
+                        Some(o) => format!("{file_path}::{o}::{name}"),
+                        None => format!("{file_path}::{name}"),
+                    };
+                    out.entry(fqn).or_insert(symbol_id);
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Reads indexed file paths and semantic edges directly for System Graph aggregation.
     pub(crate) fn semantic_edges_for_system(
         &self,
     ) -> Result<(Vec<String>, Vec<SystemSemanticEdgeRow>)> {
-        let mut conn = lock_conn(&self.conn)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let files = {
-            let mut stmt = tx.prepare("SELECT path FROM ir_files ORDER BY path")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let sem_edges = {
-            let mut stmt = tx.prepare(
-                "SELECT file_path, kind, target, source_symbol, line, evidence
-                 FROM ir_semantic_edges
-                 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?.max(0) as u32,
-                    row.get::<_, String>(5)?,
-                ))
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        Ok((files, sem_edges))
+        self.with_read_conn(|conn| {
+            let files = {
+                let mut stmt = conn.prepare("SELECT path FROM ir_files ORDER BY path")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let sem_edges = {
+                let mut stmt = conn.prepare(
+                    "SELECT file_path, kind, target, source_symbol, line, evidence
+                     FROM ir_semantic_edges
+                     ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?.max(0) as u32,
+                        row.get::<_, String>(5)?,
+                    ))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            Ok((files, sem_edges))
+        })
     }
 
     /// Exports typed node and link specs directly from SQLite so `graph_map::Index` avoids JSON.
@@ -1354,81 +1411,91 @@ impl GraphIrStore {
     }
 
     fn load_graph_rows(&self) -> Result<LoadedGraphRows> {
-        let mut conn = lock_conn(&self.conn)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        self.with_read_conn(|conn| {
+            let files = {
+                let mut stmt = conn.prepare("SELECT path FROM ir_files ORDER BY path")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
 
-        let files = {
-            let mut stmt = tx.prepare("SELECT path FROM ir_files ORDER BY path")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
+            let symbols = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_path, symbol_id, kind, name, parent_name, start_line, is_test, modifiers_json
+                     FROM ir_symbols
+                     ORDER BY file_path, start_line, id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    let kind: String = row.get(3)?;
+                    let mods_json: String = row.get(8)?;
+                    let has_abstract = serde_json::from_str::<Vec<String>>(&mods_json)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case("abstract"));
+                    let is_abstract = matches!(
+                        kind.as_str(),
+                        "interface" | "trait" | "protocol"
+                    ) || has_abstract;
+                    Ok(StoredSymbolRow {
+                        row_id: row.get(0)?,
+                        file_path: row.get(1)?,
+                        symbol_id: row.get(2)?,
+                        kind,
+                        name: row.get(4)?,
+                        parent_name: row.get(5)?,
+                        start_line: row.get::<_, i64>(6)?.max(0) as u32,
+                        is_abstract,
+                        is_test: row.get::<_, i64>(7)? != 0,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
 
-        let symbols = {
-            let mut stmt = tx.prepare(
-                "SELECT id, file_path, symbol_id, kind, name, parent_name, start_line, is_test
-                 FROM ir_symbols
-                 ORDER BY file_path, start_line, id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(StoredSymbolRow {
-                    row_id: row.get(0)?,
-                    file_path: row.get(1)?,
-                    symbol_id: row.get(2)?,
-                    kind: row.get(3)?,
-                    name: row.get(4)?,
-                    parent_name: row.get(5)?,
-                    start_line: row.get::<_, i64>(6)?.max(0) as u32,
-                    is_test: row.get::<_, i64>(7)? != 0,
-                })
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
+            let edges = {
+                let mut stmt = conn.prepare(
+                    "SELECT source_file, source_symbol, target_file, target_symbol, relation, context, line, confidence
+                     FROM ir_edges
+                     ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(StoredEdgeRow {
+                        source_file: row.get(0)?,
+                        source_symbol: row.get(1)?,
+                        target_file: row.get(2)?,
+                        target_symbol: row.get(3)?,
+                        relation: row.get(4)?,
+                        context: row.get(5)?,
+                        line: row.get::<_, i64>(6)?.max(0) as u32,
+                        confidence: row.get(7)?,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
 
-        let edges = {
-            let mut stmt = tx.prepare(
-                "SELECT source_file, source_symbol, target_file, target_symbol, relation, context, line, confidence
-                 FROM ir_edges
-                 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(StoredEdgeRow {
-                    source_file: row.get(0)?,
-                    source_symbol: row.get(1)?,
-                    target_file: row.get(2)?,
-                    target_symbol: row.get(3)?,
-                    relation: row.get(4)?,
-                    context: row.get(5)?,
-                    line: row.get::<_, i64>(6)?.max(0) as u32,
-                    confidence: row.get(7)?,
-                })
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
+            let sem_edges = {
+                let mut stmt = conn.prepare(
+                    "SELECT file_path, kind, target, source_symbol, line, evidence
+                     FROM ir_semantic_edges
+                     ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(StoredSemanticRow {
+                        file_path: row.get(0)?,
+                        kind: row.get(1)?,
+                        target: row.get(2)?,
+                        source_symbol: row.get(3)?,
+                        line: row.get::<_, i64>(4)?.max(0) as u32,
+                        evidence: row.get(5)?,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
 
-        let sem_edges = {
-            let mut stmt = tx.prepare(
-                "SELECT file_path, kind, target, source_symbol, line, evidence
-                 FROM ir_semantic_edges
-                 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(StoredSemanticRow {
-                    file_path: row.get(0)?,
-                    kind: row.get(1)?,
-                    target: row.get(2)?,
-                    source_symbol: row.get(3)?,
-                    line: row.get::<_, i64>(4)?.max(0) as u32,
-                    evidence: row.get(5)?,
-                })
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-
-        Ok(LoadedGraphRows {
-            files,
-            symbols,
-            edges,
-            sem_edges,
+            Ok(LoadedGraphRows {
+                files,
+                symbols,
+                edges,
+                sem_edges,
+            })
         })
     }
 
@@ -1574,7 +1641,7 @@ pub(crate) fn normalize_rel_path(root: &Path, raw: &str) -> Option<String> {
     if clean.is_empty() {
         return None;
     }
-    if clean.split('/').any(|seg| IGNORED_DIRS.contains(&seg)) {
+    if clean.split('/').any(|seg| IGNORED_CODE_DIRS.contains(&seg)) {
         return None;
     }
     Some(clean)
@@ -1635,7 +1702,7 @@ fn collect_dir_update_candidates(
             if meta.is_dir() {
                 let leaf = rel.rsplit('/').next().unwrap_or(&rel);
                 if depth < MAX_WALK_DEPTH
-                    && !IGNORED_DIRS.contains(&leaf)
+                    && !IGNORED_CODE_DIRS.contains(&leaf)
                     && rel != "memory-bank/local"
                 {
                     queue.push_back((path, rel, depth + 1));
@@ -1686,7 +1753,7 @@ pub(crate) fn compute_root_manifest_stamp(real_root: &Path) -> String {
             };
             if meta.is_dir() {
                 if depth < MAX_WALK_DEPTH
-                    && !IGNORED_DIRS.contains(&name_str)
+                    && !IGNORED_CODE_DIRS.contains(&name_str)
                     && rel != "memory-bank/local"
                 {
                     queue.push_back((path, rel, depth + 1));
@@ -2136,11 +2203,7 @@ fn ensure_private_sqlite_path(dir: &Path, filename: &str) -> Result<PathBuf> {
 }
 
 fn is_supported_code_rel(rel: &str) -> bool {
-    let fname = rel.rsplit('/').next().unwrap_or(rel);
-    if fname.ends_with(".min.js") || fname.ends_with(".min.mjs") || fname.ends_with(".min.cjs") {
-        return false;
-    }
-    AstGrammar::from_rel_path(rel).is_some()
+    !is_minified_js(rel) && AstGrammar::from_rel_path(rel).is_some()
 }
 
 fn mtime_nanos(meta: &fs::Metadata) -> i64 {
@@ -2181,7 +2244,7 @@ fn walk_workspace_code_files(real_root: &Path) -> Result<(Vec<WalkedFile>, bool)
             };
             if meta.is_dir() {
                 let leaf = rel.rsplit('/').next().unwrap_or(&rel);
-                if depth < MAX_WALK_DEPTH && !IGNORED_DIRS.contains(&leaf) {
+                if depth < MAX_WALK_DEPTH && !IGNORED_CODE_DIRS.contains(&leaf) {
                     queue.push_back((path, rel, depth + 1));
                 }
             } else if meta.is_file() && is_supported_code_rel(&rel) && meta.len() <= MAX_FILE_BYTES
@@ -2411,10 +2474,10 @@ fn upsert_parsed_file(tx: &Transaction<'_>, unit: &ParsedUnit, now: &str) -> Res
     Ok(())
 }
 
-fn build_reexport_index_from_db(tx: &Transaction<'_>) -> Result<ReexportIndex> {
+fn build_reexport_index_from_db(conn: &Connection) -> Result<ReexportIndex> {
     let mut index = ReexportIndex::default();
     {
-        let mut stmt = tx.prepare("SELECT file_path, kind, name, parent_name FROM ir_symbols")?;
+        let mut stmt = conn.prepare("SELECT file_path, kind, name, parent_name FROM ir_symbols")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -2435,7 +2498,7 @@ fn build_reexport_index_from_db(tx: &Transaction<'_>) -> Result<ReexportIndex> {
         }
     }
     {
-        let mut stmt = tx.prepare(
+        let mut stmt = conn.prepare(
             "SELECT file_path, alias, orig_path, orig_symbol, is_wildcard FROM ir_reexports",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2830,6 +2893,123 @@ fn upsert_meta(tx: &Transaction<'_>, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn read_meta_write_epoch(conn: &Connection) -> u64 {
+    conn.query_row(
+        "SELECT value FROM ir_meta WHERE key = 'write_epoch'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse::<u64>().ok())
+    .unwrap_or(0)
+}
+
+fn bump_meta_write_epoch(tx: &Transaction<'_>) -> Result<u64> {
+    let next = read_meta_write_epoch(tx).saturating_add(1);
+    upsert_meta(tx, "write_epoch", &next.to_string())?;
+    Ok(next)
+}
+
+fn open_readonly_pooled_conn(db_path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    let _ = conn.execute_batch("PRAGMA query_only=ON;");
+    Ok(conn)
+}
+
+fn manifests_fresh_against_meta(root: &Path, conn: &Connection) -> bool {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM ir_meta WHERE key = 'manifest_stamp'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let Some(stamp) = stored else {
+        return true;
+    };
+    let mut recorded = BTreeSet::new();
+    for entry in stamp.split('|') {
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.rsplitn(3, ':');
+        let (Some(mtime_s), Some(size_s), Some(rel)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let (Ok(expected_size), Ok(expected_mtime)) =
+            (size_s.parse::<i64>(), mtime_s.parse::<i64>())
+        else {
+            return false;
+        };
+        let Ok(meta) = fs::symlink_metadata(root.join(rel)) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return false;
+        }
+        let actual_size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+        if actual_size != expected_size || mtime_nanos(&meta) != expected_mtime {
+            return false;
+        }
+        recorded.insert(rel.to_owned());
+    }
+    for root_manifest in [
+        "Cargo.toml",
+        "package.json",
+        "tsconfig.json",
+        "jsconfig.json",
+        "composer.json",
+        "pyproject.toml",
+        "go.mod",
+    ] {
+        if !recorded.contains(root_manifest)
+            && fs::symlink_metadata(root.join(root_manifest))
+                .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_ir_file_fresh_cached(
+    conn: &Connection,
+    root: &Path,
+    rel: &str,
+    cache: &mut HashMap<String, bool>,
+) -> bool {
+    if let Some(&fresh) = cache.get(rel) {
+        return fresh;
+    }
+    let stored: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT size, mtime_ns FROM ir_files WHERE path = ?1",
+            [rel],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let fresh = match stored {
+        None => true,
+        Some((db_size, db_mtime)) => fs::symlink_metadata(root.join(rel)).is_ok_and(|meta| {
+            !meta.file_type().is_symlink()
+                && meta.is_file()
+                && i64::try_from(meta.len()).unwrap_or(i64::MAX) == db_size
+                && mtime_nanos(&meta) == db_mtime
+        }),
+    };
+    cache.insert(rel.to_owned(), fresh);
+    fresh
+}
+
 fn read_summary_from_conn(conn: &Connection) -> Result<Option<IrSummary>> {
     match conn.query_row(
         "SELECT files, symbols, edges, semantic_edges, updated_at, truncated, max_files
@@ -3056,6 +3236,7 @@ fn collect_graph_elements(
             community: comm_id,
             community_name: comm_name,
             callable_class: false,
+            is_abstract: false,
             is_test: is_test_path(path),
         });
     }
@@ -3117,6 +3298,7 @@ fn collect_graph_elements(
             community: comm_id,
             community_name: comm_name,
             callable_class: is_type_kind(&sym.kind),
+            is_abstract: sym.is_abstract,
             is_test: sym.is_test || is_test_path(&sym.file_path),
         });
     }
@@ -3273,22 +3455,39 @@ fn collect_graph_elements(
         });
     }
 
+    let canonical_sem_target = |kind: &str, target: &str| -> String {
+        if matches!(kind, "exposes_route" | "route" | "calls_route")
+            && let Some(raw) = target.strip_prefix("route:")
+        {
+            let trimmed = raw.trim();
+            let (verb, path) = match trimmed.split_once(' ') {
+                Some((v, p)) if p.trim_start().starts_with('/') => (Some(v), p.trim()),
+                _ => (None, trimmed),
+            };
+            if let Some(norm) = normalize_route_contract(verb, path, false) {
+                return norm;
+            }
+        }
+        target.to_owned()
+    };
+
     // Choose a deterministic anchor file for each shared semantic target (e.g., writers/publishers
     // before readers/listeners) so `graph_map::patterns` and `system_graph` join across files.
-    let mut semantic_anchors: BTreeMap<&str, (u8, &str, u32)> = BTreeMap::new();
+    let mut semantic_anchors: BTreeMap<String, (u8, &str, u32)> = BTreeMap::new();
     for edge in sem_edges {
         if !file_set.contains(edge.file_path.as_str()) {
             continue;
         }
+        let target_key = canonical_sem_target(&edge.kind, &edge.target);
         let prio = match edge.kind.as_str() {
             "writes_table" | "publishes_event" | "exposes_route" | "di_binds" => 0u8,
             _ => 1u8,
         };
         let cand = (prio, edge.file_path.as_str(), edge.line);
-        match semantic_anchors.get(edge.target.as_str()) {
+        match semantic_anchors.get(target_key.as_str()) {
             Some(prev) if *prev <= cand => {}
             _ => {
-                semantic_anchors.insert(edge.target.as_str(), cand);
+                semantic_anchors.insert(target_key, cand);
             }
         }
     }
@@ -3349,11 +3548,12 @@ fn collect_graph_elements(
         None
     };
 
-    let mut emitted_semantic_nodes: BTreeMap<&str, String> = BTreeMap::new();
+    let mut emitted_semantic_nodes: BTreeMap<String, String> = BTreeMap::new();
     for edge in sem_edges {
         if !file_set.contains(edge.file_path.as_str()) {
             continue;
         }
+        let target_key = canonical_sem_target(&edge.kind, &edge.target);
         let src_id = resolve_symbol(
             &edge.file_path,
             edge.source_symbol.as_deref(),
@@ -3361,7 +3561,7 @@ fn collect_graph_elements(
             edge.line,
         );
         let matched_type_id = if edge.kind == "di_binds"
-            && let Some(svc) = edge.target.strip_prefix("service:")
+            && let Some(svc) = target_key.strip_prefix("service:")
         {
             resolve_di_target(&edge.file_path, &src_id, svc)
         } else {
@@ -3370,12 +3570,12 @@ fn collect_graph_elements(
 
         let dst_id = if let Some(type_id) = matched_type_id {
             type_id
-        } else if let Some(existing) = emitted_semantic_nodes.get(edge.target.as_str()) {
+        } else if let Some(existing) = emitted_semantic_nodes.get(target_key.as_str()) {
             existing.clone()
         } else {
-            let sem_id = format!("sem:{}", edge.target);
+            let sem_id = format!("sem:{target_key}");
             let (_, anchor_file, anchor_line) = semantic_anchors
-                .get(edge.target.as_str())
+                .get(target_key.as_str())
                 .copied()
                 .unwrap_or((1, edge.file_path.as_str(), edge.line));
             let (comm_id, comm_name) = communities
@@ -3383,7 +3583,7 @@ fn collect_graph_elements(
                 .map_or((None, None), |(id, name)| (Some(*id), Some(name.clone())));
             nodes.push(IrNodeSpec {
                 id: sem_id.clone(),
-                label: edge.target.clone(),
+                label: target_key.clone(),
                 source_file: anchor_file.to_owned(),
                 source_location: Some(format!("L{anchor_line}")),
                 file_type: None,
@@ -3391,9 +3591,10 @@ fn collect_graph_elements(
                 community: comm_id,
                 community_name: comm_name,
                 callable_class: false,
+                is_abstract: false,
                 is_test: is_test_path(anchor_file),
             });
-            emitted_semantic_nodes.insert(edge.target.as_str(), sem_id.clone());
+            emitted_semantic_nodes.insert(target_key, sem_id.clone());
             sem_id
         };
 
@@ -3442,6 +3643,9 @@ fn node_link_payload_from_elements(node_specs: &[IrNodeSpec], link_specs: &[IrLi
             }
             if spec.callable_class {
                 node["_callable_class"] = json!(true);
+            }
+            if spec.is_abstract {
+                node["abstract"] = json!(true);
             }
             if spec.is_test {
                 node["is_test"] = json!(true);
@@ -3917,6 +4121,92 @@ mod tests {
         assert!(
             deps.iter()
                 .any(|d| !d.resolved && d.target.contains("missing_mod"))
+        );
+    }
+
+    #[test]
+    fn write_epoch_read_pool_abstract_modifiers_manifest_freshness_and_route_hubs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("ws");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/Contracts.php"),
+            "<?php\nabstract class BaseHandler {}\ninterface PaymentGateway {}\ntrait AuditTrait {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/client.ts"),
+            "export async function fetchOrder(id: string) { return fetch(`/api/orders/${id}`); }\n",
+        )
+        .unwrap();
+
+        let ir = GraphIrStore::open(&state, "p1").unwrap();
+        assert_eq!(ir.current_write_epoch(), 0);
+        ir.sync_workspace(&root).unwrap();
+        let epoch1 = ir.current_write_epoch();
+        assert!(epoch1 >= 1);
+
+        // Open read-only pool handle and verify exported abstract flags + canonical route contract hubs.
+        let ro = GraphIrStore::open_readonly(&state, "p1")
+            .unwrap()
+            .expect("readonly ir");
+        assert_eq!(ro.current_write_epoch(), epoch1);
+        let (ir_nodes, ir_links, _, _) = ro.export_ir_graph_elements().unwrap();
+        assert!(
+            ir_nodes
+                .iter()
+                .any(|n| n.label.contains("BaseHandler") && n.is_abstract),
+            "expected BaseHandler marked abstract: {ir_nodes:?}"
+        );
+        assert!(
+            ir_nodes
+                .iter()
+                .any(|n| n.label.contains("PaymentGateway") && n.is_abstract),
+            "expected PaymentGateway marked abstract: {ir_nodes:?}"
+        );
+        assert!(
+            ir_nodes
+                .iter()
+                .any(|n| n.id == "sem:route:GET /api/orders/{param}"),
+            "expected normalized semantic route hub: {ir_nodes:?}"
+        );
+        assert!(
+            ir_links
+                .iter()
+                .any(|l| l.target == "sem:route:GET /api/orders/{param}"
+                    && l.relation.as_deref() == Some("calls_route")),
+            "expected calls_route link onto canonical hub: {ir_links:?}"
+        );
+
+        // Concurrent `update_paths` increments `write_epoch`.
+        fs::write(root.join("src/extra.ts"), "export const ping = () => 1;\n").unwrap();
+        ir.update_paths(&root, &["src/extra.ts".to_owned()])
+            .unwrap();
+        let epoch2 = ir.current_write_epoch();
+        assert!(epoch2 > epoch1);
+
+        // External manifest edit invalidates `file_outgoing_deps_if_fresh`.
+        assert!(
+            ir.file_outgoing_deps_if_fresh(&root, "src/client.ts")
+                .unwrap()
+                .is_some()
+        );
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"demo","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        assert!(
+            ir.file_outgoing_deps_if_fresh(&root, "src/client.ts")
+                .unwrap()
+                .is_none(),
+            "manifest edit must invalidate cached outgoing deps"
         );
     }
 }

@@ -251,7 +251,7 @@ struct Found {
 pub(super) struct Patterns {
     found: Vec<Found>,
     /// The layers its files are filed in, which a folder is asked for.
-    layers: layers::Layers,
+    pub(super) layers: layers::Layers,
 }
 /// The graph as the patterns read it: types, what each lies in, and how
 /// they stand to each other.
@@ -337,7 +337,7 @@ fn is_listener_symbol(label: &str, path: &str) -> bool {
         )
 }
 /// What the source says a type is declared as.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Declared {
     /// A trait, an interface, a protocol, an abstract class.
     Abstract,
@@ -464,7 +464,7 @@ impl<'a> Read<'a> {
         }
         let semantic_tag = |relation: &str| -> Option<u16> {
             match relation {
-                "exposes_route" | "route" => Some(ROUTE),
+                "exposes_route" | "route" | "calls_route" => Some(ROUTE),
                 "di_binds" | "di_binding" => Some(DI_BINDING),
                 "publishes_event" => Some(u16::MAX - 1),
                 "handles_event" => Some(u16::MAX),
@@ -662,6 +662,12 @@ impl<'a> Read<'a> {
             .map(str::to_owned)
     }
     fn declared(&self, at: u32) -> Declared {
+        if self.index.symbols[at as usize].is_abstract {
+            return Declared::Abstract;
+        }
+        if self.index.backend.as_deref() == Some(crate::graph_ir::NATIVE_IR_TOOL) {
+            return Declared::Plain;
+        }
         match self.line(at) {
             None => Declared::Unread,
             Some(line) => {
@@ -1626,7 +1632,7 @@ impl Found {
     }
 }
 impl Index {
-    fn patterns_of(&self, certain: bool) -> &Patterns {
+    pub(super) fn patterns_of(&self, certain: bool) -> &Patterns {
         self.patterns[usize::from(certain)]
             .get_or_init(|| Patterns::find(self, certain, &|path| text_at(&self.root, path)))
     }
@@ -1743,6 +1749,24 @@ impl Index {
         renamed: &HashMap<&str, &str>,
         certain: bool,
     ) {
+        self.compare_layers_with_rules(base, view, renamed, certain, None);
+    }
+
+    /// Compares layers against `base`, supporting both built-in layers and `.harness-architecture.json` rules.
+    pub(crate) fn compare_layers_with_rules(
+        &self,
+        base: &Index,
+        view: &mut Value,
+        renamed: &HashMap<&str, &str>,
+        certain: bool,
+        rules: Option<&layer_rules::Rules>,
+    ) {
+        if let Some(rules) = rules
+            && view["pattern"]["declared"] == true
+        {
+            self.compare_declared_layers(base, view, renamed, certain, rules);
+            return;
+        }
         self.patterns_of(certain).layers.compare(
             self,
             &base.patterns_of(certain).layers,
@@ -2127,6 +2151,132 @@ mod semantic_tests {
         assert_eq!(
             certain_data["instances"][0]["semantic_summary"]["tables_written"],
             json!(["orders"])
+        );
+    }
+
+    #[test]
+    fn native_ir_abstract_skips_disk_reads_and_includes_calls_route_tag() {
+        let missing_disk_root = Path::new("/nonexistent/ir-only-root");
+        let ir_nodes = vec![
+            crate::graph_ir::IrNodeSpec {
+                id: "iface".into(),
+                label: "GatewayInterface".into(),
+                source_file: "src/Contracts/GatewayInterface.php".into(),
+                source_location: Some("L2".into()),
+                file_type: Some("php".into()),
+                node_kind: Some("class".into()),
+                community: None,
+                community_name: None,
+                callable_class: true,
+                is_abstract: true,
+                is_test: false,
+            },
+            crate::graph_ir::IrNodeSpec {
+                id: "impl_a".into(),
+                label: "StripeGateway".into(),
+                source_file: "src/StripeGateway.php".into(),
+                source_location: Some("L2".into()),
+                file_type: Some("php".into()),
+                node_kind: Some("class".into()),
+                community: None,
+                community_name: None,
+                callable_class: true,
+                is_abstract: false,
+                is_test: false,
+            },
+            crate::graph_ir::IrNodeSpec {
+                id: "impl_b".into(),
+                label: "PayPalGateway".into(),
+                source_file: "src/PayPalGateway.php".into(),
+                source_location: Some("L2".into()),
+                file_type: Some("php".into()),
+                node_kind: Some("class".into()),
+                community: None,
+                community_name: None,
+                callable_class: true,
+                is_abstract: false,
+                is_test: false,
+            },
+            crate::graph_ir::IrNodeSpec {
+                id: "ctrl".into(),
+                label: "CheckoutController".into(),
+                source_file: "src/CheckoutController.php".into(),
+                source_location: Some("L2".into()),
+                file_type: Some("php".into()),
+                node_kind: Some("class".into()),
+                community: None,
+                community_name: None,
+                callable_class: true,
+                is_abstract: false,
+                is_test: false,
+            },
+            crate::graph_ir::IrNodeSpec {
+                id: "sem:route:POST /checkout".into(),
+                label: "route:POST /checkout".into(),
+                source_file: "src/CheckoutController.php".into(),
+                source_location: Some("L1".into()),
+                file_type: None,
+                node_kind: Some("semantic".into()),
+                community: None,
+                community_name: None,
+                callable_class: false,
+                is_abstract: false,
+                is_test: false,
+            },
+        ];
+        let ir_links = vec![
+            crate::graph_ir::IrLinkSpec {
+                source: "impl_a".into(),
+                target: "iface".into(),
+                relation: Some("implements".into()),
+                confidence: Some("EXTRACTED".into()),
+                source_file: Some("src/StripeGateway.php".into()),
+                context: None,
+                evidence: None,
+            },
+            crate::graph_ir::IrLinkSpec {
+                source: "impl_b".into(),
+                target: "iface".into(),
+                relation: Some("implements".into()),
+                confidence: Some("EXTRACTED".into()),
+                source_file: Some("src/PayPalGateway.php".into()),
+                context: None,
+                evidence: None,
+            },
+            crate::graph_ir::IrLinkSpec {
+                source: "ctrl".into(),
+                target: "sem:route:POST /checkout".into(),
+                relation: Some("calls_route".into()),
+                confidence: Some("EXTRACTED".into()),
+                source_file: Some("src/CheckoutController.php".into()),
+                context: None,
+                evidence: None,
+            },
+        ];
+        let idx = Index::from_ir_parts(
+            missing_disk_root,
+            None,
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            ir_nodes,
+            ir_links,
+        )
+        .expect("from_ir_parts");
+        let read = Read::new(&idx, false, &|_| None);
+        let iface_sym = idx
+            .symbols
+            .iter()
+            .position(|s| s.is_abstract)
+            .expect("abstract sym") as u32;
+        assert_eq!(read.declared(iface_sym), Declared::Abstract);
+        let concrete_sym = idx
+            .symbols
+            .iter()
+            .position(|s| !s.is_abstract && !s.is_semantic && s.kind == Kind::Type)
+            .expect("concrete sym") as u32;
+        assert_eq!(read.declared(concrete_sym), Declared::Plain);
+        assert!(
+            !read.sym_routes.is_empty(),
+            "calls_route should populate sym_routes on NATIVE_IR_TOOL index"
         );
     }
 }

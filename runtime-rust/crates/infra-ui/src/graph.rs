@@ -70,18 +70,7 @@ fn encode_query(params: &[(&str, String)]) -> String {
 }
 
 fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    crate::dom::escape_html(text)
 }
 
 impl GraphTargetScope {

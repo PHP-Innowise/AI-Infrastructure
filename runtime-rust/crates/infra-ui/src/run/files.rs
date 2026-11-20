@@ -141,14 +141,7 @@ pub(crate) mod files_map {
     }
 
     pub(crate) fn clean_bidi(s: &str) -> String {
-        s.chars()
-            .filter(|c| {
-                !matches!(
-                    *c,
-                    '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'
-                )
-            })
-            .collect()
+        crate::dom::clean_bidi(s)
     }
 
     pub(crate) fn tidy_path(path: &str) -> String {
@@ -156,19 +149,7 @@ pub(crate) mod files_map {
     }
 
     pub(crate) fn escape_html(s: &str) -> String {
-        let cleaned = clean_bidi(s);
-        let mut out = String::with_capacity(cleaned.len());
-        for ch in cleaned.chars() {
-            match ch {
-                '&' => out.push_str("&amp;"),
-                '<' => out.push_str("&lt;"),
-                '>' => out.push_str("&gt;"),
-                '"' => out.push_str("&quot;"),
-                '\'' => out.push_str("&#39;"),
-                _ => out.push(ch),
-            }
-        }
-        out
+        crate::dom::escape_html(s)
     }
 
     pub(crate) fn truth(value: bool) -> &'static str {

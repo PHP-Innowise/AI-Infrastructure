@@ -1442,6 +1442,7 @@ fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024)
         .build()
         .expect("build tokio runtime");
     if let Err(error) = runtime.block_on(serve(

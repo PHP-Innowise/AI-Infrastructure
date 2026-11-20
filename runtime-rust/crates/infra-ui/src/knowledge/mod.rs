@@ -21,17 +21,11 @@ use serde_json::{json, Value as V};
 use std::cell::Cell;
 use std::rc::Rc;
 use usage::*;
-use wasm_bindgen::{closure::Closure, JsCast};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-const MOBILE_BREAKPOINT_QUERY: &str = "(max-width: 920px)";
-
 pub(super) fn viewport_is_mobile() -> bool {
-    dom::window()
-        .match_media(MOBILE_BREAKPOINT_QUERY)
-        .ok()
-        .flatten()
-        .is_some_and(|m| m.matches())
+    dom::is_mobile_viewport()
 }
 
 pub(super) fn usage_page_size(mobile: bool) -> usize {
@@ -84,20 +78,9 @@ fn sync_responsive_viewport(last_mobile: &Cell<bool>) {
 
 fn wire_responsive_reflow() {
     let last_mobile = Rc::new(Cell::new(viewport_is_mobile()));
-    if let Ok(Some(media)) = dom::window().match_media(MOBILE_BREAKPOINT_QUERY) {
-        let tracked = Rc::clone(&last_mobile);
-        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-            sync_responsive_viewport(&tracked);
-        });
-        let _ = media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
-        cb.forget();
-    }
-    let resize_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+    dom::on_viewport_resize("knowledge-responsive-viewport", 0, move || {
         sync_responsive_viewport(&last_mobile);
     });
-    let _ = dom::window()
-        .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref());
-    resize_cb.forget();
 }
 
 pub fn initialize() {

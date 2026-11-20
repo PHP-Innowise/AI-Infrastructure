@@ -902,7 +902,7 @@ fn render_files_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::Eleme
         for item in build_folder_render_items(&folders, show_agent_badge) {
             let details = build_folder_details_element(root, &item);
             let _ = details.set_attribute("data-key", &m::text(&item, "key"));
-            let _ = details.set_attribute("data-signature", &item.to_string());
+            let _ = details.set_attribute("data-signature", &dom::json_signature(&item));
             dom::add(&tree, &details);
         }
         dom::add(&pane, &tree);
@@ -1008,7 +1008,7 @@ fn render_commands_pane_dom(root: &str, snap: &InspectorSnapshot) -> web_sys::El
     for item in &items {
         let block = build_command_details_element(item);
         let _ = block.set_attribute("data-key", &m::text(item, "key"));
-        let _ = block.set_attribute("data-signature", &item.to_string());
+        let _ = block.set_attribute("data-signature", &dom::json_signature(item));
         dom::add(&list, &block);
     }
     dom::add(&pane, &list);

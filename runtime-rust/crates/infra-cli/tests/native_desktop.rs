@@ -475,6 +475,7 @@ fn write_executable_script(path: &Path, body: &str) {
 struct MockHealthServer {
     port: u16,
     shutdown_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    forwarded_requests: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -484,7 +485,7 @@ impl MockHealthServer {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         };
         use std::time::Duration;
@@ -512,8 +513,10 @@ impl MockHealthServer {
         .unwrap();
 
         let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let forwarded_requests = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let shutdown_flag = Arc::clone(&shutdown_requested);
+        let requests_log = Arc::clone(&forwarded_requests);
         let stop_flag = Arc::clone(&stop);
         let instance_owned = instance.to_string();
         let expected_token = token.to_string();
@@ -528,6 +531,10 @@ impl MockHealthServer {
                         let n = stream.read(&mut buf).unwrap_or(0);
                         let req = String::from_utf8_lossy(&buf[..n]);
                         let first_line = req.lines().next().unwrap_or("");
+                        let body_text = req
+                            .split_once("\r\n\r\n")
+                            .map(|(_, body)| body.trim())
+                            .unwrap_or("");
                         let has_token = req.lines().any(|line| {
                             line.to_ascii_lowercase()
                                 == format!("x-harness-token: {expected_token}")
@@ -538,6 +545,22 @@ impl MockHealthServer {
                             json!({"ok": true, "instance": instance_owned}).to_string()
                         } else if first_line.starts_with("POST /api/shutdown ") {
                             shutdown_flag.store(true, Ordering::SeqCst);
+                            "{}".to_string()
+                        } else if first_line.starts_with("POST /api/projects ") {
+                            requests_log
+                                .lock()
+                                .unwrap()
+                                .push(("POST /api/projects".to_string(), body_text.to_string()));
+                            json!({"project": {"id": "proj-e2e-forwarded"}}).to_string()
+                        } else if first_line.starts_with("POST /api/projects/") {
+                            requests_log.lock().unwrap().push((
+                                first_line
+                                    .split_whitespace()
+                                    .take(2)
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                                body_text.to_string(),
+                            ));
                             "{}".to_string()
                         } else {
                             "{}".to_string()
@@ -564,6 +587,7 @@ impl MockHealthServer {
         Self {
             port,
             shutdown_requested,
+            forwarded_requests,
             stop,
             handle: Some(handle),
         }
@@ -843,4 +867,191 @@ fn app_open_failure_writes_launcher_log_and_invokes_desktop_notification() {
         notify_text.contains("Unknown server option."),
         "{notify_text}"
     );
+}
+
+#[test]
+fn app_open_skips_slow_shell_probe_when_running_and_forwards_project_and_logs_browser_failure() {
+    let fixture = Sandbox::new();
+    let state_dir = fixture
+        .root
+        .path()
+        .join("private state/ai-infrastructure-harness");
+    let server = MockHealthServer::start(&state_dir, "inst-fast", "tok-fast");
+
+    let clone1 = fixture.root.path().join("clone1");
+    let clone2 = fixture.root.path().join("clone2");
+    for clone in [&clone1, &clone2] {
+        fs::create_dir_all(clone.join("harness/web/icons")).unwrap();
+        fs::create_dir_all(clone.join("Infrastructure-Creator")).unwrap();
+        fs::copy(
+            fixture.source.join("harness/web/index.html"),
+            clone.join("harness/web/index.html"),
+        )
+        .unwrap();
+        fs::copy(
+            fixture.source.join("Infrastructure-Creator/AGENTS.md"),
+            clone.join("Infrastructure-Creator/AGENTS.md"),
+        )
+        .unwrap();
+        for name in [
+            "ai-accelerator.svg",
+            "ai-accelerator-16.png",
+            "ai-accelerator-22.png",
+            "ai-accelerator-24.png",
+            "ai-accelerator-32.png",
+            "ai-accelerator-48.png",
+            "ai-accelerator-64.png",
+            "ai-accelerator-128.png",
+            "ai-accelerator-256.png",
+            "ai-accelerator-512.png",
+        ] {
+            fs::copy(
+                fixture.source.join("harness/web/icons").join(name),
+                clone.join("harness/web/icons").join(name),
+            )
+            .unwrap();
+        }
+    }
+    let bin1 = clone1.join("bin/infra-engine");
+    let bin2 = clone2.join("bin/infra-engine");
+    fs::create_dir_all(bin1.parent().unwrap()).unwrap();
+    fs::create_dir_all(bin2.parent().unwrap()).unwrap();
+    executable::copy(&fixture.binary, &bin1);
+    executable::copy(&fixture.binary, &bin2);
+
+    // Install clone1, then delete only clone1's binary (clone1 source dir still exists on disk).
+    let inst = Command::new(&bin1)
+        .args(["app", "install"])
+        .current_dir(&clone1)
+        .env("HOME", &fixture.home)
+        .env("XDG_DATA_HOME", &fixture.data)
+        .env("XDG_CONFIG_HOME", &fixture.config)
+        .env("XDG_STATE_HOME", fixture.root.path().join("private state"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    fixture.assert_ok(&inst);
+    fs::remove_file(&bin1).unwrap();
+
+    // Slow/blocking $SHELL (would sleep 15s and hit timeout if called when already running!)
+    let slow_shell = fixture.root.path().join("slow-shell.sh");
+    write_executable_script(&slow_shell, "#!/bin/sh\nsleep 15\n");
+
+    let target_project = fixture.root.path().join("target-project");
+    fs::create_dir(&target_project).unwrap();
+    let desktop_bin = fixture.root.path().join("desktop-bin");
+    let opened_log = fixture.root.path().join("opened-project-url.txt");
+    write_executable_script(
+        &desktop_bin.join("xdg-open"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"{}\"\n",
+            opened_log.display()
+        ),
+    );
+
+    let start = std::time::Instant::now();
+    let fast_open = Command::new(&bin2)
+        .args(["app", "open", "--project"])
+        .arg(&target_project)
+        .current_dir(&clone2)
+        .env("HOME", &fixture.home)
+        .env("XDG_DATA_HOME", &fixture.data)
+        .env("XDG_CONFIG_HOME", &fixture.config)
+        .env("XDG_STATE_HOME", fixture.root.path().join("private state"))
+        .env("SHELL", &slow_shell)
+        .env("PATH", &desktop_bin)
+        .env_remove("ACCELERATOR_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let elapsed = start.elapsed();
+    fixture.assert_ok(&fast_open);
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "app open against running server blocked on $SHELL probe ({elapsed:?})"
+    );
+
+    // `--project` was forwarded to running server and included in opened URL.
+    let sent = server.forwarded_requests.lock().unwrap().clone();
+    assert!(
+        sent.iter().any(|(req, body)| {
+            req == "POST /api/projects" && body.contains(target_project.to_string_lossy().as_ref())
+        }),
+        "expected POST /api/projects forwarding for running server: {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|(req, _)| req == "POST /api/projects/proj-e2e-forwarded/select"),
+        "expected POST /api/projects/{{id}}/select forwarding: {sent:?}"
+    );
+    let opened_url = fs::read_to_string(&opened_log).unwrap();
+    assert!(
+        opened_url.contains(&format!(
+            "http://127.0.0.1:{}/#/sessions?project=proj-e2e-forwarded",
+            server.port
+        )),
+        "expected project deep link in browser URL: {opened_url}"
+    );
+
+    // Deleting bin1 rebound app.json to clone2 even though clone1 source directory stayed on disk.
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.record()).unwrap()).unwrap();
+    assert_eq!(record["clone"], clone2.to_string_lossy().as_ref());
+    assert_eq!(record["executable"], bin2.to_string_lossy().as_ref());
+
+    // Pre-fill launcher.log > 256 KiB, fail xdg-open with stderr, verify rotation + launcher.log + notify-send.
+    let launcher_log = fixture
+        .config
+        .join("ai-infrastructure-harness/launcher.log");
+    fs::create_dir_all(launcher_log.parent().unwrap()).unwrap();
+    let oversized_marker = "OLD_LAUNCHER_HISTORY\n";
+    let mut padded = oversized_marker.as_bytes().to_vec();
+    padded.resize(260 * 1024, b'x');
+    fs::write(&launcher_log, &padded).unwrap();
+
+    let fail_bin = fixture.root.path().join("fail-browser-bin");
+    let notify_log = fixture.root.path().join("browser-fail-notify.txt");
+    write_executable_script(
+        &fail_bin.join("xdg-open"),
+        "#!/bin/sh\necho 'no graphical display' >&2\nexit 3\n",
+    );
+    write_executable_script(
+        &fail_bin.join("notify-send"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+            notify_log.display()
+        ),
+    );
+    let fail_open = Command::new(&bin2)
+        .args(["app", "open"])
+        .current_dir(&clone2)
+        .env("HOME", &fixture.home)
+        .env("XDG_DATA_HOME", &fixture.data)
+        .env("XDG_CONFIG_HOME", &fixture.config)
+        .env("XDG_STATE_HOME", fixture.root.path().join("private state"))
+        .env("SHELL", &slow_shell)
+        .env("PATH", &fail_bin)
+        .env_remove("ACCELERATOR_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    fixture.assert_ok(&fail_open);
+    let stdout = String::from_utf8_lossy(&fail_open.stdout);
+    assert!(stdout.contains(&format!("Open http://127.0.0.1:{}/", server.port)));
+
+    let rotated = fixture
+        .config
+        .join("ai-infrastructure-harness/launcher.log.1");
+    assert!(rotated.is_file(), "expected single-backup launcher.log.1");
+    assert!(
+        fs::read_to_string(&rotated)
+            .unwrap()
+            .starts_with(oversized_marker)
+    );
+    let fresh_log = fs::read_to_string(&launcher_log).unwrap();
+    assert!(fresh_log.contains("xdg-open exited with"), "{fresh_log}");
+    assert!(fresh_log.contains("no graphical display"), "{fresh_log}");
+    let notify_out = fs::read_to_string(&notify_log).unwrap();
+    assert!(notify_out.contains("xdg-open exited with"), "{notify_out}");
+    assert!(notify_out.contains("no graphical display"), "{notify_out}");
 }

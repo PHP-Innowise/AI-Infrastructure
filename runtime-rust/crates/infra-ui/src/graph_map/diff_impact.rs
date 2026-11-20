@@ -15,18 +15,7 @@ pub(super) fn plural(value: u64, one: &str, many: &str) -> String {
     format!("{} {}", count(value), if value == 1 { one } else { many })
 }
 pub(super) fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for letter in text.chars() {
-        match letter {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
-    }
-    out
+    crate::dom::escape_html(text)
 }
 pub(super) fn payload(value: &V) -> String {
     escape(&value.to_string())
@@ -107,6 +96,9 @@ pub(super) fn letter(kind: &str) -> &'static str {
         "function" | "fn" => "f",
         "case" => "c",
         "heading" => "#",
+        "semantic" | "contract" => "◈",
+        "table" | "schema" => "⊞",
+        "queue" | "topic" | "event" => "⚡",
         _ => "",
     }
 }
@@ -2144,6 +2136,19 @@ pub fn note(view: &V) -> String {
             )
         });
     }
+    if view["lod"].is_string()
+        || view["lod"].is_object()
+        || m::yes(&view["truncated"])
+        || m::yes(&view["telemetry"]["truncated"])
+    {
+        let lod_label = view["lod"]
+            .as_str()
+            .or_else(|| view["lod"]["tier"].as_str())
+            .unwrap_or("overview");
+        parts.push(format!(
+            "Progressive LOD ({lod_label}): zoom in or focus a node for full detail."
+        ));
+    }
     parts.join(" ")
 }
 /// Which a box does more through the links drawn here, in five even steps
@@ -2964,9 +2969,11 @@ pub(super) fn synthetic_edge_path(
         return d;
     }
 
-    // Route smoothly through an uncluttered horizontal channel above or below interfering cards.
-    let go_above = (from_place.y + to_place.y) * 0.5 < 240.0;
-    let gutter_step = (lane_slot % 5) as f64 * 6.0;
+    // Route smoothly through an uncluttered horizontal channel above or below interfering cards,
+    // staying below top folder headers (`MARGIN + FRAME_HEAD ~= 44`) and staggering >5 lanes cleanly.
+    let gutter_step = (lane_slot % 14) as f64 * 6.0 + (lane_slot / 14) as f64 * 4.0;
+    let above_y = min_y - 12.0 - gutter_step;
+    let go_above = (from_place.y + to_place.y) * 0.5 < 240.0 && above_y >= 44.0;
     let channel_y = if (from_place.x - to_place.x).abs() <= 8.0 {
         // Same column: arc via right channel outside boxes
         let exit_x = from_place.x + BOX_WIDTH + 22.0 + gutter_step;
@@ -2979,7 +2986,7 @@ pub(super) fn synthetic_edge_path(
             p0.0, p0.1, p1.0, p1.1, p2.0, p2.1, p3.0, p3.1
         );
     } else if go_above {
-        (min_y - 12.0 - gutter_step).max(4.0)
+        above_y
     } else {
         max_y + 10.0 + gutter_step
     };
@@ -3234,13 +3241,16 @@ impl EdgeKinds {
     }
     /// The names of every kind the link holds, whatever is switched off.
     pub fn held(&self) -> String {
+        self.held_vec().join(" ")
+    }
+
+    pub fn held_vec(&self) -> Vec<String> {
         EDGE_ARROW_SPECS
             .iter()
             .zip(&self.counts)
             .filter(|(_, count)| **count > 0)
-            .map(|(spec, _)| spec.kind)
-            .collect::<Vec<_>>()
-            .join(" ")
+            .map(|(spec, _)| spec.kind.to_owned())
+            .collect()
     }
 }
 #[cfg(test)]

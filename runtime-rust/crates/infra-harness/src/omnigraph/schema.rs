@@ -156,7 +156,39 @@ pub const QUERY_CONTEXT_SEARCH: &str = r#"query context_search($q: String, $proj
         rrf(bm25($a.title, $q), bm25($a.body, $q)) as score
     }
     order { rrf(bm25($a.title, $q), bm25($a.body, $q)) }
-    limit 25
+    limit 100
+}"#;
+
+/// Inline query pushing `$kind` predicate directly into BM25 search (`ContextAtom.kind = $kind`).
+pub(crate) const GQ_CONTEXT_SEARCH_BY_KIND: &str = r#"query context_search_by_kind($q: String, $project_id: String, $kind: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a.kind = $kind
+    }
+    return {
+        $a.atom_id as atom_id,
+        $a.kind as kind,
+        $a.title as title,
+        $a.summary as summary,
+        $a.body as body,
+        $a.tags as tags,
+        $a.source_branch as source_branch,
+        $a.source_session_id as source_session_id,
+        $a.confidence as confidence,
+        $a.pin_priority as pin_priority,
+        $a.verified as verified,
+        $a.origin_layer as origin_layer,
+        $a.authority as authority,
+        $a.privacy as privacy,
+        $a.brain_record_id as brain_record_id,
+        $a.memory_id as memory_id,
+        $a.record_revision as record_revision,
+        $a.created_at as created_at,
+        $a.updated_at as updated_at,
+        rrf(bm25($a.title, $q), bm25($a.body, $q)) as score
+    }
+    order { rrf(bm25($a.title, $q), bm25($a.body, $q)) }
+    limit 100
 }"#;
 
 /// Stored query: atoms published or consumed by a specific session.
@@ -295,7 +327,7 @@ pub const HARNESS_STORED_QUERIES_GQ: &str = concat!(
     "        rrf(bm25($a.title, $q), bm25($a.body, $q)) as score\n",
     "    }\n",
     "    order { rrf(bm25($a.title, $q), bm25($a.body, $q)) }\n",
-    "    limit 25\n",
+    "    limit 100\n",
     "}\n\n",
     "query session_neighbors($session_id: String) {\n",
     "    match {\n",
@@ -549,6 +581,79 @@ pub(crate) const GQ_LIST_SESSION_FOLLOWS: &str = r#"query list_session_follows($
         $e.relation as relation,
         $e.created_at as created_at
     }
+    limit 2000
+}"#;
+
+// Slim ID-only projection queries used by `compute_stats` to avoid fetching full atom/edge bodies.
+pub(crate) const GQ_COUNT_ATOM_IDS: &str = r#"query recent_atoms($project_id: String) {
+    match { $a: ContextAtom { project_id: $project_id } }
+    return { $a.atom_id as atom_id }
+    limit 1000
+}"#;
+
+pub(crate) const GQ_COUNT_SESSION_IDS: &str = r#"query list_sessions($project_id: String) {
+    match { $s: Session { project_id: $project_id } }
+    return { $s.session_id as session_id }
+    limit 500
+}"#;
+
+pub(crate) const GQ_COUNT_SYMBOL_IDS: &str = r#"query list_symbols($project_id: String) {
+    match { $s: SymbolRef { project_id: $project_id } }
+    return { $s.fqn as fqn }
+    limit 1000
+}"#;
+
+pub(crate) const GQ_COUNT_PUBLISHED_EDGE_IDS: &str = r#"query list_published_edges($project_id: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a $e:publishedBy $s
+    }
+    return { $a.atom_id as source_id }
+    limit 2000
+}"#;
+
+pub(crate) const GQ_COUNT_CONSUMED_EDGE_IDS: &str = r#"query list_consumed_edges($project_id: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a $e:consumedBy $s
+    }
+    return { $a.atom_id as source_id }
+    limit 2000
+}"#;
+
+pub(crate) const GQ_COUNT_FILE_EDGE_IDS: &str = r#"query list_file_edges($project_id: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a $e:touchesFile $f
+    }
+    return { $a.atom_id as source_id }
+    limit 2000
+}"#;
+
+pub(crate) const GQ_COUNT_ATOM_RELATION_IDS: &str = r#"query list_atom_relations($project_id: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a $e:relatesTo $b
+    }
+    return { $a.atom_id as source_id }
+    limit 2000
+}"#;
+
+pub(crate) const GQ_COUNT_SESSION_FOLLOW_IDS: &str = r#"query list_session_follows($project_id: String) {
+    match {
+        $s1: Session { project_id: $project_id }
+        $s1 $e:sessionFollows $s2
+    }
+    return { $s1.session_id as source_id }
+    limit 2000
+}"#;
+
+pub(crate) const GQ_COUNT_SYMBOL_EDGE_IDS: &str = r#"query list_symbol_edges($project_id: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a $e:mentionsSymbol $s
+    }
+    return { $a.atom_id as source_id }
     limit 2000
 }"#;
 

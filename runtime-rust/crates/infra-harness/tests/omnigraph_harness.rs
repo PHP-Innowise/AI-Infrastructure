@@ -811,11 +811,18 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
     let pid = params["project_id"].as_str().unwrap_or("");
     let match_proj = |v: &Value| pid.is_empty() || v["project_id"].as_str().unwrap_or("") == pid;
     match qname {
-        "context_search" => {
+        "context_search" | "context_search_by_kind" => {
             let q = params["q"].as_str().unwrap_or("").to_ascii_lowercase();
+            let kind_wanted = params["kind"].as_str().map(str::to_ascii_lowercase);
             snap.atoms
                 .values()
                 .filter(|a| match_proj(a))
+                .filter(|a| {
+                    kind_wanted.as_ref().is_none_or(|kf| {
+                        a["kind"].as_str().map(str::to_ascii_lowercase).as_deref()
+                            == Some(kf.as_str())
+                    })
+                })
                 .filter(|a| {
                     let hay = format!(
                         "{} {} {}",
@@ -2122,6 +2129,48 @@ async fn http_omnigraph_routes_end_to_end_and_share_via_app_router() {
         .await;
     assert_eq!(status, 200, "{search}");
     assert_eq!(search["hits"][0]["atom"]["atom_id"], "atom-cache-2");
+    assert!(
+        search["subgraph"]["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["atom_id"] == "atom-cache-2"),
+        "expected hit atom inside search subgraph: {search}"
+    );
+
+    let (status, empty_search) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/search?project_id={}&q=Redis&kind=decision&branch=main&limit=5",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{empty_search}");
+    assert!(empty_search["hits"].as_array().unwrap().is_empty());
+    assert!(
+        empty_search["subgraph"]["atoms"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let (status, kind_match) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/search?project_id={}&q=Redis&kind=finding&branch=main&limit=5",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{kind_match}");
+    assert_eq!(kind_match["hits"][0]["atom"]["atom_id"], "atom-cache-2");
 
     // 9. GET /api/omnigraph/changes & GET /api/omnigraph/commits/{commit_id}
     let (status, changes) = fx

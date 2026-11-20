@@ -556,8 +556,19 @@ pub(crate) fn parse_rfc3339_utc_ms(raw: &str) -> Option<f64> {
     Some((total_secs as f64) * 1000.0 + millis)
 }
 
+// Caches first-seen `timeout_seconds` deadlines per request_id so polls count down continuously.
+thread_local! {
+    static TIMEOUT_DEADLINES: std::cell::RefCell<std::collections::BTreeMap<String, (f64, f64)>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 /// Computes approval expiry deadline in Unix epoch milliseconds when `expires_at` or `timeout_seconds` is provided.
-pub(crate) fn permission_expiry_ms(event: &V, now_ms: f64) -> Option<f64> {
+pub(crate) fn resolve_permission_expiry_ms(
+    cache: &mut std::collections::BTreeMap<String, (f64, f64)>,
+    request_id: &str,
+    event: &V,
+    now_ms: f64,
+) -> Option<f64> {
     if let Some(s) = event["expires_at"].as_str() {
         if let Some(ms) = parse_rfc3339_utc_ms(s) {
             return Some(ms);
@@ -581,9 +592,31 @@ pub(crate) fn permission_expiry_ms(event: &V, now_ms: f64) -> Option<f64> {
         .as_f64()
         .filter(|n| n.is_finite() && *n > 0.0)
     {
+        if !request_id.is_empty() {
+            if let Some(&(cached_timeout, deadline)) = cache.get(request_id) {
+                if (cached_timeout - timeout_secs).abs() < f64::EPSILON {
+                    return Some(deadline);
+                }
+            }
+            let deadline = now_ms + timeout_secs * 1000.0;
+            cache.insert(request_id.to_owned(), (timeout_secs, deadline));
+            return Some(deadline);
+        }
         return Some(now_ms + timeout_secs * 1000.0);
     }
     None
+}
+
+pub(crate) fn permission_expiry_ms(event: &V, now_ms: f64) -> Option<f64> {
+    let request_id = m::text(event, "request_id");
+    let state = m::text(event, "state");
+    TIMEOUT_DEADLINES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !state.is_empty() && state != "pending" && !request_id.is_empty() {
+            cache.remove(&request_id);
+        }
+        resolve_permission_expiry_ms(&mut cache, &request_id, event, now_ms)
+    })
 }
 
 /// Formats remaining time before approval expiry into `(tone, display_label)`.
@@ -1331,8 +1364,74 @@ pub(super) fn expired_permission_event(
     })
 }
 
+/// Applies the authoritative waiting-permission count for one session to both `sessions` and `approvals.waiting_counts`.
+pub(crate) fn apply_session_waiting_count(
+    sessions: &mut [V],
+    waiting_counts: &mut std::collections::BTreeMap<String, usize>,
+    sid: &str,
+    count: usize,
+) {
+    if sid.is_empty() {
+        return;
+    }
+    if count == 0 {
+        waiting_counts.remove(sid);
+    } else {
+        waiting_counts.insert(sid.to_owned(), count);
+    }
+    for sess in sessions.iter_mut() {
+        if sess["id"].as_str() == Some(sid) && sess.is_object() {
+            sess["waiting_permissions"] = json!(count);
+        }
+    }
+}
+
+/// Reconciles `approvals.waiting_counts` directly from a fresh `/api/sessions` snapshot.
+pub(crate) fn sync_waiting_counts_from_sessions(
+    sessions: &[V],
+    waiting_counts: &mut std::collections::BTreeMap<String, usize>,
+) {
+    let mut next = std::collections::BTreeMap::new();
+    for sess in sessions {
+        let sid = m::text(sess, "id");
+        if sid.is_empty() {
+            continue;
+        }
+        let count = sess["waiting_permissions"].as_u64().unwrap_or(0) as usize;
+        if count > 0 {
+            next.insert(sid, count);
+        }
+    }
+    *waiting_counts = next;
+}
+
 /// Reconciles live waiting permission requests returned by `sessions.get`.
 pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
+    let changed_waiting_count = m::write(|s| {
+        let sid = s.sid.clone();
+        if sid.is_empty() {
+            return false;
+        }
+        let prev = s
+            .approvals
+            .waiting_counts
+            .get(&sid)
+            .copied()
+            .or_else(|| {
+                s.sessions
+                    .iter()
+                    .find(|sess| sess["id"].as_str() == Some(sid.as_str()))
+                    .and_then(|sess| sess["waiting_permissions"].as_u64())
+                    .map(|n| n as usize)
+            })
+            .unwrap_or(0);
+        let next = waiting.len();
+        apply_session_waiting_count(&mut s.sessions, &mut s.approvals.waiting_counts, &sid, next);
+        if s.selected["id"].as_str() == Some(sid.as_str()) && s.selected.is_object() {
+            s.selected["waiting_permissions"] = json!(next);
+        }
+        prev != next
+    });
     let mut live_ids = std::collections::BTreeSet::new();
     for ask in waiting {
         let id = m::text(ask, "request_id");
@@ -1353,53 +1452,56 @@ pub(crate) fn reconcile_waiting_permissions(waiting: &[V]) {
         .map(|(id, _)| id.clone())
         .filter(|id| !live_ids.contains(id))
         .collect();
-    if stale_ids.is_empty() {
-        return;
+    if !stale_ids.is_empty() {
+        for id in stale_ids {
+            let card = dom::get("events").and_then(|c| find_permission_block(&c, &id));
+            let provider = card
+                .as_ref()
+                .and_then(|block| block.get_attribute("data-provider"))
+                .unwrap_or_default();
+            let tool = card
+                .as_ref()
+                .and_then(|block| block.get_attribute("data-tool"))
+                .unwrap_or_default();
+            let summary = card
+                .as_ref()
+                .and_then(|block| permission_child(block, "permission-summary", None))
+                .and_then(|el| el.text_content())
+                .unwrap_or_default();
+            let detail = card
+                .as_ref()
+                .and_then(|block| permission_child(block, "permission-detail", Some("detail")))
+                .and_then(|el| el.text_content())
+                .unwrap_or_default();
+            let mut event = expired_permission_event(&id, &provider, &tool, &summary, &detail);
+            if let Some(ask_kind) = card
+                .as_ref()
+                .and_then(|block| block.get_attribute("data-ask-kind"))
+                .filter(|s| !s.is_empty())
+            {
+                event["ask_kind"] = json!(ask_kind);
+            }
+            if let Some(rule_summary) = card
+                .as_ref()
+                .and_then(|block| block.get_attribute("data-rule-summary"))
+                .filter(|s| !s.is_empty())
+            {
+                event["rule_summary"] = json!(rule_summary);
+            }
+            if let Some(diff_raw) = card
+                .as_ref()
+                .and_then(|block| permission_child(block, "permission-diff-wrap", None))
+                .and_then(|el| el.get_attribute("data-diff-raw"))
+                .filter(|s| !s.is_empty())
+            {
+                event["diff_preview"] = json!(diff_raw);
+            }
+            permission(&event);
+        }
     }
-    for id in stale_ids {
-        let card = dom::get("events").and_then(|c| find_permission_block(&c, &id));
-        let provider = card
-            .as_ref()
-            .and_then(|block| block.get_attribute("data-provider"))
-            .unwrap_or_default();
-        let tool = card
-            .as_ref()
-            .and_then(|block| block.get_attribute("data-tool"))
-            .unwrap_or_default();
-        let summary = card
-            .as_ref()
-            .and_then(|block| permission_child(block, "permission-summary", None))
-            .and_then(|el| el.text_content())
-            .unwrap_or_default();
-        let detail = card
-            .as_ref()
-            .and_then(|block| permission_child(block, "permission-detail", Some("detail")))
-            .and_then(|el| el.text_content())
-            .unwrap_or_default();
-        let mut event = expired_permission_event(&id, &provider, &tool, &summary, &detail);
-        if let Some(ask_kind) = card
-            .as_ref()
-            .and_then(|block| block.get_attribute("data-ask-kind"))
-            .filter(|s| !s.is_empty())
-        {
-            event["ask_kind"] = json!(ask_kind);
-        }
-        if let Some(rule_summary) = card
-            .as_ref()
-            .and_then(|block| block.get_attribute("data-rule-summary"))
-            .filter(|s| !s.is_empty())
-        {
-            event["rule_summary"] = json!(rule_summary);
-        }
-        if let Some(diff_raw) = card
-            .as_ref()
-            .and_then(|block| permission_child(block, "permission-diff-wrap", None))
-            .and_then(|el| el.get_attribute("data-diff-raw"))
-            .filter(|s| !s.is_empty())
-        {
-            event["diff_preview"] = json!(diff_raw);
-        }
-        permission(&event);
+    sync_approvals_badge();
+    if changed_waiting_count {
+        crate::session::history();
     }
 }
 
@@ -1710,48 +1812,65 @@ fn sync_permission_countdown_badges() {
 }
 
 /// Computes total pending approval count across sessions, system runs, and creator runs.
+pub(crate) fn compute_total_pending_approvals_count(
+    sessions: &[V],
+    waiting_counts: &std::collections::BTreeMap<String, usize>,
+    active_sid: &str,
+    current_pending: usize,
+    extra_run_pending: usize,
+) -> usize {
+    let mut total = 0usize;
+    let mut counted_current = false;
+    for session in sessions {
+        let sid = m::text(session, "id");
+        let mut count = session["waiting_permissions"].as_u64().unwrap_or(0) as usize;
+        if let Some(&sse_count) = waiting_counts.get(&sid) {
+            count = sse_count;
+        }
+        if !active_sid.is_empty() && sid == active_sid {
+            count = count.max(current_pending);
+            counted_current = true;
+        }
+        total += count;
+    }
+    if !counted_current {
+        total += current_pending;
+    }
+    for (sid, &count) in waiting_counts {
+        if !sessions.iter().any(|sess| m::text(sess, "id") == *sid)
+            && (counted_current || *sid != active_sid)
+        {
+            total += count;
+        }
+    }
+    total + extra_run_pending
+}
+
 pub(crate) fn total_pending_approvals_count() -> usize {
     m::read(|s| {
-        let mut total = 0usize;
         let current_pending = s
             .data
             .get("permission-pending")
             .and_then(|v| v.as_object())
             .map(|o| o.len())
             .unwrap_or(0);
-        let mut counted_current = false;
-        for session in &s.sessions {
-            let sid = m::text(session, "id");
-            let mut count = session["waiting_permissions"].as_u64().unwrap_or(0) as usize;
-            if let Some(&sse_count) = s.approvals.waiting_counts.get(&sid) {
-                count = sse_count;
-            }
-            if sid == s.sid {
-                count = count.max(current_pending);
-                counted_current = true;
-            }
-            total += count;
-        }
-        if !counted_current {
-            total += current_pending;
-        }
-        for (sid, &count) in &s.approvals.waiting_counts {
-            if !s.sessions.iter().any(|sess| m::text(sess, "id") == *sid)
-                && (counted_current || *sid != s.sid)
-            {
-                total += count;
-            }
-        }
+        let mut extra_run_pending = 0usize;
         for key in ["system-run", "creator-detail", "creator-run"] {
             if let Some(run_val) = s.data.get(key) {
                 if let Some(arr) = run_val["waiting_permissions"].as_array() {
-                    total += arr.len();
+                    extra_run_pending += arr.len();
                 } else if let Some(n) = run_val["waiting_permissions"].as_u64() {
-                    total += n as usize;
+                    extra_run_pending += n as usize;
                 }
             }
         }
-        total
+        compute_total_pending_approvals_count(
+            &s.sessions,
+            &s.approvals.waiting_counts,
+            &s.sid,
+            current_pending,
+            extra_run_pending,
+        )
     })
 }
 
@@ -2155,10 +2274,19 @@ pub(crate) async fn refresh_approvals_queue() {
                 };
                 let sid = m::text(&parsed, "sid");
                 let label = m::text(&parsed, "label");
-                for (idx, mut ask) in m::array(&parsed["session"]["waiting_permissions"])
-                    .into_iter()
-                    .enumerate()
-                {
+                let waiting_for_sid = m::array(&parsed["session"]["waiting_permissions"]);
+                if parsed["session"].is_object() {
+                    let count = waiting_for_sid.len();
+                    m::write(|s| {
+                        apply_session_waiting_count(
+                            &mut s.sessions,
+                            &mut s.approvals.waiting_counts,
+                            &sid,
+                            count,
+                        );
+                    });
+                }
+                for (idx, mut ask) in waiting_for_sid.into_iter().enumerate() {
                     ask["state"] = json!("pending");
                     let req_id = m::text(&ask, "request_id");
                     let key = if req_id.is_empty() {
@@ -2325,6 +2453,7 @@ pub(crate) async fn refresh_approvals_queue() {
     }
     schedule_permission_countdowns();
     sync_approvals_badge();
+    crate::session::history();
 }
 
 pub(crate) async fn open_approvals_drawer() {
@@ -2351,7 +2480,6 @@ pub(crate) fn close_approvals_drawer() {
         return;
     }
     dom::hidden("approvals-drawer", true);
-    dom::restore_focus_for_overlay("approvals-drawer");
 }
 
 pub(crate) async fn toggle_approvals_drawer() {

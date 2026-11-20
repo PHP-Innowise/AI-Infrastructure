@@ -661,12 +661,34 @@ pub struct OmnigraphClient {
     expected_actor: Option<String>,
 }
 
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 impl OmnigraphClient {
-    /// Create a new client targeting `base_url` and `graph_id`.
+    /// Build a shared pooled `reqwest::Client` configured for Omnigraph HTTP requests.
+    pub fn build_http_client(timeout: Duration) -> Result<reqwest::Client, OmnigraphError> {
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .user_agent("AI-Infrastructure-Harness")
+            .build()
+            .map_err(|err| OmnigraphError::transport(format!("HTTP client init failed: {err}")))
+    }
+
+    /// Create a new client targeting `base_url` and `graph_id` with its own pooled HTTP client.
     pub fn new(
         base_url: impl Into<String>,
         token: Option<String>,
         graph_id: impl Into<String>,
+    ) -> Result<Self, OmnigraphError> {
+        let http = Self::build_http_client(Duration::from_secs(30))?;
+        Self::with_http_client(base_url, token, graph_id, http)
+    }
+
+    /// Create a new client targeting `base_url` and `graph_id` reusing an existing `reqwest::Client` pool.
+    pub fn with_http_client(
+        base_url: impl Into<String>,
+        token: Option<String>,
+        graph_id: impl Into<String>,
+        http: reqwest::Client,
     ) -> Result<Self, OmnigraphError> {
         let raw = base_url.into();
         let trimmed = raw.trim().trim_end_matches('/').to_string();
@@ -683,10 +705,6 @@ impl OmnigraphClient {
                 "Omnigraph graph_id cannot be empty.",
             ));
         }
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|err| OmnigraphError::transport(format!("HTTP client init failed: {err}")))?;
         Ok(Self {
             http,
             base_url: trimmed,
@@ -742,7 +760,7 @@ impl OmnigraphClient {
         if_commit: Option<&str>,
         json_body: Option<Vec<u8>>,
     ) -> Result<Response, OmnigraphError> {
-        self.send_raw_with(
+        self.send_raw_with_timeout(
             method,
             url,
             contract_headers,
@@ -750,6 +768,7 @@ impl OmnigraphClient {
             None,
             json_body.as_ref().map(|_| "application/json"),
             json_body,
+            None,
         )
         .await
     }
@@ -768,7 +787,38 @@ impl OmnigraphClient {
         content_type: Option<&str>,
         body: Option<Vec<u8>>,
     ) -> Result<Response, OmnigraphError> {
+        self.send_raw_with_timeout(
+            method,
+            url,
+            contract_headers,
+            if_commit,
+            actor_override,
+            content_type,
+            body,
+            None,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Shared low-level transport helper for JSON, NDJSON, and probe endpoints."
+    )]
+    async fn send_raw_with_timeout(
+        &self,
+        method: Method,
+        url: Url,
+        contract_headers: bool,
+        if_commit: Option<&str>,
+        actor_override: Option<&str>,
+        content_type: Option<&str>,
+        body: Option<Vec<u8>>,
+        timeout: Option<Duration>,
+    ) -> Result<Response, OmnigraphError> {
         let mut req = self.http.request(method, url);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         if contract_headers {
             req = req.header(HTTP_API_CONTRACT_HEADER, HTTP_API_CONTRACT_VERSION);
             if let Some(token) = &self.token {
@@ -836,17 +886,47 @@ impl OmnigraphClient {
         Self::decode_json(resp).await
     }
 
-    /// Probe `GET /healthz`.
+    /// Probe `GET /healthz` with a short probe timeout.
     pub async fn health(&self) -> Result<HealthResponse, OmnigraphError> {
+        self.health_with_timeout(PROBE_TIMEOUT).await
+    }
+
+    /// Probe `GET /healthz` with an explicit request timeout.
+    pub async fn health_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<HealthResponse, OmnigraphError> {
         let url = self.root_url("/healthz")?;
-        let resp = self.send_raw(Method::GET, url, false, None, None).await?;
+        let resp = self
+            .send_raw_with_timeout(
+                Method::GET,
+                url,
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some(timeout),
+            )
+            .await?;
         Self::decode_json(resp).await
     }
 
-    /// Probe `GET /readyz`.
+    /// Probe `GET /readyz` with a short probe timeout.
     pub async fn ready(&self) -> Result<ReadinessResponse, OmnigraphError> {
         let url = self.root_url("/readyz")?;
-        let resp = self.send_raw(Method::GET, url, false, None, None).await?;
+        let resp = self
+            .send_raw_with_timeout(
+                Method::GET,
+                url,
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some(PROBE_TIMEOUT),
+            )
+            .await?;
         Self::decode_json(resp).await
     }
 
@@ -1096,7 +1176,9 @@ impl OmnigraphClient {
                             "Invalid baseline terminal record: {err}"
                         ))
                     })?;
-                resp.records = records;
+                if !records.is_empty() {
+                    resp.records = records;
+                }
                 terminal = Some(resp);
                 break;
             }

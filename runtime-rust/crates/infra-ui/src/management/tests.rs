@@ -328,3 +328,33 @@ fn management_global_project_sync_clears_creator_state_unless_pending() {
     m::take("creator-pending");
     m::take("creator-project-sync");
 }
+
+#[test]
+fn skills_filter_matches_id_name_and_description_case_insensitively() {
+    use super::test_exports::matches_skill_query;
+
+    assert!(matches_skill_query(
+        "lar-review",
+        "Laravel Review",
+        "Check Eloquent N+1 queries",
+        ""
+    ));
+    assert!(matches_skill_query(
+        "lar-review",
+        "Laravel Review",
+        "Check Eloquent N+1 queries",
+        "  LAR-REV "
+    ));
+    assert!(matches_skill_query(
+        "lar-review",
+        "Laravel Review",
+        "Check Eloquent N+1 queries",
+        "eloquent"
+    ));
+    assert!(!matches_skill_query(
+        "lar-review",
+        "Laravel Review",
+        "Check Eloquent N+1 queries",
+        "symfony"
+    ));
+}

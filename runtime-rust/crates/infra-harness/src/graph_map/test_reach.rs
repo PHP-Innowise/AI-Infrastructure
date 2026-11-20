@@ -4,7 +4,7 @@ use std::{
     fs,
     io::Read,
     sync::{Mutex, OnceLock},
-    time::UNIX_EPOCH,
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 const LISTED: usize = 8;
@@ -169,9 +169,60 @@ struct CachedCoverageEntry {
     report: CoverageReport,
 }
 
+#[derive(Clone)]
+struct CachedNegativeCoverageEntry {
+    canon_root: PathBuf,
+    dir_stamps: Vec<(String, u128)>,
+    checked_at: Instant,
+}
+
 fn coverage_report_cache() -> &'static Mutex<Vec<CachedCoverageEntry>> {
     static CACHE: OnceLock<Mutex<Vec<CachedCoverageEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn negative_coverage_cache() -> &'static Mutex<Vec<CachedNegativeCoverageEntry>> {
+    static CACHE: OnceLock<Mutex<Vec<CachedNegativeCoverageEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+const COVERAGE_PROBE_PARENTS: &[&str] = &[
+    "",
+    "coverage",
+    ".coverage",
+    "reports",
+    "target/coverage",
+    "build/logs",
+    "var/coverage",
+    "packages",
+    "services",
+    "apps",
+    "crates",
+    "modules",
+];
+const NEGATIVE_COVERAGE_TTL: Duration = Duration::from_secs(5);
+
+fn coverage_parent_dir_stamps(root: &Path) -> Vec<(String, u128)> {
+    COVERAGE_PROBE_PARENTS
+        .iter()
+        .filter_map(|&rel| {
+            let dir = if rel.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(rel)
+            };
+            let meta = fs::symlink_metadata(&dir).ok()?;
+            if !meta.is_dir() {
+                return None;
+            }
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0u128, |d| d.as_nanos());
+            Some((rel.to_owned(), mtime_ns))
+        })
+        .collect()
 }
 
 fn stat_bounded_coverage_file(root: &Path, canon_root: &Path, rel: &str) -> Option<(u64, u128)> {
@@ -696,6 +747,18 @@ fn discover_workspace_coverage(root: &Path) -> Option<CoverageReport> {
         return None;
     }
     let canon_root = infra_core::fs::canonicalize(root).ok()?;
+    let dir_stamps = coverage_parent_dir_stamps(root);
+    if let Ok(mut neg) = negative_coverage_cache().lock()
+        && let Some(pos) = neg.iter().position(|entry| entry.canon_root == canon_root)
+    {
+        let hit = &neg[pos];
+        if hit.dir_stamps == dir_stamps && hit.checked_at.elapsed() < NEGATIVE_COVERAGE_TTL {
+            let entry = neg.remove(pos);
+            neg.push(entry);
+            return None;
+        }
+        neg.remove(pos);
+    }
 
     let mut matched: Vec<(String, CoverageFormat, u64, u128)> = Vec::new();
     let mut seen_rels: BTreeSet<String> = BTreeSet::new();
@@ -767,6 +830,17 @@ fn discover_workspace_coverage(root: &Path) -> Option<CoverageReport> {
     }
 
     if matched.is_empty() {
+        if let Ok(mut neg) = negative_coverage_cache().lock() {
+            neg.retain(|entry| entry.canon_root != canon_root);
+            if neg.len() >= MAX_CACHED_COVERAGE_ROOTS {
+                neg.remove(0);
+            }
+            neg.push(CachedNegativeCoverageEntry {
+                canon_root,
+                dir_stamps,
+                checked_at: Instant::now(),
+            });
+        }
         return None;
     }
 
@@ -1080,6 +1154,97 @@ impl Index {
             row
         }).collect();
         view["test_reach"] = Value::Array(rows);
+    }
+
+    /// Collects reaching test files (dedicated test files, inline `#[test]` / `#[cfg(test)]`
+    /// source files, and LCOV/Clover coverage-verified tests) across `target_paths`.
+    pub(crate) fn collect_tests_for_paths(
+        &self,
+        target_paths: &[&str],
+        certain: bool,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        if target_paths.is_empty() {
+            return out;
+        }
+        let ids: HashMap<_, _> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(id, path)| (path.as_str(), id as u32))
+            .collect();
+        let test_files: Vec<_> = self.files.iter().map(|path| is_test(path)).collect();
+        let candidate_files: Vec<_> = self
+            .files
+            .iter()
+            .zip(&test_files)
+            .map(|(path, test)| is_candidate_test_file(path, *test))
+            .collect();
+        let coverage = discover_workspace_coverage(&self.root);
+        let canon_root = coverage
+            .as_ref()
+            .and_then(|_| infra_core::fs::canonicalize(&self.root).ok());
+        let match_coverage_test = |tn: &str| -> Option<usize> {
+            match_coverage_test_file(
+                &self.files,
+                &candidate_files,
+                tn,
+                &self.root,
+                canon_root.as_deref(),
+            )
+        };
+        let test_symbols = self
+            .test_symbols
+            .get_or_init(|| self.test_symbols(&test_files, &|path| text_at(&self.root, path)));
+        let inline = |at: u32| {
+            let symbol = &self.symbols[at as usize];
+            !test_files[symbol.file as usize]
+                && test_symbols[at as usize]
+                && matches!(symbol.kind, Kind::Function | Kind::Method)
+        };
+        let has_inline = (0..self.symbols.len() as u32).any(inline);
+        let files = Net::new(self, false, certain);
+        let symbols = Net::new(self, true, certain);
+        let per_file_slice = (VISITS / target_paths.len().max(1)).clamp(1_024, VISITS);
+
+        for &path in target_paths {
+            if let Some(&file) = ids.get(path)
+                && !test_files[file as usize]
+            {
+                let mut budget = per_file_slice;
+                let files_done = walk(&files, vec![file], &mut budget, |at, _, _| {
+                    if candidate_files[at as usize] {
+                        out.insert(self.files[at as usize].clone());
+                    }
+                });
+                if has_inline && files_done {
+                    let starts: Vec<u32> = self
+                        .range(file)
+                        .filter(|at| {
+                            !test_symbols[*at as usize]
+                                && self.symbols[*at as usize].kind != Kind::Note
+                        })
+                        .collect();
+                    let _ = walk(&symbols, starts, &mut budget, |at, _, _| {
+                        if inline(at) {
+                            let file_idx = self.symbols[at as usize].file as usize;
+                            out.insert(self.files[file_idx].clone());
+                        }
+                    });
+                }
+            }
+            if let Some(cov) = coverage.as_ref().and_then(|report| report.files.get(path)) {
+                for tn in &cov.test_hits {
+                    let file_label = match_coverage_test(tn)
+                        .map(|id| self.files[id].clone())
+                        .unwrap_or_else(|| tn.clone());
+                    if !file_label.is_empty() {
+                        out.insert(file_label);
+                    }
+                }
+            }
+        }
+        out
     }
 }
 

@@ -26,7 +26,6 @@ thread_local! {
     pub(super) static FILES: RefCell<Vec<web_sys::File>> = const { RefCell::new(Vec::new()) };
     static CAPTURED_GRAPH_CLICK: RefCell<Option<CapturedGraphClick>> = const { RefCell::new(None) };
     static LAST_MOBILE_VIEWPORT: Cell<Option<bool>> = const { Cell::new(None) };
-    static MOBILE_MEDIA_QUERY: RefCell<Option<web_sys::MediaQueryList>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,21 +507,9 @@ pub fn initialize() {
         c.forget();
     }
     LAST_MOBILE_VIEWPORT.with(|last| last.set(Some(dom::is_mobile_viewport())));
-    if let Ok(Some(mobile_media)) = dom::window().match_media(dom::MOBILE_BREAKPOINT_QUERY) {
-        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
-            sync_responsive_viewport();
-        });
-        let _ =
-            mobile_media.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
-        cb.forget();
-        MOBILE_MEDIA_QUERY.with(|slot| *slot.borrow_mut() = Some(mobile_media));
-    }
-    let resize_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+    dom::on_viewport_resize("session-responsive-viewport", 0, || {
         sync_responsive_viewport();
     });
-    let _ = dom::window()
-        .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref());
-    resize_cb.forget();
     let capture_click = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
         if let Some(target) = event
             .target()
@@ -567,6 +554,11 @@ pub(super) fn apply_theme(preference: &str) {
 pub async fn bootstrap() {
     dom::hidden("connecting", false);
     dom::disabled("reconnect", true);
+    let previous_sid = m::read(|s| s.sid.clone());
+    stop_poll();
+    dom::cancel_timer("results-poll");
+    dom::cancel_timer("idle-poll");
+    api::stop_sse();
     match api::get("/api/bootstrap").await {
         Ok(boot)
             if boot["csrf"].is_string()
@@ -576,10 +568,23 @@ pub async fn bootstrap() {
             m::set("app-update", boot["update"].clone());
             let boot_omnigraph = boot["omnigraph"].clone();
             m::write(|s| {
+                s.epoch = s.epoch.saturating_add(1);
+                s.sid.clear();
+                s.selected = V::Null;
+                s.events.clear();
+                s.seen.clear();
+                s.cursor = 0;
+                s.stream = m::SessionStreamState::default();
                 s.sessions = m::array(&boot["sessions"]);
+                run::sync_waiting_counts_from_sessions(
+                    &s.sessions,
+                    &mut s.approvals.waiting_counts,
+                );
                 s.boot = boot;
                 s.auth_failed = false;
             });
+            dom::clear("events");
+            run::reset();
             reset_session_settings_state();
             dom::hidden("connection-banner", true);
             render_update();
@@ -605,6 +610,8 @@ pub async fn bootstrap() {
             let wanted = dom::json_storage(PREFS);
             let sid = if !route.session.is_empty() {
                 route.session.clone()
+            } else if !previous_sid.is_empty() {
+                previous_sid
             } else {
                 m::text(&wanted, "session_id")
             };
@@ -993,11 +1000,23 @@ pub(super) fn split_budgets(prefix: &str) {
         );
     }
 }
-pub fn controls() {
+struct ComposerValidation {
+    ready: bool,
+    locked: bool,
+    workflow: String,
+    feature: String,
+    sdd: bool,
+    sdd_valid: bool,
+    helper_valid: bool,
+    model_valid: bool,
+    prompt: String,
+    valid: bool,
+}
+
+fn evaluate_composer_validation() -> ComposerValidation {
     let inbox_retry = inbox::needs_confirmation();
-    let (sid, session, locked, ready) = m::read(|s| {
+    let (session, locked, ready) = m::read(|s| {
         (
-            s.sid.clone(),
             s.selected.clone(),
             s.pending || m::active(&s.selected) || inbox_retry,
             !s.boot.is_null() && !s.auth_failed,
@@ -1011,13 +1030,6 @@ pub fn controls() {
     let phase = dom::value("sdd-phase");
     let phases = m::read(|s| m::array(&s.boot["sdd_phases"]));
     let sdd_valid = !sdd || m::sdd_settings_valid(&feature, &phase, &phases);
-    if sdd {
-        dom::set_value("mode", m::sdd_mode(&phase));
-    } else if ["plan", "review", "fleet-review"].contains(&workflow.as_str()) {
-        dom::set_value("mode", "plan");
-    } else if !sid.is_empty() && session["workflow"] == "native" && routing().is_null() {
-        dom::set_value("mode", &m::text(&session, "mode"));
-    }
     let dry = fleet && dom::checked("fleet-dry-run");
     let prompt = dom::value("prompt");
     let count = dom::num("agent-count").as_u64().unwrap_or(0);
@@ -1026,7 +1038,6 @@ pub fn controls() {
     let model = selected_model("");
     let custom_model = dom::value("model-choice") == "--custom--";
     let model_valid = model_selection_valid(custom_model, &model);
-    let inbox_active = inbox::eligible(&session);
     let valid = ready
         && !m::read(|s| s.pending)
         && if inbox_retry {
@@ -1045,6 +1056,63 @@ pub fn controls() {
                 && (dry || m::yes(&provider["available"]))
                 && session["workflow"] != "fleet-review"
         };
+    ComposerValidation {
+        ready,
+        locked,
+        workflow,
+        feature,
+        sdd,
+        sdd_valid,
+        helper_valid,
+        model_valid,
+        prompt,
+        valid,
+    }
+}
+
+/// Lightweight `#prompt` input validation updating only send eligibility & SDD slug hint
+/// without running the full `controls()` layout/sub-pane refresh on every keystroke.
+pub fn update_send_control() {
+    let check = evaluate_composer_validation();
+    dom::disabled("send", !check.valid);
+    dom::error(
+        "sdd-error",
+        if check.sdd
+            && !check.sdd_valid
+            && (!check.feature.is_empty() || !check.prompt.trim().is_empty())
+        {
+            "Enter a feature slug using lowercase letters, digits and single hyphens; memory is reserved."
+        } else {
+            ""
+        },
+    );
+}
+
+pub fn controls() {
+    let check = evaluate_composer_validation();
+    let inbox_retry = inbox::needs_confirmation();
+    let (sid, session, locked, ready) =
+        m::read(|s| (s.sid.clone(), s.selected.clone(), check.locked, check.ready));
+    let provider = m::provider(&dom::value("provider"));
+    let workflow = check.workflow;
+    let fleet = workflow == "fleet-review";
+    let sdd = check.sdd;
+    let feature = check.feature;
+    let phase = dom::value("sdd-phase");
+    let phases = m::read(|s| m::array(&s.boot["sdd_phases"]));
+    let sdd_valid = check.sdd_valid;
+    if sdd {
+        dom::set_value("mode", m::sdd_mode(&phase));
+    } else if ["plan", "review", "fleet-review"].contains(&workflow.as_str()) {
+        dom::set_value("mode", "plan");
+    } else if !sid.is_empty() && session["workflow"] == "native" && routing().is_null() {
+        dom::set_value("mode", &m::text(&session, "mode"));
+    }
+    let prompt = check.prompt;
+    let helper_valid = check.helper_valid;
+    let model_valid = check.model_valid;
+    let inbox_active = inbox::eligible(&session);
+    let valid = check.valid;
     let project_id = dom::value("project");
     dom::disabled("preflight-check", !ready || project_id.is_empty());
     dom::disabled("preflight-risk-callers", !ready || project_id.is_empty());
@@ -1055,9 +1123,12 @@ pub fn controls() {
         !m::active(&session) || m::read(|s| s.pending),
     );
     dom::hidden("welcome", !sid.is_empty());
-    dom::text(
+    let status_label = session["status"].as_str().unwrap_or("New session");
+    dom::text("session-status", status_label);
+    dom::attr(
         "session-status",
-        session["status"].as_str().unwrap_or("New session"),
+        "aria-label",
+        &format!("Session status: {status_label}"),
     );
     dom::text(
         "send-label",
@@ -1408,7 +1479,7 @@ pub async fn event(
     }
     if kind == "input" && id == "prompt" {
         save_preferences();
-        controls();
+        update_send_control();
         let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed && !m::active(&s.selected));
         if ready && !dom::value("project").is_empty() && has_at_file_mention(value) {
             dom::later("preflight-debounce", 600, || {

@@ -220,3 +220,75 @@ pub fn read_verified_paths(
     result.recheck(files)?;
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_verified_paths_enforces_manifest_schema_and_post_opt_wasm_digest() {
+        let dir = crate::temp::Temporary::new("wasm-assets").unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let wasm_dir = root.join("runtime-rust/target/wasm-ui");
+        std::fs::create_dir_all(&wasm_dir).unwrap();
+
+        let js = b"export default async function init() {}";
+        let raw_wasm = b"\0asm\x01\0\0\0\0\x06\x04name\x00";
+        let opt_wasm = b"\0asm\x01\0\0\0";
+        let src_digest = infra_core::bank::publication::sha256(b"sources");
+
+        std::fs::write(wasm_dir.join("infra_ui.js"), js).unwrap();
+        std::fs::write(wasm_dir.join("infra_ui_bg.wasm"), opt_wasm).unwrap();
+
+        // Stale un-optimized manifest digest must be rejected cleanly.
+        let stale_manifest = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "js_sha256": infra_core::bank::publication::sha256(js),
+            "wasm_sha256": infra_core::bank::publication::sha256(raw_wasm),
+            "source_sha256": src_digest,
+        }))
+        .unwrap();
+        std::fs::write(wasm_dir.join("abi-manifest.json"), stale_manifest).unwrap();
+        let mut files = PublicationFiles::new(&root).unwrap();
+        assert!(read_verified(&mut files).is_err());
+
+        // Unexpected keys in abi-manifest.json violate manifest fidelity.
+        let extra_field_manifest = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "js_sha256": infra_core::bank::publication::sha256(js),
+            "wasm_sha256": infra_core::bank::publication::sha256(opt_wasm),
+            "source_sha256": src_digest,
+            "wasm_opt_applied": true,
+        }))
+        .unwrap();
+        std::fs::write(wasm_dir.join("abi-manifest.json"), extra_field_manifest).unwrap();
+        assert!(read_verified(&mut files).is_err());
+
+        // Matching post-optimization digest with exact manifest schema succeeds.
+        let valid_manifest = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "js_sha256": infra_core::bank::publication::sha256(js),
+            "wasm_sha256": infra_core::bank::publication::sha256(opt_wasm),
+            "source_sha256": src_digest,
+        }))
+        .unwrap();
+        std::fs::write(wasm_dir.join("abi-manifest.json"), valid_manifest).unwrap();
+        let verified = read_verified(&mut files).unwrap();
+        assert_eq!(verified.wasm, opt_wasm);
+        assert_eq!(verified.javascript, js);
+        assert_eq!(verified.source_sha256.as_deref(), Some(src_digest.as_str()));
+
+        let html = standalone_html(
+            b"<html><body><script type=\"module\" src=\"/boot.js\"></script></body></html>",
+            &verified.javascript,
+            &verified.wasm,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(html)
+                .unwrap()
+                .contains("data:text/javascript;base64,")
+        );
+    }
+}

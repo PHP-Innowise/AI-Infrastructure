@@ -8,6 +8,9 @@
   <title>AI Infrastructure Harness</title>
   <script>(function(){try{var p=localStorage.getItem('harness.theme.v1');var t=(p==='light'||p==='dark')?p:(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;}catch(_){try{document.documentElement.dataset.theme=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}catch(__){}}})();</script>
   <link rel="icon" type="image/svg+xml" href="/icons/ai-accelerator.svg">
+  <link rel="modulepreload" href="/boot.js">
+  <link rel="modulepreload" href="/assets/infra_ui.js">
+  <link rel="preload" href="/assets/infra_ui_bg.wasm" as="fetch" crossorigin>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -932,7 +935,7 @@
       </div>
       <div class="graph-isolate-group" role="group" aria-label="Neighborhood isolation">
         <button type="button" class="button compact" id="graph-map-isolate-toggle" aria-pressed="false">Isolate</button>
-        <select id="graph-map-isolate-depth" aria-label="Isolation depth"><option value="1" selected>1 hop</option><option value="2">2 hops</option><option value="3">3 hops</option></select>
+        <select id="graph-map-isolate-depth" aria-label="Isolation depth"><option value="1">1 hop</option><option value="2" selected>2 hops</option><option value="3">3 hops</option></select>
       </div>
       <div class="graph-display-wrap">
         <button type="button" class="button compact" id="graph-map-display-toggle" aria-expanded="false" aria-controls="graph-map-display-popover">Display ▾</button>
@@ -969,7 +972,7 @@
         <ul class="graph-commit-graph-list" id="graph-commit-graph-list" role="listbox" aria-label="Git commit history graph" tabindex="-1"></ul>
         <p class="knowledge-note graph-commit-graph-note" id="graph-commit-graph-note" role="status"></p>
       </aside>
-      <div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><div class="graph-map-radar" id="graph-map-canvas-radar" aria-hidden="true" hidden></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside>
+      <div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false" tabindex="0" role="region" aria-label="Interactive code dependency graph canvas"></div><div class="graph-map-radar" id="graph-map-canvas-radar" aria-hidden="true" hidden></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside>
     </div>
     <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻). Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
     <div class="graph-arrow-legend-slot" id="graph-map-arrow-legend"></div>
@@ -979,7 +982,7 @@
     <p class="knowledge-note" id="graph-link-summary"></p>
     <p class="knowledge-note" id="graph-link-note" role="status"></p>
     <p class="error-text" id="graph-link-error" role="alert" hidden></p>
-    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-link-canvas"></div><aside class="graph-map-side" id="graph-link-side" aria-label="Selected name"></aside></div>
+    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-link-canvas" tabindex="0" role="region" aria-label="Interactive symbol link canvas"></div><aside class="graph-map-side" id="graph-link-side" aria-label="Selected name"></aside></div>
     <p class="graph-map-legend" id="graph-link-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. The head and the dashes of a link tell its kind, as the key of the links shows. Hollow: only guessed by name. Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
     <div class="graph-arrow-legend-slot" id="graph-link-arrow-legend"></div>
   </dialog>
@@ -1246,7 +1249,7 @@
         <button type="button" class="button compact session-graph-btn" data-graph-id="pin-undo" title="Undo last pin/layout change" hidden>Undo pin</button>
         <div class="graph-isolate-group" data-graph-id="isolate-group" role="group" aria-label="Neighborhood isolation">
           <button type="button" class="button compact session-graph-btn session-graph-toggle" data-graph-id="isolate-toggle" aria-pressed="false">Isolate</button>
-          <select data-graph-id="isolate-depth" aria-label="Isolation depth"><option value="1" selected>1 hop</option><option value="2">2 hops</option><option value="3">3 hops</option></select>
+          <select data-graph-id="isolate-depth" aria-label="Isolation depth"><option value="1">1 hop</option><option value="2" selected>2 hops</option><option value="3">3 hops</option></select>
         </div>
         <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
         <div class="session-graph-zoom-group" role="group" aria-label="Zoom">

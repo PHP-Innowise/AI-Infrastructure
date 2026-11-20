@@ -2751,7 +2751,8 @@ Node 22 ESM smoke suite driven over Chrome DevTools Protocol (CDP). It verifies:
 1. WASM boot (`#connecting`/`#connection-banner`), pre-WASM `data-theme` & theme
    toggle, and `/assets/infra_ui_bg.wasm` HTTP 200 transport.
 2. Embedded `#session-graph-workspace` (zoom, pan, node selection, `Isolate`,
-   `Changes`/`Whole graph`) and `#graph-map` dense Canvas2D rendering
+   `Changes`/`Whole graph`, expanded `role="dialog"` / `aria-modal="true"` /
+   sibling `inert` & `Escape` restore) and `#graph-map` dense Canvas2D rendering
    (`canvas.graph-dense-canvas[data-dense-canvas="true"]` non-blank pixels,
    HiDPI `deviceScaleFactor: 2` backing store, hover lighting, right-click `Explain`
    dialog, Shift+drag pin/unpin, Back/Forward history, `From -> To` path trace,
@@ -2761,18 +2762,31 @@ Node 22 ESM smoke suite driven over Chrome DevTools Protocol (CDP). It verifies:
    plus `#graph-map-freshness` visibility/tone.
 4. Live `/api/events/stream` SSE streaming (`#sse-status[data-state="live"]`),
    `#run-now` `#run-verb`/`#run-target` structure, `.conversation-*` / `.md-body` /
-   `.md-code-block` / `.tool-output` computed styling, and Copy button state.
+   `.md-code-block` / `.tool-output` computed styling, Copy button state,
+   `#events-jump-latest` scroll recovery, and `#events-load-earlier` pagination
+   (client slice + `?before=` fetch).
 5. `#command-palette`, `#approvals-drawer` (`role="dialog"`, `aria-modal="true"`,
-   state preservation, `Allow` resolution over SSE), Light/Dark WCAG AA `>=4.5:1`
-   contrast checks on composer placeholder & selected skill hints, `761-920px`
-   responsive layout + `/resume` drawer `inert` & focus, and `390x844` mobile
-   drawer + `Workspace` tab overflow checks.
+   state preservation, `Alt+A` / `Alt+D` shortcuts, immediate `#approvals-queue-count`
+   and `#history-filter-waiting` clear after approval), `permission-question-card`
+   (radio, multi-select checkbox, `Other` auto-check & structured answers POST),
+   `.skill-hint` click selection, Light/Dark WCAG AA `>=4.5:1` contrast checks,
+   `761-920px` responsive layout + `/resume` drawer `inert` & focus, and `390x844`
+   mobile drawer + `Workspace` tab overflow checks.
 6. Omnigraph Context Studio (constellation radar bottom-right pan clamping, search
-   & `Reset filters` on `main`, and pulse pause/resume).
+   & `Reset filters` on `main`, pulse pause/resume, `#omnigraph-transfer-dialog`,
+   and `#omnigraph-share-dialog` with backdrop-click close).
 7. System Map (`kinds_off` legend toggle, unfold with unmatched risk, side-tab
-   keyboard navigation, and multi-wave play/pause without DOM teardown).
+   keyboard navigation, multi-wave play/pause without DOM teardown, and
+   cross-graph jumps `System Map <-> Omnigraph <-> Dependency Map`).
 8. Scoped negative network tests (`403` error surfacing, SSE disconnect &
    `#reconnect` recovery).
+9. Workspace right-pane `#right-tab-diff` (file filter, copy path, collapse/expand
+   all, `Show all N lines`), `#right-tab-checks` -> `#workspace-open-checks`, and
+   `#results-view` (`changes`, `checks`, `usage` tabs).
+10. `Knowledge` (`memory-use`, `brain`, `memory`, `context`), `Skills` +
+    `Create skill` preview, `Accelerators` + `Creator` + `Setup` readiness, and
+    `#folder-picker` / `#merge-picker` modal interactions & backdrop-click close.
+11. Fresh-target cold boot at `390x844` mobile with `prefers-reduced-motion: reduce`.
 
 Build the `wasm-ui` bundle first (`infra-engine repo build-ui --root "$PWD"`),
 then run via Rust integration test (requires Chrome/Chromium and Node 22+):
@@ -2792,7 +2806,7 @@ node harness/tests/browser_e2e.mjs \
   [--other-session-id <other-session-id>] \
   [--commit-a <sha>] [--commit-b <sha>] \
   [--system-run-id <run-id>] \
-  [--chrome /opt/google/chrome/chrome] [--timeout-ms 120000]
+  [--chrome /opt/google/chrome/chrome] [--timeout-ms 150000]
 ```
 
 Use `HARNESS_CHROME_BIN` (or `--chrome`) when Chrome is installed outside

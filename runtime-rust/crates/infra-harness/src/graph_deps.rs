@@ -10,8 +10,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, VecDeque, hash_map::DefaultHasher},
     fs,
+    hash::{Hash, Hasher},
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
@@ -993,15 +995,53 @@ pub(crate) fn find_matching_references_with_context(
     {
         return Vec::new();
     }
-
-    let mut augmented_known = known_files.clone();
-    if !known_files.contains(&target) {
-        augmented_known.insert(target.clone());
-    }
-    let deps = extract_file_deps_with_context(
+    let Some(ir) = parse_file_ir(&caller, caller_source) else {
+        return Vec::new();
+    };
+    find_matching_references_from_ir(
         &caller,
         caller_source,
-        &augmented_known,
+        &ir,
+        &target,
+        target_symbols,
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+    )
+}
+
+/// Finds symbol references from `caller_source` to `target_path` reusing a pre-parsed `AstFileExtraction`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_matching_references_from_ir(
+    caller_path: &str,
+    caller_source: &str,
+    caller_ir: &AstFileExtraction,
+    target_path: &str,
+    target_symbols: &[String],
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Vec<String> {
+    let caller = clean_rel_key(caller_path);
+    let target = clean_rel_key(target_path);
+    if caller.is_empty() || target.is_empty() || caller == target || caller_source.trim().is_empty()
+    {
+        return Vec::new();
+    }
+
+    let augmented_known: Cow<'_, BTreeSet<String>> = if known_files.contains(&target) {
+        Cow::Borrowed(known_files)
+    } else {
+        let mut cloned = known_files.clone();
+        cloned.insert(target.clone());
+        Cow::Owned(cloned)
+    };
+    let deps = extract_file_deps_from_ir(
+        &caller,
+        caller_ir,
+        augmented_known.as_ref(),
         manifests_opt,
         reexports_opt,
         crate_map_opt,
@@ -1014,7 +1054,14 @@ pub(crate) fn find_matching_references_with_context(
     }
 
     let target_stem = file_stem(&target);
-    let caller_idents = crate::graph_ast::extract_code_identifiers(&caller, caller_source);
+    let caller_idents: Cow<'_, BTreeSet<String>> = if caller_ir.identifiers.is_empty() {
+        Cow::Owned(crate::graph_ast::extract_code_identifiers(
+            &caller,
+            caller_source,
+        ))
+    } else {
+        Cow::Borrowed(&caller_ir.identifiers)
+    };
 
     let same_folder = folder_of(&caller) == folder_of(&target);
     let stem_referenced =
@@ -1193,15 +1240,53 @@ pub(crate) fn find_matching_member_references_with_context(
     {
         return Vec::new();
     }
-
-    let mut augmented_known = known_files.clone();
-    if !known_files.contains(&target) {
-        augmented_known.insert(target.clone());
-    }
-    let deps = extract_file_deps_with_context(
+    let Some(ir) = parse_file_ir(&caller, caller_source) else {
+        return Vec::new();
+    };
+    find_matching_member_references_from_ir(
         &caller,
         caller_source,
-        &augmented_known,
+        &ir,
+        &target,
+        target_members,
+        known_files,
+        manifests_opt,
+        reexports_opt,
+        crate_map_opt,
+    )
+}
+
+/// Finds member-level references from `caller_source` to `target_path` reusing a pre-parsed `AstFileExtraction`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_matching_member_references_from_ir(
+    caller_path: &str,
+    caller_source: &str,
+    caller_ir: &AstFileExtraction,
+    target_path: &str,
+    target_members: &[DeclaredMember],
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+) -> Vec<DepMemberRef> {
+    let caller = clean_rel_key(caller_path);
+    let target = clean_rel_key(target_path);
+    if caller.is_empty() || target.is_empty() || caller == target || caller_source.trim().is_empty()
+    {
+        return Vec::new();
+    }
+
+    let augmented_known: Cow<'_, BTreeSet<String>> = if known_files.contains(&target) {
+        Cow::Borrowed(known_files)
+    } else {
+        let mut cloned = known_files.clone();
+        cloned.insert(target.clone());
+        Cow::Owned(cloned)
+    };
+    let deps = extract_file_deps_from_ir(
+        &caller,
+        caller_ir,
+        augmented_known.as_ref(),
         manifests_opt,
         reexports_opt,
         crate_map_opt,
@@ -1214,7 +1299,14 @@ pub(crate) fn find_matching_member_references_with_context(
     }
 
     let target_stem = file_stem(&target);
-    let caller_idents = crate::graph_ast::extract_code_identifiers(&caller, caller_source);
+    let caller_idents: Cow<'_, BTreeSet<String>> = if caller_ir.identifiers.is_empty() {
+        Cow::Owned(crate::graph_ast::extract_code_identifiers(
+            &caller,
+            caller_source,
+        ))
+    } else {
+        Cow::Borrowed(&caller_ir.identifiers)
+    };
     let same_folder = folder_of(&caller) == folder_of(&target);
     let stem_referenced =
         !target_stem.is_empty() && target_stem.len() >= 2 && caller_idents.contains(target_stem);
@@ -1588,8 +1680,14 @@ fn clip_evidence(raw: &str) -> String {
     compact[..end].to_owned()
 }
 
-struct KnownLookup<'a> {
-    known_files: &'a BTreeSet<String>,
+const MAX_CACHED_KNOWN_INDICES: usize = 16;
+
+struct KnownIndex {
+    len: usize,
+    first: Option<String>,
+    last: Option<String>,
+    h1: u64,
+    h2: u64,
     by_cleaned: BTreeMap<String, String>,
     by_lower: BTreeMap<String, Vec<String>>,
     by_stem_lower: BTreeMap<String, Vec<String>>,
@@ -1597,8 +1695,24 @@ struct KnownLookup<'a> {
     all_entries: Vec<(String, String, String)>,
 }
 
-impl<'a> KnownLookup<'a> {
-    fn new(known_files: &'a BTreeSet<String>) -> Self {
+impl KnownIndex {
+    fn digest(known_files: &BTreeSet<String>) -> (usize, u64, u64) {
+        let mut h1 = 0xcbf2_9ce4_8422_2325u64;
+        let mut h2 = DefaultHasher::new();
+        for item in known_files {
+            for b in item.as_bytes() {
+                h1 ^= u64::from(*b);
+                h1 = h1.wrapping_mul(0x100_0000_01b3);
+            }
+            h1 ^= 0xff;
+            h1 = h1.wrapping_mul(0x100_0000_01b3);
+            item.hash(&mut h2);
+            0xffu8.hash(&mut h2);
+        }
+        (known_files.len(), h1, h2.finish())
+    }
+
+    fn build(known_files: &BTreeSet<String>, len: usize, h1: u64, h2: u64) -> Arc<Self> {
         let mut by_cleaned = BTreeMap::new();
         let mut by_lower: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut by_stem_lower: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1634,14 +1748,66 @@ impl<'a> KnownLookup<'a> {
             all_entries.push((orig.clone(), cleaned, lower));
         }
 
-        Self {
-            known_files,
+        Arc::new(Self {
+            len,
+            first: known_files.iter().next().cloned(),
+            last: known_files.iter().next_back().cloned(),
+            h1,
+            h2,
             by_cleaned,
             by_lower,
             by_stem_lower,
             by_dir_stem_lower,
             all_entries,
+        })
+    }
+
+    fn for_set(known_files: &BTreeSet<String>) -> Arc<Self> {
+        static CACHE: OnceLock<Mutex<Vec<Arc<KnownIndex>>>> = OnceLock::new();
+        let (len, h1, h2) = Self::digest(known_files);
+        let first = known_files.iter().next();
+        let last = known_files.iter().next_back();
+        let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+        if let Ok(mut entries) = cache.lock()
+            && let Some(pos) = entries.iter().position(|e| {
+                e.len == len
+                    && e.h1 == h1
+                    && e.h2 == h2
+                    && e.first.as_ref() == first
+                    && e.last.as_ref() == last
+            })
+        {
+            let hit = entries.remove(pos);
+            let cloned = Arc::clone(&hit);
+            entries.push(hit);
+            return cloned;
         }
+        let built = Self::build(known_files, len, h1, h2);
+        if let Ok(mut entries) = cache.lock() {
+            if entries.len() >= MAX_CACHED_KNOWN_INDICES {
+                entries.remove(0);
+            }
+            entries.push(Arc::clone(&built));
+        }
+        built
+    }
+}
+
+struct KnownLookup<'a> {
+    known_files: &'a BTreeSet<String>,
+    index: Arc<KnownIndex>,
+}
+
+impl<'a> KnownLookup<'a> {
+    fn new(known_files: &'a BTreeSet<String>) -> Self {
+        Self {
+            known_files,
+            index: KnownIndex::for_set(known_files),
+        }
+    }
+
+    fn all_entries(&self) -> &[(String, String, String)] {
+        &self.index.all_entries
     }
 
     fn resolve_exact_or_ci(&self, candidate: &str) -> Option<String> {
@@ -1649,11 +1815,12 @@ impl<'a> KnownLookup<'a> {
         if cleaned.is_empty() {
             return None;
         }
-        if let Some(exact) = self.by_cleaned.get(&cleaned) {
+        if let Some(exact) = self.index.by_cleaned.get(&cleaned) {
             return Some(exact.clone());
         }
         let lower = cleaned.to_ascii_lowercase();
-        self.by_lower
+        self.index
+            .by_lower
             .get(&lower)
             .and_then(|matches| pick_best_candidate(matches))
     }
@@ -1670,6 +1837,7 @@ impl<'a> KnownLookup<'a> {
         }
         let slash_suffix = format!("/{cleaned}");
         let exact_matches: Vec<String> = self
+            .index
             .all_entries
             .iter()
             .filter(|(_, c, _)| {
@@ -1685,6 +1853,7 @@ impl<'a> KnownLookup<'a> {
         let lower_cleaned = cleaned.to_ascii_lowercase();
         let lower_slash = format!("/{lower_cleaned}");
         let ci_matches: Vec<String> = self
+            .index
             .all_entries
             .iter()
             .filter(|(_, c, l)| {
@@ -1699,7 +1868,11 @@ impl<'a> KnownLookup<'a> {
     fn resolve_stem_in_dir(&self, dir: &str, stem: &str, allowed_exts: &[&str]) -> Option<String> {
         let dir_lower = dir.to_ascii_lowercase();
         for variant in stem_variants(stem) {
-            if let Some(list) = self.by_dir_stem_lower.get(&(dir_lower.clone(), variant)) {
+            if let Some(list) = self
+                .index
+                .by_dir_stem_lower
+                .get(&(dir_lower.clone(), variant))
+            {
                 let filtered: Vec<String> = list
                     .iter()
                     .filter(|p| has_any_ext(p, allowed_exts))
@@ -1723,7 +1896,7 @@ impl<'a> KnownLookup<'a> {
         scope_prefix: Option<&str>,
     ) -> Option<String> {
         for variant in stem_variants(stem) {
-            let Some(list) = self.by_stem_lower.get(&variant) else {
+            let Some(list) = self.index.by_stem_lower.get(&variant) else {
                 continue;
             };
             let filtered: Vec<String> = list
@@ -3154,7 +3327,7 @@ fn resolve_go_package_suffix_files(import_path: &str, lookup: &KnownLookup) -> V
     for start in 0..segs.len() {
         let sub_dir = segs[start..].join("/");
         let mut matches: Vec<String> = lookup
-            .all_entries
+            .all_entries()
             .iter()
             .filter(|(_, c, _)| {
                 has_any_ext(c, GO_EXTS)
@@ -3384,7 +3557,7 @@ fn resolve_swift_ir(
     let dir = folder_of(rel_path);
     for imp in &ir.imports {
         let mut resolved = None;
-        for entry in &lookup.all_entries {
+        for entry in lookup.all_entries() {
             if has_any_ext(&entry.1, SWIFT_EXTS) && entry.1.contains(&format!("{}/", imp.path)) {
                 resolved = Some(entry.0.clone());
                 break;
@@ -4515,5 +4688,58 @@ class Caller {
             !targets.contains("internal/auth/verify_test.go"),
             "{deps:?}"
         );
+    }
+
+    #[test]
+    fn shared_ast_extraction_matches_file_and_member_references_and_caches_known_index() {
+        let caller_src = "use crate::service::Widget;\n\npub fn run() {\n    let w = Widget::new();\n    w.render();\n}\n";
+        let ir = crate::graph_ast::parse_file_ir("src/caller.rs", caller_src).expect("ast ir");
+        let known = BTreeSet::from(["src/caller.rs".to_owned(), "src/service.rs".to_owned()]);
+        let syms = vec!["Widget".to_owned(), "render".to_owned()];
+
+        let via_ir = find_matching_references_from_ir(
+            "src/caller.rs",
+            caller_src,
+            &ir,
+            "src/service.rs",
+            &syms,
+            &known,
+            None,
+            None,
+            None,
+        );
+        let direct =
+            find_matching_references("src/caller.rs", caller_src, "src/service.rs", &syms, &known);
+        assert_eq!(via_ir, direct);
+        assert!(via_ir.contains(&"Widget".to_owned()), "{via_ir:?}");
+
+        let target_members = extract_declared_members(
+            "src/service.rs",
+            "pub struct Widget {}\nimpl Widget { pub fn new() -> Self { Self {} }\n pub fn render(&self) {} }\n",
+        );
+        let member_refs = find_matching_member_references_from_ir(
+            "src/caller.rs",
+            caller_src,
+            &ir,
+            "src/service.rs",
+            &target_members,
+            &known,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            member_refs.iter().any(|r| r.name == "render"),
+            "{member_refs:?}"
+        );
+
+        let lookup = KnownLookup::new(&known);
+        assert_eq!(
+            lookup.resolve_exact_or_ci("src/service.rs").as_deref(),
+            Some("src/service.rs")
+        );
+        let lookup_cached = KnownLookup::new(&known);
+        assert!(Arc::ptr_eq(&lookup.index, &lookup_cached.index));
+        assert_eq!(lookup_cached.all_entries().len(), 2);
     }
 }
