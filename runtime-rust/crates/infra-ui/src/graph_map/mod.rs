@@ -317,6 +317,10 @@ pub(crate) use surfaces::focus_system_file;
 #[allow(unused_imports)]
 pub(crate) use surfaces::focus_system_from_prompt;
 #[allow(unused_imports)]
+pub(crate) use surfaces::focus_system_target;
+#[allow(unused_imports)]
+pub(crate) use surfaces::focused_dense_hit_for_canvas;
+#[allow(unused_imports)]
 pub use surfaces::handle_session_graph_click;
 #[allow(unused_imports)]
 pub use surfaces::handle_session_graph_input;
@@ -692,6 +696,7 @@ use finder_commit::refresh_commit_memory;
 use finder_commit::rename_memory_key;
 #[allow(unused_imports)]
 use finder_commit::render_commit_banner_for_view;
+#[cfg(test)]
 #[allow(unused_imports)]
 use finder_commit::render_commit_dock_list;
 #[allow(unused_imports)]
@@ -821,6 +826,8 @@ use layout::order;
 #[allow(unused_imports)]
 use layout::prompt_tokens;
 #[allow(unused_imports)]
+use layout::route_pinned_wire_path;
+#[allow(unused_imports)]
 use layout::string_list;
 #[allow(unused_imports)]
 use layout::strip_symbol_suffix;
@@ -914,6 +921,8 @@ use render::crumbs;
 use render::cycle_cut_hints_html;
 #[allow(unused_imports)]
 use render::diff_badge_sign;
+#[allow(unused_imports)]
+use render::extract_view_graph_parts;
 #[allow(unused_imports)]
 use render::file_declared_members_html;
 #[allow(unused_imports)]

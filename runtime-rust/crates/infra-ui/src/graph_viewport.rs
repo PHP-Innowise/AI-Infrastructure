@@ -2884,6 +2884,25 @@ pub(crate) mod canvas2d {
     }
 
     #[allow(dead_code)]
+    pub fn set_active_layer(canvas_id: &str, layer: Option<&str>) -> bool {
+        DENSE_SCENES.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
+                return false;
+            };
+            let next = layer
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned);
+            if meta.active_layer == next {
+                return false;
+            }
+            meta.active_layer = next;
+            true
+        })
+    }
+
+    #[allow(dead_code)]
     pub fn set_hidden_kinds(canvas_id: &str, hidden: HashSet<String>) -> bool {
         DENSE_SCENES.with(|s| {
             let mut guard = s.borrow_mut();

@@ -1457,15 +1457,27 @@ pub fn plan_roomy(
             .map(under)
             .fold(0.0, f64::max);
     // What a frame holds that no link here touches lies in a grid under the
-    // rest of it, from the frame's first layer on.
-    let apart_in = |frame: usize| {
-        (0..count)
-            .filter(|node| !linked[*node] && band[*node] == frame)
-            .collect::<Vec<_>>()
-    };
+    // rest of it, from the frame's first layer on. Precomputed in O(N) once.
+    let mut apart_by_frame: Vec<Vec<usize>> = vec![Vec::new(); framed];
+    let mut apart_pos = vec![0usize; count];
+    let mut loose = Vec::new();
+    let mut loose_pos = vec![0usize; count];
+    for node in 0..count {
+        if linked[node] {
+            continue;
+        }
+        let b = band[node];
+        if b < framed {
+            apart_pos[node] = apart_by_frame[b].len();
+            apart_by_frame[b].push(node);
+        } else if b == free {
+            loose_pos[node] = loose.len();
+            loose.push(node);
+        }
+    }
     let mut across = vec![1usize; framed];
     for frame in 0..framed {
-        let unlinked = apart_in(frame).len();
+        let unlinked = apart_by_frame[frame].len();
         if unlinked > 0 {
             let (first, last) = span[frame].unwrap_or((0, 0));
             across[frame] = (last - first + 1).max(unlinked.min(3));
@@ -1495,7 +1507,7 @@ pub fn plan_roomy(
             Step::Own(frame) => {
                 band_top[frame] = y;
                 y += tall[frame];
-                let unlinked = apart_in(frame).len();
+                let unlinked = apart_by_frame[frame].len();
                 if unlinked > 0 {
                     if tall[frame] > 0.0 {
                         y += ROW_GAP;
@@ -1531,9 +1543,6 @@ pub fn plan_roomy(
         left(layers - 1) + BOX_WIDTH + MARGIN + inset
     };
     let below_all = band_top[free] + tall[free];
-    let loose = (0..count)
-        .filter(|node| !linked[*node] && band[*node] == free)
-        .collect::<Vec<_>>();
     let per_row = (((layered_width - MARGIN) / (BOX_WIDTH + ROW_GAP)).floor() as usize).max(4);
     let apart = (layers > 0 && !loose.is_empty()).then_some(below_all + 2.0 * MARGIN);
     let grid_top = apart.map_or(band_top[free], |apart| apart + CAPTION);
@@ -1548,10 +1557,7 @@ pub fn plan_roomy(
             }
         } else if band[node] != free {
             let frame = band[node];
-            let at = apart_in(frame)
-                .iter()
-                .position(|other| *other == node)
-                .unwrap_or(0);
+            let at = apart_pos[node];
             Placed {
                 x: left(span[frame].map_or(0, |(first, _)| first) + at % across[frame]),
                 y: grid_in[frame] + (at / across[frame]) as f64 * pitch,
@@ -1559,7 +1565,7 @@ pub fn plan_roomy(
                 cycle: false,
             }
         } else {
-            let at = loose.iter().position(|other| *other == node).unwrap_or(0);
+            let at = loose_pos[node];
             Placed {
                 x: MARGIN + inset + (at % per_row) as f64 * (BOX_WIDTH + ROW_GAP),
                 y: grid_top + (at / per_row) as f64 * pitch,
@@ -1818,25 +1824,84 @@ pub(super) fn apply_pin_overrides_to_plan(
         let (Some(a), Some(b)) = (plan.nodes.get(from), plan.nodes.get(to)) else {
             continue;
         };
-        let sy_base = a.y + BOX_HEIGHT * 0.5 + start_off[wi];
-        let ey_base = b.y + BOX_HEIGHT * 0.5 + end_off[wi];
-        let (sx, sy, ex, ey) = if a.x + BOX_WIDTH <= b.x {
-            (a.x + BOX_WIDTH, sy_base, b.x, ey_base)
-        } else if b.x + BOX_WIDTH <= a.x {
-            (a.x, sy_base, b.x + BOX_WIDTH, ey_base)
-        } else {
-            (
-                a.x + BOX_WIDTH * 0.5,
-                sy_base,
-                b.x + BOX_WIDTH * 0.5,
-                ey_base,
-            )
-        };
-        let mut path = format!("M{sx:.1} {sy:.1}");
-        curve(&mut path, (sx, sy), (ex, ey));
+        let path =
+            route_pinned_wire_path((a.x, a.y), (b.x, b.y), start_off[wi], end_off[wi], false);
         wire.path = path;
     }
     moved
+}
+
+/// Computes a smooth SVG cubic wire path between pinned/dragged cards `(ax, ay)` and
+/// `(bx, by)` without cutting across card interiors when horizontally overlapped,
+/// optionally bowing detoured wires outward so spline curves stay legible.
+pub(super) fn route_pinned_wire_path(
+    a: (f64, f64),
+    b: (f64, f64),
+    sy_off: f64,
+    ey_off: f64,
+    detour: bool,
+) -> String {
+    let sy_mid = a.1 + BOX_HEIGHT * 0.5 + sy_off;
+    let ey_mid = b.1 + BOX_HEIGHT * 0.5 + ey_off;
+    if a.0 + BOX_WIDTH <= b.0 {
+        let sx = a.0 + BOX_WIDTH;
+        let ex = b.0;
+        if detour && (ex - sx).abs() > 24.0 {
+            let bow = 22.0;
+            let dip = sy_mid.max(ey_mid) + bow;
+            return format!(
+                "M{sx:.1} {sy_mid:.1} C{:.1} {dip:.1} {:.1} {dip:.1} {ex:.1} {ey_mid:.1}",
+                sx + (ex - sx) * 0.35,
+                sx + (ex - sx) * 0.65,
+            );
+        }
+        let mut path = format!("M{sx:.1} {sy_mid:.1}");
+        curve(&mut path, (sx, sy_mid), (ex, ey_mid));
+        return path;
+    }
+    if b.0 + BOX_WIDTH <= a.0 {
+        let sx = a.0;
+        let ex = b.0 + BOX_WIDTH;
+        if detour && (sx - ex).abs() > 24.0 {
+            let dip = sy_mid.max(ey_mid) + 22.0;
+            return format!(
+                "M{sx:.1} {sy_mid:.1} C{:.1} {dip:.1} {:.1} {dip:.1} {ex:.1} {ey_mid:.1}",
+                sx + (ex - sx) * 0.35,
+                sx + (ex - sx) * 0.65,
+            );
+        }
+        let mut path = format!("M{sx:.1} {sy_mid:.1}");
+        curve(&mut path, (sx, sy_mid), (ex, ey_mid));
+        return path;
+    }
+    // Horizontally overlapped cards: route top-to-bottom / bottom-to-top when vertically separated,
+    // or loop through a clear right-side channel so the wire stays outside both card bodies.
+    let sx_mid = (a.0 + BOX_WIDTH * 0.5 + sy_off * 0.5).clamp(a.0 + 12.0, a.0 + BOX_WIDTH - 12.0);
+    let ex_mid = (b.0 + BOX_WIDTH * 0.5 + ey_off * 0.5).clamp(b.0 + 12.0, b.0 + BOX_WIDTH - 12.0);
+    if a.1 + BOX_HEIGHT + 8.0 <= b.1 {
+        let sy = a.1 + BOX_HEIGHT;
+        let ey = b.1;
+        let ctrl = ((ey - sy) * 0.45).max(16.0);
+        return format!(
+            "M{sx_mid:.1} {sy:.1} C{sx_mid:.1} {:.1} {ex_mid:.1} {:.1} {ex_mid:.1} {ey:.1}",
+            sy + ctrl,
+            ey - ctrl,
+        );
+    }
+    if b.1 + BOX_HEIGHT + 8.0 <= a.1 {
+        let sy = a.1;
+        let ey = b.1 + BOX_HEIGHT;
+        let ctrl = ((sy - ey) * 0.45).max(16.0);
+        return format!(
+            "M{sx_mid:.1} {sy:.1} C{sx_mid:.1} {:.1} {ex_mid:.1} {:.1} {ex_mid:.1} {ey:.1}",
+            sy - ctrl,
+            ey + ctrl,
+        );
+    }
+    let sx = a.0 + BOX_WIDTH;
+    let ex = b.0 + BOX_WIDTH;
+    let channel_x = a.0.max(b.0) + BOX_WIDTH + if detour { 36.0 } else { 26.0 };
+    format!("M{sx:.1} {sy_mid:.1} C{channel_x:.1} {sy_mid:.1} {channel_x:.1} {ey_mid:.1} {ex:.1} {ey_mid:.1}")
 }
 /// How far the first link that passes over or under a row of layers stands
 /// off it, and how much further each next one.
