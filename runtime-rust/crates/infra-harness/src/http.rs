@@ -1308,6 +1308,54 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "POST",
+        pattern: "/api/sessions/{session_id}/skillcache/compile",
+        operation: "skillcache.compile",
+        status: 202,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/projects/{project_id}/skillcache/capsules",
+        operation: "skillcache.list",
+        status: 200,
+        token: false,
+        query: &["skill", "status", "form"],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}",
+        operation: "skillcache.get",
+        status: 200,
+        token: false,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/requalify",
+        operation: "skillcache.requalify",
+        status: 202,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/invalidate",
+        operation: "skillcache.invalidate",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "DELETE",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}",
+        operation: "skillcache.delete",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
         pattern: "/api/sessions/{session_id}/inbox/{request_id}/cancel",
         operation: "sessions.inbox_cancel",
         status: 200,
@@ -2043,6 +2091,7 @@ fn matches_sse_filter(
                 | "graph_status"
                 | "system_graph_status"
                 | "omnigraph_status"
+                | "skillcache_capsule"
                 | "resync"
         )
         && frame.session_id.as_deref() != Some(sid)
@@ -3501,5 +3550,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&gz_dec).unwrap(), huge);
+    }
+}
+
+#[cfg(test)]
+mod skillcache_route_tests {
+    use super::*;
+
+    #[test]
+    fn skillcache_routes_guard_every_change_with_the_token() {
+        let route = |operation: &str| {
+            ROUTES
+                .iter()
+                .find(|route| route.operation == operation)
+                .unwrap_or_else(|| panic!("no route for {operation}"))
+        };
+        for (operation, method, token, status) in [
+            ("skillcache.session", "GET", false, 200),
+            ("skillcache.list", "GET", false, 200),
+            ("skillcache.get", "GET", false, 200),
+            ("skillcache.compile", "POST", true, 202),
+            ("skillcache.requalify", "POST", true, 202),
+            ("skillcache.invalidate", "POST", true, 200),
+            ("skillcache.delete", "DELETE", true, 200),
+        ] {
+            let found = route(operation);
+            assert_eq!(
+                (found.method, found.token, found.status),
+                (method, token, status),
+                "{operation}"
+            );
+            assert!(
+                found
+                    .pattern
+                    .starts_with("/api/projects/{project_id}/skillcache/")
+                    || found
+                        .pattern
+                        .starts_with("/api/sessions/{session_id}/skillcache"),
+                "{operation} is nested under its project or session"
+            );
+        }
+        assert_eq!(route("skillcache.list").query, &["skill", "status", "form"]);
+        // A capsule is compiled from an observed turn: there is no route that
+        // compiles "a skill".
+        assert!(
+            !ROUTES.iter().any(|route| route.pattern.contains("/skills/")
+                && route.operation.starts_with("skillcache."))
+        );
+    }
+
+    #[test]
+    fn sse_filter_exempts_skillcache_capsule() {
+        let frame = StreamFrame {
+            seq: 1,
+            event: "skillcache_capsule",
+            session_id: None,
+            project_id: Some("p1".into()),
+            data: json!({"state": "qualified"}),
+        };
+        // A client that follows one session still hears about its project's
+        // capsules; a client of another project does not.
+        assert!(matches_sse_filter(&frame, Some("s1"), Some("p1")));
+        assert!(matches_sse_filter(&frame, Some("s1"), None));
+        assert!(!matches_sse_filter(&frame, Some("s1"), Some("p2")));
     }
 }

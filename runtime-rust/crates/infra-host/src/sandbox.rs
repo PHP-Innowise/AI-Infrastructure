@@ -636,6 +636,23 @@ impl Drop for BoundaryRequest {
     }
 }
 pub fn boundary_request(spec: &Spec) -> Result<BoundaryRequest> {
+    boundary_request_for(spec, original_paths(&spec.protected)?)
+}
+/// As [`boundary_request`], for a caller that names the paths the sandbox must
+/// not read itself. A project of any size can then be checked by its root and
+/// a bounded sample of what lies below it, instead of by every file.
+pub fn boundary_request_for(spec: &Spec, denied: Vec<PathBuf>) -> Result<BoundaryRequest> {
+    boundary_request_with(spec, denied, None)
+}
+/// As [`boundary_request_for`], with the executable that runs the in-sandbox
+/// check named by the caller. A process that embeds this library and cannot
+/// serve `internal-discovery-probe` itself, such as a test binary, names an
+/// engine that can; `None` is this executable's pinned copy.
+pub fn boundary_request_with(
+    spec: &Spec,
+    denied: Vec<PathBuf>,
+    helper: Option<&Path>,
+) -> Result<BoundaryRequest> {
     let workspace = canonical(&spec.workspace)?;
     let evidence = spec
         .evidence
@@ -644,7 +661,7 @@ pub fn boundary_request(spec: &Spec) -> Result<BoundaryRequest> {
     let control = workspace
         .parent()
         .ok_or_else(|| HarnessError::invalid("Discovery control directory is missing."))?;
-    let mut lines = original_paths(&spec.protected)?
+    let mut lines = denied
         .into_iter()
         .map(|p| arg(&p))
         .collect::<Result<Vec<_>>>()?;
@@ -673,7 +690,10 @@ pub fn boundary_request(spec: &Spec) -> Result<BoundaryRequest> {
         allowed,
     };
     let argv = vec![
-        arg(&trusted_helper(&workspace)?)?,
+        match helper {
+            Some(helper) => arg(helper)?,
+            None => arg(&trusted_helper(&workspace)?)?,
+        },
         "internal-discovery-probe".into(),
         arg(&receipt.listing)?,
         arg(&workspace)?,

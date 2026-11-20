@@ -10,6 +10,17 @@ fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let code = match arguments.first().map(String::as_str) {
         Some("internal-guard") => infra_host::process::guard_entry(&arguments[1..]).unwrap_or(1),
+        // What an engine serves for the sandboxes the gates and the compiler use.
+        Some("internal-discovery-probe") => {
+            infra_host::sandbox::probe_entry(&arguments[1..]).unwrap_or(2)
+        }
+        Some("internal-sandbox-child") => {
+            infra_host::sandbox::child_entry(&arguments[1..]).unwrap_or(2)
+        }
+        Some("skillcache") => infra_skillcache::cli::execute(
+            arguments.get(1).map_or("", String::as_str),
+            arguments.get(2..).unwrap_or(&[]),
+        ),
         Some("skillcache-run") => infra_skillcache::cli::execute_run(&arguments[1..]),
         Some("skillcache-tool") => infra_skillcache::cli::execute_tool(&arguments[1..]),
         Some("skillcache-gate1") => infra_skillcache::cli::execute_gate1(&arguments[1..]),

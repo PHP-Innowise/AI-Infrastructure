@@ -151,6 +151,7 @@ const DEFAULT_SSE_EVENTS: &[&str] = &[
     "results_check",
     "graph_status",
     "omnigraph_status",
+    "skillcache_capsule",
     "permission",
     "snapshot",
     "heartbeat",

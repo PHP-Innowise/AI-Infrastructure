@@ -28,6 +28,10 @@ use std::{
 };
 use tokio::net::TcpListener;
 
+/// An engine stand-in: it runs the `skillcache` commands, the sandbox checks
+/// and the fixture programs of the capsules the tests compile.
+const FIXTURE: &str = env!("CARGO_BIN_EXE_infra-harness-skillcache-fixture");
+
 struct StubDomain;
 impl Domain for StubDomain {
     fn execute<'a>(&'a self, _operation: &'a str, _request: Value) -> Reply<'a> {
@@ -56,18 +60,56 @@ impl BlackboardFactory for UnusedSpecial {
     }
 }
 
-/// A provider stand-in: it records its command line and prompt, then prints
-/// the event stream the test wrote for it.
+/// A provider stand-in. As a session's agent it prints the event stream the
+/// test wrote for it. As the SkillCache compiler it prints the answer written
+/// for the round its prompt names, unless it can read the project it must
+/// not see, in which case it says so instead.
 fn scripted(root: &Path, name: &str) -> PathBuf {
-    let program = root.join(format!("fake-{name}"));
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let program = bin.join(format!("fake-{name}"));
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{root}/{name}-arguments.txt\"\ncat > \"{root}/{name}-prompt.txt\"\ncat \"{root}/{name}-events.jsonl\"\n",
-        root = root.display(),
+        r#"#!/bin/sh
+dir=$(dirname "$0")
+prompt=$(cat)
+case "$prompt" in
+  *"You are the SkillCache compiler."*)
+    if [ -r "{project}/invoices/a.txt" ] || ls "{project}" >/dev/null 2>&1; then
+      cat "$dir/compiler-leak.jsonl"
+      exit 0
+    fi
+    round=$(printf '%s\n' "$prompt" | sed -n 's/^Round: \([0-9]*\).*/\1/p' | head -n 1)
+    cat "$dir/compiler-answer-$round.jsonl";;
+  *)
+    printf '%s\n' "$@" > "$dir/{name}-arguments.txt"
+    printf '%s' "$prompt" > "$dir/{name}-prompt.txt"
+    cat "$dir/{name}-events.jsonl";;
+esac
+"#,
+        project = root.join("project").display(),
     );
     fs::write(&program, script).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(root.join(format!("{name}-events.jsonl")), "").unwrap();
+    fs::write(bin.join(format!("{name}-events.jsonl")), "").unwrap();
     program
+}
+
+fn git(folder: &Path, arguments: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(folder)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(arguments)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {arguments:?}");
 }
 
 struct Stand {
@@ -88,11 +130,15 @@ impl Stand {
         let _ = infra_host::process::use_guardian(PathBuf::from(env!(
             "CARGO_BIN_EXE_infra-harness-inbox-fixture"
         )));
-        let dir = tempfile::tempdir().unwrap();
+        // Below the build folder, not `/tmp`: the agent sandbox mounts a
+        // private `/tmp` over whatever a test would put there.
+        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let root = infra_core::fs::canonicalize(dir.path()).unwrap();
         let project = root.join("project");
         let source = root.join("source");
         fs::create_dir_all(project.join(".claude/skills/pdf/scripts")).unwrap();
+        fs::create_dir_all(project.join("invoices")).unwrap();
+        fs::write(project.join("invoices/a.txt"), "Invoice 1\nTotal: 10.00\n").unwrap();
         fs::create_dir_all(&source).unwrap();
         fs::write(
             project.join(".claude/skills/pdf/SKILL.md"),
@@ -104,6 +150,10 @@ impl Stand {
             "print('rows')\n",
         )
         .unwrap();
+        // A checkout: an observed turn snapshots its starting state from it.
+        git(&project, &["init", "-q"]);
+        git(&project, &["add", "-A"]);
+        git(&project, &["commit", "-q", "-m", "base"]);
         let store = SessionStore::open(&root.join("state")).unwrap();
         let project_id = store.register(&project).unwrap()["id"]
             .as_str()
@@ -139,6 +189,7 @@ impl Stand {
             })
             .await;
         let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
+        let skillcache_providers = providers.clone();
         let special = ["creator", "system_run", "system_discovery"]
             .into_iter()
             .map(|name| {
@@ -225,7 +276,14 @@ impl Stand {
         );
         domains.insert(
             "skillcache".into(),
-            Arc::new(SkillCacheDomain::new(store.clone())),
+            Arc::new(
+                SkillCacheDomain::new(
+                    store.clone(),
+                    skillcache_providers,
+                    sessions.shutdown_cancel(),
+                )
+                .with_engine(PathBuf::from(FIXTURE)),
+            ),
         );
         let boot = store.clone();
         let closing = sessions.clone();
@@ -291,7 +349,7 @@ impl Stand {
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(
-            self.root.join(format!("{provider}-events.jsonl")),
+            self.root.join(format!("bin/{provider}-events.jsonl")),
             format!("{lines}\n"),
         )
         .unwrap();
@@ -658,5 +716,641 @@ async fn the_option_is_validated_and_can_change_between_turns() {
         )
         .await;
     assert_eq!(status, 400, "{refused}");
+    stand.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Compilation and the gates. They run for real: the compiler stand-in inside
+// the agent sandbox, the candidate's programs inside the gate sandbox.
+
+fn sandbox_usable() -> bool {
+    cfg!(target_os = "linux")
+        && std::process::Command::new("bwrap")
+            .args([
+                "--unshare-pid",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "true",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+fn runtime() -> String {
+    Path::new(FIXTURE)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// A hybrid answer whose programs are fixture programs: `extract` needs a file
+/// of the task and writes a result, `verify` only reads.
+fn hybrid_answer() -> Value {
+    let program = |id: &str, inputs: Value, outputs: Value, read_only: bool| {
+        json!({
+            "id": id,
+            "description": format!("stage {id}"),
+            "entry": [runtime(), format!("programs/{id}/program.json")],
+            "inputs": inputs,
+            "outputs": outputs,
+            "check": [runtime(), format!("programs/{id}/program.json"), "--check"],
+            "timeout_seconds": 30,
+            "read_only": read_only
+        })
+    };
+    json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "pdf-invoice-rows", "description": "Extract one row per invoice of a folder"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"}]},
+            "capabilities": {"network": "none", "runtimes": [runtime()]},
+            "bindings": [{"name": "input_dir", "type": "path", "origin": "request", "description": "Folder with the invoices"}],
+            "programs": [
+                program("extract", json!(["input_dir"]), json!(["rows_file"]), false),
+                program("verify", json!(["rows_file"]), json!([]), true)
+            ],
+            "steps": [{"kind": "program", "program": "extract"}],
+            "verification": [
+                {"kind": "program", "program": "verify"},
+                {"kind": "inspection", "text": "Open the rows file and confirm one row per invoice."}
+            ]
+        },
+        "files": [
+            {"path": "programs/extract/program.json", "content": json!({
+                "result": {"rows_file": "out/rows.json", "invoices": 1},
+                "require_file": "invoices/a.txt",
+                "write": {"out/rows.json": "[]"}
+            }).to_string()},
+            {"path": "programs/verify/program.json", "content": json!({
+                "result": {"rows": 1}, "require_file": "out/rows.json"
+            }).to_string()}
+        ],
+        "examples": {
+            "bindings": {"input_dir": "invoices-2026/"},
+            "steps": {"0": {"result": {"rows_file": "observed/rows.json"}}}
+        }
+    })
+}
+
+fn textual_answer() -> Value {
+    json!({
+        "form": "textual",
+        "capsule": {
+            "mu": {"name": "pdf-invoice-rows", "description": "Extract one row per invoice of a folder"},
+            "source": {"skills": [{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"}]}
+        },
+        "markdown": "# Extract invoice rows\n\nWhen to use: a request for the rows of a folder of invoices.\n\n## Steps\n\n1. List the invoices of the folder.\n2. Run the skill's extract script on them.\n\n## Verify\n\n1. Confirm one row per invoice.\n"
+    })
+}
+
+impl Stand {
+    /// What the compiler stand-in answers in `round`.
+    fn compiler(&self, round: usize, answer: &Value) {
+        let lines = [
+            json!({"type": "system", "subtype": "init", "session_id": format!("compiler-{round}")}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "",
+                "structured_output": answer, "session_id": format!("compiler-{round}"),
+                "usage": {"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 50},
+                "total_cost_usd": 0.05, "num_turns": 3}),
+        ]
+        .map(|line| line.to_string())
+        .join("\n");
+        fs::write(
+            self.root.join(format!("bin/compiler-answer-{round}.jsonl")),
+            format!("{lines}\n"),
+        )
+        .unwrap();
+        // What the stand-in prints if the sandbox lets it see the project.
+        fs::write(
+            self.root.join("bin/compiler-leak.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": "",
+                    "structured_output": {"form": "leaked", "capsule": {}}, "session_id": "leak"})
+            ),
+        )
+        .unwrap();
+    }
+    /// An observed turn with the `pdf` skill; returns the session and its launch.
+    async fn observed(&self) -> (String, String) {
+        self.script("claude", &skill_turn(&self.project()));
+        let sid = self
+            .turn(
+                "Extract the rows of invoices-2026/",
+                json!({"mode": "observe"}),
+            )
+            .await;
+        let generation = self.skillcache_events(&sid)[0]["generation"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (sid, generation)
+    }
+    async fn start_compile(&self, sid: &str, generation: &str) -> (String, String) {
+        let (status, queued) = self
+            .http(
+                Method::POST,
+                &format!("/api/sessions/{sid}/skillcache/compile"),
+                Some(json!({"generation": generation})),
+            )
+            .await;
+        assert_eq!(status, 202, "{queued}");
+        assert_eq!(queued["status"], "queued");
+        (
+            queued["compile_id"].as_str().unwrap().to_string(),
+            queued["capsule_id"].as_str().unwrap().to_string(),
+        )
+    }
+    async fn capsule(&self, capsule_id: &str) -> Value {
+        let (status, capsule) = self
+            .http(
+                Method::GET,
+                &format!(
+                    "/api/projects/{}/skillcache/capsules/{capsule_id}",
+                    self.project_id
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{capsule}");
+        capsule
+    }
+    /// Waits until the capsule is no longer in `status`.
+    async fn settled(&self, capsule_id: &str, status: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let capsule = self.capsule(capsule_id).await;
+            let compiling = capsule["compile"]["status"] == "queued"
+                || capsule["compile"]["status"] == "running";
+            if capsule["status"] != status && !compiling {
+                return capsule;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the capsule stayed {status}: {capsule}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    fn count(&self, sql: &str) -> i64 {
+        self.store
+            .connection()
+            .unwrap()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+}
+
+fn gate_summary(capsule: &Value) -> Vec<String> {
+    capsule["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|gate| {
+            format!(
+                "{}:{}:{}",
+                gate["round"],
+                gate["gate"].as_str().unwrap(),
+                if gate["passed"] == true {
+                    "pass"
+                } else {
+                    "fail"
+                }
+            )
+        })
+        .collect()
+}
+fn violation_codes(capsule: &Value, round: i64, gate: &str) -> Vec<String> {
+    capsule["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["round"] == round && row["gate"] == gate)
+        .flat_map(|row| {
+            row["report"]["violations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .map(|violation| violation["code"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_observed_turn_compiles_into_a_qualified_capsule() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed().await;
+    let launches = stand.count("SELECT COUNT(*) FROM launches");
+    stand.compiler(1, &hybrid_answer());
+    let (compile_id, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(capsule["form"], "hybrid");
+    assert_eq!(capsule["mu"]["name"], "pdf-invoice-rows");
+    assert_eq!(capsule["skill_name"], "pdf");
+    assert_eq!(capsule["skill_path"], ".claude/skills/pdf/SKILL.md");
+    // One round: all three gates, none of them with a model.
+    assert_eq!(
+        gate_summary(&capsule),
+        ["1:gate1:pass", "1:gate2:pass", "1:gate3:pass"]
+    );
+    let replay = &capsule["gates"][2]["report"];
+    assert_eq!(replay["completed"], json!([0, 1, 2]), "{replay}");
+    assert_eq!(replay["substituted"], json!([]));
+    assert_eq!(replay["network"], "none");
+    // The plan is shown; the programs' sources and the observed values are not.
+    assert_eq!(capsule["capsule"]["steps"][0]["program"], "extract");
+    assert_eq!(capsule["capsule"]["source"]["skills"][0]["name"], "pdf");
+    assert_eq!(capsule["files"].as_array().unwrap().len(), 2);
+    let shown = capsule.to_string();
+    assert!(
+        !shown.contains("invoices-2026/") && !shown.contains("observed/rows.json"),
+        "{shown}"
+    );
+    assert!(capsule.get("artifact_dir").is_none());
+    // The compilation is accounted apart from the session's turns:
+    // history_excludes_compiles.
+    assert_eq!(capsule["compile"]["compile_id"], compile_id.as_str());
+    assert_eq!(capsule["compile"]["status"], "completed");
+    assert_eq!(capsule["compile"]["rounds"], 1);
+    assert_eq!(capsule["compile"]["usage"]["input_tokens"], 1000);
+    assert_eq!(capsule["compile"]["usage"]["cost_usd"], 0.05);
+    assert!(capsule["compile"]["usage"]["cache_creation_input_tokens"].is_null());
+    assert_eq!(
+        capsule["compile"]["receipt"]["rounds"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(stand.count("SELECT COUNT(*) FROM launches"), launches);
+    // The warm package holds no observed value; the replay left the real
+    // workspace alone and its folders are gone.
+    let state = stand.root.join("state/skillcache");
+    let warm = state.join(format!("capsules/{}/{capsule_id}/1/warm", stand.project_id));
+    let files = infra_skillcache::fingerprint::stat_tree(&warm)
+        .unwrap()
+        .into_iter()
+        .map(|file| file.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        files,
+        [
+            "capsule.json",
+            "programs/extract/program.json",
+            "programs/verify/program.json"
+        ]
+    );
+    for file in &files {
+        let text = fs::read_to_string(warm.join(file)).unwrap();
+        assert!(!text.contains("invoices-2026/") && !text.contains("observed/rows.json"));
+    }
+    assert!(
+        state
+            .join(format!("qualification/{capsule_id}/1/examples.json"))
+            .is_file()
+    );
+    assert!(!stand.project().join("out/rows.json").exists());
+    assert!(!state.join("compile").join(&compile_id).exists());
+    // The session and the project both list it.
+    let (_, listed) = stand
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/skillcache"),
+            None,
+        )
+        .await;
+    assert_eq!(listed["traces"][0]["replayable"], true);
+    assert_eq!(listed["traces"][0]["compiling"], false);
+    assert_eq!(listed["compiles"][0]["status"], "completed");
+    assert_eq!(listed["capsules"][0]["capsule_id"], capsule_id.as_str());
+    let (_, project) = stand
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/skillcache/capsules?status=active&form=hybrid&skill=pdf",
+                stand.project_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(
+        project["capsules"].as_array().unwrap().len(),
+        1,
+        "{project}"
+    );
+    let (_, none) = stand
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/skillcache/capsules?form=textual",
+                stand.project_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(none["capsules"], json!([]));
+    // Requests outside the contract.
+    let (status, _) = stand
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/skillcache/compile"),
+            Some(json!({"generation": "no-such-launch"})),
+        )
+        .await;
+    assert_eq!(status, 404);
+    let (status, _) = stand
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/skillcache/compile"),
+            Some(json!({"skill": "pdf"})),
+        )
+        .await;
+    assert_eq!(
+        status, 400,
+        "a capsule is compiled from an observed turn, not from a skill name"
+    );
+    let (status, _) = stand
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{sid}/skillcache/compile"),
+            Some(json!({"generation": generation, "compiler": {"provider": "codex"}})),
+        )
+        .await;
+    assert_eq!(status, 400);
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compile_rounds_then_textual_then_source() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed().await;
+    // Round 1 fails Gate 1: a program reads a value nothing defines.
+    let mut first = hybrid_answer();
+    first["capsule"]["programs"][0]["inputs"] = json!(["input_dir", "nowhere"]);
+    stand.compiler(1, &first);
+    // Round 2 fails Gate 2: a program's own check exits non-zero.
+    let mut second = hybrid_answer();
+    second["files"][0]["content"] = json!({"result": {"rows_file": "x"}, "check_exit": 1})
+        .to_string()
+        .into();
+    stand.compiler(2, &second);
+    // Round 3 fails Gate 3 twice over: one program fails, and the read-only
+    // verification program writes. One replay reports both.
+    let mut third = hybrid_answer();
+    third["files"][0]["content"] = json!({"exit": 3, "stderr": "extract cannot parse the invoice"})
+        .to_string()
+        .into();
+    third["files"][1]["content"] = json!({"result": {"rows": 1}, "write": {"verified.txt": "x"}})
+        .to_string()
+        .into();
+    stand.compiler(3, &third);
+    stand.compiler(4, &textual_answer());
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(capsule["form"], "textual");
+    assert_eq!(
+        gate_summary(&capsule),
+        [
+            "1:gate1:fail",
+            "2:gate1:pass",
+            "2:gate2:fail",
+            "3:gate1:pass",
+            "3:gate2:pass",
+            "3:gate3:fail",
+            "4:gate1t:pass"
+        ]
+    );
+    assert_eq!(violation_codes(&capsule, 1, "gate1"), ["dangling_input"]);
+    assert_eq!(violation_codes(&capsule, 2, "gate2"), ["check_failed"]);
+    // gate3_substitutes_examples_and_collects_downstream, through the Harness.
+    assert_eq!(
+        violation_codes(&capsule, 3, "gate3"),
+        ["nonzero_exit", "read_only_violation"]
+    );
+    let replay = capsule["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["gate"] == "gate3")
+        .unwrap();
+    assert_eq!(replay["report"]["substituted"], json!([0, 1]));
+    assert!(
+        replay["report"]["violations"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("extract cannot parse the invoice")
+    );
+    assert_eq!(capsule["compile"]["rounds"], 4);
+    assert_eq!(capsule["compile"]["usage"]["input_tokens"], 4000);
+    assert!(
+        capsule["compile"]["outcome"]
+            .as_str()
+            .unwrap()
+            .contains("written procedure")
+    );
+    assert!(
+        capsule["markdown"]
+            .as_str()
+            .unwrap()
+            .starts_with("# Extract invoice rows")
+    );
+    assert!(capsule["capsule"].get("programs").is_none());
+    let warm = stand.root.join(format!(
+        "state/skillcache/capsules/{}/{capsule_id}/1/warm",
+        stand.project_id
+    ));
+    assert!(warm.join("capsule.md").is_file() && !warm.join("programs").exists());
+    // When the textual form is refused as well, nothing is compiled: the
+    // skill is used as it is.
+    let mut bad = textual_answer();
+    bad["markdown"] = "No steps here.".into();
+    stand.compiler(4, &bad);
+    let (compile_id, failed_id) = stand.start_compile(&sid, &generation).await;
+    let failed = stand.settled(&failed_id, "compiling").await;
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["compile"]["status"], "failed");
+    assert_eq!(failed["compile"]["compile_id"], compile_id.as_str());
+    assert!(
+        failed["reason"]
+            .as_str()
+            .unwrap()
+            .contains("No form qualified")
+    );
+    assert_eq!(
+        violation_codes(&failed, 4, "gate1t"),
+        ["invalid_markdown", "invalid_markdown"]
+    );
+    assert!(failed["capsule"].is_null());
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_capsule_is_invalidated_requalified_goes_stale_and_is_deleted() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed().await;
+    stand.compiler(1, &hybrid_answer());
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    assert_eq!(
+        stand.settled(&capsule_id, "compiling").await["status"],
+        "active"
+    );
+    let route = format!(
+        "/api/projects/{}/skillcache/capsules/{capsule_id}",
+        stand.project_id
+    );
+    // A person takes it out of use; the gates alone bring it back.
+    let (status, invalidated) = stand
+        .http(
+            Method::POST,
+            &format!("{route}/invalidate"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "{invalidated}");
+    assert_eq!(invalidated["status"], "stale");
+    let (status, queued) = stand
+        .http(Method::POST, &format!("{route}/requalify"), Some(json!({})))
+        .await;
+    assert_eq!(status, 202, "{queued}");
+    let capsule = stand.settled(&capsule_id, "stale").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(
+        gate_summary(&capsule)[3..],
+        ["2:gate1:pass", "2:gate2:pass", "2:gate3:pass"]
+    );
+    assert_eq!(
+        capsule["compile"]["rounds"], 1,
+        "a requalification calls no model"
+    );
+    // fingerprint_detects_script_change, as a person sees it: any file of the
+    // skill, not only its entry document.
+    fs::write(
+        stand
+            .project()
+            .join(".claude/skills/pdf/scripts/extract.py"),
+        "print('changed')\n",
+    )
+    .unwrap();
+    let stale = stand.capsule(&capsule_id).await;
+    assert_eq!(stale["status"], "stale");
+    assert!(
+        stale["reason"].as_str().unwrap().contains("`pdf` changed"),
+        "{stale}"
+    );
+    // A changed skill is not requalified: its capsule describes the old one.
+    let (status, _) = stand
+        .http(Method::POST, &format!("{route}/requalify"), Some(json!({})))
+        .await;
+    assert_eq!(status, 202);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let refused = loop {
+        let capsule = stand.capsule(&capsule_id).await;
+        if capsule["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Observe a new turn"))
+        {
+            break capsule;
+        }
+        assert!(Instant::now() < deadline, "{capsule}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(refused["status"], "stale");
+    // Deleting it removes its files, its trace and its snapshot.
+    let state = stand.root.join("state/skillcache");
+    assert!(state.join("snapshots").join(&generation).is_dir());
+    let (status, deleted) = stand.http(Method::DELETE, &route, None).await;
+    assert_eq!(status, 200, "{deleted}");
+    assert!(
+        !state
+            .join(format!("capsules/{}/{capsule_id}", stand.project_id))
+            .exists()
+    );
+    assert!(!state.join(format!("qualification/{capsule_id}")).exists());
+    assert!(!state.join("snapshots").join(&generation).exists());
+    assert!(stand.traces().is_empty());
+    assert_eq!(stand.count("SELECT COUNT(*) FROM skillcache_capsules"), 0);
+    assert_eq!(stand.count("SELECT COUNT(*) FROM skillcache_gates"), 0);
+    let (status, _) = stand.http(Method::GET, &route, None).await;
+    assert_eq!(status, 404);
+    // A capsule of another project is not reachable through this one.
+    let (status, _) = stand
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/skillcache/capsules/unknown",
+                stand.project_id
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(status, 404);
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changing_routes_need_the_token() {
+    let stand = Stand::new().await;
+    for (method, path) in [
+        (
+            Method::POST,
+            "/api/sessions/s/skillcache/compile".to_string(),
+        ),
+        (
+            Method::POST,
+            format!(
+                "/api/projects/{}/skillcache/capsules/c/requalify",
+                stand.project_id
+            ),
+        ),
+        (
+            Method::POST,
+            format!(
+                "/api/projects/{}/skillcache/capsules/c/invalidate",
+                stand.project_id
+            ),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/projects/{}/skillcache/capsules/c", stand.project_id),
+        ),
+    ] {
+        let response = stand
+            .client
+            .request(
+                method.clone(),
+                format!("http://127.0.0.1:{}{path}", stand.port),
+            )
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 403, "{method} {path}");
+    }
     stand.close().await;
 }

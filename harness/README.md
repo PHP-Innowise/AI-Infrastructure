@@ -506,13 +506,100 @@ What a kept trace is:
   and a trace is dropped after thirty days.
 
 Each skill the turn used is recorded with the digest of every file of its
-folder, so a later compile can tell that the skill has changed since.
-`GET /api/sessions/{session_id}/skillcache` lists a session's mode and its kept
-traces without their steps.
+folder, so a later compile can tell that the skill has changed since. When the
+workspace is a Git checkout, an observed turn also records the state it started
+from: a tree written through a private index into a private object folder under
+the Harness state. The project's own repository is read and never written.
+`GET /api/sessions/{session_id}/skillcache` lists a session's mode, its kept
+traces without their steps, and what was compiled from them.
 
-The pieces a capsule is made of are in the engine already and can be tried by
-hand: `infra-engine skillcache --help` describes the plan executor
-(`skillcache-run`), the program tool (`skillcache-tool`) and the structural gate.
+#### Compiling a trace into a capsule
+
+Compilation is an explicit action on one observed turn; nothing compiles on its
+own:
+
+```text
+POST /api/sessions/{session_id}/skillcache/compile
+{"generation": "<the observed turn>", "compiler": {"provider": "claude", "model": null}}
+```
+
+There is no "compile this skill" request: without an observed turn there is no
+trace to compile from. The request answers `202` and the work runs in its own
+queue, one compilation at a time, outside the session queue.
+
+The **compiler** is a Claude Code launch in the same operating-system sandbox as
+AI discovery, started read-only with the shell, every editing tool, the network
+tools and the skill loader switched off. It is given the request, a compact view
+of the redacted trace, a copy of the skill's files and its instructions; the
+project, its Git folder and the observed values of other capsules are not in its
+sandbox, and the same sandbox is checked for that before the compiler starts. It
+returns one structured answer and the Harness writes every file. Claude is the
+only compiler in this version because it is the only CLI that can be started
+with no shell at all; the session being compiled may be any provider's.
+
+Three **gates** then check the candidate, none of them with a model:
+
+| Gate | Where | Passes when |
+| --- | --- | --- |
+| 1 | in the Harness | the capsule's structure and dataflow hold: every program runs in exactly one step, every input is a binding, an earlier output or a value an earlier instruction produces, outputs are only what later programs read, verification programs are read-only, commands name package files and declared runtimes, and no observed value, file content or secret is in it |
+| 2 | a fresh sandbox, no network, no task file | every program's own `check` answers by the program contract |
+| 3 | a fresh copy of the task, the network only if the capsule declares it | the whole plan replays through `skillcache-run` with the observed values answering for the agent |
+
+Gate 3's copy is the turn's starting state checked out of its snapshot, plus the
+workspace's Git-ignored files (installed dependencies, build output) as they are
+at that moment, up to 1 GiB and 100,000 files. The replay never touches the real
+workspace. A failed program does not end the replay: its observed output stands
+in and the replay goes on, so one pass reports every failure; a program declared
+read-only that changes the copy fails too. A turn whose workspace is not a Git
+checkout has no snapshot and cannot be compiled.
+
+The gates run in a minimal root: the operating system's runtime, the package
+and the task copy. That is deliberately stricter than a session, so a program
+that needs a tool installed under your home folder is refused here with
+`sandbox_denied` rather than failing later. Compilation and Gates 2 and 3 need
+bubblewrap on Linux, `sandbox-exec` on macOS and an elevated Codex sandbox on
+Windows; without one nothing is qualified. There is no unconfined fallback.
+
+A refused candidate goes back to the compiler with every violation of that
+round, for up to three hybrid attempts. Then the compiler is asked for the
+**textual form**: a shorter written procedure that the agent reads instead of
+the skill, checked for shape, size, secrets and observed values (Gates 2 and 3
+do not apply: nothing of it is executed). If that is refused as well, nothing
+is compiled and the skill is used as it is.
+
+A compilation is not a turn of the session. It never appears in the session's
+launch history; its rounds, outcome and whatever usage the provider reported are
+kept in `skillcache_compiles` and shown with the capsule. A field no round
+reported stays empty; it is not shown as zero.
+
+#### Capsules
+
+| Request | What it does |
+| --- | --- |
+| `GET /api/projects/{project_id}/skillcache/capsules?skill=&status=&form=` | lists a project's capsules |
+| `GET /api/projects/{project_id}/skillcache/capsules/{capsule_id}` | the plan (`mu`, bindings, programs, steps, verification), every gate report of every round, the compilation and its usage; never the programs' sources or the observed values |
+| `POST .../capsules/{capsule_id}/requalify` | runs the gates again over the stored package: no model, the same observed values, a fresh copy of the task |
+| `POST .../capsules/{capsule_id}/invalidate` | takes an active capsule out of use until it is requalified |
+| `DELETE .../capsules/{capsule_id}` | removes the capsule, its package, its observed values, and the trace and snapshot it was compiled from |
+
+A capsule is `active` only while it still matches what it was qualified with.
+It becomes `stale` when any file of its skill's folder changes (not only
+`SKILL.md`: scripts, references and assets count), when the engine or a runtime
+its programs use changes, when the compiler's instructions change, or when its
+package is no longer what was written. An engine update therefore makes every
+capsule stale until it is requalified, which costs no model call. A capsule
+whose skill changed is not requalified: it describes the old skill, so a new
+turn has to be observed and compiled.
+
+Artifacts live under the Harness state: `skillcache/capsules/<project>/<capsule>/1/warm/`
+is the read-only package a session would mount, without any observed value, and
+`skillcache/qualification/<capsule>/1/examples.json` holds the observed values
+for Gate 3 alone. Capsule progress is published as `skillcache_capsule` events
+on the project's event stream.
+
+The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
+--help` describes the plan executor (`skillcache-run`), the program tool
+(`skillcache-tool`) and the structural gate.
 
 ### Starting the server
 

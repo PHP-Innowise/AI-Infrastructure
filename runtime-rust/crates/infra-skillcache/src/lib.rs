@@ -11,6 +11,7 @@
 //! instructions ([`compile_rules`]), the plan executor ([`executor`], its
 //! [`state`]) and the program tool ([`tool`], [`env_filter`]) with their
 //! command lines ([`cli`]), and the observed trace of a cold run ([`trace`]).
+pub mod candidate;
 pub mod capsule;
 pub mod cli;
 pub mod compile_rules;

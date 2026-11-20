@@ -29,6 +29,14 @@ path = "tests/support/browser_e2e_fixture.rs"
 test = false
 bench = false
 
+# An engine stand-in for SkillCache gates and compilations: the fixture of the
+# infra-skillcache crate, built here so that this crate's tests can name it.
+[[bin]]
+name = "infra-harness-skillcache-fixture"
+path = "../infra-skillcache/tests/support/program_fixture.rs"
+test = false
+bench = false
+
 [[bin]]
 name = "infra-harness-ab"
 path = "tools/session_ab/main.rs"

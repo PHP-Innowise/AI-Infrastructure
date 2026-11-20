@@ -301,7 +301,11 @@ impl ServicesFactory for NativeFactory {
             domains.insert("omnigraph".into(), omnigraph_domain);
             domains.insert(
                 "skillcache".into(),
-                Arc::new(crate::skillcache::SkillCacheDomain::new(store.clone())),
+                Arc::new(crate::skillcache::SkillCacheDomain::new(
+                    store.clone(),
+                    providers.clone(),
+                    sessions.shutdown_cancel(),
+                )),
             );
             let mut overrides: BTreeMap<String, Arc<dyn Domain>> = BTreeMap::new();
             overrides.insert("context.project".into(), knowledge.clone());

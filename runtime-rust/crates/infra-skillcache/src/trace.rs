@@ -112,6 +112,73 @@ impl Trace {
     }
 }
 
+/// A text's first `head` and last `tail` bytes, with a marker between them.
+fn shortened(text: &str, head: usize, tail: usize) -> String {
+    if text.len() <= head + tail {
+        return text.to_string();
+    }
+    let mut first = head;
+    while !text.is_char_boundary(first) {
+        first -= 1;
+    }
+    let mut last = text.len() - tail;
+    while !text.is_char_boundary(last) {
+        last += 1;
+    }
+    format!(
+        "{}\n[... {} bytes not shown ...]\n{}",
+        &text[..first],
+        last - first,
+        &text[last..]
+    )
+}
+fn shorten_strings(value: &Value, limit: usize) -> Value {
+    match value {
+        Value::String(text) => Value::String(shortened(text, limit * 2 / 3, limit / 3)),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| shorten_strings(item, limit))
+            .collect(),
+        Value::Object(members) => members
+            .iter()
+            .map(|(key, member)| (key.clone(), shorten_strings(member, limit)))
+            .collect::<Map<_, _>>()
+            .into(),
+        other => other.clone(),
+    }
+}
+
+/// What a compiler reads of a stored trace. A model cannot take megabytes of
+/// tool output, and a recipe does not need them: every result keeps its
+/// beginning and its end, and results shrink further until the whole view
+/// fits `budget` bytes. The order and the pairing of the steps stay as stored.
+pub fn compiler_view(steps: &[Value], budget: usize) -> Value {
+    let mut limit = 6 * 1024;
+    loop {
+        let view = steps
+            .iter()
+            .map(|step| {
+                let mut step = step.clone();
+                if let Some(output) = step["output"].as_str() {
+                    step["output"] = shortened(output, limit * 2 / 3, limit / 3).into();
+                }
+                if let Some(text) = step["text"].as_str() {
+                    step["text"] = shortened(text, 3000, 1000).into();
+                }
+                if step["input"].is_object() || step["input"].is_array() {
+                    step["input"] = shorten_strings(&step["input"], limit.min(2 * 1024));
+                }
+                step
+            })
+            .collect::<Vec<_>>();
+        let size = serde_json::to_vec(&view).map_or(usize::MAX, |bytes| bytes.len());
+        if size <= budget || limit <= 256 {
+            return Value::Array(view);
+        }
+        limit /= 2;
+    }
+}
+
 /// A file reader's line-number gutter (`   12→text` or `   12\ttext`) removed.
 fn unnumbered(text: &str) -> String {
     static GUTTER: OnceLock<Regex> = OnceLock::new();
@@ -837,6 +904,34 @@ mod tests {
             trace.steps.last().unwrap()["output"],
             "[omitted: the trace reached its size limit]"
         );
+    }
+
+    #[test]
+    fn the_compiler_view_fits_its_budget_and_keeps_every_step() {
+        let steps = (0..40)
+            .map(|index| {
+                json!({"index": index, "kind": "tool", "tool": "Bash",
+                    "input": {"command": format!("cat file-{index}"), "content": "c".repeat(9000)},
+                    "output": format!("START-{index} {} END-{index}", "o".repeat(60_000)), "error": false})
+            })
+            .collect::<Vec<_>>();
+        let view = compiler_view(&steps, 64 * 1024);
+        let size = serde_json::to_vec(&view).unwrap().len();
+        assert!(size <= 64 * 1024, "{size}");
+        let view = view.as_array().unwrap();
+        assert_eq!(view.len(), 40);
+        for (index, step) in view.iter().enumerate() {
+            assert_eq!(step["index"], index);
+            assert_eq!(step["input"]["command"], format!("cat file-{index}"));
+            let output = step["output"].as_str().unwrap();
+            // The beginning and the end of a result are what a recipe needs.
+            assert!(output.starts_with(&format!("START-{index} ")), "{output}");
+            assert!(output.ends_with(&format!(" END-{index}")), "{output}");
+            assert!(output.contains("bytes not shown"));
+        }
+        // A small trace is passed as it is.
+        let small = vec![json!({"index": 0, "kind": "message", "text": "Done."})];
+        assert_eq!(compiler_view(&small, 64 * 1024), Value::Array(small));
     }
 
     #[test]

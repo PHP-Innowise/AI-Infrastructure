@@ -2123,6 +2123,19 @@ impl Sessions {
             }),
             None => Arc::new(binding.clone()),
         };
+        if recorder.is_some() {
+            // A capsule compiled from this turn is replayed on the workspace
+            // as it is now, before the turn changes it.
+            let (state, root, generation) = (
+                self.store.state.clone(),
+                workspace.clone(),
+                job.generation.clone(),
+            );
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::skillcache::snapshot::take(&state, &root, &generation)
+            })
+            .await;
+        }
         let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
         let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
         let workspace_for_stream = workspace.clone();
@@ -2301,6 +2314,7 @@ impl Sessions {
         );
         let redactor = crate::skillcache::trace::SessionRedactor::new(turn.workspace, launched);
         let Some(trace) = recorder.finish(&redactor) else {
+            let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
             return;
         };
         let event = crate::skillcache::trace::save(&self.store, turn, trace, &redactor)
@@ -2312,6 +2326,18 @@ impl Sessions {
                     "text": format!("SkillCache could not keep this turn's trace: {error}"),
                 })
             });
+        // A snapshot lives exactly as long as the trace it belongs to.
+        if event["phase"] == "observed" {
+            let kept = self
+                .store
+                .connection()
+                .and_then(|db| crate::skillcache::db::trace_generations(&db));
+            if let Ok(kept) = kept {
+                crate::skillcache::snapshot::collect(&self.store.state, &kept);
+            }
+        } else {
+            let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
+        }
         let _ = emit(event);
     }
     pub fn send(&self, sid: &str, prompt: &str, options: &Value) -> Result<Value> {

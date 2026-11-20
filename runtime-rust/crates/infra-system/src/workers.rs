@@ -536,7 +536,10 @@ pub fn probe_failure(stdout: &[u8], code: i32) -> String {
         ),
     }
 }
-fn runtime_profile(
+/// The sandbox of an isolated agent: its CLI and the runtimes it needs
+/// readable, its account state writable, `original` denied, the workspace
+/// writable and the workspace's `evidence/` read-only.
+pub fn runtime_profile(
     executable: &Path,
     original: &[PathBuf],
     workspace: &Path,

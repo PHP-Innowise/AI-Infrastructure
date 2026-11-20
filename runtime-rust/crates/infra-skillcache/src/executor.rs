@@ -108,6 +108,10 @@ fn workspace_listing(root: &Path) -> Option<Vec<(PathBuf, u64, Option<std::time:
         names.sort_by_key(|entry| entry.file_name());
         for entry in names {
             let path = entry.path();
+            // The sandbox's own scratch folder is not the task's.
+            if folder == root && entry.file_name() == ".harness-tmp" {
+                continue;
+            }
             let metadata = std::fs::symlink_metadata(&path).ok()?;
             if metadata.is_dir() && !infra_core::fs::linked(&metadata) {
                 folders.push(path.clone());

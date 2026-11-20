@@ -343,6 +343,12 @@ impl SessionStore {
         crate::inbox::recover(&restart)?;
         crate::skillcache::db::recover(&restart)?;
         restart.commit()?;
+        // Files of SkillCache that no row owns any more: snapshots of traces
+        // that are gone, and the folders of compilations a restart interrupted.
+        if let Ok(kept) = crate::skillcache::db::trace_generations(&db) {
+            crate::skillcache::snapshot::collect(&state, &kept);
+        }
+        crate::skillcache::compile::clear_workspaces(&state);
         Ok(Self {
             state,
             db: Arc::new(Mutex::new(db)),
