@@ -846,6 +846,19 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     'embedded Whole graph mode restored',
   );
 
+  const selectAppearance = await driver.callFn(() => {
+    const p = document.getElementById('project-switcher');
+    const iso = document.getElementById('session-graph-isolate-depth');
+    return {
+      project: p ? getComputedStyle(p).appearance : '',
+      isolate: iso ? getComputedStyle(iso).appearance : '',
+    };
+  });
+  assert(
+    selectAppearance.project === 'none' && selectAppearance.isolate === 'none',
+    `Expected appearance:none on <select> controls: ${JSON.stringify(selectAppearance)}`,
+  );
+
   // Open full #graph-map modal
   await driver.click('#session-graph-open-full');
   await driver.waitFor(() => {
@@ -960,6 +973,41 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     const selected = document.querySelector('#graph-map-canvas .graph-map-node[data-selected="true"]');
     return Boolean(selected && side && side.textContent.trim().length > 0);
   }, 'node selection & inspector update in #graph-map-side');
+
+  const mapLayoutChecks = await driver.callFn(() => {
+    const side = document.getElementById('graph-map-side');
+    const isoBtn = document.getElementById('graph-map-isolate-toggle');
+    const isoSel = document.getElementById('graph-map-isolate-depth');
+    const btnR = isoBtn?.getBoundingClientRect();
+    const selR = isoSel?.getBoundingClientRect();
+    const cw = side?.clientWidth || 0;
+    const wide = side
+      ? Array.from(side.querySelectorAll('*'))
+          .map((el) => ({
+            tag: el.tagName,
+            cls: el.className,
+            sw: el.scrollWidth,
+            w: el.getBoundingClientRect().width,
+            txt: (el.textContent || '').trim().slice(0, 60),
+          }))
+          .filter((x) => x.sw > cw + 2 || x.w > cw + 2)
+          .slice(0, 8)
+      : [];
+    return {
+      sideScrollW: side?.scrollWidth || 0,
+      sideClientW: cw,
+      isoRowDelta: btnR && selR ? Math.abs(btnR.top - selR.top) : 999,
+      wide,
+    };
+  });
+  assert(
+    mapLayoutChecks.sideScrollW <= mapLayoutChecks.sideClientW + 2,
+    `Expected #graph-map-side without horizontal overflow: ${JSON.stringify(mapLayoutChecks)}`,
+  );
+  assert(
+    mapLayoutChecks.isoRowDelta < 10,
+    `Expected #graph-map Isolate button & hop select on same row: ${JSON.stringify(mapLayoutChecks)}`,
+  );
 
   // Test From -> To path trace using live /graph/map edges (prefer multi-hop path)
   const mapJson = await driver.readLatestFinishedJson('/graph/map');
@@ -1899,9 +1947,17 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   if (mainSel) {
     await driver.click(mainSel);
     await driver.waitFor(
-      (sel) => document.querySelector(sel)?.getAttribute('aria-current') === 'true'
-        && document.getElementById('run-view')?.getAttribute('data-open') === 'true',
-      'switch back to primary session_id with #run-view open before 1280x800 #run-detailed checks',
+      (sel) => {
+        const rv = document.getElementById('run-view');
+        const rvAnims = rv && typeof rv.getAnimations === 'function'
+          ? rv.getAnimations().some((a) => a.playState === 'running')
+          : false;
+        return document.querySelector(sel)?.getAttribute('aria-current') === 'true'
+          && rv?.getAttribute('data-open') === 'true'
+          && rv.getBoundingClientRect().height > 20
+          && !rvAnims;
+      },
+      'switch back to primary session_id with #run-view open and settled before 1280x800 #run-detailed checks',
       10_000,
       mainSel,
     );
@@ -2011,6 +2067,8 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const btn = document.getElementById('menu-toggle');
     return btn && getComputedStyle(btn).display !== 'none';
   }, 'mobile #menu-toggle visible at 390x844');
+  const mobileTitleWidth = await driver.callFn(() => document.getElementById('page-title')?.getBoundingClientRect().width || 0);
+  assert(mobileTitleWidth >= 48, `Expected readable #page-title width >= 48px at 390x844, got ${mobileTitleWidth}`);
 
   await driver.click('#menu-toggle');
   const mobileDrawer = await driver.waitFor(() => {
@@ -2301,6 +2359,18 @@ async function suite7SystemMap(driver, opts) {
     const tabs = Array.from(document.querySelectorAll('#system-map-side [role="tab"][data-action="system-map-side-tab"]'));
     return tabs.length > 0 ? tabs.length : null;
   }, '#system-map-side tabs rendered after node selection', 5_000);
+  const sysSideMetrics = await driver.callFn(() => {
+    const side = document.getElementById('system-map-side');
+    return {
+      width: side?.getBoundingClientRect().width || 0,
+      scrollWidth: side?.scrollWidth || 0,
+      clientWidth: side?.clientWidth || 0,
+    };
+  });
+  assert(
+    sysSideMetrics.width >= 260 && sysSideMetrics.scrollWidth <= sysSideMetrics.clientWidth + 2,
+    `Expected unclipped #system-map-side tabs & >=260px width: ${JSON.stringify(sysSideMetrics)}`,
+  );
   if (sideTabs >= 2) {
     await driver.callFn(() => {
       document.querySelector('#system-map-side [role="tab"][aria-selected="true"]')?.focus();
