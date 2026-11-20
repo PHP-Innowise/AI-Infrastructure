@@ -2234,10 +2234,15 @@ fn a_link_between_two_services_is_bridged_to_the_code_on_both_sides() {
     // billing calls orders without declaring it: its code is the bridge.
     let undeclared = unwrap_json(bridge("billing", "orders", "").unwrap());
     assert_eq!(paths(&undeclared["consumer"]), ["src/InvoiceWorker.php"]);
-    // A contract the link does not hold has no code on either side.
+    // A contract the link does not hold has no code on either side and unverified (null) confidence.
     let other = unwrap_json(bridge("web", "orders", "billing-events-v1").unwrap());
     assert!(other["consumer"]["sites"].as_array().unwrap().is_empty());
     assert!(other["provider"]["sites"].as_array().unwrap().is_empty());
+    assert_eq!(other["confidence"]["total"], 0);
+    assert_eq!(other["confidence"]["declared_sites"], 0);
+    assert_eq!(other["confidence"]["discovered_sites"], 0);
+    assert_eq!(other["confidence"]["status"], "unverified");
+    assert!(other["confidence"]["ratio"].is_null(), "{other}");
     // A link needs two different services.
     assert!(bridge("web", "web", "").is_err());
     assert!(bridge("", "orders", "").is_err());
@@ -2307,4 +2312,90 @@ fn a_link_between_two_services_is_bridged_to_the_code_on_both_sides() {
     assert_eq!(bridged_run["run_id"], "run-empty-cov");
     assert_eq!(bridged_run["run_coverage"]["consumer_opened"], 0);
     assert!(bridged_run["confidence"]["certain_refs"].as_u64().unwrap() >= 1);
+    assert_eq!(bridged_run["confidence"]["status"], "verified");
+
+    // `system_graph.{map, bridge, service_map}` support range normalization cleanly without colliding
+    // with `from`/`to` graph & service endpoints, and reject malformed targets consistently.
+    let ranged_map = unwrap_json(
+        rt.block_on(fx.domain.execute(
+            "system_graph.map",
+            json!({
+                "query": {
+                    "project_id": fx.monorepo_pid,
+                    "from": "web",
+                    "to": "orders",
+                    "path": "1",
+                    "target_from": "HEAD",
+                    "target_to": "HEAD"
+                },
+                "body": {}
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(ranged_map["target"], "range:HEAD..HEAD");
+
+    let ranged_bridge = unwrap_json(
+        rt.block_on(fx.domain.execute(
+            "system_graph.bridge",
+            json!({
+                "query": {
+                    "project_id": fx.monorepo_pid,
+                    "from": "web",
+                    "to": "orders",
+                    "contract": "orders-http-v1",
+                    "target_from": "HEAD",
+                    "target_to": "HEAD"
+                },
+                "body": {}
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(ranged_bridge["target"], "range:HEAD..HEAD");
+
+    let ranged_svc_map = unwrap_json(
+        rt.block_on(fx.domain.execute(
+            "system_graph.service_map",
+            json!({
+                "query": {
+                    "project_id": fx.monorepo_pid,
+                    "service": "orders",
+                    "target_from": "HEAD",
+                    "target_to": "HEAD"
+                },
+                "body": {}
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(ranged_svc_map["service"], "orders");
+
+    for op in [
+        "system_graph.map",
+        "system_graph.bridge",
+        "system_graph.service_map",
+    ] {
+        let bad = rt
+            .block_on(fx.domain.execute(
+                op,
+                json!({
+                    "query": {
+                        "project_id": fx.monorepo_pid,
+                        "service": "orders",
+                        "from": "web",
+                        "to": "orders",
+                        "target": "range:HEAD",
+                        "run_id": "run-empty-cov"
+                    },
+                    "body": {}
+                }),
+            ))
+            .err()
+            .unwrap_or_else(|| panic!("{op} should reject malformed range target"));
+        assert_eq!(
+            bad.status, 400,
+            "{op} should reject malformed range target: {bad}"
+        );
+    }
 }
