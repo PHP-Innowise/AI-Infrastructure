@@ -407,6 +407,8 @@ pub const ROUTES: &[Route] = &[
             "offset",
             "limit",
             "depth",
+            "lod",
+            "min_weight",
         ],
     },
     Route {
@@ -1822,64 +1824,101 @@ fn asset_response(
 }
 
 const MIN_COMPRESS_JSON_BYTES: usize = 1024;
+const BLOCKING_COMPRESS_JSON_BYTES: usize = 16 * 1024;
 
-fn response_with_encoding(
-    status: u16,
-    payload: Payload,
-    encoding: AssetEncoding,
-    head: bool,
-) -> Result<Response<Body>> {
-    let (bytes, content_type, filename, etag, cache, is_json) = match payload {
-        Payload::Json(v) => (
-            serde_json::to_vec(&v)?,
-            "application/json; charset=utf-8".into(),
-            None,
-            None,
-            None,
-            true,
-        ),
+struct EncodedPayloadParts {
+    bytes: Vec<u8>,
+    meta: EncodedResponseMeta,
+}
+
+struct EncodedResponseMeta {
+    content_type: String,
+    filename: Option<String>,
+    etag: Option<String>,
+    cache: Option<String>,
+    is_json: bool,
+}
+
+fn split_payload_bytes(payload: Payload) -> Result<EncodedPayloadParts> {
+    Ok(match payload {
+        Payload::Json(v) => EncodedPayloadParts {
+            bytes: serde_json::to_vec(&v)?,
+            meta: EncodedResponseMeta {
+                content_type: "application/json; charset=utf-8".into(),
+                filename: None,
+                etag: None,
+                cache: None,
+                is_json: true,
+            },
+        },
         Payload::Bytes {
             bytes,
             content_type,
             filename,
             etag,
             cache,
-        } => (bytes, content_type, filename, etag, cache, false),
-    };
-    let (body_bytes, content_encoding): (Vec<u8>, Option<&'static str>) =
-        if is_json && bytes.len() >= MIN_COMPRESS_JSON_BYTES {
-            match encoding {
-                AssetEncoding::Brotli => compress_brotli_quality(&bytes, 4)
-                    .filter(|c| c.len() < bytes.len())
-                    .map_or((bytes, None), |c| (c.to_vec(), Some("br"))),
-                AssetEncoding::Gzip => compress_gzip_level(&bytes, Compression::fast())
-                    .filter(|c| c.len() < bytes.len())
-                    .map_or((bytes, None), |c| (c.to_vec(), Some("gzip"))),
-                AssetEncoding::Identity => (bytes, None),
-            }
-        } else {
-            (bytes, None)
-        };
+        } => EncodedPayloadParts {
+            bytes,
+            meta: EncodedResponseMeta {
+                content_type,
+                filename,
+                etag,
+                cache,
+                is_json: false,
+            },
+        },
+    })
+}
+
+fn should_compress_json(is_json: bool, bytes_len: usize, encoding: AssetEncoding) -> bool {
+    is_json && bytes_len >= MIN_COMPRESS_JSON_BYTES && encoding != AssetEncoding::Identity
+}
+
+fn compress_json_bytes_sync(
+    bytes: Vec<u8>,
+    encoding: AssetEncoding,
+) -> (Vec<u8>, Option<&'static str>) {
+    match encoding {
+        AssetEncoding::Brotli => compress_brotli_quality(&bytes, 4)
+            .filter(|c| c.len() < bytes.len())
+            .map_or((bytes, None), |c| (c.to_vec(), Some("br"))),
+        AssetEncoding::Gzip => compress_gzip_level(&bytes, Compression::fast())
+            .filter(|c| c.len() < bytes.len())
+            .map_or((bytes, None), |c| (c.to_vec(), Some("gzip"))),
+        AssetEncoding::Identity => (bytes, None),
+    }
+}
+
+fn finish_encoded_response(
+    status: u16,
+    body_bytes: Vec<u8>,
+    content_encoding: Option<&'static str>,
+    meta: EncodedResponseMeta,
+    head: bool,
+) -> Result<Response<Body>> {
     let mut out = apply_security_headers(
         Response::builder()
             .status(
                 StatusCode::from_u16(status)
                     .map_err(|_| HarnessError::invalid("Invalid response status."))?,
             )
-            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_TYPE, meta.content_type)
             .header(header::CONTENT_LENGTH, body_bytes.len().to_string())
-            .header(header::CACHE_CONTROL, cache.unwrap_or("no-store".into())),
+            .header(
+                header::CACHE_CONTROL,
+                meta.cache.unwrap_or_else(|| "no-store".into()),
+            ),
     );
-    if is_json {
+    if meta.is_json {
         out = out.header(header::VARY, "Accept-Encoding");
     }
     if let Some(enc) = content_encoding {
         out = out.header(header::CONTENT_ENCODING, enc);
     }
-    if let Some(tag) = etag {
+    if let Some(tag) = meta.etag {
         out = out.header(header::ETAG, tag);
     }
-    if let Some(name) = filename {
+    if let Some(name) = meta.filename {
         let safe = name
             .chars()
             .filter(|c| !c.is_control() && !['"', '\\', '/'].contains(c))
@@ -1904,6 +1943,45 @@ fn response_with_encoding(
         Body::from(body_bytes)
     })
     .map_err(|_| HarnessError::unavailable("Could not construct HTTP response."))
+}
+
+fn response_with_encoding(
+    status: u16,
+    payload: Payload,
+    encoding: AssetEncoding,
+    head: bool,
+) -> Result<Response<Body>> {
+    let parts = split_payload_bytes(payload)?;
+    let (body_bytes, content_encoding) =
+        if should_compress_json(parts.meta.is_json, parts.bytes.len(), encoding) {
+            compress_json_bytes_sync(parts.bytes, encoding)
+        } else {
+            (parts.bytes, None)
+        };
+    finish_encoded_response(status, body_bytes, content_encoding, parts.meta, head)
+}
+
+async fn response_with_encoding_async(
+    status: u16,
+    payload: Payload,
+    encoding: AssetEncoding,
+    head: bool,
+) -> Result<Response<Body>> {
+    let parts = split_payload_bytes(payload)?;
+    let (body_bytes, content_encoding) =
+        if should_compress_json(parts.meta.is_json, parts.bytes.len(), encoding) {
+            if parts.bytes.len() >= BLOCKING_COMPRESS_JSON_BYTES {
+                let bytes = parts.bytes;
+                tokio::task::spawn_blocking(move || compress_json_bytes_sync(bytes, encoding))
+                    .await
+                    .map_err(|_| HarnessError::unavailable("Compression worker failed."))?
+            } else {
+                compress_json_bytes_sync(parts.bytes, encoding)
+            }
+        } else {
+            (parts.bytes, None)
+        };
+    finish_encoded_response(status, body_bytes, content_encoding, parts.meta, head)
 }
 const SSE_HANDOFF_HEADER: &str = "x-harness-sse-handoff";
 
@@ -2994,7 +3072,7 @@ async fn serve(
     } else {
         route.status
     };
-    response_with_encoding(status, payload, encoding, head)
+    response_with_encoding_async(status, payload, encoding, head).await
 }
 pub async fn serve_listener(listener: tokio::net::TcpListener, app: App) -> Result<()> {
     let mut shutdown = app.shutdown.subscribe();
@@ -3352,5 +3430,68 @@ mod tests {
         };
         assert!(matches_sse_filter(&sys, Some("s1"), Some("p1")));
         assert!(!matches_sse_filter(&sys, Some("s1"), Some("p2")));
+
+        // Verify `graph.map` advertises `lod` & `min_weight` while `system_graph.service_map` does not.
+        let gmap = ROUTES.iter().find(|r| r.operation == "graph.map").unwrap();
+        assert!(gmap.query.contains(&"lod"));
+        assert!(gmap.query.contains(&"min_weight"));
+        let smap = ROUTES
+            .iter()
+            .find(|r| r.operation == "system_graph.service_map")
+            .unwrap();
+        assert!(!smap.query.contains(&"lod"));
+        assert!(!smap.query.contains(&"min_weight"));
+
+        // `>= 16 KiB` JSON offloaded to `spawn_blocking` round-trips cleanly via Brotli & Gzip.
+        let huge = json!({
+            "items": (0..600).map(|i| format!("pkg/module_{i:04}/handler.rs")).collect::<Vec<_>>()
+        });
+        let br_async = response_with_encoding_async(
+            200,
+            Payload::Json(huge.clone()),
+            AssetEncoding::Brotli,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            br_async
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("br")
+        );
+        let br_raw = to_bytes(br_async.into_body(), usize::MAX).await.unwrap();
+        let mut br_dec = Vec::new();
+        std::io::Read::read_to_end(
+            &mut brotli::Decompressor::new(br_raw.as_ref(), 4096),
+            &mut br_dec,
+        )
+        .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&br_dec).unwrap(), huge);
+
+        let gz_async = response_with_encoding_async(
+            200,
+            Payload::Json(huge.clone()),
+            AssetEncoding::Gzip,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            gz_async
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip")
+        );
+        let gz_raw = to_bytes(gz_async.into_body(), usize::MAX).await.unwrap();
+        let mut gz_dec = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::GzDecoder::new(gz_raw.as_ref()),
+            &mut gz_dec,
+        )
+        .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&gz_dec).unwrap(), huge);
     }
 }

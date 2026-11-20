@@ -8,14 +8,16 @@
 
 use crate::{
     HarnessError, Result,
+    graph::file_types::{IGNORED_CODE_DIRS, is_excluded_workspace_path, is_scannable_code_path},
     graph_ast::{AstFileExtraction, is_graph_manifest_path, parse_file_ir},
     graph_changes::Resolved,
     graph_crates::CratePackageMap,
     graph_deps::{
         DeclaredMember, DepDiff, DepMemberRef, DepRef, EntityChange, ReexportIndex, access_kind,
         cached_manifests_for_root, diff_entities_from_ir, diff_file_deps_from_ir,
-        extract_file_deps_with_context, find_matching_member_references_with_context,
-        find_matching_references_with_context,
+        extract_file_deps_from_ir, extract_file_deps_with_context,
+        find_matching_member_references_from_ir, find_matching_member_references_with_context,
+        find_matching_references_from_ir, find_matching_references_with_context,
     },
     graph_ir::GraphIrStore,
     graph_live::{GraphFocus, clean_rel_key, folder_of},
@@ -49,24 +51,6 @@ const MAX_CYCLES_REPORTED: usize = 24;
 const MAX_CYCLE_VISITS: usize = 20_000;
 const MAX_EDGE_DIFFS: usize = 500;
 const MAX_AFFECTED_TESTS_REPORTED: usize = 200;
-
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    "target",
-    "node_modules",
-    "vendor",
-    ".next",
-    "dist",
-    "build",
-    "__pycache__",
-    ".venv",
-    ".c2p",
-];
-
-const CODE_EXTENSIONS: &[&str] = &[
-    "php", "phtml", "inc", "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "py", "pyi",
-    "go", "java", "kt", "kts", "cs", "rb", "swift", "scala", "sc",
-];
 
 enum BlobRead {
     Ok(String),
@@ -480,10 +464,16 @@ pub(crate) fn changed_catalog_with_ir(
         }));
     }
 
+    let mut blast_truncated = false;
     if let Some(idx) = index {
-        for path in merged.keys().filter(|p| !is_test_path(p)).take(64) {
-            collect_blast_tests(idx, path, &mut affected_tests);
-        }
+        let non_test_changed: Vec<&str> = merged
+            .keys()
+            .filter(|p| !is_test_path(p))
+            .map(String::as_str)
+            .collect();
+        blast_truncated = non_test_changed.len() > 64;
+        let sample: Vec<&str> = non_test_changed.into_iter().take(64).collect();
+        collect_blast_tests_batch(idx, &sample, false, &mut affected_tests);
     }
 
     for (idx, path, previous_path, mut del_callers) in deleted_entries {
@@ -503,7 +493,7 @@ pub(crate) fn changed_catalog_with_ir(
     }
 
     let edge_diffs = build_edge_diffs_json(added_edges, removed_edges, risk_callers_map);
-    let test_reach = build_test_reach_json(&affected_tests, live_focus, resolved);
+    let test_reach = build_test_reach_json(&affected_tests, live_focus, resolved, blast_truncated);
 
     json!({
         "target": target_label,
@@ -763,9 +753,9 @@ pub(crate) fn file_impact_with_ir(
         .map(|c| c.path.clone())
         .collect();
     if let Some(idx) = index {
-        collect_blast_tests(idx, &rel_path, &mut affected_tests);
+        collect_blast_tests(idx, &rel_path, certain, &mut affected_tests);
     }
-    let test_reach = build_test_reach_json(&affected_tests, live_focus, resolved);
+    let test_reach = build_test_reach_json(&affected_tests, live_focus, resolved, false);
 
     let (uses_added_json, added_vis_warnings) = serialize_uses_deps(&dep_diff.added, true);
     let (uses_removed_json, _) = serialize_uses_deps(&dep_diff.removed, false);
@@ -1076,6 +1066,48 @@ impl<'a> TargetContext<'a> {
             }
         }
         seen.into_iter().collect()
+    }
+
+    fn matching_references_from_ir(
+        &self,
+        caller_path: &str,
+        caller_src: &str,
+        caller_ir: &AstFileExtraction,
+        target_path: &str,
+        target_symbols: &[String],
+    ) -> Vec<String> {
+        find_matching_references_from_ir(
+            caller_path,
+            caller_src,
+            caller_ir,
+            target_path,
+            target_symbols,
+            &self.resolution_files,
+            Some(&self.manifests),
+            Some(&self.reexports),
+            Some(&self.crate_map),
+        )
+    }
+
+    fn matching_member_references_from_ir(
+        &self,
+        caller_path: &str,
+        caller_src: &str,
+        caller_ir: &AstFileExtraction,
+        target_path: &str,
+        target_members: &[DeclaredMember],
+    ) -> Vec<DepMemberRef> {
+        find_matching_member_references_from_ir(
+            caller_path,
+            caller_src,
+            caller_ir,
+            target_path,
+            target_members,
+            &self.resolution_files,
+            Some(&self.manifests),
+            Some(&self.reexports),
+            Some(&self.crate_map),
+        )
     }
 
     fn matching_references(
@@ -3768,6 +3800,7 @@ struct CallerScanIndex {
     priority_paths: Vec<String>,
     retained_sources: HashMap<String, String>,
     dep_cache: RefCell<HashMap<String, (String, Vec<DepRef>)>>,
+    ir_cache: RefCell<HashMap<String, Option<AstFileExtraction>>>,
 }
 
 impl CallerScanIndex {
@@ -3854,6 +3887,7 @@ impl CallerScanIndex {
         let mut scanned_files: Vec<String> = Vec::with_capacity(all_paths.len());
         let mut retained_sources: HashMap<String, String> = HashMap::new();
         let mut dep_cache: HashMap<String, (String, Vec<DepRef>)> = HashMap::new();
+        let mut ir_cache: HashMap<String, Option<AstFileExtraction>> = HashMap::new();
         let mut scanned_bytes = 0usize;
         let mut retained_bytes = 0usize;
         let small_project = all_paths.len() <= MAX_CALLER_SCAN;
@@ -3883,7 +3917,28 @@ impl CallerScanIndex {
             }
 
             if initial_seen.contains(path) || (small_project && dep_cache.len() < MAX_CALLER_SCAN) {
-                let deps = ctx.extract_live_deps_or_parse(path, Some(&src));
+                let deps = if let Some(ir) = ctx.ir()
+                    && let Ok(Some((deps, _))) = ir.file_outgoing_deps_if_fresh(ctx.root, path)
+                {
+                    deps
+                } else {
+                    let parsed = parse_file_ir(path, &src);
+                    let deps = parsed
+                        .as_ref()
+                        .map(|ir| {
+                            extract_file_deps_from_ir(
+                                path,
+                                ir,
+                                &ctx.resolution_files,
+                                Some(&ctx.manifests),
+                                Some(&ctx.reexports),
+                                Some(&ctx.crate_map),
+                            )
+                        })
+                        .unwrap_or_default();
+                    ir_cache.insert(path.clone(), parsed);
+                    deps
+                };
                 dep_cache.insert(path.clone(), (src, deps));
             } else if retained_bytes.saturating_add(src.len()) <= MAX_RETAINED_SOURCE_BYTES {
                 retained_bytes += src.len();
@@ -3897,6 +3952,7 @@ impl CallerScanIndex {
             priority_paths,
             retained_sources,
             dep_cache: RefCell::new(dep_cache),
+            ir_cache: RefCell::new(ir_cache),
         }
     }
 
@@ -4021,6 +4077,7 @@ impl CallerScanIndex {
 
     fn ensure_all_cached(&self, ctx: &TargetContext<'_>, candidates: &[String]) {
         let mut cache = self.dep_cache.borrow_mut();
+        let mut ir_cache = self.ir_cache.borrow_mut();
         for path in candidates {
             if cache.contains_key(path) {
                 continue;
@@ -4031,10 +4088,49 @@ impl CallerScanIndex {
                 .cloned()
                 .or_else(|| ctx.read_after(path).into_opt());
             if let Some(src) = src_opt {
-                let deps = ctx.extract_live_deps_or_parse(path, Some(&src));
+                let deps = if let Some(ir) = ctx.ir()
+                    && let Ok(Some((deps, _))) = ir.file_outgoing_deps_if_fresh(ctx.root, path)
+                {
+                    deps
+                } else {
+                    let parsed = parse_file_ir(path, &src);
+                    let deps = parsed
+                        .as_ref()
+                        .map(|ir| {
+                            extract_file_deps_from_ir(
+                                path,
+                                ir,
+                                &ctx.resolution_files,
+                                Some(&ctx.manifests),
+                                Some(&ctx.reexports),
+                                Some(&ctx.crate_map),
+                            )
+                        })
+                        .unwrap_or_default();
+                    ir_cache.insert(path.clone(), parsed);
+                    deps
+                };
                 cache.insert(path.clone(), (src, deps));
             }
         }
+    }
+
+    fn with_caller_ir<R>(
+        &self,
+        path: &str,
+        src: &str,
+        f: impl FnOnce(Option<&AstFileExtraction>) -> R,
+    ) -> R {
+        {
+            let ir_cache = self.ir_cache.borrow();
+            if let Some(cached) = ir_cache.get(path) {
+                return f(cached.as_ref());
+            }
+        }
+        let parsed = parse_file_ir(path, src);
+        let res = f(parsed.as_ref());
+        self.ir_cache.borrow_mut().insert(path.to_owned(), parsed);
+        res
     }
 
     fn read_source_for(&self, ctx: &TargetContext<'_>, path: &str) -> Option<String> {
@@ -4127,8 +4223,19 @@ fn evaluate_callers_for_file(
                             || previous_path.is_some_and(|old| d.target == old))
                 })
                 .collect();
-            let matched_refs =
-                ctx.matching_references(caller_path, caller_src, rel_path, target_symbols);
+            let matched_refs = scan_index.with_caller_ir(caller_path, caller_src, |ir_opt| {
+                if let Some(caller_ir) = ir_opt {
+                    ctx.matching_references_from_ir(
+                        caller_path,
+                        caller_src,
+                        caller_ir,
+                        rel_path,
+                        target_symbols,
+                    )
+                } else {
+                    ctx.matching_references(caller_path, caller_src, rel_path, target_symbols)
+                }
+            });
             let has_live_edge = !matching_deps.is_empty() || !matched_refs.is_empty();
 
             if let Some(acc) = callers.get_mut(caller_path) {
@@ -4208,8 +4315,19 @@ fn evaluate_callers_for_file(
         if let Some(src) = &acc.source_after
             && !changed_entity_names.is_empty()
         {
-            let matched_changed =
-                ctx.matching_references(&caller_path, src, rel_path, &changed_entity_names);
+            let matched_changed = scan_index.with_caller_ir(&caller_path, src, |ir_opt| {
+                if let Some(caller_ir) = ir_opt {
+                    ctx.matching_references_from_ir(
+                        &caller_path,
+                        src,
+                        caller_ir,
+                        rel_path,
+                        &changed_entity_names,
+                    )
+                } else {
+                    ctx.matching_references(&caller_path, src, rel_path, &changed_entity_names)
+                }
+            });
             acc.symbols.extend(matched_changed);
         }
 
@@ -4237,9 +4355,19 @@ fn evaluate_callers_for_file(
             Some(&ctx.crate_map),
         );
         let mut used_members = match acc.source_after.as_deref() {
-            Some(src) => {
-                ctx.matching_member_references(&caller_path, src, rel_path, declared_members)
-            }
+            Some(src) => scan_index.with_caller_ir(&caller_path, src, |ir_opt| {
+                if let Some(caller_ir) = ir_opt {
+                    ctx.matching_member_references_from_ir(
+                        &caller_path,
+                        src,
+                        caller_ir,
+                        rel_path,
+                        declared_members,
+                    )
+                } else {
+                    ctx.matching_member_references(&caller_path, src, rel_path, declared_members)
+                }
+            }),
             None => Vec::new(),
         };
 
@@ -5105,27 +5233,52 @@ impl ConfidenceAccum {
     }
 }
 
-fn collect_blast_tests(index: &Index, path: &str, out: &mut BTreeSet<String>) {
-    if let Some(blast) = index.blast(path, false)
-        && let Some(listed) = blast["listed"].as_array()
-    {
-        for item in listed {
-            if item["test"] == true
-                && let Some(test_path) = item["path"].as_str().filter(|s| !s.is_empty())
-            {
-                out.insert(test_path.to_owned());
+fn collect_blast_tests(index: &Index, path: &str, certain: bool, out: &mut BTreeSet<String>) {
+    collect_blast_tests_batch(index, &[path], certain, out);
+}
+
+fn collect_blast_tests_batch(
+    index: &Index,
+    paths: &[&str],
+    certain: bool,
+    out: &mut BTreeSet<String>,
+) {
+    for &path in paths {
+        if let Some(blast) = index.blast(path, certain) {
+            if let Some(listed) = blast["listed"].as_array() {
+                for item in listed {
+                    if item["test"] == true
+                        && let Some(test_path) = item["path"].as_str().filter(|s| !s.is_empty())
+                    {
+                        out.insert(test_path.to_owned());
+                    }
+                }
+            }
+            if let Some(marked) = blast["marked"].as_array() {
+                for entry in marked {
+                    if let Some(test_path) = entry
+                        .as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty() && is_test_path(s))
+                    {
+                        out.insert(test_path.to_owned());
+                    }
+                }
             }
         }
     }
+    out.extend(index.collect_tests_for_paths(paths, certain));
 }
 
 fn build_test_reach_json(
     affected_tests: &BTreeSet<String>,
     live_focus: Option<&GraphFocus>,
     resolved: Option<&Resolved>,
+    blast_truncated: bool,
 ) -> Value {
     let total = affected_tests.len();
-    let truncated = total > MAX_AFFECTED_TESTS_REPORTED;
+    let truncated = blast_truncated || total > MAX_AFFECTED_TESTS_REPORTED;
     let listed: Vec<&String> = affected_tests
         .iter()
         .take(MAX_AFFECTED_TESTS_REPORTED)
@@ -5198,18 +5351,6 @@ fn collect_post_revision_modified(root: &Path, rev: &str) -> BTreeSet<String> {
         modified.extend(dirty);
     }
     modified
-}
-
-fn is_excluded_workspace_path(rel: &str) -> bool {
-    let lower = rel.to_ascii_lowercase();
-    if lower == "memory-bank/local" || lower.starts_with("memory-bank/local/") {
-        return true;
-    }
-    if lower.ends_with(".min.js") || lower.ends_with(".min.mjs") || lower.ends_with(".min.cjs") {
-        return true;
-    }
-    rel.split('/')
-        .any(|comp| !comp.is_empty() && SKIP_DIRS.contains(&comp))
 }
 
 fn git_tree_files(root: &Path, rev: &str) -> Option<BTreeSet<String>> {
@@ -5388,7 +5529,7 @@ fn walk_dir_bounded(root: &Path, dir: &Path, depth: usize, out: &mut BTreeSet<St
             continue;
         }
         if meta.is_dir() {
-            if SKIP_DIRS.contains(&name) || name.starts_with('.') {
+            if IGNORED_CODE_DIRS.contains(&name) || name.starts_with('.') {
                 continue;
             }
             if let Ok(rel) = path.strip_prefix(root) {
@@ -5409,12 +5550,7 @@ fn walk_dir_bounded(root: &Path, dir: &Path, depth: usize, out: &mut BTreeSet<St
 }
 
 fn is_scannable_code(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".blade.php") || is_excluded_workspace_path(path) {
-        return false;
-    }
-    path.rsplit_once('.')
-        .is_some_and(|(_, ext)| CODE_EXTENSIONS.iter().any(|k| ext.eq_ignore_ascii_case(k)))
+    is_scannable_code_path(path)
 }
 
 fn file_stem_name(path: &str) -> Option<String> {
@@ -7107,5 +7243,99 @@ mod tests {
                 .is_empty(),
             "expected dirty cycle between src/a.rs and src/b.rs: {cyc_b}"
         );
+    }
+
+    #[test]
+    fn blast_tests_thread_certain_cover_marked_beyond_listed_and_flag_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("src/inline.rs"),
+            "#[test]\nfn inline_suite_runs() {}\n",
+        )
+        .unwrap();
+
+        let mut nodes = vec![json!({
+            "id": "core",
+            "label": "core_fn()",
+            "source_file": "src/core.rs",
+            "source_location": "L1"
+        })];
+        let mut links = Vec::new();
+        for i in 0..14 {
+            let file = format!("src/h{i:02}.rs");
+            std::fs::write(root.join(&file), "pub fn hop() {}\n").unwrap();
+            nodes.push(json!({
+                "id": format!("h{i:02}"),
+                "label": format!("hop{i}()"),
+                "source_file": file,
+                "source_location": "L1"
+            }));
+            links.push(json!({
+                "source": format!("h{i:02}"),
+                "target": "core",
+                "relation": "calls",
+                "confidence": "EXTRACTED"
+            }));
+        }
+        // Place two downstream test files hanging off h13 (which is past the 12-item `listed` slice)
+        // plus `src/inline.rs` calling `core` directly with an inline `#[test]`:
+        std::fs::write(root.join("tests/deep_test.rs"), "#[test]\nfn d() {}\n").unwrap();
+        std::fs::write(
+            root.join("tests/inferred_test.rs"),
+            "#[test]\nfn inf() {}\n",
+        )
+        .unwrap();
+        nodes.push(json!({"id": "inl", "label": "inline_caller()", "source_file": "src/inline.rs", "source_location": "L1"}));
+        nodes.push(json!({"id": "dt", "label": "d()", "source_file": "tests/deep_test.rs", "source_location": "L2"}));
+        nodes.push(json!({"id": "it", "label": "inf()", "source_file": "tests/inferred_test.rs", "source_location": "L2"}));
+        links.push(json!({"source": "inl", "target": "core", "relation": "calls", "confidence": "EXTRACTED"}));
+        links.push(json!({"source": "dt", "target": "h13", "relation": "calls", "confidence": "EXTRACTED"}));
+        links.push(
+            json!({"source": "it", "target": "h13", "relation": "calls", "confidence": "INFERRED"}),
+        );
+
+        let graph_val = json!({"nodes": nodes, "links": links});
+        let idx = Index::read(graph_val.to_string().as_bytes(), root).unwrap();
+
+        let mut certain_tests = BTreeSet::new();
+        collect_blast_tests(&idx, "src/core.rs", true, &mut certain_tests);
+        assert!(
+            certain_tests.contains("tests/deep_test.rs"),
+            "deep marked hop beyond 12-item listed must be included: {certain_tests:?}"
+        );
+        assert!(
+            !certain_tests.contains("tests/inferred_test.rs"),
+            "certain=true must exclude inferred test hop: {certain_tests:?}"
+        );
+        assert!(
+            certain_tests.contains("src/inline.rs"),
+            "inline #[test] file should be discovered: {certain_tests:?}"
+        );
+
+        let mut all_tests = BTreeSet::new();
+        collect_blast_tests(&idx, "src/core.rs", false, &mut all_tests);
+        assert!(
+            all_tests.contains("tests/inferred_test.rs"),
+            "{all_tests:?}"
+        );
+
+        // Over 64 non-test changed files surfaces `blast_truncated: true`.
+        let many_edited: Vec<(String, char)> = (0..66)
+            .map(|i| (format!("src/bulk_{i:02}.rs"), 'M'))
+            .collect();
+        let catalog = changed_catalog_with_ir(
+            root,
+            Some(&idx),
+            None,
+            None,
+            None,
+            &many_edited,
+            "work",
+            false,
+        );
+        assert_eq!(catalog["test_reach"]["truncated"], true, "{catalog}");
     }
 }

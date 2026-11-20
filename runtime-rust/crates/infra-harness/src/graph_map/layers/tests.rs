@@ -2374,3 +2374,94 @@ fn code_classifier_aligns_with_graph_ast_on_blade_templates() {
     assert!(!code("resources/views/home.blade.php"));
     assert!(code("app/Models/Order.php"));
 }
+
+#[test]
+fn skip_layer_remediation_hints_and_compare_declared_layers_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let rules = Rules::parse(
+        r#"{
+            "version": 1,
+            "layers": [
+                {"id": "api", "name": "API", "paths": ["src/api"], "allows": ["service", "repo"]},
+                {"id": "service", "name": "Service", "paths": ["src/service"], "allows": ["repo"]},
+                {"id": "repo", "name": "Repo", "paths": ["src/repo"], "allows": []}
+            ]
+        }"#
+        .as_bytes(),
+    )
+    .unwrap();
+
+    // Forward-index skip from `api` (0) -> `repo` (2) is emitted as `"skip_layer"`,
+    // while reverse `repo` (2) -> `api` (0) under declared rules is emitted as `"declared"`.
+    let base_g = json!({
+        "nodes": [
+            {"id": "api_h", "label": "Api.handle", "source_file": "src/api/Ctrl.php", "source_location": "L2"},
+            {"id": "svc_h", "label": "Svc.run", "source_file": "src/service/Svc.php", "source_location": "L2"},
+            {"id": "repo_h", "label": "Repo.find", "source_file": "src/repo/Repo.php", "source_location": "L2"}
+        ],
+        "links": [
+            {"source": "api_h", "target": "svc_h", "relation": "calls", "confidence": "EXTRACTED"},
+            {"source": "svc_h", "target": "repo_h", "relation": "calls", "confidence": "EXTRACTED"}
+        ]
+    });
+    let head_g = json!({
+        "nodes": [
+            {"id": "api_h", "label": "Api.handle", "source_file": "src/api/Ctrl.php", "source_location": "L2"},
+            {"id": "svc_h", "label": "Svc.run", "source_file": "src/service/Svc.php", "source_location": "L2"},
+            {"id": "repo_h", "label": "Repo.find", "source_file": "src/repo/Repo.php", "source_location": "L2"}
+        ],
+        "links": [
+            {"source": "repo_h", "target": "api_h", "relation": "calls", "confidence": "EXTRACTED"}
+        ]
+    });
+    let base_idx = Index::read(base_g.to_string().as_bytes(), dir.path()).unwrap();
+    let head_idx = Index::read(head_g.to_string().as_bytes(), dir.path()).unwrap();
+    let mut view = head_idx.declared_layers("demo", "", None, false, &rules);
+    head_idx.compare_declared_layers(&base_idx, &mut view, &HashMap::new(), false, &rules);
+    assert_eq!(view["pattern"]["change"]["state"], "ready");
+    assert_eq!(view["pattern"]["change"]["added"]["pairs"], 1);
+    let mut marked = head_idx.view("demo", "", None, false, "");
+    head_idx.mark_architecture(&mut marked, false, Some(&rules));
+    assert_eq!(
+        marked["architecture"]["remediation"][0]["rule_kind"],
+        "declared"
+    );
+
+    let hints = super::layer_remediation_hints(
+        [
+            (
+                true,
+                true,
+                "src/api/Ctrl.php",
+                "src/repo/Repo.php",
+                "API",
+                "Repo",
+                Flow {
+                    links: 2,
+                    guessed: 0,
+                },
+            ),
+            (
+                false,
+                false,
+                "src/repo/Repo.php",
+                "src/api/Ctrl.php",
+                "Repo",
+                "API",
+                Flow {
+                    links: 1,
+                    guessed: 0,
+                },
+            ),
+        ]
+        .into_iter(),
+    );
+    assert_eq!(hints[0]["rule_kind"], "backward");
+    assert_eq!(hints[1]["rule_kind"], "skip_layer");
+    assert!(
+        hints[1]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("port/interface")
+    );
+}

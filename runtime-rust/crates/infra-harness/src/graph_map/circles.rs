@@ -150,6 +150,22 @@ impl Index {
         })
     }
 
+    /// Returns strongly-connected file groups (each sorted by path) for `certain` or all edges.
+    pub(crate) fn scc_groups(&self, certain: bool) -> Vec<Vec<String>> {
+        self.circles(certain)
+            .groups
+            .iter()
+            .map(|group| {
+                let mut paths = group
+                    .iter()
+                    .map(|idx| self.files[*idx as usize].clone())
+                    .collect::<Vec<_>>();
+                paths.sort();
+                paths
+            })
+            .collect()
+    }
+
     /// Says of each file and folder a picture draws whether it is part of
     /// a circle of files, wherever the rest of that circle lies, and of the
     /// picture how many circles the project holds and which touch what is
@@ -227,6 +243,7 @@ impl Index {
             .enumerate()
             .filter(|(_, files)| scope.is_empty() || held(scope, files) > 0)
             .collect::<Vec<_>>();
+        let certain = view["certain"] == true;
         let listed = here
             .iter()
             .take(LISTED)
@@ -246,18 +263,24 @@ impl Index {
                 })
             })
             .collect::<Vec<_>>();
-        let certain = view["certain"] == true;
         let remediation = here
             .iter()
             .take(LISTED)
-            .filter_map(|(_, files)| {
-                let cuts = scc_cut_candidates(self, files, certain);
-                (!cuts.is_empty()).then(|| {
-                    json!({
-                        "files": files.len(),
-                        "cuts": cuts,
-                    })
-                })
+            .filter_map(|(id, files)| {
+                let start = circles.busiest[*id];
+                let (cuts, feedback_arc_cut) = scc_cut_candidates(self, files, certain);
+                if cuts.is_empty() && feedback_arc_cut.is_empty() {
+                    return None;
+                }
+                let mut entry = json!({
+                    "files": files.len(),
+                    "cuts": cuts,
+                    "feedback_arc_cut": feedback_arc_cut,
+                });
+                if let Some(witness) = shortest_witness_cycle(self, files, start, certain) {
+                    entry["witness_cycle"] = witness;
+                }
+                Some(entry)
             })
             .collect::<Vec<_>>();
         view["circles"] = json!({
@@ -268,15 +291,155 @@ impl Index {
             "listed": listed,
         });
         if !remediation.is_empty() {
+            if let Some(first_witness) = remediation.first().and_then(|r| r.get("witness_cycle")) {
+                view["cycle_witness"] = first_witness.clone();
+            }
             view["circle_remediation"] = json!(remediation);
         }
     }
 }
 
-/// Computes minimal feedback-edge cut candidates for one strongly connected component.
-fn scc_cut_candidates(index: &Index, group: &[u32], certain: bool) -> Vec<Value> {
+/// Returns up to 5 concrete symbol/import provenance entries explaining why `from_file -> to_file` exists.
+fn file_pair_provenance(index: &Index, from_file: u32, to_file: u32, certain: bool) -> Vec<Value> {
+    let mut rows: Vec<(u32, String, String, String, bool)> = Vec::new();
+    for sym_idx in index.range(from_file) {
+        for &(_, to_sym, kind_id, guessed) in index.wired(sym_idx, true, certain) {
+            let target_sym = &index.symbols[to_sym as usize];
+            if target_sym.file != to_file {
+                continue;
+            }
+            let relation = index.kinds[kind_id as usize].clone();
+            let from_sym = &index.symbols[sym_idx as usize];
+            rows.push((
+                from_sym.line,
+                index.shown(sym_idx),
+                index.shown(to_sym),
+                relation,
+                guessed,
+            ));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    rows.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3);
+    rows.into_iter()
+        .take(5)
+        .map(|(line, from_symbol, to_symbol, relation, guessed)| {
+            json!({
+                "from_symbol": from_symbol,
+                "to_symbol": to_symbol,
+                "relation": relation,
+                "line": line,
+                "guessed": guessed,
+            })
+        })
+        .collect()
+}
+
+/// Computes the shortest directed cycle starting and ending at `start` inside `group`.
+fn shortest_witness_cycle(
+    index: &Index,
+    group: &[u32],
+    start: u32,
+    certain: bool,
+) -> Option<Value> {
     if group.len() < 2 {
-        return Vec::new();
+        return None;
+    }
+    let pos_of: HashMap<u32, usize> = group
+        .iter()
+        .enumerate()
+        .map(|(idx, &file)| (file, idx))
+        .collect();
+    let &start_pos = pos_of.get(&start)?;
+    let mut adj: Vec<Vec<(usize, u64)>> = vec![Vec::new(); group.len()];
+    let mut edge_weight: HashMap<(usize, usize), u64> = HashMap::new();
+    for &(from, to, ref pair) in &index.pairs {
+        let weight = pair.weight(certain);
+        if weight == 0 || from == to {
+            continue;
+        }
+        if let (Some(&u), Some(&v)) = (pos_of.get(&from), pos_of.get(&to)) {
+            adj[u].push((v, weight));
+            edge_weight.insert((u, v), weight);
+        }
+    }
+    for neighbors in &mut adj {
+        neighbors.sort_by(|a, b| {
+            index.files[group[a.0] as usize].cmp(&index.files[group[b.0] as usize])
+        });
+    }
+
+    let mut parent = vec![usize::MAX; group.len()];
+    let mut visited = vec![false; group.len()];
+    let mut queue = std::collections::VecDeque::new();
+    for &(v, _) in &adj[start_pos] {
+        if !visited[v] {
+            visited[v] = true;
+            parent[v] = start_pos;
+            queue.push_back(v);
+        }
+    }
+    let mut back_from = None;
+    while let Some(u) = queue.pop_front() {
+        for &(v, _) in &adj[u] {
+            if v == start_pos {
+                back_from = Some(u);
+                break;
+            }
+            if !visited[v] {
+                visited[v] = true;
+                parent[v] = u;
+                queue.push_back(v);
+            }
+        }
+        if back_from.is_some() {
+            break;
+        }
+    }
+    let last = back_from?;
+    let mut cycle_positions = Vec::new();
+    let mut cur = last;
+    while cur != start_pos && cur != usize::MAX {
+        cycle_positions.push(cur);
+        cur = parent[cur];
+    }
+    if cur != start_pos {
+        return None;
+    }
+    cycle_positions.push(start_pos);
+    cycle_positions.reverse();
+
+    let mut files: Vec<&str> = cycle_positions
+        .iter()
+        .map(|&p| index.files[group[p] as usize].as_str())
+        .collect();
+    files.push(index.files[start as usize].as_str());
+    let mut edges_json = Vec::with_capacity(cycle_positions.len());
+    for i in 0..cycle_positions.len() {
+        let u = cycle_positions[i];
+        let v = cycle_positions[(i + 1) % cycle_positions.len()];
+        let from_file = group[u];
+        let to_file = group[v];
+        let weight = edge_weight.get(&(u, v)).copied().unwrap_or(1);
+        let provenance = file_pair_provenance(index, from_file, to_file, certain);
+        edges_json.push(json!({
+            "from": index.files[from_file as usize],
+            "to": index.files[to_file as usize],
+            "weight": weight,
+            "provenance": provenance,
+        }));
+    }
+    Some(json!({
+        "length": cycle_positions.len(),
+        "files": files,
+        "edges": edges_json,
+    }))
+}
+
+/// Computes minimal feedback-edge cut candidates + greedy minimal feedback-arc cut with provenance.
+fn scc_cut_candidates(index: &Index, group: &[u32], certain: bool) -> (Vec<Value>, Vec<Value>) {
+    if group.len() < 2 {
+        return (Vec::new(), Vec::new());
     }
     let pos_of: HashMap<u32, usize> = group
         .iter()
@@ -295,67 +458,138 @@ fn scc_cut_candidates(index: &Index, group: &[u32], certain: bool) -> Vec<Value>
         }
     }
     if edges.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let check_breaks = group.len() <= 32 && edges.len() <= 128;
-    let breaks_scc = |skip_idx: usize| -> bool {
+    let breaks_scc = |removed: &[bool]| -> bool {
         if !check_breaks {
             return false;
         }
         let mut adj = vec![Vec::new(); group.len()];
         for (idx, &(u, v, ..)) in edges.iter().enumerate() {
-            if idx != skip_idx {
+            if !removed[idx] {
                 adj[u].push(v as u32);
             }
         }
         let sccs = reaching_each_other(&adj);
         sccs.iter().all(|comp| comp.len() < group.len())
     };
+    let is_acyclic = |removed: &[bool]| -> bool {
+        let mut adj = vec![Vec::new(); group.len()];
+        for (idx, &(u, v, ..)) in edges.iter().enumerate() {
+            if !removed[idx] {
+                adj[u].push(v as u32);
+            }
+        }
+        reaching_each_other(&adj).is_empty()
+    };
 
-    let mut ranked: Vec<(bool, u64, u64, &str, &str)> = edges
+    let mut ranked: Vec<(bool, u64, u64, u32, u32, usize)> = edges
         .iter()
         .enumerate()
         .map(|(idx, &(_, _, from, to, links, guessed))| {
-            (
-                breaks_scc(idx),
-                links,
-                guessed,
-                index.files[from as usize].as_str(),
-                index.files[to as usize].as_str(),
-            )
+            let mut single_removed = vec![false; edges.len()];
+            single_removed[idx] = true;
+            (breaks_scc(&single_removed), links, guessed, from, to, idx)
         })
         .collect();
     ranked.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(a.1.cmp(&b.1))
             .then(a.2.cmp(&b.2))
-            .then(a.3.cmp(b.3))
-            .then(a.4.cmp(b.4))
+            .then(index.files[a.3 as usize].cmp(&index.files[b.3 as usize]))
+            .then(index.files[a.4 as usize].cmp(&index.files[b.4 as usize]))
     });
-    ranked
-        .into_iter()
-        .take(3)
-        .map(|(breaks, links, guessed, from_path, to_path)| {
-            json!({
-                "from": from_path,
-                "to": to_path,
-                "links": links,
-                "weight": links,
-                "guessed": guessed,
-                "breaks_cycle": breaks,
-                "breaks_cycles": breaks,
-                "hint": format!(
-                    "Extract an interface/port from {} or invert {} -> {} ({} link{}) to break this cycle.",
-                    name(to_path),
-                    name(from_path),
-                    name(to_path),
-                    links,
-                    if links == 1 { "" } else { "s" }
-                ),
-            })
+    let mk_cut_json = |breaks: bool, links: u64, guessed: u64, from: u32, to: u32| {
+        let from_path = index.files[from as usize].as_str();
+        let to_path = index.files[to as usize].as_str();
+        let provenance = file_pair_provenance(index, from, to, certain);
+        json!({
+            "from": from_path,
+            "to": to_path,
+            "links": links,
+            "weight": links,
+            "guessed": guessed,
+            "breaks_cycle": breaks,
+            "breaks_cycles": breaks,
+            "provenance": provenance,
+            "hint": format!(
+                "Extract an interface/port from {} or invert {} -> {} ({} link{}) to break this cycle.",
+                name(to_path),
+                name(from_path),
+                name(to_path),
+                links,
+                if links == 1 { "" } else { "s" }
+            ),
         })
-        .collect()
+    };
+
+    let cuts: Vec<Value> = ranked
+        .iter()
+        .take(3)
+        .map(|&(breaks, links, guessed, from, to, _)| mk_cut_json(breaks, links, guessed, from, to))
+        .collect();
+
+    let mut fas_cut = Vec::new();
+    if group.len() <= 64 && edges.len() <= 256 {
+        let mut removed = vec![false; edges.len()];
+        let mut by_weight: Vec<usize> = (0..edges.len()).collect();
+        by_weight.sort_by(|&a, &b| {
+            edges[a]
+                .4
+                .cmp(&edges[b].4)
+                .then(edges[a].5.cmp(&edges[b].5))
+                .then(index.files[edges[a].2 as usize].cmp(&index.files[edges[b].2 as usize]))
+                .then(index.files[edges[a].3 as usize].cmp(&index.files[edges[b].3 as usize]))
+        });
+        while !is_acyclic(&removed) {
+            let mut chosen = None;
+            for &idx in &by_weight {
+                if removed[idx] {
+                    continue;
+                }
+                let &(u, v, ..) = &edges[idx];
+                let mut adj = vec![Vec::new(); group.len()];
+                for (eidx, &(eu, ev, ..)) in edges.iter().enumerate() {
+                    if !removed[eidx] && eidx != idx {
+                        adj[eu].push(ev);
+                    }
+                }
+                let mut seen = vec![false; group.len()];
+                let mut stack = vec![v];
+                seen[v] = true;
+                let mut in_cycle = false;
+                while let Some(cur) = stack.pop() {
+                    if cur == u {
+                        in_cycle = true;
+                        break;
+                    }
+                    for &nxt in &adj[cur] {
+                        if !seen[nxt] {
+                            seen[nxt] = true;
+                            stack.push(nxt);
+                        }
+                    }
+                }
+                if in_cycle {
+                    chosen = Some(idx);
+                    break;
+                }
+            }
+            let Some(idx) = chosen else {
+                break;
+            };
+            removed[idx] = true;
+            let &(_, _, from, to, links, guessed) = &edges[idx];
+            fas_cut.push(mk_cut_json(is_acyclic(&removed), links, guessed, from, to));
+            if fas_cut.len() >= 16 {
+                break;
+            }
+        }
+    }
+
+    (cuts, fas_cut)
 }
 
 #[cfg(test)]
@@ -610,5 +844,12 @@ mod tests {
             cuts[0]["hint"].as_str().unwrap().contains("Break")
                 || cuts[0]["hint"].as_str().unwrap().contains("Extract")
         );
+        assert!(rem[0]["feedback_arc_cut"].is_array());
+        assert!(!rem[0]["feedback_arc_cut"].as_array().unwrap().is_empty());
+        let witness = &rem[0]["witness_cycle"];
+        assert!(witness["length"].as_u64().unwrap() >= 2);
+        let edges = witness["edges"].as_array().unwrap();
+        assert!(!edges.is_empty());
+        assert!(!edges[0]["provenance"].as_array().unwrap().is_empty());
     }
 }
