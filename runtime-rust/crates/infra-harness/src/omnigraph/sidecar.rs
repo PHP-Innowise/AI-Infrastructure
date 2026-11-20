@@ -9,7 +9,10 @@ use super::{
     },
     schema::{
         self, CANONICAL_KNOWLEDGE_BRANCH, GQ_CLEAR_ATOM_SYMBOLS, GQ_CLEAR_BRANCH_CONTEXT,
-        GQ_DELETE_CANONICAL_ATOM, GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM,
+        GQ_CONTEXT_SEARCH_BY_KIND, GQ_COUNT_ATOM_IDS, GQ_COUNT_ATOM_RELATION_IDS,
+        GQ_COUNT_CONSUMED_EDGE_IDS, GQ_COUNT_FILE_EDGE_IDS, GQ_COUNT_PUBLISHED_EDGE_IDS,
+        GQ_COUNT_SESSION_FOLLOW_IDS, GQ_COUNT_SESSION_IDS, GQ_COUNT_SYMBOL_EDGE_IDS,
+        GQ_COUNT_SYMBOL_IDS, GQ_DELETE_CANONICAL_ATOM, GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM,
         GQ_LINK_MENTIONS_SYMBOL, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO, GQ_LINK_SESSION_FOLLOWS,
         GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS, GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES,
         GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSION_FOLLOWS,
@@ -33,13 +36,17 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::{Cursor, Read},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    io::{BufRead, BufReader, Cursor, Read},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
@@ -48,6 +55,10 @@ const CONFIG_FILE_NAME: &str = "omnigraph.json";
 const MAX_TARBALL_BYTES: usize = 512 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_FILES: usize = 64;
+const STDERR_RING_MAX_LINES: usize = 128;
+const STDERR_RING_MAX_BYTES: usize = 32 * 1024;
+const STDERR_LINE_MAX_CHARS: usize = 512;
+const STATS_CACHE_TTL: Duration = Duration::from_secs(10);
 const VALID_ATOM_KINDS: &[&str] = &[
     "finding", "decision", "warning", "contract", "insight", "artifact", "question",
 ];
@@ -162,6 +173,79 @@ impl Drop for ProcessHandle {
 }
 
 #[derive(Default)]
+struct StderrRingBuffer {
+    lines: VecDeque<String>,
+    total_bytes: usize,
+}
+
+impl StderrRingBuffer {
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.total_bytes = 0;
+    }
+
+    fn push_line(&mut self, raw: &str) {
+        let trimmed = raw.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            return;
+        }
+        let line: String = if trimmed.chars().count() > STDERR_LINE_MAX_CHARS {
+            let prefix: String = trimmed.chars().take(STDERR_LINE_MAX_CHARS - 1).collect();
+            format!("{prefix}…")
+        } else {
+            trimmed.to_string()
+        };
+        self.total_bytes += line.len();
+        self.lines.push_back(line);
+        while self.lines.len() > STDERR_RING_MAX_LINES || self.total_bytes > STDERR_RING_MAX_BYTES {
+            let Some(dropped) = self.lines.pop_front() else {
+                self.total_bytes = 0;
+                break;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(dropped.len());
+        }
+    }
+
+    fn tail(&self, max_lines: usize) -> Vec<String> {
+        let skip = self.lines.len().saturating_sub(max_lines);
+        self.lines.iter().skip(skip).cloned().collect()
+    }
+}
+
+struct StartingGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl StartingGuard {
+    fn enter(flag: &Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::Release);
+        Self {
+            flag: Arc::clone(flag),
+        }
+    }
+}
+
+impl Drop for StartingGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CachedStats {
+    endpoint: String,
+    graph_id: String,
+    project_id: String,
+    branches_sig: String,
+    computed_at: Instant,
+    atoms: usize,
+    sessions: usize,
+    symbols: usize,
+    edges: usize,
+    commits: usize,
+}
+
+#[derive(Default)]
 struct RuntimeState {
     config: OmnigraphConfig,
     last_error: Option<String>,
@@ -180,24 +264,33 @@ struct CommitDigest {
 pub struct OmnigraphManager {
     state_dir: PathBuf,
     store: Option<SessionStore>,
+    http: reqwest::Client,
     runtime: Mutex<RuntimeState>,
+    starting: Arc<AtomicBool>,
     process: Arc<StdMutex<ProcessHandle>>,
+    stderr_ring: Arc<StdMutex<StderrRingBuffer>>,
     commit_cache: Arc<StdMutex<BTreeMap<String, CommitDigest>>>,
+    stats_cache: Arc<StdMutex<Option<CachedStats>>>,
 }
 
 impl OmnigraphManager {
     /// Construct a manager using `state_dir` for `<state>/omnigraph.json`, tools, and cluster data.
     pub fn new(state_dir: PathBuf, store: Option<SessionStore>) -> Result<Self> {
         let config = load_config_file(&state_dir.join(CONFIG_FILE_NAME))?;
+        let http = OmnigraphClient::build_http_client(Duration::from_secs(30))?;
         Ok(Self {
             state_dir,
             store,
+            http,
             runtime: Mutex::new(RuntimeState {
                 config,
                 last_error: None,
             }),
+            starting: Arc::new(AtomicBool::new(false)),
             process: Arc::new(StdMutex::new(ProcessHandle::default())),
+            stderr_ring: Arc::new(StdMutex::new(StderrRingBuffer::default())),
             commit_cache: Arc::new(StdMutex::new(BTreeMap::new())),
+            stats_cache: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -286,16 +379,73 @@ impl OmnigraphManager {
         }
     }
 
+    /// Snapshot bounded stderr lines captured from the local `omnigraph-server` sidecar.
+    pub fn stderr_tail(&self, max_lines: usize) -> Vec<String> {
+        self.stderr_ring
+            .lock()
+            .ok()
+            .map(|ring| ring.tail(max_lines))
+            .unwrap_or_default()
+    }
+
+    /// Clear cached `/status` graph statistics after mutations or shutdown.
+    pub fn invalidate_stats_cache(&self) {
+        if let Ok(mut guard) = self.stats_cache.lock() {
+            *guard = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn enter_starting_for_test(&self) -> impl Drop {
+        StartingGuard::enter(&self.starting)
+    }
+
+    #[cfg(test)]
+    pub(super) fn push_stderr_for_test(&self, line: &str) {
+        if let Ok(mut ring) = self.stderr_ring.lock() {
+            ring.push_line(line);
+        }
+    }
+
+    fn client_from_parts(
+        &self,
+        endpoint: &str,
+        token: Option<String>,
+        graph_id: &str,
+        actor_id: &str,
+    ) -> Result<OmnigraphClient> {
+        OmnigraphClient::with_http_client(endpoint, token, graph_id, self.http.clone())
+            .map(|c| c.with_actor(Some(actor_id.to_string())))
+            .map_err(Into::into)
+    }
+
     /// Download and extract Omnigraph release tarball from `url` into `<state>/tools/omnigraph/v0.15.0/`.
     pub async fn install_local_from(&self, url: &str) -> Result<Value> {
-        let http = reqwest::Client::builder()
+        self.install_local_with_sha256(url, None).await
+    }
+
+    /// Download, SHA-256 verify (against `expected_sha256` or `<url>.sha256` when published),
+    /// and extract Omnigraph release tarball into `<state>/tools/omnigraph/v0.15.0/`.
+    pub async fn install_local_with_sha256(
+        &self,
+        url: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<Value> {
+        let normalized_expected = expected_sha256
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(normalize_sha256_hex)
+            .transpose()?;
+
+        let resp = self
+            .http
+            .get(url)
             .timeout(Duration::from_secs(180))
-            .user_agent("AI-Infrastructure-Harness")
-            .build()
-            .map_err(|err| HarnessError::unavailable(format!("HTTP client error: {err}")))?;
-        let resp = http.get(url).send().await.map_err(|err| {
-            HarnessError::unavailable(format!("Failed downloading Omnigraph tarball: {err}"))
-        })?;
+            .send()
+            .await
+            .map_err(|err| {
+                HarnessError::unavailable(format!("Failed downloading Omnigraph tarball: {err}"))
+            })?;
         if !resp.status().is_success() {
             return Err(HarnessError::unavailable(format!(
                 "Omnigraph download returned HTTP {}.",
@@ -318,6 +468,42 @@ impl OmnigraphManager {
             ));
         }
 
+        let actual_sha256 = sha256_hex(&compressed);
+        let (sha256_verified, sha256_source) = if let Some(ref expected) = normalized_expected {
+            if &actual_sha256 != expected {
+                return Err(HarnessError::invalid(format!(
+                    "Omnigraph archive SHA-256 mismatch: expected {expected}, got {actual_sha256}."
+                )));
+            }
+            (true, Some("expected"))
+        } else if let Some(sidecar_url) = sidecar_sha256_url(url) {
+            match self
+                .http
+                .get(&sidecar_url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(sha_resp) if sha_resp.status().is_success() => {
+                    let sha_text = sha_resp.text().await.map_err(|err| {
+                        HarnessError::unavailable(format!(
+                            "Failed reading Omnigraph checksum from {sidecar_url}: {err}"
+                        ))
+                    })?;
+                    let expected = parse_sha256_checksum_text(&sha_text, url)?;
+                    if actual_sha256 != expected {
+                        return Err(HarnessError::invalid(format!(
+                            "Omnigraph archive SHA-256 mismatch against {sidecar_url}: expected {expected}, got {actual_sha256}."
+                        )));
+                    }
+                    (true, Some("sidecar_sha256"))
+                }
+                _ => (false, None),
+            }
+        } else {
+            (false, None)
+        };
+
         let tools_dir = self.tools_dir();
         let extracted =
             tokio::task::spawn_blocking(move || extract_omnigraph_tarball(&compressed, &tools_dir))
@@ -334,10 +520,14 @@ impl OmnigraphManager {
             "files": extracted,
             "omnigraph": discovery.cli,
             "omnigraph_server": discovery.server,
+            "sha256": actual_sha256,
+            "sha256_verified": sha256_verified,
+            "sha256_source": sha256_source,
         }))
     }
 
-    /// Build a typed `OmnigraphClient` for the currently active/configured server.
+    /// Build a typed `OmnigraphClient` for the currently active/configured server,
+    /// reusing the manager's pooled HTTP client.
     pub async fn client(&self) -> Result<OmnigraphClient> {
         let cfg = self.runtime.lock().await.config.clone();
         if cfg.mode == OmnigraphMode::Off {
@@ -348,13 +538,12 @@ impl OmnigraphManager {
         let endpoint = cfg.endpoint.as_deref().ok_or_else(|| {
             HarnessError::unavailable("Omnigraph endpoint is not configured or started.")
         })?;
-        OmnigraphClient::new(endpoint, cfg.token.clone(), cfg.graph_id.clone())
-            .map(|c| c.with_actor(Some(cfg.actor_id)))
-            .map_err(Into::into)
+        self.client_from_parts(endpoint, cfg.token.clone(), &cfg.graph_id, &cfg.actor_id)
     }
 
     /// Start the managed local `omnigraph-server` sidecar in cluster mode.
     pub async fn start_local(&self, graph_id: Option<&str>) -> Result<Value> {
+        let starting_guard = StartingGuard::enter(&self.starting);
         let binaries = self.detect_binaries();
         let cli_path = binaries.cli.ok_or_else(|| {
             HarnessError::missing(
@@ -368,6 +557,9 @@ impl OmnigraphManager {
         })?;
 
         self.close().await?;
+        if let Ok(mut ring) = self.stderr_ring.lock() {
+            ring.clear();
+        }
 
         let mut cfg = self.config().await;
         if let Some(gid) = graph_id.filter(|s| !s.trim().is_empty()) {
@@ -402,7 +594,7 @@ impl OmnigraphManager {
         let bind_addr = format!("127.0.0.1:{port}");
         let abs_data = std::fs::canonicalize(&data_dir).unwrap_or(data_dir);
 
-        let child = Command::new(&server_path)
+        let mut child = Command::new(&server_path)
             .args([
                 "--cluster",
                 &abs_data.to_string_lossy(),
@@ -412,11 +604,25 @@ impl OmnigraphManager {
             .env("OMNIGRAPH_SERVER_BEARER_TOKENS_JSON", &tokens_json)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| {
                 HarnessError::unavailable(format!("Failed spawning omnigraph-server: {err}"))
             })?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let ring = Arc::clone(&self.stderr_ring);
+            let _ = std::thread::Builder::new()
+                .name("omnigraph-stderr".into())
+                .spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(|r| r.ok()) {
+                        if let Ok(mut guard) = ring.lock() {
+                            guard.push_line(&line);
+                        }
+                    }
+                });
+        }
 
         {
             let mut proc_guard = self.process.lock().map_err(|_| {
@@ -426,8 +632,12 @@ impl OmnigraphManager {
         }
 
         let endpoint = format!("http://{bind_addr}");
-        let client = OmnigraphClient::new(&endpoint, Some(token.clone()), &cfg.graph_id)?
-            .with_actor(Some(cfg.actor_id.clone()));
+        let client = self.client_from_parts(
+            &endpoint,
+            Some(token.clone()),
+            &cfg.graph_id,
+            &cfg.actor_id,
+        )?;
 
         if let Err(err) = self
             .wait_ready_local(&client, Duration::from_secs(15))
@@ -448,14 +658,20 @@ impl OmnigraphManager {
             rt.last_error = None;
         }
         self.save_config(cfg.clone()).await?;
+        self.invalidate_stats_cache();
+        drop(starting_guard);
         self.status_json("").await
     }
 
     /// Start Omnigraph via `ghcr.io/modernrelay/omnigraph-server:v0.15.0` Docker container.
     pub async fn start_docker(&self, graph_id: Option<&str>) -> Result<Value> {
+        let starting_guard = StartingGuard::enter(&self.starting);
         let docker = infra_host::provider::find_executable("docker")
             .ok_or_else(|| HarnessError::missing("Docker CLI was not found on PATH."))?;
-        if !Self::docker_available() {
+        if !tokio::task::spawn_blocking(Self::docker_available)
+            .await
+            .unwrap_or(false)
+        {
             return Err(HarnessError::unavailable(
                 "Docker daemon is not running or unreachable.",
             ));
@@ -616,8 +832,12 @@ impl OmnigraphManager {
         }
 
         let endpoint = format!("http://127.0.0.1:{port}");
-        let client = OmnigraphClient::new(&endpoint, Some(token.clone()), &cfg.graph_id)?
-            .with_actor(Some(cfg.actor_id.clone()));
+        let client = self.client_from_parts(
+            &endpoint,
+            Some(token.clone()),
+            &cfg.graph_id,
+            &cfg.actor_id,
+        )?;
 
         if let Err(err) = self
             .wait_ready_local(&client, Duration::from_secs(20))
@@ -639,6 +859,8 @@ impl OmnigraphManager {
             rt.last_error = None;
         }
         self.save_config(cfg).await?;
+        self.invalidate_stats_cache();
+        drop(starting_guard);
         self.status_json("").await
     }
 
@@ -663,8 +885,12 @@ impl OmnigraphManager {
             .map(str::to_string)
             .or_else(|| cfg.token.clone());
 
-        let client = OmnigraphClient::new(&clean_endpoint, clean_token.clone(), &cfg.graph_id)?
-            .with_actor(Some(cfg.actor_id.clone()));
+        let client = self.client_from_parts(
+            &clean_endpoint,
+            clean_token.clone(),
+            &cfg.graph_id,
+            &cfg.actor_id,
+        )?;
 
         let health = client.health().await.map_err(|e| {
             HarnessError::unavailable(format!("Failed reaching Omnigraph /healthz: {e}"))
@@ -685,6 +911,7 @@ impl OmnigraphManager {
             rt.last_error = None;
         }
         self.save_config(cfg).await?;
+        self.invalidate_stats_cache();
         self.status_json("").await
     }
 
@@ -720,7 +947,9 @@ impl OmnigraphManager {
                 self.status_json("").await
             }
             OmnigraphMode::Docker => {
-                let was_running = self.has_running_container();
+                let was_running = self
+                    .has_running_container_async(cfg.container_name.as_deref())
+                    .await;
                 self.start_docker(Some(&cfg.graph_id)).await?;
                 if !was_running {
                     self.close().await?;
@@ -741,14 +970,29 @@ impl OmnigraphManager {
         }
     }
 
-    /// Gracefully stop any spawned local `omnigraph-server` child or Docker container.
+    /// Gracefully stop any spawned local `omnigraph-server` child or Docker container,
+    /// including pre-restart Docker containers tracked via `config.container_name`.
     pub async fn close(&self) -> Result<()> {
-        let (child_opt, container_opt) = {
+        let cfg = self.config().await;
+        let (child_opt, mut container_opt) = {
             let mut proc_guard = self.process.lock().map_err(|_| {
                 HarnessError::unavailable("Omnigraph process state lock was poisoned.")
             })?;
             (proc_guard.child.take(), proc_guard.docker_container.take())
         };
+
+        if container_opt.is_none()
+            && cfg.mode == OmnigraphMode::Docker
+            && let Some(ref persisted_name) = cfg.container_name
+            && tokio::task::spawn_blocking({
+                let name = persisted_name.clone();
+                move || docker_container_running(&name)
+            })
+            .await
+            .unwrap_or(false)
+        {
+            container_opt = Some(persisted_name.clone());
+        }
 
         if let Some(mut child) = child_opt {
             tokio::task::spawn_blocking(move || terminate_child_sync(&mut child))
@@ -768,6 +1012,7 @@ impl OmnigraphManager {
                 HarnessError::unavailable("Failed waiting for Docker Omnigraph shutdown.")
             })?;
         }
+        self.invalidate_stats_cache();
         Ok(())
     }
 
@@ -779,11 +1024,32 @@ impl OmnigraphManager {
             .unwrap_or(false)
     }
 
-    fn has_running_container(&self) -> bool {
-        self.process
+    async fn has_running_container_async(&self, configured_name: Option<&str>) -> bool {
+        let in_mem = self
+            .process
             .lock()
             .ok()
-            .is_some_and(|g| g.docker_container.is_some())
+            .and_then(|g| g.docker_container.clone());
+        let configured = configured_name.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            resolve_running_container(in_mem.as_deref(), configured.as_deref(), None).is_some()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn detect_running_container_with_docker_for_test(
+        &self,
+        configured_name: Option<&str>,
+        docker_bin: Option<&Path>,
+    ) -> Option<String> {
+        let in_mem = self
+            .process
+            .lock()
+            .ok()
+            .and_then(|g| g.docker_container.clone());
+        resolve_running_container(in_mem.as_deref(), configured_name, docker_bin)
     }
 
     async fn wait_ready_local(&self, client: &OmnigraphClient, timeout: Duration) -> Result<()> {
@@ -793,8 +1059,14 @@ impl OmnigraphManager {
                 && let Some(child) = guard.child.as_mut()
                 && let Ok(Some(status)) = child.try_wait()
             {
+                let tail = self.stderr_tail(8);
+                let detail = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" stderr: {}", tail.join(" | "))
+                };
                 return Err(HarnessError::unavailable(format!(
-                    "omnigraph-server exited during startup with status {status}."
+                    "omnigraph-server exited during startup with status {status}.{detail}"
                 )));
             }
             if let Ok(ready) = client.ready().await
@@ -804,9 +1076,15 @@ impl OmnigraphManager {
             }
             tokio::time::sleep(Duration::from_millis(120)).await;
         }
-        Err(HarnessError::unavailable(
-            "Timed out waiting for omnigraph-server /readyz.",
-        ))
+        let tail = self.stderr_tail(8);
+        let detail = if tail.is_empty() {
+            String::new()
+        } else {
+            format!(" stderr: {}", tail.join(" | "))
+        };
+        Err(HarnessError::unavailable(format!(
+            "Timed out waiting for omnigraph-server /readyz.{detail}"
+        )))
     }
 
     /// Compute status JSON expected by `GET /api/omnigraph/status`.
@@ -815,17 +1093,54 @@ impl OmnigraphManager {
             let rt = self.runtime.lock().await;
             (rt.config.clone(), rt.last_error.clone())
         };
-        let binaries = self.detect_binaries();
-        let docker_available = Self::docker_available();
+        let is_starting_flag = self.starting.load(Ordering::Acquire);
+        let stderr_tail = self.stderr_tail(64);
+        let tools_dir = self.tools_dir();
+        let configured_container = cfg.container_name.clone();
+        let in_mem_container = self
+            .process
+            .lock()
+            .ok()
+            .and_then(|g| g.docker_container.clone());
+        let is_docker_mode = cfg.mode == OmnigraphMode::Docker;
+
+        let (binaries, docker_available, docker_running) = tokio::task::spawn_blocking(move || {
+            let cli = find_binary(&tools_dir, "omnigraph");
+            let server = find_binary(&tools_dir, "omnigraph-server");
+            let version = cli.as_deref().and_then(probe_omnigraph_version);
+            let binaries = BinaryDiscovery {
+                cli,
+                server,
+                version,
+            };
+            let docker_avail = Self::docker_available();
+            let docker_up = if is_docker_mode && docker_avail {
+                in_mem_container
+                    .as_deref()
+                    .or(configured_container.as_deref())
+                    .is_some_and(docker_container_running)
+            } else {
+                false
+            };
+            (binaries, docker_avail, docker_up)
+        })
+        .await
+        .unwrap_or_else(|_| (BinaryDiscovery::default(), false, false));
 
         let mut connected = false;
-        let mut state = if cfg.mode == OmnigraphMode::Off {
+        let mut starting = is_starting_flag;
+        let mut state = if is_starting_flag {
+            "starting"
+        } else if cfg.mode == OmnigraphMode::Off {
             "unconfigured"
+        } else if docker_running {
+            "starting"
         } else {
             "stopped"
         };
-        let mut error = last_error;
+        let mut error = if is_starting_flag { None } else { last_error };
         let mut mcp_url: Option<String> = None;
+        let mut server_version: Option<String> = None;
         let mut stats = json!({
             "branches": 0,
             "atoms": 0,
@@ -835,45 +1150,90 @@ impl OmnigraphManager {
             "unmerged_branches": 0
         });
 
-        if cfg.mode != OmnigraphMode::Off
+        if !is_starting_flag
+            && cfg.mode != OmnigraphMode::Off
             && let Some(endpoint) = cfg.endpoint.as_deref()
-            && let Ok(client) = OmnigraphClient::new(endpoint, cfg.token.clone(), &cfg.graph_id)
-                .map(|c| c.with_actor(Some(cfg.actor_id.clone())))
+            && let Ok(client) = self.client_from_parts(
+                endpoint,
+                cfg.token.clone(),
+                &cfg.graph_id,
+                &cfg.actor_id,
+            )
         {
             match client.health().await {
-                Ok(_) => {
+                Ok(health) => {
+                    server_version = (!health.version.trim().is_empty()).then_some(health.version);
                     let ready_ok = client.ready().await.map(|r| r.ready).unwrap_or(true);
                     if ready_ok {
                         connected = true;
+                        starting = false;
                         state = "connected";
                         error = None;
                         mcp_url = Some(client.mcp_url());
-                        if let Ok(computed) = compute_stats(&client, project_id).await {
+                        if let Ok(computed) = self
+                            .cached_or_compute_stats(&client, endpoint, &cfg.graph_id, project_id)
+                            .await
+                        {
                             stats = computed;
                         }
                     } else {
+                        starting = true;
                         state = "starting";
                     }
                 }
                 Err(err) => {
                     state = "error";
-                    error = Some(err.message);
+                    error = Some(if stderr_tail.is_empty() {
+                        err.message
+                    } else {
+                        format!(
+                            "{} (stderr: {})",
+                            err.message,
+                            stderr_tail
+                                .iter()
+                                .rev()
+                                .take(4)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        )
+                    });
                 }
             }
         }
 
+        let auto_download_supported = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        let version = server_version.or_else(|| binaries.version.clone());
+
         Ok(json!({
             "connected": connected,
             "state": state,
+            "starting": starting,
             "mode": cfg.mode.as_str(),
             "api_contract": super::client::HTTP_API_CONTRACT_VERSION,
+            "target_version": OMNIGRAPH_VERSION,
+            "version": version,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "auto_download_supported": auto_download_supported,
+            "platform": {
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "auto_download_supported": auto_download_supported,
+            },
             "endpoint": cfg.endpoint,
             "graph_id": cfg.graph_id,
             "mcp_url": mcp_url,
             "binary_installed": binaries.cli.is_some() && binaries.server.is_some(),
             "binary_version": binaries.version,
             "docker_available": docker_available,
+            "docker_container": cfg.container_name,
+            "docker_running": docker_running,
             "error": error,
+            "stderr_tail": stderr_tail,
             "stats": stats,
         }))
     }
@@ -892,11 +1252,27 @@ impl OmnigraphManager {
 
         match action {
             "install" => {
+                let expected_sha256 = body["sha256"].as_str();
                 if let Some(url) = body["release_url"]
                     .as_str()
                     .filter(|s| !s.trim().is_empty())
                 {
-                    self.install_local_from(url).await
+                    self.install_local_with_sha256(url, expected_sha256).await
+                } else if expected_sha256.is_some() {
+                    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+                    {
+                        Err(HarnessError::invalid(
+                            "Automatic local download currently supports Linux x86_64; install `omnigraph` on PATH or use Docker/External mode.",
+                        ))
+                    }
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    {
+                        self.install_local_with_sha256(
+                            OMNIGRAPH_RELEASE_URL_LINUX_X86_64,
+                            expected_sha256,
+                        )
+                        .await
+                    }
                 } else {
                     self.install_local().await
                 }
@@ -1593,7 +1969,7 @@ impl OmnigraphManager {
         }))
     }
 
-    /// Hybrid BM25 + fallback ranking search returning `{ query, branch, hits }`.
+    /// Hybrid BM25 + fallback ranking search returning `{ query, branch, hits, subgraph }`.
     pub async fn search_json(
         &self,
         project_id: &str,
@@ -1608,38 +1984,91 @@ impl OmnigraphManager {
         let kind_filter = clean_opt(kind).map(str::to_ascii_lowercase);
         let q_trimmed = q.trim();
 
+        let matches_kind = |atom: &Value| -> bool {
+            let Some(ref kf) = kind_filter else {
+                return true;
+            };
+            atom["kind"]
+                .as_str()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+                == Some(kf.as_str())
+        };
+
         let mut raw_hits: Vec<(Value, f64, &'static str)> = Vec::new();
-        if !q_trimmed.is_empty()
-            && let Ok(resp) = run_stored_or_inline(
-                &client,
-                "context_search",
-                schema::QUERY_CONTEXT_SEARCH,
-                json!({ "q": q_trimmed, "project_id": project_id }),
-                Some(target_branch.clone()),
-                None,
-            )
-            .await
-        {
-            for row in &resp.rows {
-                let atom = normalize_atom_row(row);
-                let score = row["score"].as_f64().unwrap_or(0.5);
-                raw_hits.push((atom, score, "bm25"));
+        if !q_trimmed.is_empty() {
+            if let Some(ref kf) = kind_filter
+                && let Ok(resp) = client
+                    .query(&QueryRequest {
+                        query: GQ_CONTEXT_SEARCH_BY_KIND.into(),
+                        name: Some("context_search_by_kind".into()),
+                        params: Some(json!({
+                            "q": q_trimmed,
+                            "project_id": project_id,
+                            "kind": kf,
+                        })),
+                        branch: Some(target_branch.clone()),
+                        snapshot: None,
+                        settings: None,
+                    })
+                    .await
+            {
+                for row in &resp.rows {
+                    let atom = normalize_atom_row(row);
+                    if matches_kind(&atom) {
+                        let score = row["score"].as_f64().unwrap_or(0.5);
+                        raw_hits.push((atom, score, "bm25"));
+                    }
+                }
+            }
+
+            if raw_hits.is_empty() {
+                let mut search_params = json!({ "q": q_trimmed, "project_id": project_id });
+                if let Some(ref kf) = kind_filter {
+                    search_params["kind"] = json!(kf);
+                }
+                if let Ok(resp) = run_stored_or_inline(
+                    &client,
+                    "context_search",
+                    schema::QUERY_CONTEXT_SEARCH,
+                    search_params,
+                    Some(target_branch.clone()),
+                    None,
+                )
+                .await
+                {
+                    for row in &resp.rows {
+                        let atom = normalize_atom_row(row);
+                        if matches_kind(&atom) {
+                            let score = row["score"].as_f64().unwrap_or(0.5);
+                            raw_hits.push((atom, score, "bm25"));
+                        }
+                    }
+                }
             }
         }
 
+        let mut cached_recent_rows: Option<Vec<Value>> = None;
         if raw_hits.is_empty() {
-            let recent = run_stored_or_inline(
+            let recent = run_recent_atoms_query(
                 &client,
-                "recent_atoms",
-                schema::QUERY_RECENT_ATOMS,
-                json!({ "project_id": project_id }),
+                project_id,
                 Some(target_branch.clone()),
                 None,
             )
             .await?;
+            let (rows, _) = if recent.rows.len() >= RECENT_ATOMS_LIMIT {
+                expand_capped_graph_atoms(&client, project_id, &target_branch, None, recent.rows)
+                    .await
+            } else {
+                (recent.rows, false)
+            };
             let q_lower = q_trimmed.to_ascii_lowercase();
-            for row in &recent.rows {
+            for row in &rows {
                 let atom = normalize_atom_row(row);
+                if !matches_kind(&atom) {
+                    continue;
+                }
                 let score = if q_lower.is_empty() {
                     atom["confidence"].as_f64().unwrap_or(0.5)
                 } else {
@@ -1658,41 +2087,119 @@ impl OmnigraphManager {
                 }
             }
             raw_hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+            cached_recent_rows = Some(rows);
         }
 
-        let file_edges = query_edges_safe(
-            &client,
-            GQ_LIST_FILE_EDGES,
-            "list_file_edges",
-            &json!({ "project_id": project_id }),
-            Some(&target_branch),
-            None,
-        )
-        .await;
-        let rel_edges = query_edges_safe(
-            &client,
-            GQ_LIST_ATOM_RELATIONS,
-            "list_atom_relations",
-            &json!({ "project_id": project_id }),
-            Some(&target_branch),
-            None,
-        )
-        .await;
+        raw_hits.truncate(limit);
+        if raw_hits.is_empty() {
+            return Ok(json!({
+                "query": q_trimmed,
+                "branch": target_branch,
+                "hits": [],
+                "subgraph": {
+                    "atoms": [],
+                    "sessions": [],
+                    "files": [],
+                    "symbols": [],
+                    "edges": [],
+                    "symbol_edges": [],
+                },
+            }));
+        }
 
-        let mut hits = Vec::new();
+        let params = json!({ "project_id": project_id });
+        let branch_ref = Some(target_branch.as_str());
+        let (
+            file_edges,
+            rel_edges,
+            symbol_edge_rows,
+            pub_edges,
+            con_edges,
+            session_rows,
+            symbol_rows,
+            file_rows,
+        ) = tokio::join!(
+            query_edges_safe(
+                &client,
+                GQ_LIST_FILE_EDGES,
+                "list_file_edges",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_ATOM_RELATIONS,
+                "list_atom_relations",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_SYMBOL_EDGES,
+                "list_symbol_edges",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_PUBLISHED_EDGES,
+                "list_published_edges",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_CONSUMED_EDGES,
+                "list_consumed_edges",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_SESSIONS,
+                "list_sessions",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_SYMBOLS,
+                "list_symbols",
+                &params,
+                branch_ref,
+                None,
+            ),
+            query_edges_safe(
+                &client,
+                GQ_LIST_FILES,
+                "list_files",
+                &params,
+                branch_ref,
+                None,
+            ),
+        );
+
+        let mut hit_atom_ids = BTreeSet::new();
+        let mut neighbor_atom_ids = BTreeSet::new();
+        let mut hits = Vec::with_capacity(raw_hits.len());
+        let mut subgraph_atoms_by_id: BTreeMap<String, Value> = BTreeMap::new();
+
         for (mut atom, score, matched_via) in raw_hits {
-            if let Some(ref kf) = kind_filter
-                && atom["kind"]
-                    .as_str()
-                    .map(str::to_ascii_lowercase)
-                    .as_deref()
-                    != Some(kf.as_str())
-            {
-                continue;
-            }
             let aid = str_field(&atom, "atom_id").unwrap_or_default();
+            if !aid.is_empty() {
+                hit_atom_ids.insert(aid.clone());
+            }
             let mut files = Vec::new();
+            let mut symbols = Vec::new();
             let mut neighbors = Vec::new();
+            let mut seen_neighbors: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+
             for fe in &file_edges {
                 if str_field(fe, "source_id").as_deref() == Some(aid.as_str())
                     && let Some(path) = str_field(fe, "target_id")
@@ -1700,37 +2207,303 @@ impl OmnigraphManager {
                     if !files.contains(&path) {
                         files.push(path.clone());
                     }
-                    neighbors
-                        .push(json!({ "kind": "file", "id": path, "relation": "touches_file" }));
+                    if seen_neighbors.insert((
+                        "file".into(),
+                        path.clone(),
+                        "touches_file".into(),
+                        "outgoing".into(),
+                    )) {
+                        neighbors.push(json!({
+                            "kind": "file",
+                            "id": path,
+                            "relation": "touches_file",
+                            "direction": "outgoing",
+                        }));
+                    }
+                }
+            }
+            for se in &symbol_edge_rows {
+                if str_field(se, "source_id").as_deref() == Some(aid.as_str())
+                    && let Some(fqn) = str_field(se, "target_id")
+                {
+                    if !symbols.contains(&fqn) {
+                        symbols.push(fqn.clone());
+                    }
+                    let role = str_field(se, "role").unwrap_or_else(|| "named".to_string());
+                    if seen_neighbors.insert((
+                        "symbol".into(),
+                        fqn.clone(),
+                        "mentions_symbol".into(),
+                        "outgoing".into(),
+                    )) {
+                        neighbors.push(json!({
+                            "kind": "symbol",
+                            "id": fqn,
+                            "relation": "mentions_symbol",
+                            "direction": "outgoing",
+                            "role": role,
+                            "name": se.get("name").cloned().unwrap_or(Value::Null),
+                            "file_path": se.get("file_path").cloned().unwrap_or(Value::Null),
+                            "symbol_kind": se.get("kind").cloned().unwrap_or(Value::Null),
+                        }));
+                    }
+                }
+            }
+            for re in &rel_edges {
+                let rel = re["relation"].as_str().unwrap_or("relates_to").to_string();
+                let src = str_field(re, "source_id");
+                let dst = str_field(re, "target_id");
+                if src.as_deref() == Some(aid.as_str())
+                    && let Some(other) = dst
+                {
+                    if !other.is_empty() {
+                        neighbor_atom_ids.insert(other.clone());
+                    }
+                    if seen_neighbors.insert((
+                        "atom".into(),
+                        other.clone(),
+                        rel.clone(),
+                        "outgoing".into(),
+                    )) {
+                        neighbors.push(json!({
+                            "kind": "atom",
+                            "id": other,
+                            "relation": rel,
+                            "direction": "outgoing",
+                        }));
+                    }
+                } else if dst.as_deref() == Some(aid.as_str())
+                    && let Some(other) = src
+                    && other != aid
+                {
+                    if !other.is_empty() {
+                        neighbor_atom_ids.insert(other.clone());
+                    }
+                    if seen_neighbors.insert((
+                        "atom".into(),
+                        other.clone(),
+                        rel.clone(),
+                        "incoming".into(),
+                    )) {
+                        neighbors.push(json!({
+                            "kind": "atom",
+                            "id": other,
+                            "relation": rel,
+                            "direction": "incoming",
+                        }));
+                    }
                 }
             }
             atom["files"] = json!(files);
-            for re in &rel_edges {
-                if str_field(re, "source_id").as_deref() == Some(aid.as_str())
-                    && let Some(other) = str_field(re, "target_id")
-                {
-                    neighbors.push(json!({
-                        "kind": "atom",
-                        "id": other,
-                        "relation": re["relation"].as_str().unwrap_or("relates_to"),
-                    }));
-                }
+            atom["symbols"] = json!(symbols);
+            if !aid.is_empty() {
+                subgraph_atoms_by_id.insert(aid, atom.clone());
             }
             hits.push(json!({
                 "atom": atom,
                 "score": score,
                 "matched_via": matched_via,
+                "files": files,
+                "symbols": symbols,
                 "neighbors": neighbors,
             }));
-            if hits.len() >= limit {
-                break;
+        }
+
+        let missing_neighbors: BTreeSet<String> = neighbor_atom_ids
+            .difference(&hit_atom_ids)
+            .cloned()
+            .collect();
+        if !missing_neighbors.is_empty() {
+            let rows = match cached_recent_rows {
+                Some(rows) => rows,
+                None => {
+                    let recent = run_recent_atoms_query(
+                        &client,
+                        project_id,
+                        Some(target_branch.clone()),
+                        None,
+                    )
+                    .await
+                    .map(|r| r.rows)
+                    .unwrap_or_default();
+                    let still_missing = missing_neighbors.iter().any(|nid| {
+                        !recent.iter().any(|r| {
+                            str_field(r, "atom_id")
+                                .or_else(|| str_field(r, "id"))
+                                .as_deref()
+                                == Some(nid.as_str())
+                        })
+                    });
+                    if still_missing && recent.len() >= RECENT_ATOMS_LIMIT {
+                        expand_capped_graph_atoms(
+                            &client,
+                            project_id,
+                            &target_branch,
+                            None,
+                            recent,
+                        )
+                        .await
+                        .0
+                    } else {
+                        recent
+                    }
+                }
+            };
+            let files_by_atom = group_edge_targets_by_source(&file_edges, Some(&missing_neighbors));
+            let symbols_by_atom =
+                group_edge_targets_by_source(&symbol_edge_rows, Some(&missing_neighbors));
+            for row in &rows {
+                let mut atom = normalize_atom_row(row);
+                if let Some(aid) = str_field(&atom, "atom_id")
+                    && missing_neighbors.contains(&aid)
+                    && !subgraph_atoms_by_id.contains_key(&aid)
+                {
+                    atom["files"] = files_by_atom
+                        .get(&aid)
+                        .map(|f| json!(f))
+                        .unwrap_or_else(|| json!([]));
+                    atom["symbols"] = symbols_by_atom
+                        .get(&aid)
+                        .map(|s| json!(s))
+                        .unwrap_or_else(|| json!([]));
+                    subgraph_atoms_by_id.insert(aid, atom);
+                }
             }
         }
+
+        let subgraph_atom_ids: BTreeSet<String> = subgraph_atoms_by_id.keys().cloned().collect();
+        let subgraph_atoms: Vec<Value> = subgraph_atoms_by_id.into_values().collect();
+
+        let (mut subgraph_symbols, mut subgraph_symbol_edges) = build_symbol_graph_entries(
+            project_id,
+            &symbol_rows,
+            &symbol_edge_rows,
+            &subgraph_atom_ids,
+            None,
+            false,
+            false,
+        );
+        if !subgraph_symbols.is_empty()
+            && let Ok(Some(ir)) =
+                crate::graph_ir::GraphIrStore::open_readonly(&self.state_dir, project_id)
+        {
+            let file_paths: BTreeSet<String> = subgraph_symbols
+                .iter()
+                .filter_map(|s| str_field(s, "file_path"))
+                .collect();
+            if let Ok(id_map) = ir.canonical_symbol_ids_for_files(&file_paths) {
+                for sym in &mut subgraph_symbols {
+                    if let Some(fqn) = str_field(sym, "fqn")
+                        && let Some(cid) = id_map.get(&fqn)
+                    {
+                        sym["symbol_id"] = json!(cid);
+                    }
+                }
+                for edge in &mut subgraph_symbol_edges {
+                    if let Some(fqn) = str_field(edge, "fqn")
+                        && let Some(cid) = id_map.get(&fqn)
+                    {
+                        edge["symbol_id"] = json!(cid);
+                    }
+                }
+            }
+        }
+
+        let mut kept_session_ids = BTreeSet::new();
+        for atom in &subgraph_atoms {
+            if let Some(sid) = str_field(atom, "source_session_id") {
+                kept_session_ids.insert(sid);
+            }
+        }
+        for e in pub_edges.iter().chain(con_edges.iter()) {
+            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+                && subgraph_atom_ids.contains(&src)
+            {
+                kept_session_ids.insert(dst);
+            }
+        }
+        let session_meta_by_id = self
+            .store
+            .as_ref()
+            .map(|store| load_session_omnigraph_metadata_batch(store, &kept_session_ids))
+            .unwrap_or_default();
+        let subgraph_sessions: Vec<Value> = session_rows
+            .iter()
+            .filter(|row| {
+                str_field(row, "session_id").is_some_and(|sid| kept_session_ids.contains(&sid))
+            })
+            .map(|row| {
+                let mut obj = normalize_session_row(row);
+                if let Some(sid) = str_field(&obj, "session_id")
+                    && let Some(og) = session_meta_by_id.get(&sid)
+                {
+                    if let Some(space) = og["shared_space"].as_str().filter(|s| !s.is_empty()) {
+                        obj["shared_space"] = json!(space);
+                    }
+                    if og["linked_session_ids"].is_array() {
+                        obj["linked_session_ids"] = og["linked_session_ids"].clone();
+                    }
+                }
+                obj
+            })
+            .collect();
+
+        let mut kept_file_paths = BTreeSet::new();
+        for atom in &subgraph_atoms {
+            for f in atom["files"].as_array().into_iter().flatten() {
+                if let Some(p) = f.as_str().filter(|p| !p.is_empty()) {
+                    kept_file_paths.insert(p.to_owned());
+                }
+            }
+        }
+        for sym in &subgraph_symbols {
+            if let Some(p) = str_field(sym, "file_path") {
+                kept_file_paths.insert(p);
+            }
+        }
+        let mut subgraph_files: Vec<Value> = Vec::new();
+        let mut seen_file_paths = BTreeSet::new();
+        for row in &file_rows {
+            if let Some(path) = str_field(row, "path")
+                && kept_file_paths.contains(&path)
+                && seen_file_paths.insert(path)
+            {
+                subgraph_files.push(normalize_file_row(row));
+            }
+        }
+        for path in kept_file_paths {
+            if seen_file_paths.insert(path.clone()) {
+                subgraph_files.push(json!({
+                    "id": path,
+                    "path": path,
+                    "project_id": project_id,
+                }));
+            }
+        }
+
+        let mut subgraph_edges = build_graph_edges(
+            &pub_edges,
+            &con_edges,
+            &file_edges,
+            &rel_edges,
+            &[],
+            &subgraph_atom_ids,
+            None,
+        );
+        subgraph_edges.extend(subgraph_symbol_edges.iter().cloned());
 
         Ok(json!({
             "query": q_trimmed,
             "branch": target_branch,
             "hits": hits,
+            "subgraph": {
+                "atoms": subgraph_atoms,
+                "sessions": subgraph_sessions,
+                "files": subgraph_files,
+                "symbols": subgraph_symbols,
+                "edges": subgraph_edges,
+                "symbol_edges": subgraph_symbol_edges,
+            },
         }))
     }
 
@@ -3020,6 +3793,7 @@ impl OmnigraphManager {
             }
         }
 
+        self.invalidate_stats_cache();
         Ok(json!({
             "ok": true,
             "branch": branch,
@@ -3084,12 +3858,15 @@ impl OmnigraphManager {
                         op: Vec::new(),
                     })
                     .await?;
+                let (baseline_events, baseline_bundle) =
+                    build_baseline_recovery_payload(&baseline, &target_branch);
                 return Ok(json!({
                     "cursor": baseline.resume_cursor,
                     "caught_up": true,
                     "reset": true,
                     "snapshot_commit_id": baseline.snapshot_commit_id,
-                    "events": [],
+                    "events": baseline_events,
+                    "baseline": baseline_bundle,
                 }));
             }
             Err(err) => return Err(err.into()),
@@ -4689,6 +5466,19 @@ impl Domain for OmnigraphDomain {
                 }
                 _ => return Err(HarnessError::missing("Unknown Omnigraph operation.")),
             };
+            if matches!(
+                operation,
+                "omnigraph.setup"
+                    | "omnigraph.import"
+                    | "omnigraph.link_sessions"
+                    | "omnigraph.branch_act"
+                    | "omnigraph.publish"
+                    | "omnigraph.share"
+                    | "omnigraph.sync_items"
+                    | "omnigraph.link_brain"
+            ) {
+                self.manager.invalidate_stats_cache();
+            }
             Ok(Payload::Json(result))
         })
     }
@@ -4738,7 +5528,139 @@ fn empty_graph_view(
     })
 }
 
-async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Value> {
+impl OmnigraphManager {
+    async fn cached_or_compute_stats(
+        &self,
+        client: &OmnigraphClient,
+        endpoint: &str,
+        graph_id: &str,
+        project_id: &str,
+    ) -> Result<Value> {
+        let branches_resp = client.list_branches(true).await?;
+        let branches_count = branches_resp.branches.len();
+        let main_head = branches_resp
+            .details
+            .as_ref()
+            .and_then(|ds| ds.iter().find(|d| d.name == "main"))
+            .map(|d| d.head.graph_commit_id.as_str());
+        let unmerged_branches = branches_resp
+            .details
+            .as_ref()
+            .map(|ds| {
+                ds.iter()
+                    .filter(|d| {
+                        d.name != "main" && Some(d.head.graph_commit_id.as_str()) != main_head
+                    })
+                    .count()
+            })
+            .unwrap_or_else(|| branches_count.saturating_sub(1));
+
+        let branches_sig = build_branches_signature(&branches_resp);
+        if let Ok(guard) = self.stats_cache.lock()
+            && let Some(cached) = guard.as_ref()
+            && cached.endpoint == endpoint
+            && cached.graph_id == graph_id
+            && cached.project_id == project_id
+            && cached.branches_sig == branches_sig
+            && cached.computed_at.elapsed() < STATS_CACHE_TTL
+        {
+            return Ok(json!({
+                "branches": branches_count,
+                "atoms": cached.atoms,
+                "sessions": cached.sessions,
+                "symbols": cached.symbols,
+                "edges": cached.edges,
+                "commits": cached.commits,
+                "unmerged_branches": unmerged_branches,
+            }));
+        }
+
+        let counts = compute_lightweight_counts(client, project_id).await;
+        if let Ok(mut guard) = self.stats_cache.lock() {
+            *guard = Some(CachedStats {
+                endpoint: endpoint.to_string(),
+                graph_id: graph_id.to_string(),
+                project_id: project_id.to_string(),
+                branches_sig,
+                computed_at: Instant::now(),
+                atoms: counts.atoms,
+                sessions: counts.sessions,
+                symbols: counts.symbols,
+                edges: counts.edges,
+                commits: counts.commits,
+            });
+        }
+
+        Ok(json!({
+            "branches": branches_count,
+            "atoms": counts.atoms,
+            "sessions": counts.sessions,
+            "symbols": counts.symbols,
+            "edges": counts.edges,
+            "commits": counts.commits,
+            "unmerged_branches": unmerged_branches,
+        }))
+    }
+}
+
+struct LightweightStatsCounts {
+    atoms: usize,
+    sessions: usize,
+    symbols: usize,
+    edges: usize,
+    commits: usize,
+}
+
+fn build_branches_signature(branches_resp: &super::client::BranchListResponse) -> String {
+    if let Some(details) = branches_resp.details.as_ref() {
+        let mut parts: Vec<String> = details
+            .iter()
+            .map(|d| format!("{}={}", d.name, d.head.graph_commit_id))
+            .collect();
+        parts.sort();
+        parts.join("|")
+    } else {
+        let mut names = branches_resp.branches.clone();
+        names.sort();
+        names.join("|")
+    }
+}
+
+async fn count_atom_ids(client: &OmnigraphClient, project_id: &str) -> Result<usize> {
+    let params = json!({ "project_id": project_id });
+    match client
+        .query(&QueryRequest {
+            query: GQ_COUNT_ATOM_IDS.into(),
+            name: Some("recent_atoms".into()),
+            params: Some(params.clone()),
+            branch: Some("main".into()),
+            snapshot: None,
+            settings: None,
+        })
+        .await
+    {
+        Ok(resp) => Ok(resp.rows.len()),
+        Err(err) if matches!(err.status, 401 | 403) => client
+            .stored_query(
+                "recent_atoms",
+                &StoredQueryRequest {
+                    params: Some(params),
+                    branch: Some("main".into()),
+                    snapshot: None,
+                    expect_mutation: Some(false),
+                },
+            )
+            .await
+            .map(|r| r.rows.len())
+            .map_err(Into::into),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn compute_lightweight_counts(
+    client: &OmnigraphClient,
+    project_id: &str,
+) -> LightweightStatsCounts {
     let params = json!({ "project_id": project_id });
     let commit_query = CommitListQuery {
         branch: Some("main".into()),
@@ -4746,10 +5668,9 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         page_token: None,
     };
     let (
-        branches_res,
         commits_res,
         atoms_res,
-        sessions_res,
+        sessions_rows,
         symbols_rows,
         pub_edges,
         con_edges,
@@ -4758,12 +5679,11 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         follow_edges,
         symbol_edges,
     ) = tokio::join!(
-        client.list_branches(true),
         client.list_commits(&commit_query),
-        run_recent_atoms_query(client, project_id, Some("main".into()), None),
+        count_atom_ids(client, project_id),
         query_edges_safe(
             client,
-            GQ_LIST_SESSIONS,
+            GQ_COUNT_SESSION_IDS,
             "list_sessions",
             &params,
             Some("main"),
@@ -4771,7 +5691,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_SYMBOLS,
+            GQ_COUNT_SYMBOL_IDS,
             "list_symbols",
             &params,
             Some("main"),
@@ -4779,7 +5699,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_PUBLISHED_EDGES,
+            GQ_COUNT_PUBLISHED_EDGE_IDS,
             "list_published_edges",
             &params,
             Some("main"),
@@ -4787,7 +5707,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_CONSUMED_EDGES,
+            GQ_COUNT_CONSUMED_EDGE_IDS,
             "list_consumed_edges",
             &params,
             Some("main"),
@@ -4795,7 +5715,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_FILE_EDGES,
+            GQ_COUNT_FILE_EDGE_IDS,
             "list_file_edges",
             &params,
             Some("main"),
@@ -4803,7 +5723,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_ATOM_RELATIONS,
+            GQ_COUNT_ATOM_RELATION_IDS,
             "list_atom_relations",
             &params,
             Some("main"),
@@ -4811,7 +5731,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_SESSION_FOLLOWS,
+            GQ_COUNT_SESSION_FOLLOW_IDS,
             "list_session_follows",
             &params,
             Some("main"),
@@ -4819,7 +5739,7 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
         query_edges_safe(
             client,
-            GQ_LIST_SYMBOL_EDGES,
+            GQ_COUNT_SYMBOL_EDGE_IDS,
             "list_symbol_edges",
             &params,
             Some("main"),
@@ -4827,43 +5747,18 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
         ),
     );
 
-    let branches_resp = branches_res?;
-    let branches_count = branches_resp.branches.len();
-    let main_head = branches_resp
-        .details
-        .as_ref()
-        .and_then(|ds| ds.iter().find(|d| d.name == "main"))
-        .map(|d| d.head.graph_commit_id.as_str());
-    let unmerged_branches = branches_resp
-        .details
-        .as_ref()
-        .map(|ds| {
-            ds.iter()
-                .filter(|d| d.name != "main" && Some(d.head.graph_commit_id.as_str()) != main_head)
-                .count()
-        })
-        .unwrap_or_else(|| branches_count.saturating_sub(1));
-
-    let commits_count = commits_res.map(|c| c.commits.len()).unwrap_or(0);
-    let atoms_count = atoms_res.map(|r| r.rows.len()).unwrap_or(0);
-    let sessions_count = sessions_res.len();
-    let symbols_count = symbols_rows.len();
-    let edges_count = pub_edges.len()
-        + con_edges.len()
-        + file_edges.len()
-        + rel_edges.len()
-        + follow_edges.len()
-        + symbol_edges.len();
-
-    Ok(json!({
-        "branches": branches_count,
-        "atoms": atoms_count,
-        "sessions": sessions_count,
-        "symbols": symbols_count,
-        "edges": edges_count,
-        "commits": commits_count,
-        "unmerged_branches": unmerged_branches,
-    }))
+    LightweightStatsCounts {
+        commits: commits_res.map(|c| c.commits.len()).unwrap_or(0),
+        atoms: atoms_res.unwrap_or(0),
+        sessions: sessions_rows.len(),
+        symbols: symbols_rows.len(),
+        edges: pub_edges.len()
+            + con_edges.len()
+            + file_edges.len()
+            + rel_edges.len()
+            + follow_edges.len()
+            + symbol_edges.len(),
+    }
 }
 
 async fn run_stored_or_inline(
@@ -7439,4 +8334,338 @@ fn terminate_child_sync(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn normalize_sha256_hex(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().trim_start_matches("sha256:").trim();
+    if trimmed.len() != 64 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(HarnessError::invalid(
+            "Invalid SHA-256 digest: expected 64 hexadecimal characters.",
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn sidecar_sha256_url(url: &str) -> Option<String> {
+    let without_frag = url.split('#').next().unwrap_or(url);
+    let (base, query) = match without_frag.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (without_frag, None),
+    };
+    if base.is_empty() || base.ends_with(".sha256") {
+        return None;
+    }
+    Some(match query {
+        Some(q) => format!("{base}.sha256?{q}"),
+        None => format!("{base}.sha256"),
+    })
+}
+
+fn parse_sha256_checksum_text(text: &str, url: &str) -> Result<String> {
+    let target_name = url
+        .split('#')
+        .next()
+        .unwrap_or(url)
+        .split('?')
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(hex) = parts.next() else {
+            continue;
+        };
+        let digest = normalize_sha256_hex(hex)?;
+        if let Some(listed_file) = parts.next() {
+            let clean = listed_file.trim_start_matches('*');
+            let base = clean.rsplit('/').next().unwrap_or(clean);
+            if !target_name.is_empty() && !base.is_empty() && base != target_name {
+                return Err(HarnessError::invalid(format!(
+                    "SHA-256 manifest entry '{clean}' does not match '{target_name}'."
+                )));
+            }
+        }
+        return Ok(digest);
+    }
+    Err(HarnessError::invalid(
+        "Omnigraph SHA-256 checksum file was empty.",
+    ))
+}
+
+fn docker_container_running(container_name: &str) -> bool {
+    docker_container_running_with(None, container_name)
+}
+
+fn docker_container_running_with(docker_override: Option<&Path>, container_name: &str) -> bool {
+    let trimmed = container_name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let discovered;
+    let docker = match docker_override {
+        Some(path) => path,
+        None => {
+            let Some(found) = infra_host::provider::find_executable("docker") else {
+                return false;
+            };
+            discovered = found;
+            discovered.as_path()
+        }
+    };
+    Command::new(docker)
+        .args(["inspect", "-f", "{{.State.Running}}", trimmed])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+        })
+}
+
+fn resolve_running_container(
+    in_mem: Option<&str>,
+    configured: Option<&str>,
+    docker_override: Option<&Path>,
+) -> Option<String> {
+    if let Some(name) = in_mem.map(str::trim).filter(|s| !s.is_empty()) {
+        if docker_override.is_some() || infra_host::provider::find_executable("docker").is_some() {
+            return docker_container_running_with(docker_override, name)
+                .then(|| name.to_string());
+        }
+        return Some(name.to_string());
+    }
+    configured
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|name| docker_container_running_with(docker_override, name))
+        .map(str::to_string)
+}
+
+fn build_baseline_recovery_payload(
+    baseline: &super::client::ChangeBaselineResponse,
+    branch: &str,
+) -> (Vec<Value>, Value) {
+    let mut events = Vec::new();
+    let mut atoms = Vec::new();
+    let mut sessions = Vec::new();
+    let mut files = Vec::new();
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+
+    for rec in &baseline.records {
+        let Some(obj) = rec.as_object() else {
+            continue;
+        };
+        let props = obj
+            .get("data")
+            .or_else(|| obj.get("properties"))
+            .filter(|v| v.is_object())
+            .cloned()
+            .unwrap_or_else(|| rec.clone());
+
+        if let Some(edge_type) = obj
+            .get("edge")
+            .or_else(|| obj.get("edge_type"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                (obj.get("entity_kind").and_then(Value::as_str) == Some("edge"))
+                    .then(|| obj.get("type_name").and_then(Value::as_str))
+                    .flatten()
+            })
+        {
+            let from = obj
+                .get("from")
+                .or_else(|| obj.get("source"))
+                .or_else(|| props.get("source_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let to = obj
+                .get("to")
+                .or_else(|| obj.get("target"))
+                .or_else(|| props.get("target_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let eid = obj
+                .get("id")
+                .or_else(|| obj.get("entity_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{edge_type}:{from}->{to}"));
+            let relation = if edge_type == "RelatesTo" {
+                props["relation"]
+                    .as_str()
+                    .unwrap_or("relates_to")
+                    .to_string()
+            } else {
+                pascal_to_snake(edge_type)
+            };
+            edges.push(json!({
+                "id": eid,
+                "type": edge_type,
+                "kind": relation,
+                "relation": relation,
+                "source": from,
+                "target": to,
+                "from": from,
+                "to": to,
+                "properties": props,
+            }));
+            if events.len() < 200 {
+                events.push(json!({
+                    "graph_commit_id": baseline.snapshot_commit_id,
+                    "commit_id": baseline.snapshot_commit_id,
+                    "branch": branch,
+                    "entity_kind": "edge",
+                    "type_name": edge_type,
+                    "entity_id": eid,
+                    "kind": "edge",
+                    "node_id": Value::Null,
+                    "atom_id": Value::Null,
+                    "session_id": Value::Null,
+                    "op": "baseline",
+                    "baseline": true,
+                    "title": format!("{from} -> {to}"),
+                    "summary": relation,
+                    "properties": props,
+                }));
+            }
+            continue;
+        }
+
+        let type_name = obj
+            .get("type")
+            .or_else(|| obj.get("type_name"))
+            .and_then(Value::as_str)
+            .unwrap_or("ContextAtom");
+        let eid = obj
+            .get("id")
+            .or_else(|| obj.get("entity_id"))
+            .or_else(|| props.get("atom_id"))
+            .or_else(|| props.get("session_id"))
+            .or_else(|| props.get("path"))
+            .or_else(|| props.get("fqn"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let mut normalized_node = match type_name {
+            "ContextAtom" => {
+                let mut n = normalize_atom_row(&props);
+                if !eid.is_empty() && n["atom_id"].is_null() {
+                    n["atom_id"] = json!(eid);
+                    n["id"] = json!(eid);
+                }
+                atoms.push(n.clone());
+                n
+            }
+            "Session" => {
+                let mut n = normalize_session_row(&props);
+                if !eid.is_empty() && n["session_id"].is_null() {
+                    n["session_id"] = json!(eid);
+                    n["id"] = json!(eid);
+                }
+                sessions.push(n.clone());
+                n
+            }
+            "FileRef" => {
+                let mut n = normalize_file_row(&props);
+                if !eid.is_empty() && n["path"].is_null() {
+                    n["path"] = json!(eid);
+                    n["id"] = json!(eid);
+                }
+                files.push(n.clone());
+                n
+            }
+            "SymbolRef" => {
+                let mut n = normalize_symbol_row(&props);
+                if !eid.is_empty() && n["fqn"].is_null() {
+                    n["fqn"] = json!(eid);
+                    n["id"] = json!(eid);
+                }
+                symbols.push(n.clone());
+                n
+            }
+            _ => props.clone(),
+        };
+
+        let title = normalized_node["title"]
+            .as_str()
+            .or_else(|| normalized_node["path"].as_str())
+            .or_else(|| normalized_node["name"].as_str())
+            .unwrap_or(&eid)
+            .to_string();
+        let summary = normalized_node["summary"].as_str().unwrap_or("").to_string();
+        let kind = normalized_node["kind"]
+            .as_str()
+            .unwrap_or(type_name)
+            .to_string();
+        let atom_id_val = if type_name == "ContextAtom" {
+            Value::String(eid.clone())
+        } else {
+            Value::Null
+        };
+        let session_id_val = if type_name == "Session" {
+            Value::String(eid.clone())
+        } else {
+            normalized_node
+                .get("source_session_id")
+                .or_else(|| normalized_node.get("session_id"))
+                .cloned()
+                .unwrap_or(Value::Null)
+        };
+        if let Some(m) = normalized_node.as_object_mut() {
+            m.entry("branch").or_insert_with(|| json!(branch));
+        }
+
+        if events.len() < 200 {
+            events.push(json!({
+                "graph_commit_id": baseline.snapshot_commit_id,
+                "commit_id": baseline.snapshot_commit_id,
+                "branch": branch,
+                "entity_kind": "node",
+                "type_name": type_name,
+                "entity_id": eid,
+                "kind": kind,
+                "node_id": eid,
+                "atom_id": atom_id_val,
+                "session_id": session_id_val,
+                "op": "baseline",
+                "baseline": true,
+                "title": title,
+                "summary": summary,
+                "properties": normalized_node,
+            }));
+        }
+    }
+
+    let bundle = json!({
+        "snapshot_commit_id": baseline.snapshot_commit_id,
+        "resume_cursor": baseline.resume_cursor,
+        "record_count": baseline.records.len(),
+        "atoms": atoms,
+        "sessions": sessions,
+        "files": files,
+        "symbols": symbols,
+        "edges": edges,
+        "records": baseline.records,
+    });
+    (events, bundle)
 }

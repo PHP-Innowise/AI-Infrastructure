@@ -1124,10 +1124,23 @@ fn evaluate_mock_query(
     let pid = params["project_id"].as_str().unwrap_or("");
     let match_proj = |v: &Value| pid.is_empty() || v["project_id"].as_str().unwrap_or("") == pid;
 
-    if query_name == "context_search" || query_text.contains("context_search") {
+    if query_name == "context_search"
+        || query_name == "context_search_by_kind"
+        || query_text.contains("context_search")
+    {
         let q = params["q"].as_str().unwrap_or("").to_ascii_lowercase();
+        let kind_wanted = params["kind"].as_str().map(str::to_ascii_lowercase);
         let mut hits = Vec::new();
         for atom in snap.atoms.values().filter(|a| match_proj(a)) {
+            if let Some(ref kf) = kind_wanted
+                && atom["kind"]
+                    .as_str()
+                    .map(str::to_ascii_lowercase)
+                    .as_deref()
+                    != Some(kf.as_str())
+            {
+                continue;
+            }
             let hay = format!(
                 "{} {} {}",
                 atom["title"].as_str().unwrap_or(""),
@@ -7031,5 +7044,558 @@ async fn graph_view_scopes_subqueries_batches_sessions_and_requires_both_relates
             .as_str()
             .is_some_and(|s| !s.is_empty()),
         "expected bridged canonical symbol_id: {bridged_sym}"
+    );
+}
+
+#[tokio::test]
+async fn changes_json_recovers_baseline_records_on_410_gap() {
+    let app = Router::new()
+        .route(
+            &format!("/graphs/{}/changes", schema::HARNESS_GRAPH_ID),
+            get(|headers: HeaderMap| async move {
+                let _ = headers;
+                json_err(
+                    StatusCode::GONE,
+                    "change_feed_gap",
+                    "Retained history compacted past requested cursor.",
+                    Some(json!({
+                        "change_feed_gap": {
+                            "cursor": "expired",
+                            "first_unreadable_commit_id": "c-0099"
+                        }
+                    })),
+                )
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/changes/baseline", schema::HARNESS_GRAPH_ID),
+            post(|| async move {
+                let ndjson = concat!(
+                    r#"{"type":"ContextAtom","id":"atom-b1","data":{"atom_id":"atom-b1","kind":"decision","title":"Baseline Decision","summary":"Recovered from gap","body":"Keep tokens stateless","source_branch":"main","confidence":0.95,"pin_priority":10,"verified":true}}"#,
+                    "\n",
+                    r#"{"edge":"TouchesFile","id":"tf-b1","from":"atom-b1","to":"src/auth.rs","data":{"access":"referenced"}}"#,
+                    "\n",
+                    r#"{"baseline":{"snapshot_commit_id":"c-0100","resume_cursor":"cur-0100"}}"#,
+                    "\n"
+                );
+                (StatusCode::OK, ndjson)
+            }),
+        );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.save_config(OmnigraphConfig {
+        mode: OmnigraphMode::External,
+        endpoint: Some(format!("http://{addr}")),
+        token: Some("tok-harness".into()),
+        graph_id: schema::HARNESS_GRAPH_ID.into(),
+        ..OmnigraphConfig::default()
+    })
+    .await
+    .unwrap();
+
+    let res = mgr
+        .changes_json("proj-1", Some("expired"), Some("main"))
+        .await
+        .unwrap();
+    assert_eq!(res["reset"], true);
+    assert_eq!(res["caught_up"], true);
+    assert_eq!(res["cursor"], "cur-0100");
+    assert_eq!(res["snapshot_commit_id"], "c-0100");
+
+    let events = res["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{res}");
+    assert_eq!(events[0]["op"], "baseline");
+    assert_eq!(events[0]["baseline"], true);
+    assert_eq!(events[0]["atom_id"], "atom-b1");
+    assert_eq!(events[0]["title"], "Baseline Decision");
+    assert_eq!(events[1]["entity_kind"], "edge");
+    assert_eq!(events[1]["type_name"], "TouchesFile");
+
+    assert_eq!(res["baseline"]["record_count"], 2);
+    assert_eq!(res["baseline"]["atoms"][0]["atom_id"], "atom-b1");
+    assert_eq!(res["baseline"]["edges"][0]["from"], "atom-b1");
+    assert_eq!(res["baseline"]["edges"][0]["to"], "src/auth.rs");
+    assert_eq!(res["baseline"]["records"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn search_json_pushes_kind_skips_empty_edges_and_returns_bidirectional_subgraph_beyond_page1()
+{
+    let state_dir = tempfile::tempdir().unwrap();
+    let (store, project_id, _dir) = symbol_project(state_dir.path());
+    let (base_url, _server, mock_state) = spawn_mock_omnigraph_with_state().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+
+    // Publish an incoming neighbor, the target decision atom, and an outgoing neighbor,
+    // plus an unrelated finding mentioning the same keyword `issuer` and 255 filler atoms so
+    // the hit atom lives past the default GRAPH_PAGE_LIMIT (250).
+    let client = mgr.client().await.unwrap();
+    let mut bulk = String::new();
+    for idx in 0..255 {
+        bulk.push_str(
+            &json!({
+                "type": "ContextAtom",
+                "id": format!("atom-filler-{idx:03}"),
+                "data": {
+                    "atom_id": format!("atom-filler-{idx:03}"),
+                    "project_id": project_id,
+                    "kind": "finding",
+                    "title": format!("Filler issuer noise {idx}"),
+                    "summary": "Unrelated finding noise",
+                    "body": "issuer noise",
+                    "source_branch": "main",
+                    "confidence": 0.5,
+                    "pin_priority": 100 - (idx % 50) as i32,
+                    "verified": true,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            })
+            .to_string(),
+        );
+        bulk.push('\n');
+    }
+    client.load_ndjson("main", None, "merge", &bulk, None).await.unwrap();
+
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-in-1",
+        "kind": "insight",
+        "title": "Background session note",
+        "summary": "Predecessor context",
+        "body": "Predecessor context",
+        "relates_to": ["atom-dec-target"],
+        "pin_priority": 1
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-out-1",
+        "kind": "contract",
+        "title": "Downstream contract",
+        "summary": "Consumes TokenGuard decision",
+        "body": "Downstream note",
+        "pin_priority": 1
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-dec-target",
+        "kind": "decision",
+        "title": "TokenGuard::check validates issuer claim",
+        "summary": "Use strict issuer validation inside check()",
+        "body": "Call TokenGuard::check() on every request.",
+        "files": ["src/Auth/TokenGuard.php"],
+        "relates_to": ["depends_on:atom-out-1"],
+        "pin_priority": 0
+    }))
+    .await
+    .unwrap();
+
+    let ir = crate::graph_ir::GraphIrStore::open(state_dir.path(), &project_id).unwrap();
+    ir.sync_workspace(&std::path::PathBuf::from(
+        store.project(&project_id).unwrap()["path"]
+            .as_str()
+            .unwrap(),
+    ))
+    .unwrap();
+
+    // 1. Empty hit query must not query any edge/file/symbol tables.
+    mock_state.lock().unwrap().reads.clear();
+    let empty = mgr
+        .search_json(
+            &project_id,
+            "definitely-no-such-match-xyz",
+            Some("main"),
+            Some("decision"),
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert!(empty["hits"].as_array().unwrap().is_empty());
+    assert!(empty["subgraph"]["atoms"].as_array().unwrap().is_empty());
+    let empty_reads = mock_state.lock().unwrap().reads.clone();
+    assert!(
+        !empty_reads
+            .iter()
+            .any(|r| r.contains("list_file_edges") || r.contains("list_atom_relations") || r.contains("list_symbol_edges")),
+        "empty search must short-circuit before fetching edges: {empty_reads:?}"
+    );
+
+    // 2. Kind-filtered search pushes `kind` into `context_search_by_kind`, returns bidirectional
+    //    RelatesTo + MentionsSymbol neighbors, and provides complete page-independent subgraph.
+    mock_state.lock().unwrap().reads.clear();
+    let res = mgr
+        .search_json(&project_id, "issuer", Some("main"), Some("decision"), Some(5))
+        .await
+        .unwrap();
+    let reads = mock_state.lock().unwrap().reads.clone();
+    assert!(
+        reads.iter().any(|r| r.starts_with("context_search_by_kind@")),
+        "expected kind-filtered query pushdown in reads: {reads:?}"
+    );
+
+    let hits = res["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{res}");
+    assert_eq!(hits[0]["atom"]["atom_id"], "atom-dec-target");
+    let neighbors = hits[0]["neighbors"].as_array().unwrap();
+    assert!(
+        neighbors.iter().any(|n| {
+            n["kind"] == "atom" && n["id"] == "atom-out-1" && n["direction"] == "outgoing"
+        }),
+        "missing outgoing RelatesTo neighbor: {neighbors:?}"
+    );
+    assert!(
+        neighbors.iter().any(|n| {
+            n["kind"] == "atom" && n["id"] == "atom-in-1" && n["direction"] == "incoming"
+        }),
+        "missing incoming RelatesTo neighbor: {neighbors:?}"
+    );
+    assert!(
+        neighbors.iter().any(|n| {
+            n["kind"] == "symbol"
+                && n["id"] == "src/Auth/TokenGuard.php::TokenGuard::check"
+                && n["relation"] == "mentions_symbol"
+        }),
+        "missing MentionsSymbol neighbor: {neighbors:?}"
+    );
+
+    // Verify full subgraph hydration includes hit + both neighbors + files + symbols + edges.
+    let sub_atoms: BTreeSet<&str> = res["subgraph"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["atom_id"].as_str())
+        .collect();
+    assert!(sub_atoms.contains("atom-dec-target"), "{sub_atoms:?}");
+    assert!(sub_atoms.contains("atom-in-1"), "{sub_atoms:?}");
+    assert!(sub_atoms.contains("atom-out-1"), "{sub_atoms:?}");
+    assert!(
+        res["subgraph"]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "check" && s["symbol_id"].as_str().is_some_and(|id| !id.is_empty())),
+        "expected canonical symbol_id in search subgraph: {}",
+        res["subgraph"]["symbols"]
+    );
+    assert!(
+        res["subgraph"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "relates_to" && e["from"] == "atom-in-1" && e["to"] == "atom-dec-target"),
+        "expected incoming RelatesTo edge in search subgraph"
+    );
+
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn status_caches_stats_reuses_client_and_respects_short_health_timeout_and_starting_state() {
+    use std::time::Instant;
+
+    let (base_url, _server, mock_state) = spawn_mock_omnigraph_with_state().await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+
+    // Verify status platform/version metadata + stats caching across back-to-back polls.
+    mock_state.lock().unwrap().reads.clear();
+    let st1 = mgr.status_json("proj-1").await.unwrap();
+    assert_eq!(st1["connected"], true);
+    assert_eq!(st1["state"], "connected");
+    assert_eq!(st1["starting"], false);
+    assert_eq!(st1["target_version"], schema::OMNIGRAPH_VERSION);
+    assert_eq!(st1["version"], "0.15.0");
+    assert!(st1["platform"]["os"].is_string());
+    assert!(st1["platform"]["arch"].is_string());
+    let first_poll_reads = mock_state.lock().unwrap().reads.len();
+    assert!(first_poll_reads >= 8, "expected initial stats queries: {first_poll_reads}");
+
+    mock_state.lock().unwrap().reads.clear();
+    let st2 = mgr.status_json("proj-1").await.unwrap();
+    assert_eq!(st2["stats"], st1["stats"]);
+    assert_eq!(
+        mock_state.lock().unwrap().reads.len(),
+        0,
+        "second status poll with unchanged branch heads should hit stats cache"
+    );
+
+    // Explicitly verify `starting` state overrides dead/unreachable endpoint errors cleanly.
+    let guard = mgr.enter_starting_for_test();
+    let starting_st = mgr.status_json("proj-1").await.unwrap();
+    assert_eq!(starting_st["state"], "starting");
+    assert_eq!(starting_st["starting"], true);
+    assert_eq!(starting_st["connected"], false);
+    assert!(starting_st["error"].is_null());
+    drop(guard);
+
+    // Verify bounded stderr ring buffer preserves newest lines within limit.
+    for i in 0..160 {
+        mgr.push_stderr_for_test(&format!("stderr line {i}"));
+    }
+    let tail = mgr.stderr_tail(200);
+    assert_eq!(tail.len(), 128);
+    assert_eq!(tail.first().map(String::as_str), Some("stderr line 32"));
+    assert_eq!(tail.last().map(String::as_str), Some("stderr line 159"));
+
+    // Verify `health_with_timeout` / `health` uses short timeout instead of hanging 30s.
+    let stall_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stall_addr = stall_listener.local_addr().unwrap();
+    let _stall = tokio::spawn(async move {
+        if let Ok((_sock, _)) = stall_listener.accept().await {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    });
+    let slow_client = OmnigraphClient::new(
+        format!("http://{stall_addr}"),
+        None,
+        schema::HARNESS_GRAPH_ID,
+    )
+    .unwrap();
+    let t0 = Instant::now();
+    let err = slow_client
+        .health_with_timeout(std::time::Duration::from_millis(350))
+        .await
+        .unwrap_err();
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(2),
+        "health probe took too long: {:?} ({err})",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn install_local_with_sha256_verifies_expected_and_sidecar_checksums() {
+    use sha2::{Digest, Sha256};
+
+    let mut archive_bytes = Vec::new();
+    {
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            &mut archive_bytes,
+            flate2::Compression::fast(),
+        ));
+        for (name, body) in [
+            ("omnigraph", b"#!/bin/sh\necho cli\n".as_slice()),
+            ("omnigraph-server", b"#!/bin/sh\necho srv\n".as_slice()),
+        ] {
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(body.len() as u64);
+            hdr.set_mode(0o755);
+            hdr.set_cksum();
+            tar.append_data(&mut hdr, name, body).unwrap();
+        }
+        tar.finish().unwrap();
+    }
+    let mut actual_hex = String::new();
+    for b in Sha256::digest(&archive_bytes) {
+        actual_hex.push_str(&format!("{b:02x}"));
+    }
+
+    let bytes_arc = Arc::new(archive_bytes);
+    let good_sha = Arc::new(format!("{actual_hex}  omnigraph-linux-x86_64.tar.gz\n"));
+    let bad_sha = Arc::new(format!("{}  omnigraph-bad.tar.gz\n", "0".repeat(64)));
+    let app = Router::new()
+        .route(
+            "/omnigraph-linux-x86_64.tar.gz",
+            get({
+                let d = Arc::clone(&bytes_arc);
+                move || {
+                    let b = d.as_ref().clone();
+                    async move { (StatusCode::OK, b) }
+                }
+            }),
+        )
+        .route(
+            "/omnigraph-linux-x86_64.tar.gz.sha256",
+            get({
+                let s = Arc::clone(&good_sha);
+                move || {
+                    let t = s.as_ref().clone();
+                    async move { (StatusCode::OK, t) }
+                }
+            }),
+        )
+        .route(
+            "/omnigraph-bad.tar.gz",
+            get({
+                let d = Arc::clone(&bytes_arc);
+                move || {
+                    let b = d.as_ref().clone();
+                    async move { (StatusCode::OK, b) }
+                }
+            }),
+        )
+        .route(
+            "/omnigraph-bad.tar.gz.sha256",
+            get({
+                let s = Arc::clone(&bad_sha);
+                move || {
+                    let t = s.as_ref().clone();
+                    async move { (StatusCode::OK, t) }
+                }
+            }),
+        );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+
+    // Wrong explicit checksum rejects before extraction.
+    let wrong = mgr
+        .install_local_with_sha256(
+            &format!("http://{addr}/omnigraph-linux-x86_64.tar.gz"),
+            Some(&"f".repeat(64)),
+        )
+        .await
+        .unwrap_err();
+    assert!(wrong.message.contains("SHA-256 mismatch"), "{wrong}");
+    assert!(!mgr.tools_dir().exists());
+
+    // Wrong sidecar `.sha256` manifest rejects before extraction.
+    let bad_sidecar = mgr
+        .install_local_from(&format!("http://{addr}/omnigraph-bad.tar.gz"))
+        .await
+        .unwrap_err();
+    assert!(
+        bad_sidecar.message.contains("SHA-256 mismatch"),
+        "{bad_sidecar}"
+    );
+    assert!(!mgr.tools_dir().exists());
+
+    // Matching sidecar `.sha256` succeeds and records verification source.
+    let ok = mgr
+        .install_local_from(&format!("http://{addr}/omnigraph-linux-x86_64.tar.gz"))
+        .await
+        .unwrap();
+    assert_eq!(ok["sha256"], actual_hex);
+    assert_eq!(ok["sha256_verified"], true);
+    assert_eq!(ok["sha256_source"], "sidecar_sha256");
+
+    // Matching explicit checksum via setup_json succeeds cleanly too.
+    let ok_explicit = mgr
+        .setup_json(&json!({
+            "action": "install",
+            "release_url": format!("http://{addr}/omnigraph-linux-x86_64.tar.gz"),
+            "sha256": actual_hex,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ok_explicit["sha256_verified"], true);
+    assert_eq!(ok_explicit["sha256_source"], "expected");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn start_local_captures_stderr_on_crash() {
+    let cli_script = r#"#!/usr/bin/env bash
+set -e
+if [ "$1" = "version" ]; then
+  echo '{"version":"0.15.0"}'
+  exit 0
+fi
+if [ "$1" = "cluster" ]; then
+  echo '{"status":"complete"}'
+  exit 0
+fi
+exit 0
+"#;
+    let crashing_server = r#"#!/usr/bin/env bash
+echo "fatal: bind address already in use" >&2
+echo "hint: stop lingering instance" >&2
+exit 1
+"#;
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    let tools_dir = mgr.tools_dir();
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    for (name, body) in [("omnigraph", cli_script), ("omnigraph-server", crashing_server)] {
+        let p = tools_dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&p, perms).unwrap();
+        }
+    }
+
+    let err = mgr.start_local(None).await.unwrap_err();
+    assert!(
+        err.message.contains("fatal: bind address already in use"),
+        "expected captured child stderr in startup error: {err}"
+    );
+    let tail = mgr.stderr_tail(10);
+    assert!(
+        tail.iter().any(|l| l.contains("hint: stop lingering instance")),
+        "expected captured lines in stderr ring-buffer: {tail:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn detects_pre_restart_docker_container_via_inspect() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_docker = tmp.path().join("docker");
+    std::fs::write(
+        &fake_docker,
+        "#!/usr/bin/env bash\nif [ \"$1\" = \"inspect\" ] && [ \"$4\" = \"harness-omnigraph-alive\" ]; then\n  echo \"true\"\n  exit 0\nfi\necho \"false\"\nexit 1\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_docker).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_docker, perms).unwrap();
+    }
+
+    let mgr = OmnigraphManager::new(tmp.path().join("state"), None).unwrap();
+    assert_eq!(
+        mgr.detect_running_container_with_docker_for_test(
+            Some("harness-omnigraph-alive"),
+            Some(&fake_docker),
+        ),
+        Some("harness-omnigraph-alive".to_string())
+    );
+    assert_eq!(
+        mgr.detect_running_container_with_docker_for_test(
+            Some("harness-omnigraph-dead"),
+            Some(&fake_docker),
+        ),
+        None
     );
 }
