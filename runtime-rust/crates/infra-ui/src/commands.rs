@@ -126,15 +126,19 @@ fn target(files: bool) -> Option<String> {
         dom::query(&query)
     ))
 }
+fn normalize_command_name(raw: &str) -> String {
+    raw.trim_start_matches('/').to_lowercase()
+}
+
 fn rank(items: Vec<V>, needle: &str) -> Vec<V> {
-    let needle = needle.to_lowercase();
+    let needle = normalize_command_name(needle);
     let mut out = vec![];
     for (index, item) in items.into_iter().enumerate() {
-        let mut names = vec![m::text(&item, "name").to_lowercase()];
+        let mut names = vec![normalize_command_name(&m::text(&item, "name"))];
         names.extend(
             m::array(&item["aliases"])
                 .iter()
-                .map(|x| m::string(x).to_lowercase()),
+                .map(|x| normalize_command_name(&m::string(x))),
         );
         let score = if names.iter().any(|n| n.starts_with(&needle)) {
             Some(0)
@@ -218,14 +222,59 @@ fn select_active(previous: usize, next: usize, count: usize) {
         clear_active_descendant();
     }
 }
+fn within_composer_or_hints(el: &web_sys::Element) -> bool {
+    el.id() == "prompt" || el.closest("#skill-hints-panel").ok().flatten().is_some()
+}
+
+pub(crate) fn handle_pointer_down(target: &web_sys::Element) {
+    if m::yes(&m::data("composer-open")) && !within_composer_or_hints(target) {
+        close();
+    }
+}
+
+pub(crate) fn handle_focus_in(target: &web_sys::Element) {
+    dom::cancel_timer("composer-blur-check");
+    if m::yes(&m::data("composer-open")) && !within_composer_or_hints(target) {
+        close();
+    }
+}
+
+pub(crate) fn handle_focus_out(target: &web_sys::Element, event: &web_sys::FocusEvent) {
+    if !m::yes(&m::data("composer-open")) || !within_composer_or_hints(target) {
+        return;
+    }
+    if let Some(next) = event
+        .related_target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+    {
+        if !within_composer_or_hints(&next) {
+            close();
+        }
+        return;
+    }
+    dom::later("composer-blur-check", 0, || {
+        if m::yes(&m::data("composer-open")) {
+            let active_inside = dom::document()
+                .active_element()
+                .is_some_and(|el| within_composer_or_hints(&el));
+            if !active_inside {
+                close();
+            }
+        }
+    });
+}
+
 pub(crate) fn close() {
+    dom::cancel_timer("composer-blur-check");
     m::next("composer");
     m::set("composer-open", json!(false));
+    m::take("composer-rendered-signature");
     dom::hidden("skill-hints-panel", true);
     dom::attr("prompt", "aria-expanded", "false");
     clear_active_descendant();
 }
 pub async fn update() {
+    dom::cancel_timer("composer-blur-check");
     if m::read(|s| m::active(&s.selected)) || crate::inbox::needs_confirmation() {
         close();
         return;
@@ -249,6 +298,15 @@ pub async fn update() {
     let signature = format!("{}:{}:{}:{}", url, t.start, t.trigger, t.query);
     if m::data("composer-dismissed") == signature {
         close();
+        return;
+    }
+    if m::yes(&m::data("composer-open"))
+        && m::data("composer-rendered-signature") == signature
+        && (t.trigger == '@'
+            || (m::data("composer-cache")["url"] == url
+                && js_sys::Date::now() - m::data("composer-cache")["at"].as_f64().unwrap_or(0.)
+                    < 30000.))
+    {
         return;
     }
     m::set(
@@ -375,12 +433,44 @@ fn render() {
         dom::append("skill-hints", &li);
     }
     dom::text("skill-hints-status", &format!("{} matches", items.len()));
+    m::set(
+        "composer-rendered-signature",
+        m::data("composer-token")["signature"].clone(),
+    );
     if let Some(id) = active_option_id(count, active) {
         dom::attr("prompt", "aria-activedescendant", &id);
     } else {
         clear_active_descendant();
     }
 }
+pub(crate) fn format_composer_replacement(trigger: &str, item: &V, after: &str) -> (String, bool) {
+    let folder = trigger == "@" && item["kind"] == "folder";
+    let raw_name = if trigger == "@" {
+        m::text(item, "path")
+    } else {
+        m::text(item, "name")
+    };
+    let clean_name = if trigger == "/" {
+        raw_name.trim_start_matches('/')
+    } else {
+        raw_name.as_str()
+    };
+    let replacement = format!(
+        "{trigger}{clean_name}{}",
+        if folder || after.starts_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        }
+    );
+    (replacement, folder)
+}
+
+pub(crate) fn should_autosend_command(item: &V) -> bool {
+    let (_, hint, _) = composer_hint_parts(item);
+    hint.is_empty() || hint.starts_with('[') || hint.to_ascii_lowercase().contains("optional")
+}
+
 async fn choose(index: usize, run: bool) {
     let Some(item) = m::array(&m::data("composer-items")).get(index).cloned() else {
         return;
@@ -398,21 +488,8 @@ async fn choose(index: usize, run: bool) {
         return;
     }
     let trigger = m::text(&t, "trigger");
-    let folder = trigger == "@" && item["kind"] == "folder";
-    let name = if trigger == "@" {
-        m::text(&item, "path")
-    } else {
-        m::text(&item, "name")
-    };
     let after = &text[end..];
-    let replacement = format!(
-        "{trigger}{name}{}",
-        if folder || after.starts_with(char::is_whitespace) {
-            ""
-        } else {
-            " "
-        }
-    );
+    let (replacement, folder) = format_composer_replacement(&trigger, &item, after);
     let result = format!("{}{}{}", &text[..start], replacement, after);
     let caret = (text[..start].encode_utf16().count() + replacement.encode_utf16().count()) as u32;
     dom::set_value("prompt", &result);
@@ -430,12 +507,8 @@ async fn choose(index: usize, run: bool) {
     } else if run && trigger == "/" {
         if item["kind"] == "page" {
             intercept(&result).await;
-        } else {
-            let hint = m::text(&item, "hint");
-            if hint.is_empty() || hint.starts_with('[') || hint.to_lowercase().contains("optional")
-            {
-                session::send().await;
-            }
+        } else if should_autosend_command(&item) {
+            session::send().await;
         }
     }
 }
@@ -494,7 +567,15 @@ pub async fn intercept(text: &str) -> bool {
     let provider = dom::value("provider");
     let listed = m::array(&m::data("composer-cache")["data"]["commands"])
         .into_iter()
-        .find(|v| v["name"] == name || m::array(&v["aliases"]).iter().any(|a| a == name));
+        .find(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|s| s.trim_start_matches('/') == name)
+                || m::array(&v["aliases"]).iter().any(|a| {
+                    a.as_str()
+                        .is_some_and(|s| s.trim_start_matches('/') == name)
+                })
+        });
     let action = if let Some(v) = listed {
         if v["kind"] != "page" {
             return false;
@@ -607,10 +688,14 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         return true;
     }
     if kind == "click" && action == "palette-run" {
-        let query = m::read(|s| s.workspace.command_palette_query.clone());
-        let entries = collect_palette_entries(&query);
         let idx = payload.as_u64().unwrap_or(0) as usize;
-        if let Some(entry) = entries.into_iter().nth(idx) {
+        let entry = PALETTE_ENTRIES
+            .with(|entries| entries.borrow().get(idx).cloned())
+            .or_else(|| {
+                let query = m::read(|s| s.workspace.command_palette_query.clone());
+                collect_palette_entries(&query).into_iter().nth(idx)
+            });
+        if let Some(entry) = entry {
             execute_palette_entry(entry).await;
         }
         return true;
@@ -851,7 +936,13 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
         .collect()
 }
 
+thread_local! {
+    static PALETTE_ENTRIES: std::cell::RefCell<Vec<PaletteEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub fn open_palette() {
+    close();
     dom::save_focus_for_overlay("command-palette");
     m::write(|s| {
         s.workspace.command_palette_open = true;
@@ -874,12 +965,15 @@ pub fn close_palette() {
         s.workspace.command_palette_query.clear();
         s.workspace.command_palette_selected = 0;
     });
+    PALETTE_ENTRIES.with(|entries| entries.borrow_mut().clear());
     dom::attr("command-palette-input", "aria-expanded", "false");
+    if let Some(input) = dom::get("command-palette-input") {
+        let _ = input.remove_attribute("aria-activedescendant");
+    }
     if !was_open {
         return;
     }
     dom::hidden("command-palette", true);
-    dom::restore_focus_for_overlay("command-palette");
 }
 
 pub fn render_palette() {
@@ -898,9 +992,8 @@ pub fn render_palette() {
     } else {
         selected.min(entries.len() - 1)
     };
-    if !entries.is_empty() {
-        m::write(|s| s.workspace.command_palette_selected = active_idx);
-    }
+    m::write(|s| s.workspace.command_palette_selected = active_idx);
+    PALETTE_ENTRIES.with(|slot| *slot.borrow_mut() = entries.clone());
     list.set_text_content(None);
     if entries.is_empty() {
         dom::add(
@@ -911,7 +1004,9 @@ pub fn render_palette() {
                 "No matching commands, views, projects, or sessions.",
             ),
         );
-        dom::attr("command-palette-input", "aria-activedescendant", "");
+        if let Some(input) = dom::get("command-palette-input") {
+            let _ = input.remove_attribute("aria-activedescendant");
+        }
         return;
     }
     for (idx, item) in entries.iter().enumerate() {
@@ -1031,6 +1126,40 @@ pub(crate) fn palette_boundary_index(count: usize, end: bool) -> usize {
     }
 }
 
+pub(crate) fn palette_selection_step(count: usize, current: usize, key: &str) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    match key {
+        "ArrowDown" => Some(next_option_index(count, current, true)),
+        "ArrowUp" => Some(next_option_index(count, current, false)),
+        "Home" => Some(palette_boundary_index(count, false)),
+        "End" => Some(palette_boundary_index(count, true)),
+        _ => None,
+    }
+}
+
+fn move_palette_selection(key: &str) -> bool {
+    let count = PALETTE_ENTRIES.with(|entries| entries.borrow().len());
+    let prev = m::read(|s| s.workspace.command_palette_selected);
+    let Some(next) = palette_selection_step(count, prev, key) else {
+        return matches!(key, "ArrowDown" | "ArrowUp" | "Home" | "End");
+    };
+    m::write(|s| s.workspace.command_palette_selected = next);
+    if prev != next {
+        if let Some(prev_el) = dom::get(&format!("command-palette-option-{prev}")) {
+            let _ = prev_el.set_attribute("aria-selected", "false");
+        }
+    }
+    let next_id = format!("command-palette-option-{next}");
+    if let Some(next_el) = dom::get(&next_id) {
+        let _ = next_el.set_attribute("aria-selected", "true");
+        next_el.scroll_into_view();
+    }
+    dom::attr("command-palette-input", "aria-activedescendant", &next_id);
+    true
+}
+
 /// Global keyboard handler for `Cmd/Ctrl+K` Command Palette and palette navigation.
 pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
     if (event.ctrl_key() || event.meta_key())
@@ -1053,43 +1182,7 @@ pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
             close_palette();
             true
         }
-        "ArrowDown" => {
-            let count =
-                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
-                    .len();
-            m::write(|s| {
-                s.workspace.command_palette_selected =
-                    next_option_index(count, s.workspace.command_palette_selected, true);
-            });
-            render_palette();
-            true
-        }
-        "ArrowUp" => {
-            let count =
-                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
-                    .len();
-            m::write(|s| {
-                s.workspace.command_palette_selected =
-                    next_option_index(count, s.workspace.command_palette_selected, false);
-            });
-            render_palette();
-            true
-        }
-        "Home" => {
-            m::write(|s| s.workspace.command_palette_selected = palette_boundary_index(0, false));
-            render_palette();
-            true
-        }
-        "End" => {
-            let count =
-                collect_palette_entries(&m::read(|s| s.workspace.command_palette_query.clone()))
-                    .len();
-            m::write(|s| {
-                s.workspace.command_palette_selected = palette_boundary_index(count, true);
-            });
-            render_palette();
-            true
-        }
+        key @ ("ArrowDown" | "ArrowUp" | "Home" | "End") => move_palette_selection(key),
         "Enter" => {
             if event
                 .target()
@@ -1104,8 +1197,10 @@ pub fn palette_key(event: &web_sys::KeyboardEvent) -> bool {
                     s.workspace.command_palette_selected,
                 )
             });
-            let entries = collect_palette_entries(&query);
-            if let Some(entry) = entries.into_iter().nth(selected) {
+            let entry = PALETTE_ENTRIES
+                .with(|entries| entries.borrow().get(selected).cloned())
+                .or_else(|| collect_palette_entries(&query).into_iter().nth(selected));
+            if let Some(entry) = entry {
                 spawn_local(async move {
                     execute_palette_entry(entry).await;
                 });
@@ -1205,5 +1300,52 @@ mod tests {
             })),
             ("src/main.rs".into(), "line".into(), String::new())
         );
+    }
+
+    #[test]
+    fn choose_replacement_and_autosend_handle_leading_slash_and_argument_hint() {
+        // Leading '/' in item["name"] must not produce "//model " and rank() matches prefix.
+        let model_cmd = json!({
+            "name": "/model",
+            "argumentHint": "[model]",
+            "description": "Switch model"
+        });
+        assert_eq!(
+            format_composer_replacement("/", &model_cmd, ""),
+            ("/model ".to_owned(), false)
+        );
+        assert!(should_autosend_command(&model_cmd));
+
+        // Required argumentHint must NOT auto-send even when "hint" field is absent.
+        let required_arg_cmd = json!({
+            "name": "/review",
+            "argumentHint": "<pr-number>"
+        });
+        assert!(!should_autosend_command(&required_arg_cmd));
+        assert!(should_autosend_command(&json!({
+            "name": "help",
+            "argumentHint": "optional topic"
+        })));
+
+        let ranked = rank(
+            vec![
+                json!({"name": "clear", "description": "Reset chat"}),
+                json!({"name": "/model", "description": "Choose model"}),
+            ],
+            "mod",
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0]["name"], "/model");
+    }
+
+    #[test]
+    fn palette_selection_step_navigates_in_place_and_ignores_empty_lists() {
+        assert_eq!(palette_selection_step(0, 0, "ArrowDown"), None);
+        assert_eq!(palette_selection_step(4, 0, "ArrowDown"), Some(1));
+        assert_eq!(palette_selection_step(4, 3, "ArrowDown"), Some(0));
+        assert_eq!(palette_selection_step(4, 0, "ArrowUp"), Some(3));
+        assert_eq!(palette_selection_step(4, 2, "Home"), Some(0));
+        assert_eq!(palette_selection_step(4, 1, "End"), Some(3));
+        assert_eq!(palette_selection_step(4, 1, "Escape"), None);
     }
 }
