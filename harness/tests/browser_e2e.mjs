@@ -66,6 +66,7 @@ function parseArgs(argv) {
     commitB: '',
     systemRunId: '',
     skillcacheCapsuleId: '',
+    skillcacheRequalify: false,
     chrome: process.env.HARNESS_CHROME_BIN || '/opt/google/chrome/chrome',
     timeoutMs: 120_000,
   };
@@ -104,6 +105,9 @@ function parseArgs(argv) {
         break;
       case 'skillcache-capsule-id':
         opts.skillcacheCapsuleId = val;
+        break;
+      case 'skillcache-requalify':
+        opts.skillcacheRequalify = val === '1' || val === 'true';
         break;
       case 'chrome':
         opts.chrome = val;
@@ -1186,7 +1190,7 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   await driver.waitFor(() => (window.devicePixelRatio || 1) <= 1.05, 'devicePixelRatio restored to 1', 4_000);
 
   // Hover neighbor lighting + right-click Explain on Canvas2D + Shift+drag pin/unpin + Back/Forward
-  const pinTarget = await driver.callFn(() => {
+  const visibleNodeTargets = () => driver.callFn(() => {
     const host = document.getElementById('graph-map-canvas');
     const cr = host.getBoundingClientRect();
     const out = [];
@@ -1195,42 +1199,79 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
       const cx = nr.left + nr.width / 2;
       const cy = nr.top + nr.height / 2;
       if (cx > cr.left + 20 && cx < cr.right - 20 && cy > cr.top + 20 && cy < cr.bottom - 20) {
-        out.push({ cx, cy, payload: n.getAttribute('data-payload') || '' });
-        if (out.length >= 2) break;
+        out.push({
+          cx,
+          cy,
+          payload: n.getAttribute('data-payload') || '',
+          focused: n.getAttribute('data-focused') === 'true',
+        });
       }
     }
     return out;
   });
-  assert(pinTarget.length >= 1, 'Expected visible node targets in #graph-map-canvas for hover/pin/explain');
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pinTarget[0].cx, y: pinTarget[0].cy });
+  const historyState = () => driver.callFn(() => {
+    const canvas = document.getElementById('graph-map-canvas');
+    const back = document.getElementById('graph-map-nav-back');
+    const forward = document.getElementById('graph-map-nav-forward');
+    const crumbs = Array.from(document.querySelectorAll('#graph-map-crumbs .graph-map-history-crumb'));
+    const current = crumbs.find((c) => c.getAttribute('aria-current') === 'location');
+    return {
+      busy: canvas?.getAttribute('aria-busy') === 'true',
+      backDisabled: Boolean(back?.disabled),
+      forwardDisabled: Boolean(forward?.disabled),
+      crumbCount: crumbs.length,
+      activeIdx: current ? Number.parseInt(current.getAttribute('data-payload') || '-1', 10) : -1,
+    };
+  });
+  const initialTargets = await visibleNodeTargets();
+  assert(initialTargets.length >= 1, 'Expected visible node targets in #graph-map-canvas for hover/pin/explain');
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: initialTargets[0].cx, y: initialTargets[0].cy });
   await driver.callFn(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 
-  // Camera & selection history Back / Forward (if two nodes + history buttons exist)
-  if (pinTarget.length >= 2) {
-    await driver.clickAt(pinTarget[0].cx, pinTarget[0].cy);
-    await driver.clickAt(pinTarget[1].cx, pinTarget[1].cy);
-    const hasHistoryNav = await driver.callFn(() => {
-      const back = document.getElementById('graph-map-nav-back');
-      return Boolean(back && !back.disabled);
-    });
-    if (hasHistoryNav) {
-      await driver.click('#graph-map-nav-back');
-      await driver.waitFor(
-        () => !document.getElementById('graph-map-nav-forward')?.disabled,
-        '#graph-map-nav-forward enabled after Back navigation',
-        5_000,
-      );
-      await driver.click('#graph-map-nav-forward');
-      await driver.waitFor(
-        () => document.getElementById('graph-map-nav-forward')?.disabled === true,
-        '#graph-map-nav-forward disabled at history head',
-        5_000,
-      );
-    }
+  // Camera & selection history Back / Forward (wait for each history push & re-measure after camera shifts)
+  if (initialTargets.length >= 2) {
+    const firstTarget = initialTargets.find((t) => !t.focused) || initialTargets[0];
+    const beforeFirst = await historyState();
+    await driver.clickAt(firstTarget.cx, firstTarget.cy);
+    const afterFirst = await driver.waitUntil(async () => {
+      const s = await historyState();
+      if (!s.busy && !s.backDisabled && s.crumbCount >= 2 && (s.activeIdx > beforeFirst.activeIdx || s.crumbCount > beforeFirst.crumbCount)) {
+        return s;
+      }
+      return null;
+    }, 'First node click recorded in #graph-map-crumbs history', 8_000);
+
+    const targetsAfterFirst = await visibleNodeTargets();
+    const secondTarget = targetsAfterFirst.find((t) => t.payload !== firstTarget.payload && !t.focused)
+      || targetsAfterFirst.find((t) => t.payload !== firstTarget.payload);
+    assert(secondTarget, 'Expected a second distinct visible node after focusing first node');
+    await driver.clickAt(secondTarget.cx, secondTarget.cy);
+    const afterSecond = await driver.waitUntil(async () => {
+      const s = await historyState();
+      if (!s.busy && !s.backDisabled && s.crumbCount >= 2 && s.activeIdx > afterFirst.activeIdx) {
+        return s;
+      }
+      return null;
+    }, 'Second node click recorded in #graph-map-crumbs history', 8_000);
+
+    assert(!afterSecond.backDisabled, '#graph-map-nav-back must be enabled after two focus clicks');
+    await driver.click('#graph-map-nav-back');
+    await driver.waitUntil(async () => {
+      const s = await historyState();
+      return !s.busy && !s.forwardDisabled && s.activeIdx < afterSecond.activeIdx;
+    }, '#graph-map-nav-forward enabled after Back navigation', 8_000);
+
+    await driver.click('#graph-map-nav-forward');
+    await driver.waitUntil(async () => {
+      const s = await historyState();
+      return !s.busy && s.forwardDisabled && s.activeIdx === afterSecond.activeIdx;
+    }, '#graph-map-nav-forward disabled at history head', 8_000);
   }
 
-  // Shift+drag pin + single-node unpin / Reset pins
-  await driver.dragAt(pinTarget[0].cx, pinTarget[0].cy, pinTarget[0].cx + 36, pinTarget[0].cy + 20, { modifiers: 8 });
+  // Shift+drag pin + single-node unpin / Reset pins (re-measure after history navigation)
+  const pinTargets = await visibleNodeTargets();
+  assert(pinTargets.length >= 1, 'Expected visible node target in #graph-map-canvas for Shift+drag pin');
+  await driver.dragAt(pinTargets[0].cx, pinTargets[0].cy, pinTargets[0].cx + 36, pinTargets[0].cy + 20, { modifiers: 8 });
   const pinControls = await driver.waitFor(() => {
     const reset = document.getElementById('graph-map-reset-pins');
     const undo = document.getElementById('graph-map-pin-undo');
@@ -1254,7 +1295,7 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   });
 
   // Canvas2D right-click Explain menu & dialog
-  await driver.rightClickAt(pinTarget[0].cx, pinTarget[0].cy);
+  await driver.rightClickAt(pinTargets[0].cx, pinTargets[0].cy);
   const explainText = await driver.waitFor(() => {
     const btn = document.getElementById('graph-explain-action');
     if (!btn || btn.hidden) return null;
@@ -3594,9 +3635,10 @@ async function suite12SkillCache(driver, opts) {
   await setMode('auto');
   await driver.waitFor(() => {
     const note = document.getElementById('skillcache-note')?.textContent || '';
-    // What this provider really does: a Claude turn is observed and never runs a capsule.
-    return document.getElementById('option-skillcache-value')?.textContent === 'Auto' && note.includes('never run a capsule');
-  }, 'Auto says what a Claude session does with it', 5_000);
+    // Claude runs a capsule for `$skill`; a `/command` stays native and is only observed.
+    return document.getElementById('option-skillcache-value')?.textContent === 'Auto'
+      && note.includes('$skill') && note.includes('`/command` runs natively');
+  }, 'Auto says how a Claude session runs a capsule and keeps /command native', 5_000);
   await setMode('observe');
   await driver.click('#option-skillcache');
   await driver.waitFor(() => document.getElementById('panel-skillcache')?.hidden === true, '#panel-skillcache closes', 4_000);
@@ -3710,14 +3752,14 @@ async function suite12SkillCache(driver, opts) {
     refused = await driver.callFn(async (path) => {
       const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       return response.status;
-    }, `/api/projects/${opts.projectId}/skillcache/capsules/${capsuleId}/invalidate`);
+    }, `/api/projects/${opts.projectId}/skillcache/capsules/${capsuleId}/retire`);
   });
   assert(refused === 403, `A capsule change without the token is refused with 403, got ${refused}`);
   await driver.click('#skill-capsules-refresh');
   await driver.waitFor(() => (document.querySelector('#skill-capsules-list .skill-capsule-row')?.textContent || '').includes('Needs recompile'),
     'The refused request changed nothing', 6_000);
 
-  // 7. Filters, and a delete that takes two clicks and can be taken back.
+  // 7. Filters, Stop using (retire) -> Use again (requalify), and two-click delete.
   await driver.callFn(() => {
     const select = document.getElementById('skill-capsules-status');
     select.value = 'active';
@@ -3730,6 +3772,40 @@ async function suite12SkillCache(driver, opts) {
     select.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 1, 'Clearing the filter restores the list', 6_000);
+
+  // Stop using -> retired (kept visible in All via include_retired=true), then Use again -> active.
+  await driver.click('#skill-capsule-detail [data-action="skill-capsule-retire"]');
+  await driver.waitFor(() => {
+    const row = document.querySelector('#skill-capsules-list .skill-capsule-row');
+    const detail = document.getElementById('skill-capsule-detail');
+    const actions = Array.from(detail?.querySelectorAll('.skill-capsule-actions button') || []).map((b) => b.textContent);
+    return Boolean(row && (row.textContent || '').includes('Retired')
+      && detail && !detail.hidden && (detail.textContent || '').includes('Retired')
+      && JSON.stringify(actions) === JSON.stringify(['Use again', 'Delete…']));
+  }, 'Stop using retires the capsule and offers Use again', 8_000);
+  await driver.callFn(() => {
+    const select = document.getElementById('skill-capsules-status');
+    select.value = 'retired';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 1, 'Status=retired filter shows the retired capsule', 6_000);
+  await driver.callFn(() => {
+    const select = document.getElementById('skill-capsules-status');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 1, 'All filter keeps retired capsule visible', 6_000);
+  if (opts.skillcacheRequalify) {
+    await driver.click('#skill-capsule-detail [data-action="skill-capsule-requalify"]');
+    await driver.waitFor(() => {
+      const row = document.querySelector('#skill-capsules-list .skill-capsule-row');
+      const detail = document.getElementById('skill-capsule-detail');
+      const actions = Array.from(detail?.querySelectorAll('.skill-capsule-actions button') || []).map((b) => b.textContent);
+      return Boolean(row && (row.textContent || '').includes('Active')
+        && detail && !detail.hidden
+        && JSON.stringify(actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']));
+    }, 'Use again requalifies the retired capsule back to Active', 20_000);
+  }
   const armSel = '#skill-capsule-detail [data-action="skill-capsule-arm"]';
   await driver.waitFor((sel) => Boolean(document.querySelector(sel)), 'Delete… is offered', 6_000, armSel);
   await driver.click(armSel);

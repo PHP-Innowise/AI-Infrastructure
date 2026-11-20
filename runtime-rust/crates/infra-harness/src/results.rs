@@ -216,7 +216,7 @@ impl Results {
         let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = bytes.clone();
         let started = Instant::now();
-        let result = process::run_raw_with_lock(
+        let result = Box::pin(process::run_raw_with_lock(
             argv,
             root,
             &env,
@@ -237,7 +237,7 @@ impl Results {
                 update(&String::from_utf8_lossy(&out))?;
                 Ok(())
             },
-        )
+        ))
         .await;
         self.finish_capture(result, bytes.as_ref(), cancel.as_ref(), started)
     }
@@ -326,16 +326,14 @@ impl Results {
         argv.extend_from_slice(args);
         let mut env = env.clone();
         env.insert("GIT_NO_REPLACE_OBJECTS".into(), "1".into());
-        self.capture(&argv, root, timeout, cancel, &env, |_| Ok(()))
-            .await
+        Box::pin(self.capture(&argv, root, timeout, cancel, &env, |_| Ok(()))).await
     }
     pub async fn baseline(&self, session: &Value) -> Result<()> {
         if !session["result_base"].is_null() {
             return Ok(());
         }
         let value = match self.backend.workspace(session) {
-            Ok(root) => self
-                .git_info(&root, true)
+            Ok(root) => Box::pin(self.git_info(&root, true))
                 .await
                 .unwrap_or(json!({"is_git":false})),
             Err(_) => json!({"is_git":false}),
@@ -351,19 +349,18 @@ impl Results {
         let anchor = PublicationFiles::new(root)?;
         anchor.check()?;
         drop(anchor);
-        self.git_info_impl(root, status).await
+        Box::pin(self.git_info_impl(root, status)).await
     }
     pub async fn git_info_impl(&self, root: &Path, status: bool) -> Result<Value> {
         let run = |args: Vec<String>| async move {
-            let r = self
-                .git(
-                    root,
-                    &args,
-                    10,
-                    &BTreeMap::new(),
-                    self.backend.shutdown_cancel(),
-                )
-                .await?;
+            let r = Box::pin(self.git(
+                root,
+                &args,
+                10,
+                &BTreeMap::new(),
+                self.backend.shutdown_cancel(),
+            ))
+            .await?;
             if r.reason.is_some() {
                 return Err(HarnessError::unavailable(
                     "Could not read bounded Git state",

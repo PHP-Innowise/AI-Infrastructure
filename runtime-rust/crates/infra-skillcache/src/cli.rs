@@ -10,7 +10,7 @@ use crate::{
     executor::{self, Command, Refusal, Session},
     gate1,
     package::{self, Package},
-    state::RunState,
+    state::{RunLog, RunState},
     tool,
 };
 use serde_json::{Value, json};
@@ -206,10 +206,11 @@ pub fn execute_tool(arguments: &[String]) -> i32 {
     let Some(program) = package.capsule.program(id) else {
         return fail(2, format!("the capsule has no program `{id}`"));
     };
+    let state_file = variable(env_filter::STATE_FILE);
     // A program that failed in this run is the agent's step now; it is not
     // started again, neither by the executor nor by hand.
-    if let Some(state_file) = variable(env_filter::STATE_FILE) {
-        match RunState::load(&state_file) {
+    if let Some(state_file) = &state_file {
+        match RunState::load(state_file) {
             Ok(Some(state)) => {
                 let failed = package
                     .capsule
@@ -243,7 +244,56 @@ pub fn execute_tool(arguments: &[String]) -> i32 {
     } else {
         tool::Mode::Run(&inputs)
     };
-    match tool::run(&package, program, mode, &workspace) {
+    let log_file = (!check && state_file.is_none())
+        .then(|| variable(env_filter::LOG_FILE))
+        .flatten();
+    let step_index = package
+        .capsule
+        .plan()
+        .position(|step| step.program() == Some(id));
+    let verification = step_index.is_some_and(|index| package.capsule.is_verification(index));
+    let outcome = tool::run(&package, program, mode, &workspace);
+    if let Some(log_file) = log_file
+        && outcome.is_ok()
+    {
+        let _lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(log_file.with_extension("lock"))
+            .ok()
+            .inspect(|file| {
+                let _ = file.lock();
+            });
+        let generation = std::env::var(env_filter::GENERATION).unwrap_or_default();
+        if let Ok(mut log) = RunLog::open_log(log_file, &generation) {
+            match &outcome {
+                Ok(tool::Outcome::Completed(completed)) => {
+                    let _ = log.append(
+                        "program_completed",
+                        json!({
+                            "step_index": step_index,
+                            "program": program.id,
+                            "seconds": completed.seconds,
+                        }),
+                    );
+                }
+                Ok(tool::Outcome::Failed(failed)) => {
+                    let _ = log.append(
+                        "program_failed",
+                        json!({
+                            "step_index": step_index,
+                            "program": program.id,
+                            "reason": failed.reason,
+                            "verification": verification,
+                        }),
+                    );
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    match outcome {
         Ok(tool::Outcome::Completed(completed)) => {
             print(&json!({"status": "complete", "result": completed.result}));
             0

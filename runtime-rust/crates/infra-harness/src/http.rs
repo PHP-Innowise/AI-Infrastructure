@@ -1320,7 +1320,7 @@ pub const ROUTES: &[Route] = &[
         operation: "skillcache.list",
         status: 200,
         token: false,
-        query: &["skill", "status", "form"],
+        query: &["skill", "status", "form", "include_retired"],
     },
     Route {
         method: "GET",
@@ -1342,6 +1342,14 @@ pub const ROUTES: &[Route] = &[
         method: "POST",
         pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/invalidate",
         operation: "skillcache.invalidate",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/projects/{project_id}/skillcache/capsules/{capsule_id}/retire",
+        operation: "skillcache.retire",
         status: 200,
         token: true,
         query: &[],
@@ -3572,6 +3580,7 @@ mod skillcache_route_tests {
             ("skillcache.compile", "POST", true, 202),
             ("skillcache.requalify", "POST", true, 202),
             ("skillcache.invalidate", "POST", true, 200),
+            ("skillcache.retire", "POST", true, 200),
             ("skillcache.delete", "DELETE", true, 200),
         ] {
             let found = route(operation);
@@ -3590,7 +3599,10 @@ mod skillcache_route_tests {
                 "{operation} is nested under its project or session"
             );
         }
-        assert_eq!(route("skillcache.list").query, &["skill", "status", "form"]);
+        assert_eq!(
+            route("skillcache.list").query,
+            &["skill", "status", "form", "include_retired"]
+        );
         // A capsule is compiled from an observed turn: there is no route that
         // compiles "a skill".
         assert!(

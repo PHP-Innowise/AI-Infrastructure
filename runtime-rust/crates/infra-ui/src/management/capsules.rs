@@ -351,19 +351,23 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
     let status = detail["status"].as_str().unwrap_or("");
     let capsule = &detail["capsule"];
     let mut actions = String::new();
-    if ["active", "stale", "needs_recompile"].contains(&status) {
+    if ["active", "stale", "needs_recompile", "retired"].contains(&status) {
         actions.push_str(&button(
-            "Requalify",
+            if status == "retired" {
+                "Use again"
+            } else {
+                "Requalify"
+            },
             "skill-capsule-requalify",
             id,
             "",
             pending,
         ));
     }
-    if ["active", "needs_recompile"].contains(&status) {
+    if ["active", "stale", "needs_recompile"].contains(&status) {
         actions.push_str(&button(
             "Stop using",
-            "skill-capsule-invalidate",
+            "skill-capsule-retire",
             id,
             "",
             pending,
@@ -467,21 +471,33 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
     out
 }
 
-fn list_path(project: &str) -> String {
+fn list_query(status: &str, form: &str) -> Vec<(&'static str, String)> {
     let mut query = Vec::new();
-    for (name, id) in [
-        ("status", "skill-capsules-status"),
-        ("form", "skill-capsules-form"),
-    ] {
-        let value = dom::value(id);
-        if !value.is_empty() {
-            query.push((name, value));
-        }
+    if status.is_empty() {
+        // The server excludes retired capsules by default; "All" shows them
+        // so retiring the open capsule keeps it visible with "Use again".
+        query.push(("include_retired", "true".to_owned()));
+    } else {
+        query.push(("status", status.to_owned()));
     }
+    if !form.is_empty() {
+        query.push(("form", form.to_owned()));
+    }
+    query
+}
+
+fn list_path(project: &str) -> String {
+    let status = dom::value("skill-capsules-status");
+    let form = dom::value("skill-capsules-form");
+    let query = list_query(&status, &form);
+    let refs = query
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect::<Vec<_>>();
     format!(
         "/api/projects/{}/skillcache/capsules{}",
         dom::enc(project),
-        dom::query(&query)
+        dom::query(&refs)
     )
 }
 
@@ -673,6 +689,7 @@ pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: 
             render_detail();
         }
         "skill-capsule-requalify" => act("requalify", capsule).await,
+        "skill-capsule-retire" => act("retire", capsule).await,
         "skill-capsule-invalidate" => act("invalidate", capsule).await,
         "skill-capsule-delete" => {
             // Only a delete that was armed for this capsule goes through.
@@ -792,13 +809,16 @@ mod tests {
 
     #[test]
     fn actions_follow_the_status_and_a_delete_is_confirmed() {
-        let actions = |status: &str, armed: bool| {
+        let html_for = |status: &str, armed: bool| {
             let mut capsule = detail();
             capsule["status"] = status.into();
-            let html = render_capsule_detail_html(&capsule, armed, false);
+            render_capsule_detail_html(&capsule, armed, false)
+        };
+        let actions = |status: &str, armed: bool| {
+            let html = html_for(status, armed);
             [
                 "skill-capsule-requalify",
-                "skill-capsule-invalidate",
+                "skill-capsule-retire",
                 "skill-capsule-arm",
                 "skill-capsule-delete",
                 "skill-capsule-keep",
@@ -811,16 +831,27 @@ mod tests {
             actions("active", false),
             [
                 "skill-capsule-requalify",
-                "skill-capsule-invalidate",
+                "skill-capsule-retire",
                 "skill-capsule-arm"
             ]
         );
         assert_eq!(
             actions("stale", false),
-            ["skill-capsule-requalify", "skill-capsule-arm"]
+            [
+                "skill-capsule-requalify",
+                "skill-capsule-retire",
+                "skill-capsule-arm"
+            ]
         );
         assert_eq!(actions("failed", false), ["skill-capsule-arm"]);
-        assert_eq!(actions("retired", false), ["skill-capsule-arm"]);
+        assert_eq!(
+            actions("retired", false),
+            ["skill-capsule-requalify", "skill-capsule-arm"]
+        );
+        let retired_html = html_for("retired", false);
+        assert!(retired_html.contains(">Use again<"));
+        assert!(!retired_html.contains(">Requalify<"));
+        assert!(!retired_html.contains(">Stop using<"));
         // Nothing is done to a capsule that is being compiled.
         assert!(actions("compiling", false).is_empty());
         // A delete is one more click, and it can be taken back.
@@ -830,6 +861,17 @@ mod tests {
         );
         let pending = render_capsule_detail_html(&detail(), false, true);
         assert_eq!(pending.matches(" disabled>").count(), 3);
+        assert_eq!(
+            list_query("", ""),
+            vec![("include_retired", "true".to_owned())]
+        );
+        assert_eq!(
+            list_query("retired", "hybrid"),
+            vec![
+                ("status", "retired".to_owned()),
+                ("form", "hybrid".to_owned())
+            ]
+        );
     }
 
     #[test]

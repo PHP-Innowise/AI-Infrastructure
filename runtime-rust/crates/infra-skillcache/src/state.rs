@@ -194,31 +194,48 @@ pub struct RunLog {
     path: PathBuf,
     generation: String,
     seq: u64,
+    needs_newline: bool,
 }
 impl RunLog {
     /// Opens the journal that belongs to `state_file`, continuing its numbering.
     pub fn open(state_file: &Path, generation: &str) -> Result<Self> {
-        let path = log_path(state_file);
-        let seq = match infra_core::fs::read_regular(&path) {
-            Ok(bytes) => bytes
-                .split(|byte| *byte == b'\n')
-                .filter(|line| !line.is_empty())
-                .count() as u64,
-            Err(error) if error.kind == infra_core::ErrorKind::NotFound => 0,
+        Self::open_log(log_path(state_file), generation)
+    }
+    /// Opens a journal at `path`, continuing its numbering from the highest
+    /// valid line and separating any torn trailing partial line before writing.
+    pub fn open_log(path: PathBuf, generation: &str) -> Result<Self> {
+        let (seq, needs_newline) = match infra_core::fs::read_regular(&path) {
+            Ok(bytes) => {
+                let mut seq = 0u64;
+                for line in bytes
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                {
+                    if let Ok(event) = infra_core::strict_json::parse(line, 64 * 1024, 8, 1000)
+                        && let Some(number) = event["seq"].as_u64()
+                    {
+                        seq = seq.max(number);
+                    }
+                }
+                let needs_newline = !bytes.is_empty() && !bytes.ends_with(b"\n");
+                (seq, needs_newline)
+            }
+            Err(error) if error.kind == infra_core::ErrorKind::NotFound => (0, false),
             Err(error) => return Err(error),
         };
         Ok(Self {
             path,
             generation: generation.into(),
             seq,
+            needs_newline,
         })
     }
     /// Appends one event and flushes it. `detail` names steps and programs,
     /// never a bound value or a result.
     pub fn append(&mut self, event: &str, detail: Value) -> Result<()> {
-        self.seq += 1;
+        let next = self.seq + 1;
         let mut line = Map::new();
-        line.insert("seq".into(), self.seq.into());
+        line.insert("seq".into(), next.into());
         line.insert("generation".into(), self.generation.clone().into());
         line.insert(
             "at_ms".into(),
@@ -231,19 +248,26 @@ impl RunLog {
         if let Value::Object(detail) = detail {
             line.extend(detail);
         }
-        let mut bytes = serde_json::to_vec(&Value::Object(line))?;
+        let mut bytes = Vec::new();
+        if self.needs_newline {
+            bytes.push(b'\n');
+        }
+        serde_json::to_writer(&mut bytes, &Value::Object(line))?;
         bytes.push(b'\n');
-        infra_core::fs::append_whole_line(&self.path, &bytes)
+        infra_core::fs::append_whole_line(&self.path, &bytes)?;
+        self.seq = next;
+        self.needs_newline = false;
+        Ok(())
     }
 }
 pub fn log_path(state_file: &Path) -> PathBuf {
     state_file.with_file_name(LOG_FILE)
 }
 
-/// The journal's events after `after_seq`, in order. A torn last line, which
-/// a crash can leave, ends the reading without an error.
-pub fn read_log(state_file: &Path, after_seq: u64) -> Result<Vec<Value>> {
-    let bytes = match infra_core::fs::read_regular(&log_path(state_file)) {
+/// The journal's events after `after_seq`, in order. A torn or malformed line,
+/// which a crash can leave, is skipped without failing or hiding later lines.
+pub fn read_log_at(log_file: &Path, after_seq: u64) -> Result<Vec<Value>> {
+    let bytes = match infra_core::fs::read_regular(log_file) {
         Ok(bytes) => bytes,
         Err(error) if error.kind == infra_core::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -254,11 +278,16 @@ pub fn read_log(state_file: &Path, after_seq: u64) -> Result<Vec<Value>> {
         .filter(|line| !line.is_empty())
     {
         let Ok(event) = infra_core::strict_json::parse(line, 64 * 1024, 8, 1000) else {
-            break;
+            continue;
         };
         if event["seq"].as_u64().is_some_and(|seq| seq > after_seq) {
             events.push(event);
         }
     }
     Ok(events)
+}
+
+/// The journal's events after `after_seq` beside `state_file`.
+pub fn read_log(state_file: &Path, after_seq: u64) -> Result<Vec<Value>> {
+    read_log_at(&log_path(state_file), after_seq)
 }

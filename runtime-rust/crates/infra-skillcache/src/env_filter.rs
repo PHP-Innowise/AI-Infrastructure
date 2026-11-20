@@ -12,6 +12,7 @@ pub const PACKAGE: &str = "SKILLCACHE_PACKAGE";
 pub const ASSETS: &str = "SKILLCACHE_ASSETS";
 /// The executor's own variables; a program never sees them.
 pub const STATE_FILE: &str = "SKILLCACHE_STATE_FILE";
+pub const LOG_FILE: &str = "SKILLCACHE_LOG_FILE";
 pub const GENERATION: &str = "SKILLCACHE_GENERATION";
 
 /// Whether a variable is withheld from programs: its name contains `KEY`,

@@ -65,9 +65,20 @@ pub struct Runtime {
     pub cancel: Arc<AtomicBool>,
 }
 impl Runtime {
+    fn codex_executable(&self) -> Option<PathBuf> {
+        if cfg!(windows) {
+            self.providers
+                .get("codex")
+                .ok()
+                .and_then(|provider| provider.executable)
+        } else {
+            None
+        }
+    }
     fn engine(&self) -> Engine {
         Engine {
             path: self.engine.clone(),
+            codex: self.codex_executable(),
         }
     }
     /// Identity of the engine that executes plans: a rebuilt engine is another
@@ -104,15 +115,20 @@ pub struct Job {
     pub project_id: String,
     pub workspace: PathBuf,
     pub model: Option<String>,
+    pub eval_arm: Option<String>,
 }
 impl Job {
     fn detail(&self) -> Value {
-        json!({
+        let mut detail = json!({
             "capsule_id": self.capsule_id,
             "compile_id": self.compile_id,
             "session_id": self.session_id,
             "generation": self.generation,
-        })
+        });
+        if let Some(arm) = &self.eval_arm {
+            detail["eval_arm"] = arm.clone().into();
+        }
+        detail
     }
 }
 
@@ -236,7 +252,7 @@ fn copy_skill(folder: &Path, destination: &Path, budget: &mut u64) -> Result<()>
 
 /// A bounded sample of what lies below `root`, the root first: what the
 /// compiler's sandbox is checked not to read.
-fn sample_paths(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
+pub(crate) fn sample_paths(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
     let mut sample = Vec::new();
     let mut level = roots.to_vec();
     for _ in 0..3 {
@@ -317,6 +333,8 @@ async fn ask_compiler(
     let asked = match form {
         Form::Hybrid if round == 1 => "Return the hybrid form.".to_string(),
         Form::Hybrid => "Your previous answer was refused. Read evidence/diagnostics.json and evidence/previous/answer.json, fix every listed violation and return the hybrid form again.".to_string(),
+        Form::Textual if round == 1 => "Return the textual form directly as evidence/compile/textual.md describes.".to_string(),
+        Form::Textual if job.eval_arm.as_deref() == Some("written_procedure") => "Your previous written procedure was refused. Read evidence/diagnostics.json and evidence/previous/answer.json, fix every listed violation and return the textual form as evidence/compile/textual.md describes.".to_string(),
         Form::Textual => "The hybrid form did not qualify (evidence/diagnostics.json says why). Return the textual form as evidence/compile/textual.md describes.".to_string(),
     };
     let prompt = format!(
@@ -353,15 +371,7 @@ async fn ask_compiler(
     {
         protected.push(common);
     }
-    let codex = if cfg!(windows) {
-        runtime
-            .providers
-            .get("codex")
-            .ok()
-            .and_then(|provider| provider.executable)
-    } else {
-        None
-    };
+    let codex = runtime.codex_executable();
     let mut spec = infra_system::workers::runtime_profile(
         &executable,
         &protected,
@@ -441,22 +451,40 @@ async fn ask_compiler(
                 .unwrap_or_else(|| format!("exit code {}", output.code))
         )));
     }
-    let mut usage = Value::Null;
+    let mut components = crate::cost_observation::UsageComponents::new("claude");
+    let mut result_event: Option<Value> = None;
     for line in output.bytes.split(|byte| *byte == b'\n') {
-        if let Ok(event) = serde_json::from_slice::<Value>(line)
-            && event["type"] == "result"
-        {
-            usage = json!({
-                "input_tokens": event["usage"]["input_tokens"],
-                "output_tokens": event["usage"]["output_tokens"],
-                "cache_read_input_tokens": event["usage"]["cache_read_input_tokens"],
-                "cache_creation_input_tokens": event["usage"]["cache_creation_input_tokens"],
-                "cost_usd": event["total_cost_usd"],
-                "model_calls": event["num_turns"],
-                "seconds": output.seconds,
-            });
+        if let Ok(event) = serde_json::from_slice::<Value>(line) {
+            components.observe("main", &event);
+            if event["type"] == "result" {
+                result_event = Some(event);
+            }
         }
     }
+    let totals = components.totals();
+    let usage = match result_event {
+        Some(event) => json!({
+            "input_tokens": event["usage"]["input_tokens"].as_u64().or(totals.input_tokens),
+            "output_tokens": event["usage"]["output_tokens"].as_u64().or(totals.output_tokens),
+            "cache_read_input_tokens": event["usage"]["cache_read_input_tokens"].as_u64().or(totals.cache_read_input_tokens),
+            "cache_creation_input_tokens": event["usage"]["cache_creation_input_tokens"],
+            "cost_usd": event["total_cost_usd"],
+            "model_calls": event["num_turns"].as_u64().or(totals.model_calls),
+            "seconds": output.seconds,
+            "components": components.snapshot(),
+        }),
+        None if totals.model_calls.is_some() => json!({
+            "input_tokens": totals.input_tokens,
+            "output_tokens": totals.output_tokens,
+            "cache_read_input_tokens": totals.cache_read_input_tokens,
+            "cache_creation_input_tokens": Value::Null,
+            "cost_usd": Value::Null,
+            "model_calls": totals.model_calls,
+            "seconds": output.seconds,
+            "components": components.snapshot(),
+        }),
+        None => Value::Null,
+    };
     Ok(Answer {
         value: infra_system::native::worker_result(&output.bytes, "claude")?,
         usage,
@@ -494,6 +522,26 @@ fn total_usage(rounds: &[Value]) -> Value {
             json!(known.iter().sum::<f64>())
         };
     }
+    let has_components = rounds
+        .iter()
+        .any(|round| round.get("components").is_some_and(Value::is_object));
+    if has_components {
+        let mut combined = crate::cost_observation::ComponentTotals::default();
+        for round in rounds {
+            let comp = &round["components"];
+            if comp.is_object() {
+                combined.add(&crate::cost_observation::ComponentTotals {
+                    input_tokens: comp["input_tokens"].as_u64(),
+                    output_tokens: comp["output_tokens"].as_u64(),
+                    cache_read_input_tokens: comp["cache_read_input_tokens"].as_u64(),
+                    cache_write_5m_input_tokens: comp["cache_write_5m_input_tokens"].as_u64(),
+                    cache_write_1h_input_tokens: comp["cache_write_1h_input_tokens"].as_u64(),
+                    model_calls: comp["model_calls"].as_u64(),
+                });
+            }
+        }
+        total["components"] = combined.to_json(Some("claude"));
+    }
     total["rounds_reported"] = rounds
         .iter()
         .filter(|round| !round.is_null())
@@ -509,7 +557,7 @@ async fn wait_idle(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(IDLE_SECONDS);
     loop {
         let busy: i64 = runtime.store.connection()?.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE project_path=?1 AND status='running'",
+            "SELECT COUNT(*) FROM sessions WHERE project_path=?1 AND status IN ('queued','running')",
             [&path],
             |row| row.get(0),
         )?;
@@ -622,7 +670,8 @@ async fn qualify(
     };
     let mut passed = second["passed"] == true;
     reports.push(second);
-    if passed {
+    let skip_replay = job.eval_arm.as_deref() == Some("skillcache_no_replay");
+    if passed && !skip_replay {
         wait_idle(runtime, &job.workspace).await?;
         runtime.publish(&job.project_id, "gate3", job.detail());
         let third = {
@@ -685,10 +734,9 @@ fn publish_capsule(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let environment = fingerprint::env_fingerprint(
-        &runtime.engine_digest(),
-        &fingerprint::runtime_versions(&candidate.capsule.capabilities.runtimes),
-    );
+    let environment = fingerprint::env_fingerprint(&fingerprint::runtime_versions(
+        &candidate.capsule.capabilities.runtimes,
+    ));
     db::activate_capsule(
         &*runtime.store.connection()?,
         &db::Qualified {
@@ -700,6 +748,7 @@ fn publish_capsule(
             package_sha256: &digest,
             skill_files: &skill_identities(&job.workspace, &named)?,
             env_fingerprint: &environment,
+            engine_digest: &runtime.engine_digest(),
             artifact_dir: &artifacts.display().to_string(),
             capabilities: &json!({
                 "network": candidate.capsule.capabilities.network.as_str(),
@@ -712,12 +761,20 @@ fn publish_capsule(
 /// What a compilation ended as.
 struct Outcome {
     status: &'static str,
-    rounds: i64,
     text: String,
+}
+
+#[derive(Default)]
+struct CompileAttempt {
+    rounds: i64,
     usage: Vec<Value>,
 }
 
-async fn compile(runtime: &Arc<Runtime>, job: &Job) -> Result<Outcome> {
+async fn compile(
+    runtime: &Arc<Runtime>,
+    job: &Job,
+    attempt: &mut CompileAttempt,
+) -> Result<Outcome> {
     let stored = db::trace(&*runtime.store.connection()?, &job.generation)?
         .filter(|trace| trace["session_id"] == job.session_id.as_str())
         .ok_or_else(|| HarnessError::missing("This turn has no kept trace."))?;
@@ -737,9 +794,13 @@ async fn compile(runtime: &Arc<Runtime>, job: &Job) -> Result<Outcome> {
             )));
         }
     }
-    if snapshot::load(&runtime.store.state, &job.generation)?.is_none() {
+    let needs_replay = !matches!(
+        job.eval_arm.as_deref(),
+        Some("written_procedure" | "skillcache_no_replay")
+    );
+    if needs_replay && snapshot::load(&runtime.store.state, &job.generation)?.is_none() {
         return Err(HarnessError::unavailable(
-            "This turn has no snapshot of its starting state, so its capsule cannot be replayed: the workspace is not a Git checkout or was too large to snapshot.",
+            "This turn has no snapshot of its starting state, so its capsule cannot be replayed: the workspace could not be captured or exceeded the snapshot limits.",
         ));
     }
     let dir = compile_dir(&runtime.store, &job.compile_id);
@@ -798,30 +859,36 @@ async fn compile(runtime: &Arc<Runtime>, job: &Job) -> Result<Outcome> {
         }
         .observed_files(),
     );
-    let mut usage = Vec::new();
+    let written_procedure = job.eval_arm.as_deref() == Some("written_procedure");
+    let total_rounds = if written_procedure {
+        HYBRID_ROUNDS
+    } else {
+        HYBRID_ROUNDS + 1
+    };
     let mut earlier_examples = None;
-    for round in 1..=HYBRID_ROUNDS + 1 {
+    for round in 1..=total_rounds {
         if runtime.cancel.load(Ordering::Acquire) {
             return Err(HarnessError::unavailable(
                 "The compilation was interrupted.",
             ));
         }
-        let form = if round <= HYBRID_ROUNDS {
-            Form::Hybrid
-        } else {
+        let form = if written_procedure || round > HYBRID_ROUNDS {
             Form::Textual
+        } else {
+            Form::Hybrid
         };
         runtime.publish(
             &job.project_id,
             match round {
                 1 => "compiling",
-                _ if form == Form::Textual => "textual_fallback",
+                _ if form == Form::Textual && !written_procedure => "textual_fallback",
                 _ => "repair",
             },
             job.detail(),
         );
         let answer = ask_compiler(runtime, job, &agentbox, round, form).await?;
-        usage.push(answer.usage);
+        attempt.rounds = round;
+        attempt.usage.push(answer.usage);
         let candidate = candidate::from_answer(&answer.value, &skills, form);
         if let Ok(candidate) = &candidate
             && candidate.examples.is_some()
@@ -857,14 +924,15 @@ async fn compile(runtime: &Arc<Runtime>, job: &Job) -> Result<Outcome> {
             publish_capsule(runtime, job, candidate, &skills)?;
             return Ok(Outcome {
                 status: "completed",
-                rounds: round,
                 text: match form {
                     Form::Hybrid => format!("Qualified as a hybrid capsule in round {round}."),
+                    Form::Textual if written_procedure => {
+                        format!("Qualified as a written procedure in round {round}.")
+                    }
                     Form::Textual => {
                         "The hybrid form did not qualify; qualified as a written procedure.".into()
                     }
                 },
-                usage,
             });
         }
         // The next round reads every violation of this one and its own answer.
@@ -876,9 +944,7 @@ async fn compile(runtime: &Arc<Runtime>, job: &Job) -> Result<Outcome> {
     }
     Ok(Outcome {
         status: "failed",
-        rounds: HYBRID_ROUNDS + 1,
         text: "No form qualified; the skill is used as it is.".into(),
-        usage,
     })
 }
 
@@ -889,15 +955,18 @@ pub async fn run(runtime: &Arc<Runtime>, job: &Job) {
         .store
         .connection()
         .and_then(|db| db::compile_running(&db, &job.compile_id));
+    let mut attempt = CompileAttempt::default();
     let outcome = match begun {
-        Ok(()) => compile(runtime, job).await,
+        Ok(()) => compile(runtime, job, &mut attempt).await,
         Err(error) => Err(error),
     };
     let dir = compile_dir(&runtime.store, &job.compile_id);
-    let (status, rounds, text, usage) = match outcome {
-        Ok(outcome) => (outcome.status, outcome.rounds, outcome.text, outcome.usage),
-        Err(error) => ("failed", 0, error.to_string(), Vec::new()),
+    let (status, text) = match outcome {
+        Ok(outcome) => (outcome.status, outcome.text),
+        Err(error) => ("failed", error.to_string()),
     };
+    let rounds = attempt.rounds;
+    let usage = attempt.usage;
     let interrupted = runtime.cancel.load(Ordering::Acquire) && status != "completed";
     let status = if interrupted { "interrupted" } else { status };
     // Only the capsule's own artifacts outlive a compilation. Its folder,
@@ -1034,6 +1103,7 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
             project_id: project_id.clone(),
             workspace: workspace.to_path_buf(),
             model: None,
+            eval_arm: capsule["eval_arm"].as_str().map(String::from),
         };
         let qualified = qualify(
             runtime,
@@ -1066,22 +1136,27 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
         )?;
     }
     if passed {
-        let environment = fingerprint::env_fingerprint(
-            &runtime.engine_digest(),
-            &fingerprint::runtime_versions(&stored.capsule.capabilities.runtimes),
-        );
+        let environment = fingerprint::env_fingerprint(&fingerprint::runtime_versions(
+            &stored.capsule.capabilities.runtimes,
+        ));
         db::refresh_capsule(
             &db,
             &capsule_id,
             &identities,
             capsule["tree_sha256"].as_str().unwrap_or(""),
             &environment,
+            &runtime.engine_digest(),
         )?;
     } else {
+        let target = if capsule["status"] == "retired" {
+            "retired"
+        } else {
+            "needs_recompile"
+        };
         db::set_capsule_status(
             &db,
             &capsule_id,
-            "needs_recompile",
+            target,
             Some("The stored capsule no longer passes its gates."),
         )?;
     }

@@ -23,7 +23,7 @@ use compile::{Job, Runtime};
 use infra_skillcache::{compile_rules, fingerprint, package};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -47,6 +47,7 @@ pub struct SkillCacheDomain {
     runtime: Arc<Runtime>,
     sender: mpsc::Sender<Work>,
     receiver: Mutex<Option<mpsc::Receiver<Work>>>,
+    requalifying: Arc<Mutex<BTreeSet<String>>>,
 }
 
 /// An installed runtime's version, remembered for a minute: the identity of
@@ -76,7 +77,7 @@ fn runtime_versions(names: &[String]) -> BTreeMap<String, Option<String>> {
 /// Why an active capsule may no longer be used in `workspace`, if it may not:
 /// its skill, its environment, its rules or its package is not what it was
 /// qualified with.
-pub fn staleness(runtime: &Runtime, capsule: &Value, workspace: &Path) -> Option<String> {
+pub fn staleness(_runtime: &Runtime, capsule: &Value, workspace: &Path) -> Option<String> {
     if capsule["schema_version"].as_u64() != Some(infra_skillcache::SCHEMA_VERSION) {
         return Some("The capsule was written in another schema version.".into());
     }
@@ -131,11 +132,10 @@ pub fn staleness(runtime: &Runtime, capsule: &Value, workspace: &Path) -> Option
         .flatten()
         .filter_map(|name| name.as_str().map(String::from))
         .collect::<Vec<_>>();
-    let environment =
-        fingerprint::env_fingerprint(&runtime.engine_digest(), &runtime_versions(&runtimes));
+    let environment = fingerprint::env_fingerprint(&runtime_versions(&runtimes));
     if capsule["env_fingerprint"].as_str() != Some(environment.as_str()) {
         return Some(
-            "The engine or a runtime the capsule's programs use changed; requalify it.".into(),
+            "A runtime or SkillCache environment version the capsule depends on changed; requalify it.".into(),
         );
     }
     let warm = PathBuf::from(capsule["artifact_dir"].as_str().unwrap_or("")).join("warm");
@@ -161,6 +161,7 @@ impl SkillCacheDomain {
             }),
             sender,
             receiver: Mutex::new(Some(receiver)),
+            requalifying: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
     /// Names the engine the gates run, for a process that is not one itself.
@@ -183,6 +184,7 @@ impl SkillCacheDomain {
             return;
         };
         let runtime = self.runtime.clone();
+        let requalifying = self.requalifying.clone();
         tokio::spawn(async move {
             while let Some(work) = receiver.recv().await {
                 if runtime.cancel.load(Ordering::Acquire) {
@@ -201,10 +203,15 @@ impl SkillCacheDomain {
                                 compile::requalify(&runtime, &capsule, &workspace).await
                         {
                             if let Ok(db) = runtime.store.connection() {
+                                let target = if capsule["status"] == "retired" {
+                                    "retired"
+                                } else {
+                                    "stale"
+                                };
                                 let _ = db::set_capsule_status(
                                     &db,
                                     &capsule_id,
-                                    "stale",
+                                    target,
                                     Some(&error.to_string()),
                                 );
                             }
@@ -213,6 +220,9 @@ impl SkillCacheDomain {
                                 "failed",
                                 json!({"capsule_id": capsule_id, "outcome": error.to_string()}),
                             );
+                        }
+                        if let Ok(mut pending) = requalifying.lock() {
+                            pending.remove(&capsule_id);
                         }
                     }
                 }
@@ -259,17 +269,22 @@ impl SkillCacheDomain {
     fn list(&self, project_id: &str, query: &Value) -> Result<Value> {
         self.runtime.store.project(project_id)?;
         let filter = |name: &str| query[name].as_str().filter(|value| !value.is_empty());
+        let status = filter("status");
+        let include_retired = status == Some("retired")
+            || query["include_retired"] == true
+            || matches!(query["include_retired"].as_str(), Some("true" | "1"));
         let rows = db::capsules(
             &*self.runtime.store.connection()?,
             project_id,
             filter("skill"),
             None,
             filter("form"),
+            include_retired,
         )?;
         let mut capsules = Vec::new();
         for row in rows {
             let row = self.current(row)?;
-            if filter("status").is_none_or(|status| row["status"] == status) {
+            if status.is_none_or(|status| row["status"] == status) {
                 capsules.push(summary(&row));
             }
         }
@@ -355,18 +370,74 @@ impl SkillCacheDomain {
             .publish(project_id, "invalidated", json!({"capsule_id": capsule_id}));
         self.get(project_id, capsule_id)
     }
-    fn requalify(&self, project_id: &str, capsule_id: &str) -> Result<Value> {
+    fn retire(&self, project_id: &str, capsule_id: &str, body: &Value) -> Result<Value> {
+        if !body.is_null() && !crate::store::exact(body, &[], &["reason"]) {
+            return Err(HarnessError::invalid(
+                "Retire takes only an optional `reason`.",
+            ));
+        }
+        let custom_reason = match &body["reason"] {
+            Value::Null => None,
+            Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.len() > 500 || text.contains('\0') {
+                    return Err(HarnessError::invalid("Invalid retire reason."));
+                }
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            _ => return Err(HarnessError::invalid("Invalid retire reason.")),
+        };
         let capsule = self.owned(project_id, capsule_id)?;
         if !["active", "stale", "needs_recompile"]
+            .contains(&capsule["status"].as_str().unwrap_or(""))
+        {
+            return Err(HarnessError::conflict(
+                "Only an active, stale, or needs_recompile capsule can be retired.",
+            ));
+        }
+        let reason = custom_reason
+            .as_deref()
+            .unwrap_or("Retired by a person; requalify it to use it again.");
+        db::set_capsule_status(
+            &*self.runtime.store.connection()?,
+            capsule_id,
+            "retired",
+            Some(reason),
+        )?;
+        self.runtime.publish(
+            project_id,
+            "retired",
+            json!({"capsule_id": capsule_id, "reason": reason}),
+        );
+        self.get(project_id, capsule_id)
+    }
+    fn requalify(&self, project_id: &str, capsule_id: &str) -> Result<Value> {
+        let capsule = self.owned(project_id, capsule_id)?;
+        if !["active", "stale", "needs_recompile", "retired"]
             .contains(&capsule["status"].as_str().unwrap_or(""))
         {
             return Err(HarnessError::conflict(
                 "Only a compiled capsule can be requalified.",
             ));
         }
-        self.queue(Work::Requalify {
+        {
+            let mut pending = self.requalifying.lock().map_err(|_| {
+                HarnessError::unavailable("SkillCache requalify state lock failed.")
+            })?;
+            if !pending.insert(capsule_id.into()) {
+                return Err(HarnessError::conflict(
+                    "This capsule is already being requalified.",
+                ));
+            }
+        }
+        if let Err(error) = self.queue(Work::Requalify {
             capsule_id: capsule_id.into(),
-        })?;
+        }) {
+            if let Ok(mut pending) = self.requalifying.lock() {
+                pending.remove(capsule_id);
+            }
+            return Err(error);
+        }
         self.runtime.publish(
             project_id,
             "queued",
@@ -385,6 +456,7 @@ impl SkillCacheDomain {
         let artifacts = compile::artifact_dir(store, project_id, capsule_id, 1);
         let _ = package::remove(&artifacts.join("warm"));
         if let Some(capsule_root) = artifacts.parent() {
+            package::release(capsule_root);
             let _ = std::fs::remove_dir_all(capsule_root);
         }
         if let Some(qualification) = compile::qualification_dir(store, capsule_id, 1).parent() {
@@ -412,7 +484,7 @@ impl SkillCacheDomain {
         Ok(json!({"capsule_id": capsule_id, "deleted": true}))
     }
     fn compile(&self, session_id: &str, body: &Value) -> Result<Value> {
-        if !crate::store::exact(body, &["generation"], &["compiler"]) {
+        if !crate::store::exact(body, &["generation"], &["compiler", "eval_arm"]) {
             return Err(HarnessError::invalid(
                 "Name the turn to compile: {\"generation\": ..., \"compiler\": {\"provider\": \"claude\", \"model\": ...}}.",
             ));
@@ -420,6 +492,32 @@ impl SkillCacheDomain {
         let store = &self.runtime.store;
         let session = store.get(session_id)?;
         let generation = crate::store::text(&body["generation"], "generation", 128)?;
+        let eval_arm = if body["eval_arm"].is_null() {
+            None
+        } else {
+            if !settings::eval_enabled(store) {
+                return Err(HarnessError::invalid(
+                    "SkillCache ablation arms are available only in evaluation runs.",
+                ));
+            }
+            let arm = body["eval_arm"]
+                .as_str()
+                .filter(|arm| {
+                    matches!(
+                        *arm,
+                        "written_procedure"
+                            | "skillcache_no_replay"
+                            | "skillcache_agent"
+                            | "skillcache_executor"
+                    )
+                })
+                .ok_or_else(|| {
+                    HarnessError::invalid(
+                        "Invalid `eval_arm` for compile; expected `written_procedure`, `skillcache_no_replay`, `skillcache_agent`, or `skillcache_executor`.",
+                    )
+                })?;
+            Some(arm.to_string())
+        };
         let chosen = settings::validate(&json!({
             "mode": "observe",
             "compiler": if body["compiler"].is_null() { session["skillcache"]["compiler"].clone() } else { body["compiler"].clone() },
@@ -455,6 +553,7 @@ impl SkillCacheDomain {
                 session_id,
                 &generation,
                 &skill,
+                eval_arm.as_deref(),
             )?;
             db::begin_compile(
                 &db,
@@ -465,6 +564,7 @@ impl SkillCacheDomain {
                 &generation,
                 "claude",
                 chosen["compiler"]["model"].as_str(),
+                eval_arm.as_deref(),
             )?;
         }
         let job = Job {
@@ -475,8 +575,12 @@ impl SkillCacheDomain {
             project_id: project_id.clone(),
             workspace,
             model: chosen["compiler"]["model"].as_str().map(String::from),
+            eval_arm: eval_arm.clone(),
         };
-        let detail = json!({"capsule_id": capsule_id, "compile_id": compile_id, "session_id": session_id, "generation": job.generation});
+        let mut detail = json!({"capsule_id": capsule_id, "compile_id": compile_id, "session_id": session_id, "generation": job.generation});
+        if let Some(arm) = &eval_arm {
+            detail["eval_arm"] = arm.clone().into();
+        }
         if let Err(error) = self.queue(Work::Compile(job)) {
             let db = store.connection()?;
             let _ = db::finish_compile(
@@ -554,6 +658,8 @@ fn summary(capsule: &Value) -> Value {
         "reason",
         "revision",
         "capabilities",
+        "engine_digest",
+        "eval_arm",
         "source_session_id",
         "source_generation",
         "compile_id",
@@ -585,6 +691,11 @@ impl Domain for SkillCacheDomain {
                 "skillcache.invalidate" => {
                     self.invalidate(parameter("project_id")?, parameter("capsule_id")?)?
                 }
+                "skillcache.retire" => self.retire(
+                    parameter("project_id")?,
+                    parameter("capsule_id")?,
+                    &request["body"],
+                )?,
                 "skillcache.delete" => {
                     self.delete(parameter("project_id")?, parameter("capsule_id")?)?
                 }

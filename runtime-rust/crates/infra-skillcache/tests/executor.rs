@@ -992,3 +992,111 @@ fn replay_needs_an_observed_value_for_every_question() {
         "invalid_examples"
     );
 }
+
+#[test]
+fn opening_instruction_without_produces_is_not_skipped_on_start() {
+    let mut value = capsule();
+    value["steps"] = json!([
+        {"kind": "instruction", "text": "Prepare workspace before extract.", "source": {"path": SKILL}},
+        {"kind": "program", "program": "extract"},
+        {"kind": "program", "program": "summarize"}
+    ]);
+    value["programs"][0]["inputs"] = json!(["input_dir"]);
+    value["programs"][2]["inputs"] = json!(["summary_file"]);
+    let stand = Stand::with(value, specs());
+    let answer = stand.ok(&["run", r#"{"input_dir":"invoices/","currency":"EUR"}"#]);
+    assert_eq!(answer["status"], "your_steps", "{answer}");
+    assert_eq!(answer["steps"][0]["step_index"], 0);
+    assert_eq!(answer["produces"], json!([]));
+    let answer = stand.ok(&["continue"]);
+    assert_eq!(answer["status"], "your_steps", "{answer}");
+    assert_eq!(answer["steps"][0]["step_index"], 4);
+    assert_eq!(stand.ok(&["continue"])["status"], "complete");
+}
+
+#[test]
+fn standalone_tool_logs_to_skillcache_log_file_and_validates_inputs() {
+    let stand = Stand::new();
+    let log_file = stand.root.path().join("agent-run-log.jsonl");
+    let bad = stand
+        .command("skillcache-tool")
+        .env_remove("SKILLCACHE_STATE_FILE")
+        .env("SKILLCACHE_LOG_FILE", &log_file)
+        .args([
+            "extract",
+            "--input",
+            r#"{"input_dir":123,"quarter_files":[]}"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("must be a path"),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    let ok = stand
+        .command("skillcache-tool")
+        .env_remove("SKILLCACHE_STATE_FILE")
+        .env("SKILLCACHE_LOG_FILE", &log_file)
+        .args([
+            "extract",
+            "--input",
+            r#"{"input_dir":"invoices/","quarter_files":["a.pdf"]}"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let mut failing = specs();
+    failing[2].1 = json!({"exit": 4, "stderr": "bad rows"});
+    let fail_stand = Stand::with(capsule(), failing);
+    let fail_log = fail_stand.root.path().join("agent-fail-log.jsonl");
+    let failed = fail_stand
+        .command("skillcache-tool")
+        .env_remove("SKILLCACHE_STATE_FILE")
+        .env("SKILLCACHE_LOG_FILE", &fail_log)
+        .args([
+            "verify_csv",
+            "--input",
+            r#"{"summary_file":"out/summary.csv","quarter_files":[]}"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+    let events = infra_skillcache::state::read_log_at(&fail_log, 0).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"], "program_failed");
+    assert_eq!(events[0]["program"], "verify_csv");
+    assert_eq!(events[0]["verification"], true);
+    let ok_events = infra_skillcache::state::read_log_at(&log_file, 0).unwrap();
+    assert_eq!(ok_events.len(), 1);
+    assert_eq!(ok_events[0]["event"], "program_completed");
+    assert_eq!(ok_events[0]["program"], "extract");
+    assert_eq!(ok_events[0]["seq"], 1);
+}
+
+#[test]
+fn run_log_recovers_from_a_torn_line_and_keeps_seq_monotonic() {
+    use infra_skillcache::state::{RunLog, log_path, read_log};
+    let stand = Stand::new();
+    let log = log_path(&stand.state_file);
+    std::fs::write(
+        &log,
+        b"{\"seq\":1,\"generation\":\"g\",\"event\":\"started\"}\n{\"seq\":9,\"event\":\"torn",
+    )
+    .unwrap();
+    let mut reopened = RunLog::open(&stand.state_file, "g").unwrap();
+    reopened
+        .append("program_completed", json!({"program": "extract"}))
+        .unwrap();
+    let events = read_log(&stand.state_file, 0).unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0]["seq"], 1);
+    assert_eq!(events[1]["seq"], 2);
+    assert_eq!(events[1]["event"], "program_completed");
+}

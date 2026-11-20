@@ -20,6 +20,7 @@ pub mod executor;
 pub mod fingerprint;
 pub mod gate1;
 pub mod package;
+pub mod prompt;
 pub mod state;
 pub mod tool;
 pub mod trace;

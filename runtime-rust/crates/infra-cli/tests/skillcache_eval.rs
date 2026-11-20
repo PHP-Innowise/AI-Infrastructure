@@ -45,8 +45,13 @@ esac
 "#;
 
 /// Judges a workspace by its `out.txt`, with the receipt of the outcome
-/// evaluation, and proves it has no network and no view of the test's folder.
-const VERIFIER: &str = r#"correct=false
+/// evaluation, and fails if the sealed folder passed in `$1` is visible inside
+/// the verifier's read isolation.
+const VERIFIER: &str = r#"if [ -n "${1:-}" ] && [ -e "$1" ]; then
+  printf 'sealed folder visible inside verifier\n' >&2
+  exit 2
+fi
+correct=false
 if grep -q good out.txt 2>/dev/null; then correct=true; fi
 printf '{"schema":"task-outcome-verifier-v1","completed":true,"correct":%s}\n' "$correct"
 "#;
@@ -106,7 +111,7 @@ impl Stand {
         if verified {
             plan["verifiers"] = json!({"root": self.base.join("verifiers"), "timeout_seconds": 30});
             for task in plan["tasks"].as_array_mut().unwrap() {
-                task["verifier"] = json!(["sh", "{verifiers}/check.sh"]);
+                task["verifier"] = json!(["sh", "{verifiers}/check.sh", self.base.join("sealed")]);
             }
         }
         plan
@@ -258,6 +263,7 @@ fn a_sealed_plan_runs_once_through_its_driver_and_reports_a_verdict() {
     let arms = &report["cells"][0]["arms"];
     assert_eq!(arms["cold"]["list_price_usd"], 0.3);
     assert_eq!(arms["cold"]["model_calls"], 9.0);
+    assert!(arms["cold"]["driver_seconds"].as_f64().is_some());
     let warm = &arms["skillcache_executor"];
     assert_eq!(warm["list_price_usd"], 0.06);
     assert_eq!(warm["model_calls"], 3.0);
@@ -268,6 +274,32 @@ fn a_sealed_plan_runs_once_through_its_driver_and_reports_a_verdict() {
     assert_eq!(warm["against_cold"]["net_saving_usd"]["10"], 2.2);
     assert_eq!(warm["against_cold"]["quality"], "non-inferior");
     assert_eq!(warm["against_cold"]["verdict"], "saves");
+
+    let viewer_out = stand.base.join("benchmark.json");
+    let exported = answer(&stand.engine(
+        &[
+            "viewer",
+            "--protocol",
+            sealed.to_str().unwrap(),
+            "--result",
+            result.to_str().unwrap(),
+            "--out",
+            viewer_out.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    assert_eq!(exported["arm"], "skillcache_executor");
+    let benchmark: Value = serde_json::from_slice(&std::fs::read(&viewer_out).unwrap()).unwrap();
+    assert_eq!(
+        benchmark["configuration_order"],
+        json!(["cold", "skillcache_executor"])
+    );
+    assert_eq!(benchmark["run_summary"]["cold"]["list_price_usd"], 0.3);
+    assert_eq!(
+        benchmark["run_summary"]["skillcache_executor"]["deopt_rate"],
+        0.5
+    );
+    assert_eq!(benchmark["runs"].as_array().unwrap().len(), 12);
 
     // A result is reported under its own sealed protocol only, and a protocol
     // changed after its seal reports nothing.
@@ -372,6 +404,10 @@ fn isolation_works() -> bool {
 #[test]
 fn with_verifiers_an_isolated_verifier_judges_and_the_driver_is_not_asked() {
     if !isolation_works() {
+        assert!(
+            std::env::var_os("INFRA_REQUIRE_BWRAP").is_none(),
+            "bubblewrap namespaces are required under INFRA_REQUIRE_BWRAP"
+        );
         eprintln!("skipped: this host does not allow bubblewrap namespaces");
         return;
     }
@@ -463,4 +499,99 @@ fn with_verifiers_an_isolated_verifier_judges_and_the_driver_is_not_asked() {
     );
     assert_eq!(stand.calls().len(), before, "nothing was run");
     assert!(!stand.base.join("result-2.json").exists());
+}
+
+#[test]
+fn driver_inputs_tamper_reused_workspace_and_dense_positions_are_enforced() {
+    let stand = Stand::new();
+    let inputs = stand.base.join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    std::fs::write(inputs.join("config.json"), "{\"v\":1}").unwrap();
+    let mut plan = stand.plan(false);
+    plan["driver"]["inputs"] = json!({"root": inputs});
+    plan["matrix"] = json!([
+        {"compile_model": "compiler", "executor_model": "worker"},
+        {"compile_model": "worker", "executor_model": "worker"}
+    ]);
+    let sealed = stand.seal("matrix", &plan);
+    let result = stand.base.join("matrix-result.json");
+    answer(&stand.engine(
+        &[
+            "run",
+            "--protocol",
+            sealed.to_str().unwrap(),
+            "--out",
+            result.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    let stored: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
+    // Second matrix cell skips compile-free `cold`, so `skillcache_executor` gets dense position 0.
+    let second_cell_positions = stored["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["compile_model"] == "worker")
+        .map(|a| a["position"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        second_cell_positions.iter().all(|pos| *pos == 0),
+        "{second_cell_positions:?}"
+    );
+    // Journal is removed when result finishes cleanly.
+    assert!(!stand.base.join("matrix-result.json.journal.jsonl").exists());
+
+    // Tampering with driver.inputs stops run() before invoking the driver.
+    std::fs::write(inputs.join("config.json"), "{\"v\":2}").unwrap();
+    let before = stand.calls().len();
+    let refused = stand.engine(
+        &[
+            "run",
+            "--protocol",
+            sealed.to_str().unwrap(),
+            "--out",
+            stand.base.join("refused.json").to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(!refused.status.success());
+    assert!(text(&refused).contains("driver inputs changed"));
+    assert_eq!(stand.calls().len(), before);
+
+    // Reusing one workspace across attempts invalidates the duplicate attempt.
+    let shared_ws = stand.base.join("shared-ws");
+    std::fs::create_dir(&shared_ws).unwrap();
+    let reuse_driver = stand.base.join("reuse-driver.sh");
+    std::fs::write(
+        &reuse_driver,
+        format!(
+            "#!/bin/sh\nreq=$(cat)\ncase \"$req\" in *'\"phase\":\"prepare\"'*) printf '{{\"prepared\":true,\"usage\":{{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}}\\n' ;; *) printf '{{\"accepted\":true,\"workspace\":\"{}\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}}\\n' ;; esac\n",
+            shared_ws.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&reuse_driver, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut reuse_plan = stand.plan(false);
+    reuse_plan["driver"]["argv"] = json!([reuse_driver]);
+    let sealed_reuse = stand.seal("reuse", &reuse_plan);
+    let reuse_result = stand.base.join("reuse-result.json");
+    answer(&stand.engine(
+        &[
+            "run",
+            "--protocol",
+            sealed_reuse.to_str().unwrap(),
+            "--out",
+            reuse_result.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    let reuse_stored: Value =
+        serde_json::from_slice(&std::fs::read(&reuse_result).unwrap()).unwrap();
+    let reused_count = reuse_stored["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["status"] == "workspace-reused" && a["accepted"].is_null())
+        .count();
+    assert_eq!(reused_count, 11);
 }

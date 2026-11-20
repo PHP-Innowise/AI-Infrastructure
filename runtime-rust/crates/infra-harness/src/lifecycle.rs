@@ -1,7 +1,8 @@
 //! Generation-owned native recall, bounded recovery and agent-attested saves.
 use crate::{
-    HarnessError, Result, knowledge::KnowledgeDomain, launch_accounting::LaunchAccounting,
-    memory_attempts, memory_draft, sessions::Event, store::SessionStore,
+    HarnessError, Result, cost_observation::UsageComponents, knowledge::KnowledgeDomain,
+    launch_accounting::LaunchAccounting, memory_attempts, memory_draft, sessions::Event,
+    store::SessionStore,
 };
 use infra_core::{
     self as core, PrepareResult, RecordResult, ResultService, Revision, domain::json as wire,
@@ -73,6 +74,7 @@ struct RunState {
     cost_unknown: bool,
     limit: Option<String>,
     accounting: LaunchAccounting,
+    components: UsageComponents,
     recovery_launched: bool,
     cleanup_confirmed: bool,
     recovery_replies: Vec<String>,
@@ -393,6 +395,7 @@ impl RunnerLifecycle {
             accounting.set_outside_memory(context.roots.attached());
         }
         let native_id = session["native_session_id"].as_str().map(String::from);
+        let components = UsageComponents::new(&provider);
         let state = RunState {
             store: self.store.clone(),
             sid,
@@ -415,6 +418,7 @@ impl RunnerLifecycle {
             cost_unknown: false,
             limit: None,
             accounting,
+            components,
             recovery_launched: false,
             cleanup_confirmed: false,
             recovery_replies: vec![],
@@ -767,6 +771,9 @@ fn observe_binding(
     let mut usage_changed = false;
     if let Some(raw) = raw {
         state.accounting.raw(&phase, raw);
+        if state.enabled {
+            state.components.observe(&phase, raw);
+        }
     }
     if !state.enabled {
         return Ok(());
@@ -954,7 +961,14 @@ fn persist_progress(
             state.store.clone(),
             state.sid.clone(),
             state.generation.clone(),
-            json!({"tokens":state.tokens,"cost_usd":state.cost,"seconds":seconds,"limit_reached":state.limit,"recovery_cost_unknown":state.cost_unknown}),
+            json!({
+                "tokens": state.tokens,
+                "cost_usd": state.cost,
+                "seconds": seconds,
+                "limit_reached": state.limit,
+                "recovery_cost_unknown": state.cost_unknown,
+                "components": state.components.snapshot(),
+            }),
             state.accounting.context(),
             state.accounting.receipt(),
         )
@@ -1519,6 +1533,7 @@ impl Drop for FinishGuard {
         })()
         .unwrap_or_else(|_| "failed".into());
         if !outcome.is_empty() {
+            let _ = persist_progress(&self.0, true, true, true);
             let _ = finish_accounting(&self.0, &outcome);
         }
     }
@@ -1713,5 +1728,392 @@ impl Drop for BeginAccountingGuard {
         if persisted.is_err() {
             let _=self.store.event(&self.sid,&json!({"kind":"cost_observation","cost_generation":self.generation,"full_cost":{"schema":"harness-full-cost-v1","state":"unavailable","observer_incomplete":true,"reason":"persistence_failure"},"at":crate::store::now()}));
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_components_tests {
+    use super::*;
+    use crate::results::{Results, ResultsBackend};
+    use infra_host::provider::normalize;
+
+    struct TestBackend {
+        project: PathBuf,
+        operation: Arc<tokio::sync::Mutex<()>>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl ResultsBackend for TestBackend {
+        fn workspace(&self, _: &Value) -> Result<PathBuf> {
+            Ok(self.project.clone())
+        }
+        fn idle(&self) -> Result<()> {
+            Ok(())
+        }
+        fn enqueue_check(&self, _: &str, _: &str, _: &str) -> Result<String> {
+            Ok("chk".into())
+        }
+        fn operation_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+            self.operation.clone()
+        }
+        fn history_session_ids(&self, session: &Value) -> Result<Vec<String>> {
+            Ok(session["id"]
+                .as_str()
+                .map(str::to_owned)
+                .into_iter()
+                .collect())
+        }
+        fn shutdown_cancel(&self) -> Arc<AtomicBool> {
+            self.stop.clone()
+        }
+        fn result_context(&self, _: &Value) -> Result<core::RuntimeContext> {
+            Err(HarnessError::unavailable("unused"))
+        }
+    }
+
+    struct FakeRecovery {
+        provider: String,
+        raw_events: Vec<Value>,
+    }
+
+    impl RecoveryRunner for FakeRecovery {
+        fn run<'a>(
+            &'a mut self,
+            _request: RecoveryRequest,
+            events: Arc<dyn RunEvents>,
+            _emit: Event,
+        ) -> RecoveryReply<'a> {
+            Box::pin(async move {
+                for raw in &self.raw_events {
+                    events.observe(Some(raw), None)?;
+                    for clean in normalize(&self.provider, raw) {
+                        events.observe(None, Some(&clean))?;
+                    }
+                }
+                events.boundary("cleanup_confirmed", &Value::Null)?;
+                Ok(WorkerResult {
+                    text: "recovered".into(),
+                    ok: true,
+                    cost_usd: None,
+                    session_id: None,
+                    duration_seconds: 0.1,
+                    error: None,
+                    limit_reached: None,
+                })
+            })
+        }
+    }
+
+    fn setup_launch(
+        provider: &str,
+    ) -> (
+        tempfile::TempDir,
+        SessionStore,
+        Results,
+        RunnerLifecycle,
+        Value,
+        String,
+        Launch,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let store = SessionStore::open(&tmp.path().join("state")).unwrap();
+        let reg = store.register(&project).unwrap();
+        let session = store
+            .create(
+                &json!({
+                    "project_id": reg["id"],
+                    "provider": provider,
+                    "workflow": "native",
+                    "mode": "edit",
+                }),
+                "Measure usage components",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let generation = store.generation(&sid).unwrap();
+        let results = Results::new(
+            store.clone(),
+            Arc::new(TestBackend {
+                project: PathBuf::from(session["project_path"].as_str().unwrap()),
+                operation: Arc::new(tokio::sync::Mutex::new(())),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .unwrap();
+        results.start_launch(&sid, &generation, None).unwrap();
+        let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
+        let lifecycle = RunnerLifecycle::new(store.clone(), knowledge, source);
+        let launch = Launch {
+            provider: provider.into(),
+            executable: PathBuf::from(provider),
+            project: PathBuf::from(session["project_path"].as_str().unwrap()),
+            prompt: "Measure usage components".into(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions: None,
+            approvals: None,
+        };
+        (tmp, store, results, lifecycle, session, generation, launch)
+    }
+
+    fn feed_events(
+        lifecycle: &RunnerLifecycle,
+        binding: &RunBinding,
+        provider: &str,
+        raw: &[Value],
+    ) {
+        for event in raw {
+            lifecycle.observe(binding, Some(event), None).unwrap();
+            for clean in normalize(provider, event) {
+                lifecycle.observe(binding, None, Some(&clean)).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_persists_claude_components_across_main_and_recovery_phases() {
+        let (_tmp, store, results, lifecycle, session, generation, launch) = setup_launch("claude");
+        let sid = session["id"].as_str().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let binding = lifecycle
+            .begin(&session, "Measure usage components", &generation, cancel)
+            .unwrap();
+        lifecycle.before_dispatch(&binding, &launch).unwrap();
+        feed_events(
+            &lifecycle,
+            &binding,
+            "claude",
+            &[
+                json!({"type": "system", "subtype": "init", "session_id": "nat-claude-1"}),
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "usage": {"input_tokens": 10, "output_tokens": 2}
+                    }
+                }),
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 20,
+                            "cache_read_input_tokens": 50,
+                            "cache_creation": {
+                                "ephemeral_5m_input_tokens": 30,
+                                "ephemeral_1h_input_tokens": 5
+                            },
+                            "cache_creation_input_tokens": 35
+                        }
+                    }
+                }),
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "session_id": "nat-claude-1",
+                    "total_cost_usd": 0.04,
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "cache_read_input_tokens": 50,
+                        "cache_creation_input_tokens": 35
+                    }
+                }),
+            ],
+        );
+        store
+            .guarded_event(sid, &generation, &json!({"kind": "text", "text": "Done."}))
+            .unwrap();
+        lifecycle
+            .boundary(&binding, "cleanup_confirmed", &Value::Null)
+            .unwrap();
+        locked(&binding).unwrap().session["brain"] = json!({"review": false});
+
+        let emit: Event = Arc::new(|_| Ok(()));
+        let mut recovery = FakeRecovery {
+            provider: "claude".into(),
+            raw_events: vec![
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_2",
+                        "role": "assistant",
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 8,
+                            "cache_creation_input_tokens": 12
+                        }
+                    }
+                }),
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "session_id": "nat-claude-1",
+                    "total_cost_usd": 0.01,
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 8,
+                        "cache_creation_input_tokens": 12
+                    }
+                }),
+            ],
+        };
+        let main_result = WorkerResult {
+            text: "Done.".into(),
+            ok: true,
+            cost_usd: Some(0.04),
+            session_id: Some("nat-claude-1".into()),
+            duration_seconds: 0.2,
+            error: None,
+            limit_reached: None,
+        };
+        lifecycle
+            .finish(&binding, &main_result, &emit, &mut recovery)
+            .await
+            .unwrap();
+        results.finish_launch(&generation, "completed").unwrap();
+
+        let history = results.history(sid).unwrap();
+        let usage = &history["launches"][0]["usage"];
+        assert_eq!(usage["tokens"], 140);
+        assert!((usage["cost_usd"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+        assert_eq!(usage["recovery_cost_unknown"], false);
+        assert!(usage["limit_reached"].is_null());
+        assert_eq!(
+            usage["components"],
+            json!({
+                "input_tokens": 15,
+                "output_tokens": 28,
+                "cache_read_input_tokens": 50,
+                "cache_write_5m_input_tokens": 42,
+                "cache_write_1h_input_tokens": 5,
+                "model_calls": 2,
+                "source": "claude"
+            })
+        );
+        assert_eq!(
+            store.get(sid).unwrap()["budget_usage"]["components"],
+            usage["components"]
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_persists_codex_and_cursor_components() {
+        let (_tmp, _store, results, lifecycle, session, generation, launch) = setup_launch("codex");
+        let sid = session["id"].as_str().unwrap();
+        let binding = lifecycle
+            .begin(
+                &session,
+                "Measure usage components",
+                &generation,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        lifecycle.before_dispatch(&binding, &launch).unwrap();
+        feed_events(
+            &lifecycle,
+            &binding,
+            "codex",
+            &[
+                json!({"type": "thread.started", "thread_id": "nat-codex-1"}),
+                json!({
+                    "type": "turn.completed",
+                    "thread_id": "nat-codex-1",
+                    "usage": {
+                        "input_tokens": 120,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 25
+                    }
+                }),
+            ],
+        );
+        let emit: Event = Arc::new(|_| Ok(()));
+        let mut recovery = FakeRecovery {
+            provider: "codex".into(),
+            raw_events: vec![],
+        };
+        lifecycle
+            .finish(
+                &binding,
+                &WorkerResult {
+                    text: "ok".into(),
+                    ok: true,
+                    cost_usd: None,
+                    session_id: Some("nat-codex-1".into()),
+                    duration_seconds: 0.1,
+                    error: None,
+                    limit_reached: None,
+                },
+                &emit,
+                &mut recovery,
+            )
+            .await
+            .unwrap();
+        let history = results.history(sid).unwrap();
+        assert_eq!(history["launches"][0]["usage"]["tokens"], 145);
+        assert_eq!(
+            history["launches"][0]["usage"]["components"],
+            json!({
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 20,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "codex"
+            })
+        );
+
+        let (_tmp2, _store2, results2, lifecycle2, session2, generation2, launch2) =
+            setup_launch("cursor");
+        let sid2 = session2["id"].as_str().unwrap();
+        let binding2 = lifecycle2
+            .begin(
+                &session2,
+                "Measure usage components",
+                &generation2,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        lifecycle2.before_dispatch(&binding2, &launch2).unwrap();
+        feed_events(
+            &lifecycle2,
+            &binding2,
+            "cursor",
+            &[
+                json!({"type": "system", "subtype": "init", "session_id": "nat-cursor-1"}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "session_id": "nat-cursor-1"}),
+            ],
+        );
+        lifecycle2.abort(&binding2, "completed").unwrap();
+        let history2 = results2.history(sid2).unwrap();
+        assert_eq!(
+            history2["launches"][0]["usage"]["components"],
+            json!({
+                "input_tokens": null,
+                "output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "cursor"
+            })
+        );
     }
 }

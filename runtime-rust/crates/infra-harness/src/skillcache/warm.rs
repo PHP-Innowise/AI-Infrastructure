@@ -16,7 +16,10 @@ use crate::{
     store::SessionStore,
 };
 use infra_host::provider::{Launch, LaunchAdapter, PreparedCommand};
-use infra_skillcache::{Form, Step, capsule::Network, env_filter, package, state};
+use infra_skillcache::{
+    Form, Step, capsule::Network, env_filter, package, prompt, state, trace as sc_trace,
+};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -26,6 +29,11 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+
+/// Removes leftover warm session state directories at server startup.
+pub fn clear_sessions(state: &Path) {
+    let _ = std::fs::remove_dir_all(state.join("skillcache/sessions"));
+}
 
 /// The experiment switch for choosing among several capsules of one skill by
 /// their descriptions. Off until it has its own measurement.
@@ -48,10 +56,11 @@ fn recompile_thresholds(store: &SessionStore) -> Option<(i64, usize)> {
     Some((window as i64, failed as usize))
 }
 
-/// A turn that runs a capsule.
+/// A turn that runs a capsule (or an evaluation ablation arm).
 pub struct Warm {
     pub capsule_id: String,
     pub form: Form,
+    pub eval_arm: Option<String>,
     pub name: String,
     /// What replaces the skill request in the prompt.
     pub block: String,
@@ -62,6 +71,11 @@ pub struct Warm {
     pub state_dir: Option<PathBuf>,
     /// The last journal line already turned into a session event.
     seen: AtomicU64,
+}
+impl Warm {
+    fn agent_only(&self) -> bool {
+        self.eval_arm.as_deref() == Some("skillcache_agent")
+    }
 }
 
 pub enum Decision {
@@ -84,17 +98,27 @@ impl Decision {
                 "reason": reason,
                 "text": format!("SkillCache: this turn runs cold ({text})."),
             })),
-            Self::Hit(warm) => Some(json!({
-                "kind": "skillcache",
-                "phase": "hit",
-                "capsule_id": warm.capsule_id,
-                "form": warm.form.as_str(),
-                "mu": warm.name,
-                "text": format!(
-                    "SkillCache: capsule `{}` runs this request instead of the skill being read again.",
-                    warm.name
-                ),
-            })),
+            Self::Hit(warm) => {
+                let mut event = json!({
+                    "kind": "skillcache",
+                    "phase": "hit",
+                    "capsule_id": (!warm.capsule_id.is_empty()).then_some(warm.capsule_id.as_str()),
+                    "form": warm.form.as_str(),
+                    "mu": warm.name,
+                    "text": if warm.eval_arm.as_deref() == Some("raw_trace") {
+                        "SkillCache: injected observed trace (`raw_trace` evaluation arm).".to_string()
+                    } else {
+                        format!(
+                            "SkillCache: capsule `{}` runs this request instead of the skill being read again.",
+                            warm.name
+                        )
+                    },
+                });
+                if let Some(arm) = &warm.eval_arm {
+                    event["eval_arm"] = arm.clone().into();
+                }
+                Some(event)
+            }
         }
     }
     /// What the launch record keeps of the decision.
@@ -102,11 +126,17 @@ impl Decision {
         match self {
             Self::Off => None,
             Self::Miss { reason, .. } => Some(json!({"decision": "miss", "reason": reason})),
-            Self::Hit(warm) => Some(json!({
-                "decision": "hit",
-                "capsule_id": warm.capsule_id,
-                "form": warm.form.as_str(),
-            })),
+            Self::Hit(warm) => {
+                let mut record = json!({
+                    "decision": "hit",
+                    "capsule_id": (!warm.capsule_id.is_empty()).then_some(warm.capsule_id.as_str()),
+                    "form": warm.form.as_str(),
+                });
+                if let Some(arm) = &warm.eval_arm {
+                    record["eval_arm"] = arm.clone().into();
+                }
+                Some(record)
+            }
         }
     }
 }
@@ -122,6 +152,10 @@ fn miss(reason: &'static str, text: impl Into<String>) -> Decision {
 /// Harness state that goes first on the provider's `PATH`. Copies, so that
 /// their mode is their own; one set per engine build.
 pub fn stage_tools(runtime: &Runtime) -> Result<PathBuf> {
+    stage_tools_for(runtime, true)
+}
+
+fn stage_tools_for(runtime: &Runtime, include_run: bool) -> Result<PathBuf> {
     let engine = match &runtime.engine {
         Some(engine) => engine.clone(),
         None => std::env::current_exe()?,
@@ -132,24 +166,37 @@ pub fn stage_tools(runtime: &Runtime) -> Result<PathBuf> {
             "The engine cannot be identified.",
         ));
     }
-    let root = runtime.store.state.join("skillcache/bin");
+    let folder = if include_run {
+        "skillcache/bin"
+    } else {
+        "skillcache/bin-tool"
+    };
+    let root = runtime.store.state.join(folder);
     let bin = root.join(&digest[..16]);
     infra_core::fs::ensure_directory(&bin, true)?;
     let name = |tool: &str| bin.join(format!("{tool}{}", std::env::consts::EXE_SUFFIX));
-    let first = name("skillcache-run");
-    if !first.is_file() {
-        let staging = bin.join(format!(".staging-{}", crate::store::hexid()));
-        std::fs::copy(&engine, &staging)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o500))?;
+    let stage = |target: &Path| -> Result<()> {
+        if !target.is_file() {
+            let staging = bin.join(format!(".staging-{}", crate::store::hexid()));
+            std::fs::copy(&engine, &staging)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o500))?;
+            }
+            std::fs::rename(&staging, target)?;
         }
-        std::fs::rename(&staging, &first)?;
-    }
-    let second = name("skillcache-tool");
-    if !second.is_file() && std::fs::hard_link(&first, &second).is_err() {
-        std::fs::copy(&first, &second)?;
+        Ok(())
+    };
+    let tool = name("skillcache-tool");
+    if include_run {
+        let first = name("skillcache-run");
+        stage(&first)?;
+        if !tool.is_file() && std::fs::hard_link(&first, &tool).is_err() {
+            std::fs::copy(&first, &tool)?;
+        }
+    } else {
+        stage(&tool)?;
     }
     // An older build's copies are of no use to anyone.
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
@@ -163,7 +210,7 @@ pub fn stage_tools(runtime: &Runtime) -> Result<PathBuf> {
 fn protocol(skill: &str) -> String {
     format!(
         "How to run it:\n\
-         - Start with `skillcache-run run '{{\"name\": value, ...}}'`: one JSON object, as one shell argument, with the values above. If quoting is awkward, run `skillcache-run run -` and write the JSON to standard input.\n\
+         - Start with `skillcache-run run '{{\"name\": value, ...}}'`: one JSON object, as one shell argument, with the values above. If quoting is awkward, run `skillcache-run run - <<'EOF'` with the JSON on standard input.\n\
          - Every answer is one JSON object. Do what its `status` says:\n\
          \x20 - `needs_bindings`: supply the named values with `skillcache-run continue '{{...}}'`.\n\
          \x20 - `your_steps`: do those steps yourself with your normal tools, then `skillcache-run continue '{{...}}'` with what they produce.\n\
@@ -315,12 +362,140 @@ pub fn preview(
         Decision::Miss { reason, text } => {
             json!({"mode": mode, "decision": "miss", "reason": reason, "text": text})
         }
-        Decision::Hit(warm) => json!({
-            "mode": mode,
-            "decision": "hit",
-            "capsule": {"capsule_id": warm.capsule_id, "mu": warm.name, "form": warm.form.as_str()},
-        }),
+        Decision::Hit(warm) => {
+            let mut answer = json!({
+                "mode": mode,
+                "decision": "hit",
+                "capsule": if warm.capsule_id.is_empty() {
+                    Value::Null
+                } else {
+                    json!({
+                        "capsule_id": warm.capsule_id,
+                        "mu": warm.name,
+                        "form": warm.form.as_str(),
+                    })
+                },
+            });
+            if let Some(arm) = &warm.eval_arm {
+                answer["eval_arm"] = arm.clone().into();
+            }
+            answer
+        }
     }
+}
+
+const RAW_TRACE_VIEW_BYTES: usize = 128 * 1024;
+
+fn capsule_matches_arm(capsule: &Value, arm: Option<&str>) -> bool {
+    let cap_arm = capsule["eval_arm"].as_str();
+    match arm {
+        None => cap_arm.is_none(),
+        Some("written_procedure") => cap_arm == Some("written_procedure"),
+        Some("skillcache_no_replay") => cap_arm == Some("skillcache_no_replay"),
+        Some("skillcache_agent" | "skillcache_executor") => cap_arm.is_none() || cap_arm == arm,
+        Some(_) => false,
+    }
+}
+
+fn decide_raw_trace(
+    runtime: &Runtime,
+    session: &Value,
+    route: &ResolvedCommand,
+    workspace: &Path,
+) -> Decision {
+    let project_id = session["project_id"].as_str().unwrap_or("");
+    let db = match runtime.store.connection() {
+        Ok(db) => db,
+        Err(error) => return miss("unavailable", error.to_string()),
+    };
+    let stored = if let Some(trace_gen) = settings::trace_generation(session) {
+        let trace = match db::trace(&db, trace_gen) {
+            Ok(trace) => trace,
+            Err(error) => return miss("unavailable", error.to_string()),
+        };
+        match trace {
+            Some(trace) => {
+                let trace_sid = trace["session_id"].as_str().unwrap_or("");
+                let trace_project = db
+                    .query_row(
+                        "SELECT project_id FROM sessions WHERE id=?1",
+                        [trace_sid],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                if trace_project.as_deref() != Some(project_id) {
+                    None
+                } else {
+                    Some(trace)
+                }
+            }
+            None => None,
+        }
+    } else if route.requests.len() == 1 {
+        let request = &route.requests[0];
+        let skill_name = request["name"].as_str().unwrap_or("");
+        let skill_path = request["path"]
+            .as_str()
+            .and_then(|path| trace::spelled_skill(workspace, Path::new(path)));
+        let found = if !skill_name.is_empty() {
+            db::latest_trace_for_skill(&db, project_id, skill_name)
+        } else {
+            Ok(None)
+        };
+        match found {
+            Ok(Some(trace)) => Some(trace),
+            Ok(None) => match skill_path {
+                Some(path) => match db::latest_trace_for_skill(&db, project_id, &path) {
+                    Ok(trace) => trace,
+                    Err(error) => return miss("unavailable", error.to_string()),
+                },
+                None => None,
+            },
+            Err(error) => return miss("unavailable", error.to_string()),
+        }
+    } else {
+        return miss(
+            "no_single_skill",
+            "the message names no skill and no `trace_generation` was given",
+        );
+    };
+    let Some(stored) = stored else {
+        return miss(
+            "no_trace",
+            "no observed trace exists for `raw_trace` evaluation",
+        );
+    };
+    let steps = stored["steps"].as_array().cloned().unwrap_or_default();
+    let view = serde_json::to_string_pretty(&sc_trace::compiler_view(&steps, RAW_TRACE_VIEW_BYTES))
+        .unwrap_or_else(|_| "[]".into());
+    let name = stored["skill_refs"]
+        .as_array()
+        .and_then(|skills| skills.first())
+        .and_then(|skill| skill["name"].as_str())
+        .unwrap_or("raw_trace")
+        .to_string();
+    let block = format!(
+        "\n\nObserved trace reference for this request (`raw_trace` evaluation arm):\n\
+         Prior request: {}\n\
+         Credential-redacted observed trace:\n```json\n{}\n```\n\
+         Complete the request with your normal tools using this trace as reference.\n",
+        stored["request"].as_str().unwrap_or(""),
+        view
+    );
+    Decision::Hit(Arc::new(Warm {
+        capsule_id: String::new(),
+        form: Form::Textual,
+        eval_arm: Some("raw_trace".into()),
+        name,
+        block,
+        environment: BTreeMap::new(),
+        bin: None,
+        package: None,
+        state_dir: None,
+        seen: AtomicU64::new(0),
+    }))
 }
 
 fn decide_for(
@@ -332,6 +507,10 @@ fn decide_for(
     generation: Option<&str>,
 ) -> Decision {
     if !settings::warm(session) {
+        return Decision::Off;
+    }
+    let arm = settings::eval_arm(session);
+    if arm == Some("cold") {
         return Decision::Off;
     }
     let provider = session["provider"].as_str().unwrap_or("");
@@ -357,72 +536,132 @@ fn decide_for(
             "warm turns are verified for Claude and Codex only",
         );
     }
-    if provider == "codex" && manual {
+    if provider == "codex" && manual && !matches!(arm, Some("raw_trace" | "written_procedure")) {
         return miss(
             "codex_manual",
             "Codex in Manual mode would ask before every step of the executor",
         );
     }
-    if route.requests.len() != 1 {
-        return miss(
-            "no_single_skill",
-            if route.requests.is_empty() {
-                "the message names no skill"
-            } else {
-                "the message names more than one skill"
-            },
-        );
+    if arm == Some("raw_trace") {
+        return decide_raw_trace(runtime, session, route, workspace);
     }
-    let request = &route.requests[0];
-    let Some(skill_path) = request["path"]
-        .as_str()
-        .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
-    else {
-        return miss(
-            "no_capsule",
-            "the routed skill is not a skill folder of this project or of your home",
-        );
-    };
     let project_id = session["project_id"].as_str().unwrap_or("");
-    let candidates = match runtime
-        .store
-        .connection()
-        .and_then(|db| db::active_capsules(&db, project_id, &skill_path))
-    {
-        Ok(candidates) => candidates,
-        Err(error) => return miss("unavailable", error.to_string()),
-    };
-    let chosen = match candidates.len() {
-        0 => return miss("no_capsule", "no qualified capsule exists for this skill"),
-        1 => candidates[0].clone(),
-        _ => {
-            let by_description = runtime
-                .store
-                .setting(RETRIEVAL_BY_MU)
-                .ok()
-                .flatten()
-                .is_some_and(|value| value == true);
-            let ids = candidates
-                .iter()
-                .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
-                .collect::<Vec<_>>();
-            let best = by_description
-                .then(|| best_by_description(&runtime.store, project_id, &ids, message))
-                .flatten();
-            match best.and_then(|id| {
-                candidates
-                    .iter()
-                    .find(|capsule| capsule["capsule_id"] == id.as_str())
-            }) {
-                Some(capsule) => capsule.clone(),
+    let pin = settings::capsule_pin(session);
+    let (chosen, skill_path) = if let Some(pinned_id) = pin {
+        if route.requests.len() > 1 {
+            return miss("no_single_skill", "the message names more than one skill");
+        }
+        let requested_skill_path = if route.requests.len() == 1 {
+            match route.requests[0]["path"]
+                .as_str()
+                .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
+            {
+                Some(path) => Some(path),
                 None => {
                     return miss(
-                        "ambiguous",
-                        "this skill has several capsules and choosing among them is not enabled",
+                        "no_capsule",
+                        "the routed skill is not a skill folder of this project or of your home",
                     );
                 }
             }
+        } else {
+            None
+        };
+        let row = match runtime
+            .store
+            .connection()
+            .and_then(|db| db::capsule(&db, pinned_id))
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => return miss("no_capsule", "pinned capsule not found"),
+            Err(error) => return miss("unavailable", error.to_string()),
+        };
+        if row["project_id"] != project_id
+            || row["status"] != "active"
+            || !capsule_matches_arm(&row, arm)
+            || requested_skill_path
+                .as_deref()
+                .is_some_and(|path| row["skill_path"] != path)
+        {
+            return miss(
+                "no_capsule",
+                "pinned capsule is not active for this project, skill, and evaluation arm",
+            );
         }
+        let skill_path = row["skill_path"].as_str().unwrap_or("").to_string();
+        (row, skill_path)
+    } else {
+        if route.requests.len() != 1 {
+            return miss(
+                "no_single_skill",
+                if route.requests.is_empty() {
+                    "the message names no skill"
+                } else {
+                    "the message names more than one skill"
+                },
+            );
+        }
+        let request = &route.requests[0];
+        let Some(skill_path) = request["path"]
+            .as_str()
+            .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
+        else {
+            return miss(
+                "no_capsule",
+                "the routed skill is not a skill folder of this project or of your home",
+            );
+        };
+        let candidates = match runtime.store.connection().and_then(|db| match arm {
+            None => db::active_capsules(&db, project_id, &skill_path),
+            Some("written_procedure" | "skillcache_no_replay") => {
+                db::active_capsules_for_eval(&db, project_id, &skill_path, arm)
+            }
+            Some("skillcache_agent" | "skillcache_executor") => {
+                let dedicated = db::active_capsules_for_eval(&db, project_id, &skill_path, arm)?;
+                Ok(if dedicated.is_empty() {
+                    db::active_capsules(&db, project_id, &skill_path)?
+                } else {
+                    dedicated
+                })
+            }
+            Some(_) => Ok(Vec::new()),
+        }) {
+            Ok(candidates) => candidates,
+            Err(error) => return miss("unavailable", error.to_string()),
+        };
+        let chosen = match candidates.len() {
+            0 => return miss("no_capsule", "no qualified capsule exists for this skill"),
+            1 => candidates[0].clone(),
+            _ => {
+                let by_description = runtime
+                    .store
+                    .setting(RETRIEVAL_BY_MU)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| value == true);
+                let ids = candidates
+                    .iter()
+                    .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
+                    .collect::<Vec<_>>();
+                let best = by_description
+                    .then(|| best_by_description(&runtime.store, project_id, &ids, message))
+                    .flatten();
+                match best.and_then(|id| {
+                    candidates
+                        .iter()
+                        .find(|capsule| capsule["capsule_id"] == id.as_str())
+                }) {
+                    Some(capsule) => capsule.clone(),
+                    None => {
+                        return miss(
+                            "ambiguous",
+                            "this skill has several capsules and choosing among them is not enabled",
+                        );
+                    }
+                }
+            }
+        };
+        (chosen, skill_path)
     };
     let capsule_id = chosen["capsule_id"].as_str().unwrap_or("").to_string();
     if let Some(reason) = staleness(runtime, &chosen, workspace) {
@@ -451,12 +690,19 @@ fn decide_for(
         );
     }
     let name = stored.capsule.mu.name.clone();
-    let text = block(&stored, &skill_path);
+    let agent_only = arm == Some("skillcache_agent");
+    let text = if agent_only {
+        prompt::render_agent_driven(&stored, &skill_path)
+    } else {
+        block(&stored, &skill_path)
+    };
+    let eval_arm = arm.map(String::from);
     let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
         // A written procedure is read, and a preview stages nothing.
         return Decision::Hit(Arc::new(Warm {
             capsule_id,
             form: stored.capsule.form,
+            eval_arm,
             name,
             block: text,
             environment: BTreeMap::new(),
@@ -467,7 +713,7 @@ fn decide_for(
         }));
     };
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
-        let bin = stage_tools(runtime)?;
+        let bin = stage_tools_for(runtime, !agent_only)?;
         let state_dir = runtime
             .store
             .state
@@ -482,18 +728,26 @@ fn decide_for(
         Err(error) => return miss("unavailable", error.to_string()),
     };
     let text_of = |path: &Path| path.display().to_string();
-    let environment = BTreeMap::from([
+    let mut environment = BTreeMap::from([
         (env_filter::PACKAGE.to_string(), text_of(&warm_dir)),
         (env_filter::WORKSPACE.to_string(), text_of(workspace)),
-        (
-            env_filter::STATE_FILE.to_string(),
-            text_of(&state_dir.join("plan-state.json")),
-        ),
         (env_filter::GENERATION.to_string(), generation.to_string()),
     ]);
+    if agent_only {
+        environment.insert(
+            env_filter::LOG_FILE.to_string(),
+            text_of(&state_dir.join("run-log.jsonl")),
+        );
+    } else {
+        environment.insert(
+            env_filter::STATE_FILE.to_string(),
+            text_of(&state_dir.join("plan-state.json")),
+        );
+    }
     Decision::Hit(Arc::new(Warm {
         capsule_id,
         form: Form::Hybrid,
+        eval_arm,
         name,
         block: text,
         environment,
@@ -518,10 +772,16 @@ impl LaunchAdapter for WarmLaunchAdapter {
             // A textual capsule is read; nothing is staged for it.
             return Ok(command);
         };
-        let rest = command
+        let path_keys = command
             .environment
-            .get("PATH")
+            .keys()
+            .filter(|name| name.eq_ignore_ascii_case("PATH"))
             .cloned()
+            .collect::<Vec<_>>();
+        let rest = path_keys
+            .iter()
+            .filter_map(|key| command.environment.remove(key))
+            .next()
             .or_else(|| std::env::var("PATH").ok())
             .unwrap_or_default();
         let path =
@@ -538,7 +798,7 @@ impl LaunchAdapter for WarmLaunchAdapter {
             command.readable.push(package.clone());
         }
         match input.provider.as_str() {
-            "claude" => allow_claude(&mut command)?,
+            "claude" => allow_claude(&mut command, !self.warm.agent_only())?,
             // Codex's sandbox writes only inside its workspace and the
             // folders it is given; the executor's state file is in neither.
             // Without the sandbox there is nothing to widen.
@@ -560,8 +820,8 @@ impl LaunchAdapter for WarmLaunchAdapter {
     }
 }
 
-/// Lets Claude Code run the two commands of the protocol without asking.
-fn allow_claude(command: &mut PreparedCommand) -> Result<()> {
+/// Lets Claude Code run the SkillCache commands without asking.
+fn allow_claude(command: &mut PreparedCommand, include_run: bool) -> Result<()> {
     let wrong = || HarnessError::invalid("Claude settings cannot take the SkillCache permission.");
     let index = command.argv.iter().position(|value| value == "--settings");
     let mut settings: Value = match index {
@@ -579,7 +839,12 @@ fn allow_claude(command: &mut PreparedCommand) -> Result<()> {
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .ok_or_else(wrong)?;
-    for rule in ["Bash(skillcache-run:*)", "Bash(skillcache-tool:*)"] {
+    let rules: &[&str] = if include_run {
+        &["Bash(skillcache-run:*)", "Bash(skillcache-tool:*)"]
+    } else {
+        &["Bash(skillcache-tool:*)"]
+    };
+    for &rule in rules {
         if !allow.iter().any(|known| known == rule) {
             allow.push(rule.into());
         }
@@ -656,19 +921,22 @@ fn phase_text(event: &Value) -> Option<(&'static str, String)> {
 }
 
 impl Warm {
-    fn state_file(&self) -> Option<PathBuf> {
-        self.state_dir
-            .as_ref()
-            .map(|dir| dir.join("plan-state.json"))
+    fn log_file(&self) -> Option<PathBuf> {
+        let dir = self.state_dir.as_ref()?;
+        if self.agent_only() {
+            Some(dir.join("run-log.jsonl"))
+        } else {
+            Some(state::log_path(&dir.join("plan-state.json")))
+        }
     }
     /// Turns the executor's new journal lines into session events. A line is
     /// published once: the journal numbers them and the last one seen is kept.
     pub fn ingest(&self, emit: &dyn Fn(Value) -> Result<()>) {
-        let Some(state_file) = self.state_file() else {
+        let Some(log_file) = self.log_file() else {
             return;
         };
         let after = self.seen.load(Ordering::Acquire);
-        let Ok(events) = state::read_log(&state_file, after) else {
+        let Ok(events) = state::read_log_at(&log_file, after) else {
             return;
         };
         for event in events {
@@ -704,12 +972,20 @@ impl Warm {
     ) {
         self.ingest(emit);
         let events = self
-            .state_file()
-            .and_then(|state_file| state::read_log(&state_file, 0).ok())
+            .log_file()
+            .and_then(|log_file| state::read_log_at(&log_file, 0).ok())
             .unwrap_or_default();
         let count = |name: &str| events.iter().filter(|event| event["event"] == name).count();
         let outcome = if self.form == Form::Textual {
             "read"
+        } else if self.agent_only() {
+            if count("program_completed") > 0 {
+                "complete"
+            } else if count("program_failed") > 0 {
+                "unfinished"
+            } else {
+                "not_started"
+            }
         } else if count("complete") > 0 {
             "complete"
         } else if count("started") > 0 {
@@ -726,11 +1002,14 @@ impl Warm {
                 })
             })
             .collect::<Vec<_>>();
+        let deopts = count("program_failed") as i64;
         // Read before the connection is taken: the store has one, and both a
         // setting and a session event go through it.
         let thresholds = recompile_thresholds(store);
-        let mut waits = None;
-        if let Ok(db) = store.connection() {
+        let mut waits: Option<(String, Option<String>)> = None;
+        if !self.capsule_id.is_empty()
+            && let Ok(db) = store.connection()
+        {
             let _ = db::record_run(
                 &db,
                 &db::Run {
@@ -741,14 +1020,17 @@ impl Warm {
                     model: session["model"].as_str(),
                     outcome,
                     steps: &Value::Array(steps),
-                    deopts: count("program_failed") as i64,
+                    deopts,
                 },
             );
             let _ = db::touch_capsule(&db, &self.capsule_id);
-            // Behind its setting only: enough of the last turns handed a
-            // program step back, so the capsule waits for a person.
-            if let Some((window, failed)) = thresholds
-                && let Ok(recent) = db::capsule_runs(&db, &self.capsule_id, window)
+            // Behind its setting only: enough failing warm turns since the
+            // last qualification hand back to a person.
+            if deopts > 0
+                && let Some((window, failed)) = thresholds
+                && let Ok(Some(cap)) = db::capsule(&db, &self.capsule_id)
+                && let Some(since) = cap["updated_at"].as_str()
+                && let Ok(recent) = db::capsule_runs_since(&db, &self.capsule_id, since, window)
             {
                 let handed_back = recent
                     .iter()
@@ -767,11 +1049,26 @@ impl Warm {
                     )
                     .is_ok()
                 {
-                    waits = Some(reason);
+                    let project_id = cap["project_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(String::from);
+                    waits = Some((reason, project_id));
                 }
             }
         }
-        if let Some(reason) = waits {
+        if let Some((reason, project_id)) = waits {
+            store.publish_event(
+                "skillcache_capsule",
+                None,
+                project_id.clone(),
+                json!({
+                    "state": "needs_recompile",
+                    "project_id": project_id,
+                    "capsule_id": self.capsule_id,
+                    "reason": reason,
+                }),
+            );
             let _ = emit(json!({
                 "kind": "skillcache",
                 "phase": "needs_recompile",
@@ -1021,6 +1318,7 @@ mod tests {
         let warm = Arc::new(Warm {
             capsule_id: "c1".into(),
             form: Form::Hybrid,
+            eval_arm: None,
             name: "pdf-totals".into(),
             block: String::new(),
             environment: BTreeMap::from([(
@@ -1120,6 +1418,7 @@ mod tests {
             warm: Arc::new(Warm {
                 capsule_id: "c2".into(),
                 form: Form::Textual,
+                eval_arm: None,
                 name: "t".into(),
                 block: String::new(),
                 environment: BTreeMap::new(),
@@ -1157,6 +1456,7 @@ mod tests {
         let warm = Warm {
             capsule_id: "c1".into(),
             form: Form::Hybrid,
+            eval_arm: None,
             name: "pdf-totals".into(),
             block: String::new(),
             environment: BTreeMap::new(),

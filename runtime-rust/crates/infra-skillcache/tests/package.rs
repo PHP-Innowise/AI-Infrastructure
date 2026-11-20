@@ -179,29 +179,56 @@ fn fingerprint_detects_script_change() {
 }
 
 #[test]
-fn the_environment_identity_names_the_engine_and_each_runtime() {
+fn the_environment_identity_names_the_contract_and_each_runtime() {
     use std::collections::BTreeMap;
     let runtimes = |version: Option<&str>| {
         BTreeMap::from([("python3".to_string(), version.map(String::from))])
     };
-    let base = fingerprint::env_fingerprint("engine-a", &runtimes(Some("Python 3.13.1")));
+    let base = fingerprint::env_fingerprint(&runtimes(Some("Python 3.13.1")));
     assert_eq!(base.len(), 64);
     assert_eq!(
         base,
-        fingerprint::env_fingerprint("engine-a", &runtimes(Some("Python 3.13.1")))
+        fingerprint::env_fingerprint_for(
+            fingerprint::ENV_ABI_VERSION,
+            infra_skillcache::SCHEMA_VERSION,
+            &infra_skillcache::compile_rules::version(),
+            &runtimes(Some("Python 3.13.1")),
+        )
+    );
+    // Unrelated engine rebuilds do not change the environment identity; changes
+    // to the runtime contract, schema, compiler rules or interpreters do.
+    assert_ne!(
+        base,
+        fingerprint::env_fingerprint_for(
+            fingerprint::ENV_ABI_VERSION + 1,
+            infra_skillcache::SCHEMA_VERSION,
+            &infra_skillcache::compile_rules::version(),
+            &runtimes(Some("Python 3.13.1")),
+        )
     );
     assert_ne!(
         base,
-        fingerprint::env_fingerprint("engine-b", &runtimes(Some("Python 3.13.1")))
+        fingerprint::env_fingerprint_for(
+            fingerprint::ENV_ABI_VERSION,
+            infra_skillcache::SCHEMA_VERSION + 1,
+            &infra_skillcache::compile_rules::version(),
+            &runtimes(Some("Python 3.13.1")),
+        )
     );
     assert_ne!(
         base,
-        fingerprint::env_fingerprint("engine-a", &runtimes(Some("Python 3.14.0")))
+        fingerprint::env_fingerprint_for(
+            fingerprint::ENV_ABI_VERSION,
+            infra_skillcache::SCHEMA_VERSION,
+            "1-other",
+            &runtimes(Some("Python 3.13.1")),
+        )
     );
     assert_ne!(
         base,
-        fingerprint::env_fingerprint("engine-a", &runtimes(None))
+        fingerprint::env_fingerprint(&runtimes(Some("Python 3.14.0")))
     );
+    assert_ne!(base, fingerprint::env_fingerprint(&runtimes(None)));
     assert_eq!(fingerprint::runtime_version("no-such-runtime-here"), None);
     assert_eq!(fingerprint::runtime_version("../bin/sh"), None);
 }

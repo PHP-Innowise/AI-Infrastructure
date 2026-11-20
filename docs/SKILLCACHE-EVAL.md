@@ -14,22 +14,25 @@ applied here unchanged.
 
 ## What exists and what does not
 
-The engine seals a protocol, runs it through a driver, and reports:
+The engine seals a protocol, runs it through a driver, reports the sealed verdict,
+and can export a two-arm slice to the standalone eval viewer:
 
 ```bash
 infra-engine eval skillcache-ab seal --plan plan.json --out protocol.json
 infra-engine eval skillcache-ab run --protocol protocol.json --out result.json
 infra-engine eval skillcache-ab report --protocol protocol.json --result result.json
+infra-engine eval skillcache-ab viewer --protocol protocol.json --result result.json --out benchmark.json
 ```
 
-The **driver is yours**. It is the command that makes one preparation or one
-attempt with a real provider, and no driver for a real pilot ships with the
-engine. Two arms can be driven with the Harness as it is: `cold` (a session
-with SkillCache off) and `skillcache_executor` (a session in `warm_only`,
-after an observed turn was compiled). The other four arms are ablations that
-need modes the Harness does not have: a turn given the raw trace, a turn given
-a written procedure, a capsule without the executor, and a capsule that was
-not replayed. A protocol may name them; a driver has to provide them.
+For real pilots, build and point `driver.argv` at `infra-harness-skillcache-driver`
+(`runtime-rust/crates/infra-harness/tools/skillcache_driver/`), configured via
+a `driver.json` (`schema: "skillcache-pilot-driver-v1"`) sealed under
+`driver.inputs.root`. It runs an in-process Harness store per slot with
+`skillcache.eval_arms` enabled, driving all six arms (`cold`, `raw_trace`,
+`written_procedure`, `skillcache_agent`, `skillcache_executor`,
+`skillcache_no_replay`), sandboxing launches away from `protected`, and reading
+normalized `launches.usage.components` (`message.id`-deduplicated on Claude,
+non-cached input normalized on Codex, `null` on Cursor) plus `skillcache_runs`.
 
 The regression that runs in CI uses a scripted driver and calls no provider
 (`runtime-rust/crates/infra-cli/tests/skillcache_eval.rs`).
@@ -72,11 +75,23 @@ Unknown fields are refused.
     "verifier": ["sh", "{verifiers}/rows.sh"]
   }],
   "prices": {
-    "<model>": {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    "<model>": {
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "cache_write_5m": 0.0,
+      "cache_write_1h": 0.0
+    }
   },
+  "observe_model": "executor",
   "reuses": [1, 5, 20],
   "bootstrap": {"rounds": 10000, "seed": 20261120},
-  "driver": {"argv": ["/path/to/driver"], "timeout_seconds": 3600},
+  "driver": {
+    "argv": ["/path/to/infra-harness-skillcache-driver"],
+    "timeout_seconds": 3600,
+    "inputs": {"root": "/path/to/driver-inputs"}
+  },
   "verifiers": {"root": "/path/to/verifiers", "timeout_seconds": 300}
 }
 ```
@@ -97,11 +112,22 @@ Unknown fields are refused.
   compiler: they run once for an executor model and are shared by every cell
   with that model.
 - **`prices`** are USD per million tokens for exactly the models the matrix
-  names. They are sealed with the rest: a report cannot be repriced.
+  names. They are sealed with the rest: a report cannot be repriced. A `null`
+  column (`cache_read`, `cache_write`, `cache_write_5m`, `cache_write_1h`)
+  means the model does not bill that component (e.g. Codex `cache_write: null`)
+  and does not prevent full pricing. Use `cache_write_5m` and `cache_write_1h`
+  when a model prices 5-minute and 1-hour cache writes separately.
+- **`observe_model`** (optional, `"executor"` or `"compile"`, default
+  `"executor"`) specifies which matrix column made the cold observation whose
+  `observe_usage` a `prepare` call reports.
+- **`driver`** seals `driver.sha256` (resolved `argv[0]`) and optional
+  `driver.inputs` (`root` digested at seal); `run` refuses if either changed.
 - **`verifiers`** is all or nothing. With it, every task names its verifier
   command and an isolated verifier judges every attempt. Without it, no task
   does, and the driver's own `accepted` is recorded, which the report says
-  (`judged_by`).
+  (`judged_by`). Keep the sealed protocol in its own dedicated directory,
+  since its parent folder is listed in `protected` and refused as an attempt
+  workspace.
 
 ## The driver
 
@@ -113,46 +139,73 @@ A **preparation** happens once per task and arm before that task's attempts:
 observe the task's `observe` request and compile it, or whatever the arm needs.
 
 ```json
-{"phase": "prepare", "seal_sha256": "...", "task": "invoice-rows", "skill": "pdf",
- "observe": "...", "arm": "skillcache_executor", "compile_model": "...", "executor_model": "..."}
+{"phase": "prepare", "seal_sha256": "...", "slot": "<sha256>", "task": "invoice-rows",
+ "skill": "pdf", "observe": "...", "arm": "skillcache_executor",
+ "compile_model": "...", "executor_model": "...", "observe_model": "...",
+ "inputs": "/path/to/driver-inputs", "protected": ["/path/to/verifiers", "/path/to/sealed-dir"]}
 ```
 
 ```json
-{"prepared": true, "usage": {"input_tokens": 0, "output_tokens": 0,
- "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}, "seconds": 0.0}
+{"prepared": true,
+ "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+           "cache_creation_input_tokens": 0, "cache_write_5m_input_tokens": 0,
+           "cache_write_1h_input_tokens": 0},
+ "observe_usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                   "cache_creation_input_tokens": 0},
+ "seconds": 0.0}
 ```
 
 `prepared` says whether the arm got what it was preparing (a qualified
-capsule). The attempts run either way: a capsule that did not qualify makes
-its warm turns cold, and that is what the arm then costs.
+capsule). `usage` is the compilation work (priced at `compile_model`), and
+optional `observe_usage` is the cold observation work (priced at `observe_model`).
+The attempts run either way: a capsule that did not qualify makes its warm turns
+cold, and that is what the arm then costs.
 
-An **attempt** is one request in one arm. The arms of one probe run in an
-order drawn from the sealed seed, so that no arm is always the first on a warm
-provider cache; `position` is the place in that order.
+An **attempt** is one request in one arm. The arms of one probe actually run in
+that cell proceed in an order drawn from the sealed seed, with dense
+`position`, so that no arm is always the first on a warm provider cache.
 
 ```json
-{"phase": "attempt", "seal_sha256": "...", "task": "invoice-rows", "skill": "pdf",
- "observe": "...", "probe": "rename", "request": "Extract the rows of bills/2026-q3/",
- "arm": "skillcache_executor", "compile_model": "...", "executor_model": "...", "position": 1}
+{"phase": "attempt", "seal_sha256": "...", "slot": "<sha256>", "task": "invoice-rows",
+ "skill": "pdf", "observe": "...", "probe": "rename", "request": "Extract the rows of bills/2026-q3/",
+ "arm": "skillcache_executor", "compile_model": "...", "executor_model": "...",
+ "observe_model": "...", "position": 1,
+ "inputs": "/path/to/driver-inputs", "protected": ["/path/to/verifiers", "/path/to/sealed-dir"]}
 ```
 
 ```json
 {"workspace": "/abs/path/of/the/result", "accepted": true,
  "usage": {"input_tokens": 0, "output_tokens": 0,
-           "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+           "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+           "cache_write_5m_input_tokens": 0, "cache_write_1h_input_tokens": 0},
  "model_calls": 0, "seconds": 0.0, "program_steps": 0, "failed_steps": 0}
 ```
 
-Report only what the provider reported. A component the provider does not
-give (Codex gives no cache writes and no count of model calls, Cursor gives no
-tokens) is left out or `null`; it is never a zero. `model_calls` are distinct
-provider messages, not stream events. `program_steps` and `failed_steps` are
-the plan's program steps and how many of them were handed back to the agent.
+Report only normalized provider components:
+- `input_tokens` MUST contain **non-cached input tokens only**. On Codex, subtract
+  `cached_input_tokens` (`input_tokens - cached_input_tokens`) and emit
+  `cache_read_input_tokens = cached_input_tokens`; raw `cached_input_tokens`
+  in `usage` is refused as invalid.
+- On Claude, emit `cache_write_5m_input_tokens` and `cache_write_1h_input_tokens`
+  (or nested `cache_creation.ephemeral_{5m,1h}_input_tokens`).
+- Any component the provider does not give (Codex gives no cache writes and no
+  count of model calls, Cursor gives no tokens) is left out or `null`; it is
+  never a zero. `model_calls` are distinct provider messages (`message.id`),
+  not stream events. `program_steps` and `failed_steps` are the plan's program
+  steps and how many of them were handed back to the agent.
+
+Each attempt MUST return a distinct absolute `workspace` that does not overlap
+`verifiers.root`, the sealed protocol folder, or `driver.inputs.root`; repeated
+or overlapping workspaces are refused (`workspace-reused` / `workspace-refused`)
+and stay unjudged (`accepted: null`).
 
 A driver that fails, runs out of time or answers with something else has not
 answered. The record is kept with its status and no measurements, and the run
-goes on. A run that is interrupted writes nothing, and a sealed plan is not
-resumed or run twice.
+goes on. The engine records its own wall time around every driver call
+(`driver_seconds`) and appends each record to `<out>.journal.jsonl` during execution
+(removing the journal once `<out>` is written atomically). An interrupted run
+writes no `<out>` result, leaves `<out>.journal.jsonl` for forensics, and is
+never resumed or reported.
 
 ## Verifiers
 
@@ -190,12 +243,13 @@ matrix and each arm the report gives:
 - `list_price_usd`, the mean over fully priced attempts at the sealed table,
   and `list_price_usd_reported_components`, a lower bound over whatever was
   reported;
-- `model_calls`, `seconds`, and `deopt_rate` (handed-back program steps over
-  program steps, `null` when none were reported).
+- `model_calls`, `seconds`, `driver_seconds`, and `deopt_rate` (handed-back
+  program steps over program steps, `null` when none were reported).
 
 For every arm but `cold`, `preparation` gives how many preparations
-succeeded and `compile_usd`, their mean price at the price of the model that
-did the work. `against_cold` then answers the question:
+succeeded, `compile_usd`, `observe_usd`, and `total_usd` (all `null` unless
+all planned preparations in the cell are fully priced). `against_cold` then
+answers the question:
 
 | Field | Meaning |
 | --- | --- |
@@ -203,8 +257,8 @@ did the work. `against_cold` then answers the question:
 | `quality` | `insufficient`, `worse` (the whole interval is below `-quality_margin`), `non-inferior` (the whole interval is at or above it), or `not-shown`. |
 | `pairs`, `pairs_accepted`, `pairs_priced`, `tasks_priced` | Same task, probe and executor model in both arms; then both accepted; then both fully priced. |
 | `saving_per_reuse_usd`, `saving_ci95_usd` | Cold price minus the arm's price over priced pairs, averaged within a task and then over tasks. A cheaper attempt that was not accepted saved nothing and is not in it. |
-| `breakeven_reuses` | `ceil(compile_usd / saving)`. `null` when there is no saving or the compile price is unknown. |
-| `net_saving_usd` | `K * saving - compile_usd` for each sealed `K`. |
+| `breakeven_reuses` | `ceil(total_prepare_usd / saving)`. `null` when there is no saving or any preparation in the cell is unpriced. |
+| `net_saving_usd` | `K * saving - total_prepare_usd` for each sealed `K` (`null` unless saving and all preparations are priced). |
 | `verdict` | See below. |
 
 The verdict applies the sealed design, correctness first:

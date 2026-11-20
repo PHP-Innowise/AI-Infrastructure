@@ -349,6 +349,7 @@ impl SessionStore {
             crate::skillcache::snapshot::collect(&state, &kept);
         }
         crate::skillcache::compile::clear_workspaces(&state);
+        crate::skillcache::warm::clear_sessions(&state);
         Ok(Self {
             state,
             db: Arc::new(Mutex::new(db)),

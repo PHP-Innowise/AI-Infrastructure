@@ -86,12 +86,14 @@ fn toml(value: &Value) -> Result<String> {
 fn prepared(spec: &Spec, kind: Profile) -> Result<Spec> {
     let discovery = kind.minimal();
     let mut spec = spec.clone();
-    spec.runtime.push(
-        trusted_helper(&spec.workspace)?
-            .parent()
-            .ok_or_else(|| HarnessError::invalid("Native helper parent missing."))?
-            .to_path_buf(),
-    );
+    if cfg!(windows) || kind != Profile::Gate {
+        spec.runtime.push(
+            trusted_helper(&spec.workspace)?
+                .parent()
+                .ok_or_else(|| HarnessError::invalid("Native helper parent missing."))?
+                .to_path_buf(),
+        );
+    }
     spec.workspace = canonical(&spec.workspace)?;
     spec.target = canonical(&spec.target)?;
     if !spec.workspace.is_dir() || !spec.target.is_dir() {

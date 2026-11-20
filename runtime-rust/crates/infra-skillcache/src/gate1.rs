@@ -5,7 +5,8 @@
 //! see in one pass, each with a stable code, so one repair round can answer
 //! all of them. Gate 1T is the lighter check of the textual form.
 use crate::capsule::{
-    BINDING_BYTES, Examples, Form, SkillCapsule, Step, Violation, is_relative_path,
+    BINDING_BYTES, Examples, Form, SkillCapsule, Step, Violation, is_admitted_value,
+    is_relative_path,
 };
 use crate::package::Files;
 use serde::Serialize;
@@ -116,7 +117,10 @@ fn check_arguments(
             ));
             continue;
         }
-        if path.split(['/', '\\']).any(|part| part == "..") {
+        if path
+            .split(['/', '\\'])
+            .any(|part| part == ".." || (part.starts_with('-') && part.ends_with("..")))
+        {
             violations.push(Violation::new(
                 "argv_parent_traversal",
                 &here,
@@ -124,15 +128,22 @@ fn check_arguments(
             ));
             continue;
         }
-        if path.starts_with("programs/") || path.starts_with("assets/") {
-            if !is_relative_path(path) || !files.contains(path) {
+        let normalized = {
+            let mut rest = path;
+            while let Some(tail) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
+                rest = tail;
+            }
+            rest
+        };
+        if normalized.starts_with("programs/") || normalized.starts_with("assets/") {
+            if !is_relative_path(path) || !files.contains(normalized) {
                 violations.push(Violation::new(
                     "argv_missing_file",
                     &here,
                     format!("`{path}` is not a file of the package."),
                 ));
             } else {
-                package_file |= path.starts_with("programs/");
+                package_file |= normalized.starts_with("programs/");
             }
         }
     }
@@ -344,6 +355,21 @@ fn normalized(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_string()
 }
 
+fn contains_literal(capsule_text: &str, literal: &str) -> bool {
+    if capsule_text.contains(literal) {
+        return true;
+    }
+    serde_json::to_string(literal)
+        .ok()
+        .and_then(|quoted| {
+            quoted
+                .len()
+                .checked_sub(2)
+                .map(|_| quoted[1..quoted.len() - 1].to_string())
+        })
+        .is_some_and(|escaped| capsule_text.contains(&escaped))
+}
+
 fn check_examples(
     capsule: &SkillCapsule,
     capsule_text: &str,
@@ -405,6 +431,12 @@ fn check_examples(
                     binding.kind.as_str()
                 ),
             ));
+        } else if declared.is_none() && !is_admitted_value(value) {
+            violations.push(Violation::new(
+                "invalid_type",
+                &at,
+                "An observed value is a scalar or a list of scalars.",
+            ));
         }
         let size = serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len());
         if size > BINDING_BYTES {
@@ -436,7 +468,9 @@ fn check_examples(
                 ));
                 break;
             }
-            if text.chars().count() >= EXAMPLE_LITERAL_CHARS && capsule_text.contains(&text) {
+            if text.chars().count() >= EXAMPLE_LITERAL_CHARS
+                && contains_literal(capsule_text, &text)
+            {
                 violations.push(Violation::new(
                     "example_value_in_capsule",
                     &at,
@@ -461,12 +495,29 @@ fn check_examples(
             continue;
         };
         for output in &program.outputs {
-            if !result.contains_key(output) {
-                violations.push(Violation::new(
+            let here = format!("{at}.result.{output}");
+            match result.get(output) {
+                None | Some(Value::Null) => violations.push(Violation::new(
                     "example_missing_output",
-                    format!("{at}.result.{output}"),
+                    here,
                     format!("The observed result lacks declared output `{output}`."),
-                ));
+                )),
+                Some(value) if !is_admitted_value(value) => violations.push(Violation::new(
+                    "invalid_type",
+                    here,
+                    "An observed output is a scalar or a list of scalars.",
+                )),
+                Some(value)
+                    if serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+                        > BINDING_BYTES =>
+                {
+                    violations.push(Violation::new(
+                        "binding_too_large",
+                        here,
+                        format!("An observed output is at most {BINDING_BYTES} bytes."),
+                    ));
+                }
+                Some(_) => {}
             }
         }
         if serde_json::to_vec(result).map_or(usize::MAX, |bytes| bytes.len()) > 64 * 1024 {
@@ -666,16 +717,26 @@ pub fn check_textual(capsule: &[u8], markdown: &[u8], examples: Option<&Examples
     check_secrets("capsule.md", text, &mut violations);
     if let Some(examples) = examples {
         for (name, value) in &examples.bindings {
-            let literal = match value {
-                Value::String(literal) => normalized(literal),
-                _ => continue,
+            let literals: Vec<&str> = match value {
+                Value::String(literal) => vec![literal.as_str()],
+                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
             };
-            if literal.chars().count() >= EXAMPLE_LITERAL_CHARS && text.contains(&literal) {
-                violations.push(Violation::new(
-                    "example_value_in_capsule",
-                    format!("examples.bindings.{name}"),
-                    "The procedure repeats this observed value; it describes the parameter, not the instance.",
-                ));
+            let mut leaked = false;
+            for raw in literals {
+                check_secrets(&format!("examples.bindings.{name}"), raw, &mut violations);
+                if leaked {
+                    continue;
+                }
+                let literal = normalized(raw);
+                if literal.chars().count() >= EXAMPLE_LITERAL_CHARS && text.contains(&literal) {
+                    violations.push(Violation::new(
+                        "example_value_in_capsule",
+                        format!("examples.bindings.{name}"),
+                        "The procedure repeats this observed value; it describes the parameter, not the instance.",
+                    ));
+                    leaked = true;
+                }
             }
         }
     }

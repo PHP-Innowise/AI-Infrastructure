@@ -7,7 +7,7 @@
 //! declared output. Anything else is a failure with a bounded, redacted
 //! diagnostic; the package it ran from is verified unchanged afterwards.
 use crate::{
-    capsule::{BINDING_BYTES, Program},
+    capsule::{BINDING_BYTES, Program, is_admitted_value},
     env_filter,
     package::{self, Package},
 };
@@ -208,6 +208,28 @@ pub fn run(
                         program.id
                     ))
                 })?;
+                if !is_admitted_value(value) {
+                    return Err(RuntimeError::invalid(format!(
+                        "Input `{name}` of `{}` must be a string, a number, a boolean or a list of those.",
+                        program.id
+                    )));
+                }
+                if serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len()) > BINDING_BYTES
+                {
+                    return Err(RuntimeError::invalid(format!(
+                        "Input `{name}` of `{}` exceeds {BINDING_BYTES} bytes. Pass a path to a file, not its content.",
+                        program.id
+                    )));
+                }
+                if let Some(binding) = package.capsule.binding(name)
+                    && !binding.kind.admits(value)
+                {
+                    return Err(RuntimeError::invalid(format!(
+                        "Input `{name}` of `{}` must be a {}.",
+                        program.id,
+                        binding.kind.as_str()
+                    )));
+                }
                 selected.insert(name.clone(), value.clone());
             }
             (
@@ -277,6 +299,13 @@ pub fn run(
             seconds,
         }))
     };
+    if package::digest(&package.root)? != before {
+        return failed(
+            "package_modified",
+            "The capsule's package changed while the program ran; it is read-only.".into(),
+            ran.as_ref().ok().and_then(|outcome| outcome.exit),
+        );
+    }
     let exit = match ran {
         Ok(outcome) => outcome,
         Err(error) if error.code == "native-timeout" => {
@@ -304,13 +333,6 @@ pub fn run(
             );
         }
     };
-    if package::digest(&package.root)? != before {
-        return failed(
-            "package_modified",
-            "The capsule's package changed while the program ran; it is read-only.".into(),
-            exit.exit,
-        );
-    }
     if exit.exit != Some(0) {
         return failed(
             "nonzero_exit",

@@ -88,25 +88,28 @@ const CONFIGURATIONS: [&str; 10] = [
     "cold",
 ];
 fn configuration_of(id: &str) -> Option<&'static str> {
-    CONFIGURATIONS.into_iter().find(|name| id.contains(name))
+    CONFIGURATIONS.into_iter().find(|name| {
+        id.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|segment| segment == *name)
+    })
 }
 fn is_baseline(configuration: &str) -> bool {
     ["without_skill", "old_skill", "cold"].contains(&configuration)
 }
 /// The summary rows of a benchmark: key, label, shown as a percentage, the
-/// delta's suffix, and the decimals of a plain number. A row is shown when
-/// either configuration has it. The rows after `tokens` are the SkillCache
-/// evaluation's: what a turn cost, how often a compiled step was handed
-/// back, and what compiling cost.
-const METRICS: [(&str, &str, bool, &str, usize); 8] = [
-    ("pass_rate", "Pass Rate", true, "", 1),
-    ("time_seconds", "Time (s)", false, "s", 1),
-    ("tokens", "Tokens", false, "", 1),
-    ("model_calls", "Model calls", false, "", 1),
-    ("deopt_rate", "Steps handed back", true, "", 1),
-    ("list_price_usd", "List price (USD)", false, "", 4),
-    ("compile_usd", "Compilation (USD)", false, "", 4),
-    ("breakeven_reuses", "Break-even reuses", false, "", 0),
+/// delta's suffix, decimals of a plain number, and whether a lower value is
+/// better. A row is shown when either configuration has it. The rows after
+/// `tokens` are the SkillCache evaluation's: what a turn cost, how often a
+/// compiled step was handed back, and what compiling cost.
+const METRICS: [(&str, &str, bool, &str, usize, bool); 8] = [
+    ("pass_rate", "Pass Rate", true, "", 1, false),
+    ("time_seconds", "Time (s)", false, "s", 1, true),
+    ("tokens", "Tokens", false, "", 1, true),
+    ("model_calls", "Model calls", false, "", 1, true),
+    ("deopt_rate", "Steps handed back", true, "", 1, true),
+    ("list_price_usd", "List price (USD)", false, "", 4, true),
+    ("compile_usd", "Compilation (USD)", false, "", 4, true),
+    ("breakeven_reuses", "Break-even reuses", false, "", 0, true),
 ];
 fn link_uri(file: &V) -> String {
     let uri = text(file, "data_uri");
@@ -475,18 +478,47 @@ fn switch_view(view: &str) {
             .toggle_with_force("active", e.id() == format!("panel-{view}"));
     }
 }
-fn delta_class(value: &V) -> &'static str {
-    let n = value
+fn delta_number(value: &V) -> Option<f64> {
+    value
         .as_f64()
-        .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
-        .unwrap_or(0.0);
-    if n > 0.0 {
-        "benchmark-delta-positive"
-    } else if n < 0.0 {
-        "benchmark-delta-negative"
-    } else {
-        ""
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        .filter(|n| n.is_finite())
+}
+fn delta_class(value: &V, lower_is_better: bool) -> &'static str {
+    let Some(n) = delta_number(value) else {
+        return "";
+    };
+    if n == 0.0 {
+        return "";
     }
+    let improved = if lower_is_better { n < 0.0 } else { n > 0.0 };
+    if improved {
+        "benchmark-delta-positive"
+    } else {
+        "benchmark-delta-negative"
+    }
+}
+fn format_delta(value: &V, pct: bool, suffix: &str) -> String {
+    if value.is_null() {
+        return "—".into();
+    }
+    if pct {
+        if let Some(raw) = value.as_str().filter(|s| s.trim_end().ends_with('%')) {
+            return raw.to_string();
+        }
+        if let Some(n) = delta_number(value) {
+            let pts = n * 100.0;
+            if pts.abs() < 1e-9 {
+                return "0%".into();
+            }
+            return if (pts - pts.round()).abs() < 1e-6 {
+                format!("{pts:+.0}%")
+            } else {
+                format!("{pts:+.1}%")
+            };
+        }
+    }
+    format!("{}{suffix}", display(value))
 }
 fn rate_class(n: f64) -> &'static str {
     if n >= 0.8 {
@@ -583,7 +615,7 @@ fn render_benchmark() {
         &root,
         &["Metric".into(), title(a), title(b), "Delta".into()],
     );
-    for (key, label, pct, suffix, decimals) in METRICS {
+    for (key, label, pct, suffix, decimals, lower_is_better) in METRICS {
         if key != "pass_rate" && summary[a][key].is_null() && summary[b][key].is_null() {
             continue;
         }
@@ -595,12 +627,8 @@ fn render_benchmark() {
         add(
             &tr,
             "td",
-            delta_class(d),
-            &if d.is_null() {
-                "—".into()
-            } else {
-                format!("{}{suffix}", display(d))
-            },
+            delta_class(d, lower_is_better),
+            &format_delta(d, pct, suffix),
         );
     }
     let runs = list(&data["runs"]);
@@ -1265,9 +1293,33 @@ mod tests {
         );
         assert_eq!(configuration_of("t1/exact/cold"), Some("cold"));
         assert_eq!(configuration_of("t1/exact/raw_trace"), Some("raw_trace"));
+        assert_eq!(configuration_of("scold-1"), None);
         assert_eq!(configuration_of("eval-7"), None);
         assert!(is_baseline("cold") && is_baseline("without_skill") && is_baseline("old_skill"));
         assert!(!is_baseline("skillcache_executor") && !is_baseline("with_skill"));
+    }
+
+    #[test]
+    fn delta_formatting_and_polarity_follow_metric_direction() {
+        // Higher pass_rate is positive; lower tokens / USD / deopt_rate is positive.
+        assert_eq!(
+            delta_class(&json!("+0.25"), false),
+            "benchmark-delta-positive"
+        );
+        assert_eq!(
+            delta_class(&json!(-0.10), false),
+            "benchmark-delta-negative"
+        );
+        assert_eq!(delta_class(&json!(-5000), true), "benchmark-delta-positive");
+        assert_eq!(delta_class(&json!(0.05), true), "benchmark-delta-negative");
+        assert_eq!(delta_class(&json!(0.0), true), "");
+        assert_eq!(delta_class(&V::Null, true), "");
+        // Percentage deltas scale by 100 rather than printing raw fractions.
+        assert_eq!(format_delta(&json!("+0.25"), true, ""), "+25%");
+        assert_eq!(format_delta(&json!(-0.025), true, ""), "-2.5%");
+        assert_eq!(format_delta(&json!(0.0), true, ""), "0%");
+        assert_eq!(format_delta(&json!("-1.5"), false, "s"), "-1.5s");
+        assert_eq!(format_delta(&V::Null, true, ""), "—");
     }
 
     #[test]

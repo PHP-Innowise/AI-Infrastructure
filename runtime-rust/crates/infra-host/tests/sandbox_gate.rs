@@ -60,6 +60,15 @@ fn sandbox_gate_unshare_net_argv() {
     let layout = layout();
     let leaf = vec!["/bin/true".to_string()];
     let argv = sandbox::gate(&spec(&layout, false, None), &leaf).unwrap();
+    assert!(
+        !layout
+            .workspace
+            .parent()
+            .unwrap()
+            .join("native-helpers")
+            .exists(),
+        "Linux Gate profile should not copy trusted_helper when unused"
+    );
     assert!(argv.contains(&"--unshare-net".to_string()), "{argv:?}");
     assert!(argv.contains(&"--unshare-pid".to_string()));
     // A minimal root: the host's `/` is never bound.

@@ -228,16 +228,43 @@ pub fn runtime_version(name: &str) -> Option<String> {
         .next()
 }
 
-/// Identity of what a capsule's programs run on: the operating system, the
-/// processor, the engine that executes the plan and each declared runtime.
-/// A runtime that is not installed is part of the identity as `missing`.
-pub fn env_fingerprint(engine_digest: &str, runtimes: &BTreeMap<String, Option<String>>) -> String {
+/// The version of what the executor and the program tool promise a capsule's
+/// programs: the environment contract, the command lines, the answers. It
+/// changes only when that contract breaks, so an engine rebuilt for an
+/// unrelated reason does not make every capsule stale.
+pub const ENV_ABI_VERSION: u64 = 1;
+
+/// Identity of what a capsule's programs run on: the SkillCache runtime
+/// contract, the capsule schema and compiler rules, the operating system, the
+/// processor and each declared runtime. A runtime that is not installed is
+/// part of the identity as `missing`. The engine's own binary digest is not:
+/// it is recorded beside the capsule for information only.
+pub fn env_fingerprint(runtimes: &BTreeMap<String, Option<String>>) -> String {
+    env_fingerprint_for(
+        ENV_ABI_VERSION,
+        crate::SCHEMA_VERSION,
+        &crate::compile_rules::version(),
+        runtimes,
+    )
+}
+
+/// As [`env_fingerprint`], with the contract versions named by the caller.
+pub fn env_fingerprint_for(
+    abi_version: u64,
+    schema_version: u64,
+    compile_rules_version: &str,
+    runtimes: &BTreeMap<String, Option<String>>,
+) -> String {
     let mut hasher = Sha256::new();
+    let abi = abi_version.to_string();
+    let schema = schema_version.to_string();
     for field in [
-        "skillcache-env-v1",
+        "skillcache-env-v2",
+        abi.as_str(),
+        schema.as_str(),
+        compile_rules_version,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        engine_digest,
     ] {
         hasher.update((field.len() as u64).to_le_bytes());
         hasher.update(field.as_bytes());

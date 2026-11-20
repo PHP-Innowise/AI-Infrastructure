@@ -79,7 +79,7 @@ pub(crate) fn note(mode: &str, provider: &str, eligible: bool) -> String {
     let provider_note = match (mode, provider) {
         ("observe", _) => "",
         (_, "codex") => " In Codex, name the skill as `$skill`.",
-        (_, "claude") => " A Claude `/command` runs natively, so Claude turns are observed and never run a capsule.",
+        (_, "claude") => " In Claude, name the skill as `$skill`. A Claude `/command` runs natively, so that turn is only observed.",
         (_, "cursor") => " Cursor turns are observed and never run a capsule.",
         _ => "",
     };
@@ -130,6 +130,12 @@ pub(crate) fn preview_pill(preview: &V) -> Option<(String, &'static str)> {
         "miss" => match preview["reason"].as_str().unwrap_or("") {
             "stale" => Some(("Stale: cold".into(), "warn")),
             "no_single_skill" => None,
+            // A `/command` goes to the CLI as typed; a `$skill` mention of
+            // the same skill is what can run its capsule.
+            "native_route" => Some((
+                "Miss: cold (native command; use $skill to run the capsule)".into(),
+                "muted",
+            )),
             reason => Some((format!("Miss: cold ({})", miss_reason(reason)), "muted")),
         },
         _ => None,
@@ -292,9 +298,18 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
         .into_iter()
         .find(|trace| trace["generation"] == generation)
     {
-        Some(trace) if trace["replayable"] == false => out.push_str(
-            "<span class=\"skillcache-compile\" data-status=\"unavailable\">This turn cannot be compiled: the workspace's starting state was not kept, which needs a Git repository, so the turn cannot be replayed.</span>",
-        ),
+        Some(trace) if trace["replayable"] == false => {
+            // The starting state is a Git snapshot or a bounded copy of the
+            // folder; a workspace that fits neither cannot be replayed.
+            let why = trace["replay_reason"]
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| format!(" ({})", esc(reason)))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "<span class=\"skillcache-compile\" data-status=\"unavailable\">This turn cannot be compiled: the workspace's starting state was not kept{why}, so the turn cannot be replayed.</span>"
+            ));
+        }
         Some(_) => out.push_str(&action_button(
             "Compile into a capsule",
             "skillcache-compile",
@@ -764,10 +779,13 @@ mod tests {
         assert!(note("observe", "claude", true).contains("30 days"));
         assert!(note("warm_only", "codex", true).contains("Nothing is recorded"));
         assert!(note("auto", "codex", true).contains("$skill"));
-        // What the code does, not what one might hope: Claude and Cursor
-        // sessions never run a capsule today.
-        assert!(note("auto", "claude", true).contains("never run a capsule"));
+        // Claude runs a capsule for a `$skill` mention; its `/command` stays
+        // native and is only observed. Cursor never runs a capsule.
+        let claude = note("auto", "claude", true);
+        assert!(claude.contains("$skill") && claude.contains("`/command` runs natively"));
+        assert!(!claude.contains("never run a capsule"));
         assert!(note("warm_only", "cursor", true).contains("never run a capsule"));
+        assert_eq!(miss_reason("native_route"), "native command");
         assert!(note("auto", "codex", false).contains("ordinary sessions"));
     }
 
@@ -804,6 +822,13 @@ mod tests {
         assert_eq!(
             preview_pill(&json!({"decision": "miss", "reason": "no_capsule"})),
             Some(("Miss: cold (no qualified capsule)".into(), "muted"))
+        );
+        // A native command says what would have run the capsule.
+        assert!(
+            preview_pill(&json!({"decision": "miss", "reason": "native_route"}))
+                .unwrap()
+                .0
+                .contains("use $skill")
         );
         // An ordinary message is not a miss worth a pill.
         assert_eq!(
@@ -844,7 +869,17 @@ mod tests {
             json!({"traces": [{"generation": "g1", "replayable": false}], "compiles": []});
         let html = event_actions_html(&observed(), &unreplayable);
         assert!(payloads(&html, "skillcache-compile").is_empty());
-        assert!(html.contains("needs a Git repository"));
+        assert!(html.contains("starting state was not kept"));
+        assert!(
+            !html.contains("Git repository"),
+            "a folder copy replays too"
+        );
+        // The server's reason is shown, escaped.
+        let refused = json!({"traces": [{"generation": "g1", "replayable": false,
+                                         "replay_reason": "larger than <limit>"}], "compiles": []});
+        let html = event_actions_html(&observed(), &refused);
+        assert!(html.contains("(larger than &lt;limit&gt;)"), "{html}");
+        assert_no_inline_hex_colors(&html);
         let gone = json!({"traces": [], "compiles": []});
         assert!(event_actions_html(&observed(), &gone).contains("no longer kept"));
     }

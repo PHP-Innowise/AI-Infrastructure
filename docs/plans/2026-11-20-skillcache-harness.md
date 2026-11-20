@@ -1,6 +1,6 @@
 # План: SkillCache в Harness — наблюдение, компиляция и тёплое исполнение навыков
 
-> Статус: план для будущей реализации, не начат. Дата: 2026-11-20.
+> Статус: реализован (M0–M5, с доработками follow-up PR #108). Дата: 2026-11-20.
 > Основание: статья SkillCache (arXiv:2611.10022v1, «Execution-Grounded
 > Specialization for Token-Efficient Skill Use») и исследование кода
 > PR #107 (`feat/pr106-improvements`, коммит `cd826952`).
@@ -71,7 +71,7 @@ SkillCache превращает повторяющееся использова�
 | --- | --- | --- |
 | Жизненный цикл сессии | `Sessions::create_options` `sessions.rs:589` (ключи :590-614), `send` :2260 (ключи :2275-2288), `execute_job` :1578, `run_job` :1740 | Добавляется ключ `skillcache`; решение hit/miss — между `commands()?.route` (:2000) и `lifecycle.begin_with_options` (:2019). |
 | Сборка промпта | `prompt::build` `prompt.rs` (native short-circuit :105-125, `route.text` :237, `skill_request` :238-243), `PromptLedger` | Новая категория ledger `skillcache` вместо `skill_request` на попадании. |
-| Маршрутизация навыков | `CommandCatalog::route` `commands.rs:325`, Claude `/cmd` → `mode="native"` :374-385, `request()` :770-786 | Warm только для явно маршрутизированных навыков; native-маршрут — только observe. |
+| Маршрутизация навыков | `CommandCatalog::route` `commands.rs:325`, Claude `/cmd` → `mode="native"` :374-385, `request()` :770-786 | Warm для явно маршрутизированных `$skill` (Claude и Codex); Claude `/cmd` остаётся native и только observe. |
 | Точка инъекции в запуск | `ProjectLaunchAdapter` `accelerators.rs:417` (`adapt` :424), `EvidenceLaunchAdapter` :563 (`adapt` :567) | Warm: PATH/env/allowlist; компилятор: шаблон изолированного адаптера. |
 | Поток событий провайдера | `provider::run_monitored_locked` `infra-host/src/provider.rs:407`, `Reading::read` :565, trait `RunEvents` :115, `activity::normalize` `infra-host/src/activity.rs:847` | Единственный слот `RunEvents` занят `RunBinding` (`sessions.rs:2126`) — нужен tee для `TraceRecorder`. |
 | Учёт стоимости | `observe_binding` `lifecycle.rs:756`, `finish_accounting` :1026, `cost_observation.rs` (метки фаз только `main`/`recovery` :132-133, :627-629), `ContextTracker` `context_usage.rs` | Источник токенов warm/cold; компиляция учитывается отдельно. |
@@ -82,7 +82,7 @@ SkillCache превращает повторяющееся использова�
 | SSE | `StreamFrame.event: &'static str` `store.rs:19`, кольцо 1024 `store.rs:11`, `matches_sse_filter` `http.rs:2019-2045`, `DEFAULT_SSE_EVENTS` `infra-ui/src/api.rs:143-157` | Один новый статический кадр `skillcache_capsule`; прогресс — через `session_event`. |
 | HTTP | `Route` `http.rs:289-296`, `ROUTES` :297, DELETE поддержан (:838, :3007), `POST /api/projects/{project_id}/preflight` :1207 | Маршруты вложены в `/api/projects/{project_id}/…` и `/api/sessions/{session_id}/…`. |
 | Структурированный ответ агента | `infra-system/src/native.rs:238` (`--output-schema` Codex), :254 (`--json-schema` Claude), :391 (`structured_output`) | Компилятор возвращает капсулу структурированным ответом; файлы пишет хост. |
-| Оценка | `outcome::validate_design` `infra-eval/src/outcome.rs:506`, `seal` :627, `run_complete` :826, `summarize_complete` :1082, `known_usage` :1294, `isolation::prepare` `isolation.rs:55`, `ScriptedProvider` `bench.rs:202`, `rng::bootstrap` `rng.rs:185` | Новый протокол `skillcache-eval-protocol-v1` поверх тех же механизмов. |
+| Оценка | `outcome::validate_design` `infra-eval/src/outcome.rs:506`, `isolation::prepare` `isolation.rs:55`, `process::capture`, `rng::bootstrap` `rng.rs:185` | Собственный запечатанный протокол `skillcache-eval-protocol-v1` (собственные `seal`/`run`/`report`), с пилотным драйвером `infra-harness-skillcache-driver` и скрипт-фикстурой `infra-cli/tests/skillcache_eval.rs`. |
 | UI | `State` `infra-ui/src/model.rs:181`, `run/outcomes.rs` `TABS` :146, `session/navigation.rs:578`, `eval_viewer.rs:251` | Вкладка запуска `skillcache`, вид `skill-capsules`, конфигурации eval viewer. |
 | A/B-стенд сессий | [HARNESS-SESSION-AB](../HARNESS-SESSION-AB.md) | Образец запечатанного плана и учёта неизвестных как `null`. |
 
@@ -140,7 +140,7 @@ SkillCache превращает повторяющееся использова�
 | Сеть в гейтах | Gate 2 — без сети. Gate 3 — та же сетевая политика, которую получит warm-исполнение: капсула несёт `capabilities.network: "none"|"required"`, выведенное из `τ_obs`; по умолчанию `none`. |
 | Хранение артефактов | `<state>/skillcache/capsules/<project_key>/<capsule_id>/<rev>/warm/` (без `E`), `<state>/skillcache/qualification/<capsule_id>/<rev>/examples.json` (только Gate 3), трасса — строка `skillcache_traces`. Экспорт в репозиторий — вне v1. |
 | Учёт компиляции | Отдельная таблица `skillcache_compiles` с той же формой `usage`/`receipt`, что у `launches`; амортизация считается в домене SkillCache. |
-| Warm-маршрут | v1: ровно один явно маршрутизированный навык (`route.requests`; Codex может назвать до 5 `$skill`, `commands.rs:415-445` — тогда промах), сессия `mode="edit"`, провайдер Claude или Codex (не native Claude `/cmd`, не Codex Manual). Cursor в v1 только observe: запись вне рабочей копии в его песочнице и проброс окружения не проверены (адаптер на них не опирается, см. [AI-SYSTEM-ORCHESTRATION.md](../AI-SYSTEM-ORCHESTRATION.md)). Выбор по `μ` (FTS5) — эксперимент за флагом, пока не измерен. |
+| Warm-маршрут | v1: ровно один явно маршрутизированный навык (`route.requests`; `$skill` на Claude и Codex; до 5 `$skill` — промах), сессия `mode="edit"`, провайдер Claude или Codex (не native Claude `/cmd`, не Codex Manual). Cursor в v1 только observe: запись вне рабочей копии в его песочнице и проброс окружения не проверены (адаптер на них не опирается, см. [AI-SYSTEM-ORCHESTRATION.md](../AI-SYSTEM-ORCHESTRATION.md)). Выбор по `μ` (FTS5) — эксперимент за флагом, пока не измерен. |
 | Перекомпиляция по деоптимизациям | Только показ и ручное действие в v1; пороги — эвристика, выключены до измерения. Статус капсулы `needs_recompile` (не «deoptimized»: в статье деоптимизация — свойство шага в прогоне). |
 | Хранение трассы | Явный opt-in на сессию: только `mode ∈ {observe, auto}` (не `off` и не `warm_only`), документируется в [harness/README.md](../../harness/README.md) и [CHANGELOG.md](../../CHANGELOG.md); файлы/строки в приватном state (0700/0600), удаляются вместе с капсулой. |
 | Инструкции компилятора | Версионированный ресурс `infra-skillcache/resources/compile/` (`include_str!`), не навык изданий: иначе сработали бы зеркала, инвентари, budget, changelog изданий и установка клиентам. |
@@ -313,7 +313,7 @@ SkillCache превращает повторяющееся использова�
 | --- | --- | --- | --- |
 | Gate 1 | процесс Harness, `gate1.rs` | да | все инварианты 3.1 |
 | Gate 2 | свежая `sandbox::gate`, без сети, без файлов задачи | да | `check` каждой программы завершился по контракту 3.3 |
-| Gate 3 | свежая копия задачи (`<state>/skillcache/replay/<run_id>/workspace`), сеть по `capabilities.network` | да | `skillcache-run --replay` прошёл все `steps` и `verification` без сбоев; `E` отвечает на `needs_bindings` и NL-шаги; при сбое программы выход подставляется из `E` и replay продолжается, собирая все последующие сбои. Так как `sandbox::gate` даёт минимальный корень (как `discovery`), Gate 3 намеренно строже хостового warm-запуска; отказ песочницы помечается кодом `sandbox_denied` |
+| Gate 3 | свежая копия задачи (`<state>/skillcache/snapshots/<gen>/` → `replay/<run_id>/workspace`: Git-снимок или ограниченный по файлам/размеру/глубине снимок не-Git каталога `kind="tree"`), сеть по `capabilities.network` | да | `skillcache-run --replay` прошёл все `steps` и `verification` без сбоев; `E` отвечает на `needs_bindings` и NL-шаги; при сбое программы выход подставляется из `E` и replay продолжается, собирая все последующие сбои. Так как `sandbox::gate` даёт минимальный корень (как `discovery`), Gate 3 намеренно строже хостового warm-запуска; отказ песочницы помечается кодом `sandbox_denied` |
 
 Цикл: попытка 1 → (сбой) пакет диагностик всех гейтов → попытка 2 → попытка 3 → текстовый
 фолбэк (`form: "textual"`; проверяется облегчённый Gate 1T — **наше решение, вне статьи**:
@@ -341,12 +341,17 @@ elevated Codex (`sandbox.rs` creator/discovery); без них — отказ б
   `begin_with_options` (`:2019`): `mode ∈ {auto, warm_only}`; сессия `mode == "edit"`
   (в `plan` Codex read-only и не запишет файл состояния, а программы с `read_only: false`
   нарушают plan-режим); `route.requests` содержит **ровно один** явно маршрутизированный
-  навык (Codex допускает до 5 `$skill`, `commands.rs:415-445` — больше одного в v1 даёт
-  промах); провайдер Claude или Codex (не native Claude `/cmd`, не Codex Manual, не
-  Cursor); найдена активная капсула с совпавшими `tree_sha256`, `env_fingerprint`,
+  навык (`$skill` на Claude и Codex; до 5 `$skill`, `commands.rs:415-445` — больше одного
+  в v1 даёт промах); провайдер Claude или Codex (не native Claude `/cmd`, не Codex Manual,
+  не Cursor); найдена активная капсула с совпавшими `tree_sha256`, `env_fingerprint`,
   `schema_version`, `compile_rules_version`; и `capabilities.network != "required"` при
   провайдере, чья песочница запрещает сеть (например Codex `workspace-write` без сети —
   тогда промах).
+- Для пилотных абляций в оценке (только при store-настройке `skillcache.eval_arms = true`,
+  по умолчанию выключено) поддержаны четыре eval-режима: `raw_trace`,
+  `written_procedure` (текстовая форма с раунда 1), `skillcache_agent` (гибридная
+  капсула без `skillcache-run`, вызов `skillcache-tool` напрямую с журналом
+  `SKILLCACHE_LOG_FILE`) и `skillcache_no_replay` (только Gate 1+2).
 - `prompt::build`:
   - На попадании **`form: "hybrid"`** вместо `route.skill_request()` (`prompt.rs:238-243`)
     — блок ledger `skillcache`: `μ` («name: description»), pre-handover `B`, начальные
@@ -389,7 +394,7 @@ elevated Codex (`sandbox.rs` creator/discovery); без них — отказ б
 - `tree_sha256` по **всем** обычным файлам каталога навыка (`SKILL.md`, `scripts/`,
   `references/`, `assets/`): быстрый stat `(mtime_ns, size)`, пересчёт SHA-256 при
   расхождении. Изменение → `status = "stale"`, warm не выполняется.
-- `env_fingerprint = sha256({os, arch, engine_digest, версии runtimes из capabilities})`.
+- `env_fingerprint = sha256("skillcache-env-v2", ENV_ABI_VERSION, SCHEMA_VERSION, compile_rules_version, os, arch, версии runtimes из capabilities)` — отвязан от `engine_digest`, чтобы пересборка `infra-engine` без смены ABI/правил/схемы не делала капсулы `stale`; `engine_digest` сохраняется в БД только информационно.
 - Смена `schema_version` или версии инструкций компилятора → `stale`.
 - Дрейф кода проекта ловит деоптимизация во время прогона; ручная переквалификация
   (Gate 1–3) доступна из UI.
@@ -450,13 +455,14 @@ elevated Codex (`sandbox.rs` creator/discovery); без них — отказ б
 | Место | Изменение |
 | --- | --- |
 | `src/lib.rs` | `pub mod skillcache;` |
-| `src/skillcache/mod.rs` | `SkillCacheDomain: Domain` (операции HTTP), фасад. |
+| `src/skillcache/mod.rs` | `SkillCacheDomain: Domain` (операции HTTP, ограниченная очередь компиляции/гейтов и восстановление), фасад. |
 | `src/skillcache/db.rs` | `initialize`/`recover` таблиц (4.6); вызов из `store.rs` рядом с `inbox::initialize` и `inbox::recover` (:328, :341). |
 | `src/skillcache/trace.rs` | `TraceRecorder: RunEvents`, tee с `RunBinding`, запись `skillcache_traces`. |
 | `src/skillcache/compile.rs` | `CompilerLaunchAdapter` по образцу `EvidenceLaunchAdapter` (`accelerators.rs:563`), `run_monitored_locked`, структурированный ответ, собственный `LaunchAccounting`, запись `skillcache_compiles`. |
-| `src/skillcache/gates.rs` | Gate 2/3 через `infra_host::sandbox::gate` + `capture::run`; копия задачи по образцу `delivery.rs` (worktree) или `creator_files::validation_copy`. |
-| `src/skillcache/queue.rs` | Ограниченная очередь компиляции/гейтов вне очереди сессий, с lease на git common dir (как `session_scheduler::Lease`) и восстановлением после рестарта. |
-| `src/skillcache/warm.rs` | Решение hit/miss, стадирование `bin/`, env, `readable`, allowlist; ingest `run-log.jsonl`. |
+| `src/skillcache/snapshot.rs` | Git-снимок дерева в приватной объектной папке плюс ограниченный фолбэк-снимок не-Git каталогов (`kind: "tree"`). |
+| `src/skillcache/gates.rs` | Gate 2/3 через `infra_host::sandbox::gate` + `capture::run` поверх снимка `snapshot.rs`. |
+| `src/skillcache/warm.rs` | Решение hit/miss, стадирование `bin/`, env, `readable`, allowlist; ingest `run-log.jsonl`; eval-абляции при `skillcache.eval_arms`. |
+| `tools/skillcache_driver/` | Отдельный бинарь `[[bin]] infra-harness-skillcache-driver` для пилотного прогона `skillcache-ab` через реальный Harness. |
 | `sessions.rs` | Ключ `skillcache` в `create_options` (:590-614) и `send` (:2275-2288); hit/miss между :2000 и :2019; tee для `RunEvents` (:2126); фоновая постановка компиляции после успеха рядом с `spawn_omnigraph_publish` (:1708) только при `compile_after_observe`. `enqueue_check` (:1199) не используется. |
 | `store.rs` | Колонка `skillcache TEXT` в ALTER-списке (:295). |
 | `prompt.rs` | Категория `skillcache` (замена `skill_request` на попадании, :238-243). |
@@ -472,9 +478,10 @@ elevated Codex (`sandbox.rs` creator/discovery); без них — отказ б
 
 | Метод и путь | Операция | `token` |
 | --- | --- | --- |
-| `GET /api/projects/{project_id}/skillcache/capsules` (query: `skill`, `status`, `form`) | `skillcache.list` | нет |
+| `GET /api/projects/{project_id}/skillcache/capsules` (query: `skill`, `status`, `form`, `include_retired`) | `skillcache.list` | нет |
 | `GET /api/projects/{project_id}/skillcache/capsules/{capsule_id}` | `skillcache.get` | нет |
 | `POST /api/projects/{project_id}/skillcache/capsules/{capsule_id}/requalify` | `skillcache.requalify` | да |
+| `POST /api/projects/{project_id}/skillcache/capsules/{capsule_id}/retire` | `skillcache.retire` | да |
 | `POST /api/projects/{project_id}/skillcache/capsules/{capsule_id}/invalidate` | `skillcache.invalidate` | да |
 | `DELETE /api/projects/{project_id}/skillcache/capsules/{capsule_id}` | `skillcache.delete` | да |
 | `POST /api/sessions/{session_id}/skillcache/compile` (`{generation, compiler:{provider,model}}`) | `skillcache.compile` | да |
@@ -486,9 +493,9 @@ elevated Codex (`sandbox.rs` creator/discovery); без них — отказ б
 SSE: (1) прогресс внутри сессии — существующий кадр `session_event` с
 `{"kind":"skillcache","phase":…}`; (2) межсессионный статический кадр
 `skillcache_capsule` с `state ∈ {queued, compiling, gate1, gate2, gate3, repair, qualified,
-textual_fallback, failed, invalidated, requalified, deleted, stale}`, с `project_id`;
-добавляется в `DEFAULT_SSE_EVENTS` (`infra-ui/src/api.rs:143-157`) и в исключения
-`matches_sse_filter`.
+textual_fallback, failed, invalidated, retired, requalified, deleted, stale, needs_recompile}`,
+с `project_id`; добавляется в `DEFAULT_SSE_EVENTS` (`infra-ui/src/api.rs:143-157`) и в
+исключения `matches_sse_filter`.
 
 ### 4.6 Схема SQLite (`sessions.sqlite3`)
 
@@ -502,6 +509,7 @@ CREATE TABLE IF NOT EXISTS skillcache_capsules(
   skill_files TEXT NOT NULL, env_fingerprint TEXT NOT NULL, schema_version INTEGER NOT NULL,
   compile_rules_version TEXT NOT NULL, source_session_id TEXT NOT NULL,
   source_generation TEXT NOT NULL, compile_id TEXT NOT NULL, artifact_dir TEXT NOT NULL,
+  engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS skillcache_capsules_fts USING fts5(
   capsule_id UNINDEXED, project_id UNINDEXED, skill_name, mu_name, mu_description,
@@ -515,7 +523,7 @@ CREATE TABLE IF NOT EXISTS skillcache_compiles(
   source_generation TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','interrupted')),
   provider TEXT NOT NULL, model TEXT, rounds INTEGER NOT NULL DEFAULT 0, outcome TEXT,
-  usage TEXT, receipt TEXT, started_at TEXT NOT NULL, finished_at TEXT);
+  usage TEXT, receipt TEXT, started_at TEXT NOT NULL, finished_at TEXT, eval_arm TEXT);
 CREATE TABLE IF NOT EXISTS skillcache_runs(
   generation TEXT PRIMARY KEY, session_id TEXT NOT NULL, capsule_id TEXT NOT NULL,
   provider TEXT NOT NULL, model TEXT, outcome TEXT NOT NULL, steps TEXT NOT NULL,
@@ -547,7 +555,8 @@ CREATE TABLE IF NOT EXISTS skillcache_traces(
   `run/stream.rs`: карточки фаз `needs_bindings` → `your_steps` → `complete` и
   `program_failed` (шаг, инструкция, диагностика; без кода программы).
 - `management/capsules.rs` (новый): список и инспектор `μ, B, P, π, V`, история гейтов и
-  раундов, действия requalify/invalidate/delete, амортизация (`null` → «—»).
+  раундов, действия requalify/Use again, Stop using (`/retire`) и двухэтапный delete
+  (`/invalidate` остаётся API-алиасом для `stale`), амортизация (`null` → «—»).
 - `session/results.rs`, `knowledge/usage.rs`: группа SkillCache (hits/misses/deopts,
   стоимость компиляции отдельно от ходов).
 - `eval_viewer.rs` (:251): конфигурации `cold`, `skillcache_executor`, `skillcache_agent`,
@@ -558,20 +567,29 @@ CREATE TABLE IF NOT EXISTS skillcache_traces(
 
 ### 4.8 `infra-eval`
 
-`src/skillcache.rs` и операция `infra-engine eval skillcache-ab seal|run|report` (семейство
-`skillcache-ab` добавляется в `infra-cli/src/lib.rs:877-881`):
+`src/skillcache.rs` и операция `infra-engine eval skillcache-ab seal|run|report|viewer`
+(семейство `skillcache-ab` добавляется в `infra-cli/src/lib.rs:877-881`):
 
-- Протокол `skillcache-eval-protocol-v1` поверх `outcome::validate_design`/`seal`/
-  `run_complete`/`summarize_complete`; изоляция верификатора — `isolation::prepare`/`probe`.
+- Протокол `skillcache-eval-protocol-v1`: использует `outcome::validate_design` для
+  правил корректности, `isolation::prepare`/`probe` (Linux bubblewrap) для изоляции
+  верификаторов, `process::capture` для опеки драйвера и `rng::bootstrap` для CI;
+  `seal`/`run`/`report` реализованы в `infra-eval/src/skillcache.rs` (не поверх
+  `outcome::seal`/`run_complete`).
 - Рукава: `cold`, `raw_trace`, `written_procedure`, `skillcache_agent` (капсула без
   executor-а), `skillcache_executor`, `skillcache_no_replay` (только Gate 1+2). Пробы:
   `exact`, `instance`, `rename`, `reword`. Матрица `(compile_model, executor_model)`.
-- Метрики: `input`, `output`, `cache_read`, `cache_write` токены по провайдерам, число
-  вызовов модели (дедупликация `message.id`), латентность, `list_price_usd` по запечатанной
-  таблице цен в протоколе, частота деоптимизаций, амортизация: экономия на повтор,
-  break-even (`null`, если экономии нет), чистая экономия при `K` повторах, bootstrap CI.
-- `bench::ScriptedProvider` — детерминированные регрессии в CI без реального провайдера.
-- Отсутствие токенов (Cursor) или `cache_write` (Codex) — `null` и показ покрытия, не ноль.
+- Метрики: `input` (без кэша), `output`, `cache_read`, `cache_write` (`5m`/`1h`) токены,
+  `model_calls` и латентность (их измеряет и возвращает драйвер — для Harness это
+  `launches.usage.components` с дедупликацией по `message.id` на Claude и нормализацией
+  Codex `input - cached`; движок также замеряет `driver_seconds`); `list_price_usd` по
+  запечатанной таблице цен в протоколе, частота деоптимизаций, амортизация: экономия на
+  повтор, break-even (`null`, если экономии нет или подготовка неполностью оценена),
+  чистая экономия при `K` повторах, bootstrap CI.
+- В CI регрессии (`infra-cli/tests/skillcache_eval.rs`, `#![cfg(unix)]`) запускается
+  скриптованный shell-драйвер без вызовов провайдера; для реального пилота всех 6
+  рукавов добавлен бинарь `infra-harness-skillcache-driver` (`tools/skillcache_driver/`).
+- Отсутствие токенов (Cursor) или `cache_write` (Codex) — `null` (допускается `null`
+  для нетарифицируемых колонок в таблице цен) и показ покрытия, не ноль.
 
 ### 4.9 Документация и changelog
 
@@ -638,11 +656,13 @@ allowlist, исключения (native Claude, Codex Manual). PR 2: мост `r
 
 ### M5 — оценка и управление (2–3 PR)
 
-`infra-eval/src/skillcache.rs`, запечатанный протокол, отчёт амортизации; вид «Skill
-capsules»; eval viewer; Suite 12 в `harness/tests/browser_e2e.mjs`; флаги
-`skillcache.retrieval_by_mu` и `skillcache.recompile_thresholds` (выключены). Готово:
-CI-регрессии на `ScriptedProvider` зелёные; первый пилот — наблюдение, не основание для
-включения по умолчанию.
+`infra-eval/src/skillcache.rs`, запечатанный протокол и пилотный драйвер
+`infra-harness-skillcache-driver` (включая 4 eval-режима абляции за настройкой
+`skillcache.eval_arms`); вид «Skill capsules»; eval viewer; Suite 12 в
+`harness/tests/browser_e2e.mjs`; флаги `skillcache.retrieval_by_mu` и
+`skillcache.recompile_thresholds` (выключены). Готово: CI-регрессии на скриптованном
+драйвере (`infra-cli/tests/skillcache_eval.rs`) и пилотном драйвере с фикстурными
+провайдерами зелёные; первый пилот — наблюдение, не основание для включения по умолчанию.
 
 ## 6. Матрица проверки
 
@@ -675,8 +695,12 @@ CI-регрессии на `ScriptedProvider` зелёные; первый пи�
 
 Новые группы в [install/check-catalog.json](../../install/check-catalog.json) не нужны:
 crate попадает в `members = ["crates/*"]` и покрывается `rust`, `msrv`, `windows-native`;
-`wasm` проверяет `infra-ui`. Все команды используют `--locked`, поэтому `Cargo.lock`
-обновляется в том же PR, что и crate.
+`wasm` проверяет `infra-ui`. При этом `msrv` и `windows-native` объявлены в каталоге с
+`"default": false` и запускаются только отдельными CI-джобоми (`rust-msrv` в `rust.yml`,
+`native-windows.yml`) или явным `--group`, а не обычным `infra-engine check`; кроме того,
+`infra-cli/tests/skillcache_eval.rs` помечен `#![cfg(unix)]`, поэтому `windows-native`
+его не запускает. Все команды используют `--locked`, поэтому `Cargo.lock` обновляется
+в том же PR, что и crate.
 
 ## 7. Вне объёма v1
 

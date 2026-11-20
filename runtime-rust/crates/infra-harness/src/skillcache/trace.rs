@@ -206,6 +206,27 @@ pub fn skill_file(workspace: &Path, path: &str) -> Option<PathBuf> {
     }
 }
 
+fn frontmatter_name(file: &Path) -> Option<String> {
+    let bytes = std::fs::read(file).ok()?;
+    let text = std::str::from_utf8(&bytes[..bytes.len().min(8192)]).ok()?;
+    let rest = text
+        .strip_prefix("---\r\n")
+        .or_else(|| text.strip_prefix("---\n"))?;
+    for line in rest.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            let value = value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// The skills `S` a turn used: the ones the message routed to and the ones
 /// the trace shows the agent loading. Each is named with the digest of its
 /// folder at this moment, so a later compile can tell that it has changed.
@@ -225,17 +246,38 @@ pub fn resolve_skills(
         if name.is_empty() || name.contains([':', '/', '\\']) || name.starts_with('.') {
             return None;
         }
-        [Some(workspace.as_path()), home]
-            .into_iter()
-            .flatten()
-            .find_map(|root| {
-                skill_entry(
-                    &workspace,
-                    home,
-                    &root.join(".claude/skills").join(name).join("SKILL.md"),
-                    Some(name),
-                )
-            })
+        for folder in [".claude/skills", ".agents/skills"] {
+            if let Some(found) = [Some(workspace.as_path()), home]
+                .into_iter()
+                .flatten()
+                .find_map(|root| {
+                    skill_entry(
+                        &workspace,
+                        home,
+                        &root.join(folder).join(name).join("SKILL.md"),
+                        Some(name),
+                    )
+                })
+            {
+                return Some(found);
+            }
+        }
+        for folder in [".claude/skills", ".agents/skills"] {
+            for root in [Some(workspace.as_path()), home].into_iter().flatten() {
+                let Ok(entries) = std::fs::read_dir(root.join(folder)) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let skill_md = entry.path().join("SKILL.md");
+                    if frontmatter_name(&skill_md).as_deref() == Some(name)
+                        && let Some(found) = skill_entry(&workspace, home, &skill_md, Some(name))
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
     };
     let by_path = |path: &str, name: Option<&str>| -> Option<Value> {
         let file = match path.strip_prefix("~/") {

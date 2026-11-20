@@ -58,6 +58,8 @@ impl Round {
 pub struct Engine {
     /// `None`: this executable, through its pinned copy in the sandbox.
     pub path: Option<PathBuf>,
+    /// The Codex runtime tree needed on Windows when gates run inside AppContainer.
+    pub codex: Option<PathBuf>,
 }
 impl Engine {
     fn command(&self, workspace: &Path) -> Result<(String, Vec<PathBuf>)> {
@@ -182,12 +184,23 @@ fn environment(
     state_file: Option<&Path>,
 ) -> BTreeMap<String, String> {
     let mut environment = std::env::vars()
-        .filter(|(name, _)| !env_filter::withheld(name) && !name.starts_with("SKILLCACHE_"))
+        .filter(|(name, _)| {
+            !env_filter::withheld(name) && !name.to_ascii_uppercase().starts_with("SKILLCACHE_")
+        })
         .collect::<BTreeMap<_, _>>();
     let text = |path: &Path| path.display().to_string();
     // A named engine's folder is where its runtimes are looked for first.
     if let Some(folder) = engine.path.as_deref().and_then(Path::parent) {
-        let rest = environment.get("PATH").cloned().unwrap_or_default();
+        let path_keys = environment
+            .keys()
+            .filter(|name| name.eq_ignore_ascii_case("PATH"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let rest = path_keys
+            .iter()
+            .filter_map(|key| environment.remove(key))
+            .next()
+            .unwrap_or_default();
         let joined = std::env::join_paths(
             std::iter::once(folder.to_path_buf()).chain(std::env::split_paths(&rest)),
         )
@@ -210,7 +223,13 @@ fn environment(
     environment
 }
 
-fn spec(workspace: &Path, readable: Vec<PathBuf>, writable: Vec<PathBuf>, network: bool) -> Spec {
+fn spec(
+    workspace: &Path,
+    readable: Vec<PathBuf>,
+    writable: Vec<PathBuf>,
+    codex: Option<&Path>,
+    network: bool,
+) -> Spec {
     Spec {
         workspace: workspace.to_path_buf(),
         target: workspace.to_path_buf(),
@@ -218,7 +237,7 @@ fn spec(workspace: &Path, readable: Vec<PathBuf>, writable: Vec<PathBuf>, networ
         readable,
         accounts: writable,
         runtime: vec![],
-        codex: None,
+        codex: codex.map(Path::to_path_buf),
         evidence: None,
         network,
     }
@@ -262,7 +281,7 @@ pub fn gate2(
             let scratch = workspace.join(".harness-tmp");
             infra_core::fs::ensure_directory(&scratch, true)?;
             run_sandboxed(
-                &spec(&workspace, readable, vec![], false),
+                &spec(&workspace, readable, vec![], engine.codex.as_deref(), false),
                 &[
                     executable,
                     "skillcache".into(),
@@ -355,6 +374,7 @@ pub fn gate3(
                 &top,
                 readable,
                 vec![round.state.clone()],
+                engine.codex.as_deref(),
                 candidate.capsule.capabilities.network == Network::Required,
             ),
             &[
@@ -468,7 +488,10 @@ mod tests {
 
     #[test]
     fn a_gate_process_gets_no_credential_and_a_scratch_home() {
-        let engine = Engine { path: None };
+        let engine = Engine {
+            path: None,
+            codex: None,
+        };
         let environment = environment(
             &engine,
             Path::new("/pkg"),

@@ -9,7 +9,7 @@
 //! attempt it interrupted. A failed program is never run again; the rest of
 //! the plan stays compiled.
 use crate::{
-    capsule::{BINDING_BYTES, Examples, SkillCapsule, Step},
+    capsule::{BINDING_BYTES, Examples, SkillCapsule, Step, is_admitted_value},
     gate1,
     package::Package,
     state::{Awaiting, Failure, RunLog, RunState},
@@ -81,16 +81,6 @@ fn produces(step: &Step) -> &[String] {
     match step {
         Step::Instruction { produces, .. } => produces,
         _ => &[],
-    }
-}
-
-fn admitted_value(value: &Value) -> bool {
-    match value {
-        Value::Null | Value::Object(_) => false,
-        Value::Array(items) => items
-            .iter()
-            .all(|item| item.is_string() || item.is_number() || item.is_boolean()),
-        _ => true,
     }
 }
 
@@ -178,7 +168,7 @@ impl<'a> Runner<'a> {
                     format!("`{name}` is already bound; a bound value does not change."),
                 ));
             }
-            if !admitted_value(value) {
+            if !is_admitted_value(value) {
                 return Err(Refusal::new(
                     "invalid_values",
                     format!("`{name}` must be a string, a number, a boolean or a list of those."),
@@ -546,13 +536,15 @@ impl<'a> Runner<'a> {
         let (leading, names) = self.instruction_steps(0);
         self.bind(supplied, &names)?;
         // The opening instruction steps are shown to the agent before it
-        // starts the run; a step is done once everything it produces is bound.
+        // starts the run; a step that produces values is done once everything
+        // it produces is bound. Steps with no declared outputs are never
+        // skipped silently before the agent confirms them.
         for index in leading {
-            let done = self.capsule.plan_step(index).is_some_and(|step| {
-                produces(step)
+            let needed = self.capsule.plan_step(index).map(produces).unwrap_or(&[]);
+            let done = !needed.is_empty()
+                && needed
                     .iter()
-                    .all(|name| self.state.bindings.contains_key(name))
-            });
+                    .all(|name| self.state.bindings.contains_key(name));
             if !done {
                 break;
             }

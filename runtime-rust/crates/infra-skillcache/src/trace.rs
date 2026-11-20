@@ -203,13 +203,84 @@ fn reads_one_file(command: &str) -> bool {
 }
 
 fn skill_paths(text: &str) -> Vec<String> {
+    static DOUBLE_QUOTED: OnceLock<Regex> = OnceLock::new();
+    static SINGLE_QUOTED: OnceLock<Regex> = OnceLock::new();
     static PATH: OnceLock<Regex> = OnceLock::new();
-    PATH.get_or_init(|| {
+    let double_quoted = DOUBLE_QUOTED.get_or_init(|| {
+        Regex::new(
+            r#"(?:^|[\s=:(,])"((?:/|~[/\\]|\.{1,2}[/\\]|\.[A-Za-z0-9_-]+[/\\]|[A-Za-z]:[/\\])(?:[^"\n\r]*[/\\])?SKILL\.md)""#,
+        )
+        .expect("a fixed expression")
+    });
+    let single_quoted = SINGLE_QUOTED.get_or_init(|| {
+        Regex::new(
+            r#"(?:^|[\s=:(,])'((?:/|~[/\\]|\.{1,2}[/\\]|\.[A-Za-z0-9_-]+[/\\]|[A-Za-z]:[/\\])(?:[^'\n\r]*[/\\])?SKILL\.md)'"#,
+        )
+        .expect("a fixed expression")
+    });
+    let plain = PATH.get_or_init(|| {
         Regex::new(r#"[A-Za-z0-9_.~:/\\-]*[/\\]SKILL\.md"#).expect("a fixed expression")
-    })
-    .find_iter(text)
-    .map(|found| found.as_str().replace('\\', "/"))
-    .collect()
+    });
+    let mut spans = Vec::new();
+    let mut paths = Vec::new();
+    for regex in [double_quoted, single_quoted] {
+        for captures in regex.captures_iter(text) {
+            if let Some(inner) = captures.get(1) {
+                spans.push(inner.start()..inner.end());
+                let path = inner.as_str().replace('\\', "/");
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    for found in plain.find_iter(text) {
+        if spans
+            .iter()
+            .any(|span| found.start() >= span.start && found.end() <= span.end)
+        {
+            continue;
+        }
+        let path = found.as_str().replace('\\', "/");
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn collect_value_skills(value: &Value, found: &mut Vec<SkillRef>) {
+    match value {
+        Value::String(text) => {
+            found.extend(skill_paths(text).into_iter().map(|path| SkillRef {
+                name: None,
+                path: Some(path),
+            }));
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_value_skills(item, found);
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                if ["file_path", "path", "target_file"].contains(&key.as_str())
+                    && let Some(raw) = value.as_str()
+                {
+                    let path = raw.replace('\\', "/");
+                    if path == "SKILL.md" || path.ends_with("/SKILL.md") {
+                        found.push(SkillRef {
+                            name: None,
+                            path: Some(path),
+                        });
+                        continue;
+                    }
+                }
+                collect_value_skills(value, found);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// How far past its limit a text is kept until it is redacted, so that a
@@ -327,13 +398,24 @@ impl Recorder {
             bytes: 0,
         }
     }
-    fn push(&mut self, step: RawStep) -> Option<usize> {
-        if self.steps.len() >= STEPS {
+    fn push(&mut self, mut step: RawStep) -> Option<usize> {
+        let step_bytes = step.text.as_ref().map_or(0, |text| text.text.len())
+            + serde_json::to_vec(&step.input).map_or(0, |bytes| bytes.len());
+        if self.steps.len() >= STEPS || self.bytes + step_bytes > TRACE_BYTES {
             self.counters.omitted += 1;
+            if self.steps.len() < STEPS
+                && step.tool.is_some()
+                && self.steps.last().is_none_or(|last| !last.omitted)
+            {
+                step.input = Value::Null;
+                step.text = None;
+                step.omitted = true;
+                self.steps.push(step);
+                return Some(self.steps.len() - 1);
+            }
             return None;
         }
-        self.bytes += step.text.as_ref().map_or(0, |text| text.text.len())
-            + serde_json::to_vec(&step.input).map_or(0, |bytes| bytes.len());
+        self.bytes += step_bytes;
         self.steps.push(step);
         Some(self.steps.len() - 1)
     }
@@ -353,7 +435,13 @@ impl Recorder {
             agent: agent.map(String::from),
         });
     }
-    fn started(&mut self, id: &str, tool: &str, input: &Value, agent: Option<&str>) {
+    fn started(
+        &mut self,
+        id: &str,
+        tool: &str,
+        input: &Value,
+        agent: Option<&str>,
+    ) -> Option<usize> {
         self.note_skills(tool, input);
         // Oversized arguments keep their shape and lose the ends of their
         // longest strings.
@@ -374,27 +462,32 @@ impl Recorder {
             exit_code: None,
             agent: agent.map(String::from),
         };
-        if let Some(index) = self.push(step)
-            && !id.is_empty()
-        {
+        let index = self.push(step)?;
+        if !id.is_empty() {
             self.open.insert(id.into(), index);
         }
+        Some(index)
+    }
+    fn complete_index(&mut self, index: usize, output: &str, error: bool, exit_code: Option<i64>) {
+        let step = &mut self.steps[index];
+        if !step.omitted {
+            if self.bytes >= TRACE_BYTES {
+                self.counters.omitted += 1;
+                step.omitted = true;
+            } else {
+                let held = hold(output, OBSERVATION_BYTES);
+                self.bytes += held.text.len();
+                step.output = Some(held);
+            }
+        }
+        step.error = Some(error);
+        step.exit_code = exit_code;
     }
     fn completed(&mut self, id: &str, output: &str, error: bool, exit_code: Option<i64>) {
         let Some(index) = self.open.remove(id) else {
             return;
         };
-        let step = &mut self.steps[index];
-        if self.bytes >= TRACE_BYTES {
-            self.counters.omitted += 1;
-            step.omitted = true;
-        } else {
-            let held = hold(output, OBSERVATION_BYTES);
-            self.bytes += held.text.len();
-            step.output = Some(held);
-        }
-        step.error = Some(error);
-        step.exit_code = exit_code;
+        self.complete_index(index, output, error, exit_code);
     }
     fn note_skills(&mut self, tool: &str, input: &Value) {
         let mut found = Vec::new();
@@ -410,14 +503,7 @@ impl Recorder {
                 });
             }
         } else {
-            let text = match input {
-                Value::String(text) => text.clone(),
-                other => other.to_string(),
-            };
-            found.extend(skill_paths(&text).into_iter().map(|path| SkillRef {
-                name: None,
-                path: Some(path),
-            }));
+            collect_value_skills(input, &mut found);
         }
         for skill in found {
             if !self.skills.contains(&skill) {
@@ -442,12 +528,14 @@ impl Recorder {
                 for block in blocks.into_iter().flatten() {
                     match block["type"].as_str() {
                         Some("text") => self.message(block["text"].as_str().unwrap_or(""), agent),
-                        Some("tool_use") => self.started(
-                            block["id"].as_str().unwrap_or(""),
-                            block["name"].as_str().unwrap_or("Tool"),
-                            &block["input"],
-                            agent,
-                        ),
+                        Some("tool_use") => {
+                            self.started(
+                                block["id"].as_str().unwrap_or(""),
+                                block["name"].as_str().unwrap_or("Tool"),
+                                &block["input"],
+                                agent,
+                            );
+                        }
                         Some("thinking" | "redacted_thinking") => {
                             self.counters.reasoning_dropped += 1;
                         }
@@ -518,21 +606,37 @@ impl Recorder {
             "web_search" => json!({"query": item["query"]}),
             _ => json!({"tool": item["tool"]}),
         };
-        if !self.open.contains_key(id) {
-            self.started(id, kind, &input, None);
-        }
+        let index = if !id.is_empty()
+            && let Some(&existing) = self.open.get(id)
+        {
+            Some(existing)
+        } else {
+            self.started(id, kind, &input, None)
+        };
         if phase == "item.completed" {
             let output = match &item["aggregated_output"] {
                 Value::String(text) => text.clone(),
                 _ => match &item["result"] {
-                    Value::Null => String::new(),
+                    Value::Null => match &item["error"] {
+                        Value::Null => String::new(),
+                        Value::String(text) => text.clone(),
+                        other => other["message"]
+                            .as_str()
+                            .map_or_else(|| other.to_string(), String::from),
+                    },
                     Value::String(text) => text.clone(),
                     other => other.to_string(),
                 },
             };
             let exit_code = item["exit_code"].as_i64();
-            let error = item["status"] == "failed" || exit_code.is_some_and(|code| code != 0);
-            self.completed(id, &output, error, exit_code);
+            let error = item["status"] == "failed"
+                || exit_code.is_some_and(|code| code != 0)
+                || !item["error"].is_null();
+            if !id.is_empty() {
+                self.completed(id, &output, error, exit_code);
+            } else if let Some(index) = index {
+                self.complete_index(index, &output, error, exit_code);
+            }
         }
     }
     fn cursor(&mut self, event: &Value) {
@@ -572,9 +676,13 @@ impl Recorder {
                             call["args"].clone(),
                         )
                     };
-                    if !self.open.contains_key(&id) {
-                        self.started(&id, &tool, &arguments, None);
-                    }
+                    let index = if !id.is_empty()
+                        && let Some(&existing) = self.open.get(&id)
+                    {
+                        Some(existing)
+                    } else {
+                        self.started(&id, &tool, &arguments, None)
+                    };
                     if event["subtype"] == "completed" {
                         let outcome = &call["result"];
                         let error = outcome.get("error").is_some();
@@ -589,15 +697,27 @@ impl Recorder {
                             other => other["content"]
                                 .as_str()
                                 .or_else(|| other["output"].as_str())
-                                .or_else(|| other["stdout"].as_str())
-                                .map_or_else(|| other.to_string(), String::from),
+                                .map(String::from)
+                                .or_else(|| {
+                                    let stdout = other["stdout"].as_str().unwrap_or("");
+                                    let stderr = other["stderr"].as_str().unwrap_or("");
+                                    match (stdout.is_empty(), stderr.is_empty()) {
+                                        (false, true) => Some(stdout.to_string()),
+                                        (true, false) => Some(stderr.to_string()),
+                                        (false, false) => Some(format!("{stdout}\n{stderr}")),
+                                        (true, true) => None,
+                                    }
+                                })
+                                .unwrap_or_else(|| other.to_string()),
                         };
-                        self.completed(
-                            &id,
-                            &output,
-                            error,
-                            outcome["success"]["exitCode"].as_i64(),
-                        );
+                        let exit_code = outcome["success"]["exitCode"]
+                            .as_i64()
+                            .or_else(|| outcome["error"]["exitCode"].as_i64());
+                        if !id.is_empty() {
+                            self.completed(&id, &output, error, exit_code);
+                        } else if let Some(index) = index {
+                            self.complete_index(index, &output, error, exit_code);
+                        }
                     }
                 }
             }
@@ -954,5 +1074,66 @@ mod tests {
             assert!(!reads_one_file(command), "{command}");
         }
         assert_eq!(unnumbered("plain\ntext"), "plain\ntext");
+    }
+
+    #[test]
+    fn trace_bounds_inputs_and_messages_and_handles_spaces_errors_and_empty_ids() {
+        let mut recorder = Recorder::new("claude");
+        let big = "a".repeat(MESSAGE_BYTES);
+        for _ in 0..(TRACE_BYTES / MESSAGE_BYTES + 20) {
+            recorder.observe(
+                &json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": big}
+                ]}}),
+            );
+        }
+        let bounded = recorder.finish(&PolicyRedactor);
+        let size = serde_json::to_vec(&bounded.to_value()).unwrap().len();
+        assert!(size < TRACE_BYTES + 2 * MESSAGE_BYTES, "{size}");
+        assert!(bounded.counters.omitted >= 10, "{:?}", bounded.counters);
+
+        let claude = record(
+            "claude",
+            &[
+                json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/work/My Project/.claude/skills/pdf/SKILL.md"}},
+                    {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "cat \"/work/My Other Project/.claude/skills/csv/SKILL.md\""}}
+                ]}}),
+            ],
+        );
+        assert_eq!(
+            claude.skills,
+            [
+                SkillRef {
+                    name: None,
+                    path: Some("/work/My Project/.claude/skills/pdf/SKILL.md".into()),
+                },
+                SkillRef {
+                    name: None,
+                    path: Some("/work/My Other Project/.claude/skills/csv/SKILL.md".into()),
+                },
+            ]
+        );
+
+        let codex = record(
+            "codex",
+            &[
+                json!({"type": "item.completed", "item": {"id": "", "type": "mcp_tool_call", "server": "s", "tool": "t", "arguments": {}, "error": {"message": "mcp failed"}, "status": "failed"}}),
+            ],
+        );
+        assert_eq!(codex.steps.len(), 1);
+        assert_eq!(codex.steps[0]["output"], "mcp failed");
+        assert_eq!(codex.steps[0]["error"], true);
+
+        let cursor = record(
+            "cursor",
+            &[
+                json!({"type": "tool_call", "subtype": "completed", "call_id": "", "tool_call": {"shellToolCall": {"args": {"command": "false"}, "result": {"error": {"stdout": "out", "stderr": "err", "exitCode": 7}}}}}),
+            ],
+        );
+        assert_eq!(cursor.steps.len(), 1);
+        assert_eq!(cursor.steps[0]["output"], "out\nerr");
+        assert_eq!(cursor.steps[0]["exit_code"], 7);
+        assert_eq!(cursor.steps[0]["error"], true);
     }
 }

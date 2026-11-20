@@ -125,6 +125,17 @@ fn gate1_rejects_examples_inside_the_capsule() {
     refused("example_value_in_capsule", |value| {
         value["mu"]["description"] = "Summarise invoices/2026-q3/ into a CSV".into()
     });
+    // A multiline observed value matches even when JSON-escaped in the capsule.
+    let mut multiline = examples();
+    multiline["bindings"]["currency"] = "first line\nsecond line".into();
+    let mut with_nl = capsule();
+    with_nl["mu"]["description"] = "Handle first line\nsecond line".into();
+    let report = gate(&with_nl, &files(), Some(&multiline));
+    assert!(
+        report.has("example_value_in_capsule"),
+        "{:?}",
+        report.violations
+    );
 }
 
 #[test]
@@ -237,6 +248,13 @@ fn gate1_rejects_commands_that_are_not_package_files() {
     });
     refused("argv_parent_traversal", |value| {
         value["programs"][0]["entry"] = json!(["python3", "programs/../../main.py"])
+    });
+    refused("argv_parent_traversal", |value| {
+        value["programs"][0]["entry"] =
+            json!(["python3", "programs/extract/main.py", "-I../secret"])
+    });
+    refused("argv_missing_file", |value| {
+        value["programs"][0]["entry"] = json!(["python3", "./programs/extract/main.py"])
     });
     refused("argv_missing_file", |value| {
         value["programs"][0]["check"] = json!(["python3", "programs/extract/absent.py"])
@@ -376,6 +394,21 @@ fn gate1_rejects_examples_that_do_not_fit_the_capsule() {
         "{:?}",
         report.violations
     );
+    let report = with(&|observed| observed["steps"]["1"] = json!({"result": {"rows_file": null}}));
+    assert!(
+        report.has("example_missing_output"),
+        "{:?}",
+        report.violations
+    );
+    let report =
+        with(&|observed| observed["steps"]["1"] = json!({"result": {"rows_file": {"a": 1}}}));
+    assert!(report.has("invalid_type"), "{:?}", report.violations);
+    let report = with(&|observed| {
+        observed["steps"]["1"] = json!({"result": {"rows_file": "x".repeat(5000)}});
+    });
+    assert!(report.has("binding_too_large"), "{:?}", report.violations);
+    let report = with(&|observed| observed["bindings"]["quarter_files"] = json!([["nested"]]));
+    assert!(report.has("invalid_type"), "{:?}", report.violations);
     let report = with(&|observed| {
         observed["steps"].as_object_mut().unwrap().remove("2");
     });
@@ -482,6 +515,22 @@ fn gate1t_checks_the_textual_form() {
         &bytes(&manifest),
         b"# T\n\n1. Read invoices/2026-q3/ and sum.\n",
         Some(&observed),
+    );
+    assert!(
+        report.has("example_value_in_capsule"),
+        "{:?}",
+        report.violations
+    );
+    // An element of an array binding is checked in Gate 1T as well.
+    let mut array_observed = observed.clone();
+    array_observed.bindings.insert(
+        "quarter_files".into(),
+        json!(["q3-invoice-01.pdf", "q3-invoice-02.pdf"]),
+    );
+    let report = gate1::check_textual(
+        &bytes(&manifest),
+        b"# T\n\n1. Open q3-invoice-01.pdf.\n",
+        Some(&array_observed),
     );
     assert!(
         report.has("example_value_in_capsule"),

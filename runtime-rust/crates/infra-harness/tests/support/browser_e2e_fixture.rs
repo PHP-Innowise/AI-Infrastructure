@@ -539,6 +539,13 @@ fn create_fixture_project(project: &Path) -> Result<(String, String)> {
         run_git(project, &["checkout", "-B", "main"])?;
     }
 
+    let pdf_skill = project.join(".agents/skills/pdf");
+    fs::create_dir_all(&pdf_skill)?;
+    fs::write(
+        pdf_skill.join("SKILL.md"),
+        "---\nname: pdf\ndescription: Extract rows from PDF documents\n---\n\n# PDF\n\nExtract the rows and check the totals.\n",
+    )?;
+
     // 10 subdirectories x 20 files = 200 files + 12 root files + 2 test files = 214 files.
     // Under WHOLE_LIMITS (Unfold all), framed caps at 180 + 12 root files = 192 nodes (>= 180).
     for g in 0..10usize {
@@ -880,19 +887,26 @@ fn spawn_shutdown_watchers(
 /// warm turns, and the SkillCache events of one turn of the finished session.
 /// Nothing is compiled or run here; the rows are written as the Harness
 /// would have left them.
-fn seed_skillcache(store: &SessionStore, project_id: &str, session_id: &str) -> Result<()> {
+fn seed_skillcache(
+    store: &SessionStore,
+    project: &Path,
+    project_id: &str,
+    session_id: &str,
+) -> Result<()> {
     let generation = store
         .events(session_id, 0)?
         .iter()
         .find_map(|event| event["launch_id"].as_str().map(str::to_owned))
         .ok_or_else(|| HarnessError::invalid("The finished fixture session has no launch."))?;
     let skill_path = ".agents/skills/pdf/SKILL.md";
+    let tree = infra_skillcache::fingerprint::tree_sha256(&project.join(".agents/skills/pdf"))
+        .map_err(|error| HarnessError::unavailable(error.to_string()))?;
     let zeros = "0".repeat(64);
     let capsule = json!({
         "schema_version": 1,
         "form": "hybrid",
         "mu": {"name": "pdf-rows", "description": "Rows of every invoice PDF in a folder"},
-        "source": {"skills": [{"name": "pdf", "path": skill_path, "tree_sha256": zeros}]},
+        "source": {"skills": [{"name": "pdf", "path": skill_path, "tree_sha256": tree.sha256}]},
         "capabilities": {"network": "none", "runtimes": ["sh"]},
         "bindings": [{"name": "input_dir", "type": "path", "origin": "request",
                       "description": "Folder with the invoices"}],
@@ -915,12 +929,15 @@ fn seed_skillcache(store: &SessionStore, project_id: &str, session_id: &str) -> 
     let parsed = infra_skillcache::SkillCapsule::parse(&serde_json::to_vec(&capsule)?)
         .map_err(|_| HarnessError::invalid("The fixture capsule is not a valid capsule."))?;
     let mut files = infra_skillcache::package::Files::new();
-    for program in ["programs/extract/main.sh", "programs/verify/main.sh"] {
-        files.insert(
-            program,
-            b"printf '{\"status\":\"complete\",\"result\":{}}\\n'\n".to_vec(),
-        );
-    }
+    files.insert(
+        "programs/extract/main.sh",
+        b"printf '{\"status\":\"complete\",\"result\":{\"rows_file\":\"out/q3-rows.csv\"}}\\n'\n"
+            .to_vec(),
+    );
+    files.insert(
+        "programs/verify/main.sh",
+        b"printf '{\"status\":\"complete\",\"result\":{}}\\n'\n".to_vec(),
+    );
     let artifacts = store
         .state
         .join("skillcache/capsules")
@@ -930,6 +947,33 @@ fn seed_skillcache(store: &SessionStore, project_id: &str, session_id: &str) -> 
     let package_sha256 =
         infra_skillcache::package::write_warm(&artifacts.join("warm"), &parsed, None, &files)
             .map_err(|error| HarnessError::unavailable(error.to_string()))?;
+    let qual_dir = store
+        .state
+        .join("skillcache/qualification")
+        .join(SKILLCACHE_CAPSULE)
+        .join("1");
+    infra_core::fs::ensure_directory(&qual_dir, true)?;
+    infra_core::fs::atomic_json(
+        &qual_dir.join("examples.json"),
+        &json!({
+            "bindings": {"input_dir": "docs/q3-pdfs"},
+            "steps": {"0": {"result": {"rows_file": "out/q3-rows.csv"}}}
+        }),
+    )?;
+    infra_harness::skillcache::snapshot::take(&store.state, project, &generation)?;
+    let skill_files = json!({
+        "skills": [{
+            "name": "pdf",
+            "path": skill_path,
+            "tree_sha256": tree.sha256,
+            "taken_ns": tree.taken_ns.to_string(),
+            "files": tree.files.iter().map(|file| json!({
+                "path": file.path,
+                "size": file.size,
+                "mtime_ns": file.mtime_ns.to_string(),
+            })).collect::<Vec<_>>()
+        }]
+    });
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let compile_id = "e2ecompile000001";
     let reason = "2 of its last 3 warm turns handed a program step back.";
@@ -948,13 +992,14 @@ fn seed_skillcache(store: &SessionStore, project_id: &str, session_id: &str) -> 
         )?;
         db.execute(
             "INSERT INTO skillcache_capsules(capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,reason)
-             VALUES(?1,?2,'pdf',?3,'pdf-rows','Rows of every invoice PDF in a folder','hybrid','needs_recompile',1,?4,?4,?5,'e2e',1,'e2e',?6,?7,?8,?9,?10,?10,?10,?11,?12,?13)",
+             VALUES(?1,?2,'pdf',?3,'pdf-rows','Rows of every invoice PDF in a folder','hybrid','needs_recompile',1,?4,?5,?6,'e2e',1,'e2e',?7,?8,?9,?10,?11,?11,?11,?12,?13,?14)",
             rusqlite::params![
                 SKILLCACHE_CAPSULE,
                 project_id,
                 skill_path,
                 zeros,
-                json!({"skills": [{"name": "pdf", "path": skill_path, "tree_sha256": zeros, "files": []}]}).to_string(),
+                tree.sha256,
+                skill_files.to_string(),
                 session_id,
                 generation,
                 compile_id,
@@ -1271,7 +1316,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         || Ok(store.get(&other_session_id)?["status"] == "completed"),
     )
     .await?;
-    seed_skillcache(&store, &project_id, &other_session_id)?;
+    seed_skillcache(&store, &project, &project_id, &other_session_id)?;
 
     // Create primary active session holding a real pending permission + initial tool & Markdown events.
     let main_created = json_payload(
@@ -1474,6 +1519,14 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let app = http::App::new(services.clone(), port, ui_root, shutdown.clone())?;
 
+    let skillcache_requalify = if cfg!(target_os = "linux") {
+        std::process::Command::new("bwrap")
+            .args(["--ro-bind", "/", "/", "--unshare-net", "/usr/bin/true"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    } else {
+        cfg!(target_os = "macos")
+    };
     let receipt = json!({
         "url": format!("http://127.0.0.1:{port}"),
         "project_id": project_id,
@@ -1485,6 +1538,7 @@ async fn serve(root: &Path, ui_root: &Path, source_root: &Path, timeout_secs: u6
         "system_run_id": system_run_id,
         "omnigraph_graph_id": HARNESS_GRAPH_ID,
         "skillcache_capsule_id": SKILLCACHE_CAPSULE,
+        "skillcache_requalify": skillcache_requalify,
         "root": root,
     });
     fs::write(root.join("browser-e2e.json"), receipt.to_string())?;
@@ -1576,6 +1630,12 @@ fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if arguments.first().is_some_and(|arg| arg == "internal-guard") {
         std::process::exit(infra_host::process::guard_entry(&arguments[1..]).unwrap_or(125));
+    }
+    if arguments.first().is_some_and(|arg| arg == "skillcache") {
+        let (name, args) = arguments[1..]
+            .split_first()
+            .map_or(("", &[][..]), |(name, args)| (name.as_str(), args));
+        std::process::exit(infra_skillcache::cli::execute(name, args));
     }
     if arguments.iter().any(|arg| arg == "--print") {
         if let Err(error) = fake_provider(&arguments) {

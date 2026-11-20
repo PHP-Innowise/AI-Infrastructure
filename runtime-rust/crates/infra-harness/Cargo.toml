@@ -49,6 +49,12 @@ path = "tools/session_ab/oracle_child.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "infra-harness-skillcache-driver"
+path = "tools/skillcache_driver/main.rs"
+test = false
+bench = false
+
 [dependencies]
 infra-host = { path = "../infra-host" }
 infra-core = { path = "../infra-core" }

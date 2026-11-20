@@ -20,8 +20,10 @@ use crate::{
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::{File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const PROTOCOL: &str = "skillcache-eval-protocol-v1";
@@ -46,12 +48,23 @@ pub const PROBES: [&str; 4] = ["exact", "instance", "rename", "reword"];
 /// Arms that involve no compiler: they run once for an executor model,
 /// whatever the compile model of the cell.
 const COMPILE_FREE: [&str; 2] = ["cold", "raw_trace"];
-/// The token components a provider may report, and their price columns.
-const COMPONENTS: [(&str, &str); 4] = [
-    ("input_tokens", "input"),
-    ("output_tokens", "output"),
-    ("cache_read_input_tokens", "cache_read"),
-    ("cache_creation_input_tokens", "cache_write"),
+/// The normalized token components recorded on each attempt or preparation.
+/// `input_tokens` holds non-cached input tokens only.
+const USAGE_COMPONENTS: [&str; 6] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_write_5m_input_tokens",
+    "cache_write_1h_input_tokens",
+];
+const PRICE_COLUMNS: [&str; 6] = [
+    "input",
+    "output",
+    "cache_read",
+    "cache_write",
+    "cache_write_5m",
+    "cache_write_1h",
 ];
 /// The placeholder a verifier's argument uses for the sealed verifier folder.
 const VERIFIERS: &str = "{verifiers}";
@@ -135,6 +148,7 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
         "bootstrap",
         "driver",
         "verifiers",
+        "observe_model",
     ];
     if sealed {
         known.extend(["sealed_at", "seal_sha256"]);
@@ -144,6 +158,11 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
         return Err(invalid(format!("`schema` is `{PROTOCOL}`")));
     }
     text(protocol, "question", 1000)?;
+    match &protocol["observe_model"] {
+        Value::Null => {}
+        Value::String(which) if which == "executor" || which == "compile" => {}
+        _ => return Err(invalid("`observe_model` is `executor` or `compile`")),
+    }
     // The correctness design of the outcome evaluation: correctness first,
     // a fixed horizon, and an unknown that makes the answer insufficient.
     outcome::validate_design(&protocol["design"])?;
@@ -262,7 +281,8 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
         }
     }
     // The prices are part of what is sealed: a report cannot pick a cheaper
-    // table afterwards.
+    // table afterwards. `null` for an optional component means the model does
+    // not bill it.
     let prices = protocol["prices"]
         .as_object()
         .ok_or_else(|| invalid("`prices` maps each model to its USD per million tokens"))?;
@@ -275,13 +295,15 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
         let row = prices
             .get(model)
             .ok_or_else(|| invalid(format!("`prices` has no row for model `{model}`")))?;
-        only(
-            row,
-            &format!("`prices.{model}`"),
-            &COMPONENTS.map(|(_, column)| column),
-        )?;
-        for (_, column) in COMPONENTS {
-            if !row[column]
+        only(row, &format!("`prices.{model}`"), &PRICE_COLUMNS)?;
+        let row_obj = row
+            .as_object()
+            .ok_or_else(|| invalid(format!("`prices.{model}` is an object")))?;
+        let valid_rate = |value: &Value, allow_null: bool, column: &str| -> Result<()> {
+            if allow_null && value.is_null() {
+                return Ok(());
+            }
+            if !value
                 .as_f64()
                 .is_some_and(|price| price.is_finite() && price >= 0.0)
             {
@@ -289,6 +311,38 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
                     "`prices.{model}.{column}` is a price in USD per million tokens"
                 )));
             }
+            Ok(())
+        };
+        for required in ["input", "output"] {
+            if !row_obj.contains_key(required) {
+                return Err(invalid(format!("`prices.{model}.{required}` is required")));
+            }
+            valid_rate(&row[required], false, required)?;
+        }
+        if !row_obj.contains_key("cache_read") {
+            return Err(invalid(format!(
+                "`prices.{model}.cache_read` is required (number or null)"
+            )));
+        }
+        valid_rate(&row["cache_read"], true, "cache_read")?;
+        let write_keys = ["cache_write", "cache_write_5m", "cache_write_1h"];
+        if !write_keys.iter().any(|key| row_obj.contains_key(*key)) {
+            return Err(invalid(format!(
+                "`prices.{model}` requires `cache_write` or `cache_write_5m`/`cache_write_1h` (number or null)"
+            )));
+        }
+        for key in write_keys {
+            if row_obj.contains_key(key) {
+                valid_rate(&row[key], true, key)?;
+            }
+        }
+        if let (Some(scalar), Some(m5)) =
+            (row["cache_write"].as_f64(), row["cache_write_5m"].as_f64())
+            && (scalar - m5).abs() > 1e-12
+        {
+            return Err(invalid(format!(
+                "`prices.{model}.cache_write` and `cache_write_5m` differ"
+            )));
         }
     }
     let reuses = protocol["reuses"]
@@ -313,11 +367,11 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
     {
         return Err(invalid("`bootstrap` is {rounds: 100..100000, seed}"));
     }
-    only(
-        &protocol["driver"],
-        "`driver`",
-        &["argv", "timeout_seconds"],
-    )?;
+    let mut driver_known = vec!["argv", "timeout_seconds", "inputs"];
+    if sealed {
+        driver_known.push("sha256");
+    }
+    only(&protocol["driver"], "`driver`", &driver_known)?;
     if !protocol["driver"]["argv"].as_array().is_some_and(|argv| {
         !argv.is_empty()
             && argv
@@ -326,8 +380,37 @@ pub fn validate(protocol: &Value, sealed: bool) -> Result<()> {
     }) || seconds(&protocol["driver"]["timeout_seconds"], 86_400.0).is_none()
     {
         return Err(invalid(
-            "`driver` is {argv, timeout_seconds}: the command that runs one preparation or one attempt",
+            "`driver` is {argv, timeout_seconds[, inputs]}: the command that runs one preparation or one attempt",
         ));
+    }
+    if sealed
+        && !protocol["driver"]["sha256"]
+            .as_str()
+            .is_some_and(|digest| artifact::hex(digest, 64))
+    {
+        return Err(invalid("a sealed protocol records the driver's digest"));
+    }
+    match &protocol["driver"]["inputs"] {
+        Value::Null => {}
+        inputs => {
+            let mut known = vec!["root"];
+            if sealed {
+                known.push("sha256");
+            }
+            only(inputs, "`driver.inputs`", &known)?;
+            if !Path::new(text(inputs, "root", 4096)?).is_absolute() {
+                return Err(invalid("`driver.inputs.root` is an absolute folder"));
+            }
+            if sealed
+                && !inputs["sha256"]
+                    .as_str()
+                    .is_some_and(|digest| artifact::hex(digest, 64))
+            {
+                return Err(invalid(
+                    "a sealed protocol records the driver inputs' digest",
+                ));
+            }
+        }
     }
     if sealed
         && (!protocol["seal_sha256"]
@@ -405,8 +488,82 @@ fn seal_digest(protocol: &Value) -> Result<String> {
     artifact::digest(&body)
 }
 
-/// Seals a protocol: checks it, records the digest of the verifiers' folder,
-/// and writes it with its seal to `out`, which must not exist.
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn resolve_driver_executable(program: &str) -> Result<PathBuf> {
+    let candidate = Path::new(program);
+    if candidate.components().count() > 1 {
+        let abs = infra_core::fs::absolute(candidate)?;
+        if is_executable_file(&abs) {
+            return Ok(abs);
+        }
+        return Err(invalid(format!(
+            "driver `{program}` is not an executable file"
+        )));
+    }
+    for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let joined = directory.join(program);
+        if is_executable_file(&joined) {
+            return Ok(joined);
+        }
+        #[cfg(windows)]
+        for extension in std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+        {
+            let with_ext = directory.join(format!("{program}{extension}"));
+            if is_executable_file(&with_ext) {
+                return Ok(with_ext);
+            }
+        }
+    }
+    Err(invalid(format!("driver `{program}` was not found on PATH")))
+}
+
+fn driver_digest(argv: &[String]) -> Result<String> {
+    let program = argv
+        .first()
+        .ok_or_else(|| invalid("`driver.argv` is empty"))?;
+    let resolved = resolve_driver_executable(program)?;
+    let real = infra_core::fs::canonicalize(&resolved)?;
+    let meta = std::fs::metadata(&real)?;
+    if !meta.is_file() || meta.len() > crate::executable::LIMIT as u64 {
+        return Err(invalid("driver executable is not a bounded regular file"));
+    }
+    let bytes = std::fs::read(&real)?;
+    if bytes.len() > crate::executable::LIMIT {
+        return Err(invalid("driver executable exceeds size limit"));
+    }
+    Ok(artifact::sha(&bytes))
+}
+
+fn observing_model(protocol: &Value, compile_model: Option<&str>, executor_model: &str) -> String {
+    if protocol["observe_model"].as_str() == Some("compile")
+        && let Some(model) = compile_model
+    {
+        model.to_string()
+    } else {
+        executor_model.to_string()
+    }
+}
+
+/// Seals a protocol: checks it, records the digests of the driver, any driver
+/// inputs, and the verifiers' folder, and writes it with its seal to `out`,
+/// which must not exist.
 pub fn seal(protocol: &Path, out: &Path) -> Result<Value> {
     let mut document = artifact::read_json(protocol, LIMIT)?;
     validate(&document, false)?;
@@ -415,13 +572,33 @@ pub fn seal(protocol: &Path, out: &Path) -> Result<Value> {
             "the sealed protocol already exists; a seal is written once",
         ));
     }
-    if let Some(root) = document["verifiers"]["root"].as_str().map(PathBuf::from) {
-        if !root.is_dir() || artifact::overlaps(&root, out)? {
+    let verifiers_root = document["verifiers"]["root"].as_str().map(PathBuf::from);
+    if let Some(root) = &verifiers_root {
+        if !root.is_dir() || artifact::overlaps(root, out)? {
             return Err(invalid(
                 "`verifiers.root` is an existing folder that does not hold the sealed protocol",
             ));
         }
-        document["verifiers"]["sha256"] = artifact::candidate_digest(&root)?.into();
+        document["verifiers"]["sha256"] = artifact::candidate_digest(root)?.into();
+    }
+    document["driver"]["sha256"] = driver_digest(&strings(&document["driver"]["argv"]))?.into();
+    if let Some(root) = document["driver"]["inputs"]["root"]
+        .as_str()
+        .map(PathBuf::from)
+    {
+        if !root.is_dir() || artifact::overlaps(&root, out)? {
+            return Err(invalid(
+                "`driver.inputs.root` is an existing folder that does not hold the sealed protocol",
+            ));
+        }
+        if let Some(verifiers) = &verifiers_root
+            && artifact::overlaps(&root, verifiers)?
+        {
+            return Err(invalid(
+                "`driver.inputs.root` must not overlap `verifiers.root`",
+            ));
+        }
+        document["driver"]["inputs"]["sha256"] = artifact::candidate_digest(&root)?.into();
     }
     document["sealed_at"] = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -449,14 +626,51 @@ fn load(path: &Path) -> Result<Value> {
 fn count(value: &Value) -> Option<u64> {
     process::token(value)
 }
-/// The four token components of a usage; a component that was not reported
-/// stays null.
-fn usage(source: &Value) -> Value {
-    COMPONENTS
+fn empty_usage() -> Value {
+    USAGE_COMPONENTS
         .iter()
-        .map(|(component, _)| ((*component).to_string(), json!(count(&source[*component]))))
+        .map(|component| ((*component).to_string(), Value::Null))
         .collect::<Map<_, _>>()
         .into()
+}
+/// Normalized token components of a usage; unnormalized `cached_input_tokens`
+/// is refused so cached tokens are never double-counted.
+fn parse_usage(source: &Value) -> std::result::Result<Value, &'static str> {
+    if source.is_null() {
+        return Ok(empty_usage());
+    }
+    if !source.is_object() {
+        return Err("driver-answer-invalid");
+    }
+    if source
+        .get("cached_input_tokens")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("driver-answer-invalid");
+    }
+    let write_5m = count(&source["cache_write_5m_input_tokens"])
+        .or_else(|| count(&source["cache_creation"]["ephemeral_5m_input_tokens"]));
+    let write_1h = count(&source["cache_write_1h_input_tokens"])
+        .or_else(|| count(&source["cache_creation"]["ephemeral_1h_input_tokens"]));
+    let write_total =
+        count(&source["cache_creation_input_tokens"]).or_else(|| match (write_5m, write_1h) {
+            (Some(m5), Some(h1)) => m5.checked_add(h1),
+            _ => None,
+        });
+    let mut map = Map::new();
+    map.insert("input_tokens".into(), json!(count(&source["input_tokens"])));
+    map.insert(
+        "output_tokens".into(),
+        json!(count(&source["output_tokens"])),
+    );
+    map.insert(
+        "cache_read_input_tokens".into(),
+        json!(count(&source["cache_read_input_tokens"])),
+    );
+    map.insert("cache_creation_input_tokens".into(), json!(write_total));
+    map.insert("cache_write_5m_input_tokens".into(), json!(write_5m));
+    map.insert("cache_write_1h_input_tokens".into(), json!(write_1h));
+    Ok(Value::Object(map))
 }
 fn known_seconds(value: &Value) -> Value {
     json!(
@@ -464,6 +678,9 @@ fn known_seconds(value: &Value) -> Value {
             .as_f64()
             .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
     )
+}
+fn round_millis(seconds: f64) -> f64 {
+    (seconds * 1000.0).round() / 1000.0
 }
 
 struct Driver {
@@ -473,24 +690,27 @@ struct Driver {
     environment: BTreeMap<String, String>,
 }
 impl Driver {
-    /// One call: a JSON object in, a JSON object out. A driver that fails,
-    /// runs out of time or answers with something else has not answered; only
-    /// a loss of process custody stops the run.
-    fn ask(&self, request: &Value) -> Result<std::result::Result<Value, &'static str>> {
+    /// One call: a JSON object in, a JSON object out, plus engine-measured wall
+    /// seconds. A driver that fails, runs out of time or answers with something
+    /// else has not answered; only a loss of process custody stops the run.
+    fn ask(&self, request: &Value) -> Result<(std::result::Result<Value, &'static str>, f64)> {
         let spec = CommandSpec {
             argv: self.argv.clone(),
             cwd: self.cwd.clone(),
             env: self.environment.clone(),
             input: request.to_string().into_bytes(),
         };
+        let started = Instant::now();
         let (code, raw) = process::capture(&spec, self.timeout, 1024 * 1024)?;
+        let elapsed = round_millis(started.elapsed().as_secs_f64());
         if code != 0 {
-            return Ok(Err("driver-failed"));
+            return Ok((Err("driver-failed"), elapsed));
         }
-        Ok(artifact::strict(&raw)
+        let parsed = artifact::strict(&raw)
             .ok()
             .filter(Value::is_object)
-            .ok_or("driver-answer-invalid"))
+            .ok_or("driver-answer-invalid");
+        Ok((parsed, elapsed))
     }
 }
 
@@ -569,6 +789,75 @@ fn stop_if_interrupted() -> Result<()> {
     Ok(())
 }
 
+fn journal_path(out: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.journal.jsonl", out.display()))
+}
+
+struct Journal {
+    path: PathBuf,
+    file: File,
+}
+impl Journal {
+    fn open(path: PathBuf) -> Result<Self> {
+        artifact::ordinary(&path)?;
+        if path.exists() {
+            return Err(invalid(
+                "a forensic journal for this output already exists; remove it or choose another output path",
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            artifact::private_dir(parent)?;
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        Ok(Self { path, file })
+    }
+    fn append(&mut self, entry: &Value) -> Result<()> {
+        let mut line = entry.to_string();
+        line.push('\n');
+        self.file.write_all(line.as_bytes())?;
+        self.file.flush()?;
+        Ok(())
+    }
+    fn finish(self) {
+        drop(self.file);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn slot_digest(fields: Value) -> Result<String> {
+    artifact::digest(&fields)
+}
+
+fn check_attempt_workspace(
+    raw: &str,
+    seen: &mut BTreeSet<PathBuf>,
+    protected: &[&Path],
+) -> Result<std::result::Result<(), &'static str>> {
+    let ws = Path::new(raw);
+    if !ws.is_absolute() || !ws.is_dir() {
+        return Ok(Err("workspace-refused"));
+    }
+    let Ok(canon) = infra_core::fs::canonicalize(ws) else {
+        return Ok(Err("workspace-refused"));
+    };
+    for forbidden in protected {
+        if artifact::overlaps(&canon, forbidden)? {
+            return Ok(Err("workspace-refused"));
+        }
+    }
+    if !seen.insert(canon) {
+        return Ok(Err("workspace-reused"));
+    }
+    Ok(Ok(()))
+}
+
 /// Runs every planned preparation and attempt through the driver and writes
 /// the result, which must not exist: a sealed plan is run once.
 pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
@@ -576,6 +865,22 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
     if out.exists() {
         return Err(invalid(
             "the result already exists; a sealed plan is run once",
+        ));
+    }
+    let driver_argv = strings(&sealed["driver"]["argv"]);
+    if sealed["driver"]["sha256"].as_str() != Some(driver_digest(&driver_argv)?.as_str()) {
+        return Err(invalid("the driver changed after the protocol was sealed"));
+    }
+    let inputs_root = sealed["driver"]["inputs"]["root"]
+        .as_str()
+        .map(PathBuf::from);
+    if let Some(root) = &inputs_root
+        && (!root.is_dir()
+            || sealed["driver"]["inputs"]["sha256"].as_str()
+                != Some(artifact::candidate_digest(root)?.as_str()))
+    {
+        return Err(invalid(
+            "the driver inputs changed after the protocol was sealed",
         ));
     }
     let private = infra_core::fs::absolute(protocol)?
@@ -588,7 +893,7 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
             let verifiers = Verifiers {
                 root: PathBuf::from(settings["root"].as_str().unwrap_or_default()),
                 timeout: seconds(&settings["timeout_seconds"], 3600.0).unwrap_or_default(),
-                private,
+                private: private.clone(),
             };
             if !verifiers.root.is_dir()
                 || settings["sha256"].as_str()
@@ -602,8 +907,23 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
             Some(verifiers)
         }
     };
+    let mut protected_strings = Vec::new();
+    let mut forbidden_roots: Vec<PathBuf> = Vec::new();
+    if let Some(v) = &verifiers {
+        protected_strings.push(v.root.to_string_lossy().into_owned());
+        forbidden_roots.push(v.root.clone());
+    }
+    protected_strings.push(private.to_string_lossy().into_owned());
+    forbidden_roots.push(private);
+    if let Some(root) = &inputs_root {
+        forbidden_roots.push(root.clone());
+    }
+    let inputs_value = inputs_root
+        .as_ref()
+        .map(|root| Value::String(root.to_string_lossy().into_owned()))
+        .unwrap_or(Value::Null);
     let driver = Driver {
-        argv: strings(&sealed["driver"]["argv"]),
+        argv: driver_argv,
         timeout: seconds(&sealed["driver"]["timeout_seconds"], 86_400.0).unwrap_or_default(),
         cwd: std::env::current_dir()?,
         environment: std::env::vars_os()
@@ -614,10 +934,22 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
     let probes = strings(&sealed["probes"]);
     let mut order = rng::Random::new(sealed["bootstrap"]["seed"].as_u64().unwrap_or_default());
     let started = chrono::Utc::now();
+    let mut journal = Journal::open(journal_path(out))?;
+    journal.append(&json!({
+        "kind": "started",
+        "schema": RESULT,
+        "seal_sha256": sealed["seal_sha256"],
+        "started_at": started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }))?;
     let mut preparations = Vec::new();
     let mut attempts = Vec::new();
     let mut prepared = BTreeSet::new();
     let mut attempted = BTreeSet::new();
+    let mut seen_workspaces = BTreeSet::new();
+    let protected_refs = forbidden_roots
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
     for cell in items(&sealed["matrix"]) {
         for task in items(&sealed["tasks"]) {
             let id = task["id"].as_str().unwrap_or_default();
@@ -635,16 +967,30 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                 {
                     continue;
                 }
-                stop_if_interrupted()?;
-                let answer = driver.ask(&json!({
+                let observe_model =
+                    observing_model(&sealed, compile_model.as_deref(), &executor_model);
+                let slot = slot_digest(json!({
                     "phase": "prepare",
                     "seal_sha256": sealed["seal_sha256"],
+                    "task": id,
+                    "arm": arm,
+                    "compile_model": compile_model,
+                    "executor_model": executor_model,
+                }))?;
+                stop_if_interrupted()?;
+                let (answer, driver_seconds) = driver.ask(&json!({
+                    "phase": "prepare",
+                    "seal_sha256": sealed["seal_sha256"],
+                    "slot": slot,
                     "task": id,
                     "skill": task["skill"],
                     "observe": task["observe"],
                     "arm": arm,
                     "compile_model": compile_model,
                     "executor_model": executor_model,
+                    "observe_model": observe_model,
+                    "inputs": inputs_value,
+                    "protected": protected_strings,
                 }))?;
                 stop_if_interrupted()?;
                 let mut record = json!({
@@ -652,19 +998,38 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                     "arm": arm,
                     "compile_model": compile_model,
                     "executor_model": executor_model,
+                    "observe_model": observe_model,
                     "status": "finished",
                     "prepared": null,
-                    "usage": usage(&Value::Null),
+                    "usage": empty_usage(),
+                    "observe_usage": null,
                     "seconds": null,
+                    "driver_seconds": driver_seconds,
                 });
                 match answer {
                     Ok(answer) => {
-                        record["prepared"] = json!(answer["prepared"].as_bool());
-                        record["usage"] = usage(&answer["usage"]);
-                        record["seconds"] = known_seconds(&answer["seconds"]);
+                        match (
+                            parse_usage(&answer["usage"]),
+                            if answer["observe_usage"].is_null() {
+                                Ok(Value::Null)
+                            } else {
+                                parse_usage(&answer["observe_usage"])
+                            },
+                        ) {
+                            (Ok(parsed_usage), Ok(parsed_observe)) => {
+                                record["prepared"] = json!(answer["prepared"].as_bool());
+                                record["usage"] = parsed_usage;
+                                record["observe_usage"] = parsed_observe;
+                                record["seconds"] = known_seconds(&answer["seconds"]);
+                            }
+                            (Err(reason), _) | (_, Err(reason)) => {
+                                record["status"] = reason.into();
+                            }
+                        }
                     }
                     Err(reason) => record["status"] = reason.into(),
                 }
+                journal.append(&json!({"kind": "preparation", "record": &record}))?;
                 preparations.push(record);
             }
             for probe in &probes {
@@ -673,7 +1038,8 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                 } else {
                     &task["probes"][probe]
                 };
-                for (position, arm) in shuffled(&arms, &mut order).into_iter().enumerate() {
+                let mut position = 0usize;
+                for arm in shuffled(&arms, &mut order) {
                     let (compile_model, executor_model) = models(&arm, cell);
                     if !attempted.insert((
                         id.to_string(),
@@ -684,10 +1050,24 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                     )) {
                         continue;
                     }
-                    stop_if_interrupted()?;
-                    let answer = driver.ask(&json!({
+                    let current_position = position;
+                    position += 1;
+                    let observe_model =
+                        observing_model(&sealed, compile_model.as_deref(), &executor_model);
+                    let slot = slot_digest(json!({
                         "phase": "attempt",
                         "seal_sha256": sealed["seal_sha256"],
+                        "task": id,
+                        "probe": probe,
+                        "arm": arm,
+                        "compile_model": compile_model,
+                        "executor_model": executor_model,
+                    }))?;
+                    stop_if_interrupted()?;
+                    let (answer, driver_seconds) = driver.ask(&json!({
+                        "phase": "attempt",
+                        "seal_sha256": sealed["seal_sha256"],
+                        "slot": slot,
                         "task": id,
                         "skill": task["skill"],
                         "observe": task["observe"],
@@ -696,7 +1076,10 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                         "arm": arm,
                         "compile_model": compile_model,
                         "executor_model": executor_model,
-                        "position": position,
+                        "observe_model": observe_model,
+                        "position": current_position,
+                        "inputs": inputs_value,
+                        "protected": protected_strings,
                     }))?;
                     stop_if_interrupted()?;
                     let mut record = json!({
@@ -705,49 +1088,73 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                         "arm": arm,
                         "compile_model": compile_model,
                         "executor_model": executor_model,
-                        "position": position,
+                        "position": current_position,
                         "status": "finished",
                         "accepted": null,
                         "judged_by": null,
-                        "usage": usage(&Value::Null),
+                        "usage": empty_usage(),
                         "model_calls": null,
                         "seconds": null,
+                        "driver_seconds": driver_seconds,
                         "program_steps": null,
                         "failed_steps": null,
                     });
                     match answer {
-                        Ok(answer) => {
-                            record["usage"] = usage(&answer["usage"]);
-                            record["model_calls"] = json!(count(&answer["model_calls"]));
-                            record["seconds"] = known_seconds(&answer["seconds"]);
-                            record["program_steps"] = json!(count(&answer["program_steps"]));
-                            record["failed_steps"] = json!(count(&answer["failed_steps"]));
-                            let accepted = match &verifiers {
-                                // With verifiers the driver is not asked what
-                                // it thinks of its own work.
-                                Some(verifiers) => {
-                                    record["judged_by"] = "verifier".into();
-                                    match answer["workspace"].as_str().map(Path::new) {
-                                        Some(workspace)
-                                            if workspace.is_absolute() && workspace.is_dir() =>
-                                        {
-                                            let judged = verifiers
-                                                .judge(workspace, &strings(&task["verifier"]))?;
-                                            stop_if_interrupted()?;
-                                            judged
+                        Ok(answer) => match parse_usage(&answer["usage"]) {
+                            Ok(parsed_usage) => {
+                                record["usage"] = parsed_usage;
+                                record["model_calls"] = json!(count(&answer["model_calls"]));
+                                record["seconds"] = known_seconds(&answer["seconds"]);
+                                record["program_steps"] = json!(count(&answer["program_steps"]));
+                                record["failed_steps"] = json!(count(&answer["failed_steps"]));
+                                let raw_ws = answer["workspace"].as_str().filter(|s| !s.is_empty());
+                                let ws_check = match raw_ws {
+                                    Some(ws) => check_attempt_workspace(
+                                        ws,
+                                        &mut seen_workspaces,
+                                        &protected_refs,
+                                    )?,
+                                    None => Ok(()),
+                                };
+                                match ws_check {
+                                    Err(reason) => {
+                                        record["status"] = reason.into();
+                                        if verifiers.is_some() {
+                                            record["judged_by"] = "verifier".into();
                                         }
-                                        _ => None,
+                                    }
+                                    Ok(()) => {
+                                        let accepted = match &verifiers {
+                                            // With verifiers the driver is not asked what
+                                            // it thinks of its own work.
+                                            Some(verifiers) => {
+                                                record["judged_by"] = "verifier".into();
+                                                match raw_ws.map(Path::new) {
+                                                    Some(workspace) => {
+                                                        let judged = verifiers.judge(
+                                                            workspace,
+                                                            &strings(&task["verifier"]),
+                                                        )?;
+                                                        stop_if_interrupted()?;
+                                                        judged
+                                                    }
+                                                    None => None,
+                                                }
+                                            }
+                                            None => {
+                                                record["judged_by"] = "driver".into();
+                                                answer["accepted"].as_bool()
+                                            }
+                                        };
+                                        record["accepted"] = json!(accepted);
                                     }
                                 }
-                                None => {
-                                    record["judged_by"] = "driver".into();
-                                    answer["accepted"].as_bool()
-                                }
-                            };
-                            record["accepted"] = json!(accepted);
-                        }
+                            }
+                            Err(reason) => record["status"] = reason.into(),
+                        },
                         Err(reason) => record["status"] = reason.into(),
                     }
+                    journal.append(&json!({"kind": "attempt", "record": &record}))?;
                     attempts.push(record);
                 }
             }
@@ -763,6 +1170,7 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
         "attempts": attempts,
     });
     artifact::write_json(out, &result)?;
+    journal.finish();
     Ok(json!({
         "result": out,
         "seal_sha256": sealed["seal_sha256"],
@@ -775,19 +1183,82 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
     }))
 }
 
+fn opt_price(row: &Value, key: &str) -> Option<f64> {
+    row.get(key).and_then(Value::as_f64)
+}
+
 /// The list price of a usage under one model's sealed row, in USD: the sum
-/// over the components that were reported, and whether that was all of them.
+/// over the components that were reported, and whether every billed component
+/// was reported (null price columns mean the model does not bill them).
 fn price(usage: &Value, row: &Value) -> (Option<f64>, bool) {
     let mut total = 0.0;
-    let mut known = 0;
-    for (component, column) in COMPONENTS {
-        if let (Some(tokens), Some(per_million)) = (count(&usage[component]), row[column].as_f64())
-        {
-            total += tokens as f64 * per_million / 1_000_000.0;
-            known += 1;
+    let mut any_known = false;
+    let mut complete = true;
+    for (component, column) in [
+        ("input_tokens", "input"),
+        ("output_tokens", "output"),
+        ("cache_read_input_tokens", "cache_read"),
+    ] {
+        match (opt_price(row, column), count(&usage[component])) {
+            (Some(per_million), Some(tokens)) => {
+                total += tokens as f64 * per_million / 1_000_000.0;
+                any_known = true;
+            }
+            (Some(_), None) => complete = false,
+            (None, Some(tokens)) if tokens > 0 => complete = false,
+            (None, _) => {}
         }
     }
-    ((known > 0).then_some(total), known == COMPONENTS.len())
+    let r_scalar = opt_price(row, "cache_write");
+    let r_5m = opt_price(row, "cache_write_5m").or(r_scalar);
+    let r_1h = opt_price(row, "cache_write_1h");
+    let t_5m = count(&usage["cache_write_5m_input_tokens"]);
+    let t_1h = count(&usage["cache_write_1h_input_tokens"]);
+    let t_tot = count(&usage["cache_creation_input_tokens"]);
+    if r_scalar.is_none() && r_5m.is_none() && r_1h.is_none() {
+        if t_5m.is_some_and(|n| n > 0)
+            || t_1h.is_some_and(|n| n > 0)
+            || t_tot.is_some_and(|n| n > 0)
+        {
+            complete = false;
+        }
+    } else if t_5m.is_some() || t_1h.is_some() {
+        match (t_5m, r_5m) {
+            (Some(n5), Some(rate5)) => {
+                total += n5 as f64 * rate5 / 1_000_000.0;
+                any_known = true;
+            }
+            (Some(n5), None) if n5 > 0 => complete = false,
+            (None, Some(_)) => complete = false,
+            _ => {}
+        }
+        match (t_1h, r_1h) {
+            (Some(n1), Some(rate1)) => {
+                total += n1 as f64 * rate1 / 1_000_000.0;
+                any_known = true;
+            }
+            (Some(n1), None) if n1 > 0 => complete = false,
+            (None, Some(_)) => complete = false,
+            _ => {}
+        }
+    } else if let Some(nt) = t_tot {
+        if nt == 0 {
+            any_known = true;
+        } else if r_1h.is_some_and(|rate1| Some(rate1) != r_5m) {
+            complete = false;
+        } else if let Some(rate) = r_scalar.or(r_5m) {
+            total += nt as f64 * rate / 1_000_000.0;
+            any_known = true;
+        } else {
+            complete = false;
+        }
+    } else {
+        complete = false;
+    }
+    (
+        (any_known && total.is_finite()).then_some(total),
+        any_known && complete,
+    )
 }
 fn full_price(usage: &Value, row: &Value) -> Option<f64> {
     let (total, complete) = price(usage, row);
@@ -822,7 +1293,7 @@ fn arm_summary(attempts: &[&Value], row: &Value) -> Value {
         .count();
     let mut tokens = Map::new();
     let mut coverage = Map::new();
-    for (component, _) in COMPONENTS {
+    for component in USAGE_COMPONENTS {
         let known = attempts
             .iter()
             .filter_map(|attempt| count(&attempt["usage"][component]).map(|tokens| tokens as f64))
@@ -871,10 +1342,12 @@ fn arm_summary(attempts: &[&Value], row: &Value) -> Value {
             "fully_priced": priced.len(),
             "model_calls": known("model_calls").len(),
             "seconds": known("seconds").len(),
+            "driver_seconds": known("driver_seconds").len(),
             "program_steps": stepped.len(),
         },
         "model_calls": rounded(mean(&known("model_calls"))),
         "seconds": rounded(mean(&known("seconds"))),
+        "driver_seconds": rounded(mean(&known("driver_seconds"))),
         "list_price_usd": rounded(mean(&priced)),
         "list_price_usd_reported_components": rounded(mean(&lower)),
         "deopt_rate": rounded((steps > 0).then(|| failed as f64 / steps as f64)),
@@ -965,6 +1438,9 @@ pub fn report(protocol: &Path, result: &Path) -> Result<Value> {
             let (compile_model, executor_model) = models(arm, cell);
             let compile_row =
                 &sealed["prices"][compile_model.as_deref().unwrap_or(&executor_model)];
+            let observe_model_name =
+                observing_model(&sealed, compile_model.as_deref(), &executor_model);
+            let observe_row = &sealed["prices"][&observe_model_name];
             let prepared = tasks
                 .iter()
                 .map(|task| {
@@ -980,14 +1456,36 @@ pub fn report(protocol: &Path, result: &Path) -> Result<Value> {
                 .iter()
                 .filter_map(|preparation| full_price(&preparation["usage"], compile_row))
                 .collect::<Vec<_>>();
+            let observe_reported = prepared
+                .iter()
+                .filter(|preparation| !preparation["observe_usage"].is_null())
+                .count();
+            let observe_prices = prepared
+                .iter()
+                .filter_map(|preparation| full_price(&preparation["observe_usage"], observe_row))
+                .collect::<Vec<_>>();
             let compile = mean(&compile_prices);
+            let observe = (observe_reported > 0)
+                .then(|| mean(&observe_prices))
+                .flatten();
+            let all_compile_priced = compile_prices.len() == prepared.len();
+            let all_observe_priced =
+                observe_reported == 0 || observe_prices.len() == prepared.len();
+            let total_prepare = if all_compile_priced && all_observe_priced {
+                Some(compile.unwrap_or(0.0) + observe.unwrap_or(0.0))
+            } else {
+                None
+            };
             summary["preparation"] = json!({
                 "planned": prepared.len(),
                 "prepared": prepared.iter().filter(|p| p["prepared"] == true).count(),
                 "not_prepared": prepared.iter().filter(|p| p["prepared"] == false).count(),
                 "unknown": prepared.iter().filter(|p| !p["prepared"].is_boolean()).count(),
                 "fully_priced": compile_prices.len(),
+                "observe_fully_priced": observe_prices.len(),
                 "compile_usd": rounded(compile),
+                "observe_usd": rounded(observe),
+                "total_usd": rounded(total_prepare),
             });
             // Correctness first. The paired unit is the task: its probes are
             // not independent of each other.
@@ -1052,8 +1550,8 @@ pub fn report(protocol: &Path, result: &Path) -> Result<Value> {
                 (_, Some([low, _])) if low > 0.0 => "saves",
                 (_, Some(_)) => "no-saving-shown",
             };
-            let breakeven = match (saving, compile) {
-                (Some(saving), Some(compile)) if saving > 0.0 => Some((compile / saving).ceil()),
+            let breakeven = match (saving, total_prepare) {
+                (Some(saving), Some(prepare)) if saving > 0.0 => Some((prepare / saving).ceil()),
                 _ => None,
             };
             let net = items(&sealed["reuses"])
@@ -1063,8 +1561,8 @@ pub fn report(protocol: &Path, result: &Path) -> Result<Value> {
                         reuses.to_string(),
                         rounded(
                             saving
-                                .zip(compile)
-                                .map(|(saving, compile)| reuses as f64 * saving - compile),
+                                .zip(total_prepare)
+                                .map(|(saving, prepare)| reuses as f64 * saving - prepare),
                         ),
                     )
                 })
@@ -1103,6 +1601,219 @@ pub fn report(protocol: &Path, result: &Path) -> Result<Value> {
         // Applying a verdict is a person's decision, and never one for a
         // default.
         "note": "A report is evidence for the sealed question. It enables nothing by default.",
+    }))
+}
+
+fn total_tokens(usage: &Value, row: &Value) -> Option<f64> {
+    full_price(usage, row)?;
+    let input = count(&usage["input_tokens"]).unwrap_or(0);
+    let output = count(&usage["output_tokens"]).unwrap_or(0);
+    let read = count(&usage["cache_read_input_tokens"]).unwrap_or(0);
+    let write = count(&usage["cache_creation_input_tokens"]).unwrap_or_else(|| {
+        count(&usage["cache_write_5m_input_tokens"]).unwrap_or(0)
+            + count(&usage["cache_write_1h_input_tokens"]).unwrap_or(0)
+    });
+    Some((input + output + read + write) as f64)
+}
+
+/// Exports one `(cell, arm vs cold)` slice of a sealed evaluation into the
+/// `benchmark.json` format consumed by `infra-ui`'s `eval_viewer`.
+pub fn viewer(
+    protocol: &Path,
+    result: &Path,
+    out: &Path,
+    arm: Option<&str>,
+    compile_model: Option<&str>,
+    executor_model: Option<&str>,
+) -> Result<Value> {
+    let summary_report = report(protocol, result)?;
+    let sealed = load(protocol)?;
+    let result_doc = artifact::read_json(result, artifact::MAX_TREE)?;
+    let cells = summary_report["cells"]
+        .as_array()
+        .ok_or_else(|| invalid("report has no cells"))?;
+    let cell = match (compile_model, executor_model) {
+        (Some(cm), Some(em)) => cells
+            .iter()
+            .find(|c| c["compile_model"] == cm && c["executor_model"] == em)
+            .ok_or_else(|| invalid(format!("no matrix cell for ({cm}, {em})")))?,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(invalid("specify both --compile-model and --executor-model"));
+        }
+        (None, None) => {
+            if cells.len() == 1 {
+                &cells[0]
+            } else {
+                return Err(invalid(
+                    "specify --compile-model and --executor-model when the matrix has multiple cells",
+                ));
+            }
+        }
+    };
+    let cm = cell["compile_model"].as_str().unwrap_or_default();
+    let em = cell["executor_model"].as_str().unwrap_or_default();
+    let cell_arms = cell["arms"]
+        .as_object()
+        .ok_or_else(|| invalid("cell has no arms"))?;
+    let chosen_arm = match arm {
+        Some("cold") => return Err(invalid("`--arm` must name a non-cold arm")),
+        Some(name) => {
+            if !cell_arms.contains_key(name) {
+                return Err(invalid(format!("arm `{name}` is not in this report")));
+            }
+            name.to_string()
+        }
+        None => {
+            let others = cell_arms
+                .keys()
+                .filter(|k| k.as_str() != "cold")
+                .collect::<Vec<_>>();
+            if others.iter().any(|k| k.as_str() == "skillcache_executor") {
+                "skillcache_executor".to_string()
+            } else if others.len() == 1 {
+                others[0].clone()
+            } else {
+                return Err(invalid(
+                    "specify --arm when comparing multiple non-cold arms",
+                ));
+            }
+        }
+    };
+    let executor_row = &sealed["prices"][em];
+    let cell_attempts = |target_arm: &str| -> Vec<&Value> {
+        let (expected_cm, expected_em) = models(target_arm, cell);
+        items(&result_doc["attempts"])
+            .filter(|a| {
+                a["arm"] == target_arm
+                    && a["compile_model"].as_str().map(String::from) == expected_cm
+                    && a["executor_model"] == expected_em
+            })
+            .collect()
+    };
+    let cold_attempts = cell_attempts("cold");
+    let arm_attempts = cell_attempts(&chosen_arm);
+    let cold_tokens = mean(
+        &cold_attempts
+            .iter()
+            .filter_map(|a| total_tokens(&a["usage"], executor_row))
+            .collect::<Vec<_>>(),
+    );
+    let arm_tokens = mean(
+        &arm_attempts
+            .iter()
+            .filter_map(|a| total_tokens(&a["usage"], executor_row))
+            .collect::<Vec<_>>(),
+    );
+    let cold_summary = &cell_arms["cold"];
+    let arm_summary = &cell_arms[&chosen_arm];
+    let pick_time = |s: &Value| {
+        s["seconds"]
+            .as_f64()
+            .or_else(|| s["driver_seconds"].as_f64())
+    };
+    let cold_time = pick_time(cold_summary);
+    let arm_time = pick_time(arm_summary);
+    let build_row = |s: &Value, tok: Option<f64>, is_arm: bool| {
+        let mut obj = json!({
+            "pass_rate": s["acceptance_rate"],
+            "time_seconds": pick_time(s),
+            "tokens": rounded(tok),
+            "model_calls": s["model_calls"],
+            "list_price_usd": s["list_price_usd"],
+        });
+        if is_arm {
+            obj["deopt_rate"] = s["deopt_rate"].clone();
+            obj["compile_usd"] = s["preparation"]["total_usd"]
+                .as_f64()
+                .map(|_| s["preparation"]["total_usd"].clone())
+                .unwrap_or_else(|| s["preparation"]["compile_usd"].clone());
+            obj["breakeven_reuses"] = s["against_cold"]["breakeven_reuses"].clone();
+        }
+        obj
+    };
+    let diff = |a: Option<f64>, b: Option<f64>, decimals: usize| -> Value {
+        match (a, b) {
+            (Some(a), Some(b)) => json!(format!("{:+.*}", decimals, a - b)),
+            _ => Value::Null,
+        }
+    };
+    let delta = json!({
+        "pass_rate": diff(arm_summary["acceptance_rate"].as_f64(), cold_summary["acceptance_rate"].as_f64(), 4),
+        "time_seconds": diff(arm_time, cold_time, 1),
+        "tokens": diff(arm_tokens, cold_tokens, 1),
+        "model_calls": diff(arm_summary["model_calls"].as_f64(), cold_summary["model_calls"].as_f64(), 1),
+        "list_price_usd": diff(arm_summary["list_price_usd"].as_f64(), cold_summary["list_price_usd"].as_f64(), 4),
+    });
+    let mut skills = BTreeSet::new();
+    let mut task_ids = Vec::new();
+    for task in items(&sealed["tasks"]) {
+        if let Some(id) = task["id"].as_str() {
+            task_ids.push(json!(id));
+        }
+        if let Some(skill) = task["skill"].as_str() {
+            skills.insert(skill.to_string());
+        }
+    }
+    let probes = strings(&sealed["probes"]);
+    let mut runs = Vec::new();
+    for (task_idx, task) in items(&sealed["tasks"]).enumerate() {
+        let id = task["id"].as_str().unwrap_or_default();
+        let eval_id = task_idx + 1;
+        for config in ["cold", chosen_arm.as_str()] {
+            let (expected_cm, expected_em) = models(config, cell);
+            for probe in &probes {
+                if let Some(attempt) = items(&result_doc["attempts"]).find(|a| {
+                    a["task"] == id
+                        && a["probe"] == probe.as_str()
+                        && a["arm"] == config
+                        && a["compile_model"].as_str().map(String::from) == expected_cm
+                        && a["executor_model"] == expected_em
+                }) {
+                    let accepted = attempt["accepted"].as_bool();
+                    let passed = i32::from(accepted == Some(true));
+                    let pass_rate = accepted.map(|ok| if ok { 1.0 } else { 0.0 });
+                    runs.push(json!({
+                        "eval_id": eval_id,
+                        "eval_name": id,
+                        "configuration": config,
+                        "run_number": probe,
+                        "result": {
+                            "pass_rate": pass_rate,
+                            "passed": passed,
+                            "total": 1,
+                            "time_seconds": attempt["seconds"].as_f64().or_else(|| attempt["driver_seconds"].as_f64()),
+                            "errors": i32::from(attempt["status"] != "finished"),
+                        }
+                    }));
+                }
+            }
+        }
+    }
+    let benchmark = json!({
+        "metadata": {
+            "skill_name": skills.into_iter().collect::<Vec<_>>().join(", "),
+            "timestamp": result_doc["finished_at"],
+            "evals_run": task_ids,
+            "runs_per_configuration": probes.len(),
+            "seal_sha256": sealed["seal_sha256"],
+            "compile_model": cm,
+            "executor_model": em,
+        },
+        "configuration_order": ["cold", chosen_arm],
+        "run_summary": {
+            "cold": build_row(cold_summary, cold_tokens, false),
+            chosen_arm.clone(): build_row(arm_summary, arm_tokens, true),
+            "delta": delta,
+        },
+        "runs": runs,
+    });
+    artifact::write_json(out, &benchmark)?;
+    Ok(json!({
+        "viewer": out,
+        "arm": chosen_arm,
+        "compile_model": cm,
+        "executor_model": em,
+        "runs": runs.len(),
     }))
 }
 
@@ -1149,7 +1860,23 @@ mod tests {
         json!({"input_tokens": input, "output_tokens": output,
                "cache_read_input_tokens": read, "cache_creation_input_tokens": write})
     }
+    fn write_exec(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
     fn sealed(folder: &Path, document: &Value) -> PathBuf {
+        let mut document = document.clone();
+        if document["driver"]["argv"] == json!(["driver"]) {
+            let driver = folder.join("driver");
+            if !driver.exists() {
+                write_exec(&driver, "#!/bin/sh\necho '{}'\n");
+            }
+            document["driver"]["argv"] = json!([driver]);
+        }
         let source = folder.join("protocol.json");
         std::fs::write(&source, document.to_string()).unwrap();
         let out = folder.join("sealed.json");
@@ -1503,5 +2230,211 @@ mod tests {
         let folder = scratch();
         let other_sealed = sealed(&folder.0, &other);
         assert!(report(&other_sealed, &result_path).is_err());
+    }
+
+    #[test]
+    fn codex_null_price_component_is_fully_priced_and_5m_1h_split_is_priced() {
+        let mut doc = protocol();
+        doc["prices"]["worker"] =
+            json!({"input": 2.0, "output": 10.0, "cache_read": 0.5, "cache_write": null});
+        validate(&doc, false).unwrap();
+        let codex_usage = parse_usage(&json!({
+            "input_tokens": 500_000,
+            "output_tokens": 100_000,
+            "cache_read_input_tokens": 200_000,
+            "cache_creation_input_tokens": null
+        }))
+        .unwrap();
+        assert_eq!(
+            full_price(&codex_usage, &doc["prices"]["worker"]),
+            Some(2.1)
+        );
+
+        doc["prices"]["compiler"] = json!({
+            "input": 3.0,
+            "output": 15.0,
+            "cache_read": 0.3,
+            "cache_write_5m": 3.75,
+            "cache_write_1h": 6.0
+        });
+        validate(&doc, false).unwrap();
+        let claude_usage = parse_usage(&json!({
+            "input_tokens": 1_000_000,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 1_000_000,
+                "ephemeral_1h_input_tokens": 1_000_000
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            full_price(&claude_usage, &doc["prices"]["compiler"]),
+            Some(12.75)
+        );
+        // Distinct 1h price refuses scalar cache_creation without 5m/1h split.
+        let scalar_only = parse_usage(&json!({
+            "input_tokens": 1_000_000,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 1000
+        }))
+        .unwrap();
+        assert_eq!(full_price(&scalar_only, &doc["prices"]["compiler"]), None);
+
+        // Contradictory scalar and 5m rates are refused.
+        doc["prices"]["compiler"]["cache_write"] = json!(4.0);
+        assert!(validate(&doc, false).is_err());
+    }
+
+    #[test]
+    fn unnormalized_cached_input_tokens_is_refused() {
+        let raw_codex = json!({
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "cached_input_tokens": 50
+        });
+        assert_eq!(parse_usage(&raw_codex), Err("driver-answer-invalid"));
+    }
+
+    #[test]
+    fn observe_usage_is_priced_at_observe_model_and_partial_prep_makes_breakeven_null() {
+        let root = scratch();
+        let sealed_path = sealed(&root.0, &protocol());
+        let result_path = result(&root.0, &sealed_path, plain_attempt, |key| {
+            let mut prep = plain_preparation(key);
+            if key.1 == "skillcache_executor" {
+                // 100k input + 10k output at worker price = 0.30 USD.
+                prep["observe_usage"] = tokens(100_000, 10_000, Some(0), Some(0));
+            }
+            prep
+        });
+        let summary = report(&sealed_path, &result_path).unwrap();
+        let prep = &summary["cells"][0]["arms"]["skillcache_executor"]["preparation"];
+        assert_eq!(prep["compile_usd"], 0.2);
+        assert_eq!(prep["observe_usd"], 0.3);
+        assert_eq!(prep["total_usd"], 0.5);
+        // 0.50 / 0.24 = 2.08 -> 3 reuses (instead of 1 from compile alone).
+        let against = &summary["cells"][0]["arms"]["skillcache_executor"]["against_cold"];
+        assert_eq!(against["breakeven_reuses"], 3);
+        assert_eq!(against["net_saving_usd"]["10"], 1.9);
+
+        // Partial preparation pricing sets break-even and net savings to null.
+        let partial_dir = scratch();
+        let partial_sealed = sealed(&partial_dir.0, &protocol());
+        let partial_result = result(&partial_dir.0, &partial_sealed, plain_attempt, |key| {
+            let mut prep = plain_preparation(key);
+            if key.0 == "t2" && key.1 == "skillcache_executor" {
+                prep["usage"] = tokens(10_000, 2_000, Some(0), None);
+            }
+            prep
+        });
+        let partial = report(&partial_sealed, &partial_result).unwrap();
+        let partial_against = &partial["cells"][0]["arms"]["skillcache_executor"]["against_cold"];
+        assert!(partial_against["breakeven_reuses"].is_null());
+        assert!(partial_against["net_saving_usd"]["10"].is_null());
+    }
+
+    #[test]
+    fn workspace_checks_and_journal_guards_reject_reuse_and_overlap() {
+        let root = scratch();
+        let verifiers_dir = root.0.join("verifiers");
+        let ws1 = root.0.join("ws1");
+        let ws2 = root.0.join("ws2");
+        let bad = verifiers_dir.join("inside");
+        for dir in [&verifiers_dir, &ws1, &ws2, &bad] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut seen = BTreeSet::new();
+        let protected = [verifiers_dir.as_path()];
+        assert_eq!(
+            check_attempt_workspace(ws1.to_str().unwrap(), &mut seen, &protected).unwrap(),
+            Ok(())
+        );
+        assert_eq!(
+            check_attempt_workspace(ws1.to_str().unwrap(), &mut seen, &protected).unwrap(),
+            Err("workspace-reused")
+        );
+        assert_eq!(
+            check_attempt_workspace(bad.to_str().unwrap(), &mut seen, &protected).unwrap(),
+            Err("workspace-refused")
+        );
+        assert_eq!(
+            check_attempt_workspace("relative/path", &mut seen, &protected).unwrap(),
+            Err("workspace-refused")
+        );
+
+        let out = root.0.join("result.json");
+        let mut journal = Journal::open(journal_path(&out)).unwrap();
+        journal.append(&json!({"kind": "started"})).unwrap();
+        assert!(journal_path(&out).exists());
+        assert!(Journal::open(journal_path(&out)).is_err());
+        journal.finish();
+        assert!(!journal_path(&out).exists());
+    }
+
+    #[test]
+    fn driver_seal_detects_changed_executable_and_inputs() {
+        let root = scratch();
+        let inputs = root.0.join("inputs");
+        let sealed_dir = root.0.join("sealed");
+        std::fs::create_dir_all(&inputs).unwrap();
+        std::fs::create_dir_all(&sealed_dir).unwrap();
+        std::fs::write(inputs.join("driver.json"), "{\"v\":1}").unwrap();
+        let driver = root.0.join("driver");
+        write_exec(&driver, "#!/bin/sh\necho '{}'\n");
+
+        let mut doc = protocol();
+        doc["driver"]["argv"] = json!([driver]);
+        doc["driver"]["inputs"] = json!({"root": inputs});
+        let source = root.0.join("protocol.json");
+        std::fs::write(&source, doc.to_string()).unwrap();
+        let sealed_path = sealed_dir.join("sealed.json");
+        seal(&source, &sealed_path).unwrap();
+
+        let stored: Value = serde_json::from_slice(&std::fs::read(&sealed_path).unwrap()).unwrap();
+        assert_eq!(stored["driver"]["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            stored["driver"]["inputs"]["sha256"].as_str().unwrap().len(),
+            64
+        );
+
+        // Changing driver inputs stops run() before calling the driver.
+        std::fs::write(inputs.join("driver.json"), "{\"v\":2}").unwrap();
+        let err = run(&sealed_path, &root.0.join("res1.json")).unwrap_err();
+        assert!(err.message.contains("driver inputs changed"), "{err:?}");
+
+        // Restoring inputs, then changing the driver executable also stops run().
+        std::fs::write(inputs.join("driver.json"), "{\"v\":1}").unwrap();
+        write_exec(&driver, "#!/bin/sh\necho '{\"changed\":true}'\n");
+        let err = run(&sealed_path, &root.0.join("res2.json")).unwrap_err();
+        assert!(err.message.contains("driver changed"), "{err:?}");
+    }
+
+    #[test]
+    fn viewer_exports_benchmark_json_for_eval_viewer() {
+        let root = scratch();
+        let sealed_path = sealed(&root.0, &protocol());
+        let result_path = result(&root.0, &sealed_path, plain_attempt, plain_preparation);
+        let out = root.0.join("benchmark.json");
+        let info = viewer(&sealed_path, &result_path, &out, None, None, None).unwrap();
+        assert_eq!(info["arm"], "skillcache_executor");
+        assert_eq!(info["runs"], 12);
+        let exported: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(
+            exported["configuration_order"],
+            json!(["cold", "skillcache_executor"])
+        );
+        assert_eq!(exported["run_summary"]["cold"]["pass_rate"], 1.0);
+        assert_eq!(exported["run_summary"]["cold"]["tokens"], 110_000.0);
+        assert_eq!(
+            exported["run_summary"]["skillcache_executor"]["deopt_rate"],
+            0.5
+        );
+        assert_eq!(
+            exported["run_summary"]["skillcache_executor"]["breakeven_reuses"],
+            1
+        );
+        assert_eq!(exported["runs"].as_array().unwrap().len(), 12);
     }
 }

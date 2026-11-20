@@ -242,4 +242,25 @@ fn the_engine_has_a_skillcache_command_group() {
         .output()
         .unwrap();
     assert_eq!(json_line(&output)["code"], "not_configured");
+    let caps = Command::new(engine)
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    let caps: Value = serde_json::from_slice(&caps.stdout).unwrap();
+    assert!(
+        caps["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "skillcache"),
+        "{caps}"
+    );
+    assert_eq!(
+        infra_cli::staged_tool(Some(std::ffi::OsStr::new("SKILLCACHE-RUN.EXE"))),
+        Some("run-command")
+    );
+    assert_eq!(
+        infra_cli::staged_tool(Some(std::ffi::OsStr::new("SkillCache-Tool.exe"))),
+        Some("tool")
+    );
 }

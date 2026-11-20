@@ -221,6 +221,18 @@ pub struct Examples {
     pub steps: BTreeMap<usize, Map<String, Value>>,
 }
 
+/// Whether `value` is a scalar or a flat list of scalars (strings, numbers,
+/// booleans). Nulls, objects and nested lists are refused.
+pub fn is_admitted_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Object(_) => false,
+        Value::Array(items) => items
+            .iter()
+            .all(|item| item.is_string() || item.is_number() || item.is_boolean()),
+        _ => true,
+    }
+}
+
 /// `[a-z][a-z0-9_]{0,63}`: bindings, outputs and program identifiers.
 pub fn is_name(text: &str) -> bool {
     let mut bytes = text.bytes();
@@ -1082,7 +1094,7 @@ impl Examples {
                             let at = format!("examples.bindings.{name}");
                             if !is_name(name) {
                                 reader.refuse("invalid_value", &at, "An example names a binding.");
-                            } else if value.is_null() || value.is_object() {
+                            } else if !is_admitted_value(value) {
                                 reader.refuse(
                                     "invalid_type",
                                     &at,

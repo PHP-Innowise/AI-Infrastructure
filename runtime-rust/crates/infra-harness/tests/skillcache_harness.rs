@@ -71,6 +71,17 @@ fn scripted(root: &Path, name: &str) -> PathBuf {
     let script = format!(
         r#"#!/bin/sh
 dir=$(dirname "$0")
+case " $* " in
+  *" --input-format stream-json "*)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"request_id":"harness-commands"'*)
+          echo '{{"type":"control_response","response":{{"request_id":"harness-commands","subtype":"success","response":{{"commands":[{{"name":"pdf","description":"Work with PDF files"}}]}}}}}}'
+          exit 0;;
+      esac
+    done
+    exit 0;;
+esac
 prompt=$(cat)
 case "$prompt" in
   *"You are the SkillCache compiler."*)
@@ -83,7 +94,12 @@ case "$prompt" in
   *)
     printf '%s\n' "$@" > "$dir/{name}-arguments.txt"
     printf '%s' "$prompt" > "$dir/{name}-prompt.txt"
-    cat "$dir/{name}-events.jsonl";;
+    env > "$dir/{name}-environment.txt"
+    if [ -f "$dir/{name}-agent.sh" ]; then
+      . "$dir/{name}-agent.sh"
+    else
+      cat "$dir/{name}-events.jsonl"
+    fi;;
 esac
 "#,
         project = root.join("project").display(),
@@ -454,6 +470,16 @@ impl Stand {
             options["skillcache"] = skillcache;
         }
         options
+    }
+    async fn claude_turn(&self, prompt: &str, skillcache: Value, agent: Option<&str>) -> String {
+        let script = self.root.join("bin/claude-agent.sh");
+        match agent {
+            Some(agent) => fs::write(&script, agent).unwrap(),
+            None => {
+                let _ = fs::remove_file(&script);
+            }
+        }
+        self.turn(prompt, skillcache).await
     }
     /// Starts a session and waits for its turn to end.
     async fn turn(&self, prompt: &str, skillcache: Value) -> String {
@@ -936,11 +962,23 @@ impl Stand {
         (sid, generation)
     }
     async fn start_compile(&self, sid: &str, generation: &str) -> (String, String) {
+        self.start_compile_with(sid, generation, None).await
+    }
+    async fn start_compile_with(
+        &self,
+        sid: &str,
+        generation: &str,
+        eval_arm: Option<&str>,
+    ) -> (String, String) {
+        let mut body = json!({"generation": generation});
+        if let Some(arm) = eval_arm {
+            body["eval_arm"] = arm.into();
+        }
         let (status, queued) = self
             .http(
                 Method::POST,
                 &format!("/api/sessions/{sid}/skillcache/compile"),
-                Some(json!({"generation": generation})),
+                Some(body),
             )
             .await;
         assert_eq!(status, 202, "{queued}");
@@ -951,13 +989,13 @@ impl Stand {
         )
     }
     async fn capsule(&self, capsule_id: &str) -> Value {
+        self.capsule_in(&self.project_id, capsule_id).await
+    }
+    async fn capsule_in(&self, project_id: &str, capsule_id: &str) -> Value {
         let (status, capsule) = self
             .http(
                 Method::GET,
-                &format!(
-                    "/api/projects/{}/skillcache/capsules/{capsule_id}",
-                    self.project_id
-                ),
+                &format!("/api/projects/{project_id}/skillcache/capsules/{capsule_id}"),
                 None,
             )
             .await;
@@ -966,9 +1004,12 @@ impl Stand {
     }
     /// Waits until the capsule is no longer in `status`.
     async fn settled(&self, capsule_id: &str, status: &str) -> Value {
+        self.settled_in(&self.project_id, capsule_id, status).await
+    }
+    async fn settled_in(&self, project_id: &str, capsule_id: &str, status: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
-            let capsule = self.capsule(capsule_id).await;
+            let capsule = self.capsule_in(project_id, capsule_id).await;
             let compiling = capsule["compile"]["status"] == "queued"
                 || capsule["compile"]["status"] == "running";
             if capsule["status"] != status && !compiling {
@@ -2058,5 +2099,483 @@ async fn warm_network_capability_mismatch_is_miss() {
             .lines()
             .any(|line| line == "--add-dir")
     );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_warm_routing_runs_dollar_and_hint_while_keeping_slash_native() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed().await;
+    stand.compiler(1, &hybrid_answer());
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    assert_eq!(
+        stand.settled(&capsule_id, "compiling").await["status"],
+        "active"
+    );
+
+    // `/pdf` on Claude stays native (observe-only miss, no warm injection).
+    stand.script("claude", &skill_turn(&stand.project()));
+    let native_sid = stand
+        .claude_turn("/pdf invoices/", json!({"mode": "warm_only"}), None)
+        .await;
+    let events = stand.skillcache_events(&native_sid);
+    assert_eq!(events[0]["phase"], "miss", "{events:?}");
+    assert_eq!(events[0]["reason"], "native_route", "{events:?}");
+    assert!(
+        !stand
+            .recorded("claude-prompt.txt")
+            .contains("SkillCache capsule")
+    );
+
+    // `$pdf` on Claude runs warm with `Bash(skillcache-run:*)` + `Bash(skillcache-tool:*)`.
+    let fixture = Path::new(FIXTURE).parent().unwrap().display().to_string();
+    let claude_warm_agent = format!(
+        r#"PATH="{fixture}:$PATH"
+if ! command -v skillcache-run >/dev/null 2>&1; then exit 1; fi
+skillcache-run run '{{"input_dir":"invoices/"}}' >/dev/null
+mkdir -p out && printf '[{{"id":1,"total":10}}]\n' > out/rows.json
+skillcache-run continue >/dev/null
+echo '{{"type":"system","subtype":"init","session_id":"claude-warm-1"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Rows extracted.","session_id":"claude-warm-1","total_cost_usd":0.01}}'
+"#
+    );
+    let warm_sid = stand
+        .claude_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"mode": "warm_only"}),
+            Some(&claude_warm_agent),
+        )
+        .await;
+    assert_eq!(stand.store.get(&warm_sid).unwrap()["status"], "completed");
+    assert_eq!(stand.phases(&warm_sid)[0], "hit");
+    assert_eq!(stand.phases(&warm_sid).last().unwrap(), "complete");
+    let prompt = stand.recorded("claude-prompt.txt");
+    assert!(
+        prompt.contains("SkillCache capsule for this request"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("<<'EOF'"), "{prompt}");
+    let args = stand.recorded("claude-arguments.txt");
+    let lines = args.lines().collect::<Vec<_>>();
+    let idx = lines.iter().position(|line| *line == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(lines[idx + 1]).unwrap();
+    let allow = settings["permissions"]["allow"].as_array().unwrap();
+    assert!(
+        allow.iter().any(|v| v == "Bash(skillcache-run:*)"),
+        "{settings}"
+    );
+    assert!(
+        allow.iter().any(|v| v == "Bash(skillcache-tool:*)"),
+        "{settings}"
+    );
+
+    // Explicit `skillcache.skill` hint on Claude hits even without `$pdf` in text.
+    let hint_sid = stand
+        .claude_turn(
+            "Extract the rows of invoices/",
+            json!({"mode": "warm_only", "skill": "pdf"}),
+            Some(&claude_warm_agent),
+        )
+        .await;
+    assert_eq!(stand.phases(&hint_sid)[0], "hit");
+    assert_eq!(stand.phases(&hint_sid).last().unwrap(), "complete");
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn non_git_workspace_snapshots_and_replays_gate3() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let plain_dir = tempfile::tempdir().unwrap();
+    let plain = infra_core::fs::canonicalize(plain_dir.path()).unwrap();
+    if std::process::Command::new("git")
+        .arg("-C")
+        .arg(&plain)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("skipped: tempdir lies inside a Git checkout");
+        return;
+    }
+    fs::create_dir_all(plain.join(".claude/skills/pdf/scripts")).unwrap();
+    fs::create_dir_all(plain.join("invoices")).unwrap();
+    fs::write(
+        plain.join(".claude/skills/pdf/SKILL.md"),
+        "---\nname: pdf\ndescription: Work with PDF files\n---\n# PDF\n\nUse scripts/extract.py.\n",
+    )
+    .unwrap();
+    fs::write(
+        plain.join(".claude/skills/pdf/scripts/extract.py"),
+        "print('rows')\n",
+    )
+    .unwrap();
+    fs::write(plain.join("invoices/a.txt"), "Invoice 1\nTotal: 10.00\n").unwrap();
+
+    let stand = Stand::new().await;
+    let project_id = stand.store.register(&plain).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    stand.script("claude", &skill_turn(&plain));
+    let (status, created) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({
+                "project_id": project_id,
+                "provider": "claude",
+                "mode": "edit",
+                "workflow": "native",
+                "project_context": false,
+                "permissions": "bypass",
+                "prompt": "Summarise the invoices in invoices/",
+                "skillcache": {"mode": "observe"},
+            })),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let sid = created["session"]["id"].as_str().unwrap().to_owned();
+    stand.finished(&sid, 1).await;
+    let generation = stand.skillcache_events(&sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let snap = infra_harness::skillcache::snapshot::load(&stand.store.state, &generation)
+        .unwrap()
+        .expect("tree snapshot saved");
+    assert_eq!(snap["kind"], "tree", "{snap}");
+
+    stand.compiler(1, &hybrid_answer());
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand
+        .settled_in(&project_id, &capsule_id, "compiling")
+        .await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(
+        gate_summary(&capsule),
+        ["1:gate1:pass", "1:gate2:pass", "1:gate3:pass"]
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retired_lifecycle_hides_preserves_status_and_requalifies() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (capsule_id, _) = stand.compiled_capsule(&codex_answer()).await;
+    let route = format!(
+        "/api/projects/{}/skillcache/capsules/{capsule_id}",
+        stand.project_id
+    );
+    let list_route = format!("/api/projects/{}/skillcache/capsules", stand.project_id);
+
+    let (status, retired) = stand
+        .http(
+            Method::POST,
+            &format!("{route}/retire"),
+            Some(json!({"reason": "Paused during review"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{retired}");
+    assert_eq!(retired["status"], "retired");
+    assert_eq!(retired["reason"], "Paused during review");
+
+    let (_, default_list) = stand.http(Method::GET, &list_route, None).await;
+    assert!(default_list["capsules"].as_array().unwrap().is_empty());
+    let (_, with_retired) = stand
+        .http(
+            Method::GET,
+            &format!("{list_route}?include_retired=true"),
+            None,
+        )
+        .await;
+    assert_eq!(with_retired["capsules"].as_array().unwrap().len(), 1);
+    let (_, status_retired) = stand
+        .http(Method::GET, &format!("{list_route}?status=retired"), None)
+        .await;
+    assert_eq!(status_retired["capsules"].as_array().unwrap().len(), 1);
+
+    // Retired capsules are never selected on warm turns.
+    stand.script("codex", &codex_skill_turn());
+    let sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            None,
+        )
+        .await;
+    assert_eq!(stand.skillcache_events(&sid)[0]["reason"], "no_capsule");
+
+    // Failed requalification preserves `retired` status instead of flipping to `stale`.
+    let skill_md = stand.project().join(".agents/skills/pdf/SKILL.md");
+    let orig_skill = fs::read_to_string(&skill_md).unwrap();
+    fs::write(
+        &skill_md,
+        "---\nname: pdf\ndescription: Drift\n---\nChanged\n",
+    )
+    .unwrap();
+    let (status, _) = stand
+        .http(Method::POST, &format!("{route}/requalify"), Some(json!({})))
+        .await;
+    assert_eq!(status, 202);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let cap = stand.capsule(&capsule_id).await;
+        if cap["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("Observe a new turn"))
+        {
+            assert_eq!(cap["status"], "retired", "{cap}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{cap}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Restoring skill and requalifying returns the capsule to `active`.
+    fs::write(&skill_md, orig_skill).unwrap();
+    let (status, _) = stand
+        .http(Method::POST, &format!("{route}/requalify"), Some(json!({})))
+        .await;
+    assert_eq!(status, 202);
+    let restored = stand.settled(&capsule_id, "retired").await;
+    assert_eq!(restored["status"], "active", "{restored}");
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eval_arms_require_setting_and_run_all_four_ablations() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (obs_sid, obs_gen) = stand.observed().await;
+
+    // Eval arms rejected by default when `skillcache.eval_arms` is disabled.
+    let (status, denied_session) = stand
+        .http(
+            Method::POST,
+            "/api/sessions",
+            Some(stand.options(
+                "$pdf extract invoices/",
+                json!({"mode": "warm_only", "eval_arm": "raw_trace", "trace_generation": obs_gen}),
+            )),
+        )
+        .await;
+    assert_eq!(status, 400, "{denied_session}");
+    let (status, denied_compile) = stand
+        .http(
+            Method::POST,
+            &format!("/api/sessions/{obs_sid}/skillcache/compile"),
+            Some(json!({"generation": obs_gen, "eval_arm": "written_procedure"})),
+        )
+        .await;
+    assert_eq!(status, 400, "{denied_compile}");
+
+    stand
+        .store
+        .set_setting(
+            infra_harness::skillcache::settings::EVAL_SETTING,
+            &json!(true),
+        )
+        .unwrap();
+
+    // 1. `raw_trace`: injects redacted tau_obs directly into prompt, stages nothing.
+    stand.script("claude", &skill_turn(&stand.project()));
+    let raw_sid = stand
+        .claude_turn(
+            "$pdf extract invoices/",
+            json!({"mode": "warm_only", "eval_arm": "raw_trace", "trace_generation": obs_gen}),
+            None,
+        )
+        .await;
+    assert_eq!(stand.phases(&raw_sid)[0], "hit");
+    let raw_prompt = stand.recorded("claude-prompt.txt");
+    assert!(
+        raw_prompt.contains("Observed trace reference"),
+        "{raw_prompt}"
+    );
+    assert!(!raw_prompt.contains("abcdefghijklmnop1234"));
+    assert!(!stand.root.join("state/skillcache/bin").exists());
+
+    // 2. `written_procedure`: round-1 textual compile, warm run without executor.
+    stand.compiler(1, &textual_answer());
+    let (_, wp_id) = stand
+        .start_compile_with(&obs_sid, &obs_gen, Some("written_procedure"))
+        .await;
+    let wp = stand.settled(&wp_id, "compiling").await;
+    assert_eq!(wp["status"], "active", "{wp}");
+    assert_eq!(wp["form"], "textual");
+    assert_eq!(wp["eval_arm"], "written_procedure");
+    assert_eq!(gate_summary(&wp), ["1:gate1t:pass"]);
+    assert_eq!(wp["compile"]["rounds"], 1);
+    let (_, default_list) = stand
+        .http(
+            Method::GET,
+            &format!("/api/projects/{}/skillcache/capsules", stand.project_id),
+            None,
+        )
+        .await;
+    assert!(
+        default_list["capsules"].as_array().unwrap().is_empty(),
+        "eval capsules must stay isolated from normal capsule listings"
+    );
+    let wp_sid = stand
+        .claude_turn(
+            "$pdf extract invoices/",
+            json!({"mode": "warm_only", "eval_arm": "written_procedure", "capsule_id": wp_id}),
+            None,
+        )
+        .await;
+    assert_eq!(stand.phases(&wp_sid)[0], "hit");
+    assert!(
+        stand
+            .recorded("claude-prompt.txt")
+            .contains("This written procedure was compiled")
+    );
+
+    // 3. `skillcache_no_replay`: qualifies Gate 1 + Gate 2 only (no Gate 3).
+    stand.compiler(1, &hybrid_answer());
+    let (_, nr_id) = stand
+        .start_compile_with(&obs_sid, &obs_gen, Some("skillcache_no_replay"))
+        .await;
+    let nr = stand.settled(&nr_id, "compiling").await;
+    assert_eq!(nr["status"], "active", "{nr}");
+    assert_eq!(gate_summary(&nr), ["1:gate1:pass", "1:gate2:pass"]);
+
+    // 4. `skillcache_agent`: stages only `skillcache-tool`, sets `SKILLCACHE_LOG_FILE`,
+    // and restricts Claude permissions to `Bash(skillcache-tool:*)`.
+    let (_, normal_id) = stand.start_compile(&obs_sid, &obs_gen).await;
+    let normal = stand.settled(&normal_id, "compiling").await;
+    assert_eq!(normal["status"], "active", "{normal}");
+    let fixture = Path::new(FIXTURE).parent().unwrap().display().to_string();
+    let agent_only_script = format!(
+        r#"PATH="{fixture}:$PATH"
+if command -v skillcache-run >/dev/null 2>&1; then exit 99; fi
+if [ -n "$SKILLCACHE_STATE_FILE" ]; then exit 98; fi
+if [ -z "$SKILLCACHE_LOG_FILE" ]; then exit 97; fi
+mkdir -p out
+skillcache-tool extract --input '{{"input_dir":"invoices/"}}' >/dev/null
+echo '{{"type":"system","subtype":"init","session_id":"claude-agent-only"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Done","session_id":"claude-agent-only","total_cost_usd":0.01}}'
+"#
+    );
+    let agent_sid = stand
+        .claude_turn(
+            "$pdf extract invoices/",
+            json!({"mode": "warm_only", "eval_arm": "skillcache_agent", "capsule_id": normal_id}),
+            Some(&agent_only_script),
+        )
+        .await;
+    assert_eq!(stand.store.get(&agent_sid).unwrap()["status"], "completed");
+    assert_eq!(stand.phases(&agent_sid)[0], "hit");
+    let agent_prompt = stand.recorded("claude-prompt.txt");
+    assert!(agent_prompt.contains("skillcache-tool"), "{agent_prompt}");
+    assert!(
+        !agent_prompt.contains("skillcache-run run"),
+        "{agent_prompt}"
+    );
+    let args = stand.recorded("claude-arguments.txt");
+    let lines = args.lines().collect::<Vec<_>>();
+    let idx = lines.iter().position(|line| *line == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(lines[idx + 1]).unwrap();
+    let allow = settings["permissions"]["allow"].as_array().unwrap();
+    assert!(
+        allow.iter().any(|v| v == "Bash(skillcache-tool:*)"),
+        "{settings}"
+    );
+    assert!(
+        !allow.iter().any(|v| v == "Bash(skillcache-run:*)"),
+        "{settings}"
+    );
+    let (_, agent_sc) = stand
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{agent_sid}/skillcache"),
+            None,
+        )
+        .await;
+    assert_eq!(agent_sc["runs"][0]["capsule_id"], normal_id);
+    assert_eq!(agent_sc["runs"][0]["outcome"], "complete");
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn needs_recompile_ignores_passing_turns_after_requalify() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (capsule_id, _) = stand.compiled_capsule(&codex_answer()).await;
+    stand
+        .store
+        .set_setting(
+            infra_harness::skillcache::warm::RECOMPILE_THRESHOLDS,
+            &json!({"window": 2, "failed_runs": 1}),
+        )
+        .unwrap();
+
+    // Failing step flips active -> needs_recompile.
+    let a_txt = stand.project().join("invoices/a.txt");
+    let orig_a = fs::read_to_string(&a_txt).unwrap();
+    fs::remove_file(&a_txt).unwrap();
+    let by_hand = r#"mkdir -p out && echo '[]' > out/rows.json
+call 2 skillcache-run continue '{"rows_file":"out/rows.json"}'"#;
+    let fail_sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            Some(&warm_agent(&stand.root, by_hand)),
+        )
+        .await;
+    assert!(
+        stand
+            .phases(&fail_sid)
+            .contains(&"needs_recompile".to_string())
+    );
+    assert_eq!(
+        stand.capsule(&capsule_id).await["status"],
+        "needs_recompile"
+    );
+
+    // Requalify brings capsule back to active.
+    fs::write(&a_txt, orig_a).unwrap();
+    let route = format!(
+        "/api/projects/{}/skillcache/capsules/{capsule_id}/requalify",
+        stand.project_id
+    );
+    let (status, _) = stand.http(Method::POST, &route, Some(json!({}))).await;
+    assert_eq!(status, 202);
+    assert_eq!(
+        stand.settled(&capsule_id, "needs_recompile").await["status"],
+        "active"
+    );
+
+    // Next passing warm turn (`deopts == 0`) must keep status `active`.
+    let pass_sid = stand
+        .codex_turn(
+            "$pdf extract the rows of invoices/",
+            json!({"skillcache": {"mode": "warm_only"}}),
+            Some(&warm_agent(&stand.root, "call 2 skillcache-run status")),
+        )
+        .await;
+    assert!(
+        !stand
+            .phases(&pass_sid)
+            .contains(&"needs_recompile".to_string())
+    );
+    assert_eq!(stand.capsule(&capsule_id).await["status"], "active");
     stand.close().await;
 }

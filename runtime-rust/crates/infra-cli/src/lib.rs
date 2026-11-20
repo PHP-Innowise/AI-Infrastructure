@@ -43,10 +43,13 @@ const GROUPS: &[&str] = &[
 /// staged the engine under it: `skillcache-run` or `skillcache-tool`, with or
 /// without the platform's executable suffix.
 pub fn staged_tool(name: Option<&std::ffi::OsStr>) -> Option<&'static str> {
-    match Path::new(name?).file_stem()?.to_str()? {
-        "skillcache-run" => Some("run-command"),
-        "skillcache-tool" => Some("tool"),
-        _ => None,
+    let stem = Path::new(name?).file_stem()?.to_str()?;
+    if stem.eq_ignore_ascii_case("skillcache-run") {
+        Some("run-command")
+    } else if stem.eq_ignore_ascii_case("skillcache-tool") {
+        Some("tool")
+    } else {
+        None
     }
 }
 /// Runs one SkillCache command and returns its exit code. `name` is an
@@ -233,7 +236,7 @@ pub fn capabilities() -> Value {
     let source = env!("INFRA_ENGINE_SOURCE_SHA256");
     let source = (!source.is_empty())
         .then(|| json!({"scheme":infra_tooling::source_identity::SCHEME,"sha256":source}));
-    let mut descriptor = json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source});
+    let mut descriptor = json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","skillcache","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source});
     // Report dependency truth: workspace feature unification can enable ONNX
     // in pilots even when this package's forwarding feature was not selected.
     if infra_pilots::onnx::compiled() {
@@ -926,7 +929,9 @@ pub fn run(raw: &[String]) -> Result<Output> {
                     .unwrap_or_default()
                     .into();
             }
-            if operation.ends_with("/report") && request["result"].is_null() {
+            if (operation.ends_with("/report") || operation == "skillcache-ab/viewer")
+                && request["result"].is_null()
+            {
                 request["result"] = request["_positionals"]
                     .as_array()
                     .and_then(|args| args.first())

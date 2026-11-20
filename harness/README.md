@@ -506,10 +506,13 @@ What a kept trace is:
   and a trace is dropped after thirty days.
 
 Each skill the turn used is recorded with the digest of every file of its
-folder, so a later compile can tell that the skill has changed since. When the
-workspace is a Git checkout, an observed turn also records the state it started
-from: a tree written through a private index into a private object folder under
-the Harness state. The project's own repository is read and never written.
+folder, so a later compile can tell that the skill has changed since. An
+observed turn also records the state its workspace started from: for a Git
+checkout, a tree written through a private index into a private object folder
+under the Harness state (the project's own repository is read and never
+written); for a non-Git folder, a bounded directory copy (`kind: "tree"`,
+skipping `.git`, `target`, `.harness-tmp`, the Harness state folder, symlinks,
+and special files, up to 50,000 files / 256 MiB / depth 32).
 `GET /api/sessions/{session_id}/skillcache` lists a session's mode, its kept
 traces without their steps, and what was compiled from them.
 
@@ -545,13 +548,15 @@ Three **gates** then check the candidate, none of them with a model:
 | 2 | a fresh sandbox, no network, no task file | every program's own `check` answers by the program contract |
 | 3 | a fresh copy of the task, the network only if the capsule declares it | the whole plan replays through `skillcache-run` with the observed values answering for the agent |
 
-Gate 3's copy is the turn's starting state checked out of its snapshot, plus the
-workspace's Git-ignored files (installed dependencies, build output) as they are
-at that moment, up to 1 GiB and 100,000 files. The replay never touches the real
-workspace. A failed program does not end the replay: its observed output stands
-in and the replay goes on, so one pass reports every failure; a program declared
-read-only that changes the copy fails too. A turn whose workspace is not a Git
-checkout has no snapshot and cannot be compiled.
+Gate 3's copy comes from the turn's starting snapshot: for a Git checkout, the
+saved tree plus the workspace's Git-ignored files (installed dependencies, build
+output) as they are at that moment, up to 1 GiB and 100,000 files; for a
+non-Git folder, the bounded directory snapshot. The replay never touches the
+real workspace. A failed program does not end the replay: its observed output
+stands in and the replay goes on, so one pass reports every failure; a program
+declared read-only that changes the copy fails too. Only a workspace whose
+starting state exceeded the snapshot limits or could not be copied has no
+snapshot and cannot be replayed.
 
 The gates run in a minimal root: the operating system's runtime, the package
 and the task copy. That is deliberately stricter than a session, so a program
@@ -576,20 +581,22 @@ reported stays empty; it is not shown as zero.
 
 | Request | What it does |
 | --- | --- |
-| `GET /api/projects/{project_id}/skillcache/capsules?skill=&status=&form=` | lists a project's capsules |
+| `GET /api/projects/{project_id}/skillcache/capsules?skill=&status=&form=&include_retired=` | lists a project's capsules (retired capsules are excluded unless `status=retired` or `include_retired=true`) |
 | `GET /api/projects/{project_id}/skillcache/capsules/{capsule_id}` | the plan (`mu`, bindings, programs, steps, verification), every gate report of every round, the compilation and its usage; never the programs' sources or the observed values |
-| `POST .../capsules/{capsule_id}/requalify` | runs the gates again over the stored package: no model, the same observed values, a fresh copy of the task |
-| `POST .../capsules/{capsule_id}/invalidate` | takes an active capsule out of use until it is requalified |
+| `POST .../capsules/{capsule_id}/requalify` | runs the gates again over the stored package: no model, the same observed values, a fresh copy of the task (also restores a `retired` capsule to `active` if gates pass) |
+| `POST .../capsules/{capsule_id}/retire` | retires a capsule (`retired`) so warm turns skip it until someone uses **Use again** (`requalify`) |
+| `POST .../capsules/{capsule_id}/invalidate` | marks an `active` or `needs_recompile` capsule `stale` until it is requalified |
 | `DELETE .../capsules/{capsule_id}` | removes the capsule, its package, its observed values, and the trace and snapshot it was compiled from |
 
 A capsule is `active` only while it still matches what it was qualified with.
 It becomes `stale` when any file of its skill's folder changes (not only
-`SKILL.md`: scripts, references and assets count), when the engine or a runtime
-its programs use changes, when the compiler's instructions change, or when its
-package is no longer what was written. An engine update therefore makes every
-capsule stale until it is requalified, which costs no model call. A capsule
-whose skill changed is not requalified: it describes the old skill, so a new
-turn has to be observed and compiled.
+`SKILL.md`: scripts, references and assets count), when the SkillCache ABI or
+capsule schema changes, when a declared runtime its programs use changes, when
+the compiler's instructions change, or when its package is no longer what was
+written. Rebuilding `infra-engine` without changing the SkillCache ABI, schema,
+compiler rules, or runtimes keeps existing capsules active (`engine_digest` is
+recorded only as metadata). A capsule whose skill changed is not requalified:
+it describes the old skill, so a new turn has to be observed and compiled.
 
 Artifacts live under the Harness state: `skillcache/capsules/<project>/<capsule>/1/warm/`
 is the read-only package a session would mount, without any observed value, and
@@ -615,10 +622,11 @@ line:
 | the capsule still matches its skill, environment, rules and package | `stale` |
 | the capsule needs no network, or Codex runs in Bypass | `network` |
 
-In this version a message routes to one skill for Codex through a single
-`$skill` mention. A Claude Code `/command` is native, so Claude sessions are
-observed and compiled from but do not run warm yet, and Cursor is observed
-only: writing outside the workspace in its sandbox is not verified.
+In this version a message routes to one skill for both Claude Code and Codex
+through a single `$skill` mention. A Claude Code `/command` is native (`native_route`),
+so `/command` turns are observed and compiled from without running warm, and
+Cursor is observed only: writing outside the workspace in its sandbox is not
+verified.
 
 On a **hit** the request to load and follow the skill is replaced by the
 capsule's block: its name and description, the values to take from the request,
@@ -686,7 +694,8 @@ The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
 - **Run view.** A turn with SkillCache events gets a `SkillCache` tab that lists
   every phase in order. A kept trace offers **Compile into a capsule** once;
   after that it shows the compilation's state and links to the capsule. A
-  trace whose starting workspace was not kept (no Git repository) says that it
+  trace whose starting workspace was not kept (for example, it exceeded the
+  non-Git snapshot limits or contained no copyable starting state) says why it
   cannot be compiled.
 - **Usage.** A session that used SkillCache gets one line above its launch
   history: how many turns ran warm, how many ran cold and why, how many
@@ -698,9 +707,10 @@ The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
   form, filterable. One capsule shows what it is for, the values it needs, its
   programs (their commands, never their sources), its plan and verification,
   the skill it was compiled from, its compilation, its gate history round by
-  round, and how its warm turns went. **Requalify** runs the gates again
-  without a model, **Stop using** marks it stale until someone requalifies
-  it, and **Delete** takes a second click. What a reuse saves is shown as unknown: it is measured by a
+  round, and how its warm turns went. **Requalify** (or **Use again** when
+  `retired`) runs the gates again without a model, **Stop using** retires it
+  (`retired`) until someone uses **Use again**, and **Delete** takes a second
+  click. What a reuse saves is shown as unknown: it is measured by a
   [sealed evaluation](../docs/SKILLCACHE-EVAL.md), never read off a session.
 
 #### A capsule's status
@@ -709,10 +719,10 @@ The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
 | --- | --- | --- |
 | `compiling` | Its compilation is queued or running. | no |
 | `active` | It passed its gates and still matches its skill, environment, compiler rules and package. | yes |
-| `stale` | Something it was qualified with changed (a file of the skill, the engine or a runtime, the rules), or a person stopped using it. The reason is shown. Requalify it, or compile a new turn. | no |
+| `stale` | Something it was qualified with changed (a file of the skill, a runtime, the SkillCache ABI/schema/rules), or `/invalidate` marked it stale. The reason is shown. Requalify it, or compile a new turn. | no |
 | `needs_recompile` | A requalification failed, or the recompile setting below marked it. | no |
 | `failed` | No form qualified. The skill is used as it is. | no |
-| `retired` | Reserved by the schema; nothing sets it in this version. | no |
+| `retired` | A person clicked **Stop using**. Excluded from warm turns and hidden by default unless `status=retired` or `include_retired=true` (used by **All** in the page). **Use again** requalifies it. | no |
 
 A step that fell back to the agent is a property of that turn. By default the
 Harness only shows how a capsule's warm turns went. The setting
@@ -731,11 +741,15 @@ Whether a capsule pays is a measurement:
 infra-engine eval skillcache-ab seal --plan plan.json --out protocol.json
 infra-engine eval skillcache-ab run --protocol protocol.json --out result.json
 infra-engine eval skillcache-ab report --protocol protocol.json --result result.json
+infra-engine eval skillcache-ab viewer --protocol protocol.json --result result.json --out benchmark.json
 ```
 
 [docs/SKILLCACHE-EVAL.md](../docs/SKILLCACHE-EVAL.md) describes the sealed
-protocol, the driver that runs one attempt with a real provider (yours to
-write: none ships with the engine), the isolated verifiers, and the verdict.
+protocol, the real Harness pilot driver (`infra-harness-skillcache-driver` in
+`runtime-rust/crates/infra-harness/tools/skillcache_driver/`, plus the four
+eval-only ablation modes `raw_trace`, `written_procedure`, `skillcache_agent`,
+and `skillcache_no_replay` unlocked only when store setting
+`skillcache.eval_arms` is `true`), the isolated verifiers, and the verdict.
 A report is evidence for the question that was sealed; it turns nothing on.
 
 ### Starting the server
