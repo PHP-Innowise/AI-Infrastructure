@@ -1383,6 +1383,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-skillcache"
+version = "0.1.0"
+dependencies = [
+ "infra-core",
+ "infra-host",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "infra-system"
 version = "0.1.0"
 dependencies = [

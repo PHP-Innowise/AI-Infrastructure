@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SkillCache compiler answer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["form", "capsule"],
+  "properties": {
+    "form": {"type": "string", "enum": ["hybrid", "textual"]},
+    "capsule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mu", "source"],
+      "properties": {
+        "mu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "description"],
+          "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"}
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["skills"],
+          "properties": {
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "path"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "path": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["network", "runtimes"],
+          "properties": {
+            "network": {"type": "string", "enum": ["none", "required"]},
+            "runtimes": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "type", "origin"],
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"type": "string", "enum": ["string", "path", "number", "boolean", "list"]},
+              "origin": {"type": "string", "enum": ["request"]},
+              "description": {"type": "string"}
+            }
+          }
+        },
+        "programs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "entry", "inputs", "outputs", "check", "timeout_seconds", "read_only"],
+            "properties": {
+              "id": {"type": "string"},
+              "description": {"type": "string"},
+              "entry": {"type": "array", "items": {"type": "string"}},
+              "inputs": {"type": "array", "items": {"type": "string"}},
+              "outputs": {"type": "array", "items": {"type": "string"}},
+              "check": {"type": "array", "items": {"type": "string"}},
+              "timeout_seconds": {"type": "integer"},
+              "read_only": {"type": "boolean"}
+            }
+          }
+        },
+        "steps": {"type": "array", "items": {"$ref": "#/definitions/step"}},
+        "verification": {"type": "array", "items": {"$ref": "#/definitions/step"}}
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "content"],
+        "properties": {
+          "path": {"type": "string"},
+          "content": {"type": "string"}
+        }
+      }
+    },
+    "examples": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {"type": "object"},
+        "steps": {"type": "object"}
+      }
+    },
+    "markdown": {"type": "string"}
+  },
+  "definitions": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["instruction", "program", "inspection"]},
+        "program": {"type": "string"},
+        "text": {"type": "string"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": {"type": "string"},
+            "section": {"type": "string"}
+          }
+        },
+        "produces": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
