@@ -412,7 +412,14 @@ pub fn history() {
 pub async fn refresh() {
     match api::get("/api/sessions").await {
         Ok(v) => {
-            m::write(|s| s.sessions = m::array(&v["sessions"]));
+            dom::error("events-error", "");
+            m::write(|s| {
+                s.sessions = m::array(&v["sessions"]);
+                crate::run::sync_waiting_counts_from_sessions(
+                    &s.sessions,
+                    &mut s.approvals.waiting_counts,
+                );
+            });
             history();
             crate::run::sync_approvals_badge();
             if m::read(|s| s.approvals.drawer_open) {
@@ -562,7 +569,7 @@ pub(super) fn view_label(view: &str) -> &str {
         _ => view,
     }
 }
-pub(super) fn render_tabs(view: &str, group: &str) {
+pub(crate) fn view_tabs_for_group(group: &str, has_session: bool) -> Vec<&'static str> {
     let views: &[&str] = match group {
         "sessions" => &["sessions", "changes", "checks", "usage"],
         "systems" => &["systems", "system-changes"],
@@ -571,31 +578,59 @@ pub(super) fn render_tabs(view: &str, group: &str) {
         "skills" => &["skills", "create-skill"],
         _ => &["accelerators", "creator", "kit3", "setup"],
     };
-    let sid = m::read(|s| s.sid.clone());
-    let views = views
+    views
         .iter()
         .copied()
-        .filter(|v| !["changes", "checks", "usage"].contains(v) || !sid.is_empty())
-        .collect::<Vec<_>>();
-    dom::clear("view-tabs");
+        .filter(|v| !["changes", "checks", "usage"].contains(v) || has_session)
+        .collect()
+}
+
+pub(super) fn render_tabs(view: &str, group: &str) {
+    let sid = m::read(|s| s.sid.clone());
+    let views = view_tabs_for_group(group, !sid.is_empty());
+    let sig = views.join(",");
     dom::attr("view-tabs", "role", "tablist");
     dom::attr("view-tabs", "aria-label", "Section tabs");
     dom::hidden("view-tabs", views.len() < 2);
-    for item in views {
-        let selected = item == view;
-        let button = dom::button(view_label(item), "view-open", json!(item));
-        button.set_class_name("view-tab");
-        let _ = button.set_attribute("role", "tab");
-        let _ = button.set_attribute("data-view", item);
-        let _ = button.set_attribute("aria-selected", if selected { "true" } else { "false" });
-        let _ = button.set_attribute("tabindex", if selected { "0" } else { "-1" });
-        if selected {
-            let _ = button.set_attribute("aria-current", "page");
+    let reuse_existing = dom::get("view-tabs").is_some_and(|tabs| {
+        tabs.get_attribute("data-tab-views").as_deref() == Some(sig.as_str())
+            && dom::children(&tabs).len() == views.len()
+    });
+    if reuse_existing {
+        if let Some(tabs) = dom::get("view-tabs") {
+            for button in dom::children(&tabs) {
+                let item = button.get_attribute("data-view").unwrap_or_default();
+                let selected = item == view;
+                let _ =
+                    button.set_attribute("aria-selected", if selected { "true" } else { "false" });
+                let _ = button.set_attribute("tabindex", if selected { "0" } else { "-1" });
+                if selected {
+                    let _ = button.set_attribute("aria-current", "page");
+                } else {
+                    let _ = button.remove_attribute("aria-current");
+                }
+            }
+            dom::sync_roving_widget(&tabs);
         }
-        dom::append("view-tabs", &button);
-    }
-    if let Some(tabs) = dom::get("view-tabs") {
-        dom::sync_roving_widget(&tabs);
+    } else {
+        dom::clear("view-tabs");
+        dom::attr("view-tabs", "data-tab-views", &sig);
+        for item in views {
+            let selected = item == view;
+            let button = dom::button(view_label(item), "view-open", json!(item));
+            button.set_class_name("view-tab");
+            let _ = button.set_attribute("role", "tab");
+            let _ = button.set_attribute("data-view", item);
+            let _ = button.set_attribute("aria-selected", if selected { "true" } else { "false" });
+            let _ = button.set_attribute("tabindex", if selected { "0" } else { "-1" });
+            if selected {
+                let _ = button.set_attribute("aria-current", "page");
+            }
+            dom::append("view-tabs", &button);
+        }
+        if let Some(tabs) = dom::get("view-tabs") {
+            dom::sync_roving_widget(&tabs);
+        }
     }
     dom::hidden("open-kit3", view != "kit3");
 }

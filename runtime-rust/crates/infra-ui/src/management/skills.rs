@@ -442,17 +442,68 @@ pub(super) async fn discover(refresh: bool) {
     }
     skills_controls();
 }
-pub(super) fn render_skills() {
-    let query = dom::value("skills-filter").to_lowercase();
+pub(crate) fn skill_search_haystack(id: &str, name: &str, description: &str) -> String {
+    format!("{id}\n{name}\n{description}").to_ascii_lowercase()
+}
+
+pub(crate) fn matches_skill_haystack(haystack: &str, query: &str) -> bool {
+    let q = query.trim().to_ascii_lowercase();
+    q.is_empty() || haystack.contains(&q)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn matches_skill_query(id: &str, name: &str, description: &str, query: &str) -> bool {
+    matches_skill_haystack(&skill_search_haystack(id, name, description), query)
+}
+
+pub(super) fn filter_skills_in_place() {
+    let Some(list) = dom::get("skills-list") else {
+        return;
+    };
+    let query = dom::value("skills-filter");
     let selected = m::array(&m::data("skills-selection"));
+    let total = dom::children(&list).len();
+    let mut visible = 0usize;
+    for row in dom::children(&list) {
+        let hay = row.get_attribute("data-skill-haystack").unwrap_or_default();
+        let matched = matches_skill_haystack(&hay, &query);
+        dom::hide(&row, !matched);
+        if matched {
+            visible += 1;
+        }
+        if let Ok(Some(input)) = row.query_selector("input[type=\"checkbox\"]") {
+            let id = input.get_attribute("value").unwrap_or_default();
+            if let Some(html_input) = input.dyn_ref::<web_sys::HtmlInputElement>() {
+                html_input.set_checked(selected.iter().any(|v| v == &id));
+            }
+        }
+    }
+    dom::text("skills-visible-count", &format!("{visible} matching"));
+    dom::text(
+        "skills-selection-count",
+        &format!("{} selected of {total}", selected.len()),
+    );
+}
+
+pub(super) fn render_skills() {
     let v = m::data("skills-discovery");
     let items = if v["skills"].is_array() {
         m::array(&v["skills"])
     } else {
         m::array(&v["items"])
     };
+    let sig = dom::json_signature(&v);
+    let reuse_dom = dom::get("skills-list").is_some_and(|list| {
+        list.get_attribute("data-discovery-signature").as_deref() == Some(sig.as_str())
+            && dom::children(&list).len() == items.len()
+    });
+    if reuse_dom {
+        filter_skills_in_place();
+        return;
+    }
+    let selected = m::array(&m::data("skills-selection"));
     dom::clear("skills-list");
-    let mut count = 0;
+    dom::attr("skills-list", "data-discovery-signature", &sig);
     for skill in &items {
         let id = m::text(skill, "id");
         let name = {
@@ -464,12 +515,9 @@ pub(super) fn render_skills() {
             }
         };
         let description = m::text(skill, "description");
-        let text = format!("{id} {name} {description}");
-        if !text.to_lowercase().contains(&query) {
-            continue;
-        }
-        count += 1;
+        let haystack = skill_search_haystack(&id, &name, &description);
         let row = dom::el("label", "skill-choice", "");
+        let _ = row.set_attribute("data-skill-haystack", &haystack);
         let input = dom::el("input", "", "");
         let _ = input.set_attribute("type", "checkbox");
         let _ = input.set_attribute("data-action", "skills-select");
@@ -491,11 +539,7 @@ pub(super) fn render_skills() {
         dom::add(&row, &copy);
         dom::append("skills-list", &row);
     }
-    dom::text("skills-visible-count", &format!("{count} matching"));
-    dom::text(
-        "skills-selection-count",
-        &format!("{} selected of {}", selected.len(), items.len()),
-    );
+    filter_skills_in_place();
 }
 pub(super) async fn installed_skills() {
     let p = dom::value("skills-project");

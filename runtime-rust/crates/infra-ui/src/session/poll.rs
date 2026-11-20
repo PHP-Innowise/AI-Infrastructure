@@ -442,6 +442,7 @@ pub async fn select_with_view(id: &str, target_view: Option<&str>) {
 }
 pub fn stop_poll() {
     dom::cancel_timer("session-poll");
+    dom::cancel_timer("idle-poll");
     m::next("session-poll");
     clear_stream_sync();
     inbox::stop();
@@ -555,7 +556,21 @@ pub async fn poll(epoch: u64) {
                     session["waiting_permissions"] = json!(waiting.len());
                 }
             }
+            let authoritative_waiting = waiting_list
+                .as_ref()
+                .map(|w| w.len())
+                .or_else(|| session["waiting_permissions"].as_u64().map(|n| n as usize));
             m::upsert(session.clone());
+            if let Some(count) = authoritative_waiting {
+                m::write(|s| {
+                    run::apply_session_waiting_count(
+                        &mut s.sessions,
+                        &mut s.approvals.waiting_counts,
+                        &sid,
+                        count,
+                    );
+                });
+            }
             apply_settings(&session);
             let events = m::array(&data["events"]);
             let length = events.len();
@@ -624,6 +639,11 @@ pub async fn poll(epoch: u64) {
                 spawn_local(async {
                     crate::graph::load(true).await;
                 });
+                if results_relevant() {
+                    spawn_local(async {
+                        results().await;
+                    });
+                }
                 crate::graph_map::sync_embedded(true);
             }
             if should_sync_embedded_changes(&fresh_events, focus_changed, was_active, is_active) {
@@ -698,6 +718,53 @@ pub async fn poll(epoch: u64) {
             }
         }
         Err(_) => {}
+    }
+}
+
+pub(crate) fn should_schedule_idle_reconnect_poll(
+    sse_connected: bool,
+    auth_failed: bool,
+    booted: bool,
+    active_session_polling: bool,
+) -> bool {
+    !sse_connected && !auth_failed && booted && !active_session_polling
+}
+
+async fn idle_reconnect_poll() {
+    let (auth_failed, booted, active_session_polling) = m::read(|s| {
+        (
+            s.auth_failed,
+            !s.boot.is_null(),
+            !s.sid.is_empty() && (m::active(&s.selected) || inbox::watching(&s.sid)),
+        )
+    });
+    if !should_schedule_idle_reconnect_poll(
+        api::sse_connected(),
+        auth_failed,
+        booted,
+        active_session_polling,
+    ) {
+        return;
+    }
+    refresh().await;
+    let (auth_failed, booted, active_session_polling) = m::read(|s| {
+        (
+            s.auth_failed,
+            !s.boot.is_null(),
+            !s.sid.is_empty() && (m::active(&s.selected) || inbox::watching(&s.sid)),
+        )
+    });
+    if should_schedule_idle_reconnect_poll(
+        api::sse_connected(),
+        auth_failed,
+        booted,
+        active_session_polling,
+    ) {
+        dom::later("idle-poll", 1000, || {
+            spawn_local(async {
+                idle_reconnect_poll().await;
+            });
+        });
     }
 }
 
@@ -848,6 +915,7 @@ pub(crate) fn initialize_sse_listeners() {
     });
 
     api::on_sse("sse_open", |_| {
+        dom::cancel_timer("idle-poll");
         if m::read(|s| s.auth_failed || s.boot.is_null()) {
             return;
         }
@@ -869,18 +937,20 @@ pub(crate) fn initialize_sse_listeners() {
     });
 
     api::on_sse("sse_error", |_| {
-        let (sid, epoch, active, auth_failed) = m::read(|s| {
+        let (sid, epoch, active, auth_failed, booted) = m::read(|s| {
             (
                 s.sid.clone(),
                 s.epoch,
                 !s.sid.is_empty() && (m::active(&s.selected) || inbox::watching(&s.sid)),
                 s.auth_failed,
+                !s.boot.is_null(),
             )
         });
-        if auth_failed {
+        if auth_failed || !booted {
             return;
         }
         if active && !sid.is_empty() {
+            dom::cancel_timer("idle-poll");
             let initial_pending =
                 STREAM_SYNC.with(|sync| sync.borrow().initial_poll_epoch == Some(epoch));
             if !initial_pending {
@@ -891,8 +961,10 @@ pub(crate) fn initialize_sse_listeners() {
                 });
             }
         } else {
-            spawn_local(async {
-                let _ = api::get("/api/sessions").await;
+            dom::later("idle-poll", 250, || {
+                spawn_local(async {
+                    idle_reconnect_poll().await;
+                });
             });
         }
     });

@@ -51,6 +51,11 @@ pub fn text(id: &str, value: &str) {
     }
 }
 pub const MODAL_OVERLAY_IDS: [&str; 3] = ["command-palette", "approvals-drawer", "run-file-card"];
+pub const EXPANDED_WORKSPACE_IDS: [&str; 3] = [
+    "session-graph-workspace",
+    "system-map-workspace",
+    "system-change-map-workspace",
+];
 const FALLBACK_RESTORE_SELECTOR: &str = "#view-tabs [aria-selected=\"true\"], #new-session";
 const MODAL_FOCUSABLE_SELECTOR: &str = "button:not([disabled]), a[href], input:not([disabled]):not([type=\"hidden\"]), select:not([disabled]), textarea:not([disabled]), details > summary:not([tabindex=\"-1\"]), [tabindex]:not([tabindex=\"-1\"])";
 
@@ -62,6 +67,114 @@ pub fn is_mobile_viewport() -> bool {
         .ok()
         .flatten()
         .is_some_and(|list| list.matches())
+}
+
+pub(crate) fn should_register_viewport_listener(existing_keys: &[String], guard_key: &str) -> bool {
+    !guard_key.is_empty() && !existing_keys.iter().any(|k| k == guard_key)
+}
+
+type ResizeCallback = std::rc::Rc<std::cell::RefCell<Box<dyn FnMut()>>>;
+
+#[derive(Default)]
+struct ViewportResizeHub {
+    wired: bool,
+    mobile_media: Option<web_sys::MediaQueryList>,
+    listeners: Vec<(String, i32, ResizeCallback)>,
+}
+
+thread_local! {
+    static VIEWPORT_RESIZE_HUB: std::cell::RefCell<ViewportResizeHub> =
+        std::cell::RefCell::new(ViewportResizeHub::default());
+}
+
+fn dispatch_viewport_resize() {
+    let entries: Vec<(String, i32, ResizeCallback)> = VIEWPORT_RESIZE_HUB.with(|hub| {
+        hub.borrow()
+            .listeners
+            .iter()
+            .map(|(k, ms, cb)| (k.clone(), *ms, std::rc::Rc::clone(cb)))
+            .collect()
+    });
+    for (key, debounce_ms, cb) in entries {
+        if debounce_ms > 0 {
+            later(&format!("viewport-resize:{key}"), debounce_ms, move || {
+                if let Ok(mut f) = cb.try_borrow_mut() {
+                    f();
+                }
+            });
+        } else if let Ok(mut f) = cb.try_borrow_mut() {
+            f();
+        }
+    }
+}
+
+/// Registers an idempotent viewport `resize` + `MOBILE_BREAKPOINT_QUERY` listener on the shared hub.
+/// When `debounce_ms > 0`, rapid resize events coalesce via `dom::later`.
+pub fn on_viewport_resize(guard_key: &str, debounce_ms: i32, on_resize: impl FnMut() + 'static) {
+    let should_wire = VIEWPORT_RESIZE_HUB.with(|hub| {
+        let mut hub = hub.borrow_mut();
+        let existing: Vec<String> = hub.listeners.iter().map(|(k, _, _)| k.clone()).collect();
+        if !should_register_viewport_listener(&existing, guard_key) {
+            return false;
+        }
+        hub.listeners.push((
+            guard_key.to_owned(),
+            debounce_ms,
+            std::rc::Rc::new(std::cell::RefCell::new(Box::new(on_resize))),
+        ));
+        if hub.wired {
+            return false;
+        }
+        hub.wired = true;
+        true
+    });
+    if !should_wire {
+        return;
+    }
+    if let Ok(Some(media)) = window().match_media(MOBILE_BREAKPOINT_QUERY) {
+        let media_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+            dispatch_viewport_resize();
+        });
+        let _ = media.add_event_listener_with_callback("change", media_cb.as_ref().unchecked_ref());
+        media_cb.forget();
+        VIEWPORT_RESIZE_HUB.with(|hub| {
+            hub.borrow_mut().mobile_media = Some(media);
+        });
+    }
+    let resize_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+        dispatch_viewport_resize();
+    });
+    if window()
+        .add_event_listener_with_callback("resize", resize_cb.as_ref().unchecked_ref())
+        .is_ok()
+    {
+        resize_cb.forget();
+    }
+}
+
+pub(crate) fn overlay_stack_priority(
+    palette_open: bool,
+    drawer_open: bool,
+    top_dialog_open: bool,
+    file_card_open: bool,
+    mobile_sidebar_open: bool,
+    expanded_ws_open: bool,
+) -> Option<&'static str> {
+    if palette_open {
+        Some("command-palette")
+    } else if drawer_open {
+        Some("approvals-drawer")
+    } else if top_dialog_open {
+        Some("dialog")
+    } else if file_card_open {
+        Some("run-file-card")
+    } else if mobile_sidebar_open {
+        Some("sidebar")
+    } else if expanded_ws_open {
+        Some("expanded-workspace")
+    } else {
+        None
+    }
 }
 
 fn overlay_inert_targets(
@@ -125,8 +238,49 @@ fn set_inert_attr(id: &str, inert: bool) {
     }
 }
 
-/// Synchronizes `inert` attributes across the shell, sidebar, and stacked modal overlays.
+fn clear_workspace_inert() {
+    for el in all("[data-workspace-inert=\"true\"]") {
+        let _ = el.remove_attribute("data-workspace-inert");
+        let _ = el.remove_attribute("inert");
+    }
+}
+
+fn active_expanded_workspace() -> Option<Element> {
+    EXPANDED_WORKSPACE_IDS.iter().find_map(|id| {
+        let el = get(id)?;
+        (el.get_attribute("data-expanded").as_deref() == Some("true") && !element_hidden(&el, None))
+            .then_some(el)
+    })
+}
+
+fn apply_workspace_sibling_inert(ws: &Element) {
+    let Some(main_el) = get("main") else {
+        return;
+    };
+    let mut cur = ws.clone();
+    loop {
+        if cur == main_el {
+            break;
+        }
+        let Some(parent) = cur.parent_element() else {
+            break;
+        };
+        for sibling in children(&parent) {
+            if sibling != cur && !sibling.has_attribute("inert") {
+                let _ = sibling.set_attribute("data-workspace-inert", "true");
+                let _ = sibling.set_attribute("inert", "");
+            }
+        }
+        if parent == main_el {
+            break;
+        }
+        cur = parent;
+    }
+}
+
+/// Synchronizes `inert` attributes across the shell, sidebar, expanded workspaces, and stacked modal overlays.
 pub fn sync_overlay_inert() {
+    clear_workspace_inert();
     let is_open =
         |id: &str| get(id).is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
     let other_dialog_open = document()
@@ -134,15 +288,32 @@ pub fn sync_overlay_inert() {
         .ok()
         .flatten()
         .is_some();
+    let palette_open = is_open("command-palette");
+    let drawer_open = is_open("approvals-drawer");
+    let file_or_dialog_open = is_open("run-file-card") || other_dialog_open;
     let sidebar_open = get("sidebar").is_some_and(|e| e.class_list().contains("open"));
-    for (id, inert) in overlay_inert_targets(
-        is_open("command-palette"),
-        is_open("approvals-drawer"),
-        is_open("run-file-card") || other_dialog_open,
+    let mobile = is_mobile_viewport();
+    let expanded_ws =
+        if !palette_open && !drawer_open && !file_or_dialog_open && !(mobile && sidebar_open) {
+            active_expanded_workspace()
+        } else {
+            None
+        };
+
+    for (id, mut inert) in overlay_inert_targets(
+        palette_open,
+        drawer_open,
+        file_or_dialog_open,
         sidebar_open,
-        is_mobile_viewport(),
+        mobile,
     ) {
+        if expanded_ws.is_some() && id == "sidebar" {
+            inert = true;
+        }
         set_inert_attr(id, inert);
+    }
+    if let Some(ws) = expanded_ws {
+        apply_workspace_sibling_inert(&ws);
     }
 }
 
@@ -153,11 +324,19 @@ pub fn hidden(id: &str, v: bool) {
 }
 pub fn hide(e: &Element, v: bool) {
     let id = e.id();
+    let was_open = !e.has_attribute("hidden") || e.has_attribute("open");
+    let mut restored_already = false;
     if let Ok(dialog) = e.clone().dyn_into::<web_sys::HtmlDialogElement>() {
         if v {
             let _ = e.set_attribute("hidden", "");
             if dialog.open() {
+                mark_suppress_close_restore(&id);
                 dialog.close();
+                if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
+                    sync_overlay_inert();
+                    restore_focus_for_overlay(&id);
+                    restored_already = true;
+                }
             }
         } else {
             if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !dialog.open() {
@@ -171,10 +350,16 @@ pub fn hide(e: &Element, v: bool) {
     } else if v {
         let _ = e.set_attribute("hidden", "");
     } else {
+        if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !was_open {
+            save_focus_for_overlay(&id);
+        }
         let _ = e.remove_attribute("hidden");
     }
-    if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
+    if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !restored_already {
         sync_overlay_inert();
+        if v && was_open {
+            restore_focus_for_overlay(&id);
+        }
     }
 }
 pub fn disabled(id: &str, v: bool) {
@@ -186,9 +371,41 @@ pub fn disabled(id: &str, v: bool) {
         }
     }
 }
+fn sync_expanded_workspace_modal(el: &Element, id: &str, was_expanded: bool, now_expanded: bool) {
+    if was_expanded == now_expanded {
+        return;
+    }
+    if now_expanded {
+        save_focus_for_overlay(id);
+        if let Some(prev_role) = el.get_attribute("role") {
+            let _ = el.set_attribute("data-prev-role", &prev_role);
+        } else {
+            let _ = el.remove_attribute("data-prev-role");
+        }
+        let _ = el.set_attribute("role", "dialog");
+        let _ = el.set_attribute("aria-modal", "true");
+        sync_overlay_inert();
+    } else {
+        let _ = el.remove_attribute("aria-modal");
+        if let Some(prev_role) = el.get_attribute("data-prev-role") {
+            let _ = el.set_attribute("role", &prev_role);
+            let _ = el.remove_attribute("data-prev-role");
+        } else {
+            let _ = el.remove_attribute("role");
+        }
+        sync_overlay_inert();
+        restore_focus_for_overlay(id);
+    }
+}
+
 pub fn attr(id: &str, key: &str, value: &str) {
     if let Some(e) = get(id) {
+        let was_expanded =
+            key == "data-expanded" && e.get_attribute("data-expanded").as_deref() == Some("true");
         let _ = e.set_attribute(key, value);
+        if key == "data-expanded" && EXPANDED_WORKSPACE_IDS.contains(&id) {
+            sync_expanded_workspace_modal(&e, id, was_expanded, value == "true");
+        }
     }
 }
 pub fn class(id: &str, key: &str, v: bool) {
@@ -311,6 +528,23 @@ pub fn focus(id: &str) {
 thread_local! {
     static FOCUS_RETURN_STACK: std::cell::RefCell<Vec<(String, Element)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static SUPPRESS_CLOSE_FOCUS_RESTORE: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+fn mark_suppress_close_restore(overlay_id: &str) {
+    if !overlay_id.is_empty() {
+        SUPPRESS_CLOSE_FOCUS_RESTORE.with(|set| {
+            set.borrow_mut().insert(overlay_id.to_owned());
+        });
+    }
+}
+
+pub(crate) fn take_suppress_close_restore(
+    suppressed: &mut std::collections::BTreeSet<String>,
+    overlay_id: &str,
+) -> bool {
+    !overlay_id.is_empty() && suppressed.remove(overlay_id)
 }
 
 pub fn save_focus_for_overlay(overlay_id: &str) {
@@ -377,13 +611,18 @@ pub fn dialog(id: &str, open: bool) {
                     focus_element(el);
                 }
             }
+            sync_overlay_inert();
         } else {
-            if d.open() {
+            let was_open = d.open();
+            if was_open {
+                mark_suppress_close_restore(id);
                 d.close();
             }
-            restore_focus_for_overlay(id);
+            sync_overlay_inert();
+            if was_open {
+                restore_focus_for_overlay(id);
+            }
         }
-        sync_overlay_inert();
     }
 }
 pub fn validity(id: &str) -> bool {
@@ -761,6 +1000,59 @@ pub fn num(id: &str) -> V {
         .map(V::Number)
         .unwrap_or(V::Null)
 }
+fn fnv1a_feed(h1: &mut u64, h2: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *h1 ^= u64::from(b);
+        *h1 = h1.wrapping_mul(0x0000_0100_0000_01B3);
+        *h2 = h2.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ u64::from(b).wrapping_add(0x517C_C1B7_2722_0A95);
+    }
+}
+
+fn feed_json_value(h1: &mut u64, h2: &mut u64, v: &V) {
+    match v {
+        V::Null => fnv1a_feed(h1, h2, b"N"),
+        V::Bool(true) => fnv1a_feed(h1, h2, b"T"),
+        V::Bool(false) => fnv1a_feed(h1, h2, b"F"),
+        V::Number(n) => {
+            fnv1a_feed(h1, h2, b"#");
+            fnv1a_feed(h1, h2, n.to_string().as_bytes());
+            fnv1a_feed(h1, h2, b"\x00");
+        }
+        V::String(s) => {
+            fnv1a_feed(h1, h2, b"$");
+            fnv1a_feed(h1, h2, &s.len().to_le_bytes());
+            fnv1a_feed(h1, h2, s.as_bytes());
+        }
+        V::Array(arr) => {
+            fnv1a_feed(h1, h2, b"[");
+            fnv1a_feed(h1, h2, &arr.len().to_le_bytes());
+            for item in arr {
+                feed_json_value(h1, h2, item);
+            }
+            fnv1a_feed(h1, h2, b"]");
+        }
+        V::Object(map) => {
+            fnv1a_feed(h1, h2, b"{");
+            fnv1a_feed(h1, h2, &map.len().to_le_bytes());
+            for (k, val) in map {
+                fnv1a_feed(h1, h2, &k.len().to_le_bytes());
+                fnv1a_feed(h1, h2, k.as_bytes());
+                feed_json_value(h1, h2, val);
+            }
+            fnv1a_feed(h1, h2, b"}");
+        }
+    }
+}
+
+/// Computes a compact 128-bit structural digest of a JSON value without serializing the full payload into DOM attributes.
+pub fn json_signature(v: &V) -> String {
+    let mut h1: u64 = 0xCBF2_9CE4_8422_2325;
+    let mut h2: u64 = 0x517C_C1B7_2722_0A95;
+    feed_json_value(&mut h1, &mut h2, v);
+    format!("{h1:016x}{h2:016x}")
+}
+
 pub fn keyed_render(
     id: &str,
     items: &[V],
@@ -776,7 +1068,7 @@ pub fn keyed_render(
     }
     for (index, item) in items.iter().enumerate() {
         let key = key_of(item);
-        let signature = item.to_string();
+        let signature = json_signature(item);
         let old = previous.remove(&key);
         let node = if old
             .as_ref()
@@ -1054,32 +1346,69 @@ fn modal_focusables(card: &Element) -> Vec<Element> {
 }
 
 fn active_overlay_container() -> Option<Element> {
-    for id in MODAL_OVERLAY_IDS {
-        if let Some(el) = get(id) {
-            if !el.has_attribute("hidden") || el.has_attribute("open") {
-                return Some(el);
+    let palette_el =
+        get("command-palette").filter(|el| !el.has_attribute("hidden") || el.has_attribute("open"));
+    let drawer_el = get("approvals-drawer")
+        .filter(|el| !el.has_attribute("hidden") || el.has_attribute("open"));
+    let top_dialog = document()
+        .query_selector_all("dialog[open]:not(#command-palette):not(#approvals-drawer)")
+        .ok()
+        .and_then(|dialogs| {
+            let len = dialogs.length();
+            if len > 0 {
+                dialogs
+                    .item(len - 1)
+                    .and_then(|n| n.dyn_into::<Element>().ok())
+            } else {
+                None
             }
+        });
+    let file_card_el =
+        get("run-file-card").filter(|el| !el.has_attribute("hidden") || el.has_attribute("open"));
+    let mobile_sidebar_el = is_mobile_viewport()
+        .then(|| get("sidebar").filter(|el| el.class_list().contains("open")))
+        .flatten();
+    let expanded_ws_el = active_expanded_workspace();
+    match overlay_stack_priority(
+        palette_el.is_some(),
+        drawer_el.is_some(),
+        top_dialog.is_some(),
+        file_card_el.is_some(),
+        mobile_sidebar_el.is_some(),
+        expanded_ws_el.is_some(),
+    ) {
+        Some("command-palette") => palette_el,
+        Some("approvals-drawer") => drawer_el,
+        Some("dialog") => top_dialog,
+        Some("run-file-card") => file_card_el,
+        Some("sidebar") => mobile_sidebar_el,
+        Some("expanded-workspace") => expanded_ws_el,
+        _ => None,
+    }
+}
+
+pub(crate) fn collapse_active_expanded_workspace() -> bool {
+    if active_overlay_container()
+        .is_some_and(|el| !EXPANDED_WORKSPACE_IDS.contains(&el.id().as_str()))
+    {
+        return false;
+    }
+    let Some(ws) = active_expanded_workspace() else {
+        return false;
+    };
+    let selector = match ws.id().as_str() {
+        "session-graph-workspace" => "#session-graph-expand, [data-graph-id=\"expand\"]",
+        "system-map-workspace" => "#system-map-expand",
+        "system-change-map-workspace" => "#system-change-topology-expand",
+        _ => return false,
+    };
+    if let Ok(Some(btn)) = ws.query_selector(selector) {
+        if let Some(html) = btn.dyn_ref::<HtmlElement>() {
+            html.click();
+            return true;
         }
     }
-    if let Ok(dialogs) = document().query_selector_all("dialog[open]") {
-        let len = dialogs.length();
-        if len > 0 {
-            if let Some(last) = dialogs
-                .item(len - 1)
-                .and_then(|n| n.dyn_into::<Element>().ok())
-            {
-                return Some(last);
-            }
-        }
-    }
-    if is_mobile_viewport() {
-        if let Some(sidebar) = get("sidebar") {
-            if sidebar.class_list().contains("open") {
-                return Some(sidebar);
-            }
-        }
-    }
-    None
+    false
 }
 
 fn handle_modal_trap(event: &web_sys::KeyboardEvent) -> bool {
@@ -1382,8 +1711,10 @@ pub fn wire_a11y_widgets() {
                 if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
                     let _ = target.set_attribute("hidden", "");
                 }
+                let suppressed = SUPPRESS_CLOSE_FOCUS_RESTORE
+                    .with(|set| take_suppress_close_restore(&mut set.borrow_mut(), &id));
                 sync_overlay_inert();
-                if !id.is_empty() {
+                if !id.is_empty() && !suppressed {
                     restore_focus_for_overlay(&id);
                 }
             }
@@ -1397,8 +1728,37 @@ pub fn wire_a11y_widgets() {
     close_cb.forget();
 }
 
+/// Strips Unicode bidirectional override control characters from text.
+pub fn clean_bidi(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            !matches!(
+                *c,
+                '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'
+            )
+        })
+        .collect()
+}
+
+/// Strips bidirectional override controls and escapes `&`, `<`, `>`, `"`, `'` for HTML interpolation.
+pub fn escape_html(raw: &str) -> String {
+    let cleaned = clean_bidi(raw);
+    let mut out = String::with_capacity(cleaned.len());
+    for ch in cleaned.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Escapes a value for safe interpolation inside a CSS attribute selector (`[attr="..."]`).
-pub(crate) fn escape_css_attr_value(raw: &str) -> String {
+pub fn escape_css_attr_value(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
         match ch {
@@ -1564,5 +1924,64 @@ mod tests {
                 ("command-palette", false),
             ]
         );
+    }
+
+    #[test]
+    fn overlay_stack_priority_and_close_restore_dedup_hold() {
+        // Native top-layer <dialog open> wins over non-top-layer #run-file-card.
+        assert_eq!(
+            overlay_stack_priority(false, false, true, true, false, true),
+            Some("dialog")
+        );
+        assert_eq!(
+            overlay_stack_priority(true, true, true, true, true, true),
+            Some("command-palette")
+        );
+        assert_eq!(
+            overlay_stack_priority(false, false, false, true, true, true),
+            Some("run-file-card")
+        );
+        assert_eq!(
+            overlay_stack_priority(false, false, false, false, false, true),
+            Some("expanded-workspace")
+        );
+
+        let mut suppressed = std::collections::BTreeSet::from(["command-palette".to_owned()]);
+        assert!(take_suppress_close_restore(
+            &mut suppressed,
+            "command-palette"
+        ));
+        assert!(!take_suppress_close_restore(
+            &mut suppressed,
+            "command-palette"
+        ));
+        assert!(!take_suppress_close_restore(&mut suppressed, ""));
+    }
+
+    #[test]
+    fn escape_html_json_signature_and_resize_guard_work() {
+        assert_eq!(
+            escape_html("<a href=\"x\" title='y'>\u{202e}a&b</a>"),
+            "&lt;a href=&quot;x&quot; title=&#39;y&#39;&gt;a&amp;b&lt;/a&gt;"
+        );
+        assert_eq!(escape_css_attr_value("a\"b\\c\nd"), "a\\\"b\\\\c\\a d");
+
+        let s1 = json_signature(&json!({"id": "c1", "output": "ok"}));
+        let s2 = json_signature(&json!({"id": "c1", "output": "ok2"}));
+        let s3 = json_signature(&json!({"id": "c1", "output": "ok"}));
+        assert_eq!(s1.len(), 32);
+        assert_eq!(s1, s3);
+        assert_ne!(s1, s2);
+
+        let existing = vec!["session-responsive-viewport".to_owned()];
+        assert!(!should_register_viewport_listener(
+            &existing,
+            "session-responsive-viewport"
+        ));
+        assert!(should_register_viewport_listener(
+            &existing,
+            "knowledge-responsive-viewport"
+        ));
+        assert!(!should_register_viewport_listener(&existing, ""));
     }
 }

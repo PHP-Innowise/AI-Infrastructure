@@ -104,6 +104,26 @@ fn set_workspace_note_error(id: &str, msg: &str, is_error: bool) {
     }
 }
 
+pub(crate) fn results_poll_delay_ms(
+    sse_connected: bool,
+    session_active: bool,
+    checks_active: bool,
+) -> Option<i32> {
+    if !session_active && !checks_active {
+        return None;
+    }
+    if sse_connected {
+        // SSE delivers `results_check` and `session_status`; avoid 1.2s polling loops when connected.
+        if checks_active {
+            Some(15_000)
+        } else {
+            None
+        }
+    } else {
+        Some(1200)
+    }
+}
+
 pub(super) fn render_results_files_into(container_id: &str, scope_id: &str, files: &[V]) {
     let Some(container) = dom::get(container_id) else {
         return;
@@ -426,8 +446,12 @@ pub async fn results() {
                 let view = m::read(|s| s.view.clone());
                 render_tabs(&view, "sessions");
             }
-            if m::read(|s| m::active(&s.selected)) || checks.iter().any(m::active) {
-                dom::later("results-poll", 1200, || {
+            if let Some(delay) = results_poll_delay_ms(
+                api::sse_connected(),
+                m::read(|s| m::active(&s.selected)),
+                checks.iter().any(m::active),
+            ) {
+                dom::later("results-poll", delay, || {
                     spawn_local(async {
                         results().await;
                     })

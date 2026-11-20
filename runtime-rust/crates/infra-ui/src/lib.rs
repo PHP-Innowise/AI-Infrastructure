@@ -4,10 +4,12 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 mod activity;
 mod api;
+#[cfg(feature = "catalog")]
 mod catalog;
 mod classify;
 mod commands;
 mod dom;
+#[cfg(feature = "eval-viewer")]
 mod eval_viewer;
 mod git_commit_graph;
 mod graph;
@@ -73,9 +75,11 @@ pub(crate) mod test_support {
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
+    #[cfg(feature = "eval-viewer")]
     if dom::get("eval-viewer-data").is_some() {
         return eval_viewer::start();
     }
+    #[cfg(feature = "catalog")]
     if dom::get("kit3-data").is_some() {
         catalog::start();
         return Ok(());
@@ -95,6 +99,7 @@ pub fn start() -> Result<(), JsValue> {
         "keyup",
         "pointerover",
         "focusin",
+        "focusout",
     ] {
         let k = kind.to_owned();
         let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
@@ -154,9 +159,26 @@ pub fn start() -> Result<(), JsValue> {
             }
             if k == "keyup" {
                 if target.id() == "prompt" {
-                    spawn_local(async {
-                        commands::update().await;
-                    });
+                    if let Some(key_event) = event.dyn_ref::<web_sys::KeyboardEvent>() {
+                        if matches!(
+                            key_event.key().as_str(),
+                            "ArrowLeft" | "ArrowRight" | "Home" | "End" | "PageUp" | "PageDown"
+                        ) {
+                            spawn_local(async {
+                                commands::update().await;
+                            });
+                        }
+                    }
+                }
+                return;
+            }
+            if k == "focusin" {
+                commands::handle_focus_in(&target);
+                return;
+            }
+            if k == "focusout" {
+                if let Some(focus_event) = event.dyn_ref::<web_sys::FocusEvent>() {
+                    commands::handle_focus_out(&target, focus_event);
                 }
                 return;
             }
@@ -187,7 +209,10 @@ pub fn start() -> Result<(), JsValue> {
                     return;
                 }
                 if key.key() == "Escape" {
-                    if run::escape() || activity::escape() {
+                    if run::escape()
+                        || activity::escape()
+                        || dom::collapse_active_expanded_workspace()
+                    {
                         event.prevent_default();
                         return;
                     }
@@ -220,6 +245,7 @@ pub fn start() -> Result<(), JsValue> {
             .contains(&k.as_str())
             {
                 if k == "pointerdown" {
+                    commands::handle_pointer_down(&target);
                     run::pointer_down(&target);
                     activity::pointer_down(&target);
                 }
@@ -251,6 +277,23 @@ pub fn start() -> Result<(), JsValue> {
                 if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
                     if dom::click_outside_element(&element, mouse) {
                         run::close_approvals_drawer();
+                    }
+                }
+                return;
+            }
+            if k == "click"
+                && matches!(
+                    element.id().as_str(),
+                    "folder-picker"
+                        | "merge-picker"
+                        | "omni-settings-dialog"
+                        | "omnigraph-transfer-dialog"
+                        | "omnigraph-share-dialog"
+                )
+            {
+                if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
+                    if dom::click_outside_element(&element, mouse) {
+                        dom::dialog(&element.id(), false);
                     }
                 }
                 return;
