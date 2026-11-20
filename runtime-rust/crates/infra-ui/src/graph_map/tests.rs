@@ -9735,3 +9735,221 @@ fn dense_graph_skips_offscreen_extras_initially_and_populates_dense_meta() {
         assert!(extra.contains("graph-map-spread"), "{extra}");
     }
 }
+
+#[test]
+fn dense_portals_route_valid_actions_and_patch_preserves_semantics_and_isolate() {
+    let nodes: Vec<V> = (0..185)
+        .map(|i| {
+            json!({
+                "path": if i == 0 { "sem:auth.guard".to_owned() } else { format!("src/f_{i}.php") },
+                "name": if i == 0 { "AuthGuard".to_owned() } else { format!("f_{i}") },
+                "node_kind": if i == 0 { "semantic" } else { "file" },
+                "visibility": if i == 1 { "public" } else { "" },
+                "in_cycle": i == 1,
+                "folder": false,
+                "out": 1,
+                "in": 1,
+            })
+        })
+        .collect();
+    let edges: Vec<V> = (0..184)
+        .map(|i| {
+            json!({
+                "from": if i == 0 { "sem:auth.guard".to_owned() } else { format!("src/f_{i}.php") },
+                "to": format!("src/f_{}.php", i + 1),
+                "links": 1,
+                "kinds": {"calls": 1}
+            })
+        })
+        .collect();
+    let view = json!({
+        "mode": "map",
+        "nodes": nodes,
+        "edges": edges,
+        "frames": [],
+        "spread": [],
+        "focus": {"path": "src/f_1.php"},
+        "lod": {"tier": "overview", "shown": 185, "total": 900},
+        "cycle": {"witness": ["src/f_1.php", "src/f_2.php", "src/f_1.php"], "cut_hints": [{"from": "src/f_2.php", "to": "src/f_1.php", "links": 1}]},
+    });
+    let impact = json!({
+        "path": "src/f_1.php",
+        "uses": {
+            "added": [{"target": "src/f_2.php", "kind": "calls"}],
+            "removed": [{"target": "src/f_99.php", "kind": "imports"}],
+            "unchanged": []
+        },
+        "used_by": []
+    });
+    let mut iso = BTreeSet::new();
+    iso.insert(0);
+    iso.insert(1);
+    iso.insert(2);
+    let overlay_ctx = CanvasOverlayContext {
+        impact: Some(&impact),
+        isolate_cone: Some(&iso),
+        ..Default::default()
+    };
+    let mut rendered = canvas_with_overlays(&view, "graph-map", overlay_ctx);
+    let mut scene = rendered.dense_scene.take().expect("dense scene");
+    let meta = rendered.dense_meta.as_ref().expect("dense meta");
+    // P0 #3: synthetic removed edge outside isolate_cone is excluded, added edge (1->2) is included.
+    let syn_added = scene
+        .edges
+        .iter()
+        .find(|e| e.diff == "added")
+        .expect("synthetic added edge in dense scene");
+    assert!(meta
+        .edges
+        .get(&syn_added.index)
+        .is_some_and(|m| m.summary.contains("-> f_2")));
+    assert!(!scene.edges.iter().any(|e| e.diff == "removed"));
+
+    // Refresh patch retains diff/impact on dense edge specs.
+    let overlay_ctx = CanvasOverlayContext {
+        impact: Some(&impact),
+        isolate_cone: Some(&iso),
+        ..Default::default()
+    };
+    let patch = compute_canvas_selection_patch(
+        &view,
+        &rendered.plan_nodes,
+        &rendered.plan_frames,
+        &rendered.pairs,
+        &overlay_ctx,
+    );
+    refresh_dense_scene_for_patch(
+        &mut scene,
+        &rendered.pairs,
+        &rendered.node_keys,
+        &patch,
+        &overlay_ctx,
+    );
+    assert!(scene
+        .edges
+        .iter()
+        .any(|e| e.index == 1 && e.diff == "added"));
+
+    // Semantic hub node metadata and progressive LOD + witness display.
+    let sem_meta = meta.nodes.get(&0).expect("semantic node meta");
+    assert_eq!(sem_meta.symbol_kind, "contract");
+    assert!(rendered.dense_node_htmls[0].contains("data-semantic=\"true\""));
+    assert!(note(&view).contains("Progressive LOD (overview)"));
+    let cut_html = cycle_cut_hints_html(&view);
+    assert!(cut_html.contains("<strong>Cycle witness</strong>:"));
+    assert!(cut_html.contains("src/f_1.php"));
+
+    // P0 #2: portal extras route via valid actions and never emit unhandled "graph-map-symbol".
+    let spec = DenseNodeExtraSpec {
+        index: 1,
+        x: 100.0,
+        y: 100.0,
+        portal_out: vec![2],
+        ..Default::default()
+    };
+    let portal = render_dense_node_extras_for_mounted(&view, &spec, None);
+    assert!(
+        portal.contains("data-action=\"graph-map-node\""),
+        "{portal}"
+    );
+    assert!(!portal.contains("graph-map-symbol"), "{portal}");
+    let mut scen_view = view.clone();
+    scen_view["mode"] = json!("scenario");
+    let scen_portal = render_dense_node_extras_for_mounted(&scen_view, &spec, None);
+    assert!(
+        scen_portal.contains("data-action=\"graph-map-scenario-open\""),
+        "{scen_portal}"
+    );
+    assert!(!scen_portal.contains("graph-map-symbol"), "{scen_portal}");
+}
+
+#[test]
+fn pinned_wires_detours_synthetic_gutters_and_clean_modal_lens_selection() {
+    // Horizontally overlapping cards route around box interiors instead of crossing straight through.
+    let overlap_path = route_pinned_wire_path((10.0, 120.0), (50.0, 120.0), 0.0, 0.0, false);
+    assert!(overlap_path.contains(" C"), "{overlap_path}");
+    assert_ne!(
+        route_pinned_wire_path((10.0, 120.0), (260.0, 120.0), 0.0, 0.0, true),
+        route_pinned_wire_path((10.0, 120.0), (260.0, 120.0), 0.0, 0.0, false)
+    );
+
+    // synthetic_edge_path expands beyond 5 lane slots and stays below top folder header (>= 44.0).
+    let placed = vec![
+        Placed {
+            x: 10.0,
+            y: 120.0,
+            layer: Some(0),
+            cycle: false,
+        },
+        Placed {
+            x: 200.0,
+            y: 120.0,
+            layer: Some(1),
+            cycle: false,
+        },
+        Placed {
+            x: 390.0,
+            y: 120.0,
+            layer: Some(2),
+            cycle: false,
+        },
+    ];
+    let slot1 = synthetic_edge_path(0, 2, &placed, 1);
+    let slot7 = synthetic_edge_path(0, 2, &placed, 7);
+    assert_ne!(slot1, slot7);
+    let top_placed = vec![
+        Placed {
+            x: 10.0,
+            y: 30.0,
+            layer: Some(0),
+            cycle: false,
+        },
+        Placed {
+            x: 200.0,
+            y: 30.0,
+            layer: Some(1),
+            cycle: false,
+        },
+        Placed {
+            x: 390.0,
+            y: 30.0,
+            layer: Some(2),
+            cycle: false,
+        },
+    ];
+    let top_slot = synthetic_edge_path(0, 2, &top_placed, 1);
+    let ctrl_y: f64 = top_slot
+        .split(',')
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        ctrl_y >= 44.0,
+        "expected control y >= 44.0, got {ctrl_y} in {top_slot}"
+    );
+
+    assert_eq!(
+        active_modal_lens(&json!({"lens_tests": true}), &json!({})),
+        "tests"
+    );
+    assert_eq!(
+        active_modal_lens(&json!({"lens_runs": true}), &json!({})),
+        "runs"
+    );
+    assert_eq!(
+        active_modal_lens(&json!({}), &json!({"mode": "patterns"})),
+        "architecture"
+    );
+    assert_eq!(
+        active_modal_lens(&json!({"target": "commit:abc1234"}), &json!({})),
+        "changes"
+    );
+    assert_eq!(
+        active_modal_lens(&json!({}), &json!({"mode": "map"})),
+        "dependencies"
+    );
+}

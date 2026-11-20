@@ -816,26 +816,7 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
     } else if let Some(title) = hit_opt.as_ref().and_then(|hit| hit.get_attribute("title")) {
         title
     } else if let Some(node) = matched_node {
-        let name = m::text(node, "name");
-        let file = node["file"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                (m::yes(&node["symbol"]) && view["mode"] == "file")
-                    .then(|| view["scope"].as_str())
-                    .flatten()
-            })
-            .unwrap_or("");
-        let line = node["line"].as_u64().unwrap_or(0);
-        let sym_kind = node["kind"].as_str().filter(|s| !s.is_empty());
-        match (name.is_empty(), file.is_empty(), line > 0, sym_kind) {
-            (false, false, true, Some(k)) => format!("{name} ({k}) · {file}:{line}"),
-            (false, false, true, None) => format!("{name} · {file}:{line}"),
-            (false, false, false, Some(k)) => format!("{name} ({k}) · {file}"),
-            (false, false, false, None) => format!("{name} · {file}"),
-            (false, true, _, Some(k)) => format!("{name} ({k})"),
-            _ => label.clone(),
-        }
+        format_node_explain_subject(node, &view, &label)
     } else {
         label.clone()
     };
@@ -1843,6 +1824,29 @@ fn is_horizontal_rule(line: &str) -> bool {
             || t.bytes().all(|b| b == b'_'))
 }
 
+pub(crate) fn format_node_explain_subject(node: &V, view: &V, fallback: &str) -> String {
+    let name = m::text(node, "name");
+    let file = node["file"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            (m::yes(&node["symbol"]) && view["mode"] == "file")
+                .then(|| view["scope"].as_str())
+                .flatten()
+        })
+        .unwrap_or("");
+    let line = node["line"].as_u64().unwrap_or(0);
+    let sym_kind = node["kind"].as_str().filter(|s| !s.is_empty());
+    match (name.is_empty(), file.is_empty(), line > 0, sym_kind) {
+        (false, false, true, Some(k)) => format!("{name} ({k}) · {file}:{line}"),
+        (false, false, true, None) => format!("{name} · {file}:{line}"),
+        (false, false, false, Some(k)) => format!("{name} ({k}) · {file}"),
+        (false, false, false, None) => format!("{name} · {file}"),
+        (false, true, _, Some(k)) => format!("{name} ({k})"),
+        _ => fallback.to_owned(),
+    }
+}
+
 /// Renders assistant Markdown into XSS-safe HTML using `app.css` classes (zero
 /// inline hex colors). Handles incremental/streaming replies including unclosed
 /// fenced code blocks gracefully.
@@ -2457,5 +2461,43 @@ Streaming <script>alert(1)</script> [bad](javascript:alert(1)) [docs](https://ex
             bounded["uses"][0]["path"],
             json!("src/mod_0/very_long_component_name_0.rs")
         );
+    }
+
+    #[test]
+    fn expected_project_prefers_scoped_service_and_dense_node_evidence_carries_location() {
+        let sys_scope = GraphTargetScope::SystemService {
+            project_id: "svc-b".to_owned(),
+            config_path: "system.yaml".to_owned(),
+            service_id: "svc-b".to_owned(),
+            services: vec![],
+            run_id: None,
+            run_title: None,
+            launches: vec![],
+        };
+        assert_eq!(
+            expected_project_for_canvas("graph-map-canvas", Some(&sys_scope), &json!({})),
+            "svc-b"
+        );
+        assert_eq!(
+            expected_project_for_canvas(
+                "graph-map-canvas",
+                None,
+                &json!({"context": {"project": "svc-c"}})
+            ),
+            "svc-c"
+        );
+
+        let subj = format_node_explain_subject(
+            &json!({"name": "issue", "kind": "method", "file": "src/Auth/Token.php", "line": 42}),
+            &json!({"mode": "map"}),
+            "fallback",
+        );
+        assert_eq!(subj, "issue (method) · src/Auth/Token.php:42");
+        let file_mode_subj = format_node_explain_subject(
+            &json!({"name": "check", "symbol": true, "line": 17}),
+            &json!({"mode": "file", "scope": "src/Auth/Guard.php"}),
+            "fallback",
+        );
+        assert_eq!(file_mode_subj, "check · src/Auth/Guard.php:17");
     }
 }

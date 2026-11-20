@@ -1862,4 +1862,42 @@ mod tests {
         let changed = build_layouts_cached(&many, Some("sha6"));
         assert!(!Rc::ptr_eq(&first, &changed));
     }
+
+    #[test]
+    fn dock_window_prescroll_cache_refs_and_aspect_ratio_contracts() {
+        assert_eq!(commit_dock_window_range(80, 360.0, 360.0), (0, 80));
+        assert_eq!(commit_dock_window_range(120, 0.0, 360.0), (0, 46));
+        assert_eq!(
+            commit_dock_window_range(120, (119 * ROW_HEIGHT) as f64, 360.0),
+            (101, 120)
+        );
+        assert_eq!(scroll_top_for_commit_row(119, 0.0, 360.0), Some(3960.0));
+        assert_eq!(scroll_top_for_commit_row(0, 500.0, 360.0), Some(0.0));
+        assert_eq!(scroll_top_for_commit_row(2, 0.0, 360.0), None);
+
+        let base = vec![json!({
+            "commit": "sha1",
+            "short": "sha1",
+            "subject": "Base",
+            "parents": [],
+            "refs": [{"name": "main", "kind": "head"}],
+            "target": "commit:sha1",
+        })];
+        let refs_updated = vec![json!({
+            "commit": "sha1",
+            "short": "sha1",
+            "subject": "Base",
+            "parents": [],
+            "refs": [{"name": "main", "kind": "head"}, {"name": "v1.0", "kind": "tag"}],
+            "target": "commit:sha1",
+        })];
+        let a = build_layouts_cached(&base, Some("sha1"));
+        let b = build_layouts_cached(&refs_updated, Some("sha1"));
+        assert!(!Rc::ptr_eq(&a, &b));
+
+        assert!(a[0]
+            .rail_svg
+            .contains("preserveAspectRatio=\"xMidYMid meet\""));
+        assert!(!a[0].rail_svg.contains("preserveAspectRatio=\"none\""));
+    }
 }
