@@ -68,6 +68,17 @@ pub fn focus_system_graph_workspace() {
 /// Switches either `Services` (`surface == "services"`) or `Changes` (`surface == "changes"`)
 /// from the cross-service topology canvas into a member service's (or `__system__`'s) code map.
 pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Option<&str>) {
+    drill_down_service_target(surface, service_id, focus_path, None);
+}
+
+/// Switches `Services` or `Changes` into a member service's embedded code map and focuses
+/// an optional file path + symbol target (`symbol_fqn`, short symbol, or `symbol_id`).
+pub fn drill_down_service_target(
+    surface: &str,
+    service_id: &str,
+    focus_path: Option<&str>,
+    focus_symbol: Option<&str>,
+) {
     let project = dom::value("system-project");
     let config = dom::value("system-config");
     if service_id.is_empty() {
@@ -101,7 +112,11 @@ pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Optio
         // A file is selected in the picture that is open here, not in a
         // window over it.
         if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
-            crate::graph_map::focus_system_file(crate::graph_map::SystemEmbeddedKind::Change, path);
+            crate::graph_map::focus_system_target(
+                crate::graph_map::SystemEmbeddedKind::Change,
+                path,
+                focus_symbol,
+            );
         }
     } else {
         m::set("system-member-selected", json!(service_id));
@@ -126,7 +141,11 @@ pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Optio
             crate::graph::sync_embedded_progress_for_surface("system-member-graph", st);
         }
         if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
-            crate::graph_map::focus_system_file(crate::graph_map::SystemEmbeddedKind::Member, path);
+            crate::graph_map::focus_system_target(
+                crate::graph_map::SystemEmbeddedKind::Member,
+                path,
+                focus_symbol,
+            );
         }
     }
 }
@@ -473,7 +492,8 @@ pub fn build_changes_overlay(
     }
 
     // Prefer wave-0 root seeds (`reason` selected/contract_provider or path len 1)
-    // from `plan.impact`; `plan.context.services` lists all downstream participants.
+    // from `plan.impact`, then explicit `plan.selected` / checked UI `plan_seeds`;
+    // only fall back to `plan.context.services` when no root seeds were specified.
     let mut seeds: Vec<String> = m::array(&run_doc["plan"]["impact"])
         .into_iter()
         .filter(|entry| {
@@ -486,9 +506,28 @@ pub fn build_changes_overlay(
         .filter(|s| !s.is_empty())
         .collect();
     if seeds.is_empty() {
+        seeds = m::array(&run_doc["plan"]["selected"])
+            .into_iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+    }
+    if seeds.is_empty() && !plan_seeds.is_empty() {
+        seeds = plan_seeds.to_vec();
+    }
+    if seeds.is_empty() {
         seeds = m::array(&run_doc["plan"]["context"]["services"])
             .into_iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
             .collect();
     }
     let unopened = if run_doc["cross_service_unopened"].is_array() {
@@ -510,7 +549,7 @@ pub fn build_changes_overlay(
     json!({
         "stage": stage,
         "run_id": run_id,
-        "seed_services": if seeds.is_empty() { plan_seeds } else { &seeds },
+        "seed_services": seeds,
         "depth": run_doc["plan"]["depth"].as_u64().unwrap_or(depth),
         "changed_contracts": parsed_contracts,
         "step_states": V::Object(step_states),

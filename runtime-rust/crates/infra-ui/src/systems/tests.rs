@@ -573,6 +573,36 @@ mod display_tests {
         });
         let impact_overlay = build_changes_overlay(&impact_run_doc, false, &[], 32, "");
         assert_eq!(impact_overlay["seed_services"], json!(["billing"]));
+
+        // When `plan.impact` has no root seeds, explicit `plan.selected` and UI `plan_seeds`
+        // take precedence over full `plan.context.services`.
+        let selected_run_doc = json!({
+            "id": "run-44",
+            "active": false,
+            "plan": {
+                "depth": 2,
+                "selected": ["orders"],
+                "context": { "services": ["billing", "orders", "gateway"] },
+                "impact": [
+                    { "service": "gateway", "reason": "potential_consumer", "path": ["orders", "gateway"] }
+                ]
+            }
+        });
+        let selected_overlay =
+            build_changes_overlay(&selected_run_doc, false, &["fallback-ui".to_owned()], 2, "");
+        assert_eq!(selected_overlay["seed_services"], json!(["orders"]));
+
+        let no_selected_doc = json!({
+            "id": "run-45",
+            "active": false,
+            "plan": {
+                "depth": 2,
+                "context": { "services": ["billing", "orders", "gateway"] }
+            }
+        });
+        let ui_seed_overlay =
+            build_changes_overlay(&no_selected_doc, false, &["billing".to_owned()], 2, "");
+        assert_eq!(ui_seed_overlay["seed_services"], json!(["billing"]));
     }
     #[test]
     fn receipt_changed_files_deduplicates_report_and_evidence_paths() {
@@ -1177,6 +1207,43 @@ mod display_tests {
         assert_eq!(
             system_permissions_panel_state(&run_doc),
             (false, String::new())
+        );
+
+        // inspect-system-file-graph extracts symbol target priority cleanly.
+        assert_eq!(
+            extract_system_file_symbol(&json!({
+                "service": "web",
+                "path": "src/a.rs",
+                "symbol_fqn": "src/a.rs::Foo::bar",
+                "symbol": "bar",
+                "from_symbols": ["OrdersClient::place"],
+                "symbol_id": "sym:1"
+            }))
+            .as_deref(),
+            Some("src/a.rs::Foo::bar")
+        );
+        assert_eq!(
+            extract_system_file_symbol(&json!({
+                "service": "web",
+                "path": "src/a.rs",
+                "from_symbols": ["OrdersClient::place"],
+                "symbol_id": "sym:1"
+            }))
+            .as_deref(),
+            Some("OrdersClient::place")
+        );
+        assert_eq!(
+            extract_system_file_symbol(&json!({
+                "service": "web",
+                "path": "src/a.rs",
+                "symbol_id": "sym:1"
+            }))
+            .as_deref(),
+            Some("sym:1")
+        );
+        assert_eq!(
+            extract_system_file_symbol(&json!({"service": "web", "path": "src/a.rs"})),
+            None
         );
     }
 }
