@@ -7,9 +7,9 @@ mod tests;
 #[allow(unused_imports)]
 pub use catalog_map::{
     adopt_sidebar_project, aggregate_graphs_pill, build_changes_overlay, catalog_autoload,
-    drill_down_service_map, focus_system_graph_workspace, leave_systems_view,
-    monotonic_service_graph_status, reset_system_project, switch_changes_to_topology,
-    switch_services_to_topology,
+    drill_down_service_map, drill_down_service_target, focus_system_graph_workspace,
+    leave_systems_view, monotonic_service_graph_status, reset_system_project,
+    switch_changes_to_topology, switch_services_to_topology,
 };
 pub use editor::{add_service, edit_field, editor_open};
 pub(crate) use runs::read as read_system_run;
@@ -738,10 +738,11 @@ pub async fn event(
             }
         }
         "inspect-system-file-graph" => {
-            // The file of a receipt is shown in the code map of its service
+            // The file (and optional symbol) is shown in the code map of its service
             // that is embedded in this view, and the view is brought to it.
             let svc = m::text(payload, "service");
             let path = m::text(payload, "path");
+            let symbol = extract_system_file_symbol(payload);
             let is_changes_view = m::read(|s| s.view == "system-changes");
             if !svc.is_empty() && !path.is_empty() {
                 let surf = if is_changes_view {
@@ -749,7 +750,7 @@ pub async fn event(
                 } else {
                     "services"
                 };
-                drill_down_service_map(surf, &svc, Some(&path));
+                drill_down_service_target(surf, &svc, Some(&path), symbol.as_deref());
                 focus_system_graph_workspace();
             }
         }
@@ -833,6 +834,28 @@ pub async fn event(
         _ => return false,
     }
     true
+}
+
+pub(super) fn extract_system_file_symbol(payload: &V) -> Option<String> {
+    ["symbol_fqn", "symbol"]
+        .into_iter()
+        .map(|k| m::text(payload, k))
+        .find(|s| !s.is_empty())
+        .or_else(|| {
+            m::array(&payload["from_symbols"])
+                .into_iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .next()
+        })
+        .or_else(|| {
+            let sid = m::text(payload, "symbol_id");
+            (!sid.is_empty()).then_some(sid)
+        })
 }
 
 #[cfg(test)]

@@ -1208,5 +1208,42 @@ mod display_tests {
             system_permissions_panel_state(&run_doc),
             (false, String::new())
         );
+
+        // inspect-system-file-graph extracts symbol target priority cleanly.
+        assert_eq!(
+            extract_system_file_symbol(&json!({
+                "service": "web",
+                "path": "src/a.rs",
+                "symbol_fqn": "src/a.rs::Foo::bar",
+                "symbol": "bar",
+                "from_symbols": ["OrdersClient::place"],
+                "symbol_id": "sym:1"
+            }))
+            .as_deref(),
+            Some("src/a.rs::Foo::bar")
+        );
+        assert_eq!(
+            extract_system_file_symbol(&json!({
+                "service": "web",
+                "path": "src/a.rs",
+                "from_symbols": ["OrdersClient::place"],
+                "symbol_id": "sym:1"
+            }))
+            .as_deref(),
+            Some("OrdersClient::place")
+        );
+        assert_eq!(
+            extract_system_file_symbol(&json!({
+                "service": "web",
+                "path": "src/a.rs",
+                "symbol_id": "sym:1"
+            }))
+            .as_deref(),
+            Some("sym:1")
+        );
+        assert_eq!(
+            extract_system_file_symbol(&json!({"service": "web", "path": "src/a.rs"})),
+            None
+        );
     }
 }

@@ -68,6 +68,17 @@ pub fn focus_system_graph_workspace() {
 /// Switches either `Services` (`surface == "services"`) or `Changes` (`surface == "changes"`)
 /// from the cross-service topology canvas into a member service's (or `__system__`'s) code map.
 pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Option<&str>) {
+    drill_down_service_target(surface, service_id, focus_path, None);
+}
+
+/// Switches `Services` or `Changes` into a member service's embedded code map and focuses
+/// an optional file path + symbol target (`symbol_fqn`, short symbol, or `symbol_id`).
+pub fn drill_down_service_target(
+    surface: &str,
+    service_id: &str,
+    focus_path: Option<&str>,
+    focus_symbol: Option<&str>,
+) {
     let project = dom::value("system-project");
     let config = dom::value("system-config");
     if service_id.is_empty() {
@@ -101,7 +112,11 @@ pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Optio
         // A file is selected in the picture that is open here, not in a
         // window over it.
         if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
-            crate::graph_map::focus_system_file(crate::graph_map::SystemEmbeddedKind::Change, path);
+            crate::graph_map::focus_system_target(
+                crate::graph_map::SystemEmbeddedKind::Change,
+                path,
+                focus_symbol,
+            );
         }
     } else {
         m::set("system-member-selected", json!(service_id));
@@ -126,7 +141,11 @@ pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Optio
             crate::graph::sync_embedded_progress_for_surface("system-member-graph", st);
         }
         if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
-            crate::graph_map::focus_system_file(crate::graph_map::SystemEmbeddedKind::Member, path);
+            crate::graph_map::focus_system_target(
+                crate::graph_map::SystemEmbeddedKind::Member,
+                path,
+                focus_symbol,
+            );
         }
     }
 }
