@@ -1024,9 +1024,13 @@ use surfaces::active_modal_lens;
 #[allow(unused_imports)]
 use surfaces::apply_click_action;
 #[allow(unused_imports)]
+use surfaces::apply_modal_lens_switch;
+#[allow(unused_imports)]
 use surfaces::apply_node_patch_to_el;
 #[allow(unused_imports)]
 use surfaces::apply_surface_camera;
+#[allow(unused_imports)]
+use surfaces::apply_surface_history_snapshot;
 #[allow(unused_imports)]
 use surfaces::apply_surface_live_focus;
 #[allow(unused_imports)]
@@ -1052,6 +1056,8 @@ use surfaces::caller_rank;
 use surfaces::changes_count_of;
 #[allow(unused_imports)]
 use surfaces::choose;
+#[allow(unused_imports)]
+use surfaces::clear_lens_submodes;
 #[allow(unused_imports)]
 use surfaces::clear_surface_drag_suppress;
 #[allow(unused_imports)]
@@ -1191,6 +1197,8 @@ pub(crate) use surfaces::show_non_destructive_stale_banner;
 use surfaces::side_tabs_html;
 #[allow(unused_imports)]
 use surfaces::side_top_html;
+#[allow(unused_imports)]
+use surfaces::snapshot_opt_changed_scope;
 #[allow(unused_imports)]
 use surfaces::store_surface_plan_cache;
 #[allow(unused_imports)]

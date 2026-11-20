@@ -1175,6 +1175,100 @@ pub(in crate::graph_map) fn switch_surface_to_service_file(
     save_surface_state(surface, &next_state);
     true
 }
+
+/// Clears sub-mode precedence keys so switching top-level modal lens tabs does
+/// not leave `build_scoped_map_path` trapped in an earlier cycle, pattern,
+/// scenario, traced/followed path, isolation, or pagination offset.
+pub(in crate::graph_map) fn clear_lens_submodes(state: &mut V) {
+    let taken = std::mem::replace(state, V::Null);
+    let mut cleared = unfollowed(taken);
+    cleared["traced_path"] = V::Null;
+    cleared["isolate_active"] = json!(false);
+    cleared["offset"] = json!(0);
+    *state = cleared;
+}
+
+/// Applies top-level modal lens selection (`dependencies`, `changes`,
+/// `architecture`, `tests`, `runs`) onto `state`, returning `true` if `lens`
+/// is recognized.
+pub(in crate::graph_map) fn apply_modal_lens_switch(state: &mut V, lens: &str) -> bool {
+    match lens {
+        "dependencies" => {
+            clear_lens_submodes(state);
+            state["target"] = json!("");
+            state["compare_base"] = V::Null;
+            state["run_id"] = V::Null;
+            state["history"] = json!(false);
+            state["patterns"] = json!(false);
+            state["modules"] = json!(false);
+            state["lens_tests"] = json!(false);
+            state["lens_runs"] = json!(false);
+            state["failing"] = json!([]);
+            state["side_tab"] = json!("details");
+            true
+        }
+        "changes" => {
+            clear_lens_submodes(state);
+            state["history"] = json!(false);
+            state["patterns"] = json!(false);
+            state["modules"] = json!(false);
+            state["lens_tests"] = json!(false);
+            state["lens_runs"] = json!(false);
+            state["failing"] = json!([]);
+            state["side_tab"] = json!("changes");
+            if m::text(state, "target").is_empty() {
+                state["target"] = json!("work");
+            }
+            true
+        }
+        "architecture" => {
+            clear_lens_submodes(state);
+            state["target"] = json!("");
+            state["compare_base"] = V::Null;
+            state["run_id"] = V::Null;
+            state["history"] = json!(false);
+            state["patterns"] = json!(true);
+            state["lens_tests"] = json!(false);
+            state["lens_runs"] = json!(false);
+            state["failing"] = json!([]);
+            state["side_tab"] = json!("analysis");
+            true
+        }
+        "tests" => {
+            clear_lens_submodes(state);
+            state["history"] = json!(false);
+            state["patterns"] = json!(false);
+            state["modules"] = json!(false);
+            state["lens_tests"] = json!(true);
+            state["lens_runs"] = json!(false);
+            state["compare_base"] = V::Null;
+            state["run_id"] = V::Null;
+            state["side_tab"] = json!("analysis");
+            if m::text(state, "target").is_empty() {
+                state["target"] = json!("work");
+            }
+            true
+        }
+        "runs" => {
+            clear_lens_submodes(state);
+            state["target"] = json!("");
+            state["compare_base"] = V::Null;
+            state["lens_runs"] = json!(true);
+            // `active_modal_lens` maps `history=1` to `"runs"`, and when `target`
+            // is empty, `history=1` is the backend query flag that populates
+            // `history_side(view)` in the Analysis tab instead of a plain map.
+            state["history"] = json!(true);
+            state["patterns"] = json!(false);
+            state["modules"] = json!(false);
+            state["lens_tests"] = json!(false);
+            state["failing"] = json!([]);
+            state["side_tab"] = json!("analysis");
+            true
+        }
+        _ => false,
+    }
+}
+
 pub async fn event(
     kind: &str,
     id: &str,
@@ -1710,83 +1804,19 @@ pub async fn event(
         }
         (
             "click",
-            "graph-map-lens-dependencies"
+            id @ ("graph-map-lens-dependencies"
             | "graph-map-lens-changes"
             | "graph-map-lens-architecture"
             | "graph-map-lens-tests"
-            | "graph-map-lens-runs",
+            | "graph-map-lens-runs"),
             _,
         ) => {
             let lens = id.strip_prefix("graph-map-lens-").unwrap_or("dependencies");
-            match lens {
-                "dependencies" => {
-                    state["target"] = json!("");
-                    state["compare_base"] = V::Null;
-                    state["run_id"] = V::Null;
-                    state["history"] = json!(false);
-                    state["patterns"] = json!(false);
-                    state["modules"] = json!(false);
-                    state["lens_tests"] = json!(false);
-                    state["lens_runs"] = json!(false);
-                    state["failing"] = json!([]);
-                    state["side_tab"] = json!("details");
-                    chosen = true;
-                }
-                "changes" => {
-                    state["history"] = json!(false);
-                    state["patterns"] = json!(false);
-                    state["modules"] = json!(false);
-                    state["lens_tests"] = json!(false);
-                    state["lens_runs"] = json!(false);
-                    state["failing"] = json!([]);
-                    state["side_tab"] = json!("changes");
-                    if m::text(&state, "target").is_empty() {
-                        state["target"] = json!("work");
-                    }
-                    chosen = true;
-                }
-                "architecture" => {
-                    state["target"] = json!("");
-                    state["compare_base"] = V::Null;
-                    state["run_id"] = V::Null;
-                    state["history"] = json!(false);
-                    state["patterns"] = json!(true);
-                    state["lens_tests"] = json!(false);
-                    state["lens_runs"] = json!(false);
-                    state["failing"] = json!([]);
-                    state["side_tab"] = json!("analysis");
-                    dom::save(PATTERNS, Some("1"));
-                    chosen = true;
-                }
-                "tests" => {
-                    state["history"] = json!(false);
-                    state["patterns"] = json!(false);
-                    state["modules"] = json!(false);
-                    state["lens_tests"] = json!(true);
-                    state["lens_runs"] = json!(false);
-                    state["compare_base"] = V::Null;
-                    state["run_id"] = V::Null;
-                    state["side_tab"] = json!("analysis");
-                    if m::text(&state, "target").is_empty() {
-                        state["target"] = json!("work");
-                    }
-                    chosen = true;
-                }
-                "runs" => {
-                    state["target"] = json!("");
-                    state["compare_base"] = V::Null;
-                    state["lens_runs"] = json!(true);
-                    state["history"] = json!(true);
-                    state["patterns"] = json!(false);
-                    state["modules"] = json!(false);
-                    state["lens_tests"] = json!(false);
-                    state["failing"] = json!([]);
-                    state["side_tab"] = json!("analysis");
-                    chosen = true;
-                }
-                _ => {}
-            }
+            chosen = apply_modal_lens_switch(&mut state, lens);
             if chosen {
+                if lens == "architecture" {
+                    dom::save(PATTERNS, Some("1"));
+                }
                 sync_modal_lens_controls_from_state(&state);
             }
         }
@@ -2031,6 +2061,9 @@ pub async fn event(
         }
         ("change", "graph-map-history", _) => {
             state["history"] = json!(checked);
+            if !checked {
+                state["lens_runs"] = json!(false);
+            }
         }
         ("change", "graph-map-notests", _) => {
             // The choice is the viewer's and holds for the next map too.

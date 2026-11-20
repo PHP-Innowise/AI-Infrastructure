@@ -367,39 +367,7 @@ pub(in crate::graph_map) fn navigate_surface_history(
     let prev_certain = m::yes(&state["certain"]);
     let prev_no_incoming = m::yes(&state["no_incoming"]);
     if let Some(snap) = snapshot_opt {
-        for key in [
-            "focus",
-            "scope",
-            "target",
-            "compare_base",
-            "run_id",
-            "launch",
-            "patterns",
-            "modules",
-            "history",
-            "lens_tests",
-            "lens_runs",
-            "failing",
-            "side_tab",
-            "isolate_active",
-            "isolate_depth",
-            "traced_path",
-            "filter",
-            "whole",
-            "notests",
-            "certain",
-            "no_incoming",
-            "cone",
-            "spreads",
-            "out",
-            "into",
-            "cycle",
-            "pattern",
-        ] {
-            if !snap[key].is_null() {
-                state[key] = snap[key].clone();
-            }
-        }
+        apply_surface_history_snapshot(&mut state, &snap);
     } else {
         state["focus"] = json!(new_focus);
         state["scope"] = json!(new_scope);
@@ -455,10 +423,89 @@ pub(in crate::graph_map) fn navigate_surface_history(
     true
 }
 
+/// Restores navigation-snapshot fields onto `state`, resetting nullable and
+/// optional fields whenever `snap` explicitly recorded `null` or omitted them.
+pub(in crate::graph_map) fn apply_surface_history_snapshot(state: &mut V, snap: &V) {
+    for key in ["focus", "scope", "target", "filter", "follow", "side"] {
+        state[key] = json!(m::text(snap, key));
+    }
+    state["side_tab"] = json!(match m::text(snap, "side_tab").as_str() {
+        k @ ("changes" | "analysis") => k,
+        _ => "details",
+    });
+    for key in [
+        "compare_base",
+        "run_id",
+        "launch",
+        "compare_launch",
+        "agent",
+        "traced_path",
+        "cone",
+        "pick",
+        "cycle",
+        "cycle_base",
+        "cycle_return",
+        "pattern",
+        "pattern_return",
+        "scenario",
+        "scenario_return",
+        "test_path_return",
+    ] {
+        state[key] = snap[key].clone();
+    }
+    for key in [
+        "patterns",
+        "modules",
+        "history",
+        "lens_tests",
+        "lens_runs",
+        "isolate_active",
+        "whole",
+        "notests",
+        "certain",
+        "no_incoming",
+        "shared",
+    ] {
+        state[key] = json!(m::yes(&snap[key]));
+    }
+    state["isolate_depth"] = json!(snap["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3));
+    state["scenario_skip"] = json!(snap["scenario_skip"].as_u64().unwrap_or(0));
+    state["offset"] = json!(snap["offset"].as_u64().unwrap_or(0));
+    for key in [
+        "failing", "out", "into", "spread", "spreads", "path", "skip",
+    ] {
+        state[key] = if snap[key].is_array() {
+            snap[key].clone()
+        } else {
+            json!([])
+        };
+    }
+}
+
 pub(in crate::graph_map) fn snapshot_opt_changed_scope(next: &V, prev: &V) -> bool {
     m::text(next, "scope") != m::text(prev, "scope")
+        || m::text(next, "target") != m::text(prev, "target")
+        || m::text(next, "compare_base") != m::text(prev, "compare_base")
+        || m::text(next, "run_id") != m::text(prev, "run_id")
+        || m::text(next, "launch") != m::text(prev, "launch")
+        || m::text(next, "follow") != m::text(prev, "follow")
         || m::array(&next["failing"]) != m::array(&prev["failing"])
+        || m::array(&next["out"]) != m::array(&prev["out"])
+        || m::array(&next["into"]) != m::array(&prev["into"])
+        || m::array(&next["spread"]) != m::array(&prev["spread"])
+        || m::array(&next["path"]) != m::array(&prev["path"])
         || m::yes(&next["lens_tests"]) != m::yes(&prev["lens_tests"])
         || m::yes(&next["lens_runs"]) != m::yes(&prev["lens_runs"])
-        || m::text(next, "compare_base") != m::text(prev, "compare_base")
+        || m::yes(&next["whole"]) != m::yes(&prev["whole"])
+        || m::yes(&next["shared"]) != m::yes(&prev["shared"])
+        || m::yes(&next["isolate_active"]) != m::yes(&prev["isolate_active"])
+        || next["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3)
+            != prev["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3)
+        || next["offset"].as_u64().unwrap_or(0) != prev["offset"].as_u64().unwrap_or(0)
+        || next["scenario_skip"].as_u64().unwrap_or(0)
+            != prev["scenario_skip"].as_u64().unwrap_or(0)
+        || next["cycle"] != prev["cycle"]
+        || next["cycle_base"] != prev["cycle_base"]
+        || next["pattern"] != prev["pattern"]
+        || next["scenario"] != prev["scenario"]
 }

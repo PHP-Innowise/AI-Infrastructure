@@ -9987,3 +9987,163 @@ fn pinned_wires_detours_synthetic_gutters_and_clean_modal_lens_selection() {
     );
     assert!(note(&json!({"mode": "map", "lod": "crate"})).contains("Progressive LOD (crate)"));
 }
+
+#[test]
+fn modal_lens_switch_clears_submode_precedence_and_history_snapshot_restores_nulls() {
+    for lens in ["dependencies", "changes", "architecture", "tests", "runs"] {
+        let mut st = json!({
+            "target": "commit:deadbeef",
+            "compare_base": "main",
+            "run_id": "sysrun-9",
+            "cycle": "src/CycleA.php",
+            "cycle_return": {"target": "work"},
+            "cycle_base": {"place": "src/CycleA.php", "revision": "abc123"},
+            "pattern": "Factory",
+            "pattern_return": {"target": ""},
+            "scenario": "src/Entry.php",
+            "scenario_return": {"target": ""},
+            "scenario_skip": 4,
+            "shared": true,
+            "path": ["src/A.php", "src/B.php"],
+            "test_path_return": {"target": "work"},
+            "traced_path": {"from": "src/A.php", "to": "src/B.php"},
+            "isolate_active": true,
+            "isolate_depth": 2,
+            "offset": 50,
+            "follow": "src/A.php",
+            "out": ["src/B.php"],
+            "into": ["src/C.php"],
+            "side": "into",
+            "skip": [1, 2],
+            "history": true,
+            "patterns": true,
+            "modules": true,
+            "lens_tests": true,
+            "lens_runs": true,
+            "failing": ["tests/OrderTest.php"]
+        });
+        assert!(apply_modal_lens_switch(&mut st, lens));
+        assert!(st["cycle"].is_null(), "{lens}: cycle should clear");
+        assert!(
+            st["cycle_base"].is_null(),
+            "{lens}: cycle_base should clear"
+        );
+        assert!(st["pattern"].is_null(), "{lens}: pattern should clear");
+        assert!(st["scenario"].is_null(), "{lens}: scenario should clear");
+        assert_eq!(st["scenario_skip"], json!(0), "{lens}");
+        assert_eq!(st["shared"], json!(false), "{lens}");
+        assert_eq!(st["path"], json!([]), "{lens}");
+        assert!(
+            st["traced_path"].is_null(),
+            "{lens}: traced_path should clear"
+        );
+        assert_eq!(st["isolate_active"], json!(false), "{lens}");
+        assert_eq!(st["offset"], json!(0), "{lens}");
+        assert_eq!(st["follow"], json!(""), "{lens}");
+
+        let url = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &st, false);
+        assert!(
+            !url.contains("cycle=")
+                && !url.contains("pattern=")
+                && !url.contains("scenario=")
+                && !url.contains("shared=")
+                && !url.contains("path=")
+                && !url.contains("depth=")
+                && !url.contains("offset=")
+                && !url.contains("follow="),
+            "lens={lens} URL retained stale submode precedence: {url}"
+        );
+        assert_eq!(active_modal_lens(&st, &json!({})), lens);
+    }
+
+    assert!(!apply_modal_lens_switch(&mut json!({}), "unknown"));
+
+    // Snapshot restore must overwrite non-null/active state when snap holds null or omits optional keys.
+    let initial_snap = json!({
+        "focus": "",
+        "scope": "",
+        "target": "",
+        "compare_base": null,
+        "run_id": null,
+        "launch": null,
+        "traced_path": null,
+        "cycle": null,
+        "cycle_base": null,
+        "pattern": null,
+        "side_tab": "details",
+        "patterns": false,
+        "history": false,
+    });
+    let active_state = json!({
+        "focus": "src/CycleA.php",
+        "scope": "src",
+        "target": "work",
+        "compare_base": "main",
+        "run_id": "run-7",
+        "launch": "2",
+        "traced_path": {"from": "a", "to": "b"},
+        "cycle": "src/CycleA.php",
+        "cycle_base": {"place": "src/CycleA.php", "revision": "abc123"},
+        "pattern": "Factory",
+        "scenario": "src/Entry.php",
+        "scenario_skip": 3,
+        "shared": true,
+        "path": ["src/A.php", "src/B.php"],
+        "isolate_active": true,
+        "isolate_depth": 3,
+        "offset": 25,
+        "follow": "src/CycleA.php",
+        "out": ["src/B.php"],
+        "into": ["src/C.php"],
+        "spread": ["src"],
+        "failing": ["tests/OrderTest.php"],
+        "lens_tests": true,
+        "lens_runs": true,
+        "patterns": true,
+        "modules": true,
+        "history": true,
+        "whole": true,
+        "notests": true,
+        "certain": true,
+        "no_incoming": true,
+        "side_tab": "analysis",
+    });
+    let mut restored = active_state.clone();
+    apply_surface_history_snapshot(&mut restored, &initial_snap);
+    assert_eq!(restored["focus"], json!(""));
+    assert_eq!(restored["scope"], json!(""));
+    assert_eq!(restored["target"], json!(""));
+    assert!(restored["compare_base"].is_null());
+    assert!(restored["run_id"].is_null());
+    assert!(restored["launch"].is_null());
+    assert!(restored["traced_path"].is_null());
+    assert!(restored["cycle"].is_null());
+    assert!(restored["cycle_base"].is_null());
+    assert!(restored["pattern"].is_null());
+    assert!(restored["scenario"].is_null());
+    assert_eq!(restored["scenario_skip"], json!(0));
+    assert_eq!(restored["shared"], json!(false));
+    assert_eq!(restored["path"], json!([]));
+    assert_eq!(restored["isolate_active"], json!(false));
+    assert_eq!(restored["isolate_depth"], json!(2));
+    assert_eq!(restored["offset"], json!(0));
+    assert_eq!(restored["follow"], json!(""));
+    assert_eq!(restored["out"], json!([]));
+    assert_eq!(restored["into"], json!([]));
+    assert_eq!(restored["spread"], json!([]));
+    assert_eq!(restored["failing"], json!([]));
+    assert_eq!(restored["lens_tests"], json!(false));
+    assert_eq!(restored["lens_runs"], json!(false));
+    assert_eq!(restored["modules"], json!(false));
+    assert_eq!(restored["whole"], json!(false));
+    assert_eq!(restored["notests"], json!(false));
+    assert_eq!(restored["certain"], json!(false));
+    assert_eq!(restored["no_incoming"], json!(false));
+    assert_eq!(restored["side_tab"], json!("details"));
+
+    // Leaving a cycle/pattern/isolated state back to a clean snapshot must trigger map reload.
+    let mut cycle_only = initial_snap.clone();
+    cycle_only["cycle"] = json!("src/CycleA.php");
+    assert!(snapshot_opt_changed_scope(&restored, &cycle_only));
+    assert!(!snapshot_opt_changed_scope(&restored, &initial_snap));
+}

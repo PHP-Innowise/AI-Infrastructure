@@ -186,11 +186,12 @@ pub(crate) use embedded::{
 pub(crate) use history::focused_dense_hit_for_canvas;
 #[allow(unused_imports)]
 pub(super) use history::{
-    can_undo_pins, current_dense_hover, navigate_surface_history, nudge_surface_node_pin,
-    push_pin_undo_snapshot, record_surface_history, set_dense_hover, snapshot_opt_changed_scope,
-    surface_history_trail_html, sync_history_and_pin_controls, sync_modal_lens_controls_from_state,
-    undo_surface_pins, unpin_surface_node, update_surface_active_camera, LAST_DENSE_HOVER,
-    SURFACE_NAV_EPOCHS, SURFACE_NAV_HISTORY, SURFACE_NAV_SNAPSHOTS, SURFACE_PIN_UNDO,
+    apply_surface_history_snapshot, can_undo_pins, current_dense_hover, navigate_surface_history,
+    nudge_surface_node_pin, push_pin_undo_snapshot, record_surface_history, set_dense_hover,
+    snapshot_opt_changed_scope, surface_history_trail_html, sync_history_and_pin_controls,
+    sync_modal_lens_controls_from_state, undo_surface_pins, unpin_surface_node,
+    update_surface_active_camera, LAST_DENSE_HOVER, SURFACE_NAV_EPOCHS, SURFACE_NAV_HISTORY,
+    SURFACE_NAV_SNAPSHOTS, SURFACE_PIN_UNDO,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -223,8 +224,9 @@ pub(crate) use interactions::{handle_system_change, handle_system_click, handle_
 pub use modal_lifecycle::{append_system_task_draft, event};
 #[allow(unused_imports)]
 pub(super) use modal_lifecycle::{
-    apply_click_action, attach_map_context_to_system_task, choose, load, parent, place,
-    reconcile_view_state, render, set_surface_attrs, switch_surface_to_service_file, ClickOutcome,
+    apply_click_action, apply_modal_lens_switch, attach_map_context_to_system_task, choose,
+    clear_lens_submodes, load, parent, place, reconcile_view_state, render, set_surface_attrs,
+    switch_surface_to_service_file, ClickOutcome,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
