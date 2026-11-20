@@ -1348,6 +1348,7 @@ pub fn canvas_with_overlays(
                     explain_payload: json!({"from": nodes[from]["path"], "to": nodes[to]["path"]}),
                     from_index: Some(from),
                     to_index: Some(to),
+                    ..Default::default()
                 },
             );
             dense_edges.push(graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
@@ -1672,6 +1673,7 @@ pub fn canvas_with_overlays(
                 graph_viewport::canvas2d::DenseNodeMeta {
                     explain_kind: "node".to_owned(),
                     explain_payload: node["path"].clone(),
+                    ..Default::default()
                 },
             );
             let on_traced = overlay.path_nodes.is_some_and(|pn| pn.contains(&index));
