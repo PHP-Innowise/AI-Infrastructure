@@ -677,85 +677,84 @@ fn pan_to_keep_rect_in_view(
     true
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct SysNavEntry {
-    focus: String,
-    selected_edge: V,
-    pan_x: f64,
-    pan_y: f64,
-    scale: f64,
+fn sys_nav_entry_from(state: &V, cam: &Camera) -> graph_viewport::CameraSelectionEntry {
+    let focus = m::text(state, "focus");
+    let edge = &state["selected_edge"];
+    let target = json!({
+        "focus": focus,
+        "selected_edge": edge,
+    })
+    .to_string();
+    let (key, label) = if edge.is_object() {
+        let f = m::text(edge, "from");
+        let t = m::text(edge, "to");
+        (format!("edge:{f}->{t}"), format!("{f} → {t}"))
+    } else {
+        (format!("node:{focus}"), focus.clone())
+    };
+    graph_viewport::CameraSelectionEntry {
+        key,
+        label,
+        target,
+        cam: cam.viewport_cam(),
+    }
 }
 
-#[derive(Default)]
-struct SysNavHistory {
-    entries: Vec<SysNavEntry>,
-    cursor: usize,
-}
-
-impl SysNavHistory {
-    fn push(&mut self, entry: SysNavEntry) {
-        if let Some(cur) = self.entries.get(self.cursor) {
-            if cur.focus == entry.focus && cur.selected_edge == entry.selected_edge {
-                return;
-            }
-        }
-        if !self.entries.is_empty() && self.cursor + 1 < self.entries.len() {
-            self.entries.truncate(self.cursor + 1);
-        }
-        self.entries.push(entry);
-        if self.entries.len() > 32 {
-            let drain = self.entries.len() - 32;
-            self.entries.drain(0..drain);
-        }
-        self.cursor = self.entries.len().saturating_sub(1);
-    }
-
-    fn can_back(&self) -> bool {
-        self.cursor > 0 && !self.entries.is_empty()
-    }
-
-    fn can_forward(&self) -> bool {
-        self.cursor + 1 < self.entries.len()
-    }
-
-    fn step_back(&mut self) -> Option<SysNavEntry> {
-        if !self.can_back() {
-            return None;
-        }
-        self.cursor -= 1;
-        self.entries.get(self.cursor).cloned()
-    }
-
-    fn step_forward(&mut self) -> Option<SysNavEntry> {
-        if !self.can_forward() {
-            return None;
-        }
-        self.cursor += 1;
-        self.entries.get(self.cursor).cloned()
-    }
+fn parse_sys_nav_entry(entry: &graph_viewport::CameraSelectionEntry) -> (String, V, f64, f64, f64) {
+    let parsed: V = serde_json::from_str(&entry.target).unwrap_or(V::Null);
+    let focus = parsed["focus"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| entry.key.strip_prefix("node:").unwrap_or("").to_owned());
+    let selected_edge = if parsed["selected_edge"].is_object() {
+        parsed["selected_edge"].clone()
+    } else {
+        V::Null
+    };
+    (
+        focus,
+        selected_edge,
+        entry.cam.tx,
+        entry.cam.ty,
+        entry.cam.scale,
+    )
 }
 
 thread_local! {
     static SYS_WAVE_PLAYING: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
     static SYS_HOVER_HIT: RefCell<HashMap<&'static str, Option<(u8, usize)>>> = RefCell::new(HashMap::new());
-    static SYS_NAV_HISTORY: RefCell<HashMap<&'static str, SysNavHistory>> = RefCell::new(HashMap::new());
+    static SYS_NAV_HISTORY: RefCell<HashMap<&'static str, graph_viewport::CameraSelectionHistory>> =
+        RefCell::new(HashMap::new());
 }
 
 fn push_sys_nav_history(surface: SysMapSurface, state: &V, cam: &Camera) {
-    let entry = SysNavEntry {
-        focus: m::text(state, "focus"),
-        selected_edge: state["selected_edge"].clone(),
-        pan_x: cam.pan_x,
-        pan_y: cam.pan_y,
-        scale: cam.scale,
-    };
+    let entry = sys_nav_entry_from(state, cam);
     SYS_NAV_HISTORY.with(|h| {
-        h.borrow_mut().entry(surface.id).or_default().push(entry);
+        h.borrow_mut()
+            .entry(surface.id)
+            .or_insert_with(|| graph_viewport::CameraSelectionHistory::new(32))
+            .push(entry);
     });
+}
+
+fn canvas_has_empty_plane(canvas_id: &str) -> bool {
+    dom::get(canvas_id).is_some_and(|c| {
+        c.query_selector(".graph-map-plane[data-empty=\"true\"]")
+            .ok()
+            .flatten()
+            .is_some()
+    })
 }
 
 fn apply_camera(surface: SysMapSurface, cam: &Camera) {
     let zoom_id = format!("{}-zoom-level", surface.id_prefix);
+    if canvas_has_empty_plane(surface.canvas_id) {
+        dom::attr(surface.canvas_id, "data-scale", "1.0000");
+        dom::attr(surface.canvas_id, "data-lod", "near");
+        dom::text(&zoom_id, "100%");
+        sync_system_radar(surface, cam);
+        return;
+    }
     let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(220.0));
     let _ = graph_viewport::apply_transform_3d_by_id(
         surface.canvas_id,
@@ -1463,6 +1462,14 @@ pub fn normalize_map_doc(raw: &V, catalog: &V, graph_status: &V, state: &V) -> V
     expand_unfolded_nodes(&out, state)
 }
 
+fn is_child_node_kind(kind: &str) -> bool {
+    matches!(kind, "contract" | "capability" | "source" | "more")
+}
+
+const UNFOLD_CAP_LIMIT: usize = 6;
+const UNFOLD_CONTRACT_LIMIT: usize = 8;
+const UNFOLD_SOURCE_LIMIT: usize = 6;
+
 fn expand_unfolded_nodes(doc: &V, state: &V) -> V {
     let whole = m::yes(&state["whole"]);
     let spread_set: BTreeSet<String> = m::array(&state["spread"])
@@ -1474,23 +1481,52 @@ fn expand_unfolded_nodes(doc: &V, state: &V) -> V {
     }
 
     let base_nodes = m::array(&doc["nodes"]);
-    // If server already emitted real child contract/capability/source nodes (ignoring synthetic __unmatched__ placeholders), keep them.
-    if base_nodes.iter().any(|n| {
-        !node_id(n).starts_with("__unmatched__:")
-            && !m::yes(&n["unmatched"])
-            && matches!(
-                n["kind"].as_str(),
-                Some("contract" | "capability" | "source")
-            )
-    }) {
-        return doc.clone();
-    }
-
-    let mut nodes = base_nodes.clone();
-    let mut edges = m::array(&doc["edges"]);
+    let mut existing_ids: BTreeSet<String> = BTreeSet::new();
+    let mut existing_by_svc_kind: BTreeMap<(String, &'static str), BTreeSet<String>> =
+        BTreeMap::new();
     let mut contract_node_by_key: BTreeMap<(String, String), String> = BTreeMap::new();
 
-    for svc in &base_nodes {
+    for n in &base_nodes {
+        let nid = node_id(n);
+        if nid.is_empty() {
+            continue;
+        }
+        existing_ids.insert(nid.clone());
+        let kind_str = n["kind"].as_str().unwrap_or("");
+        if !nid.starts_with("__unmatched__:")
+            && !m::yes(&n["unmatched"])
+            && is_child_node_kind(kind_str)
+        {
+            let parent = first_non_empty(n, &["parent_service", "parent", "service"]);
+            if !parent.is_empty() {
+                let kind_key = match kind_str {
+                    "capability" => "capability",
+                    "contract" => "contract",
+                    "source" => "source",
+                    _ => "more",
+                };
+                let label = first_non_empty(n, &["name", "label", "path", "id"]);
+                existing_by_svc_kind
+                    .entry((parent.clone(), kind_key))
+                    .or_default()
+                    .insert(label.clone());
+                if kind_key == "contract" && !label.is_empty() {
+                    contract_node_by_key.insert((parent, label), nid);
+                }
+            }
+        }
+    }
+
+    let mut nodes = base_nodes;
+    let mut edges = m::array(&doc["edges"]);
+    let mut new_nodes: Vec<V> = Vec::new();
+    let mut svc_overflow_updates: Vec<(usize, usize)> = Vec::new();
+
+    for (svc_idx, svc) in nodes.iter().enumerate() {
+        let skind = svc["kind"].as_str().unwrap_or("service");
+        if is_child_node_kind(skind) {
+            continue;
+        }
         let sid = node_id(svc);
         if sid.is_empty()
             || sid.starts_with("__unmatched__:")
@@ -1499,77 +1535,181 @@ fn expand_unfolded_nodes(doc: &V, state: &V) -> V {
         {
             continue;
         }
-        for cap in m::array(&svc["capabilities"]).into_iter().take(6) {
+
+        // Capabilities
+        let mut unique_caps: Vec<String> = Vec::new();
+        for cap in m::array(&svc["capabilities"]) {
             let cname = capability_name(&cap);
-            if cname.trim().is_empty() {
-                continue;
+            if !cname.trim().is_empty() && !unique_caps.contains(&cname) {
+                unique_caps.push(cname);
             }
-            let cid = format!("{sid}::cap::{cname}");
-            nodes.push(json!({
-                "id": cid,
-                "path": cid,
-                "service": sid,
-                "parent_service": sid,
-                "kind": "capability",
-                "name": cname,
-            }));
         }
-        for c in m::array(&svc["provides"]).into_iter().take(8) {
+        let existing_caps = existing_by_svc_kind
+            .get(&(sid.clone(), "capability"))
+            .cloned()
+            .unwrap_or_default();
+        let mut cap_slots_used = existing_caps.len();
+        let cap_total = unique_caps.len().max(cap_slots_used);
+        if cap_slots_used == 0 {
+            for cname in unique_caps.iter().take(UNFOLD_CAP_LIMIT) {
+                let cid = format!("{sid}::cap::{cname}");
+                if existing_ids.insert(cid.clone()) {
+                    new_nodes.push(json!({
+                        "id": cid,
+                        "path": cid,
+                        "service": sid,
+                        "parent_service": sid,
+                        "kind": "capability",
+                        "name": cname,
+                    }));
+                    cap_slots_used += 1;
+                }
+            }
+        }
+        let caps_more = cap_total.saturating_sub(cap_slots_used);
+
+        // Contracts (provides)
+        let mut unique_contracts: Vec<(String, V)> = Vec::new();
+        for c in m::array(&svc["provides"]) {
             let cname = contract_name(&c);
-            if cname.is_empty() {
-                continue;
+            if !cname.is_empty() && !unique_contracts.iter().any(|(n, _)| n == &cname) {
+                unique_contracts.push((cname, c));
             }
-            let ckind = normalize_contract_arrow_kind(&m::text(&c, "kind"));
-            let cid = format!("{sid}::contract::{cname}");
-            contract_node_by_key.insert((sid.clone(), cname.clone()), cid.clone());
-            nodes.push(json!({
-                "id": cid,
-                "path": cid,
-                "service": sid,
-                "parent_service": sid,
-                "kind": "contract",
-                "contract_kind": ckind,
-                "name": cname,
-                "version": m::text(&c, "version"),
-                "source": first_non_empty(&c, &["source", "schema", "path"]),
-            }));
         }
-        for src in m::array(&svc["shared_sources"]).into_iter().take(6) {
+        let existing_contracts = existing_by_svc_kind
+            .get(&(sid.clone(), "contract"))
+            .cloned()
+            .unwrap_or_default();
+        let mut contract_slots_used = existing_contracts.len();
+        let contracts_total = unique_contracts.len().max(contract_slots_used);
+        if contract_slots_used == 0 {
+            for (cname, c) in unique_contracts.iter().take(UNFOLD_CONTRACT_LIMIT) {
+                let ckind = normalize_contract_arrow_kind(&m::text(c, "kind"));
+                let cid = format!("{sid}::contract::{cname}");
+                contract_node_by_key.insert((sid.clone(), cname.clone()), cid.clone());
+                if existing_ids.insert(cid.clone()) {
+                    new_nodes.push(json!({
+                        "id": cid,
+                        "path": cid,
+                        "service": sid,
+                        "parent_service": sid,
+                        "kind": "contract",
+                        "contract_kind": ckind,
+                        "name": cname,
+                        "version": m::text(c, "version"),
+                        "source": first_non_empty(c, &["source", "schema", "path"]),
+                    }));
+                    contract_slots_used += 1;
+                }
+            }
+        }
+        let contracts_more = contracts_total.saturating_sub(contract_slots_used);
+
+        // Shared sources
+        let mut unique_sources: Vec<String> = Vec::new();
+        for src in m::array(&svc["shared_sources"]) {
             let spath = src
                 .as_str()
+                .map(str::trim)
                 .map(str::to_owned)
                 .unwrap_or_else(|| m::text(&src, "path"));
-            if spath.trim().is_empty() {
-                continue;
+            if !spath.is_empty() && !unique_sources.contains(&spath) {
+                unique_sources.push(spath);
             }
-            let cid = format!("{sid}::source::{spath}");
-            nodes.push(json!({
-                "id": cid,
-                "path": spath,
+        }
+        let existing_sources = existing_by_svc_kind
+            .get(&(sid.clone(), "source"))
+            .cloned()
+            .unwrap_or_default();
+        let mut source_slots_used = existing_sources.len();
+        let sources_total = unique_sources.len().max(source_slots_used);
+        if source_slots_used == 0 {
+            for spath in unique_sources.iter().take(UNFOLD_SOURCE_LIMIT) {
+                let cid = format!("{sid}::source::{spath}");
+                if existing_ids.insert(cid.clone()) {
+                    new_nodes.push(json!({
+                        "id": cid,
+                        "path": spath,
+                        "service": sid,
+                        "parent_service": sid,
+                        "kind": "source",
+                        "name": spath.rsplit('/').next().unwrap_or(spath),
+                    }));
+                    source_slots_used += 1;
+                }
+            }
+        }
+        let sources_more = sources_total.saturating_sub(source_slots_used);
+
+        let backend_more = svc["unfolded_more"].as_u64().unwrap_or(0) as usize;
+        let overflow = caps_more + contracts_more + sources_more + backend_more;
+        let more_id = format!("{sid}::more");
+        if overflow > 0
+            && !existing_by_svc_kind.contains_key(&(sid.clone(), "more"))
+            && existing_ids.insert(more_id.clone())
+        {
+            let mut parts = Vec::new();
+            if caps_more > 0 {
+                parts.push(format!("{caps_more} capabilities"));
+            }
+            if contracts_more > 0 {
+                parts.push(format!("{contracts_more} contracts"));
+            }
+            if sources_more > 0 {
+                parts.push(format!("{sources_more} sources"));
+            }
+            if backend_more > 0 {
+                parts.push(format!("{backend_more} items"));
+            }
+            let detail = format!(
+                "+{} hidden ({}) — click to view all",
+                overflow,
+                parts.join(", ")
+            );
+            new_nodes.push(json!({
+                "id": more_id,
+                "path": sid,
                 "service": sid,
                 "parent_service": sid,
-                "kind": "source",
-                "name": spath.rsplit('/').next().unwrap_or(&spath),
+                "kind": "more",
+                "name": format!("+{overflow} more"),
+                "detail": detail,
+                "more_count": overflow,
             }));
+            svc_overflow_updates.push((svc_idx, overflow));
         }
     }
 
+    for (svc_idx, overflow) in svc_overflow_updates {
+        if let Some(svc) = nodes.get_mut(svc_idx) {
+            svc["unfolded_truncated"] = json!(true);
+            svc["unfolded_more"] = json!(overflow);
+        }
+    }
+    nodes.extend(new_nodes);
+
+    let mut existing_edge_pairs: BTreeSet<(String, String)> = edges
+        .iter()
+        .map(|e| (m::text(e, "from"), m::text(e, "to")))
+        .collect();
     for edge in m::array(&doc["edges"]) {
         let from = m::text(&edge, "from");
         let to = m::text(&edge, "to");
         for c in m::array(&edge["contracts"]) {
             let cname = contract_name(&c);
             if let Some(cid) = contract_node_by_key.get(&(to.clone(), cname.clone())) {
-                edges.push(json!({
-                    "from": from,
-                    "to": cid,
-                    "kind": normalize_contract_arrow_kind(&m::text(&c, "kind")),
-                    "contracts": [c],
-                    "provenance": edge["provenance"],
-                    "broken_risk": edge["broken_risk"],
-                    "against": edge["against"],
-                    "child_link": true,
-                }));
+                if existing_edge_pairs.insert((from.clone(), cid.clone())) {
+                    edges.push(json!({
+                        "from": from,
+                        "to": cid,
+                        "kind": normalize_contract_arrow_kind(&m::text(&c, "kind")),
+                        "contracts": [c],
+                        "provenance": edge["provenance"],
+                        "broken_risk": edge["broken_risk"],
+                        "against": edge["against"],
+                        "child_link": true,
+                    }));
+                }
             }
         }
     }
@@ -1793,10 +1933,7 @@ pub fn find_cross_service_cycles(doc: &V) -> Vec<Vec<String>> {
     let mut service_ids = Vec::new();
     let mut id_to_idx = BTreeMap::new();
     for node in m::array(&doc["nodes"]) {
-        if matches!(
-            node["kind"].as_str(),
-            Some("contract" | "capability" | "source")
-        ) {
+        if node["kind"].as_str().is_some_and(is_child_node_kind) {
             continue;
         }
         let id = node_id(&node);
@@ -2005,10 +2142,7 @@ pub fn assign_service_layers(doc: &V) -> (BTreeMap<String, usize>, Vec<(String, 
     let mut ids = Vec::new();
 
     for n in &nodes {
-        if matches!(
-            n["kind"].as_str(),
-            Some("contract" | "capability" | "source")
-        ) {
+        if n["kind"].as_str().is_some_and(is_child_node_kind) {
             continue;
         }
         let id = node_id(n);
@@ -2103,9 +2237,7 @@ pub fn layout_system_nodes_with_pins(
 
     for n in &all_nodes {
         let kind = n["kind"].as_str().unwrap_or("service");
-        if matches!(kind, "contract" | "capability" | "source")
-            && !node_id(n).starts_with("__unmatched__:")
-        {
+        if is_child_node_kind(kind) && !node_id(n).starts_with("__unmatched__:") {
             let parent = first_non_empty(n, &["parent_service", "parent", "service"]);
             if !parent.is_empty() {
                 children_by_service
@@ -2994,7 +3126,7 @@ fn filtered_doc(doc: &V, state: &V) -> V {
                         in_adj[v].push(u);
                     }
                 }
-                let depth = state["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3) as usize;
+                let depth = state["isolate_depth"].as_u64().unwrap_or(1).clamp(1, 3) as usize;
                 let dist = graph_viewport::hop_cone_distances(
                     nodes.len(),
                     &out_adj,
@@ -3675,10 +3807,32 @@ fn render_canvas_bundle_with_layout(
                 "contract" => "C",
                 "capability" => "Cap",
                 "source" => "Src",
+                "more" => "...",
                 _ => "•",
             };
+            let title_text = if kind == "more" {
+                let d = m::text(node, "detail");
+                if d.is_empty() {
+                    name.clone()
+                } else {
+                    d
+                }
+            } else {
+                name.clone()
+            };
+            let child_payload = if kind == "more" {
+                payload_attr(&json!({
+                    "surface": surface.id,
+                    "path": parent_id,
+                    "id": parent_id,
+                    "service": parent_id,
+                    "kind": "service",
+                }))
+            } else {
+                payload.clone()
+            };
             format!(
-                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-parent=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{}{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
+                "<button type=\"button\" class=\"graph-map-node system-map-node system-map-child\" data-n=\"{}\" data-parent=\"{}\" data-kind=\"{}\" data-selected=\"{}\"{}{child_extra} style=\"left:{:.1}px;top:{:.1}px;width:{:.1}px;height:{:.1}px\" data-action=\"system-map-node\" data-payload=\"{child_payload}\" data-explain-services=\"{}\" title=\"{}\" aria-label=\"{}\"><span class=\"system-child-badge\">{}</span><span class=\"system-node-title\">{}</span></button>",
                 escape(&placed.id),
                 escape(parent_id),
                 escape(kind),
@@ -3693,8 +3847,8 @@ fn render_canvas_bundle_with_layout(
                 placed.w,
                 placed.h,
                 escape(&svc_id),
-                escape(&name),
-                escape(&name),
+                escape(&title_text),
+                escape(&title_text),
                 escape(badge),
                 escape(&name),
             )
@@ -4174,16 +4328,24 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
         return html;
     }
     if bridge["confidence"].is_object() {
-        let certain = bridge["confidence"]["certain_refs"].as_u64().unwrap_or(0);
-        let guessed = bridge["confidence"]["guessed_refs"].as_u64().unwrap_or(0);
-        let pct = (bridge["confidence"]["ratio"]
-            .as_f64()
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0)
-            * 100.0)
-            .round() as u64;
+        let conf = &bridge["confidence"];
+        let certain = conf["certain_refs"].as_u64().unwrap_or(0);
+        let guessed = conf["guessed_refs"].as_u64().unwrap_or(0);
+        let declared = conf["declared_sites"].as_u64().unwrap_or(0);
+        let discovered = conf["discovered_sites"].as_u64().unwrap_or(0);
+        let total_evidence = conf["total"]
+            .as_u64()
+            .unwrap_or(certain + guessed + declared + discovered);
+        let conf_status = m::text(conf, "status");
+        let ratio = conf["ratio"].as_f64();
+        let ratio_label = if ratio.is_none() || total_evidence == 0 || conf_status == "unverified" {
+            "Unverified (0 evidence)".to_owned()
+        } else {
+            let pct = (ratio.unwrap_or(0.0).clamp(0.0, 1.0) * 100.0).round() as u64;
+            format!("<strong>{pct}%</strong>")
+        };
         html.push_str(&format!(
-            "<p class=\"system-note system-bridge-confidence\">Link confidence: <strong>{pct}%</strong> ({certain} certain, {guessed} guessed)</p>"
+            "<p class=\"system-note system-bridge-confidence\">Link confidence: {ratio_label} ({certain} certain refs, {guessed} guessed refs, {declared} declared sites, {discovered} discovered sites)</p>"
         ));
     }
     if bridge["run_coverage"].is_object() {
@@ -4257,16 +4419,43 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
             } else {
                 ""
             };
+            let mut raw_syms: Vec<String> = Vec::new();
+            let mut first_sym_id: Option<String> = None;
+            let mut first_sym_fqn: Option<String> = None;
+            for item in m::array(&site["from_symbols"]) {
+                let name_opt = item
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        let candidate =
+                            first_non_empty(&item, &["fqn", "name", "symbol", "symbol_id"]);
+                        (!candidate.is_empty()).then_some(candidate)
+                    });
+                if let Some(sym_name) = name_opt {
+                    if first_sym_id.is_none() {
+                        let sid = first_non_empty(&item, &["symbol_id", "id"]);
+                        if !sid.is_empty() {
+                            first_sym_id = Some(sid);
+                        }
+                    }
+                    if first_sym_fqn.is_none() {
+                        let fqn = first_non_empty(&item, &["fqn"]);
+                        if !fqn.is_empty() {
+                            first_sym_fqn = Some(fqn);
+                        }
+                    }
+                    if !raw_syms.contains(&sym_name) {
+                        raw_syms.push(sym_name);
+                    }
+                }
+            }
             let syms_note = {
-                let syms = m::array(&site["from_symbols"])
+                let syms = raw_syms
                     .iter()
-                    .filter_map(|s| {
-                        s.as_str()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(escape)
-                    })
                     .take(4)
+                    .map(|s| escape(s))
                     .collect::<Vec<_>>()
                     .join(", ");
                 if syms.is_empty() {
@@ -4275,7 +4464,18 @@ pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> 
                     format!(" · via {syms}")
                 }
             };
-            let open = payload_attr(&json!({"path": path, "service": service}));
+            let mut open_obj = json!({"path": path, "service": service});
+            if !raw_syms.is_empty() {
+                open_obj["symbol"] = json!(raw_syms[0]);
+                open_obj["from_symbols"] = json!(raw_syms);
+                if let Some(sid) = first_sym_id {
+                    open_obj["symbol_id"] = json!(sid);
+                }
+                if let Some(fqn) = first_sym_fqn {
+                    open_obj["symbol_fqn"] = json!(fqn);
+                }
+            }
+            let open = payload_attr(&open_obj);
             html.push_str(&format!(
                 "<li class=\"system-bridge-site\" data-opened-by-run=\"{}\"><div><code>{}</code><div class=\"system-note\">{how}{}{reach}{syms_note}{opened_note}</div></div><button type=\"button\" class=\"button compact\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" aria-label=\"Show {} on the code map of {}\">Map</button></li>",
                 if m::yes(&site["opened_by_run"]) { "true" } else { "false" },
@@ -5978,14 +6178,17 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
         invalidate_hover_cache(surface.canvas_id);
         let has_total_nodes = !m::array(&doc["nodes"]).is_empty();
         let combined_html = if canvas_html.is_empty() {
-            if has_total_nodes {
+            let empty_inner = if has_total_nodes {
                 let clear_p = payload_attr(&json!({ "surface": surface.id }));
                 format!(
                     "<div class=\"system-empty\" role=\"status\"><p>No services match the active filters or isolation scope.</p><button type=\"button\" class=\"button compact primary\" data-action=\"system-map-clear-filters\" data-payload=\"{clear_p}\">Reset filters</button></div>"
                 )
             } else {
                 "<div class=\"system-empty\" role=\"status\"><p>No services or contracts mapped yet.</p></div>".to_owned()
-            }
+            };
+            format!(
+                "<div class=\"graph-map-plane system-map-plane\" data-empty=\"true\" style=\"--graph-pan-x:0.0px;--graph-pan-y:0.0px;--graph-scale:1.0000;width:100%;height:100%;min-height:320px;transform:none;transition:none\">{empty_inner}</div>"
+            )
         } else if radar_svg.is_empty() {
             canvas_html.clone()
         } else {
@@ -6076,6 +6279,14 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
     dom::hidden(surface.note_id, note.is_empty());
 
     set_html(surface.side_id, &render_side_html(surface, &doc, &state));
+
+    if m::array(&view_doc["nodes"]).is_empty() {
+        cam.plane_w = 0.0;
+        cam.plane_h = 0.0;
+        save_camera(surface, &cam);
+        apply_camera(surface, &cam);
+        return;
+    }
 
     let size_changed = (cam.plane_w - pw).abs() > 1.0 || (cam.plane_h - ph).abs() > 1.0;
     cam.plane_w = pw;
@@ -6524,6 +6735,7 @@ pub fn refresh_changes_map(
 pub fn focus_service_changes(service_id: &str) {
     let mut state = surface_state(SERVICES_SURFACE);
     state["focus"] = json!(service_id);
+    state["roving_focus"] = json!(service_id);
     state["selected_edge"] = V::Null;
     state["side_tab"] = json!("changes");
     save_surface_state(SERVICES_SURFACE, &state);
@@ -6531,6 +6743,61 @@ pub fn focus_service_changes(service_id: &str) {
     spawn_local(async {
         fetch_surface_changes(SERVICES_SURFACE).await;
     });
+}
+
+/// Focuses and pans a service onto the center/viewport of the System Topology map (`SERVICES_SURFACE`).
+pub fn focus_service_topology(service_id: &str) -> bool {
+    let target = service_id.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let mut state = surface_state(SERVICES_SURFACE);
+    let doc = m::data(SERVICES_SURFACE.map_key);
+    let matched_id = m::array(&doc["nodes"])
+        .into_iter()
+        .find(|n| {
+            let id = node_id(n);
+            id.eq_ignore_ascii_case(target)
+                || m::text(n, "name").eq_ignore_ascii_case(target)
+                || m::text(n, "service").eq_ignore_ascii_case(target)
+        })
+        .map(|n| node_id(&n))
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| target.to_owned());
+
+    let cam = load_camera(SERVICES_SURFACE);
+    let need_seed = SYS_NAV_HISTORY.with(|h| {
+        h.borrow()
+            .get(SERVICES_SURFACE.id)
+            .is_none_or(|nav| nav.entries().is_empty())
+    });
+    if need_seed {
+        push_sys_nav_history(SERVICES_SURFACE, &state, &cam);
+    }
+    state["focus"] = json!(matched_id);
+    state["roving_focus"] = json!(matched_id);
+    state["selected_edge"] = V::Null;
+    state["side_tab"] = json!("details");
+    save_surface_state(SERVICES_SURFACE, &state);
+    render_surface(SERVICES_SURFACE, false);
+
+    let rect_opt = SYS_DENSE_CACHE.with(|c| {
+        let g = c.borrow();
+        let entry = g.get(SERVICES_SURFACE.canvas_id)?;
+        let &idx = entry.node_index_by_id.get(&matched_id)?;
+        let n = entry.layout.nodes.get(idx)?;
+        Some((n.x, n.y, n.w, n.h))
+    });
+    let mut next_cam = load_camera(SERVICES_SURFACE);
+    if let Some((nx, ny, nw, nh)) = rect_opt {
+        let (vw, vh, measured) = viewport_size(SERVICES_SURFACE.canvas_id);
+        if measured && pan_to_keep_rect_in_view(&mut next_cam, (nx, ny, nw, nh), (vw, vh), 48.0) {
+            save_camera(SERVICES_SURFACE, &next_cam);
+            apply_camera(SERVICES_SURFACE, &next_cam);
+        }
+    }
+    push_sys_nav_history(SERVICES_SURFACE, &state, &next_cam);
+    true
 }
 
 pub fn current_context_brief() -> String {
@@ -7235,10 +7502,46 @@ fn update_sys_live_drag(
     }
 }
 
+pub fn should_ignore_canvas_pointer(
+    kind: &str,
+    in_canvas: bool,
+    in_radar: bool,
+    in_interactive: bool,
+    in_empty: bool,
+    in_map_node: bool,
+) -> bool {
+    if !in_canvas || in_radar {
+        return false;
+    }
+    if in_empty {
+        return matches!(kind, "pointerdown" | "dblclick");
+    }
+    match kind {
+        "pointerdown" => in_interactive,
+        "dblclick" => in_interactive && !in_map_node,
+        _ => false,
+    }
+}
+
 pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     let target_el = event
         .target()
         .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+    let in_interactive = target_el.as_ref().is_some_and(|el| {
+        el.closest("button, a, input, select, textarea")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    let in_empty = target_el
+        .as_ref()
+        .is_some_and(|el| el.closest(".system-empty").ok().flatten().is_some());
+    let in_map_node = target_el.as_ref().is_some_and(|el| {
+        el.closest(".system-map-node[data-n]")
+            .ok()
+            .flatten()
+            .is_some()
+    });
 
     if radar_pointer_event(kind, event, target_el.as_ref()) {
         return true;
@@ -7427,6 +7730,17 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
 
         let mut drag = graph_viewport::DragPan::from_json(&m::data(surface.drag_key));
         let drag_active = drag.active;
+
+        if should_ignore_canvas_pointer(
+            kind,
+            in_canvas,
+            in_radar,
+            in_interactive,
+            in_empty,
+            in_map_node,
+        ) {
+            return false;
+        }
 
         if kind == "dblclick" && in_canvas && !in_radar {
             if let Some(node_el) = target_el
@@ -8062,7 +8376,7 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
                 let depth = dom::value(&format!("{p}-isolate-depth"))
                     .trim()
                     .parse::<u64>()
-                    .unwrap_or(2)
+                    .unwrap_or(1)
                     .clamp(1, 3);
                 state["isolate_active"] = json!(next);
                 state["isolate_depth"] = json!(depth);
@@ -8121,7 +8435,7 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             let depth = dom::value(id)
                 .trim()
                 .parse::<u64>()
-                .unwrap_or(2)
+                .unwrap_or(1)
                 .clamp(1, 3);
             let mut state = surface_state(surface);
             state["isolate_depth"] = json!(depth);
@@ -8239,7 +8553,7 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             let need_seed = SYS_NAV_HISTORY.with(|h| {
                 h.borrow()
                     .get(surface.id)
-                    .is_none_or(|nav| nav.entries.is_empty())
+                    .is_none_or(|nav| nav.entries().is_empty())
             });
             if need_seed {
                 push_sys_nav_history(surface, &state, &cam);
@@ -8259,7 +8573,7 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             let need_seed = SYS_NAV_HISTORY.with(|h| {
                 h.borrow()
                     .get(surface.id)
-                    .is_none_or(|nav| nav.entries.is_empty())
+                    .is_none_or(|nav| nav.entries().is_empty())
             });
             if need_seed {
                 push_sys_nav_history(surface, &state, &cam);
@@ -8407,22 +8721,23 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
                 let mut map = h.borrow_mut();
                 let nav = map.get_mut(surface.id)?;
                 if back {
-                    nav.step_back()
+                    nav.back().cloned()
                 } else {
-                    nav.step_forward()
+                    nav.forward().cloned()
                 }
             });
             if let Some(entry) = entry {
+                let (focus, selected_edge, pan_x, pan_y, scale) = parse_sys_nav_entry(&entry);
                 let mut state = surface_state(surface);
-                state["focus"] = json!(entry.focus);
-                state["roving_focus"] = json!(entry.focus);
-                state["selected_edge"] = entry.selected_edge;
+                state["focus"] = json!(focus);
+                state["roving_focus"] = json!(focus);
+                state["selected_edge"] = selected_edge;
                 state["side_tab"] = json!("details");
                 save_surface_state(surface, &state);
                 let mut cam = load_camera(surface);
-                cam.pan_x = entry.pan_x;
-                cam.pan_y = entry.pan_y;
-                cam.scale = entry.scale;
+                cam.pan_x = pan_x;
+                cam.pan_y = pan_y;
+                cam.scale = scale;
                 cam.fit_mode = false;
                 save_camera(surface, &cam);
                 render_surface(surface, false);
@@ -9757,26 +10072,27 @@ mod tests {
             "visible event kind remains drawn"
         );
 
-        // SysNavHistory back/forward & pause wave button coverage.
-        let mut nav = SysNavHistory::default();
-        nav.push(SysNavEntry {
-            focus: "api".to_owned(),
-            selected_edge: V::Null,
-            pan_x: 0.0,
-            pan_y: 0.0,
-            scale: 1.0,
-        });
-        nav.push(SysNavEntry {
-            focus: "orders".to_owned(),
-            selected_edge: V::Null,
-            pan_x: 10.0,
-            pan_y: 20.0,
-            scale: 1.2,
-        });
+        // CameraSelectionHistory back/forward & pause wave button coverage.
+        let mut nav = graph_viewport::CameraSelectionHistory::new(32);
+        nav.push(sys_nav_entry_from(
+            &json!({ "focus": "api" }),
+            &Camera::default(),
+        ));
+        nav.push(sys_nav_entry_from(
+            &json!({ "focus": "orders" }),
+            &Camera {
+                pan_x: 10.0,
+                pan_y: 20.0,
+                scale: 1.2,
+                ..Camera::default()
+            },
+        ));
         assert!(nav.can_back());
-        assert_eq!(nav.step_back().unwrap().focus, "api");
+        let (back_focus, ..) = parse_sys_nav_entry(nav.back().unwrap());
+        assert_eq!(back_focus, "api");
         assert!(nav.can_forward());
-        assert_eq!(nav.step_forward().unwrap().focus, "orders");
+        let (fwd_focus, ..) = parse_sys_nav_entry(nav.forward().unwrap());
+        assert_eq!(fwd_focus, "orders");
 
         SYS_WAVE_PLAYING.with(|w| {
             w.borrow_mut().insert(CHANGES_SURFACE.id);
@@ -9798,5 +10114,145 @@ mod tests {
             w.borrow_mut().remove(CHANGES_SURFACE.id);
         });
         assert!(scrubber.contains("system-map-wave-pause"));
+    }
+
+    #[test]
+    fn bridge_confidence_null_and_from_symbols_payload_and_unfold_more_and_guards() {
+        // 1) Bridge confidence unverified when ratio is null or zero evidence + declared/discovered sites + from_symbols Map payload.
+        let bridge = json!({
+            "kind": "system_bridge",
+            "from": "web",
+            "to": "orders",
+            "confidence": {
+                "certain_refs": 0,
+                "guessed_refs": 0,
+                "declared_sites": 0,
+                "discovered_sites": 0,
+                "total": 0,
+                "status": "unverified",
+                "ratio": null
+            },
+            "consumer": {
+                "service": "web",
+                "graph": true,
+                "sites": [{
+                    "path": "src/OrdersClient.ts",
+                    "found": true,
+                    "from_symbols": ["OrdersClient::place", "OrdersClient::cancel"],
+                    "contracts": ["orders-api"]
+                }],
+                "more": 0
+            },
+            "provider": {
+                "service": "orders",
+                "graph": true,
+                "sites": [],
+                "more": 0,
+                "cut": false
+            }
+        });
+        let html = bridge_html(SERVICES_SURFACE, "web", "orders", &bridge);
+        assert!(html.contains("Unverified (0 evidence)"), "{html}");
+        assert!(
+            html.contains("0 declared sites, 0 discovered sites"),
+            "{html}"
+        );
+        let payloads = crate::test_support::payloads(&html, "inspect-system-file-graph");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["symbol"], json!("OrdersClient::place"));
+        assert_eq!(
+            payloads[0]["from_symbols"],
+            json!(["OrdersClient::place", "OrdersClient::cancel"])
+        );
+
+        let mut verified_bridge = bridge;
+        verified_bridge["confidence"] = json!({
+            "certain_refs": 2,
+            "guessed_refs": 1,
+            "declared_sites": 3,
+            "discovered_sites": 2,
+            "ratio": 0.625
+        });
+        let verified_html = bridge_html(SERVICES_SURFACE, "web", "orders", &verified_bridge);
+        assert!(verified_html.contains("63%"));
+        assert!(verified_html
+            .contains("2 certain refs, 1 guessed refs, 3 declared sites, 2 discovered sites"));
+
+        // 2) expand_unfolded_nodes avoids early exit when another service already has detail nodes,
+        //    and emits visible `+N more` badge node when capabilities/contracts/sources exceed caps.
+        let multi_doc = json!({
+            "nodes": [
+                {
+                    "id": "api",
+                    "name": "API",
+                    "kind": "service",
+                    "capabilities": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
+                    "provides": (0..10).map(|i| json!({"name": format!("rpc.{i}"), "kind": "http"})).collect::<Vec<_>>(),
+                    "shared_sources": ["a.md", "b.md", "c.md", "d.md", "e.md", "f.md", "g.md"]
+                },
+                {
+                    "id": "orders",
+                    "name": "Orders",
+                    "kind": "service"
+                },
+                {
+                    "id": "orders::contract::c1",
+                    "parent_service": "orders",
+                    "service": "orders",
+                    "kind": "contract",
+                    "name": "c1"
+                }
+            ],
+            "edges": []
+        });
+        let unfolded = expand_unfolded_nodes(&multi_doc, &json!({ "whole": true }));
+        let u_nodes = unfolded["nodes"].as_array().unwrap();
+        assert!(
+            u_nodes
+                .iter()
+                .any(|n| n["parent_service"] == "api" && n["kind"] == "contract"),
+            "must unfold api contracts even though orders already had a contract node"
+        );
+        let more_node = u_nodes
+            .iter()
+            .find(|n| n["id"] == "api::more")
+            .expect("+N more badge node for truncated capabilities/contracts/sources");
+        // 2 extra caps + 2 extra contracts + 1 extra source = 5 more
+        assert_eq!(more_node["name"], "+5 more");
+        assert_eq!(more_node["more_count"], 5);
+        let canvas_html = render_canvas_html_with_layout(
+            SERVICES_SURFACE,
+            &unfolded,
+            &json!({ "whole": true }),
+            &layout_system_nodes(&unfolded, false),
+        );
+        assert!(canvas_html.contains("+5 more"), "{canvas_html}");
+
+        // 3) pointer guard rejects interactive elements and empty-state buttons/boxes.
+        assert!(should_ignore_canvas_pointer(
+            "pointerdown",
+            true,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(should_ignore_canvas_pointer(
+            "pointerdown",
+            true,
+            false,
+            false,
+            true,
+            false
+        ));
+        assert!(should_ignore_canvas_pointer(
+            "dblclick", true, false, false, true, false
+        ));
+        assert!(should_ignore_canvas_pointer(
+            "dblclick", true, false, true, false, false
+        ));
+        assert!(!should_ignore_canvas_pointer(
+            "dblclick", true, false, true, false, true
+        ));
     }
 }

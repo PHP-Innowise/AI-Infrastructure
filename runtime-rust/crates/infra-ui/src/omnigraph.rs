@@ -2027,8 +2027,14 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
                 esc(&label),
             ));
             if !file_path.is_empty() {
+                let sym_id = sym_node
+                    .and_then(|s| s["symbol_id"].as_str().or_else(|| s["id"].as_str()))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(fqn.as_str());
                 let jump_payload = json!({
                     "path": file_path,
+                    "symbol_id": sym_id,
                     "fqn": fqn,
                     "symbol": label,
                 })
@@ -2333,6 +2339,11 @@ fn render_file_node_inspector_html(graph: &V, file: &V) -> String {
 
 fn render_symbol_node_inspector_html(graph: &V, symbol: &V) -> String {
     let sid = symbol_node_id(symbol);
+    let sym_id = symbol["symbol_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&sid);
     let fqn = symbol["fqn"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -2403,6 +2414,7 @@ fn render_symbol_node_inspector_html(graph: &V, symbol: &V) -> String {
     if !file_path.is_empty() {
         let jump_payload = json!({
             "path": file_path,
+            "symbol_id": sym_id,
             "fqn": fqn,
             "symbol": title,
         })
@@ -2818,49 +2830,66 @@ fn pan_to_keep_rect_in_view(
     true
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct OmniNavEntry {
+fn omni_nav_entry_from(
     selected_id: Option<String>,
-    branch: String,
-    cam: OmnigraphCamera,
+    branch: &str,
+    cam: &OmnigraphCamera,
+) -> graph_viewport::CameraSelectionEntry {
+    let sel = selected_id.unwrap_or_default();
+    let branch_clean = if branch.trim().is_empty() {
+        "main"
+    } else {
+        branch.trim()
+    };
+    let target = json!({
+        "selected_id": if sel.is_empty() { V::Null } else { json!(sel) },
+        "branch": branch_clean,
+    })
+    .to_string();
+    let label = if sel.is_empty() {
+        "Overview".to_owned()
+    } else {
+        sel.clone()
+    };
+    graph_viewport::CameraSelectionEntry {
+        key: format!("{branch_clean}::{sel}"),
+        label,
+        target,
+        cam: cam.to_viewport(),
+    }
 }
 
-#[derive(Default)]
-struct OmniNavHistory {
-    entries: Vec<OmniNavEntry>,
-    cursor: usize,
-}
-
-impl OmniNavHistory {
-    fn push(&mut self, entry: OmniNavEntry) {
-        if let Some(cur) = self.entries.get(self.cursor) {
-            if cur.selected_id == entry.selected_id && cur.branch == entry.branch {
-                return;
-            }
-        }
-        if !self.entries.is_empty() && self.cursor + 1 < self.entries.len() {
-            self.entries.truncate(self.cursor + 1);
-        }
-        self.entries.push(entry);
-        if self.entries.len() > 32 {
-            let drain = self.entries.len() - 32;
-            self.entries.drain(0..drain);
-        }
-        self.cursor = self.entries.len().saturating_sub(1);
-    }
-
-    fn can_back(&self) -> bool {
-        self.cursor > 0 && !self.entries.is_empty()
-    }
-
-    fn can_forward(&self) -> bool {
-        self.cursor + 1 < self.entries.len()
-    }
+fn parse_omni_nav_entry(
+    entry: &graph_viewport::CameraSelectionEntry,
+) -> (Option<String>, String, OmnigraphCamera) {
+    let parsed: V = serde_json::from_str(&entry.target).unwrap_or(V::Null);
+    let selected_id = parsed["selected_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let branch = parsed["branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main")
+        .to_owned();
+    let cur_cam = load_camera();
+    let cam = OmnigraphCamera {
+        scale: entry.cam.scale,
+        pan_x: entry.cam.tx,
+        pan_y: entry.cam.ty,
+        plane_w: cur_cam.plane_w,
+        plane_h: cur_cam.plane_h,
+        fit_mode: false,
+    };
+    (selected_id, branch, cam)
 }
 
 thread_local! {
     static OMNI_HOVER_HIT: RefCell<Option<Option<(u8, usize)>>> = const { RefCell::new(None) };
-    static OMNI_NAV_HISTORY: RefCell<OmniNavHistory> = RefCell::new(OmniNavHistory::default());
+    static OMNI_NAV_HISTORY: RefCell<graph_viewport::CameraSelectionHistory> =
+        RefCell::new(graph_viewport::CameraSelectionHistory::new(32));
 }
 
 fn clear_omni_hover_state(cam: &OmnigraphCamera) {
@@ -2913,7 +2942,59 @@ fn viewport_size() -> (f64, f64) {
     (w, h)
 }
 
+fn sync_omni_radar(cam: &OmnigraphCamera) {
+    let Some(radar) = dom::get("omnigraph-canvas-radar") else {
+        return;
+    };
+    let (vw, vh, measured) = viewport_size_measured();
+    let visible = measured
+        && cam.plane_w > 0.0
+        && cam.plane_h > 0.0
+        && graph_viewport::radar_window_rect(
+            cam.to_viewport(),
+            (vw, vh),
+            (cam.plane_w, cam.plane_h),
+        )
+        .is_some();
+    let Some(radar_view) = radar.query_selector(".omni-radar-view").ok().flatten() else {
+        dom::hide(&radar, true);
+        return;
+    };
+    if !visible {
+        dom::hide(&radar, true);
+        return;
+    }
+    if let Some((vx, vy, vw, vh)) = clamped_radar_rect(
+        cam.to_viewport(),
+        (vw, vh),
+        (cam.plane_w, cam.plane_h),
+        16.0,
+    ) {
+        let _ = radar_view.set_attribute("x", &format!("{vx:.1}"));
+        let _ = radar_view.set_attribute("y", &format!("{vy:.1}"));
+        let _ = radar_view.set_attribute("width", &format!("{vw:.1}"));
+        let _ = radar_view.set_attribute("height", &format!("{vh:.1}"));
+        dom::hide(&radar, false);
+    } else {
+        dom::hide(&radar, true);
+    }
+}
+
 fn apply_camera(cam: &OmnigraphCamera) {
+    let has_empty = dom::get("omnigraph-canvas").is_some_and(|c| {
+        c.query_selector(".graph-map-plane[data-empty=\"true\"]")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if has_empty {
+        dom::attr("omnigraph-canvas", "data-lod", "near");
+        dom::text("omni-zoom-level", "100%");
+        if let Some(radar) = dom::get("omnigraph-canvas-radar") {
+            dom::hide(&radar, true);
+        }
+        return;
+    }
     let plane_size = (cam.plane_w.max(320.0), cam.plane_h.max(240.0));
     graph_viewport::apply_transform_3d_by_id(
         "omnigraph-canvas",
@@ -2922,23 +3003,7 @@ fn apply_camera(cam: &OmnigraphCamera) {
         plane_size,
         graph_viewport::OMNIGRAPH_LOD,
     );
-    if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
-        if let Some(radar_view) = dom::get("omnigraph-canvas-radar")
-            .and_then(|r| r.query_selector(".omni-radar-view").ok().flatten())
-        {
-            if let Some((vx, vy, vw, vh)) = clamped_radar_rect(
-                cam.to_viewport(),
-                viewport_size(),
-                (cam.plane_w, cam.plane_h),
-                16.0,
-            ) {
-                let _ = radar_view.set_attribute("x", &format!("{vx:.1}"));
-                let _ = radar_view.set_attribute("y", &format!("{vy:.1}"));
-                let _ = radar_view.set_attribute("width", &format!("{vw:.1}"));
-                let _ = radar_view.set_attribute("height", &format!("{vh:.1}"));
-            }
-        }
-    }
+    sync_omni_radar(cam);
     sync_omnigraph_viewport_culling(cam);
     let hover = OMNI_HOVER_HIT.with(|h| h.borrow().flatten());
     graph_viewport::canvas2d::paint_scene("omnigraph-canvas", cam.to_viewport(), hover, true);
@@ -3043,6 +3108,10 @@ fn refit_if_visible() {
     }
 }
 
+thread_local! {
+    static OMNI_SSE_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn ensure_resize_watch() {
     graph_viewport::ensure_resize_observer(
         "omnigraph-resize-watched",
@@ -3052,12 +3121,59 @@ fn ensure_resize_watch() {
     );
 }
 
+fn on_sse_omnigraph_status(payload: &V) {
+    let ev_project = m::text(payload, "project_id");
+    let cur_project = current_project_id();
+    if !ev_project.is_empty() && !cur_project.is_empty() && ev_project != cur_project {
+        return;
+    }
+    if payload["connected"].is_boolean() {
+        hydrate_status(payload);
+    }
+    let op = m::text(payload, "operation");
+    let in_view = m::read(|s| s.view == "omnigraph");
+    let graph_changed = matches!(
+        op.as_str(),
+        "omnigraph.publish"
+            | "omnigraph.branch_act"
+            | "omnigraph.import"
+            | "omnigraph.sync_knowledge"
+            | "omnigraph.promote"
+            | "omnigraph.setup"
+    );
+    spawn_local(async move {
+        refresh_pill().await;
+        if in_view && graph_changed && m::yes(&m::data("omnigraph-status")["connected"]) {
+            refresh_graph_preserving_pages().await;
+            poll_changes(false).await;
+        }
+    });
+}
+
+fn on_sse_omnigraph_resync() {
+    let in_view = m::read(|s| s.view == "omnigraph");
+    spawn_local(async move {
+        refresh_pill().await;
+        if in_view && m::yes(&m::data("omnigraph-status")["connected"]) {
+            refresh_graph_preserving_pages().await;
+            poll_changes(false).await;
+        }
+    });
+}
+
 pub fn initialize() {
     let _ = ui_state();
     render_tabs();
     sync_pulse_toggle();
     attach_transfer_dropzone_listeners();
     ensure_resize_watch();
+    OMNI_SSE_BOUND.with(|bound| {
+        if !bound.get() {
+            bound.set(true);
+            api::on_sse("omnigraph_status", on_sse_omnigraph_status);
+            api::on_sse("resync", |_| on_sse_omnigraph_resync());
+        }
+    });
 }
 
 fn reset_pulse_cursor() {
@@ -3156,27 +3272,146 @@ pub async fn open_knowledge_atom(project_id: &str, target_atom_id: &str) {
     }
 }
 
+fn service_match_tokens(service: &str, sys_catalog: &V) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let trimmed = service.trim();
+    if trimmed.is_empty() {
+        return tokens;
+    }
+    tokens.push(trimmed.to_ascii_lowercase());
+    for svc in m::array(&sys_catalog["services"]) {
+        let sid = m::text(&svc, "id");
+        let name = m::text(&svc, "name");
+        if sid.eq_ignore_ascii_case(trimmed)
+            || (!name.is_empty() && name.eq_ignore_ascii_case(trimmed))
+        {
+            if !name.is_empty() {
+                tokens.push(name.to_ascii_lowercase());
+            }
+            for root_key in ["root", "path", "folder"] {
+                let root = m::text(&svc, root_key)
+                    .trim_matches('/')
+                    .to_ascii_lowercase();
+                if !root.is_empty() && !tokens.contains(&root) {
+                    tokens.push(root);
+                }
+            }
+        }
+    }
+    tokens
+}
+
+pub fn local_service_match_ids(graph: &V, service: &str, sys_catalog: &V) -> Vec<String> {
+    let tokens = service_match_tokens(service, sys_catalog);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let matches_any = |hay: &str| {
+        let low = hay.to_ascii_lowercase();
+        tokens.iter().any(|t| low.contains(t))
+    };
+    let mut ids = Vec::new();
+    for a in m::array(&graph["atoms"]) {
+        let aid = atom_id(&a);
+        if aid.is_empty() {
+            continue;
+        }
+        let hit = matches_any(a["title"].as_str().unwrap_or(""))
+            || matches_any(a["summary"].as_str().unwrap_or(""))
+            || m::array(&a["tags"])
+                .iter()
+                .any(|t| t.as_str().is_some_and(matches_any))
+            || m::array(&a["files"])
+                .iter()
+                .any(|f| f.as_str().is_some_and(matches_any));
+        if hit && !ids.contains(&aid) {
+            ids.push(aid);
+        }
+    }
+    for f in m::array(&graph["files"]) {
+        let fid = file_node_id(&f);
+        let path = f["path"].as_str().unwrap_or(&fid);
+        if !fid.is_empty() && matches_any(path) && !ids.contains(&fid) {
+            ids.push(fid);
+        }
+    }
+    for sym in m::array(&graph["symbols"]) {
+        let sid = symbol_node_id(&sym);
+        let path = symbol_file_path(&sym);
+        let fqn = sym["fqn"].as_str().unwrap_or(&sid);
+        if !sid.is_empty() && (matches_any(&path) || matches_any(fqn)) && !ids.contains(&sid) {
+            ids.push(sid);
+        }
+    }
+    ids
+}
+
 pub(crate) async fn open_from_system_service(service: String) {
+    let query = service.trim().to_owned();
+    // Focus/highlight matching nodes in the constellation instead of filtering
+    // `#omnigraph-search` (which hides unrelated context nodes).
     set_ui_state(|s| {
+        s["query"] = json!("");
         s["stage_tab"] = json!("constellation");
         s["drawer_tab"] = json!("inspector");
     });
+    dom::set_value("omnigraph-search", "");
+    m::set("omnigraph-search-results", V::Null);
+    dom::hidden("omnigraph-search-clear", true);
     crate::session::open_view("omnigraph", true).await;
-    let query = service.trim().to_owned();
-    if !query.is_empty() {
-        dom::set_value("omnigraph-search", &query);
-        run_search(query).await;
-        let hits = m::array(&m::data("omnigraph-search-results")["hits"]);
-        if let Some(first_id) = hits
-            .first()
-            .map(|h| atom_id(&h["atom"]))
-            .filter(|s| !s.is_empty())
-        {
-            set_ui_state(|s| s["selected_id"] = json!(first_id));
-            render_constellation();
-            render_inspector();
-            fly_to_node(&first_id);
+    if query.is_empty() {
+        return;
+    }
+
+    let project = current_project_id();
+    let st = ui_state();
+    let mut matched_ids = local_service_match_ids(
+        &m::data("omnigraph-graph"),
+        &query,
+        &m::data("system-map-catalog-cache"),
+    );
+    let search_path = format!(
+        "/api/omnigraph/search{}",
+        dom::query(&[
+            ("project_id", project),
+            ("q", query.clone()),
+            ("branch", m::text(&st, "branch")),
+            ("limit", "20".into()),
+        ])
+    );
+    if let Ok((epoch, res)) = api::scoped("omnigraph-service-focus", &search_path).await {
+        if m::current("omnigraph-service-focus", epoch) {
+            let (merged_graph, _) =
+                merge_search_subgraph_into_graph(m::data("omnigraph-graph"), &res);
+            m::set("omnigraph-graph", merged_graph);
+            for id in collect_search_hit_ids(&res) {
+                if !matched_ids.contains(&id) {
+                    matched_ids.push(id);
+                }
+            }
         }
+    }
+    let first_id = matched_ids.first().cloned();
+    set_ui_state(|s| {
+        s["highlighted_ids"] = json!(matched_ids);
+        if let Some(ref fid) = first_id {
+            s["selected_id"] = json!(fid);
+            s["focused_id"] = json!(fid);
+        }
+    });
+    if let Some(ref fid) = first_id {
+        render_studio();
+        fly_to_node(fid);
+    } else {
+        render_studio();
+        dom::text(
+            "omnigraph-status-message",
+            &format!(
+                "No Omnigraph atoms matched service '{query}' yet — showing full constellation."
+            ),
+        );
+        dom::attr("omnigraph-status-message", "data-degraded", "false");
+        dom::hidden("omnigraph-status-message", false);
     }
 }
 
@@ -3188,15 +3423,152 @@ pub fn hydrate_status(status: &V) {
     apply_status_to_chrome(status);
 }
 
+pub fn degraded_status_from_error(previous: &V, error_message: &str) -> V {
+    let mut next = if previous.is_object() {
+        previous.clone()
+    } else {
+        json!({})
+    };
+    next["connected"] = json!(false);
+    next["state"] = json!("error");
+    next["error"] = json!(error_message);
+    next
+}
+
 pub async fn refresh_pill() {
     let project = current_project_id();
     let path = format!(
         "/api/omnigraph/status{}",
         dom::query(&[("project_id", project)])
     );
-    if let Ok(status) = api::get(&path).await {
-        hydrate_status(&status);
+    match api::get(&path).await {
+        Ok(status) => hydrate_status(&status),
+        Err(e) if !e.aborted => {
+            let degraded = degraded_status_from_error(&m::data("omnigraph-status"), &e.message);
+            hydrate_status(&degraded);
+        }
+        Err(_) => {}
     }
+}
+
+pub fn studio_visibility_plan(status: &V, has_loaded_graph: bool) -> (bool, bool, Option<String>) {
+    let connected = m::yes(&status["connected"]);
+    if connected {
+        return (false, true, None);
+    }
+    let state = m::text(status, "state").to_ascii_lowercase();
+    if has_loaded_graph && state != "unconfigured" {
+        let err = m::text(status, "error");
+        let banner = if m::yes(&status["starting"])
+            || matches!(
+                state.as_str(),
+                "installing" | "starting" | "applying_schema"
+            ) {
+            "Omnigraph runtime is reconnecting — showing last loaded graph in read-only mode."
+                .to_owned()
+        } else if !err.is_empty() {
+            format!(
+                "Omnigraph offline ({err}) — showing last loaded graph. Open Connection… to reconnect."
+            )
+        } else {
+            "Omnigraph is currently offline — showing last loaded graph. Open Connection… to start or reconnect.".to_owned()
+        };
+        return (false, true, Some(banner));
+    }
+    (true, false, None)
+}
+
+pub fn local_install_copy(status: &V) -> (String, String, bool) {
+    let installed = m::yes(&status["binary_installed"]);
+    let bin_version = m::text(status, "binary_version");
+    let target_version = {
+        let tv = m::text(status, "target_version");
+        if !tv.is_empty() {
+            tv
+        } else {
+            let sv = m::text(status, "version");
+            if !sv.is_empty() {
+                sv
+            } else {
+                bin_version.clone()
+            }
+        }
+    };
+    let auto_supported = status["auto_download_supported"]
+        .as_bool()
+        .or_else(|| status["platform"]["auto_download_supported"].as_bool())
+        .unwrap_or(true);
+    let os = {
+        let p = m::text(&status["platform"], "os");
+        if p.is_empty() {
+            m::text(status, "os")
+        } else {
+            p
+        }
+    };
+    let arch = {
+        let a = m::text(&status["platform"], "arch");
+        if a.is_empty() {
+            m::text(status, "arch")
+        } else {
+            a
+        }
+    };
+    let platform_label = match (os.is_empty(), arch.is_empty()) {
+        (false, false) => format!("{os}/{arch}"),
+        (false, true) => os,
+        (true, false) => arch,
+        (true, true) => "this platform".to_owned(),
+    };
+
+    let button_label = if !auto_supported && !installed {
+        if target_version.is_empty() {
+            "Local Auto-Download Unavailable".to_owned()
+        } else {
+            format!("Local {target_version} Unavailable")
+        }
+    } else if installed {
+        if target_version.is_empty() {
+            "Reinstall Local Omnigraph".to_owned()
+        } else {
+            format!("Reinstall Local Omnigraph {target_version}")
+        }
+    } else if target_version.is_empty() {
+        "Install & Start Local Omnigraph".to_owned()
+    } else {
+        format!("Install & Start Local Omnigraph {target_version}")
+    };
+
+    let detail_text = if !auto_supported && !installed {
+        format!(
+            "Local sidecar auto-download is unavailable on {platform_label}; use Start via Docker or Connect External Server."
+        )
+    } else if !bin_version.is_empty() {
+        format!(
+            "Installed version {bin_version} ({platform_label}). Managed locally with automatic schema apply and bearer auth."
+        )
+    } else if installed {
+        format!(
+            "Local sidecar installed ({platform_label}). Managed locally with automatic schema apply and bearer auth."
+        )
+    } else if !target_version.is_empty() {
+        format!(
+            "Downloads or launches local Omnigraph {target_version} for {platform_label} with automatic schema setup and bearer auth."
+        )
+    } else {
+        format!(
+            "Downloads or launches the local sidecar for {platform_label} with automatic schema setup and bearer auth."
+        )
+    };
+    (button_label, detail_text, auto_supported)
+}
+
+fn graph_has_loaded_content(graph: &V) -> bool {
+    graph.is_object()
+        && (!m::array(&graph["atoms"]).is_empty()
+            || !m::array(&graph["branches"]).is_empty()
+            || !m::array(&graph["sessions"]).is_empty()
+            || !m::array(&graph["files"]).is_empty())
 }
 
 fn apply_status_to_chrome(status: &V) {
@@ -3260,26 +3632,34 @@ fn apply_status_to_chrome(status: &V) {
     dom::hidden("omnigraph-mcp-copy", mcp_url.is_empty());
     dom::hidden("omnigraph-apply-schema", !connected);
     dom::hidden("omnigraph-stop", !connected);
-    dom::hidden("omnigraph-onboarding", connected);
-    dom::hidden("omnigraph-studio", !connected);
+
+    let has_loaded_graph = graph_has_loaded_content(&m::data("omnigraph-graph"));
+    let (show_onboarding, show_studio, degraded_banner) =
+        studio_visibility_plan(status, has_loaded_graph);
+    dom::hidden("omnigraph-onboarding", !show_onboarding);
+    dom::hidden("omnigraph-studio", !show_studio);
+    if let Some(banner) = degraded_banner {
+        dom::text("omnigraph-status-message", &banner);
+        dom::attr("omnigraph-status-message", "data-degraded", "true");
+        dom::hidden("omnigraph-status-message", false);
+    } else if connected
+        && dom::get("omnigraph-status-message")
+            .and_then(|el| el.get_attribute("data-degraded"))
+            .as_deref()
+            == Some("true")
+    {
+        dom::attr("omnigraph-status-message", "data-degraded", "false");
+        dom::text("omnigraph-status-message", "");
+        dom::hidden("omnigraph-status-message", true);
+    }
 
     let installed = m::yes(&status["binary_installed"]);
-    let version = m::text(status, "binary_version");
+    let (btn_label, local_detail, auto_supported) = local_install_copy(status);
     dom::hidden("omnigraph-start-local", !installed || connected);
-    dom::text(
-        "omnigraph-install-start",
-        if installed {
-            "Reinstall Local Omnigraph v0.15.0"
-        } else {
-            "Install & Start Local Omnigraph v0.15.0"
-        },
-    );
-    if !version.is_empty() {
-        dom::text(
-            "omnigraph-local-detail",
-            &format!("Installed version {version}. Managed locally with automatic schema apply and bearer auth."),
-        );
-    }
+    dom::text("omnigraph-install-start", &btn_label);
+    dom::disabled("omnigraph-install-start", !auto_supported && !installed);
+    dom::disabled("omni-dlg-install", !auto_supported && !installed);
+    dom::text("omnigraph-local-detail", &local_detail);
     let docker_ok = m::yes(&status["docker_available"]);
     dom::disabled("omnigraph-start-docker", !docker_ok && !connected);
     dom::disabled("omni-dlg-start-docker", !docker_ok);
@@ -3287,7 +3667,19 @@ fn apply_status_to_chrome(status: &V) {
     dom::disabled("omnigraph-export-open", !connected);
     dom::disabled("omnigraph-import-open", !connected);
 
-    let err = m::text(status, "error");
+    let mut err = m::text(status, "error");
+    let stderr_tail = m::array(&status["stderr_tail"])
+        .into_iter()
+        .filter_map(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    if err.is_empty() && !stderr_tail.is_empty() && state == "error" {
+        err = stderr_tail.last().cloned().unwrap_or_default();
+    }
     dom::error("omnigraph-error", &err);
     dom::text(
         "omnigraph-session-note",
@@ -3350,12 +3742,14 @@ pub fn on_project_changed() {
     dom::cancel_timer("omnigraph-pulse");
     OMNI_DENSE_CACHE.with(|c| *c.borrow_mut() = None);
     OMNI_HOVER_HIT.with(|h| *h.borrow_mut() = None);
-    OMNI_NAV_HISTORY.with(|h| *h.borrow_mut() = OmniNavHistory::default());
+    OMNI_NAV_HISTORY.with(|h| h.borrow_mut().clear());
     graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
     m::set("omnigraph-graph", V::Null);
     m::set("omnigraph-diff", V::Null);
     m::set("omnigraph-search-results", V::Null);
     m::set("omnigraph-commit-detail", V::Null);
+    m::set("omnigraph-head-commit", V::Null);
+    m::set("omnigraph-workspace-changes", V::Null);
     m::set("omnigraph-positions", V::Null);
     m::set("omnigraph-raw-positions", V::Null);
     m::set("omnigraph-structure-digest", V::Null);
@@ -3511,32 +3905,48 @@ pub fn render_pagination_bar_html(graph: &V) -> (bool, String) {
     (true, html)
 }
 
-pub fn merge_graph_page(mut existing: V, page: V) -> V {
+fn merge_graph_collections(existing: &mut V, patch: &V) -> bool {
+    if !patch.is_object() {
+        return false;
+    }
     if !existing.is_object() {
-        return page;
+        *existing = json!({
+            "atoms": [],
+            "sessions": [],
+            "files": [],
+            "symbols": [],
+            "edges": [],
+            "symbol_edges": []
+        });
     }
-    if !page.is_object() {
-        return existing;
-    }
-    let merge_array = |dst_root: &mut V, src_root: &V, key: &str, id_fn: fn(&V) -> String| {
-        let mut combined = m::array(&dst_root[key]);
-        let mut seen: BTreeSet<String> = combined
-            .iter()
-            .map(id_fn)
-            .filter(|id| !id.is_empty())
-            .collect();
-        for item in m::array(&src_root[key]) {
-            let id = id_fn(&item);
-            if id.is_empty() || seen.insert(id) {
-                combined.push(item);
+    let mut changed = false;
+    let merge_array =
+        |dst_root: &mut V, src_root: &V, key: &str, id_fn: fn(&V) -> String| -> bool {
+            let incoming = m::array(&src_root[key]);
+            if incoming.is_empty() {
+                return false;
             }
-        }
-        dst_root[key] = V::Array(combined);
-    };
-    merge_array(&mut existing, &page, "atoms", atom_id);
-    merge_array(&mut existing, &page, "sessions", session_node_id);
-    merge_array(&mut existing, &page, "files", file_node_id);
-    merge_array(&mut existing, &page, "symbols", symbol_node_id);
+            let mut combined = m::array(&dst_root[key]);
+            let mut seen: BTreeSet<String> = combined
+                .iter()
+                .map(id_fn)
+                .filter(|id| !id.is_empty())
+                .collect();
+            let mut added = false;
+            for item in incoming {
+                let id = id_fn(&item);
+                if id.is_empty() || seen.insert(id) {
+                    combined.push(item);
+                    added = true;
+                }
+            }
+            dst_root[key] = V::Array(combined);
+            added
+        };
+    changed |= merge_array(existing, patch, "atoms", atom_id);
+    changed |= merge_array(existing, patch, "sessions", session_node_id);
+    changed |= merge_array(existing, patch, "files", file_node_id);
+    changed |= merge_array(existing, patch, "symbols", symbol_node_id);
 
     let edge_key = |e: &V| -> String {
         let eid = e["id"].as_str().unwrap_or("").trim();
@@ -3546,20 +3956,36 @@ pub fn merge_graph_page(mut existing: V, page: V) -> V {
         format!("{}|{}|{}", edge_from(e), edge_rel(e), edge_to(e))
     };
     for key in ["edges", "symbol_edges"] {
+        let incoming = m::array(&patch[key]);
+        if incoming.is_empty() {
+            continue;
+        }
         let mut combined = m::array(&existing[key]);
         let mut seen: BTreeSet<String> = combined
             .iter()
             .map(edge_key)
             .filter(|k| !k.is_empty())
             .collect();
-        for edge in m::array(&page[key]) {
+        for edge in incoming {
             let k = edge_key(&edge);
             if k.is_empty() || seen.insert(k) {
                 combined.push(edge);
+                changed = true;
             }
         }
         existing[key] = V::Array(combined);
     }
+    changed
+}
+
+pub fn merge_graph_page(mut existing: V, page: V) -> V {
+    if !existing.is_object() {
+        return page;
+    }
+    if !page.is_object() {
+        return existing;
+    }
+    let _ = merge_graph_collections(&mut existing, &page);
 
     for meta_key in ["total_atoms", "has_more", "truncated", "limit", "telemetry"] {
         if !page[meta_key].is_null() {
@@ -3570,6 +3996,180 @@ pub fn merge_graph_page(mut existing: V, page: V) -> V {
     // stale cursor from an earlier page does not linger on merged state.
     existing["next_cursor"] = page["next_cursor"].clone();
     existing
+}
+
+/// Merges `/api/omnigraph/search` hit subgraph & entities into the cached graph
+/// without mutating pagination cursors so search hits beyond page 1 (`limit=250`)
+/// stay visible on the constellation and selectable cleanly.
+pub fn merge_search_subgraph_into_graph(mut existing: V, search_res: &V) -> (V, bool) {
+    if !existing.is_object() || !search_res.is_object() {
+        return (existing, false);
+    }
+    let mut changed = false;
+    if search_res["subgraph"].is_object() {
+        changed |= merge_graph_collections(&mut existing, &search_res["subgraph"]);
+    }
+    let mut patch_atoms = Vec::new();
+    let mut patch_files = Vec::new();
+    let mut patch_symbols = Vec::new();
+    let mut patch_sessions = Vec::new();
+    let mut patch_edges = Vec::new();
+    let mut patch_sym_edges = Vec::new();
+
+    for hit in m::array(&search_res["hits"]) {
+        if hit["atom"].is_object() {
+            patch_atoms.push(hit["atom"].clone());
+        }
+        for f in m::array(&hit["files"]) {
+            if f.is_object() {
+                patch_files.push(f);
+            } else if let Some(s) = f.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                patch_files.push(json!({ "id": s, "path": s }));
+            }
+        }
+        for sym in m::array(&hit["symbols"]) {
+            if sym.is_object() {
+                patch_symbols.push(sym);
+            } else if let Some(s) = sym.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                patch_symbols.push(json!({ "id": s, "fqn": s }));
+            }
+        }
+        for edge in m::array(&hit["edges"]) {
+            if edge["relation"].as_str() == Some("mentions_symbol")
+                || edge["kind"].as_str() == Some("mentions_symbol")
+            {
+                patch_sym_edges.push(edge);
+            } else {
+                patch_edges.push(edge);
+            }
+        }
+        for neighbor in m::array(&hit["neighbors"]) {
+            if let Some(obj) = neighbor.as_object() {
+                let kind = obj.get("kind").and_then(V::as_str).unwrap_or("");
+                let nid = obj
+                    .get("id")
+                    .or_else(|| obj.get("node_id"))
+                    .and_then(V::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if nid.is_empty() {
+                    continue;
+                }
+                match kind {
+                    "file" => patch_files.push(json!({ "id": nid, "path": nid })),
+                    "symbol" => patch_symbols.push(json!({ "id": nid, "fqn": nid })),
+                    "session" => patch_sessions.push(json!({ "id": nid })),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let hit_patch = json!({
+        "atoms": patch_atoms,
+        "files": patch_files,
+        "symbols": patch_symbols,
+        "sessions": patch_sessions,
+        "edges": patch_edges,
+        "symbol_edges": patch_sym_edges,
+    });
+    changed |= merge_graph_collections(&mut existing, &hit_patch);
+    (existing, changed)
+}
+
+pub fn collect_search_hit_ids(res: &V) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut push_unique = |id: &str| {
+        let t = id.trim();
+        if !t.is_empty() && !ids.iter().any(|x| x == t) {
+            ids.push(t.to_owned());
+        }
+    };
+    for hit in m::array(&res["hits"]) {
+        push_unique(&atom_id(&hit["atom"]));
+        for f in m::array(&hit["files"]) {
+            if let Some(s) = f.as_str() {
+                push_unique(s);
+            } else {
+                push_unique(&file_node_id(&f));
+            }
+        }
+        for sym in m::array(&hit["symbols"]) {
+            if let Some(s) = sym.as_str() {
+                push_unique(s);
+            } else {
+                push_unique(&symbol_node_id(&sym));
+            }
+        }
+        for neighbor in m::array(&hit["neighbors"]) {
+            if let Some(nid) = neighbor
+                .as_str()
+                .or_else(|| neighbor["id"].as_str())
+                .or_else(|| neighbor["node_id"].as_str())
+            {
+                push_unique(nid);
+            }
+        }
+    }
+    if let Some(sub) = res["subgraph"].as_object() {
+        for a in sub.get("atoms").and_then(V::as_array).into_iter().flatten() {
+            push_unique(&atom_id(a));
+        }
+        for s in sub
+            .get("sessions")
+            .and_then(V::as_array)
+            .into_iter()
+            .flatten()
+        {
+            push_unique(&session_node_id(s));
+        }
+        for f in sub.get("files").and_then(V::as_array).into_iter().flatten() {
+            push_unique(&file_node_id(f));
+        }
+        for sym in sub
+            .get("symbols")
+            .and_then(V::as_array)
+            .into_iter()
+            .flatten()
+        {
+            push_unique(&symbol_node_id(sym));
+        }
+    }
+    ids
+}
+
+fn graph_head_commit_id(graph: &V, branch: &str) -> String {
+    for k in ["head_commit_id", "head_commit", "snapshot_commit_id"] {
+        if let Some(s) = graph[k].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            return s.to_owned();
+        }
+    }
+    let target_branch = branch.trim();
+    if !target_branch.is_empty() {
+        for b in m::array(&graph["branches"]) {
+            let name = b["name"].as_str().unwrap_or("").trim();
+            if name == target_branch {
+                for ck in ["head_commit_id", "head", "commit_id", "head_commit"] {
+                    if let Some(c) = b[ck].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        return c.to_owned();
+                    }
+                }
+            }
+        }
+    }
+    for c in m::array(&graph["commits"]) {
+        if target_branch.is_empty() || c["branch"].as_str().map(str::trim) == Some(target_branch) {
+            if let Some(id) = c["id"]
+                .as_str()
+                .or_else(|| c["commit_id"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return id.to_owned();
+            }
+        }
+    }
+    String::new()
 }
 
 fn graph_request_path(
@@ -3597,12 +4197,108 @@ fn graph_request_path(
     format!("/api/omnigraph/graph{}", dom::query(&params))
 }
 
+fn unwrap_scoped_doc(raw: &V, expected_project: &str, require_work_target: bool) -> Option<V> {
+    if !raw.is_object() {
+        return None;
+    }
+    if raw["data"].is_object() {
+        let proj = m::text(raw, "project");
+        let scope_key = m::text(raw, "scope_key");
+        let target = m::text(raw, "target");
+        if require_work_target && !target.is_empty() && target != "work" {
+            return None;
+        }
+        if !expected_project.is_empty() {
+            let matches_proj = proj == expected_project
+                || (!scope_key.is_empty() && scope_key == format!("project:{expected_project}"));
+            if !proj.is_empty() || !scope_key.is_empty() {
+                if !matches_proj {
+                    return None;
+                }
+            } else if let Some(key) = raw["key"].as_str() {
+                if !key.starts_with(&format!("project:{expected_project}|")) {
+                    return None;
+                }
+            }
+        }
+        return Some(raw["data"].clone());
+    }
+    if raw["files"].is_array()
+        || raw["items"].is_array()
+        || raw["edge_diffs"].is_object()
+        || raw["broken"].is_array()
+        || raw["risks"].is_array()
+        || raw["suspects"].is_array()
+    {
+        return Some(raw.clone());
+    }
+    None
+}
+
+pub fn resolve_workspace_drift_docs(project_id: &str) -> (Option<V>, Option<V>) {
+    let changes_doc = [
+        "omnigraph-workspace-changes",
+        "graph-map-changes",
+        "session-graph-changes",
+    ]
+    .iter()
+    .find_map(|key| unwrap_scoped_doc(&m::data(key), project_id, true));
+
+    let impact_doc = [
+        "omnigraph-workspace-impact",
+        "graph-map-impact",
+        "session-graph-impact",
+    ]
+    .iter()
+    .find_map(|key| unwrap_scoped_doc(&m::data(key), project_id, false));
+
+    (changes_doc, impact_doc)
+}
+
+async fn fetch_workspace_changes_for_project(project_id: String) {
+    if project_id.trim().is_empty() {
+        return;
+    }
+    let path = format!(
+        "/api/projects/{}/graph/changes?target=work",
+        dom::enc(project_id.trim())
+    );
+    if let Ok((epoch, doc)) = api::scoped("omnigraph-workspace-changes", &path).await {
+        if !m::current("omnigraph-workspace-changes", epoch) || current_project_id() != project_id {
+            return;
+        }
+        m::set(
+            "omnigraph-workspace-changes",
+            json!({
+                "project": project_id,
+                "target": "work",
+                "data": doc
+            }),
+        );
+        if m::read(|s| s.view == "omnigraph") && m::text(&ui_state(), "snapshot").trim().is_empty()
+        {
+            render_constellation();
+        }
+    }
+}
+
+fn ensure_workspace_changes_loaded(project_id: &str) {
+    let pid = project_id.trim().to_owned();
+    if pid.is_empty() || resolve_workspace_drift_docs(&pid).0.is_some() {
+        return;
+    }
+    spawn_local(async move {
+        fetch_workspace_changes_for_project(pid).await;
+    });
+}
+
 async fn refresh_graph_with_limit(limit: usize, preserve_pages: Option<usize>) {
     let project = current_project_id();
     let st = ui_state();
+    let branch = m::text(&st, "branch");
     let params = vec![
-        ("project_id", project),
-        ("branch", m::text(&st, "branch")),
+        ("project_id", project.clone()),
+        ("branch", branch.clone()),
         ("snapshot", m::text(&st, "snapshot")),
         ("kind", m::text(&st, "kind")),
         ("q", String::new()),
@@ -3615,10 +4311,15 @@ async fn refresh_graph_with_limit(limit: usize, preserve_pages: Option<usize>) {
             if preserve_pages.is_none() {
                 m::set("omnigraph-raw-positions", V::Null);
             }
+            let head = graph_head_commit_id(&graph, &branch);
+            if !head.is_empty() {
+                m::set("omnigraph-head-commit", json!(head));
+            }
             m::set("omnigraph-structure-digest", V::Null);
             m::set("omnigraph-graph", graph.clone());
             sync_branch_selectors(&graph);
             sync_session_selectors(&graph);
+            ensure_workspace_changes_loaded(&project);
             render_studio();
         }
         Err(e) if !e.aborted => dom::error("omnigraph-error", &e.message),
@@ -3705,22 +4406,12 @@ async fn run_search(query: String) {
     match api::scoped("omnigraph-search", &path).await {
         Ok((epoch, res)) if m::current("omnigraph-search", epoch) => {
             m::set("omnigraph-search-results", res.clone());
-            let mut ids = Vec::new();
-            for hit in m::array(&res["hits"]) {
-                let aid = atom_id(&hit["atom"]);
-                if !aid.is_empty() {
-                    ids.push(aid);
-                }
-                for neighbor in m::array(&hit["neighbors"]) {
-                    if let Some(nid) = neighbor
-                        .as_str()
-                        .or_else(|| neighbor["id"].as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        ids.push(nid.to_owned());
-                    }
-                }
+            let (merged_graph, changed) =
+                merge_search_subgraph_into_graph(m::data("omnigraph-graph"), &res);
+            if changed {
+                m::set("omnigraph-graph", merged_graph);
             }
+            let ids = collect_search_hit_ids(&res);
             set_ui_state(|s| {
                 s["highlighted_ids"] = json!(ids);
             });
@@ -3729,6 +4420,109 @@ async fn run_search(query: String) {
         Err(e) if !e.aborted => dom::error("omnigraph-error", &e.message),
         _ => {}
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangesPollDecision {
+    pub next_cursor: String,
+    pub next_head_commit: String,
+    pub reset: bool,
+    pub head_changed: bool,
+    pub should_refresh_graph: bool,
+    pub has_baseline: bool,
+}
+
+pub fn classify_changes_poll_response(
+    prev_head_commit: &str,
+    data: &V,
+    force: bool,
+) -> ChangesPollDecision {
+    let next_cursor = m::text(data, "cursor");
+    let next_head_commit = m::text(data, "snapshot_commit_id");
+    let reset = m::yes(&data["reset"]);
+    let head_changed = !prev_head_commit.trim().is_empty()
+        && !next_head_commit.is_empty()
+        && prev_head_commit.trim() != next_head_commit;
+    let incoming_len = m::array(&data["events"]).len();
+    let has_baseline = data["baseline"].is_object();
+    let should_refresh_graph = reset || head_changed || (!force && incoming_len > 0);
+    ChangesPollDecision {
+        next_cursor,
+        next_head_commit,
+        reset,
+        head_changed,
+        should_refresh_graph,
+        has_baseline,
+    }
+}
+
+pub fn extract_baseline_graph_patch(baseline: &V) -> Option<V> {
+    if !baseline.is_object() {
+        return None;
+    }
+    let has_collections = [
+        "atoms",
+        "sessions",
+        "files",
+        "symbols",
+        "edges",
+        "symbol_edges",
+    ]
+    .iter()
+    .any(|k| baseline[k].is_array());
+    if has_collections {
+        return Some(baseline.clone());
+    }
+    let records = m::array(&baseline["records"]);
+    if records.is_empty() {
+        return None;
+    }
+    let mut atoms = Vec::new();
+    let mut files = Vec::new();
+    let mut sessions = Vec::new();
+    let mut edges = Vec::new();
+    for rec in records {
+        let props = if rec["after"]["properties"].is_object() {
+            &rec["after"]["properties"]
+        } else if rec["properties"].is_object() {
+            &rec["properties"]
+        } else {
+            &rec
+        };
+        let etype = rec["entity_type"]["name"]
+            .as_str()
+            .or_else(|| rec["entity_type"].as_str())
+            .or_else(|| rec["kind"].as_str())
+            .unwrap_or("");
+        let kind = rec["kind"].as_str().unwrap_or("");
+        if kind == "edge" || (!edge_from(&rec).is_empty() && !edge_to(&rec).is_empty()) {
+            edges.push(rec);
+        } else if etype == "FileRef" || props["path"].is_string() && props["title"].is_null() {
+            let mut obj = props.clone();
+            if obj["id"].is_null() && rec["id"].is_string() {
+                obj["id"] = rec["id"].clone();
+            }
+            files.push(obj);
+        } else if etype == "Session" {
+            let mut obj = props.clone();
+            if obj["id"].is_null() && rec["id"].is_string() {
+                obj["id"] = rec["id"].clone();
+            }
+            sessions.push(obj);
+        } else {
+            let mut obj = props.clone();
+            if obj["id"].is_null() && rec["id"].is_string() {
+                obj["id"] = rec["id"].clone();
+            }
+            atoms.push(obj);
+        }
+    }
+    Some(json!({
+        "atoms": atoms,
+        "sessions": sessions,
+        "files": files,
+        "edges": edges,
+    }))
 }
 
 async fn poll_changes(force: bool) {
@@ -3748,25 +4542,60 @@ async fn poll_changes(force: bool) {
     );
     match api::scoped("omnigraph-changes", &path).await {
         Ok((epoch, data)) if m::current("omnigraph-changes", epoch) => {
-            let next_cursor = m::text(&data, "cursor");
-            if !next_cursor.is_empty() {
-                m::set("omnigraph-pulse-cursor", json!({ "value": next_cursor }));
+            if m::yes(&m::data("omnigraph-pulse-error")) {
+                m::set("omnigraph-pulse-error", json!(false));
+                dom::error("omnigraph-error", "");
+            }
+            let prev_head = m::data("omnigraph-head-commit")
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            let decision = classify_changes_poll_response(&prev_head, &data, force);
+            if !decision.next_cursor.is_empty() {
+                m::set(
+                    "omnigraph-pulse-cursor",
+                    json!({ "value": decision.next_cursor }),
+                );
+            }
+            if !decision.next_head_commit.is_empty() {
+                m::set("omnigraph-head-commit", json!(decision.next_head_commit));
+            }
+            if decision.has_baseline {
+                if let Some(patch) = extract_baseline_graph_patch(&data["baseline"]) {
+                    let mut current_graph = m::data("omnigraph-graph");
+                    if merge_graph_collections(&mut current_graph, &patch) {
+                        m::set("omnigraph-graph", current_graph);
+                    }
+                }
             }
             let incoming = m::array(&data["events"]);
             if !incoming.is_empty() {
                 let mut existing = m::array(&m::data("omnigraph-pulse-events"));
-                let mut merged = incoming.clone();
+                let mut merged = incoming;
                 merged.append(&mut existing);
                 merged.truncate(MAX_PULSE_EVENTS);
                 m::set("omnigraph-pulse-events", json!(merged));
-                render_pulse();
-                if !force {
-                    refresh_graph_preserving_pages().await;
-                    refresh_pill().await;
-                }
-            } else {
-                render_pulse();
             }
+            render_pulse();
+            if decision.reset {
+                dom::text(
+                    "omnigraph-status-message",
+                    "Change feed reset detected — synced baseline context graph.",
+                );
+                dom::attr("omnigraph-status-message", "data-degraded", "false");
+                dom::hidden("omnigraph-status-message", false);
+            }
+            if decision.should_refresh_graph {
+                refresh_graph_preserving_pages().await;
+                refresh_pill().await;
+            }
+        }
+        Err(e) if !e.aborted => {
+            m::set("omnigraph-pulse-error", json!(true));
+            dom::error(
+                "omnigraph-error",
+                &format!("Live Pulse poll failed: {}", e.message),
+            );
         }
         _ => {}
     }
@@ -4161,7 +4990,7 @@ fn anchor_filter_signature(st: &V) -> String {
         st["show_files"].as_bool().unwrap_or(true),
         st["show_sessions"].as_bool().unwrap_or(true),
         m::yes(&st["isolate_active"]),
-        st["isolate_depth"].as_u64().unwrap_or(2),
+        st["isolate_depth"].as_u64().unwrap_or(1),
     )
 }
 
@@ -4211,7 +5040,7 @@ fn current_constellation_filter(
     });
     let isolate_active = m::yes(&st["isolate_active"]);
     let isolate_depth = if isolate_active {
-        st["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 3) as usize
+        st["isolate_depth"].as_u64().unwrap_or(1).clamp(1, 3) as usize
     } else {
         0
     };
@@ -4768,9 +5597,8 @@ fn render_omni_history_bar() {
     let (can_back, can_fwd, crumb) = OMNI_NAV_HISTORY.with(|h| {
         let hist = h.borrow();
         let label = hist
-            .entries
-            .get(hist.cursor)
-            .and_then(|e| e.selected_id.clone())
+            .current()
+            .and_then(|e| parse_omni_nav_entry(e).0)
             .unwrap_or_else(|| "Overview".to_owned());
         (hist.can_back(), hist.can_forward(), label)
     });
@@ -4800,12 +5628,12 @@ fn render_constellation() {
     attach_omni_hover_leave_once();
     let st = ui_state();
     if m::text(&st, "snapshot").trim().is_empty() {
-        let changes_doc = m::data("graph-changes");
-        let impact_doc = m::data("graph-impact");
+        let project = current_project_id();
+        let (changes_doc, impact_doc) = resolve_workspace_drift_docs(&project);
         omnigraph_canvas::inject_workspace_drift(
             &mut graph,
-            changes_doc.is_object().then_some(&changes_doc),
-            impact_doc.is_object().then_some(&impact_doc),
+            changes_doc.as_ref(),
+            impact_doc.as_ref(),
         );
     }
     let paged_count = m::data("omnigraph-page-count").as_u64().unwrap_or(1).max(1) as usize;
@@ -4958,6 +5786,9 @@ fn render_constellation() {
     if rendered.node_count == 0 {
         dom::attr("omnigraph-canvas", "data-lod", "near");
         dom::text("omni-zoom-level", "100%");
+        if let Some(radar) = dom::get("omnigraph-canvas-radar") {
+            dom::hide(&radar, true);
+        }
     } else {
         cam.plane_w = rendered.width;
         cam.plane_h = rendered.height;
@@ -5628,11 +6459,8 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
         let branch = m::text(&ui_state(), "branch");
         let cam = load_camera();
         OMNI_NAV_HISTORY.with(|h| {
-            h.borrow_mut().push(OmniNavEntry {
-                selected_id: Some(nid.clone()),
-                branch,
-                cam,
-            });
+            h.borrow_mut()
+                .push(omni_nav_entry_from(Some(nid.clone()), &branch, &cam));
         });
         set_ui_state(|s| {
             s["selected_id"] = json!(nid);
@@ -5654,18 +6482,20 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 return Some((p.to_owned(), None));
             }
         }
-        if let Some(sym) = m::array(&graph["symbols"])
-            .into_iter()
-            .find(|s| symbol_node_id(s) == nid || s["fqn"].as_str() == Some(nid))
-        {
+        if let Some(sym) = m::array(&graph["symbols"]).into_iter().find(|s| {
+            symbol_node_id(s) == nid
+                || s["symbol_id"].as_str() == Some(nid)
+                || s["fqn"].as_str() == Some(nid)
+        }) {
             let p = symbol_file_path(&sym);
             if !p.is_empty() {
-                let fqn = sym["fqn"]
+                let target_sym = sym["fqn"]
                     .as_str()
+                    .or_else(|| sym["symbol_id"].as_str())
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
-                return Some((p, fqn));
+                return Some((p, target_sym));
             }
         }
         if let Some(atom) = m::array(&graph["atoms"])
@@ -5981,6 +6811,7 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             {
                 let symbol_fqn = node_el
                     .get_attribute("data-symbol-fqn")
+                    .or_else(|| node_el.get_attribute("data-symbol-id"))
                     .map(|s| s.trim().to_owned())
                     .filter(|s| !s.is_empty());
                 let project = current_project_id();
@@ -6044,6 +6875,35 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     false
 }
 
+pub fn constellation_hotkey_allowed(
+    view: &str,
+    stage_tab: &str,
+    studio_hidden: bool,
+    modal_open: bool,
+    in_editable: bool,
+    has_mods: bool,
+) -> bool {
+    view == "omnigraph"
+        && (stage_tab.is_empty() || stage_tab == "constellation")
+        && !studio_hidden
+        && !modal_open
+        && !in_editable
+        && !has_mods
+}
+
+fn any_omni_modal_open() -> bool {
+    for id in [
+        "omni-settings-dialog",
+        "omnigraph-transfer-dialog",
+        "omnigraph-share-dialog",
+    ] {
+        if dom::get(id).is_some_and(|el| el.has_attribute("open")) {
+            return true;
+        }
+    }
+    !dom::all("dialog[open]").is_empty()
+}
+
 pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     let target = event
         .target()
@@ -6075,15 +6935,29 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     if m::read(|s| s.view != "omnigraph") {
         return false;
     }
-    let in_input = target
-        .as_ref()
-        .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
+    let modal_open = any_omni_modal_open();
+    let studio_hidden = dom::get("omnigraph-studio").is_none_or(|el| el.has_attribute("hidden"));
+    let stage_tab = m::text(&ui_state(), "stage_tab");
+    let stage_tab_str = if stage_tab.is_empty() {
+        "constellation"
+    } else {
+        stage_tab.as_str()
+    };
+    let in_input = target.as_ref().is_some_and(|el| {
+        matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+            || el
+                .closest("[contenteditable=\"true\"]")
+                .ok()
+                .flatten()
+                .is_some()
+    });
+    let has_mods = event.ctrl_key() || event.meta_key() || event.alt_key();
 
     if event.key() == "/"
-        && !event.ctrl_key()
-        && !event.meta_key()
-        && !event.alt_key()
+        && !has_mods
         && !in_input
+        && !modal_open
+        && !studio_hidden
         && dom::get("omnigraph-search")
             .is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
     {
@@ -6095,6 +6969,7 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     if let Some(el) = target.as_ref() {
         if el.get_attribute("role").as_deref() == Some("tab")
             && el.closest("#omnigraph-view").ok().flatten().is_some()
+            && !modal_open
         {
             let key = event.key();
             if ["ArrowLeft", "ArrowRight", "Home", "End"].contains(&key.as_str()) {
@@ -6139,7 +7014,14 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
         }
     }
 
-    if !in_input && !event.ctrl_key() && !event.meta_key() && !event.alt_key() {
+    if constellation_hotkey_allowed(
+        "omnigraph",
+        stage_tab_str,
+        studio_hidden,
+        modal_open,
+        in_input,
+        has_mods,
+    ) {
         let in_radar = target
             .as_ref()
             .is_some_and(|el| el.closest(".omni-radar").ok().flatten().is_some());
@@ -7188,14 +8070,29 @@ async fn submit_share_form() {
     crate::session::sync_working_indicator();
 }
 
-pub fn resolve_code_map_target(payload: &V) -> Option<(String, Option<String>)> {
+pub fn resolve_code_map_target_with_symbol_id(
+    payload: &V,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let symbol_id = payload["symbol_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let fqn = payload["fqn"]
         .as_str()
         .or_else(|| payload["symbol_fqn"].as_str())
-        .or_else(|| payload["node_id"].as_str())
         .map(str::trim)
-        .filter(|s| s.contains("::"))
-        .map(str::to_owned);
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            payload["node_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| s.contains("::"))
+                .map(str::to_owned)
+        })
+        .or_else(|| symbol_id.clone());
+    let resolved_sym_id = symbol_id.or_else(|| fqn.clone());
     let direct = payload
         .as_str()
         .or_else(|| payload["path"].as_str())
@@ -7203,12 +8100,13 @@ pub fn resolve_code_map_target(payload: &V) -> Option<(String, Option<String>)> 
         .map(str::trim)
         .filter(|s| !s.is_empty());
     if let Some(path) = direct {
-        return Some((path.to_owned(), fqn));
+        return Some((path.to_owned(), fqn, resolved_sym_id));
     }
     let raw_fqn = fqn.as_deref().or_else(|| {
         payload["fqn"]
             .as_str()
             .or_else(|| payload["symbol_fqn"].as_str())
+            .or_else(|| payload["symbol_id"].as_str())
             .or_else(|| payload["node_id"].as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -7218,7 +8116,11 @@ pub fn resolve_code_map_target(payload: &V) -> Option<(String, Option<String>)> 
         .map(|(head, _)| head.trim())
         .filter(|head| !head.is_empty() && (head.contains('/') || head.contains('.')))?
         .to_owned();
-    Some((path, Some(raw_fqn.to_owned())))
+    Some((path, Some(raw_fqn.to_owned()), resolved_sym_id))
+}
+
+pub fn resolve_code_map_target(payload: &V) -> Option<(String, Option<String>)> {
+    resolve_code_map_target_with_symbol_id(payload).map(|(p, fqn, sym_id)| (p, fqn.or(sym_id)))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -7251,6 +8153,131 @@ async fn open_file_in_code_map(path: &str) {
     open_target_in_code_map(None, path, None).await;
 }
 
+pub fn find_context_node_for_file(graph: &V, path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || !graph.is_object() {
+        return None;
+    }
+    m::array(&graph["files"])
+        .into_iter()
+        .find(|f| {
+            f["path"].as_str() == Some(trimmed)
+                || f["file_path"].as_str() == Some(trimmed)
+                || f.as_str() == Some(trimmed)
+        })
+        .map(|f| file_node_id(&f))
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            m::array(&graph["symbols"])
+                .into_iter()
+                .find(|s| symbol_file_path(s) == trimmed)
+                .map(|s| symbol_node_id(&s))
+                .filter(|id| !id.is_empty())
+        })
+        .or_else(|| {
+            m::array(&graph["atoms"])
+                .into_iter()
+                .find(|a| {
+                    a["files"]
+                        .as_array()
+                        .is_some_and(|fs| fs.iter().any(|x| x.as_str() == Some(trimmed)))
+                })
+                .map(|a| atom_id(&a))
+                .filter(|id| !id.is_empty())
+        })
+}
+
+pub fn resolve_system_service_target(
+    graph: &V,
+    sys_catalog: &V,
+    raw_node_id: &str,
+) -> Option<String> {
+    let nid = raw_node_id.trim();
+    if nid.is_empty() {
+        return None;
+    }
+    let mut candidates = vec![nid.to_owned()];
+    for f in m::array(&graph["files"]) {
+        if file_node_id(&f) == nid || f["path"].as_str() == Some(nid) {
+            if let Some(p) = f["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                candidates.push(p.to_owned());
+            }
+        }
+    }
+    for s in m::array(&graph["symbols"]) {
+        if symbol_node_id(&s) == nid
+            || s["symbol_id"].as_str() == Some(nid)
+            || s["fqn"].as_str() == Some(nid)
+        {
+            let p = symbol_file_path(&s);
+            if !p.is_empty() {
+                candidates.push(p);
+            }
+        }
+    }
+    for a in m::array(&graph["atoms"]) {
+        if atom_id(&a) == nid {
+            for f in m::array(&a["files"]) {
+                if let Some(p) = f.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    candidates.push(p.to_owned());
+                }
+            }
+            for tag in m::array(&a["tags"]) {
+                if let Some(t) = tag.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    candidates.push(t.to_owned());
+                }
+            }
+        }
+    }
+
+    let norm = |s: &str| {
+        s.trim()
+            .trim_start_matches("./")
+            .trim_matches('/')
+            .to_ascii_lowercase()
+    };
+    let services = m::array(&sys_catalog["services"]);
+    let mut best_prefix: Option<(usize, String)> = None;
+    for cand in &candidates {
+        let nc = norm(cand);
+        if nc.is_empty() {
+            continue;
+        }
+        for svc in &services {
+            let sid = m::text(svc, "id");
+            if sid.is_empty() {
+                continue;
+            }
+            let sname = m::text(svc, "name");
+            if nc == norm(&sid) || (!sname.is_empty() && nc == norm(&sname)) {
+                return Some(sid);
+            }
+            for root_key in ["root", "path", "folder"] {
+                let root = norm(&m::text(svc, root_key));
+                if root.is_empty() {
+                    continue;
+                }
+                if nc == root || nc.starts_with(&format!("{root}/")) {
+                    let len = root.len();
+                    if best_prefix.as_ref().is_none_or(|(b, _)| len > *b) {
+                        best_prefix = Some((len, sid.clone()));
+                    }
+                }
+            }
+        }
+        for sh in m::array(&sys_catalog["shared_sources"]) {
+            let sp = sh
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::text(&sh, "path"));
+            if !sp.is_empty() && norm(&sp) == nc {
+                return Some("__system__".to_owned());
+            }
+        }
+    }
+    best_prefix.map(|(_, sid)| sid)
+}
+
 pub(crate) async fn focus_context_for_file(project: Option<&str>, path: &str) {
     if let Some(p) = project.map(str::trim).filter(|s| !s.is_empty()) {
         dom::set_value("omnigraph-project", p);
@@ -7270,30 +8297,7 @@ pub(crate) async fn focus_context_for_file(project: Option<&str>, path: &str) {
     render_tabs();
     refresh_graph().await;
     let graph = m::data("omnigraph-graph");
-    let matched_id = m::array(&graph["files"])
-        .into_iter()
-        .find(|f| {
-            f["path"].as_str() == Some(trimmed)
-                || f["file_path"].as_str() == Some(trimmed)
-                || f.as_str() == Some(trimmed)
-        })
-        .and_then(|f| {
-            f["id"]
-                .as_str()
-                .or_else(|| f["path"].as_str())
-                .or_else(|| f.as_str())
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            m::array(&graph["atoms"])
-                .into_iter()
-                .find(|a| {
-                    a["files"]
-                        .as_array()
-                        .is_some_and(|fs| fs.iter().any(|x| x.as_str() == Some(trimmed)))
-                })
-                .and_then(|a| a["id"].as_str().map(str::to_owned))
-        });
+    let matched_id = find_context_node_for_file(&graph, trimmed);
     if let Some(nid) = matched_id {
         set_ui_state(|s| {
             s["selected_id"] = json!(nid);
@@ -7342,8 +8346,12 @@ pub async fn event(
             "omnigraph-branch" => {
                 let _ = switch_branch_state(value, true);
                 reset_pulse_cursor();
+                m::set("omnigraph-pulse-events", json!([]));
+                m::set("omnigraph-head-commit", V::Null);
+                render_pulse();
                 m::set("omnigraph-commit-detail", V::Null);
                 refresh_graph().await;
+                poll_changes(true).await;
                 return true;
             }
             "omnigraph-show-sessions" => {
@@ -7361,7 +8369,7 @@ pub async fn event(
                 return true;
             }
             "omni-isolate-depth" => {
-                let depth = value.trim().parse::<u64>().unwrap_or(2).clamp(1, 3);
+                let depth = value.trim().parse::<u64>().unwrap_or(1).clamp(1, 3);
                 let st = ui_state();
                 let seed = st["isolate_seed"]
                     .as_str()
@@ -7922,11 +8930,8 @@ pub async fn event(
                 let branch = m::text(&ui_state(), "branch");
                 let cam = load_camera();
                 OMNI_NAV_HISTORY.with(|h| {
-                    h.borrow_mut().push(OmniNavEntry {
-                        selected_id: Some(node_id.clone()),
-                        branch,
-                        cam,
-                    });
+                    h.borrow_mut()
+                        .push(omni_nav_entry_from(Some(node_id.clone()), &branch, &cam));
                 });
                 set_ui_state(|s| {
                     s["selected_id"] = json!(node_id);
@@ -7966,43 +8971,32 @@ pub async fn event(
             true
         }
         "omnigraph-history-back" | "omnigraph-history-forward" => {
-            let delta: isize = if action == "omnigraph-history-back" {
-                -1
-            } else {
-                1
-            };
+            let back = action == "omnigraph-history-back";
             let target = OMNI_NAV_HISTORY.with(|h| {
                 let mut hist = h.borrow_mut();
-                if delta < 0 && hist.can_back() {
-                    hist.cursor -= 1;
-                    hist.entries.get(hist.cursor).cloned()
-                } else if delta > 0 && hist.can_forward() {
-                    hist.cursor += 1;
-                    hist.entries.get(hist.cursor).cloned()
+                if back {
+                    hist.back().cloned()
                 } else {
-                    None
+                    hist.forward().cloned()
                 }
             });
             if let Some(entry) = target {
+                let (selected_id, branch, cam) = parse_omni_nav_entry(&entry);
                 let cur_branch = m::text(&ui_state(), "branch");
-                if !entry.branch.is_empty() && entry.branch != cur_branch {
-                    let _ = switch_branch_state(&entry.branch, false);
+                if !branch.is_empty() && branch != cur_branch {
+                    let _ = switch_branch_state(&branch, false);
                 }
                 set_ui_state(|s| {
-                    s["selected_id"] = entry
-                        .selected_id
-                        .as_ref()
-                        .map(|id| json!(id))
-                        .unwrap_or(V::Null);
+                    s["selected_id"] = selected_id.map(|id| json!(id)).unwrap_or(V::Null);
                     s["focused_id"] = s["selected_id"].clone();
                     s["stage_tab"] = json!("constellation");
                 });
-                save_camera(&entry.cam);
+                save_camera(&cam);
                 sync_controls_from_state();
                 render_tabs();
                 render_constellation();
                 render_inspector();
-                apply_camera(&entry.cam);
+                apply_camera(&cam);
             }
             true
         }
@@ -8023,7 +9017,31 @@ pub async fn event(
             false
         }
         "omnigraph-open-system-map" => {
+            let node_id = payload["node_id"]
+                .as_str()
+                .or_else(|| payload.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::text(&ui_state(), "selected_id"));
+            let graph = m::data("omnigraph-graph");
+            let initial_match = resolve_system_service_target(
+                &graph,
+                &m::data("system-map-catalog-cache"),
+                &node_id,
+            );
             crate::session::open_view("systems", true).await;
+            let matched = initial_match.or_else(|| {
+                resolve_system_service_target(
+                    &graph,
+                    &m::data("system-map-catalog-cache"),
+                    &node_id,
+                )
+            });
+            if let Some(svc) = matched {
+                crate::systems::switch_services_to_topology();
+                crate::system_map::focus_service_topology(&svc);
+            }
             crate::systems::focus_system_graph_workspace();
             true
         }
@@ -8088,7 +9106,7 @@ pub async fn event(
             let depth = dom::value("omni-isolate-depth")
                 .trim()
                 .parse::<u64>()
-                .unwrap_or(2)
+                .unwrap_or(1)
                 .clamp(1, 3);
             let seed = st["selected_id"]
                 .as_str()
@@ -10022,18 +11040,268 @@ mod tests {
         assert!(1500.0 * view_cam.scale + view_cam.pan_x >= 0.0);
         assert!(1700.0 * view_cam.scale + view_cam.pan_x <= 800.0);
 
-        let mut hist = OmniNavHistory::default();
-        hist.push(OmniNavEntry {
-            selected_id: Some("a1".to_owned()),
-            branch: "main".to_owned(),
-            cam: view_cam.clone(),
-        });
-        hist.push(OmniNavEntry {
-            selected_id: Some("a2".to_owned()),
-            branch: "main".to_owned(),
-            cam: view_cam,
-        });
+        let mut hist = graph_viewport::CameraSelectionHistory::new(32);
+        hist.push(omni_nav_entry_from(
+            Some("a1".to_owned()),
+            "main",
+            &view_cam,
+        ));
+        hist.push(omni_nav_entry_from(
+            Some("a2".to_owned()),
+            "main",
+            &view_cam,
+        ));
         assert!(hist.can_back());
         assert!(!hist.can_forward());
+    }
+
+    #[test]
+    fn pr106_p0_p1_fixes_drift_poll_status_search_cross_graph_and_hotkeys() {
+        // P0 #1: resolve_workspace_drift_docs reads scoped Dependency Map keys (`graph-map-*`, `session-graph-*`)
+        //        instead of dead `graph-changes`/`graph-impact` keys and validates active project + work target.
+        m::set(
+            "graph-map-changes",
+            json!({
+                "scope_key": "project:proj-1",
+                "project": "proj-1",
+                "target": "work",
+                "data": { "files": [{ "path": "src/auth.rs", "broken_risk": true }] }
+            }),
+        );
+        m::set(
+            "session-graph-impact",
+            json!({
+                "key": "project:proj-1|src/auth.rs|work",
+                "data": { "suspects": ["src/login.rs"] }
+            }),
+        );
+        let (ch, imp) = resolve_workspace_drift_docs("proj-1");
+        assert_eq!(ch.unwrap()["files"][0]["path"], "src/auth.rs");
+        assert_eq!(imp.unwrap()["suspects"][0], "src/login.rs");
+        // Mismatched project must be ignored cleanly.
+        assert_eq!(resolve_workspace_drift_docs("other-proj"), (None, None));
+        m::take("graph-map-changes");
+        m::take("session-graph-impact");
+
+        // P0 #2: classify_changes_poll_response refreshes on `reset: true` or `snapshot_commit_id != head_commit`
+        //        even when events array is empty or force=true, and extracts baseline records.
+        let reset_resp = json!({
+            "cursor": "c-20",
+            "caught_up": true,
+            "reset": true,
+            "snapshot_commit_id": "commit-new",
+            "events": [],
+            "baseline": {
+                "records": [{
+                    "id": "atom-base-1",
+                    "entity_type": { "name": "ContextAtom" },
+                    "properties": { "title": "Recovered atom", "kind": "finding" }
+                }]
+            }
+        });
+        let dec = classify_changes_poll_response("commit-old", &reset_resp, true);
+        assert!(dec.reset);
+        assert!(dec.head_changed);
+        assert!(dec.should_refresh_graph);
+        assert!(dec.has_baseline);
+        let patch = extract_baseline_graph_patch(&reset_resp["baseline"]).unwrap();
+        assert_eq!(patch["atoms"][0]["title"], "Recovered atom");
+
+        let head_advance_resp = json!({
+            "cursor": "c-21",
+            "reset": false,
+            "snapshot_commit_id": "commit-next",
+            "events": []
+        });
+        assert!(
+            classify_changes_poll_response("commit-old", &head_advance_resp, true)
+                .should_refresh_graph
+        );
+        assert!(
+            !classify_changes_poll_response(
+                "commit-old",
+                &json!({
+                    "cursor": "c-21",
+                    "reset": false,
+                    "snapshot_commit_id": "commit-old",
+                    "events": []
+                }),
+                true
+            )
+            .should_refresh_graph
+        );
+
+        // P0 #3: Non-destructive degraded studio visibility + platform/version dynamic install copy + error pill
+        let disconnected_status = json!({
+            "connected": false,
+            "state": "error",
+            "error": "sidecar timed out",
+            "binary_installed": false,
+            "target_version": "v0.16.0",
+            "platform": { "os": "macos", "arch": "arm64", "auto_download_supported": false }
+        });
+        let (show_onboard, show_studio, banner) =
+            studio_visibility_plan(&disconnected_status, true);
+        assert!(
+            !show_onboard,
+            "must not bounce back to onboarding while graph is loaded"
+        );
+        assert!(
+            show_studio,
+            "studio must remain visible with degraded banner"
+        );
+        assert!(banner.unwrap().contains("sidecar timed out"));
+        let (onb_empty, stu_empty, _) = studio_visibility_plan(&disconnected_status, false);
+        assert!(onb_empty);
+        assert!(!stu_empty);
+
+        let (btn_lbl, detail_txt, auto_ok) = local_install_copy(&disconnected_status);
+        assert!(!auto_ok);
+        assert!(btn_lbl.contains("v0.16.0"));
+        assert!(detail_txt.contains("macos/arm64"));
+        let degraded =
+            degraded_status_from_error(&json!({"connected": true, "mode": "local"}), "503 down");
+        assert_eq!(degraded["connected"], false);
+        assert_eq!(degraded["state"], "error");
+        assert_eq!(degraded["error"], "503 down");
+
+        // P1 #6: Search subgraph beyond page-1 merges into omnigraph-graph without wiping next_cursor.
+        let page1 = json!({
+            "atoms": [{ "id": "a1", "title": "First" }],
+            "next_cursor": "cursor-page-2",
+            "has_more": true
+        });
+        let search_res = json!({
+            "hits": [{
+                "atom": { "id": "a999", "title": "Deep Hit" },
+                "files": ["src/deep.rs"],
+                "neighbors": [{ "kind": "symbol", "id": "src/deep.rs::Deep::run" }]
+            }],
+            "subgraph": {
+                "atoms": [{ "id": "a999", "title": "Deep Hit" }],
+                "files": [{ "id": "src/deep.rs", "path": "src/deep.rs" }],
+                "symbols": [{ "id": "src/deep.rs::Deep::run", "symbol_id": "sym:deep:1", "fqn": "src/deep.rs::Deep::run" }],
+                "edges": [{ "id": "e-999", "from": "a999", "to": "src/deep.rs", "relation": "touches_file" }]
+            }
+        });
+        let (merged, changed) = merge_search_subgraph_into_graph(page1, &search_res);
+        assert!(changed);
+        assert_eq!(merged["atoms"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            merged["next_cursor"], "cursor-page-2",
+            "cursor must stay intact"
+        );
+        let hit_ids = collect_search_hit_ids(&search_res);
+        assert!(hit_ids.contains(&"a999".to_owned()));
+        assert!(hit_ids.contains(&"src/deep.rs::Deep::run".to_owned()));
+
+        // P1 #7: Cross-graph jumps (`symbol_id`, `atom_id` fallback, service target resolution, service focus ids)
+        let sym_graph = json!({
+            "atoms": [{
+                "atom_id": "atom-canonical-1",
+                "title": "JWT fix",
+                "files": ["services/auth/src/jwt.rs"],
+                "symbols": ["services/auth/src/jwt.rs::verify"]
+            }],
+            "symbols": [{
+                "id": "services/auth/src/jwt.rs::verify",
+                "symbol_id": "sym:jwt:verify",
+                "fqn": "services/auth/src/jwt.rs::verify",
+                "file_path": "services/auth/src/jwt.rs",
+                "name": "verify"
+            }]
+        });
+        let sym_insp = render_symbol_node_inspector_html(&sym_graph, &sym_graph["symbols"][0]);
+        let payloads = crate::test_support::payloads(&sym_insp, "omnigraph-open-code-map");
+        assert_eq!(payloads[0]["symbol_id"], "sym:jwt:verify");
+        assert_eq!(
+            resolve_code_map_target_with_symbol_id(&json!({
+                "path": "services/auth/src/jwt.rs",
+                "symbol_id": "sym:jwt:verify"
+            })),
+            Some((
+                "services/auth/src/jwt.rs".to_owned(),
+                Some("sym:jwt:verify".to_owned()),
+                Some("sym:jwt:verify".to_owned()),
+            ))
+        );
+        assert_eq!(
+            find_context_node_for_file(&sym_graph, "services/auth/src/jwt.rs").as_deref(),
+            Some("services/auth/src/jwt.rs::verify")
+        );
+        let atom_only_graph = json!({
+            "atoms": [{
+                "atom_id": "atom-raw-id",
+                "title": "Only atom_id field",
+                "files": ["services/billing/tax.rs"]
+            }]
+        });
+        assert_eq!(
+            find_context_node_for_file(&atom_only_graph, "services/billing/tax.rs").as_deref(),
+            Some("atom-raw-id")
+        );
+        let cat = json!({
+            "services": [
+                { "id": "auth-svc", "name": "Auth", "root": "services/auth" },
+                { "id": "billing", "name": "Billing", "root": "services/billing" }
+            ],
+            "shared_sources": ["docs/architecture.md"]
+        });
+        assert_eq!(
+            resolve_system_service_target(&sym_graph, &cat, "atom-canonical-1").as_deref(),
+            Some("auth-svc")
+        );
+        assert!(local_service_match_ids(&sym_graph, "auth-svc", &cat)
+            .contains(&"atom-canonical-1".to_owned()));
+
+        // P1 #10: Hotkeys gated behind omnigraph + constellation + visible studio + no modal open.
+        assert!(constellation_hotkey_allowed(
+            "omnigraph",
+            "constellation",
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!constellation_hotkey_allowed(
+            "omnigraph",
+            "dag",
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!constellation_hotkey_allowed(
+            "omnigraph",
+            "merge",
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!constellation_hotkey_allowed(
+            "omnigraph",
+            "constellation",
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!constellation_hotkey_allowed(
+            "omnigraph",
+            "constellation",
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(!constellation_hotkey_allowed(
+            "sessions",
+            "constellation",
+            false,
+            false,
+            false,
+            false
+        ));
     }
 }

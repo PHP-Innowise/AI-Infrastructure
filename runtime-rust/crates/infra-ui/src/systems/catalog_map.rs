@@ -473,7 +473,8 @@ pub fn build_changes_overlay(
     }
 
     // Prefer wave-0 root seeds (`reason` selected/contract_provider or path len 1)
-    // from `plan.impact`; `plan.context.services` lists all downstream participants.
+    // from `plan.impact`, then explicit `plan.selected` / checked UI `plan_seeds`;
+    // only fall back to `plan.context.services` when no root seeds were specified.
     let mut seeds: Vec<String> = m::array(&run_doc["plan"]["impact"])
         .into_iter()
         .filter(|entry| {
@@ -486,9 +487,28 @@ pub fn build_changes_overlay(
         .filter(|s| !s.is_empty())
         .collect();
     if seeds.is_empty() {
+        seeds = m::array(&run_doc["plan"]["selected"])
+            .into_iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+    }
+    if seeds.is_empty() && !plan_seeds.is_empty() {
+        seeds = plan_seeds.to_vec();
+    }
+    if seeds.is_empty() {
         seeds = m::array(&run_doc["plan"]["context"]["services"])
             .into_iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
             .collect();
     }
     let unopened = if run_doc["cross_service_unopened"].is_array() {
@@ -510,7 +530,7 @@ pub fn build_changes_overlay(
     json!({
         "stage": stage,
         "run_id": run_id,
-        "seed_services": if seeds.is_empty() { plan_seeds } else { &seeds },
+        "seed_services": seeds,
         "depth": run_doc["plan"]["depth"].as_u64().unwrap_or(depth),
         "changed_contracts": parsed_contracts,
         "step_states": V::Object(step_states),

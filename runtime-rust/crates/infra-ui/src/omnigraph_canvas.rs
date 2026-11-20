@@ -290,6 +290,7 @@ struct CanvasNode {
     status: String,
     provider: String,
     file_path: String,
+    symbol_id: String,
     symbol_fqn: String,
     symbol_kind: String,
     symbols: Vec<String>,
@@ -518,7 +519,9 @@ pub fn inject_workspace_drift(
                     continue;
                 }
                 let broken = item["broken_risk"].as_bool().unwrap_or(false)
-                    || item["risk"].as_str() == Some("high");
+                    || item["risk"].as_str() == Some("high")
+                    || item["impact"].as_str() == Some("broken_risk")
+                    || item["status"].as_str() == Some("deleted");
                 let status = if broken {
                     "broken"
                 } else if item["stale"].as_bool().unwrap_or(false) {
@@ -527,6 +530,19 @@ pub fn inject_workspace_drift(
                     "changed"
                 };
                 file_drift.insert(p.to_owned(), (status, broken));
+            }
+        }
+        if let Some(risk_callers) = changes["edge_diffs"]["risk_callers"].as_array() {
+            for rc in risk_callers {
+                let broken = rc["impact"].as_str() == Some("broken_risk")
+                    || rc["broken_risk"].as_bool().unwrap_or(false);
+                if broken {
+                    for key in ["from", "to"] {
+                        if let Some(p) = rc[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                            file_drift.insert(p.to_owned(), ("broken", true));
+                        }
+                    }
+                }
             }
         }
     }
@@ -2147,6 +2163,7 @@ fn extract_graph_items(
                 status,
                 provider,
                 file_path: String::new(),
+                symbol_id: String::new(),
                 symbol_fqn: String::new(),
                 symbol_kind: String::new(),
                 symbols: Vec::new(),
@@ -2222,6 +2239,7 @@ fn extract_graph_items(
                 status: String::new(),
                 provider: String::new(),
                 file_path: String::new(),
+                symbol_id: String::new(),
                 symbol_fqn: String::new(),
                 symbol_kind: String::new(),
                 symbols,
@@ -2284,6 +2302,7 @@ fn extract_graph_items(
                 status: String::new(),
                 provider: lang,
                 file_path: path,
+                symbol_id: String::new(),
                 symbol_fqn: String::new(),
                 symbol_kind: String::new(),
                 symbols: Vec::new(),
@@ -2355,6 +2374,7 @@ fn extract_graph_items(
                 status: String::new(),
                 provider: symbol_kind.clone(),
                 file_path,
+                symbol_id,
                 symbol_fqn: fqn,
                 symbol_kind,
                 symbols: Vec::new(),
@@ -3420,6 +3440,9 @@ fn render_constellation_node(
     let mut extra_attrs = String::new();
     if !node.file_path.is_empty() {
         extra_attrs.push_str(&format!(" data-file-path=\"{}\"", esc(&node.file_path)));
+    }
+    if !node.symbol_id.is_empty() {
+        extra_attrs.push_str(&format!(" data-symbol-id=\"{}\"", esc(&node.symbol_id)));
     }
     if !node.symbol_fqn.is_empty() {
         extra_attrs.push_str(&format!(" data-symbol-fqn=\"{}\"", esc(&node.symbol_fqn)));
@@ -5493,6 +5516,60 @@ mod tests {
                 .get("src/auth/jwt.rs::JwtService::verify")
                 .copied(),
             sym_pos_before
+        );
+
+        // 5. inject_workspace_drift consumes `/api/projects/{id}/graph/changes` shapes (`files[].impact`, `edge_diffs.risk_callers`)
+        //    and Symbol nodes expose canonical `data-symbol-id`.
+        let mut drift_graph = json!({
+            "files": [
+                { "id": "src/auth/jwt.rs", "path": "src/auth/jwt.rs" },
+                { "id": "src/http/handler.rs", "path": "src/http/handler.rs" },
+                { "id": "src/util.rs", "path": "src/util.rs" }
+            ],
+            "symbols": [{
+                "id": "src/auth/jwt.rs::JwtService::verify",
+                "symbol_id": "sym:jwt:verify:12",
+                "fqn": "src/auth/jwt.rs::JwtService::verify",
+                "file_path": "src/auth/jwt.rs",
+                "kind": "method",
+                "name": "verify"
+            }]
+        });
+        let changes_payload = json!({
+            "files": [
+                { "path": "src/util.rs", "status": "modified", "impact": "modified" },
+                { "path": "src/http/handler.rs", "impact": "broken_risk" }
+            ],
+            "edge_diffs": {
+                "risk_callers": [{ "from": "src/http/handler.rs", "to": "src/auth/jwt.rs", "impact": "broken_risk" }]
+            }
+        });
+        inject_workspace_drift(&mut drift_graph, Some(&changes_payload), None);
+        let drift_out = render_constellation(
+            &drift_graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                ..Default::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert!(
+            drift_out
+                .html
+                .contains("data-symbol-id=\"sym:jwt:verify:12\""),
+            "{}",
+            drift_out.html
+        );
+        assert!(
+            drift_out.html.contains("data-drift=\"broken\""),
+            "{}",
+            drift_out.html
+        );
+        assert!(
+            drift_out.html.contains("data-drift=\"changed\""),
+            "{}",
+            drift_out.html
         );
     }
 }
