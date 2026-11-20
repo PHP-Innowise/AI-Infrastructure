@@ -2581,15 +2581,29 @@ impl SystemGraphDomain {
         (normalized_target, run_id)
     }
 
-    fn normalize_target_query(query: &Value) -> Result<(Option<String>, Option<String>)> {
+    fn normalize_target_query_with(
+        query: &Value,
+        range_via_from_to: bool,
+    ) -> Result<(Option<String>, Option<String>)> {
         let raw_target = query["target"].as_str().map(str::trim).unwrap_or("");
-        let raw_from = query["from"].as_str().map(str::trim).unwrap_or("");
-        let raw_to = query["to"].as_str().map(str::trim).unwrap_or("");
+        let (raw_from, raw_to, range_label) = if range_via_from_to {
+            (
+                query["from"].as_str().map(str::trim).unwrap_or(""),
+                query["to"].as_str().map(str::trim).unwrap_or(""),
+                "from/to",
+            )
+        } else {
+            (
+                query["target_from"].as_str().map(str::trim).unwrap_or(""),
+                query["target_to"].as_str().map(str::trim).unwrap_or(""),
+                "target_from/target_to",
+            )
+        };
         let effective_target = if !raw_target.is_empty() {
             if !raw_from.is_empty() || !raw_to.is_empty() {
-                return Err(HarnessError::invalid(
-                    "Specify either target or from/to range parameters, not both.",
-                ));
+                return Err(HarnessError::invalid(format!(
+                    "Specify either target or {range_label} range parameters, not both."
+                )));
             }
             Some(raw_target.to_owned())
         } else if !raw_from.is_empty() || !raw_to.is_empty() {
@@ -2604,10 +2618,26 @@ impl SystemGraphDomain {
         } else {
             None
         };
-        Ok(Self::normalize_target_and_run_id(
+        let (norm_target, run_id) = Self::normalize_target_and_run_id(
             effective_target.as_deref(),
             query["run_id"].as_str(),
-        ))
+        );
+        if let Some(ref ts) = norm_target {
+            Target::parse(ts)?;
+        }
+        Ok((norm_target, run_id))
+    }
+
+    fn normalize_target_query(query: &Value) -> Result<(Option<String>, Option<String>)> {
+        Self::normalize_target_query_with(query, true)
+    }
+
+    /// Normalizes `target`, `run_id`, and disambiguated `target_from`/`target_to`
+    /// range parameters on endpoints where `from`/`to` identify graph or service nodes.
+    fn normalize_endpoint_safe_target_query(
+        query: &Value,
+    ) -> Result<(Option<String>, Option<String>)> {
+        Self::normalize_target_query_with(query, false)
     }
 
     fn resolve_service_summaries_for_target(
@@ -3288,18 +3318,21 @@ impl SystemGraphDomain {
         body: Value,
     ) -> Result<Value> {
         if let Some(qobj) = query.as_object_mut() {
+            let range_via_from_to = matches!(op, "graph.changes" | "graph.file_impact");
+            let (norm_target, _) = Self::normalize_target_query_with(
+                &Value::Object(qobj.clone()),
+                range_via_from_to,
+            )?;
             qobj.remove("project_id");
             qobj.remove("config_path");
             qobj.remove("service");
-            let raw_target = qobj
-                .get("target")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let raw_run_id = qobj
-                .remove("run_id")
-                .and_then(|v| v.as_str().map(str::to_owned));
-            let (norm_target, _) =
-                Self::normalize_target_and_run_id(raw_target.as_deref(), raw_run_id.as_deref());
+            qobj.remove("run_id");
+            qobj.remove("target_from");
+            qobj.remove("target_to");
+            if range_via_from_to {
+                qobj.remove("from");
+                qobj.remove("to");
+            }
             match norm_target {
                 Some(nt) => {
                     qobj.insert("target".to_owned(), json!(nt));
@@ -3394,10 +3427,7 @@ impl SystemGraphDomain {
             "system_graph.map" => {
                 let project_id = query["project_id"].as_str().unwrap_or("");
                 let config_path = query["config_path"].as_str();
-                let (target_spec, run_id) = Self::normalize_target_and_run_id(
-                    query["target"].as_str(),
-                    query["run_id"].as_str(),
-                );
+                let (target_spec, run_id) = Self::normalize_endpoint_safe_target_query(query)?;
                 let agent_filter = query["agent"]
                     .as_str()
                     .map(str::trim)
@@ -3688,10 +3718,7 @@ impl SystemGraphDomain {
                 let project_id = query["project_id"].as_str().unwrap_or("");
                 let config_path = query["config_path"].as_str();
                 let certain = Self::parse_bool_flag(query, "certain")?;
-                let (target_spec, run_id) = Self::normalize_target_and_run_id(
-                    query["target"].as_str(),
-                    query["run_id"].as_str(),
-                );
+                let (target_spec, run_id) = Self::normalize_endpoint_safe_target_query(query)?;
                 let agent_filter = query["agent"]
                     .as_str()
                     .map(str::trim)
@@ -3795,10 +3822,8 @@ impl Domain for SystemGraphDomain {
 
                     if operation == "system_graph.service_map" && target.service_id != "__system__"
                     {
-                        let (target_spec, run_id) = Self::normalize_target_and_run_id(
-                            query["target"].as_str(),
-                            query["run_id"].as_str(),
-                        );
+                        let (target_spec, run_id) =
+                            Self::normalize_endpoint_safe_target_query(query)?;
                         let target_str = out["target"].as_str().unwrap_or("");
                         let effective_target = target_spec
                             .as_deref()
@@ -5552,10 +5577,17 @@ fn bridge_view(
         .count();
     let certain_total = certain_refs + declared_sites;
     let total_confidence = certain_total + guessed_refs + discovered_sites;
-    let confidence_ratio = if total_confidence == 0 {
-        1.0
+    let confidence_ratio: Option<f64> = if total_confidence == 0 {
+        None
     } else {
-        ((certain_total as f64 / total_confidence as f64) * 1000.0).round() / 1000.0
+        Some(((certain_total as f64 / total_confidence as f64) * 1000.0).round() / 1000.0)
+    };
+    let confidence_status = if total_confidence == 0 {
+        "unverified"
+    } else if guessed_refs + discovered_sites == 0 {
+        "verified"
+    } else {
+        "mixed"
     };
     let (consumer_sites, consumer_more, consumer_opened, consumer_total) =
         listed(from, consumer, &consumer_index);
@@ -5574,6 +5606,8 @@ fn bridge_view(
             "guessed_refs": guessed_refs,
             "declared_sites": declared_sites,
             "discovered_sites": discovered_sites,
+            "total": total_confidence,
+            "status": confidence_status,
             "ratio": confidence_ratio,
         },
         "consumer": {
