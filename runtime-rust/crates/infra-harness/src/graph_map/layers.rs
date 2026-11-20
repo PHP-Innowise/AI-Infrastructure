@@ -178,10 +178,6 @@ const PASSED: &[&str] = &["exception", "request", "response"];
 /// operations of an API is an operation. They file a file only where no
 /// folder of a narrower meaning says another layer.
 const THINGS: &[&str] = &["model", "entity"];
-/// Files of these kinds are code that can be filed in a layer.
-const CODE: &[&str] = &[
-    "php", "py", "rb", "java", "kt", "cs", "ts", "tsx", "js", "jsx", "go", "rs", "swift", "scala",
-];
 /// Names that file what lies in a folder so named, and not a file: a file
 /// named `Application` or `Console` starts a program more often than it is
 /// a layer of one.
@@ -251,36 +247,57 @@ pub(super) const TELLS: [&str; 2] = [
 ];
 /// Computes minimal cut / decoupling remediation hints for forbidden layer edges.
 fn layer_remediation_hints<'a>(
-    items: impl Iterator<Item = (&'a str, &'a str, &'a str, &'a str, Flow)>,
+    items: impl Iterator<Item = (bool, bool, &'a str, &'a str, &'a str, &'a str, Flow)>,
 ) -> Vec<Value> {
     let mut rows: Vec<_> = items.collect();
     rows.sort_by(|a, b| {
-        a.4.links
-            .cmp(&b.4.links)
-            .then(a.4.guessed.cmp(&b.4.guessed))
-            .then(a.0.cmp(b.0))
-            .then(a.1.cmp(b.1))
+        a.6.links
+            .cmp(&b.6.links)
+            .then(a.6.guessed.cmp(&b.6.guessed))
+            .then(a.2.cmp(b.2))
+            .then(a.3.cmp(b.3))
     });
     rows.into_iter()
         .take(6)
-        .map(|(from_path, to_path, from_layer, to_layer, flow)| {
-            json!({
-                "from": from_path,
-                "to": to_path,
-                "from_layer": from_layer,
-                "to_layer": to_layer,
-                "links": flow.links,
-                "weight": flow.links,
-                "guessed": flow.guessed,
-                "hint": format!(
-                    "Invert {from_layer} -> {to_layer}: move {} behind a {from_layer} port/interface consumed by {} ({} link{}).",
-                    name(to_path),
-                    name(from_path),
-                    flow.links,
-                    if flow.links == 1 { "" } else { "s" }
-                ),
-            })
-        })
+        .map(
+            |(is_declared, is_skip, from_path, to_path, from_layer, to_layer, flow)| {
+                let rule_kind = if is_skip {
+                    "skip_layer"
+                } else if is_declared {
+                    "declared"
+                } else {
+                    "backward"
+                };
+                let hint = if is_skip {
+                    format!(
+                        "Bypassed layer in {from_layer} -> {to_layer}: route {} through an allowed intermediate layer or port/interface instead of direct access from {} ({} link{}).",
+                        name(to_path),
+                        name(from_path),
+                        flow.links,
+                        if flow.links == 1 { "" } else { "s" }
+                    )
+                } else {
+                    format!(
+                        "Invert {from_layer} -> {to_layer}: move {} behind a {from_layer} port/interface consumed by {} ({} link{}).",
+                        name(to_path),
+                        name(from_path),
+                        flow.links,
+                        if flow.links == 1 { "" } else { "s" }
+                    )
+                };
+                json!({
+                    "from": from_path,
+                    "to": to_path,
+                    "from_layer": from_layer,
+                    "to_layer": to_layer,
+                    "rule_kind": rule_kind,
+                    "links": flow.links,
+                    "weight": flow.links,
+                    "guessed": flow.guessed,
+                    "hint": hint,
+                })
+            },
+        )
         .collect()
 }
 /// Whether a file is code a layer can hold: no test, and no template that
@@ -293,12 +310,7 @@ fn declared(rules: &Rules, path: &str) -> Option<usize> {
     code(path).then(|| rules.layer(path)).flatten()
 }
 fn code(path: &str) -> bool {
-    let file = name(path);
-    !is_test(path)
-        && file.rsplit_once('.').is_some_and(|(stem, kind)| {
-            CODE.iter().any(|code| kind.eq_ignore_ascii_case(code))
-                && !stem.to_lowercase().ends_with(".blade")
-        })
+    crate::graph::file_types::is_layer_code_path(path)
 }
 /// The layer a file is filed in: by the ending of its name, by its name as a
 /// whole, or by the nearest folder named for a layer. A name that is a plain
@@ -717,7 +729,7 @@ impl Index {
                     .collect::<Vec<_>>(),
             )
         } else {
-            let layers = Layers::read(self, certain);
+            let layers = &self.patterns_of(certain).layers;
             let Some(held) = layers.held(self, scope).or_else(|| layers.held(self, "")) else {
                 return;
             };
@@ -725,8 +737,21 @@ impl Index {
                 .iter()
                 .map(|layer| (layer.id, layer.name))
                 .collect();
-            let [layered, ringed] = layers.ways;
-            (if held.way == RINGED { ringed } else { layered }, table)
+            let [layered, ringed] = &layers.ways;
+            (
+                if held.way == RINGED {
+                    Way {
+                        of: ringed.of.clone(),
+                        cross: ringed.cross.clone(),
+                    }
+                } else {
+                    Way {
+                        of: layered.of.clone(),
+                        cross: layered.cross.clone(),
+                    }
+                },
+                table,
+            )
         };
         let opened = self.opens(asked);
         let within = |path: &str| opened.map_or_else(|| under(scope, path), |file| file == path);
@@ -741,7 +766,7 @@ impl Index {
         let mut violations = Vec::new();
         let mut violation_links = 0;
         let mut marked = HashMap::new();
-        let mut violating_edges: Vec<(&str, &str, &str, &str, Flow)> = Vec::new();
+        let mut violating_edges: Vec<(bool, bool, &str, &str, &str, &str, Flow)> = Vec::new();
         for &(from, to, ref edge) in &way.cross {
             let flow = edge.flow;
             let (a, b) = (from as usize, to as usize);
@@ -756,7 +781,10 @@ impl Index {
             if forbidden(from_layer, to_layer) {
                 marked.insert((source.as_str(), target.as_str()), flow.links);
                 violation_links += flow.links;
+                let is_skip = rules.is_some() && from_layer < to_layer;
                 violating_edges.push((
+                    rules.is_some(),
+                    is_skip,
                     source.as_str(),
                     target.as_str(),
                     table[from_layer].1,
@@ -963,6 +991,64 @@ impl Index {
         }
         view["patterns"] = json!({"found":found, "kinds":kinds});
     }
+
+    pub(crate) fn compare_declared_layers(
+        &self,
+        base: &Index,
+        view: &mut Value,
+        renamed: &HashMap<&str, &str>,
+        certain: bool,
+        rules: &Rules,
+    ) {
+        let head_way = Way::read(self, certain, &|path| declared(rules, path));
+        let base_way = Way::read(base, certain, &|path| declared(rules, path));
+        let table: Vec<DisplayLayer<'_>> = rules
+            .layers
+            .iter()
+            .map(|l| DisplayLayer {
+                id: &l.id,
+                name: &l.name,
+            })
+            .collect();
+        compare_ways(
+            self,
+            base,
+            &head_way,
+            &base_way,
+            &table,
+            &|above, below| rules.forbidden(above, below),
+            view,
+            renamed,
+        );
+    }
+
+    /// Lists all forbidden file-level dependencies against `.harness-architecture.json` `rules`.
+    pub(crate) fn declared_rule_violations(
+        &self,
+        certain: bool,
+        rules: &Rules,
+    ) -> Vec<(String, String, u64, String)> {
+        let way = Way::read(self, certain, &|path| declared(rules, path));
+        way.forbidden_pairs(&|above, below| rules.forbidden(above, below))
+            .into_iter()
+            .map(|pair| {
+                let from_layer = rules
+                    .layers
+                    .get(pair.above)
+                    .map_or("unknown", |l| l.name.as_str());
+                let to_layer = rules
+                    .layers
+                    .get(pair.below)
+                    .map_or("unknown", |l| l.name.as_str());
+                (
+                    self.files[pair.from as usize].clone(),
+                    self.files[pair.to as usize].clone(),
+                    pair.flow.links,
+                    format!("{from_layer} -> {to_layer}"),
+                )
+            })
+            .collect()
+    }
 }
 
 impl Held {
@@ -1067,13 +1153,19 @@ impl Held {
                         .collect::<Vec<_>>(),
                     "more": against.len().saturating_sub(LISTED),
                 },
-                "remediation": layer_remediation_hints(against.iter().map(|&&(from, to, flow)| (
-                    index.files[from as usize].as_str(),
-                    index.files[to as usize].as_str(),
-                    table[of[from as usize] as usize].name,
-                    table[of[to as usize] as usize].name,
-                    flow,
-                ))),
+                "remediation": layer_remediation_hints(against.iter().map(|&&(from, to, flow)| {
+                    let from_idx = of[from as usize] as usize;
+                    let to_idx = of[to as usize] as usize;
+                    (
+                        rules.is_some(),
+                        rules.is_some() && from_idx < to_idx,
+                        index.files[from as usize].as_str(),
+                        index.files[to as usize].as_str(),
+                        table[from_idx].name,
+                        table[to_idx].name,
+                        flow,
+                    )
+                })),
             },
             "nodes": present.iter().map(|layer| node(*layer)).collect::<Vec<_>>(),
             "edges": present
@@ -1215,7 +1307,7 @@ impl Held {
 }
 /// One pair of files of two layers as a row: the two files with the layers
 /// they are filed in, and through how many links the first needs the second.
-fn paired(index: &Index, table: &[Layer], pair: &Backward) -> Value {
+fn paired(index: &Index, table: &[DisplayLayer<'_>], pair: &Backward) -> Value {
     let end = |file: u32, layer: usize| {
         let path = index.files[file as usize].as_str();
         json!({"path": path, "name": name(path), "layer": table[layer].name})
@@ -1225,49 +1317,157 @@ fn paired(index: &Index, table: &[Layer], pair: &Backward) -> Value {
         "links": pair.flow.links, "guessed": pair.flow.guessed,
     })
 }
-/// A pair of files of which the first needs the second against the order of
+/// A pair of files of which the first needs the second against the rules of
 /// their layers.
 struct Backward {
     from: u32,
     to: u32,
-    /// The layers of the two, the first the later in the order.
     above: usize,
     below: usize,
     flow: Flow,
 }
-impl Layers {
-    /// What runs against the order of the layers of a graph read one way,
-    /// the most linked first. Whether a folder of it would be said to be in
-    /// layers is not asked: this is for measuring one graph against another
-    /// by the same way.
-    fn backward(&self, way: usize) -> Vec<Backward> {
-        let Way { of, cross } = &self.ways[way];
-        cross
+impl Way {
+    fn forbidden_pairs(&self, forbidden: &dyn Fn(usize, usize) -> bool) -> Vec<Backward> {
+        self.cross
             .iter()
             .map(|(from, to, edge)| Backward {
                 from: *from,
                 to: *to,
-                above: of[*from as usize] as usize,
-                below: of[*to as usize] as usize,
+                above: self.of[*from as usize] as usize,
+                below: self.of[*to as usize] as usize,
                 flow: edge.flow,
             })
-            .filter(|pair| pair.above > pair.below)
+            .filter(|pair| forbidden(pair.above, pair.below))
             .collect()
     }
-    /// Says in the picture of a folder's layers what a change did to their
-    /// order: the pairs of files that run against it now and did not in
-    /// `base`, the graph the change started from, and those that did there
-    /// and no longer do. A pair is told by its two files, whatever the
-    /// number of its links; `renamed` gives, for a file the change moved,
-    /// the path it had in `base`. A pair is of the folder where both its
-    /// files lie in it after the change, so a file moved into the folder
-    /// with what it already had against the order adds nothing, and one
-    /// moved out takes nothing away; nor does renaming the folder itself.
-    /// The base is read the way the folder is read now, by the four layers
-    /// or by its rings, so that what differs is what the change did and not
-    /// how a folder is read. In the lists of the picture the pairs that
-    /// are among the added come first and say so, and a link between two
-    /// layers says how many of its links they are.
+}
+#[allow(clippy::too_many_arguments)]
+fn compare_ways(
+    index: &Index,
+    base: &Index,
+    head_way: &Way,
+    base_way: &Way,
+    table: &[DisplayLayer<'_>],
+    forbidden: &dyn Fn(usize, usize) -> bool,
+    view: &mut Value,
+    renamed: &HashMap<&str, &str>,
+) {
+    let scope = view["scope"].as_str().unwrap_or("").to_owned();
+    let moved = renamed
+        .iter()
+        .map(|(new, old)| (*old, *new))
+        .collect::<HashMap<_, _>>();
+    let before = |pair: &Backward| {
+        let old = |file: u32| {
+            let path = index.files[file as usize].as_str();
+            renamed.get(path).copied().unwrap_or(path)
+        };
+        (old(pair.from), old(pair.to))
+    };
+    let after = |pair: &Backward| {
+        let new = |file: u32| {
+            let path = base.files[file as usize].as_str();
+            moved.get(path).copied().unwrap_or(path)
+        };
+        (new(pair.from), new(pair.to))
+    };
+    fn here<'a>(index: &'a Index, pair: &Backward) -> (&'a str, &'a str) {
+        (
+            index.files[pair.from as usize].as_str(),
+            index.files[pair.to as usize].as_str(),
+        )
+    }
+    let within = |(from, to): (&str, &str)| under(&scope, from) && under(&scope, to);
+    let (now, was) = (
+        head_way.forbidden_pairs(forbidden),
+        base_way.forbidden_pairs(forbidden),
+    );
+    let had = was
+        .iter()
+        .map(|pair| here(base, pair))
+        .collect::<HashSet<_>>();
+    let has = now.iter().map(before).collect::<HashSet<_>>();
+    let added = now
+        .iter()
+        .filter(|pair| within(here(index, pair)) && !had.contains(&before(pair)))
+        .collect::<Vec<_>>();
+    let removed = was
+        .iter()
+        .filter(|pair| within(after(pair)) && !has.contains(&here(base, pair)))
+        .collect::<Vec<_>>();
+    let listed = |idx: &Index, pairs: &[&Backward]| {
+        let flow = pairs.iter().fold(Flow::default(), |sum, pair| Flow {
+            links: sum.links + pair.flow.links,
+            guessed: sum.guessed + pair.flow.guessed,
+        });
+        json!({
+            "pairs": pairs.len(), "links": flow.links, "guessed": flow.guessed,
+            "rows": pairs
+                .iter()
+                .take(LISTED)
+                .map(|pair| paired(idx, table, pair))
+                .collect::<Vec<_>>(),
+            "more": pairs.len().saturating_sub(LISTED),
+        })
+    };
+    let new = added
+        .iter()
+        .map(|pair| (pair.from, pair.to))
+        .collect::<HashSet<_>>();
+    let rows = |keep: &dyn Fn(&Backward) -> bool| {
+        let (first, rest): (Vec<_>, Vec<_>) = now
+            .iter()
+            .filter(|pair| within(here(index, pair)) && keep(pair))
+            .partition(|pair| new.contains(&(pair.from, pair.to)));
+        let told = first.len();
+        first
+            .into_iter()
+            .chain(rest)
+            .take(LISTED)
+            .enumerate()
+            .map(|(at, pair)| {
+                let mut row = paired(index, table, pair);
+                if at < told {
+                    row["added"] = json!(true);
+                }
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+    let layer = |path: &Value| {
+        let id = path.as_str()?.strip_prefix("layer:")?;
+        table.iter().position(|layer| layer.id == id)
+    };
+    view["pattern"]["against"]["rows"] = json!(rows(&|_| true));
+    let focus = &view["focus"];
+    if focus["link"] == true {
+        if let Some((from, to)) = layer(&focus["from"]["path"]).zip(layer(&focus["to"]["path"]))
+            && forbidden(from, to)
+        {
+            view["focus"]["rows"] = json!(rows(&|pair| pair.above == from && pair.below == to));
+        }
+    } else if let Some(chosen) = layer(&focus["path"]) {
+        view["focus"]["against"]["rows"] = json!(rows(&|pair| pair.above == chosen));
+    }
+    let mut through: HashMap<(usize, usize), u64> = HashMap::new();
+    for pair in &added {
+        *through.entry((pair.above, pair.below)).or_default() += pair.flow.links;
+    }
+    for edge in view["edges"].as_array_mut().into_iter().flatten() {
+        if let Some(links) = layer(&edge["from"])
+            .zip(layer(&edge["to"]))
+            .and_then(|ends| through.get(&ends))
+        {
+            edge["added"] = json!(links);
+        }
+    }
+    view["pattern"]["change"] = json!({
+        "state": "ready",
+        "added": listed(index, &added),
+        "removed": listed(base, &removed),
+    });
+}
+impl Layers {
     pub(super) fn compare(
         &self,
         index: &Index,
@@ -1276,126 +1476,25 @@ impl Layers {
         view: &mut Value,
         renamed: &HashMap<&str, &str>,
     ) {
-        let scope = view["scope"].as_str().unwrap_or("").to_owned();
-        let way = self.held(index, &scope).map_or(LAYERED, |held| held.way);
-        let table = WAYS[way];
-        let moved = renamed
+        let scope = view["scope"].as_str().unwrap_or("");
+        let way = self.held(index, scope).map_or(LAYERED, |held| held.way);
+        let table: Vec<DisplayLayer<'_>> = WAYS[way]
             .iter()
-            .map(|(new, old)| (*old, *new))
-            .collect::<HashMap<_, _>>();
-        // The two files of a pair of either graph, by their paths before
-        // the change and after it.
-        let before = |pair: &Backward| {
-            let old = |file: u32| {
-                let path = index.files[file as usize].as_str();
-                renamed.get(path).copied().unwrap_or(path)
-            };
-            (old(pair.from), old(pair.to))
-        };
-        let after = |pair: &Backward| {
-            let new = |file: u32| {
-                let path = base.files[file as usize].as_str();
-                moved.get(path).copied().unwrap_or(path)
-            };
-            (new(pair.from), new(pair.to))
-        };
-        fn here<'a>(index: &'a Index, pair: &Backward) -> (&'a str, &'a str) {
-            (
-                index.files[pair.from as usize].as_str(),
-                index.files[pair.to as usize].as_str(),
-            )
-        }
-        let within = |(from, to): (&str, &str)| under(&scope, from) && under(&scope, to);
-        let (now, was) = (self.backward(way), then.backward(way));
-        let had = was
-            .iter()
-            .map(|pair| here(base, pair))
-            .collect::<HashSet<_>>();
-        let has = now.iter().map(before).collect::<HashSet<_>>();
-        let added = now
-            .iter()
-            .filter(|pair| within(here(index, pair)) && !had.contains(&before(pair)))
-            .collect::<Vec<_>>();
-        let removed = was
-            .iter()
-            .filter(|pair| within(after(pair)) && !has.contains(&here(base, pair)))
-            .collect::<Vec<_>>();
-        let listed = |index: &Index, pairs: &[&Backward]| {
-            let flow = pairs.iter().fold(Flow::default(), |sum, pair| Flow {
-                links: sum.links + pair.flow.links,
-                guessed: sum.guessed + pair.flow.guessed,
-            });
-            json!({
-                "pairs": pairs.len(), "links": flow.links, "guessed": flow.guessed,
-                "rows": pairs
-                    .iter()
-                    .take(LISTED)
-                    .map(|pair| paired(index, table, pair))
-                    .collect::<Vec<_>>(),
-                "more": pairs.len().saturating_sub(LISTED),
+            .map(|l| DisplayLayer {
+                id: l.id,
+                name: l.name,
             })
-        };
-        // A list of the picture shows no more than its first pairs, the
-        // most linked: in each of them what the change added comes first,
-        // so that it is never among those left out, and says so. The lists
-        // are of all that runs against the order in the folder, of a
-        // selected layer's own, and of a selected link back.
-        let new = added
-            .iter()
-            .map(|pair| (pair.from, pair.to))
-            .collect::<HashSet<_>>();
-        let rows = |keep: &dyn Fn(&Backward) -> bool| {
-            let (first, rest): (Vec<_>, Vec<_>) = now
-                .iter()
-                .filter(|pair| within(here(index, pair)) && keep(pair))
-                .partition(|pair| new.contains(&(pair.from, pair.to)));
-            let told = first.len();
-            first
-                .into_iter()
-                .chain(rest)
-                .take(LISTED)
-                .enumerate()
-                .map(|(at, pair)| {
-                    let mut row = paired(index, table, pair);
-                    if at < told {
-                        row["added"] = json!(true);
-                    }
-                    row
-                })
-                .collect::<Vec<_>>()
-        };
-        let layer = |path: &Value| {
-            let id = path.as_str()?.strip_prefix("layer:")?;
-            table.iter().position(|layer| layer.id == id)
-        };
-        view["pattern"]["against"]["rows"] = json!(rows(&|_| true));
-        let focus = &view["focus"];
-        if focus["link"] == true {
-            if let Some((from, to)) = layer(&focus["from"]["path"]).zip(layer(&focus["to"]["path"]))
-                && from > to
-            {
-                view["focus"]["rows"] = json!(rows(&|pair| pair.above == from && pair.below == to));
-            }
-        } else if let Some(chosen) = layer(&focus["path"]) {
-            view["focus"]["against"]["rows"] = json!(rows(&|pair| pair.above == chosen));
-        }
-        let mut through: HashMap<(usize, usize), u64> = HashMap::new();
-        for pair in &added {
-            *through.entry((pair.above, pair.below)).or_default() += pair.flow.links;
-        }
-        for edge in view["edges"].as_array_mut().into_iter().flatten() {
-            if let Some(links) = layer(&edge["from"])
-                .zip(layer(&edge["to"]))
-                .and_then(|ends| through.get(&ends))
-            {
-                edge["added"] = json!(links);
-            }
-        }
-        view["pattern"]["change"] = json!({
-            "state": "ready",
-            "added": listed(index, &added),
-            "removed": listed(base, &removed),
-        });
+            .collect();
+        compare_ways(
+            index,
+            base,
+            &self.ways[way],
+            &then.ways[way],
+            &table,
+            &|above, below| above > below,
+            view,
+            renamed,
+        );
     }
 }
 impl Held {

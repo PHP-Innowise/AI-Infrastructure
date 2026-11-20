@@ -62,6 +62,11 @@ fn ensure_graph_event_bridge(store: &SessionStore) {
 }
 pub trait Domain: Send + Sync {
     fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a>;
+
+    /// Whether this domain emits authoritative `graph_status` events over the graph bridge.
+    fn emits_graph_status_events(&self) -> bool {
+        false
+    }
 }
 pub struct NativeServices {
     pub store: SessionStore,
@@ -510,6 +515,9 @@ impl NativeServices {
                 );
             }
             "graph.act" => {
+                if body["action"].as_str() == Some("changes") {
+                    return;
+                }
                 let project_id = val["project_id"]
                     .as_str()
                     .or_else(|| params["project_id"].as_str())
@@ -537,6 +545,11 @@ impl NativeServices {
                     && let Some(ir_rev) = val.get("ir_revision").and_then(Value::as_u64)
                 {
                     ev["revision"] = json!(ir_rev);
+                }
+                if ev.get("ir_revision").is_none()
+                    && let Some(rev) = ev.get("revision").and_then(Value::as_u64)
+                {
+                    ev["ir_revision"] = json!(rev);
                 }
                 self.store
                     .publish_event("graph_status", None, Some(project_id), ev);
@@ -1390,7 +1403,15 @@ impl Services for NativeServices {
                     .await;
                 }
             }
-            self.emit_domain_mutation_sse(operation, params, body, &payload);
+            let bridged_graph_act = operation == "graph.act"
+                && !self.overrides.contains_key("graph.act")
+                && self
+                    .domains
+                    .get("graph")
+                    .is_some_and(|domain| domain.emits_graph_status_events());
+            if !bridged_graph_act {
+                self.emit_domain_mutation_sse(operation, params, body, &payload);
+            }
             Ok(payload)
         })
     }
@@ -2741,6 +2762,88 @@ mod tests {
         let f3 = rx.recv().await.unwrap();
         assert_eq!(f3.event, "omnigraph_status");
         assert_eq!(f3.data["operation"], "omnigraph.publish");
+
+        // `action == "changes"` does NOT emit spurious `graph_status` mutation SSE.
+        services.emit_domain_mutation_sse(
+            "graph.act",
+            &json!({"project_id": "p1"}),
+            &json!({"action": "changes"}),
+            &Payload::Json(json!({"files": []})),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "action == changes must suppress spurious graph_status SSE"
+        );
+
+        // Domain overriding `emits_graph_status_events() -> true` skips duplicate `NativeServices::request` emit.
+        struct BridgedGraphStub;
+        impl Domain for BridgedGraphStub {
+            fn execute<'a>(
+                &'a self,
+                _op: &'a str,
+                _req: Value,
+            ) -> Pin<Box<dyn Future<Output = Result<Payload>> + Send + 'a>> {
+                Box::pin(async {
+                    Ok(Payload::Json(
+                        json!({"state": "building", "ir_revision": 9}),
+                    ))
+                })
+            }
+            fn emits_graph_status_events(&self) -> bool {
+                true
+            }
+        }
+        let mut bridged_domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "knowledge",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "omnigraph",
+            "delivery",
+            "results",
+            "system_graph",
+        ]
+        .into_iter()
+        .map(|k| (k.to_owned(), Arc::clone(&stub)))
+        .collect();
+        bridged_domains.insert("graph".into(), Arc::new(BridgedGraphStub));
+        let bridged_store = SessionStore::open(&root.path().join("state2")).unwrap();
+        let mut bridged_rx = match bridged_store.stream().subscribe(None) {
+            crate::store::ReplayStart::Frames { rx, .. } => rx,
+            _ => panic!("expected Frames"),
+        };
+        let bridged_services = NativeServices::new(
+            bridged_store,
+            bridged_domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap();
+        let _ = bridged_services
+            .request(
+                "graph.act",
+                json!({"params": {"project_id": "p1"}, "body": {"action": "rebuild"}}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            bridged_rx.try_recv().is_err(),
+            "NativeServices must skip duplicate emit_domain_mutation_sse when Domain bridges events"
+        );
+        bridged_services.close().await.unwrap();
 
         services.close().await.unwrap();
     }
