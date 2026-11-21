@@ -46,6 +46,7 @@ mod session_mounts;
 mod session_scheduler;
 pub mod sessions;
 pub mod setup;
+pub mod skillcache;
 pub mod skills;
 pub mod store;
 pub mod strict_json;

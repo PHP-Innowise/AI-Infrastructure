@@ -65,6 +65,8 @@ function parseArgs(argv) {
     commitA: '',
     commitB: '',
     systemRunId: '',
+    skillcacheCapsuleId: '',
+    skillcacheRequalify: false,
     chrome: process.env.HARNESS_CHROME_BIN || '/opt/google/chrome/chrome',
     timeoutMs: 120_000,
   };
@@ -100,6 +102,12 @@ function parseArgs(argv) {
         break;
       case 'system-run-id':
         opts.systemRunId = val;
+        break;
+      case 'skillcache-capsule-id':
+        opts.skillcacheCapsuleId = val;
+        break;
+      case 'skillcache-requalify':
+        opts.skillcacheRequalify = val === '1' || val === 'true';
         break;
       case 'chrome':
         opts.chrome = val;
@@ -1182,7 +1190,7 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   await driver.waitFor(() => (window.devicePixelRatio || 1) <= 1.05, 'devicePixelRatio restored to 1', 4_000);
 
   // Hover neighbor lighting + right-click Explain on Canvas2D + Shift+drag pin/unpin + Back/Forward
-  const pinTarget = await driver.callFn(() => {
+  const visibleNodeTargets = () => driver.callFn(() => {
     const host = document.getElementById('graph-map-canvas');
     const cr = host.getBoundingClientRect();
     const out = [];
@@ -1191,42 +1199,79 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
       const cx = nr.left + nr.width / 2;
       const cy = nr.top + nr.height / 2;
       if (cx > cr.left + 20 && cx < cr.right - 20 && cy > cr.top + 20 && cy < cr.bottom - 20) {
-        out.push({ cx, cy, payload: n.getAttribute('data-payload') || '' });
-        if (out.length >= 2) break;
+        out.push({
+          cx,
+          cy,
+          payload: n.getAttribute('data-payload') || '',
+          focused: n.getAttribute('data-focused') === 'true',
+        });
       }
     }
     return out;
   });
-  assert(pinTarget.length >= 1, 'Expected visible node targets in #graph-map-canvas for hover/pin/explain');
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pinTarget[0].cx, y: pinTarget[0].cy });
+  const historyState = () => driver.callFn(() => {
+    const canvas = document.getElementById('graph-map-canvas');
+    const back = document.getElementById('graph-map-nav-back');
+    const forward = document.getElementById('graph-map-nav-forward');
+    const crumbs = Array.from(document.querySelectorAll('#graph-map-crumbs .graph-map-history-crumb'));
+    const current = crumbs.find((c) => c.getAttribute('aria-current') === 'location');
+    return {
+      busy: canvas?.getAttribute('aria-busy') === 'true',
+      backDisabled: Boolean(back?.disabled),
+      forwardDisabled: Boolean(forward?.disabled),
+      crumbCount: crumbs.length,
+      activeIdx: current ? Number.parseInt(current.getAttribute('data-payload') || '-1', 10) : -1,
+    };
+  });
+  const initialTargets = await visibleNodeTargets();
+  assert(initialTargets.length >= 1, 'Expected visible node targets in #graph-map-canvas for hover/pin/explain');
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: initialTargets[0].cx, y: initialTargets[0].cy });
   await driver.callFn(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 
-  // Camera & selection history Back / Forward (if two nodes + history buttons exist)
-  if (pinTarget.length >= 2) {
-    await driver.clickAt(pinTarget[0].cx, pinTarget[0].cy);
-    await driver.clickAt(pinTarget[1].cx, pinTarget[1].cy);
-    const hasHistoryNav = await driver.callFn(() => {
-      const back = document.getElementById('graph-map-nav-back');
-      return Boolean(back && !back.disabled);
-    });
-    if (hasHistoryNav) {
-      await driver.click('#graph-map-nav-back');
-      await driver.waitFor(
-        () => !document.getElementById('graph-map-nav-forward')?.disabled,
-        '#graph-map-nav-forward enabled after Back navigation',
-        5_000,
-      );
-      await driver.click('#graph-map-nav-forward');
-      await driver.waitFor(
-        () => document.getElementById('graph-map-nav-forward')?.disabled === true,
-        '#graph-map-nav-forward disabled at history head',
-        5_000,
-      );
-    }
+  // Camera & selection history Back / Forward (wait for each history push & re-measure after camera shifts)
+  if (initialTargets.length >= 2) {
+    const firstTarget = initialTargets.find((t) => !t.focused) || initialTargets[0];
+    const beforeFirst = await historyState();
+    await driver.clickAt(firstTarget.cx, firstTarget.cy);
+    const afterFirst = await driver.waitUntil(async () => {
+      const s = await historyState();
+      if (!s.busy && !s.backDisabled && s.crumbCount >= 2 && (s.activeIdx > beforeFirst.activeIdx || s.crumbCount > beforeFirst.crumbCount)) {
+        return s;
+      }
+      return null;
+    }, 'First node click recorded in #graph-map-crumbs history', 8_000);
+
+    const targetsAfterFirst = await visibleNodeTargets();
+    const secondTarget = targetsAfterFirst.find((t) => t.payload !== firstTarget.payload && !t.focused)
+      || targetsAfterFirst.find((t) => t.payload !== firstTarget.payload);
+    assert(secondTarget, 'Expected a second distinct visible node after focusing first node');
+    await driver.clickAt(secondTarget.cx, secondTarget.cy);
+    const afterSecond = await driver.waitUntil(async () => {
+      const s = await historyState();
+      if (!s.busy && !s.backDisabled && s.crumbCount >= 2 && s.activeIdx > afterFirst.activeIdx) {
+        return s;
+      }
+      return null;
+    }, 'Second node click recorded in #graph-map-crumbs history', 8_000);
+
+    assert(!afterSecond.backDisabled, '#graph-map-nav-back must be enabled after two focus clicks');
+    await driver.click('#graph-map-nav-back');
+    await driver.waitUntil(async () => {
+      const s = await historyState();
+      return !s.busy && !s.forwardDisabled && s.activeIdx < afterSecond.activeIdx;
+    }, '#graph-map-nav-forward enabled after Back navigation', 8_000);
+
+    await driver.click('#graph-map-nav-forward');
+    await driver.waitUntil(async () => {
+      const s = await historyState();
+      return !s.busy && s.forwardDisabled && s.activeIdx === afterSecond.activeIdx;
+    }, '#graph-map-nav-forward disabled at history head', 8_000);
   }
 
-  // Shift+drag pin + single-node unpin / Reset pins
-  await driver.dragAt(pinTarget[0].cx, pinTarget[0].cy, pinTarget[0].cx + 36, pinTarget[0].cy + 20, { modifiers: 8 });
+  // Shift+drag pin + single-node unpin / Reset pins (re-measure after history navigation)
+  const pinTargets = await visibleNodeTargets();
+  assert(pinTargets.length >= 1, 'Expected visible node target in #graph-map-canvas for Shift+drag pin');
+  await driver.dragAt(pinTargets[0].cx, pinTargets[0].cy, pinTargets[0].cx + 36, pinTargets[0].cy + 20, { modifiers: 8 });
   const pinControls = await driver.waitFor(() => {
     const reset = document.getElementById('graph-map-reset-pins');
     const undo = document.getElementById('graph-map-pin-undo');
@@ -1250,7 +1295,7 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   });
 
   // Canvas2D right-click Explain menu & dialog
-  await driver.rightClickAt(pinTarget[0].cx, pinTarget[0].cy);
+  await driver.rightClickAt(pinTargets[0].cx, pinTargets[0].cy);
   const explainText = await driver.waitFor(() => {
     const btn = document.getElementById('graph-explain-action');
     if (!btn || btn.hidden) return null;
@@ -3544,6 +3589,253 @@ async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, o
   }
 }
 
+async function suite12SkillCache(driver, opts) {
+  console.log('[Suite 12] SkillCache: composer option, stream cards, run tab & Skill capsules view');
+  assert(opts.skillcacheCapsuleId && opts.otherSessionId && opts.projectId, 'Suite 12 needs the seeded capsule, the finished session and the project');
+  const capsuleId = opts.skillcacheCapsuleId;
+  const setMode = (mode) => driver.callFn((value) => {
+    const select = document.getElementById('skillcache-mode');
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }, mode);
+
+  // 1. The composer's option: off until chosen, named on the chip, remembered with the draft.
+  await driver.click('button.nav-item[data-nav="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'sessions view open before Suite 12', 8_000);
+  await driver.click('#new-session');
+  await driver.waitFor(() => {
+    const chip = document.getElementById('option-skillcache');
+    return Boolean(chip && chip.getBoundingClientRect().width > 0
+      && document.getElementById('option-skillcache-value')?.textContent === 'Off');
+  }, '#option-skillcache chip visible and Off in a new draft', 6_000);
+  await driver.click('#option-skillcache');
+  await driver.waitFor(() => {
+    const panel = document.getElementById('panel-skillcache');
+    const chip = document.getElementById('option-skillcache');
+    const note = document.getElementById('skillcache-note')?.textContent || '';
+    return Boolean(panel && !panel.hidden && chip?.getAttribute('aria-expanded') === 'true' && note.startsWith('Off.'));
+  }, '#panel-skillcache opens and says nothing is recorded', 5_000);
+  const modelDisabledWhileOff = await driver.callFn(() => document.getElementById('skillcache-compiler-model')?.disabled === true);
+  assert(modelDisabledWhileOff, 'The compiler model has no meaning while SkillCache is off');
+
+  await setMode('observe');
+  await driver.waitFor(() => {
+    const note = document.getElementById('skillcache-note')?.textContent || '';
+    return document.getElementById('option-skillcache-value')?.textContent === 'Observe'
+      && note.includes('redacted trace') && note.includes('30 days')
+      && document.getElementById('skillcache-compiler-model')?.disabled === false;
+  }, 'Observe names what is kept and for how long', 5_000);
+  const remembered = await driver.callFn(() => {
+    const tab = sessionStorage.getItem('harness.sessions.tab-drafts.v1') || '';
+    const shared = localStorage.getItem('harness.sessions.preferences.v1') || '';
+    return tab.includes('"skillcache-mode":"observe"') || shared.includes('"skillcache-mode":"observe"');
+  });
+  assert(remembered, 'The chosen SkillCache mode is saved with the draft');
+
+  await setMode('auto');
+  await driver.waitFor(() => {
+    const note = document.getElementById('skillcache-note')?.textContent || '';
+    // Claude runs a capsule for `$skill`; a `/command` stays native and is only observed.
+    return document.getElementById('option-skillcache-value')?.textContent === 'Auto'
+      && note.includes('$skill') && note.includes('`/command` runs natively');
+  }, 'Auto says how a Claude session runs a capsule and keeps /command native', 5_000);
+  await setMode('observe');
+  await driver.click('#option-skillcache');
+  await driver.waitFor(() => document.getElementById('panel-skillcache')?.hidden === true, '#panel-skillcache closes', 4_000);
+
+  // 2. The finished session: its stored option is its own, and its turn's SkillCache cards are in the conversation.
+  const otherSel = `#history [data-action="session-open"][data-payload="${JSON.stringify(opts.otherSessionId).replace(/"/g, '\\"')}"]`;
+  await driver.click(otherSel);
+  await driver.waitFor(() => {
+    const phases = Array.from(document.querySelectorAll('#events .conversation-skillcache')).map((e) => e.dataset.phase);
+    return ['observed', 'hit', 'program_failed', 'complete'].every((phase) => phases.includes(phase));
+  }, 'SkillCache cards of the finished turn are in the conversation', 12_000);
+  // The session's own stored option replaces the draft's on the chip.
+  await driver.waitFor(() => document.getElementById('option-skillcache-value')?.textContent === 'Off'
+    && document.getElementById('skillcache-mode')?.value === 'off',
+  'A session that never opted in shows SkillCache Off', 8_000);
+  const cards = await driver.callFn(() => Array.from(document.querySelectorAll('#events .conversation-skillcache')).map((e) => ({
+    phase: e.dataset.phase,
+    tone: e.dataset.tone,
+    text: e.textContent || '',
+    border: getComputedStyle(e).borderLeftColor,
+  })));
+  const failedCard = cards.find((card) => card.phase === 'program_failed');
+  assert(failedCard.tone === 'warn' && failedCard.text.includes('Step handed back') && failedCard.text.includes('nonzero_exit'),
+    `program_failed card names the handed-back step and its reason: ${JSON.stringify(failedCard)}`);
+  assert(!failedCard.text.includes('main.sh') && !failedCard.text.includes('printf'), 'A card never shows program code');
+  assert(!cards.some((card) => card.phase === 'started'), 'The conversation shows what a person may act on, not every phase');
+  const hitCard = cards.find((card) => card.phase === 'hit');
+  assert(hitCard.border !== failedCard.border, `Tones are told apart by token colors (${hitCard.border} vs ${failedCard.border})`);
+  // The observed turn was compiled already: its card says so instead of offering to compile it again.
+  const observedCard = cards.find((card) => card.phase === 'observed');
+  await driver.waitFor(() => {
+    const card = document.querySelector('#events .conversation-skillcache[data-phase="observed"]');
+    return Boolean(card && card.textContent.includes('Compilation completed') && !card.querySelector('[data-action="skillcache-compile"]'));
+  }, `observed card shows its compilation once the session's state is read (${observedCard.text.slice(0, 80)})`, 8_000);
+
+  // 3. The run view's SkillCache tab lists every phase of the turn.
+  const openTab = '.run-receipt [data-action="run-open"][data-payload="\\"skillcache\\""]';
+  await driver.waitFor((sel) => Boolean(document.querySelector(sel)), 'Last run line offers the SkillCache tab', 8_000, openTab);
+  await driver.click(openTab);
+  await driver.waitFor(() => {
+    const tab = document.getElementById('run-tab-skillcache');
+    const pane = document.getElementById('run-pane-skillcache');
+    return Boolean(tab && !tab.hidden && tab.getAttribute('aria-selected') === 'true' && pane && !pane.hidden
+      && pane.querySelectorAll('.skillcache-phase').length >= 5);
+  }, '#run-pane-skillcache lists the phases', 8_000);
+  const pane = await driver.callFn(() => {
+    const failed = document.querySelector('#run-pane-skillcache .skillcache-phase[data-phase="program_failed"]');
+    return {
+      phases: Array.from(document.querySelectorAll('#run-pane-skillcache .skillcache-phase')).map((e) => e.dataset.phase),
+      failed: failed?.textContent || '',
+      tone: failed?.dataset.tone,
+      opens: document.querySelectorAll('#run-pane-skillcache [data-action="skillcache-open-capsule"]').length,
+    };
+  });
+  assert(pane.phases.includes('started') && pane.phases.includes('complete'), `The tab lists phases the conversation leaves out: ${pane.phases}`);
+  assert(pane.tone === 'warn' && pane.failed.includes('reason: nonzero_exit') && pane.failed.includes('step 1') && pane.failed.includes('program extract'),
+    `program_failed row names reason, step and program: ${pane.failed}`);
+  assert(pane.opens >= 1, 'The tab links to the capsule the turn used');
+
+  // 4. From the turn to its capsule: the Skill capsules view with the capsule open.
+  // Activated in the page, not by pointer coordinates: in the detailed run panel the pane scrolls
+  // under the sticky composer, so the centered button may sit beneath it.
+  await driver.callFn(() => document.querySelector('#run-pane-skillcache [data-action="skillcache-open-capsule"]').click());
+  await driver.waitFor(() => {
+    const view = document.getElementById('skill-capsules-view');
+    const detail = document.getElementById('skill-capsule-detail');
+    const tab = document.querySelector('#view-tabs [data-view="skill-capsules"]');
+    return Boolean(view && !view.hidden && tab?.getAttribute('aria-selected') === 'true'
+      && detail && !detail.hidden && detail.textContent.includes('Plan (π)'));
+  }, 'Skill capsules view opens with the capsule inspected', 10_000);
+  const inspected = await driver.callFn(() => {
+    const detail = document.getElementById('skill-capsule-detail');
+    const row = document.querySelector('#skill-capsules-list .skill-capsule-row');
+    return {
+      text: detail.textContent || '',
+      rows: document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length,
+      current: row?.getAttribute('aria-current'),
+      rowText: row?.textContent || '',
+      actions: Array.from(detail.querySelectorAll('.skill-capsule-actions button')).map((b) => b.textContent),
+      inlineColors: detail.innerHTML.match(/style="[^"]*#[0-9a-fA-F]{3,8}/g),
+    };
+  });
+  assert(inspected.rows === 1 && inspected.current === 'true', 'The open capsule is the current row');
+  assert(inspected.rowText.includes('pdf-rows') && inspected.rowText.includes('Needs recompile') && inspected.rowText.includes('handed a program step back'),
+    `The row names the capsule, its state and why: ${inspected.rowText}`);
+  for (const part of ['Values it needs from the request (B)', 'Programs (P)', 'Plan (π)', 'Verification (V)', 'Gate history', 'Round 1 · gate1 failed', 'output_unread', 'Qualified as a hybrid capsule in round 2.']) {
+    assert(inspected.text.includes(part), `The inspector shows "${part}"`);
+  }
+  // What compiling cost is known; what a reuse saves is not, and is not a zero.
+  assert(inspected.text.includes('Compilation cost$0.0512'), `Compilation cost is shown: ${inspected.text.slice(0, 200)}`);
+  assert(inspected.text.includes('Saving per reuse—') && inspected.text.includes('Break-even—'), 'An unknown saving is a dash, not a zero');
+  assert(!inspected.text.includes('printf'), 'The inspector lists package files and never their contents');
+  assert(JSON.stringify(inspected.actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']), `Actions follow the status: ${inspected.actions}`);
+  assert(!inspected.inlineColors, `No inline colors in the inspector: ${inspected.inlineColors}`);
+
+  // 5. Themes: the status color is a token, so it changes with the theme.
+  const warnColor = () => driver.callFn(() => getComputedStyle(document.querySelector('#skill-capsules-list .skill-capsule-chip[data-tone="warn"]')).color);
+  const initialTheme = await driver.callFn(() => document.documentElement.getAttribute('data-theme'));
+  const otherTheme = initialTheme === 'dark' ? 'light' : 'dark';
+  const colorBefore = await warnColor();
+  await driver.click(`#theme-${otherTheme}`);
+  await driver.waitFor((expected) => document.documentElement.getAttribute('data-theme') === expected, `theme flips to ${otherTheme}`, 5_000, otherTheme);
+  const colorAfter = await warnColor();
+  assert(colorBefore !== colorAfter, `Status chip color follows the theme (${colorBefore} vs ${colorAfter})`);
+  await driver.click(`#theme-${initialTheme}`);
+  await driver.waitFor((expected) => document.documentElement.getAttribute('data-theme') === expected, `theme restores to ${initialTheme}`, 5_000, initialTheme);
+
+  // 6. A changing request without the page's token is refused.
+  let refused = 0;
+  await driver.allowHttpErrors(async () => {
+    refused = await driver.callFn(async (path) => {
+      const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      return response.status;
+    }, `/api/projects/${opts.projectId}/skillcache/capsules/${capsuleId}/retire`);
+  });
+  assert(refused === 403, `A capsule change without the token is refused with 403, got ${refused}`);
+  await driver.click('#skill-capsules-refresh');
+  await driver.waitFor(() => (document.querySelector('#skill-capsules-list .skill-capsule-row')?.textContent || '').includes('Needs recompile'),
+    'The refused request changed nothing', 6_000);
+
+  // 7. Filters, Stop using (retire) -> Use again (requalify), and two-click delete.
+  await driver.callFn(() => {
+    const select = document.getElementById('skill-capsules-status');
+    select.value = 'active';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 0, 'Status filter narrows the list', 6_000);
+  await driver.callFn(() => {
+    const select = document.getElementById('skill-capsules-status');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 1, 'Clearing the filter restores the list', 6_000);
+
+  // Stop using -> retired (kept visible in All via include_retired=true), then Use again -> active.
+  await driver.click('#skill-capsule-detail [data-action="skill-capsule-retire"]');
+  await driver.waitFor(() => {
+    const row = document.querySelector('#skill-capsules-list .skill-capsule-row');
+    const detail = document.getElementById('skill-capsule-detail');
+    const actions = Array.from(detail?.querySelectorAll('.skill-capsule-actions button') || []).map((b) => b.textContent);
+    return Boolean(row && (row.textContent || '').includes('Retired')
+      && detail && !detail.hidden && (detail.textContent || '').includes('Retired')
+      && JSON.stringify(actions) === JSON.stringify(['Use again', 'Delete…']));
+  }, 'Stop using retires the capsule and offers Use again', 8_000);
+  await driver.callFn(() => {
+    const select = document.getElementById('skill-capsules-status');
+    select.value = 'retired';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 1, 'Status=retired filter shows the retired capsule', 6_000);
+  await driver.callFn(() => {
+    const select = document.getElementById('skill-capsules-status');
+    select.value = '';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.querySelectorAll('#skill-capsules-list .skill-capsule-row').length === 1, 'All filter keeps retired capsule visible', 6_000);
+  if (opts.skillcacheRequalify) {
+    await driver.click('#skill-capsule-detail [data-action="skill-capsule-requalify"]');
+    await driver.waitFor(() => {
+      const row = document.querySelector('#skill-capsules-list .skill-capsule-row');
+      const detail = document.getElementById('skill-capsule-detail');
+      const actions = Array.from(detail?.querySelectorAll('.skill-capsule-actions button') || []).map((b) => b.textContent);
+      return Boolean(row && (row.textContent || '').includes('Active')
+        && detail && !detail.hidden
+        && JSON.stringify(actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']));
+    }, 'Use again requalifies the retired capsule back to Active', 20_000);
+  }
+  const armSel = '#skill-capsule-detail [data-action="skill-capsule-arm"]';
+  await driver.waitFor((sel) => Boolean(document.querySelector(sel)), 'Delete… is offered', 6_000, armSel);
+  await driver.click(armSel);
+  await driver.waitFor(() => Boolean(document.querySelector('#skill-capsule-detail [data-action="skill-capsule-delete"]')
+    && document.querySelector('#skill-capsule-detail [data-action="skill-capsule-keep"]')), 'Delete asks to be confirmed', 4_000);
+  await driver.click('#skill-capsule-detail [data-action="skill-capsule-keep"]');
+  await driver.waitFor((sel) => Boolean(document.querySelector(sel)) && !document.querySelector('#skill-capsule-detail [data-action="skill-capsule-delete"]'),
+    'Keep it takes the delete back', 4_000, armSel);
+  await driver.click(armSel);
+  await driver.waitFor(() => Boolean(document.querySelector('#skill-capsule-detail [data-action="skill-capsule-delete"]')), 'Delete armed again', 4_000);
+  await driver.click('#skill-capsule-detail [data-action="skill-capsule-delete"]');
+  await driver.waitFor(() => {
+    const list = document.getElementById('skill-capsules-list');
+    const detail = document.getElementById('skill-capsule-detail');
+    return Boolean(list && list.querySelectorAll('.skill-capsule-row').length === 0
+      && (list.textContent || '').includes('No capsule yet') && detail?.hidden);
+  }, 'The deleted capsule leaves the list and the inspector', 10_000);
+
+  // 8. The draft kept its choice while another session and another view were open.
+  await driver.click('button.nav-item[data-nav="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'return to #sessions-view after Suite 12', 6_000);
+  await driver.click('#new-session');
+  await driver.waitFor(() => document.getElementById('option-skillcache-value')?.textContent === 'Observe',
+    'A new draft restores the remembered SkillCache mode', 6_000);
+  await setMode('off');
+  await driver.waitFor(() => document.getElementById('option-skillcache-value')?.textContent === 'Off', 'SkillCache is left Off', 4_000);
+
+  driver.assertNoErrors('Suite 12');
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const { browserWsUrl, pageWsUrl, cleanup } = await launchChrome(opts.chrome, opts.timeoutMs);
@@ -3592,13 +3884,14 @@ async function main() {
       await suite7SystemMap(driver, opts);
       await suite9DiffChecksAndResults(driver, pageCdp, opts);
       await suite10KnowledgeSkillsManagementDialogs(driver);
+      await suite12SkillCache(driver, opts);
 
-      driver.assertNoErrors('Suites 1-7 & 9-10 check');
+      driver.assertNoErrors('Suites 1-7, 9-10 & 12 check');
       await suite8NegativeNetworkAndSseRecovery(driver, pageCdp);
       await suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts);
 
       driver.assertNoErrors('final check');
-      console.log('ALL 11 HEADLESS CHROME CDP E2E SUITES PASSED');
+      console.log('ALL 12 HEADLESS CHROME CDP E2E SUITES PASSED');
     })();
 
     await Promise.race([runSuites, timeoutPromise]);

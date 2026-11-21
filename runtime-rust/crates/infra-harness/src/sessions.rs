@@ -57,6 +57,79 @@ pub struct SessionLimits {
     pub seconds: u64,
     pub concurrency: usize,
 }
+#[derive(Clone)]
+struct ProtectedSandbox {
+    protected: Vec<PathBuf>,
+    engine: Option<PathBuf>,
+}
+fn build_protected_spec(
+    executable: &Path,
+    protected: &ProtectedSandbox,
+    workspace: &Path,
+    codex: Option<PathBuf>,
+    state_dir: Option<&Path>,
+    extra_readable: &[PathBuf],
+    evidence: &Path,
+) -> Result<infra_host::sandbox::Spec> {
+    let mut readable = extra_readable.to_vec();
+    readable.push(evidence.to_path_buf());
+    let mut spec = infra_system::workers::runtime_profile(
+        executable,
+        &protected.protected,
+        workspace,
+        codex,
+        &readable,
+    )?;
+    spec.target = protected.protected[0].clone();
+    spec.evidence = Some(evidence.to_path_buf());
+    if let Some(engine_dir) = protected.engine.as_deref().and_then(Path::parent) {
+        spec.runtime.push(engine_dir.to_path_buf());
+    }
+    if let Some(state_dir) = state_dir {
+        spec.accounts.push(state_dir.to_path_buf());
+    }
+    Ok(spec)
+}
+struct ProtectedLaunchAdapter {
+    inner: Arc<dyn provider::LaunchAdapter>,
+    protected: ProtectedSandbox,
+    workspace: PathBuf,
+    codex: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+    evidence: PathBuf,
+}
+impl provider::LaunchAdapter for ProtectedLaunchAdapter {
+    fn adapt(
+        &self,
+        input: &Launch,
+        command: infra_host::provider::PreparedCommand,
+    ) -> Result<infra_host::provider::PreparedCommand> {
+        let mut command = self.inner.adapt(input, command)?;
+        #[cfg(windows)]
+        if input.provider == "codex"
+            && let Some(position) = command.argv.iter().position(|value| value == "--sandbox")
+        {
+            command.argv.splice(
+                position..position + 2,
+                [
+                    "-c".into(),
+                    "default_permissions=\":danger-full-access\"".into(),
+                ],
+            );
+        }
+        let spec = build_protected_spec(
+            &input.executable,
+            &self.protected,
+            &self.workspace,
+            self.codex.clone(),
+            self.state_dir.as_deref(),
+            &command.readable,
+            &self.evidence,
+        )?;
+        command.argv = infra_host::sandbox::discovery(&spec, &command.argv)?;
+        Ok(command)
+    }
+}
 pub struct Sessions {
     pub store: SessionStore,
     pub source: PathBuf,
@@ -81,6 +154,8 @@ pub struct Sessions {
     results: Mutex<Option<Arc<crate::results::Results>>>,
     graphs: Mutex<Option<Arc<crate::graph::Graphs>>>,
     omnigraph: Mutex<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
+    skillcache: Mutex<Option<Arc<crate::skillcache::compile::Runtime>>>,
+    protected: Mutex<Option<ProtectedSandbox>>,
     lifecycle: Arc<crate::lifecycle::RunnerLifecycle>,
     /// Permission requests running sessions wait on.
     permissions: Arc<crate::permissions::PermissionDesk>,
@@ -431,6 +506,8 @@ impl Sessions {
             results: Mutex::new(None),
             graphs: Mutex::new(None),
             omnigraph: Mutex::new(None),
+            skillcache: Mutex::new(None),
+            protected: Mutex::new(None),
             lifecycle,
             permissions: Arc::default(),
             default_seconds: limits.seconds,
@@ -611,6 +688,7 @@ impl Sessions {
             "system_explain",
             "omnigraph",
             "permissions",
+            "skillcache",
         ];
         if !data.is_object()
             || data
@@ -663,6 +741,11 @@ impl Sessions {
         value["agents_enabled"] = enabled.into();
         value["agent_count"] = count.into();
         value["permissions"] = crate::permissions::validate(&data["permissions"])?;
+        value["skillcache"] = crate::skillcache::settings::validate(&data["skillcache"])?;
+        crate::skillcache::settings::admit_with_eval(
+            &value,
+            crate::skillcache::settings::eval_enabled(&self.store),
+        )?;
         let fleet = if workflow == "fleet-review" {
             fleet_options(
                 data.get("fleet").unwrap_or(&json!({})),
@@ -915,6 +998,136 @@ impl Sessions {
     pub fn install_graphs(&self, value: Arc<crate::graph::Graphs>) -> Result<()> {
         *lock(&self.graphs)? = Some(value);
         Ok(())
+    }
+    /// SkillCache is optional: without it a session that asks for warm turns
+    /// still decides them, with this executable as the engine.
+    pub fn install_skillcache(
+        &self,
+        value: Arc<crate::skillcache::compile::Runtime>,
+    ) -> Result<()> {
+        *lock(&self.skillcache)? = Some(value);
+        Ok(())
+    }
+    /// Configures protected paths that every session run must not read
+    /// (verified with `boundary_request_with` and wrapped via `sandbox::discovery`).
+    pub fn install_protected(
+        &self,
+        protected: Vec<PathBuf>,
+        engine: Option<PathBuf>,
+    ) -> Result<()> {
+        let mut canonical = Vec::with_capacity(protected.len());
+        for path in protected {
+            canonical.push(infra_core::fs::canonicalize(&path)?);
+        }
+        *lock(&self.protected)? = (!canonical.is_empty()).then_some(ProtectedSandbox {
+            protected: canonical,
+            engine,
+        });
+        Ok(())
+    }
+    #[inline(never)]
+    async fn attach_protected(
+        &self,
+        inner: Arc<dyn provider::LaunchAdapter>,
+        protected_cfg: ProtectedSandbox,
+        executable: &Path,
+        workspace: &Path,
+        warm: Option<&crate::skillcache::warm::Warm>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Arc<ProtectedLaunchAdapter>> {
+        let evidence_dir = self.store.state.join("skillcache/protected-probe");
+        infra_host::util::private_directory(&self.store.state.join("skillcache"))?;
+        infra_core::fs::ensure_directory(&evidence_dir, true)?;
+        let probe_file = evidence_dir.join("probe.txt");
+        if !probe_file.exists() {
+            infra_core::fs::atomic_write(&probe_file, b"ok\n")?;
+        }
+        let codex = if cfg!(windows) {
+            self.providers
+                .get("codex")
+                .ok()
+                .and_then(|provider| provider.executable)
+        } else {
+            None
+        };
+        let warm_state_dir = warm.and_then(|w| w.state_dir.clone());
+        let mut extra_readable = Vec::new();
+        if let Some(w) = warm {
+            if let Some(bin) = &w.bin {
+                extra_readable.push(bin.clone());
+            }
+            if let Some(pkg) = &w.package {
+                extra_readable.push(pkg.clone());
+            }
+        }
+        let spec = build_protected_spec(
+            executable,
+            &protected_cfg,
+            workspace,
+            codex.clone(),
+            warm_state_dir.as_deref(),
+            &extra_readable,
+            &evidence_dir,
+        )?;
+        let denied = crate::skillcache::compile::sample_paths(&protected_cfg.protected, 2000);
+        let boundary = infra_host::sandbox::boundary_request_with(
+            &spec,
+            denied,
+            protected_cfg.engine.as_deref(),
+        )?;
+        let probe_env = std::env::vars().collect::<BTreeMap<_, _>>();
+        let probe = Box::pin(infra_system::native::run_raw_monitored(
+            &boundary.command,
+            workspace,
+            &probe_env,
+            &[],
+            &[],
+            60,
+            cancel.clone(),
+            Some(self.store.runner_lock()),
+            None,
+            |_| Ok(()),
+        ))
+        .await?;
+        let attested = probe
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .next_back()
+            .unwrap_or(Value::Null);
+        let verified = probe.code == 0
+            && attested["ok"] == true
+            && attested["denied"].as_u64() == Some(boundary.denied as u64)
+            && attested["evidence_read_only"] == true
+            && attested["workspace_writable"] == true;
+        let failure_msg =
+            (!verified).then(|| infra_system::workers::probe_failure(&probe.bytes, probe.code));
+        drop(boundary);
+        if let Some(message) = failure_msg {
+            return Err(HarnessError::forbidden(message));
+        }
+        Ok(Arc::new(ProtectedLaunchAdapter {
+            inner,
+            protected: protected_cfg,
+            workspace: workspace.to_path_buf(),
+            codex,
+            state_dir: warm_state_dir,
+            evidence: evidence_dir,
+        }))
+    }
+    /// Resolves the shared SkillCache runtime.
+    fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
+        lock(&self.skillcache)
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_else(|| {
+                Arc::new(crate::skillcache::compile::Runtime {
+                    store: self.store.clone(),
+                    providers: self.providers.clone(),
+                    engine: None,
+                    cancel: self.stopping.clone(),
+                })
+            })
     }
     /// Omnigraph cross-session context sharing is optional: a session queue without one runs unchanged.
     pub fn install_omnigraph(&self, value: Arc<crate::omnigraph::OmnigraphManager>) -> Result<()> {
@@ -1795,20 +2008,42 @@ impl Sessions {
             }
             Ok(())
         });
+        // Protected paths are kept from a run by wrapping an ordinary
+        // session's launches. The specialized workflows start their own, so
+        // with protected paths installed they are refused rather than run
+        // outside the boundary.
+        if lock(&self.protected)?.is_some()
+            && [
+                "creator",
+                "system_run",
+                "system_discovery",
+                "fleet",
+                "clash",
+            ]
+            .iter()
+            .any(|name| !session[*name].is_null())
+        {
+            return Err(HarnessError::forbidden(
+                "Protected paths are installed: only an ordinary session runs here.",
+            ));
+        }
         for name in ["creator", "system_run", "system_discovery"] {
             if !session[name].is_null() {
-                let result = self
-                    .special
-                    .get(name)
-                    .ok_or_else(|| HarnessError::unavailable("Native workflow is unavailable."))?
-                    .run(
-                        session,
-                        job.prompt.clone(),
-                        job.generation.clone(),
-                        cancel,
-                        emit,
-                    )
-                    .await;
+                let result = Box::pin(
+                    self.special
+                        .get(name)
+                        .ok_or_else(|| {
+                            HarnessError::unavailable("Native workflow is unavailable.")
+                        })?
+                        .run(
+                            session,
+                            job.prompt.clone(),
+                            job.generation.clone(),
+                            cancel,
+                            emit,
+                        ),
+                )
+                .await;
                 self.permissions.expire(&job.sid);
                 return result;
             }
@@ -1833,8 +2068,14 @@ impl Sessions {
                 .is_some_and(|value| ["approve", "reject"].contains(&value))
             {
                 if session["omnigraph"]["enabled"] == true && !omnigraph_already_reviewed {
-                    self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
-                        .await;
+                    Box::pin(self.prepare_omnigraph_for_run(
+                        &mut session,
+                        job,
+                        &workspace,
+                        &cancel,
+                        &emit,
+                    ))
+                    .await;
                     omnigraph_prepared = true;
                 }
                 let binding = self.lifecycle.begin_with_options(
@@ -1918,12 +2159,18 @@ impl Sessions {
             {
                 fleet.decide(&job.sid, action == "approve")?;
             } else if !omnigraph_prepared {
-                self.prepare_omnigraph_for_run(&mut session, job, &config.project, &cancel, &emit)
-                    .await;
+                Box::pin(self.prepare_omnigraph_for_run(
+                    &mut session,
+                    job,
+                    &config.project,
+                    &cancel,
+                    &emit,
+                ))
+                .await;
             }
             let _ =
                 self.emit_initial_focus(&job.sid, &session, &config.project, &job.prompt, &emit);
-            let result = fleet.drive(&job.sid, &config, cancel, emit).await;
+            let result = Box::pin(fleet.drive(&job.sid, &config, cancel, emit)).await;
             if let Some(binding) = &graph_binding {
                 let _ = self.lifecycle.abort(
                     binding,
@@ -1938,8 +2185,14 @@ impl Sessions {
         }
         if !session["clash"].is_null() {
             if !omnigraph_prepared {
-                self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
-                    .await;
+                Box::pin(self.prepare_omnigraph_for_run(
+                    &mut session,
+                    job,
+                    &workspace,
+                    &cancel,
+                    &emit,
+                ))
+                .await;
             }
             let mut executables = BTreeMap::new();
             for id in ["claude", "codex", "cursor"] {
@@ -1974,15 +2227,14 @@ impl Sessions {
                 adapter: self.launch_adapter(&session)?,
             };
             let _ = self.emit_initial_focus(&job.sid, &session, &workspace, &job.prompt, &emit);
-            let result = cycle
-                .drive(
-                    &job.prompt,
-                    stage,
-                    !session["clash_result"].is_null(),
-                    cancel,
-                    emit,
-                )
-                .await;
+            let result = Box::pin(cycle.drive(
+                &job.prompt,
+                stage,
+                !session["clash_result"].is_null(),
+                cancel,
+                emit,
+            ))
+            .await;
             self.permissions.expire(&job.sid);
             if let Some(binding) = &graph_binding {
                 let _ = self.lifecycle.abort(
@@ -1996,8 +2248,11 @@ impl Sessions {
             }
             return result;
         }
-        let route = if session["workflow"] == "native" {
-            self.commands()?.route(&session, &job.prompt).await?
+        let mut route = if session["workflow"] == "native" {
+            let commands = self.commands()?;
+            let mut route = Box::pin(commands.route(&session, &job.prompt)).await?;
+            Box::pin(commands.apply_skill_hint(&session, &mut route)).await?;
+            route
         } else {
             crate::commands::ResolvedCommand {
                 mode: "text".into(),
@@ -2013,7 +2268,7 @@ impl Sessions {
             && !omnigraph_prepared
             && !omnigraph_already_reviewed
         {
-            self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
+            Box::pin(self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit))
                 .await;
         }
         let binding = self.lifecycle.begin_with_options(
@@ -2031,6 +2286,32 @@ impl Sessions {
             return Ok(json!({"kind":"awaiting_context"}));
         }
         session = binding.session.clone();
+        if session["workflow"] == "native" {
+            let commands = self.commands()?;
+            Box::pin(commands.apply_skill_hint(&session, &mut route)).await?;
+        }
+        // A turn that may run a SkillCache capsule decides it only once the
+        // turn is ready to dispatch, so `awaiting_context` never leaves stage files.
+        let warm = {
+            let decision = crate::skillcache::warm::decide(
+                &self.skillcache_runtime(),
+                &session,
+                &route,
+                &job.prompt,
+                &workspace,
+                &job.generation,
+            );
+            if let Some(event) = decision.event() {
+                emit(event)?;
+            }
+            if let Some(record) = decision.record() {
+                let _ = results.note_skillcache(&job.generation, &record);
+            }
+            match decision {
+                crate::skillcache::warm::Decision::Hit(warm) => Some(warm),
+                _ => None,
+            }
+        };
         self.graph_moment(&job.sid, crate::graph::Trigger::Launch);
         let initial_focus =
             self.emit_initial_focus(&job.sid, &session, &workspace, &route.text, &emit)?;
@@ -2042,12 +2323,13 @@ impl Sessions {
         }
         let configured = (|| -> Result<Launch> {
             let mut launch = self.configure_launch(&session, &route.text)?;
-            let prepared = crate::prompt::build(
+            let prepared = crate::prompt::build_with_skillcache(
                 &self.store,
                 &session,
                 &job.prompt,
                 &route,
                 &binding.instructions,
+                warm.as_ref().map(|warm| warm.block.as_str()),
             )?;
             launch.prompt = if session["system_explain"].is_object() {
                 format!(
@@ -2076,12 +2358,61 @@ impl Sessions {
         let mut launch = match configured {
             Ok(launch) => launch,
             Err(error) => {
+                if let Some(state_dir) = warm.as_ref().and_then(|w| w.state_dir.as_deref()) {
+                    let _ = std::fs::remove_dir_all(state_dir);
+                }
                 let _ = self.lifecycle.abort(&binding, "failed");
                 return Err(error);
             }
         };
         launch.approvals = self.approvals(&job.sid, &session, &emit);
         let adapter = self.launch_adapter(&session)?;
+        // The turn's own launch gets the executor when it runs a capsule; a
+        // recovery turn after it does not.
+        let mut dispatch_adapter: Arc<dyn provider::LaunchAdapter> = match &warm {
+            Some(warm) => Arc::new(crate::skillcache::warm::WarmLaunchAdapter {
+                inner: adapter.clone(),
+                warm: warm.clone(),
+            }),
+            None => adapter.clone(),
+        };
+        let mut recovery_adapter = adapter.clone();
+        let protected_cfg = lock(&self.protected)?.clone();
+        if let Some(protected_cfg) = protected_cfg {
+            dispatch_adapter = match Box::pin(self.attach_protected(
+                dispatch_adapter,
+                protected_cfg,
+                &launch.executable,
+                &workspace,
+                warm.as_deref(),
+                &cancel,
+            ))
+            .await
+            {
+                Ok(adapted) => {
+                    // The recovery launch of the turn runs inside the same
+                    // boundary. It gets no capsule, so nothing of the warm
+                    // run is opened to it.
+                    recovery_adapter = Arc::new(ProtectedLaunchAdapter {
+                        inner: adapter.clone(),
+                        protected: adapted.protected.clone(),
+                        workspace: adapted.workspace.clone(),
+                        codex: adapted.codex.clone(),
+                        state_dir: None,
+                        evidence: adapted.evidence.clone(),
+                    });
+                    adapted
+                }
+                Err(error) => {
+                    if let Some(state_dir) = warm.as_ref().and_then(|w| w.state_dir.as_deref()) {
+                        let _ = std::fs::remove_dir_all(state_dir);
+                    }
+                    let _ = self.lifecycle.abort(&binding, "failed");
+                    return Err(error);
+                }
+            };
+        }
+        let warm_for_stream = warm.clone();
         let previous = launch
             .session
             .as_deref()
@@ -2109,6 +2440,38 @@ impl Sessions {
         let generation = job.generation.clone();
         let emit_events = emit.clone();
         let focus_for_stream = live_focus.clone();
+        // A session that opted in keeps the trace of this cold turn (evaluation
+        // ablation runs never record traces). The recorder sees the same raw events
+        // as the binding and nothing else.
+        let recorder = (crate::skillcache::settings::records(&session)
+            && crate::skillcache::settings::eval_arm(&session).is_none()
+            && warm.is_none())
+        .then(|| crate::skillcache::trace::TraceRecorder::new(&launch.provider));
+        let run_events: Arc<dyn provider::RunEvents> = match &recorder {
+            Some(recorder) => Arc::new(crate::skillcache::trace::Tee {
+                primary: binding.clone(),
+                recorder: recorder.clone(),
+            }),
+            None => Arc::new(binding.clone()),
+        };
+        let observed_before = if recorder.is_some() {
+            // A capsule compiled from this turn is replayed on the workspace
+            // as it is now, before the turn changes it.
+            let (state, root, generation) = (
+                self.store.state.clone(),
+                workspace.clone(),
+                job.generation.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                crate::skillcache::snapshot::take(&state, &root, &generation).ok()??;
+                crate::skillcache::replay_result::capture(&root, Some(&state)).ok()
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
         let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
         let workspace_for_stream = workspace.clone();
@@ -2121,9 +2484,9 @@ impl Sessions {
             dispatch_cancel,
             previous,
             Some(self.store.runner_lock()),
-            Some(adapter.as_ref()),
+            Some(dispatch_adapter.as_ref()),
             &binding.environment,
-            Some(Arc::new(binding.clone())),
+            Some(run_events),
             move |event| {
                 if event["kind"] == "usage"
                     && let Some(n) = provider::total_tokens(&event)
@@ -2163,9 +2526,15 @@ impl Sessions {
                 } else {
                     None
                 };
+                let tool = event["kind"] == "tool";
                 emit_events(event)?;
                 if let Some(delta) = focus_delta {
                     emit_events(delta)?;
+                }
+                // The executor journals each phase beside its state; a tool
+                // event is when a new line can have appeared.
+                if tool && let Some(warm) = &warm_for_stream {
+                    warm.ingest(&|event| emit_events(event));
                 }
                 Ok(())
             },
@@ -2174,6 +2543,9 @@ impl Sessions {
         drop(forwarding);
         // Whatever the run left waiting is answered no.
         self.permissions.expire(&job.sid);
+        if let Some(warm) = &warm {
+            warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
+        }
         let observed = observed.map_err(|error| {
             if error.code == "native-cancelled"
                 && budget_stop.load(Ordering::Acquire)
@@ -2229,14 +2601,30 @@ impl Sessions {
                 "The assigned inbox turn has no matching native identity proof.",
             ));
         }
+        if result.ok
+            && let Some(before) = observed_before
+        {
+            // Capture the primary turn's effects before lifecycle recovery
+            // or publication can change the project.
+            let (state, root, generation) = (
+                self.store.state.clone(),
+                workspace.clone(),
+                job.generation.clone(),
+            );
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::skillcache::replay_result::record(&state, &root, &generation, before)
+            })
+            .await;
+        }
         let mut recovery = NativeRecovery {
-            adapter,
+            adapter: recovery_adapter,
             human_cancel: cancel.clone(),
         };
-        let memory = self
-            .lifecycle
-            .finish(&binding, &result, &emit, &mut recovery)
-            .await?;
+        let memory = Box::pin(
+            self.lifecycle
+                .finish(&binding, &result, &emit, &mut recovery),
+        )
+        .await?;
         if let Ok(mut tracker) = live_focus.lock()
             && tracker.complete()
         {
@@ -2252,10 +2640,157 @@ impl Sessions {
                     .unwrap_or_else(|| "Native session did not complete.".into()),
             ));
         }
+        if let Some(recorder) = &recorder {
+            self.keep_trace(
+                recorder,
+                &crate::skillcache::trace::ObservedTurn {
+                    session: &session,
+                    generation: &job.generation,
+                    message: &job.prompt,
+                    route: &route,
+                    workspace: &workspace,
+                },
+                &binding.environment,
+                &emit,
+            );
+        }
         *native_proof = result.session_id.clone();
         Ok(
             json!({"kind":"result","ok":true,"text":result.text,"observed_cost_usd":result.cost_usd,"provider_billing":"unknown","memory":memory["memory"],"full_cost":memory["full_cost"]}),
         )
+    }
+    /// What SkillCache would decide for a message of the composer, before it
+    /// is sent. `body["skillcache"]` carries what the composer shows and a
+    /// stored session does not yet have: the mode, and for a new session the
+    /// provider, the session's mode and its permissions.
+    async fn skillcache_preview(&self, project_id: &str, body: &Value) -> Result<Value> {
+        let composer = &body["skillcache"];
+        let prompt = body["prompt"].as_str().unwrap_or("").trim().to_string();
+        let mut session = match body["session_id"].as_str().filter(|sid| !sid.is_empty()) {
+            Some(sid) => self.store.get(sid)?,
+            None => {
+                let project = self.store.project(project_id)?;
+                json!({
+                    "id": "",
+                    "project_id": project_id,
+                    "project_path": project["path"],
+                    "workflow": "native",
+                    "agents_enabled": false,
+                    "agent_count": 3,
+                })
+            }
+        };
+        if session["project_id"] != project_id {
+            return Err(HarnessError::invalid(
+                "Session does not belong to the requested project.",
+            ));
+        }
+        for (field, key) in [
+            ("provider", "provider"),
+            ("session_mode", "mode"),
+            ("permissions", "permissions"),
+        ] {
+            if let Some(value) = composer[field].as_str() {
+                session[key] = value.into();
+            }
+        }
+        if composer.is_object() {
+            let mut merged = session["skillcache"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let mut has_skillcache_field = false;
+            for key in [
+                "mode",
+                "compiler",
+                "compile_after_observe",
+                "skill",
+                "eval_arm",
+                "trace_generation",
+                "capsule_id",
+            ] {
+                if let Some(value) = composer.get(key)
+                    && !value.is_null()
+                {
+                    merged.insert(key.into(), value.clone());
+                    has_skillcache_field = true;
+                }
+            }
+            if has_skillcache_field {
+                if !merged.contains_key("mode") {
+                    merged.insert(
+                        "mode".into(),
+                        crate::skillcache::settings::mode(&session).into(),
+                    );
+                }
+                session["skillcache"] =
+                    crate::skillcache::settings::validate(&Value::Object(merged))?;
+                crate::skillcache::settings::admit_with_eval(
+                    &session,
+                    crate::skillcache::settings::eval_enabled(&self.store),
+                )?;
+            }
+        }
+        if !crate::skillcache::settings::warm(&session) || prompt.is_empty() {
+            return Ok(json!({
+                "mode": crate::skillcache::settings::mode(&session),
+                "decision": "off",
+            }));
+        }
+        let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+        let mut route = self.commands()?.route(&session, &prompt).await?;
+        self.commands()?
+            .apply_skill_hint(&session, &mut route)
+            .await?;
+        Ok(crate::skillcache::warm::preview(
+            &self.skillcache_runtime(),
+            &session,
+            &route,
+            &prompt,
+            &workspace,
+        ))
+    }
+    /// Stores the observed trace of a turn that completed. A trace that
+    /// cannot be kept never fails the turn it observed.
+    fn keep_trace(
+        &self,
+        recorder: &crate::skillcache::trace::TraceRecorder,
+        turn: &crate::skillcache::trace::ObservedTurn<'_>,
+        environment: &BTreeMap<String, Option<String>>,
+        emit: &Event,
+    ) {
+        let launched = std::env::vars().chain(
+            environment
+                .iter()
+                .filter_map(|(name, value)| Some((name.clone(), value.clone()?))),
+        );
+        let redactor = crate::skillcache::trace::SessionRedactor::new(turn.workspace, launched);
+        let Some(trace) = recorder.finish(&redactor) else {
+            let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
+            return;
+        };
+        let event = crate::skillcache::trace::save(&self.store, turn, trace, &redactor)
+            .unwrap_or_else(|error| {
+                json!({
+                    "kind": "skillcache",
+                    "phase": "not_observed",
+                    "reason": "storage",
+                    "text": format!("SkillCache could not keep this turn's trace: {error}"),
+                })
+            });
+        // A snapshot lives exactly as long as the trace it belongs to.
+        if event["phase"] == "observed" {
+            let kept = self
+                .store
+                .connection()
+                .and_then(|db| crate::skillcache::db::trace_generations(&db));
+            if let Ok(kept) = kept {
+                crate::skillcache::snapshot::collect(&self.store.state, &kept);
+            }
+        } else {
+            let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
+        }
+        let _ = emit(event);
     }
     pub fn send(&self, sid: &str, prompt: &str, options: &Value) -> Result<Value> {
         let session = self.store.get(sid)?;
@@ -2285,6 +2820,7 @@ impl Sessions {
             "omnigraph",
             "brain",
             "permissions",
+            "skillcache",
         ];
         if !options.is_object()
             || options
@@ -2299,6 +2835,22 @@ impl Sessions {
         let mut fields = followup_settings(&session, options, &self.providers.catalog(provider)?)?;
         if let Some(raw_omni) = options.get("omnigraph") {
             fields["omnigraph"] = merge_omnigraph_followup(&session["omnigraph"], raw_omni, sid)?;
+        }
+        if let Some(raw) = options.get("skillcache") {
+            fields["skillcache"] = crate::skillcache::settings::validate(raw)?;
+        }
+        {
+            // The turn as it would run: SkillCache stays with ordinary turns.
+            let mut next = session.clone();
+            for key in ["skillcache", "clash", "sdd"] {
+                if let Some(value) = fields.get(key) {
+                    next[key] = value.clone();
+                }
+            }
+            crate::skillcache::settings::admit_with_eval(
+                &next,
+                crate::skillcache::settings::eval_enabled(&self.store),
+            )?;
         }
         if let Some(update) = options.get("brain") {
             fields["brain"] = crate::brain_settings::followup(&session["brain"], update)?;
@@ -2362,6 +2914,15 @@ impl Domain for Sessions {
             let sid = request["params"]["session_id"].as_str().unwrap_or("");
             let body = &request["body"];
             let value = match operation {
+                "sessions.skillcache_preview" => {
+                    return Ok(Payload::Json(
+                        self.skillcache_preview(
+                            request["params"]["project_id"].as_str().unwrap_or(""),
+                            body,
+                        )
+                        .await?,
+                    ));
+                }
                 "sessions.inbox_accept" => {
                     if !store::exact(body, &["request_id", "prompt"], &[]) {
                         return Err(HarnessError::invalid(
@@ -3994,6 +4555,8 @@ pub(crate) mod generation_completion_tests {
                 results: Mutex::new(Some(results.clone())),
                 graphs: Mutex::new(None),
                 omnigraph: Mutex::new(None),
+                skillcache: Mutex::new(None),
+                protected: Mutex::new(None),
                 lifecycle: Arc::new(crate::lifecycle::RunnerLifecycle::new(
                     store, knowledge, source,
                 )),

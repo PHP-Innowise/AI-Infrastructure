@@ -1029,3 +1029,492 @@ impl Drop for LocalOperation {
         }
     }
 }
+
+fn add_optional(acc: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *acc = Some(acc.unwrap_or(0).saturating_add(value));
+    }
+}
+
+/// Normalized token component totals for a launch or provider phase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComponentTotals {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_write_5m_input_tokens: Option<u64>,
+    pub cache_write_1h_input_tokens: Option<u64>,
+    pub model_calls: Option<u64>,
+}
+
+impl ComponentTotals {
+    /// Adds every reported field from `other` into `self`; fields unreported in
+    /// both remain `None`.
+    pub fn add(&mut self, other: &Self) {
+        add_optional(&mut self.input_tokens, other.input_tokens);
+        add_optional(&mut self.output_tokens, other.output_tokens);
+        add_optional(
+            &mut self.cache_read_input_tokens,
+            other.cache_read_input_tokens,
+        );
+        add_optional(
+            &mut self.cache_write_5m_input_tokens,
+            other.cache_write_5m_input_tokens,
+        );
+        add_optional(
+            &mut self.cache_write_1h_input_tokens,
+            other.cache_write_1h_input_tokens,
+        );
+        add_optional(&mut self.model_calls, other.model_calls);
+    }
+
+    /// Serializes normalized components in the `launches.usage.components` shape.
+    pub fn to_json(&self, source: Option<&str>) -> Value {
+        object!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_write_5m_input_tokens": self.cache_write_5m_input_tokens,
+            "cache_write_1h_input_tokens": self.cache_write_1h_input_tokens,
+            "model_calls": self.model_calls,
+            "source": source,
+        })
+    }
+}
+
+/// Extracts normalized component counts from one Claude `message.usage` object.
+pub fn claude_message_components(usage: &Value) -> ComponentTotals {
+    let cache = &usage["cache_creation"];
+    let mut write_5m = counter(&cache["ephemeral_5m_input_tokens"]);
+    let write_1h = counter(&cache["ephemeral_1h_input_tokens"]);
+    if write_5m.is_none() && write_1h.is_none() {
+        write_5m = counter(&usage["cache_creation_input_tokens"]);
+    }
+    ComponentTotals {
+        input_tokens: counter(&usage["input_tokens"]),
+        output_tokens: counter(&usage["output_tokens"]),
+        cache_read_input_tokens: counter(&usage["cache_read_input_tokens"]),
+        cache_write_5m_input_tokens: write_5m,
+        cache_write_1h_input_tokens: write_1h,
+        model_calls: Some(1),
+    }
+}
+
+/// Extracts normalized component counts from one Codex `turn.completed.usage` object.
+pub fn codex_turn_components(usage: &Value) -> ComponentTotals {
+    let cached = counter(&usage["cached_input_tokens"]);
+    let input =
+        counter(&usage["input_tokens"]).map(|total| total.saturating_sub(cached.unwrap_or(0)));
+    ComponentTotals {
+        input_tokens: input,
+        output_tokens: counter(&usage["output_tokens"]),
+        cache_read_input_tokens: cached,
+        cache_write_5m_input_tokens: None,
+        cache_write_1h_input_tokens: None,
+        model_calls: None,
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct PhaseComponents {
+    claude_messages: BTreeMap<String, ComponentTotals>,
+    /// The output tokens each closing `result` event of the phase reported.
+    claude_reports: Vec<Option<u64>>,
+    codex_totals: ComponentTotals,
+}
+
+/// Accumulates normalized token components across launch phases (`main` and `recovery`).
+#[derive(Clone, Debug)]
+pub struct UsageComponents {
+    provider: String,
+    phases: BTreeMap<String, PhaseComponents>,
+}
+
+impl UsageComponents {
+    /// Creates a component tracker for `provider`.
+    pub fn new(provider: &str) -> Self {
+        Self {
+            provider: provider.into(),
+            phases: BTreeMap::new(),
+        }
+    }
+
+    /// Observes one raw provider event during `phase` (`"main"` or `"recovery"`).
+    pub fn observe(&mut self, phase: &str, event: &Value) {
+        if !event.is_object() || !["main", "recovery"].contains(&phase) {
+            return;
+        }
+        let kind = event["type"].as_str().unwrap_or("");
+        match self.provider.as_str() {
+            "claude" if kind == "assistant" => {
+                let message = &event["message"];
+                if !message.is_object()
+                    || message["role"].as_str().unwrap_or("assistant") != "assistant"
+                {
+                    return;
+                }
+                let Some(id) = message["id"].as_str().filter(|id| !id.is_empty()) else {
+                    return;
+                };
+                let usage = &message["usage"];
+                if !usage.is_object() {
+                    return;
+                }
+                self.phases
+                    .entry(phase.into())
+                    .or_default()
+                    .claude_messages
+                    .insert(id.into(), claude_message_components(usage));
+            }
+            // The usage a message carries in the stream is what was known when
+            // the message began: its output count is not final, and no later
+            // event of the message corrects it. The launch's closing report
+            // has the output of the whole launch.
+            "claude" if kind == "result" => {
+                self.phases
+                    .entry(phase.into())
+                    .or_default()
+                    .claude_reports
+                    .push(counter(&event["usage"]["output_tokens"]));
+            }
+            "codex" if kind == "turn.completed" => {
+                let usage = &event["usage"];
+                if !usage.is_object() {
+                    return;
+                }
+                self.phases
+                    .entry(phase.into())
+                    .or_default()
+                    .codex_totals
+                    .add(&codex_turn_components(usage));
+            }
+            _ => {}
+        }
+    }
+
+    /// Sums normalized components across all observed phases.
+    pub fn totals(&self) -> ComponentTotals {
+        let mut total = ComponentTotals::default();
+        match self.provider.as_str() {
+            "claude" => {
+                // Input and cache counts are final in every message. Output is
+                // known only where exactly one report closed the phase; a
+                // phase that was cut short, or closed more than once, leaves
+                // the launch's output unknown rather than too small.
+                let mut output = Some(0u64);
+                for phase in self.phases.values() {
+                    for msg in phase.claude_messages.values() {
+                        total.add(msg);
+                    }
+                    output = match (output, phase.claude_reports.as_slice()) {
+                        (Some(sum), [Some(reported)]) => sum.checked_add(*reported),
+                        _ => None,
+                    };
+                }
+                total.output_tokens = output.filter(|_| !self.phases.is_empty());
+            }
+            "codex" => {
+                for phase in self.phases.values() {
+                    total.add(&phase.codex_totals);
+                }
+            }
+            _ => {}
+        }
+        total
+    }
+
+    /// Returns the JSON object stored at `launches.usage.components`.
+    pub fn snapshot(&self) -> Value {
+        let source = ["claude", "codex", "cursor"]
+            .contains(&self.provider.as_str())
+            .then_some(self.provider.as_str());
+        self.totals().to_json(source)
+    }
+}
+
+#[cfg(test)]
+mod usage_components_tests {
+    use super::*;
+
+    #[test]
+    fn claude_dedupes_by_message_id_and_splits_5m_1h_cache_writes() {
+        let mut components = UsageComponents::new("claude");
+
+        // The events of msg_1 carry the output count of the message's start.
+        components.observe(
+            "main",
+            &object!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 3,
+                        "cache_read_input_tokens": 500,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 200,
+                            "ephemeral_1h_input_tokens": 50
+                        },
+                        "cache_creation_input_tokens": 250
+                    }
+                }
+            }),
+        );
+        // A later event of msg_1 (last usage per id wins; its output is still
+        // not the message's final count).
+        components.observe(
+            "main",
+            &object!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 42,
+                        "cache_read_input_tokens": 500,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 200,
+                            "ephemeral_1h_input_tokens": 50
+                        },
+                        "cache_creation_input_tokens": 250
+                    }
+                }
+            }),
+        );
+        // Chunk for msg_1 lacking usage must not clobber the prior usage.
+        components.observe(
+            "main",
+            &object!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "role": "assistant"
+                }
+            }),
+        );
+        // Subagent call with only scalar cache_creation_input_tokens (falls back to 5m).
+        components.observe(
+            "main",
+            &object!({
+                "type": "assistant",
+                "parent_tool_use_id": "toolu_1",
+                "message": {
+                    "id": "msg_2",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 30,
+                        "output_tokens": 18,
+                        "cache_creation_input_tokens": 80
+                    }
+                }
+            }),
+        );
+        // The closing report: its input is not counted on top of the messages',
+        // and its output is the launch's, which no message event had.
+        components.observe(
+            "main",
+            &object!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "usage": {
+                    "input_tokens": 999,
+                    "output_tokens": 640
+                }
+            }),
+        );
+        // Recovery phase call with explicit 1h cache write only (must not fall back to 5m).
+        components.observe(
+            "recovery",
+            &object!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_3",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 20,
+                        "output_tokens": 10,
+                        "cache_creation": {
+                            "ephemeral_1h_input_tokens": 40
+                        },
+                        "cache_creation_input_tokens": 40
+                    }
+                }
+            }),
+        );
+
+        // The recovery phase has no closing report yet: the launch's output
+        // is unknown, never the sum of what its messages started with.
+        assert_eq!(
+            components.snapshot(),
+            object!({
+                "input_tokens": 150,
+                "output_tokens": null,
+                "cache_read_input_tokens": 500,
+                "cache_write_5m_input_tokens": 280,
+                "cache_write_1h_input_tokens": 90,
+                "model_calls": 3,
+                "source": "claude"
+            })
+        );
+        components.observe(
+            "recovery",
+            &object!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "usage": {"input_tokens": 20, "output_tokens": 75}
+            }),
+        );
+        assert_eq!(components.snapshot()["output_tokens"], 715);
+        assert_eq!(components.snapshot()["input_tokens"], 150);
+        // A phase closed twice does not say which report is the whole of it.
+        components.observe(
+            "recovery",
+            &object!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "usage": {"input_tokens": 20, "output_tokens": 80}
+            }),
+        );
+        assert!(components.snapshot()["output_tokens"].is_null());
+    }
+
+    #[test]
+    fn codex_normalizes_non_cached_input_and_leaves_cache_writes_and_calls_null() {
+        let mut components = UsageComponents::new("codex");
+        components.observe(
+            "main",
+            &object!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 25
+                }
+            }),
+        );
+        // Recovery with cached > input exercises saturating subtraction.
+        components.observe(
+            "recovery",
+            &object!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 15,
+                    "cached_input_tokens": 30,
+                    "output_tokens": 5
+                }
+            }),
+        );
+
+        assert_eq!(
+            components.snapshot(),
+            object!({
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "cache_read_input_tokens": 50,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "codex"
+            })
+        );
+
+        // Unreported cached_input_tokens stays null (never 0).
+        let mut no_cache = UsageComponents::new("codex");
+        no_cache.observe(
+            "main",
+            &object!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 40,
+                    "output_tokens": 8
+                }
+            }),
+        );
+        assert_eq!(
+            no_cache.snapshot(),
+            object!({
+                "input_tokens": 40,
+                "output_tokens": 8,
+                "cache_read_input_tokens": null,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "codex"
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_and_unreported_or_unknown_providers_keep_fields_null() {
+        let mut cursor = UsageComponents::new("cursor");
+        cursor.observe(
+            "main",
+            &object!({
+                "type": "assistant",
+                "message": {
+                    "id": "c_1",
+                    "usage": {"input_tokens": 50, "output_tokens": 10}
+                }
+            }),
+        );
+        cursor.observe(
+            "main",
+            &object!({
+                "type": "result",
+                "usage": {"input_tokens": 50, "output_tokens": 10}
+            }),
+        );
+        assert_eq!(
+            cursor.snapshot(),
+            object!({
+                "input_tokens": null,
+                "output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "cursor"
+            })
+        );
+
+        let claude_empty = UsageComponents::new("claude");
+        assert_eq!(
+            claude_empty.snapshot(),
+            object!({
+                "input_tokens": null,
+                "output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "claude"
+            })
+        );
+
+        let mut unknown = UsageComponents::new("unknown");
+        unknown.observe(
+            "main",
+            &object!({
+                "type": "assistant",
+                "message": {"id": "u_1", "usage": {"input_tokens": 10, "output_tokens": 5}}
+            }),
+        );
+        assert_eq!(
+            unknown.snapshot(),
+            object!({
+                "input_tokens": null,
+                "output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": null
+            })
+        );
+    }
+}

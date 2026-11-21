@@ -173,6 +173,7 @@ mod native {
                 } else {
                     None
                 },
+                network: true,
             }
         }
         fn helper(&self) -> Result<PathBuf> {

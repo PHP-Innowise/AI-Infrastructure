@@ -719,17 +719,36 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let providers = Arc::new(ProviderDomain {
-            providers: Arc::new(RwLock::new(BTreeMap::from([(
-                "claude".into(),
+        // The registry holds all three providers, installed or not
+        // (`provider::discover`), and a launch on Windows reads Codex's entry
+        // for the sandbox it runs in. Only Claude is installed here.
+        let absent = |id: &str| {
+            (
+                id.to_owned(),
                 Provider {
-                    id: "claude".into(),
-                    name: "Fake Claude".into(),
-                    available: true,
-                    executable: Some(PathBuf::from("/bin/echo")),
+                    id: id.into(),
+                    name: format!("Absent {id}"),
+                    available: false,
+                    executable: None,
                     detail: "test".into(),
                 },
-            )]))),
+            )
+        };
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::from([
+                (
+                    "claude".into(),
+                    Provider {
+                        id: "claude".into(),
+                        name: "Fake Claude".into(),
+                        available: true,
+                        executable: Some(PathBuf::from("/bin/echo")),
+                        detail: "test".into(),
+                    },
+                ),
+                absent("codex"),
+                absent("cursor"),
+            ]))),
         });
         let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
         let special = ["creator", "system_run", "system_discovery"]

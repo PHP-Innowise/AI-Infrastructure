@@ -859,6 +859,7 @@ fn render_event_into(
         "error",
         "memory",
         "omnigraph",
+        "skillcache",
         "delegation",
         "clash_turn",
         "clash_state",
@@ -867,6 +868,11 @@ fn render_event_into(
     ]
     .contains(&kind.as_str())
     {
+        return false;
+    }
+    // The run view's tab lists every SkillCache event; the conversation
+    // shows the ones a person may act on.
+    if kind == "skillcache" && !crate::skillcache::in_stream(v) {
         return false;
     }
     if matches!(kind.as_str(), "text" | "thinking") && text.is_empty() {
@@ -1051,6 +1057,14 @@ fn render_event_into(
                     dom::add(&block, &body);
                 }
             }
+            "skillcache" => {
+                let _ = block.set_attribute("data-phase", &m::text(v, "phase"));
+                let _ = block.set_attribute("data-tone", crate::skillcache::phase_tone(v));
+                crate::skillcache::set_markup(
+                    &block,
+                    &crate::skillcache::stream_card_html(v, &crate::skillcache::session_state()),
+                );
+            }
             _ => {
                 dom::add(&block, &dom::el("p", "", &text));
             }
@@ -1058,6 +1072,22 @@ fn render_event_into(
         dom::add(container, &block);
     }
     true
+}
+
+/// Rebuilds the SkillCache cards once the session's state is known: what can
+/// be done about an observed turn depends on it.
+pub(crate) fn refresh_skillcache_cards() {
+    let state = crate::skillcache::session_state();
+    let events = m::read(|s| s.events.clone());
+    for block in dom::all("#events .conversation-skillcache") {
+        let id = block.get_attribute("data-event-id").unwrap_or_default();
+        if let Some(event) = events.iter().find(|event| m::string(&event["id"]) == id) {
+            crate::skillcache::set_markup(
+                &block,
+                &crate::skillcache::stream_card_html(event, &state),
+            );
+        }
+    }
 }
 
 fn prepend_events_range(start: usize, end: usize) {

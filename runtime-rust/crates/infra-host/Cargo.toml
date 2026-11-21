@@ -27,6 +27,9 @@ uuid = { version = "=1.22.0", features = ["v4"] }
 sha2 = "=0.11.0"
 regex = "1"
 chrono = { version = "=0.4.45", features = ["clock"] }
+[dev-dependencies]
+tempfile = "=3.27.0"
+
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
 [target.'cfg(windows)'.dependencies]

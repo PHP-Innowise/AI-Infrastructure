@@ -2999,3 +2999,60 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
   .diff-file-group[data-focused="true"],.command-palette-item[aria-selected="true"],.command-palette-head:focus-within,.graph-lens-btn[aria-selected="true"],.graph-pick-list [role="option"][aria-selected="true"] { outline:2px solid Highlight; border-color:Highlight; }
   .approvals-badge { border:1px solid CanvasText; background:Highlight; color:HighlightText; forced-color-adjust:none; }
 }
+/* SkillCache: the composer's option, the next turn's preview, the run tab, the stream cards and the capsules view. */
+.skillcache-panel-actions { margin-top:8px; }
+.skillcache-pill { display:inline-flex; align-items:center; margin-right:8px; padding:2px 8px; border:1px solid var(--border-subtle); border-radius:var(--radius-pill); background:var(--paper); color:var(--ink-2); font-size:var(--text-meta); line-height:var(--leading-body); white-space:nowrap; }
+.skillcache-pill[data-tone="ok"] { border-color:var(--success-line); background:var(--success-soft); color:var(--success); }
+.skillcache-pill[data-tone="warn"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
+.conversation-skillcache { margin:8px 0; padding:4px 0 4px 12px; border-left:2px solid var(--line); color:var(--ink-2); font-size:var(--text-meta); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.conversation-skillcache[data-tone="ok"] { border-left-color:var(--success-dot); }
+.conversation-skillcache[data-tone="warn"] { border-left-color:var(--warning-dot); }
+.conversation-skillcache p { margin:0; }
+.skillcache-phase-name { color:var(--ink); font-weight:var(--weight-strong); }
+.skillcache-phases { margin:0; padding:0; list-style:none; }
+.skillcache-phase { display:grid; gap:2px; padding:8px 0 8px 12px; border-left:2px solid var(--line); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.skillcache-phase + .skillcache-phase { margin-top:4px; }
+.skillcache-phase[data-tone="ok"] { border-left-color:var(--success-dot); }
+.skillcache-phase[data-tone="warn"] { border-left-color:var(--warning-dot); }
+.skillcache-phase-text { color:var(--ink-2); }
+.skillcache-phase-facts { color:var(--muted); font-size:var(--text-meta); }
+.skillcache-phase-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:4px; }
+.skillcache-compile { color:var(--muted); font-size:var(--text-meta); }
+.skillcache-compile[data-status="completed"] { color:var(--success); }
+.skillcache-compile[data-status="failed"],.skillcache-compile[data-status="interrupted"] { color:var(--error); }
+.skill-capsules-toolbar { align-items:flex-end; gap:12px; }
+.skill-capsules-layout { display:grid; grid-template-columns:minmax(240px,1fr) minmax(0,2fr); gap:24px; align-items:start; margin:12px 0; }
+.skill-capsules-list { display:grid; gap:4px; }
+.skill-capsules-list .empty-note { margin:0; padding:24px 0; }
+.skill-capsule-row { display:grid; gap:4px; width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--paper); color:var(--ink); font:inherit; text-align:left; cursor:pointer; }
+.skill-capsule-row:hover { background:var(--hover); }
+.skill-capsule-row[aria-current="true"] { border-color:var(--purple-line); background:var(--purple-tint); }
+.skill-capsule-row:focus-visible,.skill-capsule-detail:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.skill-capsule-name { font-weight:var(--weight-strong); overflow-wrap:anywhere; }
+.skill-capsule-chip[data-tone="ok"] { border-color:var(--success-line); color:var(--success); }
+.skill-capsule-chip[data-tone="warn"] { border-color:var(--warning-line); color:var(--warning); }
+.skill-capsule-chip[data-tone="bad"] { border-color:var(--error-line); color:var(--error); }
+.skill-capsule-reason { margin:8px 0 0; color:var(--warning); font-size:var(--text-meta); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.skill-capsule-detail { min-width:0; padding:16px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--paper); }
+.skill-capsule-head h3 { margin:0 0 8px; overflow-wrap:anywhere; }
+.skill-capsule-description { margin:8px 0; color:var(--ink-2); line-height:var(--leading-body); }
+.skill-capsule-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.skill-capsule-section { margin-top:20px; }
+.skill-capsule-section h4 { margin:0 0 8px; color:var(--ink); font-size:var(--text-ui); font-weight:var(--weight-strong); }
+.skill-capsule-list,.skill-capsule-steps { margin:0; color:var(--ink-2); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.skill-capsule-list { padding-left:0; list-style:none; }
+.skill-capsule-steps { padding-left:20px; }
+.skill-capsule-list li + li,.skill-capsule-steps li + li { margin-top:6px; }
+.skill-capsule-kind,.skill-capsule-source,.skill-capsule-produces,.skill-capsule-facts { color:var(--muted); font-size:var(--text-meta); }
+.skill-capsule-facts { display:block; }
+.skill-capsule-violations { margin:4px 0 0; padding-left:16px; color:var(--muted); font-size:var(--text-meta); }
+.skill-capsule-gates li[data-passed="false"] > .skill-capsule-kind { color:var(--error); }
+.skill-capsule-facts-grid { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin:0; font-size:var(--text-ui); }
+.skill-capsule-facts-grid dt { color:var(--muted); }
+.skill-capsule-facts-grid dd { margin:0; color:var(--ink); overflow-wrap:anywhere; }
+@media (max-width:900px) { .skill-capsules-layout { grid-template-columns:1fr; } }
+@media (forced-colors:active) {
+  .skillcache-pill,.skill-capsule-row,.skill-capsule-detail { border-color:CanvasText; }
+  .conversation-skillcache,.skillcache-phase { border-left-color:CanvasText; }
+  .skill-capsule-row[aria-current="true"] { outline:2px solid Highlight; }
+}
