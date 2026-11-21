@@ -827,30 +827,83 @@ fn create_fixture_project(project: &Path) -> Result<(String, String)> {
     Ok((commit_a, commit_b))
 }
 
+/// Stops the fixture once the parent closes its end of standard input, or is
+/// gone. Only a pipe says that: a terminal, a file and the null device end for
+/// other reasons, or never.
+#[cfg(unix)]
+fn watch_stdin(shutdown: tokio::sync::watch::Sender<bool>) {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let is_pipe =
+        unsafe { libc::fstat(0, &mut stat) == 0 } && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO;
+    if !is_pipe {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 256];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+        let _ = shutdown.send(true);
+    });
+}
+
+/// The same on Windows, where the pipe is asked rather than read. A read that
+/// waits there holds the pipe, and a child that inherits it as its own
+/// standard input can then hang in its start-up until that read ends.
+#[cfg(windows)]
+fn watch_stdin(shutdown: tokio::sync::watch::Sender<bool>) {
+    use windows_sys::Win32::{
+        Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
+        System::{
+            Console::{GetStdHandle, STD_INPUT_HANDLE},
+            Pipes::PeekNamedPipe,
+        },
+    };
+    if unsafe { GetFileType(GetStdHandle(STD_INPUT_HANDLE)) } != FILE_TYPE_PIPE {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 256];
+        loop {
+            let mut waiting = 0u32;
+            // The question fails once the other end is closed and nothing is
+            // left to read.
+            let open = unsafe {
+                PeekNamedPipe(
+                    GetStdHandle(STD_INPUT_HANDLE),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut waiting,
+                    std::ptr::null_mut(),
+                )
+            } != 0;
+            if !open {
+                break;
+            }
+            if waiting == 0 {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            // What the parent wrote is taken and dropped, as on Unix.
+            if !matches!(stdin.read(&mut buf), Ok(read) if read > 0) {
+                break;
+            }
+        }
+        let _ = shutdown.send(true);
+    });
+}
+
 fn spawn_shutdown_watchers(
     shutdown: tokio::sync::watch::Sender<bool>,
     timeout_secs: u64,
 ) -> tokio::task::JoinHandle<()> {
-    #[cfg(unix)]
-    {
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        let is_pipe = unsafe { libc::fstat(0, &mut stat) == 0 }
-            && (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO;
-        if is_pipe {
-            let stdin_shutdown = shutdown.clone();
-            std::thread::spawn(move || {
-                let mut stdin = std::io::stdin();
-                let mut buf = [0u8; 256];
-                loop {
-                    match stdin.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => continue,
-                    }
-                }
-                let _ = stdin_shutdown.send(true);
-            });
-        }
-    }
+    watch_stdin(shutdown.clone());
 
     let sig_shutdown = shutdown.clone();
     tokio::spawn(async move {

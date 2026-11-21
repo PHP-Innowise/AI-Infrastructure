@@ -3073,7 +3073,17 @@ mod tests {
 
     #[test]
     fn cursor_edit_diff_preview_and_strict_session_rule_keys() {
-        let mut driver = cursor(setup(PermissionMode::Manual, None));
+        // The workspace is absolute on this host. `/work/project` names no
+        // drive, so on Windows nothing can be told to lie inside it.
+        let workspace = if cfg!(windows) {
+            "C:\\work\\project"
+        } else {
+            "/work/project"
+        };
+        let mut driver = cursor(Setup {
+            cwd: workspace.into(),
+            ..setup(PermissionMode::Manual, None)
+        });
         let init = driver.opening().replies[0].clone();
         respond(&mut driver, &init, json!({"protocolVersion": 1}));
         let new_req = json!({"id": 2});
@@ -3144,7 +3154,7 @@ mod tests {
                 "toolCall": {
                     "toolCallId": "edit-2",
                     "kind": "edit",
-                    "locations": [{"path": "/work/project/src/b.rs"}],
+                    "locations": [{"path": format!("{workspace}/src/b.rs")}],
                     "content": [{"type": "diff", "path": "src/b.rs", "diff": "@@ -1 +1 @@\n-old\n+new"}]
                 }
             }
@@ -3163,12 +3173,13 @@ mod tests {
         );
 
         // 3. Unsafe paths & non-path tools must NOT get session_rule_key or session_option.
+        let sibling = format!("{workspace}-other/src/a.rs");
         for bad_path in [
             "../secret.txt",
             "src/../../secret.txt",
             "/etc/passwd",
-            "/work/project-other/src/a.rs",
-            "/work/project",
+            sibling.as_str(),
+            workspace,
             ".",
             "~/notes.md",
         ] {
