@@ -478,7 +478,7 @@ elevated Codex (`sandbox.rs` creator/discovery); без них — отказ б
 
 | Метод и путь | Операция | `token` |
 | --- | --- | --- |
-| `GET /api/projects/{project_id}/skillcache/capsules` (query: `skill`, `status`, `form`, `include_retired`) | `skillcache.list` | нет |
+| `GET /api/projects/{project_id}/skillcache/capsules` (query: `skill`, `status`, `form`, `include_retired`, `include_eval`) | `skillcache.list` | нет |
 | `GET /api/projects/{project_id}/skillcache/capsules/{capsule_id}` | `skillcache.get` | нет |
 | `POST /api/projects/{project_id}/skillcache/capsules/{capsule_id}/requalify` | `skillcache.requalify` | да |
 | `POST /api/projects/{project_id}/skillcache/capsules/{capsule_id}/retire` | `skillcache.retire` | да |

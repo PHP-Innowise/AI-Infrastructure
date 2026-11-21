@@ -783,7 +783,7 @@ async fn run_attempt(
 
     let mut seeded_state: Option<PathBuf> = None;
     let skillcache_option = if arm == "cold" {
-        json!({"mode": "off"})
+        cold_option()
     } else {
         let pkey = prep_key(
             seal_sha256,
@@ -794,17 +794,17 @@ async fn run_attempt(
         );
         let prep_meta = config.state_root.join("prep").join(&pkey).join("prep.json");
         if !prep_meta.is_file() {
-            json!({"mode": "off"})
+            cold_option()
         } else {
             let bytes = core_fs::read_regular(&prep_meta)?;
             let prep = infra_harness::strict_json::parse(&bytes, 1024 * 1024)?;
             if prep["prepared"] != true {
-                json!({"mode": "off"})
+                cold_option()
             } else if arm == "raw_trace" {
                 let src_state = PathBuf::from(prep["state_dir"].as_str().unwrap_or(""));
                 let trace_gen = prep["trace_generation"].as_str().unwrap_or("");
                 if !src_state.join("sessions.sqlite3").is_file() || trace_gen.is_empty() {
-                    json!({"mode": "off"})
+                    cold_option()
                 } else {
                     seeded_state = Some(src_state);
                     json!({
@@ -817,7 +817,7 @@ async fn run_attempt(
                 let src_state = PathBuf::from(prep["state_dir"].as_str().unwrap_or(""));
                 let capsule_id = prep["capsule_id"].as_str().unwrap_or("");
                 if !src_state.join("sessions.sqlite3").is_file() || capsule_id.is_empty() {
-                    json!({"mode": "off"})
+                    cold_option()
                 } else {
                     seeded_state = Some(src_state);
                     json!({
@@ -863,6 +863,14 @@ async fn run_attempt(
     env.close().await?;
 
     let accepted = session["status"].as_str() == Some("completed");
+    // Whether the arm's treatment ran: the turn's own decision, as its launch
+    // recorded it. A cold arm has none to apply; an arm that fell back to a
+    // cold turn says so instead of passing for its treatment.
+    let applied = (arm != "cold").then(|| {
+        launches
+            .iter()
+            .any(|launch| launch["settings"]["skillcache"]["decision"] == "hit")
+    });
     Ok(json!({
         "workspace": attempt_ws,
         "accepted": accepted,
@@ -871,7 +879,15 @@ async fn run_attempt(
         "seconds": started.elapsed().as_secs_f64(),
         "program_steps": program_steps,
         "failed_steps": failed_steps,
+        "applied": applied,
     }))
+}
+
+/// A turn without the arm's treatment that is still routed as every other
+/// arm's: a `$skill` mention is resolved for a session that opted into
+/// SkillCache, and the `cold` arm keeps the capsule out of it.
+fn cold_option() -> Value {
+    json!({"mode": "warm_only", "eval_arm": "cold"})
 }
 
 pub async fn handle(

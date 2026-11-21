@@ -178,8 +178,15 @@ that cell proceed in an order drawn from the sealed seed, with dense
  "usage": {"input_tokens": 0, "output_tokens": 0,
            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
            "cache_write_5m_input_tokens": 0, "cache_write_1h_input_tokens": 0},
- "model_calls": 0, "seconds": 0.0, "program_steps": 0, "failed_steps": 0}
+ "model_calls": 0, "seconds": 0.0, "program_steps": 0, "failed_steps": 0,
+ "applied": true}
 ```
+
+`applied` says whether the arm's treatment ran in this attempt: `true` when
+the turn ran the capsule or got the trace, `false` when it ran without it (no
+preparation, a capsule that no longer matched, a provider that cannot run
+one), and left out or `null` for `cold` and when the driver cannot tell. An
+attempt that was not applied stays in its arm; the arm's `coverage` counts it.
 
 Report only normalized provider components:
 - `input_tokens` MUST contain **non-cached input tokens only**. On Codex, subtract
@@ -239,7 +246,8 @@ matrix and each arm the report gives:
   `null` while any planned attempt is unjudged;
 - mean `tokens` per component with `coverage` (how many attempts reported
   each component, how many were fully priced, how many reported model calls,
-  seconds and program steps);
+  seconds and program steps, and how many were `applied` or `not_applied`: an
+  arm whose attempts mostly ran without its treatment measured `cold` twice);
 - `list_price_usd`, the mean over fully priced attempts at the sealed table,
   and `list_price_usd_reported_components`, a lower bound over whatever was
   reported;

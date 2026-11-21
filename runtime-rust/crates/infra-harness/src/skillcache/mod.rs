@@ -77,7 +77,7 @@ fn runtime_versions(names: &[String]) -> BTreeMap<String, Option<String>> {
 /// Why an active capsule may no longer be used in `workspace`, if it may not:
 /// its skill, its environment, its rules or its package is not what it was
 /// qualified with.
-pub fn staleness(_runtime: &Runtime, capsule: &Value, workspace: &Path) -> Option<String> {
+pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
     if capsule["schema_version"].as_u64() != Some(infra_skillcache::SCHEMA_VERSION) {
         return Some("The capsule was written in another schema version.".into());
     }
@@ -246,7 +246,7 @@ impl SkillCacheDomain {
         let Ok(workspace) = project_path(&self.runtime.store, &capsule) else {
             return Ok(capsule);
         };
-        let Some(reason) = staleness(&self.runtime, &capsule, &workspace) else {
+        let Some(reason) = staleness(&capsule, &workspace) else {
             return Ok(capsule);
         };
         let id = capsule["capsule_id"].as_str().unwrap_or("").to_string();
@@ -270,9 +270,9 @@ impl SkillCacheDomain {
         self.runtime.store.project(project_id)?;
         let filter = |name: &str| query[name].as_str().filter(|value| !value.is_empty());
         let status = filter("status");
-        let include_retired = status == Some("retired")
-            || query["include_retired"] == true
-            || matches!(query["include_retired"].as_str(), Some("true" | "1"));
+        let asked =
+            |name: &str| query[name] == true || matches!(query[name].as_str(), Some("true" | "1"));
+        let include_retired = status == Some("retired") || asked("include_retired");
         let rows = db::capsules(
             &*self.runtime.store.connection()?,
             project_id,
@@ -280,6 +280,10 @@ impl SkillCacheDomain {
             None,
             filter("form"),
             include_retired,
+            // An evaluation arm's capsules are not what a person manages;
+            // they are listed on request, so that they can be found and
+            // deleted.
+            asked("include_eval"),
         )?;
         let mut capsules = Vec::new();
         for row in rows {
@@ -608,9 +612,14 @@ impl SkillCacheDomain {
         let mut traces = db::session_traces(&db, session_id)?;
         for listed in &mut traces {
             let generation = listed["generation"].as_str().unwrap_or("").to_string();
-            listed["replayable"] = snapshot::load(&store.state, &generation)
-                .is_ok_and(|snapshot| snapshot.is_some())
-                .into();
+            let replayable =
+                snapshot::load(&store.state, &generation).is_ok_and(|snapshot| snapshot.is_some());
+            listed["replayable"] = replayable.into();
+            if !replayable {
+                // Why the turn cannot be compiled, for the person looking
+                // at it: what keeps a snapshot and what a folder may be.
+                listed["replay_reason"] = snapshot::unavailable_reason().into();
+            }
             listed["compiling"] = db::compile_pending(&db, &generation)?.into();
         }
         let compiles = db::session_compiles(&db, session_id)?;

@@ -690,7 +690,6 @@ pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: 
         }
         "skill-capsule-requalify" => act("requalify", capsule).await,
         "skill-capsule-retire" => act("retire", capsule).await,
-        "skill-capsule-invalidate" => act("invalidate", capsule).await,
         "skill-capsule-delete" => {
             // Only a delete that was armed for this capsule goes through.
             if m::data("skill-capsule-armed") == capsule {

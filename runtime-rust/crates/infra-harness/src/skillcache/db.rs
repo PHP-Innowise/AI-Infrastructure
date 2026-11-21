@@ -85,7 +85,11 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
         .optional()?
         .is_some_and(|sql| !sql.contains("'retired'"));
     if needs_retired_check {
-        db.execute_batch(&format!(
+        // One transaction: an interruption between dropping the old table and
+        // renaming the new one must not leave the project without its
+        // capsules.
+        let rebuild = db.unchecked_transaction()?;
+        rebuild.execute_batch(&format!(
             "DROP TABLE IF EXISTS skillcache_capsules_new;
              CREATE TABLE skillcache_capsules_new(
                  capsule_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, skill_name TEXT NOT NULL,
@@ -105,6 +109,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
              ALTER TABLE skillcache_capsules_new RENAME TO skillcache_capsules;
              CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);"
         ))?;
+        rebuild.commit()?;
     }
     Ok(())
 }
@@ -422,7 +427,9 @@ pub(crate) fn capsule(db: &Connection, capsule_id: &str) -> Result<Option<Value>
         .optional()?)
 }
 
-/// A project's capsules, newest first, optionally narrowed.
+/// A project's capsules, newest first, optionally narrowed. The capsules of
+/// an evaluation arm are listed only when asked for: they are not what a
+/// person manages, but they must be findable to be deleted.
 pub(crate) fn capsules(
     db: &Connection,
     project_id: &str,
@@ -430,10 +437,11 @@ pub(crate) fn capsules(
     status: Option<&str>,
     form: Option<&str>,
     include_retired: bool,
+    include_eval: bool,
 ) -> Result<Vec<Value>> {
     let mut query = db.prepare(&format!(
         "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
-         WHERE project_id=?1 AND eval_arm IS NULL
+         WHERE project_id=?1 AND (?6 != 0 OR eval_arm IS NULL)
            AND (?2 IS NULL OR skill_name=?2 OR skill_path=?2)
            AND (?3 IS NULL OR status=?3)
            AND (?3 IS NOT NULL OR ?5 != 0 OR status != 'retired')
@@ -441,7 +449,14 @@ pub(crate) fn capsules(
          ORDER BY created_at DESC,rowid DESC"
     ))?;
     let rows = query.query_map(
-        params![project_id, skill, status, form, i64::from(include_retired)],
+        params![
+            project_id,
+            skill,
+            status,
+            form,
+            i64::from(include_retired),
+            i64::from(include_eval)
+        ],
         capsule_row,
     )?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1035,19 +1050,27 @@ mod tests {
             1
         );
         assert_eq!(
-            capsules(&db, "project", None, None, None, false)
+            capsules(&db, "project", None, None, None, false, false)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            capsules(&db, "project", None, None, None, true)
+            capsules(&db, "project", None, None, None, true, false)
                 .unwrap()
                 .len(),
             2
         );
+        // An evaluation arm's capsule is listed only when asked for.
+        let with_eval = capsules(&db, "project", None, None, None, true, true).unwrap();
+        assert_eq!(with_eval.len(), 3);
+        assert!(
+            with_eval
+                .iter()
+                .any(|capsule| capsule["eval_arm"] == "skillcache_agent")
+        );
         assert_eq!(
-            capsules(&db, "project", None, Some("retired"), None, false)
+            capsules(&db, "project", None, Some("retired"), None, false, false)
                 .unwrap()
                 .len(),
             1

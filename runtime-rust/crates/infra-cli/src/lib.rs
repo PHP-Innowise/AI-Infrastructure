@@ -42,16 +42,7 @@ const GROUPS: &[&str] = &[
 /// The command an executable name stands for when a warm SkillCache session
 /// staged the engine under it: `skillcache-run` or `skillcache-tool`, with or
 /// without the platform's executable suffix.
-pub fn staged_tool(name: Option<&std::ffi::OsStr>) -> Option<&'static str> {
-    let stem = Path::new(name?).file_stem()?.to_str()?;
-    if stem.eq_ignore_ascii_case("skillcache-run") {
-        Some("run-command")
-    } else if stem.eq_ignore_ascii_case("skillcache-tool") {
-        Some("tool")
-    } else {
-        None
-    }
-}
+pub use infra_skillcache::cli::staged_tool;
 /// Runs one SkillCache command and returns its exit code. `name` is an
 /// operation of the `skillcache` group, or `run-command` for the executor's
 /// own command line (`run`, `continue` or `status` first).

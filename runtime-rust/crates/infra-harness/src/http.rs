@@ -1320,7 +1320,7 @@ pub const ROUTES: &[Route] = &[
         operation: "skillcache.list",
         status: 200,
         token: false,
-        query: &["skill", "status", "form", "include_retired"],
+        query: &["skill", "status", "form", "include_retired", "include_eval"],
     },
     Route {
         method: "GET",
@@ -3601,7 +3601,7 @@ mod skillcache_route_tests {
         }
         assert_eq!(
             route("skillcache.list").query,
-            &["skill", "status", "form", "include_retired"]
+            &["skill", "status", "form", "include_retired", "include_eval"]
         );
         // A capsule is compiled from an observed turn: there is no route that
         // compiles "a skill".

@@ -49,10 +49,58 @@ pub fn program_environment(
     environment
 }
 
+/// Takes `PATH` out of an environment and returns its value. On Windows the
+/// name is matched in any letter case and every spelling of it is removed,
+/// so that a `Path` left behind cannot shadow the `PATH` the caller writes
+/// next. Elsewhere only `PATH` is that variable.
+pub fn take_path(environment: &mut BTreeMap<String, String>) -> Option<String> {
+    let names = environment
+        .keys()
+        .filter(|name| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case("PATH")
+            } else {
+                name.as_str() == "PATH"
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    // All of them are removed before one is chosen; the names are in order,
+    // and the fully capitalised spelling is the first of them.
+    names
+        .into_iter()
+        .filter_map(|name| environment.remove(&name))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn take_path_removes_the_variable_and_on_windows_every_spelling_of_it() {
+        let mut environment = BTreeMap::from([
+            ("PATH".to_string(), "/bin".to_string()),
+            ("Path".to_string(), "other".to_string()),
+            ("LANG".to_string(), "C".to_string()),
+        ]);
+        assert_eq!(take_path(&mut environment).as_deref(), Some("/bin"));
+        assert!(!environment.contains_key("PATH"));
+        // Elsewhere `Path` is another variable and stays; on Windows it is
+        // the same one and goes with it.
+        assert_eq!(environment.contains_key("Path"), !cfg!(windows));
+        assert!(environment.contains_key("LANG"));
+        assert_eq!(take_path(&mut BTreeMap::new()), None);
+        let mut other = BTreeMap::from([("Path".to_string(), "bin".to_string())]);
+        assert_eq!(
+            take_path(&mut other).as_deref(),
+            cfg!(windows).then_some("bin")
+        );
+        assert_eq!(other.is_empty(), cfg!(windows));
+    }
 
     fn inherited(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         pairs

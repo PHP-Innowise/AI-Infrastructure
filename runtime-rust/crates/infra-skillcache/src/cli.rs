@@ -16,6 +16,21 @@ use crate::{
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+/// The command an executable name stands for when the engine was staged
+/// under it for a warm session: `skillcache-run` or `skillcache-tool`, in any
+/// letter case, with or without the platform's executable suffix. Every
+/// executable that answers to those names asks this one function.
+pub fn staged_tool(name: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    let stem = std::path::Path::new(name?).file_stem()?.to_str()?;
+    if stem.eq_ignore_ascii_case("skillcache-run") {
+        Some("run-command")
+    } else if stem.eq_ignore_ascii_case("skillcache-tool") {
+        Some("tool")
+    } else {
+        None
+    }
+}
+
 const SUPPLIED_BYTES: usize = 256 * 1024;
 const HELP: &str = "Usage: infra-engine skillcache <operation>\n\
   run ['<JSON>'] [--replay <examples.json>]   start a capsule's plan with the values known so far\n\

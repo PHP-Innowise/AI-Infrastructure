@@ -207,8 +207,16 @@ pub fn skill_file(workspace: &Path, path: &str) -> Option<PathBuf> {
 }
 
 fn frontmatter_name(file: &Path) -> Option<String> {
-    let bytes = std::fs::read(file).ok()?;
-    let text = std::str::from_utf8(&bytes[..bytes.len().min(8192)]).ok()?;
+    use std::io::Read;
+    // The name is in the first lines: the read is bounded, and a cut inside
+    // a multi-byte character must not lose the lines before it.
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .ok()?
+        .take(8192)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     let rest = text
         .strip_prefix("---\r\n")
         .or_else(|| text.strip_prefix("---\n"))?;
@@ -396,6 +404,22 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frontmatter_name_is_read_from_a_long_file_that_is_not_ascii() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("SKILL.md");
+        let mut text = String::from("---\nname: отчёты\ndescription: d\n---\n");
+        while text.len() < 8191 {
+            text.push('a');
+        }
+        // The 8192nd byte is the first half of a two-byte character.
+        text.push_str(&"ж".repeat(16));
+        std::fs::write(&file, &text).unwrap();
+        assert!(std::str::from_utf8(&text.as_bytes()[..8192]).is_err());
+        assert_eq!(frontmatter_name(&file).as_deref(), Some("отчёты"));
+        assert_eq!(frontmatter_name(&root.path().join("absent.md")), None);
+    }
 
     #[test]
     fn the_session_redactor_replaces_environment_secrets_and_host_paths() {

@@ -191,16 +191,7 @@ fn environment(
     let text = |path: &Path| path.display().to_string();
     // A named engine's folder is where its runtimes are looked for first.
     if let Some(folder) = engine.path.as_deref().and_then(Path::parent) {
-        let path_keys = environment
-            .keys()
-            .filter(|name| name.eq_ignore_ascii_case("PATH"))
-            .cloned()
-            .collect::<Vec<_>>();
-        let rest = path_keys
-            .iter()
-            .filter_map(|key| environment.remove(key))
-            .next()
-            .unwrap_or_default();
+        let rest = env_filter::take_path(&mut environment).unwrap_or_default();
         let joined = std::env::join_paths(
             std::iter::once(folder.to_path_buf()).chain(std::env::split_paths(&rest)),
         )

@@ -53,10 +53,20 @@ impl Drop for Stand {
     }
 }
 
+/// Stages the engine under a tool's name. The shared engine itself is never
+/// linked: a second name would change its link count and change time, which
+/// tests running beside this one check as the engine's identity. The stand
+/// takes one copy of its own, and a tool's name is a link to that copy, as the
+/// Harness stages them.
 fn staged(bin: &Path, name: &str) -> PathBuf {
-    let path = bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    if std::fs::hard_link(ENGINE, &path).is_err() {
-        std::fs::copy(ENGINE, &path).unwrap();
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let own = bin.join(format!("engine-copy{suffix}"));
+    if !own.is_file() {
+        std::fs::copy(ENGINE, &own).unwrap();
+    }
+    let path = bin.join(format!("{name}{suffix}"));
+    if std::fs::hard_link(&own, &path).is_err() {
+        std::fs::copy(&own, &path).unwrap();
     }
     path
 }

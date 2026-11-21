@@ -1034,7 +1034,7 @@ impl Sessions {
         workspace: &Path,
         warm: Option<&crate::skillcache::warm::Warm>,
         cancel: &Arc<AtomicBool>,
-    ) -> Result<Arc<dyn provider::LaunchAdapter>> {
+    ) -> Result<Arc<ProtectedLaunchAdapter>> {
         let evidence_dir = self.store.state.join("skillcache/protected-probe");
         infra_host::util::private_directory(&self.store.state.join("skillcache"))?;
         infra_core::fs::ensure_directory(&evidence_dir, true)?;
@@ -2008,6 +2008,25 @@ impl Sessions {
             }
             Ok(())
         });
+        // Protected paths are kept from a run by wrapping an ordinary
+        // session's launches. The specialized workflows start their own, so
+        // with protected paths installed they are refused rather than run
+        // outside the boundary.
+        if lock(&self.protected)?.is_some()
+            && [
+                "creator",
+                "system_run",
+                "system_discovery",
+                "fleet",
+                "clash",
+            ]
+            .iter()
+            .any(|name| !session[*name].is_null())
+        {
+            return Err(HarnessError::forbidden(
+                "Protected paths are installed: only an ordinary session runs here.",
+            ));
+        }
         for name in ["creator", "system_run", "system_discovery"] {
             if !session[name].is_null() {
                 let result = Box::pin(
@@ -2357,6 +2376,7 @@ impl Sessions {
             }),
             None => adapter.clone(),
         };
+        let mut recovery_adapter = adapter.clone();
         let protected_cfg = lock(&self.protected)?.clone();
         if let Some(protected_cfg) = protected_cfg {
             dispatch_adapter = match Box::pin(self.attach_protected(
@@ -2369,7 +2389,20 @@ impl Sessions {
             ))
             .await
             {
-                Ok(adapted) => adapted,
+                Ok(adapted) => {
+                    // The recovery launch of the turn runs inside the same
+                    // boundary. It gets no capsule, so nothing of the warm
+                    // run is opened to it.
+                    recovery_adapter = Arc::new(ProtectedLaunchAdapter {
+                        inner: adapter.clone(),
+                        protected: adapted.protected.clone(),
+                        workspace: adapted.workspace.clone(),
+                        codex: adapted.codex.clone(),
+                        state_dir: None,
+                        evidence: adapted.evidence.clone(),
+                    });
+                    adapted
+                }
                 Err(error) => {
                     if let Some(state_dir) = warm.as_ref().and_then(|w| w.state_dir.as_deref()) {
                         let _ = std::fs::remove_dir_all(state_dir);
@@ -2564,7 +2597,7 @@ impl Sessions {
             ));
         }
         let mut recovery = NativeRecovery {
-            adapter,
+            adapter: recovery_adapter,
             human_cancel: cancel.clone(),
         };
         let memory = Box::pin(

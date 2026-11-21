@@ -664,7 +664,7 @@ fn decide_for(
         (chosen, skill_path)
     };
     let capsule_id = chosen["capsule_id"].as_str().unwrap_or("").to_string();
-    if let Some(reason) = staleness(runtime, &chosen, workspace) {
+    if let Some(reason) = staleness(&chosen, workspace) {
         if generation.is_some() {
             if let Ok(db) = runtime.store.connection() {
                 let _ = db::set_capsule_status(&db, &capsule_id, "stale", Some(&reason));
@@ -772,16 +772,7 @@ impl LaunchAdapter for WarmLaunchAdapter {
             // A textual capsule is read; nothing is staged for it.
             return Ok(command);
         };
-        let path_keys = command
-            .environment
-            .keys()
-            .filter(|name| name.eq_ignore_ascii_case("PATH"))
-            .cloned()
-            .collect::<Vec<_>>();
-        let rest = path_keys
-            .iter()
-            .filter_map(|key| command.environment.remove(key))
-            .next()
+        let rest = env_filter::take_path(&mut command.environment)
             .or_else(|| std::env::var("PATH").ok())
             .unwrap_or_default();
         let path =
@@ -979,9 +970,30 @@ impl Warm {
         let outcome = if self.form == Form::Textual {
             "read"
         } else if self.agent_only() {
-            if count("program_completed") > 0 {
+            // The agent drives the programs itself, so nothing says "the plan
+            // ended": it is complete when every program step of it ran to its
+            // end and none failed, and unfinished when only some did.
+            let planned = self
+                .package
+                .as_deref()
+                .and_then(|dir| package::load(dir).ok())
+                .map(|stored| {
+                    stored
+                        .capsule
+                        .plan()
+                        .filter(|step| step.program().is_some())
+                        .count()
+                });
+            let completed = events
+                .iter()
+                .filter(|event| event["event"] == "program_completed")
+                .filter_map(|event| event["step_index"].as_u64())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            let failed = count("program_failed");
+            if failed == 0 && planned.is_some_and(|planned| planned > 0 && completed >= planned) {
                 "complete"
-            } else if count("program_failed") > 0 {
+            } else if completed > 0 || failed > 0 {
                 "unfinished"
             } else {
                 "not_started"
@@ -1086,6 +1098,38 @@ impl Warm {
 mod tests {
     use super::*;
     use infra_skillcache::SkillCapsule;
+
+    /// A capsule is not requalified when the engine is rebuilt, only when the
+    /// executor's contract changes, and that is versioned by hand
+    /// (`ENV_ABI_VERSION`). This pins what an agent is told of the contract
+    /// and the variables a run gets to that version, so that changing either
+    /// is noticed here. Raise the version when capsules qualified before the
+    /// change must not run after it; then update the pin.
+    #[test]
+    fn the_executor_contract_is_pinned_to_its_version() {
+        let told = [
+            protocol("skill").as_str(),
+            env_filter::INPUT,
+            env_filter::WORKSPACE,
+            env_filter::PACKAGE,
+            env_filter::ASSETS,
+            env_filter::STATE_FILE,
+            env_filter::LOG_FILE,
+            env_filter::GENERATION,
+        ]
+        .join("\n");
+        assert_eq!(
+            (
+                infra_skillcache::fingerprint::ENV_ABI_VERSION,
+                crate::store::sha(told.as_bytes()).as_str(),
+            ),
+            (
+                1,
+                "b61df6478d380781deae6b0d9561f415437c70983cd72fe00feb10bebc7d6da4"
+            ),
+            "the executor's contract changed: decide on ENV_ABI_VERSION, then update this pin"
+        );
+    }
 
     fn stored(root: &Path) -> package::Package {
         let capsule = json!({

@@ -8,9 +8,14 @@
 //! tree; they are copied from the workspace when the replay copy is made.
 //! When the workspace is not a Git checkout, a bounded directory copy
 //! captures its files into a private snapshot folder instead, skipping
-//! `.git`, `target`, `.harness-tmp`, the Harness state folder, symlinks,
-//! and special files; workspaces exceeding the snapshot limits have no
-//! snapshot and so no replay.
+//! every `.git`, the `target` and `.harness-tmp` of the workspace's own
+//! root, the Harness state folder and special files; workspaces exceeding
+//! the snapshot limits have no snapshot and so no replay. A checkout Git
+//! cannot read keeps no snapshot either: it is not copied as a folder.
+//! In both kinds a symbolic link is kept when it is relative and stays
+//! inside the tree (installed dependencies are full of them), so that the
+//! copy's link points at the copy; a link that leaves the tree is not
+//! copied.
 use crate::{HarnessError, Result};
 use serde_json::{Value, json};
 use std::{
@@ -29,7 +34,9 @@ const TREE_FILES: usize = 50_000;
 const TREE_BYTES: u64 = 256 * 1024 * 1024;
 const TREE_DEPTH: usize = 32;
 const TREE_SECONDS: u64 = 60;
-const TREE_SKIPPED_NAMES: [&str; 3] = [".git", "target", ".harness-tmp"];
+/// Left out of a tree snapshot at the workspace's own root only: a folder of
+/// the same name deeper in the tree is the project's.
+const ROOT_SKIPPED_NAMES: [&str; 2] = ["target", ".harness-tmp"];
 
 #[derive(Clone, Copy)]
 struct Limits {
@@ -140,12 +147,49 @@ fn tree_bytes(root: &Path) -> u64 {
     total
 }
 
-fn should_skip_name(name: &OsStr) -> bool {
+fn should_skip_name(name: &OsStr, depth: usize) -> bool {
     name.to_str()
-        .is_some_and(|name| TREE_SKIPPED_NAMES.contains(&name))
+        .is_some_and(|name| name == ".git" || (depth == 0 && ROOT_SKIPPED_NAMES.contains(&name)))
+}
+
+/// The target of the symbolic link at `link` when the link may be kept in a
+/// copy of the tree below `root`: a relative target that, read by name, never
+/// leaves the tree. The copy's link then points at the copy, never at the
+/// host.
+#[cfg(unix)]
+fn kept_link(root: &Path, link: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    let mut depth = link.parent()?.strip_prefix(root).ok()?.components().count();
+    for component in target.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => depth = depth.checked_sub(1)?,
+            std::path::Component::Normal(_) => depth += 1,
+            _ => return None,
+        }
+    }
+    Some(target)
+}
+
+/// Whether `workspace` lies in a Git checkout, told without Git: a `.git`
+/// that is a repository (it has a `HEAD`) or the file that names one, in the
+/// folder or above it.
+fn in_checkout(workspace: &Path) -> bool {
+    workspace.ancestors().any(|folder| {
+        let git = folder.join(".git");
+        match std::fs::symlink_metadata(&git) {
+            Ok(metadata) if metadata.is_dir() => git.join("HEAD").is_file(),
+            Ok(metadata) => metadata.is_file(),
+            Err(_) => false,
+        }
+    })
 }
 
 struct TreeCopy<'a> {
+    /// Where the tree begins: what a kept link is measured against. Links
+    /// are recreated on Unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    root: &'a Path,
     state_canon: &'a Path,
     deadline: Instant,
     limits: Limits,
@@ -168,7 +212,7 @@ impl TreeCopy<'_> {
                 return Ok(false);
             }
             let name = entry.file_name();
-            if should_skip_name(&name) {
+            if should_skip_name(&name, depth) {
                 continue;
             }
             let from = entry.path();
@@ -180,11 +224,18 @@ impl TreeCopy<'_> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
+            let to = destination.join(&name);
             if infra_core::fs::linked_at(&from, &metadata)? {
+                #[cfg(unix)]
+                if metadata.file_type().is_symlink()
+                    && let Some(target) = kept_link(self.root, &from)
+                {
+                    std::os::unix::fs::symlink(target, &to)?;
+                    continue;
+                }
                 self.skipped_links += 1;
                 continue;
             }
-            let to = destination.join(&name);
             if metadata.is_dir() {
                 let next_depth = depth + 1;
                 if next_depth > self.limits.depth {
@@ -234,6 +285,7 @@ fn take_tree(
         }
     };
     let mut copy = TreeCopy {
+        root: &workspace_canon,
         state_canon: &state_canon,
         deadline: Instant::now() + Duration::from_secs(limits.seconds),
         limits,
@@ -292,13 +344,21 @@ fn take_with(
         ],
         &[],
     ) else {
-        return take_tree(state, workspace, generation, &root, limits);
+        // Git did not answer. A folder that is no checkout is copied as a
+        // tree; a checkout Git could not read (no Git on `PATH`, an ownership
+        // refusal, a timeout) keeps no snapshot rather than a copy of
+        // everything in it before every observed turn.
+        return if in_checkout(workspace) {
+            Ok(None)
+        } else {
+            take_tree(state, workspace, generation, &root, limits)
+        };
     };
     let text = String::from_utf8_lossy(&located).into_owned();
     let mut lines = text.lines();
     let (Some(top), Some(git_dir), Some(common)) = (lines.next(), lines.next(), lines.next())
     else {
-        return take_tree(state, workspace, generation, &root, limits);
+        return Ok(None);
     };
     let prefix = lines.next().unwrap_or("").trim_end_matches('/').to_string();
     let top = PathBuf::from(top);
@@ -383,12 +443,23 @@ struct Copied {
     bytes: u64,
     truncated: bool,
 }
-fn copy_entry(from: &Path, to: &Path, copied: &mut Copied) -> std::io::Result<()> {
+/// Copies one ignored entry of the checkout at `root`. A link is kept only
+/// when it stays inside the checkout; see [`kept_link`].
+fn copy_entry(root: &Path, from: &Path, to: &Path, copied: &mut Copied) -> std::io::Result<()> {
     if copied.truncated {
         return Ok(());
     }
     let metadata = std::fs::symlink_metadata(from)?;
     if infra_core::fs::linked_at(from, &metadata).unwrap_or(true) {
+        #[cfg(unix)]
+        if metadata.file_type().is_symlink()
+            && let Some(target) = kept_link(root, from)
+        {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::os::unix::fs::symlink(target, to)?;
+        }
         return Ok(());
     }
     if metadata.is_dir() {
@@ -396,7 +467,7 @@ fn copy_entry(from: &Path, to: &Path, copied: &mut Copied) -> std::io::Result<()
         let mut entries = std::fs::read_dir(from)?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            copy_entry(&entry.path(), &to.join(entry.file_name()), copied)?;
+            copy_entry(root, &entry.path(), &to.join(entry.file_name()), copied)?;
         }
     } else if metadata.is_file() {
         if copied.files >= IGNORED_FILES
@@ -509,6 +580,7 @@ fn materialize_git(root: &Path, snapshot: &Value, destination: &Path) -> Result<
                 continue;
             }
             let _ = copy_entry(
+                &top,
                 &top.join(relative),
                 &destination.join(relative),
                 &mut copied,
@@ -529,7 +601,22 @@ fn materialize_git(root: &Path, snapshot: &Value, destination: &Path) -> Result<
     }))
 }
 
+/// Why a turn has no snapshot, for the person who cannot compile it: what
+/// keeps one, and the limits a folder copy has. The cause of one refusal is
+/// not kept.
+pub fn unavailable_reason() -> String {
+    format!(
+        "it needs a Git checkout Git can read, or a folder of at most {TREE_FILES} files, {} MiB and {TREE_DEPTH} levels that copies within {TREE_SECONDS} s",
+        TREE_BYTES / (1024 * 1024)
+    )
+}
+
+/// Copies the snapshot's files below `source` to `destination`. `root` is
+/// where the snapshot's files begin: a link is recreated only when it stays
+/// below it (see [`kept_link`]), as a snapshot writes it; any other link was
+/// not written by a snapshot and refuses the copy.
 fn copy_tree_materialize(
+    root: &Path,
     source: &Path,
     destination: &Path,
     files: &mut usize,
@@ -540,15 +627,22 @@ fn copy_tree_materialize(
     for entry in entries {
         let from = entry.path();
         let metadata = std::fs::symlink_metadata(&from)?;
+        let to = destination.join(entry.file_name());
         if infra_core::fs::linked_at(&from, &metadata)? {
+            #[cfg(unix)]
+            if metadata.file_type().is_symlink()
+                && let Some(target) = kept_link(root, &from)
+            {
+                std::os::unix::fs::symlink(target, &to)?;
+                continue;
+            }
             return Err(HarnessError::forbidden(
                 "The snapshot contains a symbolic link.",
             ));
         }
-        let to = destination.join(entry.file_name());
         if metadata.is_dir() {
             infra_core::fs::ensure_directory(&to, true)?;
-            copy_tree_materialize(&from, &to, files, bytes)?;
+            copy_tree_materialize(root, &from, &to, files, bytes)?;
         } else if metadata.is_file() {
             if let Ok(existing) = std::fs::symlink_metadata(&to)
                 && infra_core::fs::linked_at(&to, &existing)?
@@ -577,7 +671,13 @@ fn materialize_tree(root: &Path, destination: &Path) -> Result<Value> {
     infra_core::fs::ensure_directory(destination, true)?;
     let mut files = 0usize;
     let mut bytes = 0u64;
-    copy_tree_materialize(&files_root, destination, &mut files, &mut bytes)?;
+    copy_tree_materialize(
+        &files_root,
+        &files_root,
+        destination,
+        &mut files,
+        &mut bytes,
+    )?;
     Ok(json!({
         "workspace": destination,
         "kind": "tree",
@@ -592,6 +692,122 @@ fn materialize_tree(root: &Path, destination: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relative link that stays inside the tree is carried into the replay
+    /// copy, in a checkout's ignored files and in a folder's snapshot; a link
+    /// that leaves the tree is not.
+    #[cfg(unix)]
+    #[test]
+    fn links_inside_the_tree_are_kept_in_a_replay_and_the_others_are_not() {
+        let root = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(root.path()).unwrap();
+        let state = base.join("state");
+        let link = |target: &str, at: PathBuf| std::os::unix::fs::symlink(target, at).unwrap();
+        let read = |at: PathBuf| std::fs::read_link(at).unwrap();
+        std::fs::write(base.join("outside.txt"), "secret\n").unwrap();
+
+        let project = base.join("project");
+        std::fs::create_dir_all(project.join("vendor/pkg")).unwrap();
+        std::fs::create_dir_all(project.join("vendor/bin")).unwrap();
+        run(&project, &["init", "-q"]);
+        std::fs::write(project.join(".gitignore"), "vendor/\n").unwrap();
+        std::fs::write(project.join("tracked.txt"), "ok\n").unwrap();
+        run(&project, &["add", "-A"]);
+        run(&project, &["commit", "-q", "-m", "base"]);
+        std::fs::write(project.join("vendor/pkg/tool.sh"), "echo tool\n").unwrap();
+        link("../pkg/tool.sh", project.join("vendor/bin/tool"));
+        link("pkg", project.join("vendor/alias"));
+        link("../../../outside.txt", project.join("vendor/bin/leaves"));
+        take(&state, &project, "gen-git").unwrap().unwrap();
+        let replay = base.join("replay-git");
+        materialize(&state, "gen-git", &replay).unwrap();
+        assert_eq!(
+            read(replay.join("vendor/bin/tool")),
+            Path::new("../pkg/tool.sh")
+        );
+        assert_eq!(
+            std::fs::read_to_string(replay.join("vendor/bin/tool")).unwrap(),
+            "echo tool\n"
+        );
+        assert_eq!(read(replay.join("vendor/alias")), Path::new("pkg"));
+        assert!(std::fs::symlink_metadata(replay.join("vendor/bin/leaves")).is_err());
+
+        let plain = base.join("plain");
+        std::fs::create_dir_all(plain.join("node_modules/.pnpm/dep")).unwrap();
+        if git(&plain, &["rev-parse", "--show-toplevel"], &[]).is_ok() {
+            eprintln!("skipped: the temporary folder lies inside a Git checkout");
+            return;
+        }
+        std::fs::write(plain.join("node_modules/.pnpm/dep/index.js"), "1\n").unwrap();
+        link(".pnpm/dep", plain.join("node_modules/dep"));
+        link("../../outside.txt", plain.join("node_modules/leaves"));
+        let snapshot = take(&state, &plain, "gen-tree").unwrap().unwrap();
+        assert_eq!(snapshot["kind"], "tree");
+        assert_eq!(snapshot["skipped_links"], 1);
+        let replay = base.join("replay-tree");
+        materialize(&state, "gen-tree", &replay).unwrap();
+        assert_eq!(
+            read(replay.join("node_modules/dep")),
+            Path::new(".pnpm/dep")
+        );
+        assert_eq!(
+            std::fs::read_to_string(replay.join("node_modules/dep/index.js")).unwrap(),
+            "1\n"
+        );
+        assert!(std::fs::symlink_metadata(replay.join("node_modules/leaves")).is_err());
+    }
+
+    #[test]
+    fn only_the_root_of_a_tree_leaves_out_its_build_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(root.path()).unwrap();
+        let project = base.join("plain");
+        let state = base.join("state");
+        std::fs::create_dir_all(project.join("src/deploy/target")).unwrap();
+        std::fs::create_dir_all(project.join("target")).unwrap();
+        std::fs::create_dir_all(project.join("src/.git")).unwrap();
+        if git(&project, &["rev-parse", "--show-toplevel"], &[]).is_ok() {
+            eprintln!("skipped: the temporary folder lies inside a Git checkout");
+            return;
+        }
+        std::fs::write(project.join("src/deploy/target/prod.yaml"), "host: a\n").unwrap();
+        std::fs::write(project.join("target/built.bin"), "skip\n").unwrap();
+        std::fs::write(project.join("src/.git/marker"), "skip\n").unwrap();
+        let snapshot = take(&state, &project, "gen-1").unwrap().unwrap();
+        assert_eq!(snapshot["files"], 1);
+        let replay = base.join("replay");
+        materialize(&state, "gen-1", &replay).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replay.join("src/deploy/target/prod.yaml")).unwrap(),
+            "host: a\n"
+        );
+        assert!(!replay.join("target").exists());
+        assert!(!replay.join("src/.git").exists());
+    }
+
+    /// A repository by its shape that Git refuses is what an ownership
+    /// refusal, a timeout or a missing Git look like from here: it keeps no
+    /// snapshot and is not copied as a folder.
+    #[test]
+    fn a_checkout_git_cannot_read_keeps_no_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(root.path()).unwrap();
+        let project = base.join("project");
+        let state = base.join("state");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::write(project.join(".git/HEAD"), "not a ref\n").unwrap();
+        std::fs::write(project.join("big.txt"), "content\n").unwrap();
+        if git(&project, &["rev-parse", "--show-toplevel"], &[]).is_ok() {
+            eprintln!("skipped: Git reads this folder as a checkout");
+            return;
+        }
+        assert!(in_checkout(&project));
+        assert!(in_checkout(&project.join("deeper/still")));
+        assert!(take(&state, &project, "gen-1").unwrap().is_none());
+        assert!(!state.join("skillcache/snapshots/gen-1").exists());
+        assert!(load(&state, "gen-1").unwrap().is_none());
+        assert!(unavailable_reason().contains("50000 files, 256 MiB"));
+    }
 
     fn run(folder: &Path, arguments: &[&str]) {
         let status = Command::new("git")

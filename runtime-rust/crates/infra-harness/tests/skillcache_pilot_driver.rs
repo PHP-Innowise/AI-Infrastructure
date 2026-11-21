@@ -651,6 +651,16 @@ fn all_six_arms_and_shared_observation_work_end_to_end() {
             "protected": stand.protected(),
         }));
         assert_eq!(attempt["accepted"], true, "{arm}: {attempt}");
+        // Every arm but `cold` says that its treatment ran; `cold` has none.
+        assert_eq!(
+            attempt["applied"],
+            if *arm == "cold" {
+                Value::Null
+            } else {
+                json!(true)
+            },
+            "{arm}: {attempt}"
+        );
         let ws = PathBuf::from(attempt["workspace"].as_str().unwrap());
         assert!(ws.is_dir(), "{arm} workspace missing: {}", ws.display());
         assert!(workspaces.insert(ws.clone()), "reused workspace for {arm}");
@@ -800,6 +810,8 @@ fn missing_or_failed_preparation_runs_cold_and_non_git_fixture_works() {
         "protected": stand.protected(),
     }));
     assert_eq!(missing["accepted"], true, "{missing}");
+    // The arm ran without its capsule, and the answer says so.
+    assert_eq!(missing["applied"], false, "{missing}");
     assert!(missing["program_steps"].is_null());
     assert!(missing["failed_steps"].is_null());
     let ws = PathBuf::from(missing["workspace"].as_str().unwrap());
@@ -850,6 +862,7 @@ fn missing_or_failed_preparation_runs_cold_and_non_git_fixture_works() {
         "protected": stand.protected(),
     }));
     assert_eq!(fallback["accepted"], true, "{fallback}");
+    assert_eq!(fallback["applied"], false, "{fallback}");
     assert!(fallback["program_steps"].is_null());
 
     // Non-Git task `t2` prepares & executes warm when compilation succeeds.

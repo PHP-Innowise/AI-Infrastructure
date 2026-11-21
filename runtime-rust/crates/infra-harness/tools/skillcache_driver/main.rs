@@ -13,23 +13,9 @@ mod workspace;
 use infra_core::fs as core_fs;
 use infra_harness::{HarnessError, Result, strict_json};
 use serde_json::Value;
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::{io::Read, path::PathBuf};
 
 const REQUEST_BYTES: usize = 1024 * 1024;
-
-fn staged_tool(arg0: Option<&std::ffi::OsStr>) -> Option<&'static str> {
-    let stem = Path::new(arg0?).file_stem()?.to_str()?;
-    if stem.eq_ignore_ascii_case("skillcache-run") {
-        Some("run-command")
-    } else if stem.eq_ignore_ascii_case("skillcache-tool") {
-        Some("tool")
-    } else {
-        None
-    }
-}
 
 fn read_request() -> Result<Value> {
     let mut raw = Vec::new();
@@ -79,7 +65,8 @@ fn run_driver() -> Result<Value> {
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().map(String::as_str) != Some("internal-guard")
-        && let Some(kind) = staged_tool(std::env::args_os().next().as_deref())
+        && let Some(kind) =
+            infra_skillcache::cli::staged_tool(std::env::args_os().next().as_deref())
     {
         let code = match kind {
             "run-command" => infra_skillcache::cli::execute_run(&args),

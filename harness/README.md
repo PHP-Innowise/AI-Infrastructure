@@ -511,8 +511,13 @@ observed turn also records the state its workspace started from: for a Git
 checkout, a tree written through a private index into a private object folder
 under the Harness state (the project's own repository is read and never
 written); for a non-Git folder, a bounded directory copy (`kind: "tree"`,
-skipping `.git`, `target`, `.harness-tmp`, the Harness state folder, symlinks,
-and special files, up to 50,000 files / 256 MiB / depth 32).
+skipping every `.git`, the `target` and `.harness-tmp` of the folder's own
+root, the Harness state folder and special files, up to 50,000 files /
+256 MiB / depth 32). A checkout that Git cannot read (no Git on `PATH`, an
+ownership refusal, a timeout) keeps no snapshot: it is not copied as a folder.
+In both kinds a symbolic link is kept when it is relative and stays inside the
+tree, which is what installed dependencies are made of; a link that leaves the
+tree is not copied.
 `GET /api/sessions/{session_id}/skillcache` lists a session's mode, its kept
 traces without their steps, and what was compiled from them.
 
@@ -581,7 +586,7 @@ reported stays empty; it is not shown as zero.
 
 | Request | What it does |
 | --- | --- |
-| `GET /api/projects/{project_id}/skillcache/capsules?skill=&status=&form=&include_retired=` | lists a project's capsules (retired capsules are excluded unless `status=retired` or `include_retired=true`) |
+| `GET /api/projects/{project_id}/skillcache/capsules?skill=&status=&form=&include_retired=&include_eval=` | lists a project's capsules (retired capsules are excluded unless `status=retired` or `include_retired=true`; the capsules of an evaluation arm are listed only with `include_eval=true`, which is how they are found to be deleted) |
 | `GET /api/projects/{project_id}/skillcache/capsules/{capsule_id}` | the plan (`mu`, bindings, programs, steps, verification), every gate report of every round, the compilation and its usage; never the programs' sources or the observed values |
 | `POST .../capsules/{capsule_id}/requalify` | runs the gates again over the stored package: no model, the same observed values, a fresh copy of the task (also restores a `retired` capsule to `active` if gates pass) |
 | `POST .../capsules/{capsule_id}/retire` | retires a capsule (`retired`) so warm turns skip it until someone uses **Use again** (`requalify`) |
@@ -623,7 +628,9 @@ line:
 | the capsule needs no network, or Codex runs in Bypass | `network` |
 
 In this version a message routes to one skill for both Claude Code and Codex
-through a single `$skill` mention. A Claude Code `/command` is native (`native_route`),
+through a single `$skill` mention. For Claude Code the mention is routed only
+in a session that opted into SkillCache (any mode but `off`): an ordinary
+Claude session's message goes as it was typed. A Claude Code `/command` is native (`native_route`),
 so `/command` turns are observed and compiled from without running warm, and
 Cursor is observed only: writing outside the workspace in its sandbox is not
 verified.
@@ -694,9 +701,9 @@ The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
 - **Run view.** A turn with SkillCache events gets a `SkillCache` tab that lists
   every phase in order. A kept trace offers **Compile into a capsule** once;
   after that it shows the compilation's state and links to the capsule. A
-  trace whose starting workspace was not kept (for example, it exceeded the
-  non-Git snapshot limits or contained no copyable starting state) says why it
-  cannot be compiled.
+  trace whose starting workspace was not kept says that it cannot be compiled
+  and what a snapshot needs (`replay_reason`: a Git checkout Git can read, or
+  a folder within the snapshot limits); the cause of one refusal is not kept.
 - **Usage.** A session that used SkillCache gets one line above its launch
   history: how many turns ran warm, how many ran cold and why, how many
   compiled steps went back to the agent, how many traces are kept, and what

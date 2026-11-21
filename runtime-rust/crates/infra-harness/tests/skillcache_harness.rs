@@ -2507,7 +2507,33 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"Done","se
         )
         .await;
     assert_eq!(agent_sc["runs"][0]["capsule_id"], normal_id);
-    assert_eq!(agent_sc["runs"][0]["outcome"], "complete");
+    // The agent ran one of the plan's two programs: the run is not complete.
+    assert_eq!(agent_sc["runs"][0]["outcome"], "unfinished");
+    // With the verification program as well, the whole plan ran.
+    let extract = "skillcache-tool extract --input '{\"input_dir\":\"invoices/\"}' >/dev/null\n";
+    let whole_plan_script = agent_only_script.replace(
+        extract,
+        &format!(
+            "{extract}skillcache-tool verify --input '{{\"rows_file\":\"out/rows.json\"}}' >/dev/null\n"
+        ),
+    );
+    assert_ne!(whole_plan_script, agent_only_script);
+    let whole_sid = stand
+        .claude_turn(
+            "$pdf extract invoices/",
+            json!({"mode": "warm_only", "eval_arm": "skillcache_agent", "capsule_id": normal_id}),
+            Some(&whole_plan_script),
+        )
+        .await;
+    assert_eq!(stand.store.get(&whole_sid).unwrap()["status"], "completed");
+    let (_, whole_sc) = stand
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{whole_sid}/skillcache"),
+            None,
+        )
+        .await;
+    assert_eq!(whole_sc["runs"][0]["outcome"], "complete", "{whole_sc}");
     stand.close().await;
 }
 

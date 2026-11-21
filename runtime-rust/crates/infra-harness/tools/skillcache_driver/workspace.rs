@@ -36,7 +36,9 @@ fn copy_tree_no_links(
         if skip_top_git && depth == 0 && name == ".git" {
             continue;
         }
-        if matches!(name.to_str(), Some("target" | ".harness-tmp")) {
+        // Build and scratch folders of the copied root only: a folder of the
+        // same name deeper in the tree is the fixture's own.
+        if depth == 0 && matches!(name.to_str(), Some("target" | ".harness-tmp")) {
             continue;
         }
         let src_path = entry.path();

@@ -391,7 +391,14 @@ impl CommandCatalog {
                     format!("/{name} is not a Claude Code command here, so it went as text.")
                 });
             }
-            let mentioned = mentions(message);
+            // A `$skill` mention is routed only for a session that opted into
+            // SkillCache: an ordinary Claude session's message goes as typed
+            // and its prompt stays what it was.
+            let mentioned = if crate::skillcache::settings::mode(session) == "off" {
+                Vec::new()
+            } else {
+                mentions(message)
+            };
             if !mentioned.is_empty() {
                 let skills = claude_skills(&cwd)?;
                 resolve_mentions(&mentioned, &skills, &mut route);
@@ -1186,12 +1193,23 @@ mod tests {
         )
         .unwrap();
         let catalog = catalog_in(root.path());
-        let session = json!({
+        // A session that did not opt into SkillCache sends its message as it
+        // was typed: the mention is not routed and the prompt gains nothing.
+        let ordinary = json!({
             "provider": "claude",
             "project_path": workspace.display().to_string(),
             "agents_enabled": false,
             "agent_count": 1,
         });
+        let untouched = catalog
+            .route(&ordinary, "Please run $sc-test-pdf on invoice.pdf")
+            .await
+            .unwrap();
+        assert!(untouched.requests.is_empty());
+        assert!(untouched.notice.is_none());
+        assert_eq!(untouched.skill_request(), "");
+        let mut session = ordinary.clone();
+        session["skillcache"] = json!({"mode": "auto"});
 
         let routed = catalog
             .route(&session, "Please run $sc-test-pdf on invoice.pdf")

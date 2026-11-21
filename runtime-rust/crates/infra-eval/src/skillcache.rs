@@ -1098,6 +1098,7 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                         "driver_seconds": driver_seconds,
                         "program_steps": null,
                         "failed_steps": null,
+                        "applied": null,
                     });
                     match answer {
                         Ok(answer) => match parse_usage(&answer["usage"]) {
@@ -1107,6 +1108,11 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                                 record["seconds"] = known_seconds(&answer["seconds"]);
                                 record["program_steps"] = json!(count(&answer["program_steps"]));
                                 record["failed_steps"] = json!(count(&answer["failed_steps"]));
+                                // Whether the arm's treatment ran in this
+                                // attempt, when the driver can tell: an
+                                // attempt that ran cold under an arm's name
+                                // is counted apart in the arm's summary.
+                                record["applied"] = json!(answer["applied"].as_bool());
                                 let raw_ws = answer["workspace"].as_str().filter(|s| !s.is_empty());
                                 let ws_check = match raw_ws {
                                     Some(ws) => check_attempt_workspace(
@@ -1344,6 +1350,16 @@ fn arm_summary(attempts: &[&Value], row: &Value) -> Value {
             "seconds": known("seconds").len(),
             "driver_seconds": known("driver_seconds").len(),
             "program_steps": stepped.len(),
+            // How many attempts ran the arm's treatment and how many the
+            // driver says ran without it; the rest it could not tell.
+            "applied": attempts
+                .iter()
+                .filter(|attempt| attempt["applied"] == true)
+                .count(),
+            "not_applied": attempts
+                .iter()
+                .filter(|attempt| attempt["applied"] == false)
+                .count(),
         },
         "model_calls": rounded(mean(&known("model_calls"))),
         "seconds": rounded(mean(&known("seconds"))),
