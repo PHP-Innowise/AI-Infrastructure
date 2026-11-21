@@ -1911,7 +1911,7 @@ mod usage_components_tests {
                         "role": "assistant",
                         "usage": {
                             "input_tokens": 10,
-                            "output_tokens": 20,
+                            "output_tokens": 2,
                             "cache_read_input_tokens": 50,
                             "cache_creation": {
                                 "ephemeral_5m_input_tokens": 30,
@@ -1955,7 +1955,7 @@ mod usage_components_tests {
                         "role": "assistant",
                         "usage": {
                             "input_tokens": 5,
-                            "output_tokens": 8,
+                            "output_tokens": 1,
                             "cache_creation_input_tokens": 12
                         }
                     }

@@ -361,7 +361,7 @@ case "$prompt" in
 {"type":"user","session_id":"nat-claude-1","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"# PDF\nExtract invoice rows.","is_error":false}]}}
 {"type":"assistant","session_id":"nat-claude-1","message":{"id":"msg_2","role":"assistant","usage":{"input_tokens":20,"output_tokens":10,"cache_read_input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}},"content":[{"type":"tool_use","id":"tu_2","name":"Bash","input":{"command":"sh .claude/skills/pdf/scripts/extract.sh"}},{"type":"text","text":"Done."}]}}
 {"type":"user","session_id":"nat-claude-1","message":{"content":[{"type":"tool_result","tool_use_id":"tu_2","content":"ok","is_error":false}]}}
-{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"nat-claude-1","total_cost_usd":0.01}
+{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"nat-claude-1","total_cost_usd":0.01,"usage":{"input_tokens":120,"output_tokens":50,"cache_read_input_tokens":35,"cache_creation_input_tokens":40}}
 EOF
     exit 0
     ;;
@@ -371,7 +371,7 @@ esac
 cat <<'EOF'
 {"type":"system","subtype":"init","session_id":"nat-claude-warm"}
 {"type":"assistant","session_id":"nat-claude-warm","message":{"id":"msg_w1","role":"assistant","usage":{"input_tokens":40,"output_tokens":12,"cache_read_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":4}},"content":[{"type":"text","text":"Warm complete."}]}}
-{"type":"result","subtype":"success","is_error":false,"result":"Warm complete.","session_id":"nat-claude-warm","total_cost_usd":0.002}
+{"type":"result","subtype":"success","is_error":false,"result":"Warm complete.","session_id":"nat-claude-warm","total_cost_usd":0.002,"usage":{"input_tokens":40,"output_tokens":12,"cache_read_input_tokens":10,"cache_creation_input_tokens":0}}
 EOF
 "##;
         let claude_path = bin.join("fake-claude");

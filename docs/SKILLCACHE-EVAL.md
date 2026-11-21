@@ -195,6 +195,10 @@ Report only normalized provider components:
   in `usage` is refused as invalid.
 - On Claude, emit `cache_write_5m_input_tokens` and `cache_write_1h_input_tokens`
   (or nested `cache_creation.ephemeral_{5m,1h}_input_tokens`).
+- On Claude, `output_tokens` is what the launch's closing `result` event
+  reports. The usage a message carries in the stream is taken when the message
+  begins, so its output count is not final; a launch without exactly one
+  closing report leaves `output_tokens` `null`.
 - Any component the provider does not give (Codex gives no cache writes and no
   count of model calls, Cursor gives no tokens) is left out or `null`; it is
   never a zero. `model_calls` are distinct provider messages (`message.id`),
@@ -230,6 +234,17 @@ zero:
 
 ```json
 {"schema": "task-outcome-verifier-v1", "completed": true, "correct": true}
+```
+
+One verifier judges every probe of its task and sees nothing but the
+workspace, so a word of its command may hold `{probe}`, which becomes the
+probe of the attempt being judged (`exact`, `instance`, `rename` or `reword`).
+Without it a verifier cannot tell the result its probe's request asked for
+from the result of the observed request, which is exactly what a capsule that
+replayed its observation leaves behind:
+
+```json
+"verifier": ["python3", "{verifiers}/rows.py", "{probe}"]
 ```
 
 Anything else, including a missing workspace, is not a judgment: `accepted`

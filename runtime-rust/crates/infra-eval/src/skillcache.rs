@@ -68,6 +68,11 @@ const PRICE_COLUMNS: [&str; 6] = [
 ];
 /// The placeholder a verifier's argument uses for the sealed verifier folder.
 const VERIFIERS: &str = "{verifiers}";
+/// The placeholder for the probe of the attempt being judged. One verifier
+/// judges every probe of its task and sees only the workspace: without the
+/// probe it cannot tell a result for the observed request, left by a capsule
+/// that replayed it, from the result the probe's own request asked for.
+const PROBE: &str = "{probe}";
 const SLOTS: usize = 20_000;
 const LIMIT: usize = 16 * 1024 * 1024;
 
@@ -750,10 +755,13 @@ impl Verifiers {
     }
     /// Runs one task's verifier over a workspace. It answers with the receipt
     /// of the outcome evaluation; anything else is not a judgment.
-    fn judge(&self, workspace: &Path, command: &[String]) -> Result<Option<bool>> {
+    fn judge(&self, workspace: &Path, command: &[String], probe: &str) -> Result<Option<bool>> {
         let argv = command
             .iter()
-            .map(|word| word.replace(VERIFIERS, &self.root.to_string_lossy()))
+            .map(|word| {
+                word.replace(VERIFIERS, &self.root.to_string_lossy())
+                    .replace(PROBE, probe)
+            })
             .collect::<Vec<_>>();
         let Ok(view) = self.view(workspace, &argv) else {
             return Ok(None);
@@ -1140,6 +1148,7 @@ pub fn run(protocol: &Path, out: &Path) -> Result<Value> {
                                                         let judged = verifiers.judge(
                                                             workspace,
                                                             &strings(&task["verifier"]),
+                                                            probe,
                                                         )?;
                                                         stop_if_interrupted()?;
                                                         judged

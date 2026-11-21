@@ -1118,6 +1118,8 @@ pub fn codex_turn_components(usage: &Value) -> ComponentTotals {
 #[derive(Clone, Debug, Default)]
 struct PhaseComponents {
     claude_messages: BTreeMap<String, ComponentTotals>,
+    /// The output tokens each closing `result` event of the phase reported.
+    claude_reports: Vec<Option<u64>>,
     codex_totals: ComponentTotals,
 }
 
@@ -1164,6 +1166,17 @@ impl UsageComponents {
                     .claude_messages
                     .insert(id.into(), claude_message_components(usage));
             }
+            // The usage a message carries in the stream is what was known when
+            // the message began: its output count is not final, and no later
+            // event of the message corrects it. The launch's closing report
+            // has the output of the whole launch.
+            "claude" if kind == "result" => {
+                self.phases
+                    .entry(phase.into())
+                    .or_default()
+                    .claude_reports
+                    .push(counter(&event["usage"]["output_tokens"]));
+            }
             "codex" if kind == "turn.completed" => {
                 let usage = &event["usage"];
                 if !usage.is_object() {
@@ -1184,11 +1197,21 @@ impl UsageComponents {
         let mut total = ComponentTotals::default();
         match self.provider.as_str() {
             "claude" => {
+                // Input and cache counts are final in every message. Output is
+                // known only where exactly one report closed the phase; a
+                // phase that was cut short, or closed more than once, leaves
+                // the launch's output unknown rather than too small.
+                let mut output = Some(0u64);
                 for phase in self.phases.values() {
                     for msg in phase.claude_messages.values() {
                         total.add(msg);
                     }
+                    output = match (output, phase.claude_reports.as_slice()) {
+                        (Some(sum), [Some(reported)]) => sum.checked_add(*reported),
+                        _ => None,
+                    };
                 }
+                total.output_tokens = output.filter(|_| !self.phases.is_empty());
             }
             "codex" => {
                 for phase in self.phases.values() {
@@ -1217,7 +1240,7 @@ mod usage_components_tests {
     fn claude_dedupes_by_message_id_and_splits_5m_1h_cache_writes() {
         let mut components = UsageComponents::new("claude");
 
-        // First streaming chunk for msg_1 with partial output_tokens.
+        // The events of msg_1 carry the output count of the message's start.
         components.observe(
             "main",
             &object!({
@@ -1238,7 +1261,8 @@ mod usage_components_tests {
                 }
             }),
         );
-        // Final chunk for msg_1 (last usage per id wins).
+        // A later event of msg_1 (last usage per id wins; its output is still
+        // not the message's final count).
         components.observe(
             "main",
             &object!({
@@ -1287,7 +1311,8 @@ mod usage_components_tests {
                 }
             }),
         );
-        // Terminal result event must not be double-counted on top of assistant events.
+        // The closing report: its input is not counted on top of the messages',
+        // and its output is the launch's, which no message event had.
         components.observe(
             "main",
             &object!({
@@ -1296,7 +1321,7 @@ mod usage_components_tests {
                 "is_error": false,
                 "usage": {
                     "input_tokens": 999,
-                    "output_tokens": 999
+                    "output_tokens": 640
                 }
             }),
         );
@@ -1320,11 +1345,13 @@ mod usage_components_tests {
             }),
         );
 
+        // The recovery phase has no closing report yet: the launch's output
+        // is unknown, never the sum of what its messages started with.
         assert_eq!(
             components.snapshot(),
             object!({
                 "input_tokens": 150,
-                "output_tokens": 70,
+                "output_tokens": null,
                 "cache_read_input_tokens": 500,
                 "cache_write_5m_input_tokens": 280,
                 "cache_write_1h_input_tokens": 90,
@@ -1332,6 +1359,28 @@ mod usage_components_tests {
                 "source": "claude"
             })
         );
+        components.observe(
+            "recovery",
+            &object!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "usage": {"input_tokens": 20, "output_tokens": 75}
+            }),
+        );
+        assert_eq!(components.snapshot()["output_tokens"], 715);
+        assert_eq!(components.snapshot()["input_tokens"], 150);
+        // A phase closed twice does not say which report is the whole of it.
+        components.observe(
+            "recovery",
+            &object!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "usage": {"input_tokens": 20, "output_tokens": 80}
+            }),
+        );
+        assert!(components.snapshot()["output_tokens"].is_null());
     }
 
     #[test]

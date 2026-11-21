@@ -501,6 +501,56 @@ fn with_verifiers_an_isolated_verifier_judges_and_the_driver_is_not_asked() {
     assert!(!stand.base.join("result-2.json").exists());
 }
 
+/// One verifier judges every probe of its task and sees nothing but the
+/// workspace, so the probe is given to it. Here every workspace holds the
+/// same file, as after a capsule that replayed the observed request, and
+/// only the observed request's own probe may accept it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_verifier_is_told_the_probe_it_judges() {
+    if !isolation_works() {
+        assert!(
+            std::env::var_os("INFRA_REQUIRE_BWRAP").is_none(),
+            "bubblewrap namespaces are required under INFRA_REQUIRE_BWRAP"
+        );
+        eprintln!("skipped: this host does not allow bubblewrap namespaces");
+        return;
+    }
+    let stand = Stand::new();
+    std::fs::write(
+        stand.base.join("verifiers/probe.sh"),
+        "correct=false\nif [ \"$1\" = exact ] && grep -q . out.txt 2>/dev/null; then correct=true; fi\nprintf '{\"schema\":\"task-outcome-verifier-v1\",\"completed\":true,\"correct\":%s}\\n' \"$correct\"\n",
+    )
+    .unwrap();
+    let mut plan = stand.plan(true);
+    for task in plan["tasks"].as_array_mut().unwrap() {
+        task["verifier"] = json!(["sh", "{verifiers}/probe.sh", "{probe}"]);
+    }
+    let sealed = stand.seal("probes", &plan);
+    let result = stand.base.join("result.json");
+    let done = answer(&stand.engine(
+        &[
+            "run",
+            "--protocol",
+            sealed.to_str().unwrap(),
+            "--out",
+            result.to_str().unwrap(),
+        ],
+        &[("WORK", &stand.base.join("work"))],
+    ));
+    assert_eq!(done["unanswered"], 0);
+    let stored: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
+    let attempts = stored["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 12);
+    for attempt in attempts {
+        assert_eq!(
+            attempt["accepted"],
+            attempt["probe"] == "exact",
+            "{attempt}"
+        );
+    }
+}
+
 #[test]
 fn driver_inputs_tamper_reused_workspace_and_dense_positions_are_enforced() {
     let stand = Stand::new();
