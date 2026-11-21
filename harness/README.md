@@ -554,7 +554,7 @@ Three **gates** then check the candidate, none of them with a model:
 | --- | --- | --- |
 | 1 | in the Harness | the capsule's structure and dataflow hold: every program runs in exactly one step, every input is a binding, an earlier output or a value an earlier instruction produces, outputs are only what later programs read, verification programs are read-only, commands name package files and declared runtimes, and no observed value, file content or secret is in it |
 | 2 | a fresh sandbox, no network, no task file | every program's own `check` answers by the program contract |
-| 3 | a fresh copy of the task, the network only if the capsule declares it | the whole plan replays through `skillcache-run` with the observed values answering for the agent |
+| 3 | a fresh copy of the task, the network only if the capsule declares it | the plan replays through `skillcache-run` with the observed values answering for the agent, and reproduces the observed workspace file changes |
 
 Gate 3's copy comes from the turn's starting snapshot: for a Git checkout, the
 saved tree plus the workspace's Git-ignored files (installed dependencies, build
@@ -562,9 +562,22 @@ output) as they are at that moment, up to 1 GiB and 100,000 files; for a
 non-Git folder, the bounded directory snapshot. The replay never touches the
 real workspace. A failed program does not end the replay: its observed output
 stands in and the replay goes on, so one pass reports every failure; a program
-declared read-only that changes the copy fails too. Only a workspace whose
-starting state exceeded the snapshot limits or could not be copied has no
-snapshot and cannot be replayed.
+declared read-only that changes the copy fails too.
+
+The Harness records which regular files the cold turn added, edited or removed.
+Gate 3 compares that delta with the replay's delta. Both the changed paths and
+the final bytes must match. A missing, different or unexpected change fails
+with `replay_result_mismatch`. The observation keeps only SHA-256 fingerprints
+beside the snapshot, and the gate reports counts. A successful replay with
+no file changes on either side reports `no_file_changes`. The comparison
+covers regular files inside the workspace, excluding `.git`, the Harness
+state directory, and the root's `target` and `.harness-tmp` folders.
+Each capture is bounded to 50,000 entries, 256 MiB, 32 levels and 60 seconds.
+Git-ignored outputs can already be present in the replay's starting copy.
+If an output is already present with the observed bytes, rewriting it leaves
+no delta for Gate 3 to match.
+If the evidence is missing, including for observations from older versions,
+observe the turn again to qualify or requalify a hybrid capsule.
 
 The gates run in a minimal root: the operating system's runtime, the package
 and the task copy. That is deliberately stricter than a session, so a program
@@ -704,9 +717,8 @@ The pieces a capsule is made of can be tried by hand: `infra-engine skillcache
 - **Run view.** A turn with SkillCache events gets a `SkillCache` tab that lists
   every phase in order. A kept trace offers **Compile into a capsule** once;
   after that it shows the compilation's state and links to the capsule. A
-  trace whose starting workspace was not kept says that it cannot be compiled
-  and what a snapshot needs (`replay_reason`: a Git checkout Git can read, or
-  a folder within the snapshot limits); the cause of one refusal is not kept.
+  trace whose starting snapshot or workspace result was not kept says what
+  evidence is missing in `replay_reason`.
 - **Usage.** A session that used SkillCache gets one line above its launch
   history: how many turns ran warm, how many ran cold and why, how many
   compiled steps went back to the agent, how many traces are kept, and what

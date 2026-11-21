@@ -582,6 +582,13 @@ fn skill_turn(project: &Path) -> Vec<Value> {
     ]
 }
 
+fn writing_agent(provider: &str) -> String {
+    format!(
+        r#"mkdir -p out && printf '%s' '[]' > out/rows.json
+cat "$dir/{provider}-events.jsonl""#
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_observed_turn_keeps_its_redacted_trace() {
     let stand = Stand::new().await;
@@ -950,9 +957,10 @@ impl Stand {
     async fn observed(&self) -> (String, String) {
         self.script("claude", &skill_turn(&self.project()));
         let sid = self
-            .turn(
+            .claude_turn(
                 "Extract the rows of invoices-2026/",
                 json!({"mode": "observe"}),
+                Some(&writing_agent("claude")),
             )
             .await;
         let generation = self.skillcache_events(&sid)[0]["generation"]
@@ -1092,6 +1100,8 @@ async fn an_observed_turn_compiles_into_a_qualified_capsule() {
     assert_eq!(replay["completed"], json!([0, 1, 2]), "{replay}");
     assert_eq!(replay["substituted"], json!([]));
     assert_eq!(replay["network"], "none");
+    assert_eq!(replay["result_comparison"]["status"], "matched");
+    assert_eq!(replay["result_comparison"]["observed_changes"], 1);
     // The plan is shown; the programs' sources and the observed values are not.
     assert_eq!(capsule["capsule"]["steps"][0]["program"], "extract");
     assert_eq!(capsule["capsule"]["source"]["skills"][0]["name"], "pdf");
@@ -1144,7 +1154,10 @@ async fn an_observed_turn_compiles_into_a_qualified_capsule() {
             .join(format!("qualification/{capsule_id}/1/examples.json"))
             .is_file()
     );
-    assert!(!stand.project().join("out/rows.json").exists());
+    assert_eq!(
+        fs::read(stand.project().join("out/rows.json")).unwrap(),
+        b"[]"
+    );
     assert!(!state.join("compile").join(&compile_id).exists());
     // The session and the project both list it.
     let (_, listed) = stand
@@ -1212,6 +1225,95 @@ async fn an_observed_turn_compiles_into_a_qualified_capsule() {
         )
         .await;
     assert_eq!(status, 400);
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gate3_rejects_successful_replay_with_a_different_result() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed().await;
+    // Qualification uses the result that was observed, even if the live
+    // project has been edited since the turn.
+    let live_output = stand.project().join("out/rows.json");
+    fs::write(&live_output, "subsequent edit").unwrap();
+
+    let answer = hybrid_answer();
+    let mut wrong = answer.clone();
+    let mut program: Value =
+        serde_json::from_str(wrong["files"][0]["content"].as_str().unwrap()).unwrap();
+    program["write"]["out/rows.json"] = "[{}]".into();
+    program["write"]["private-extra.txt"] = "unobserved contents".into();
+    wrong["files"][0]["content"] = program.to_string().into();
+    stand.compiler(1, &wrong);
+    stand.compiler(2, &answer);
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(
+        violation_codes(&capsule, 1, "gate3"),
+        ["replay_result_mismatch"]
+    );
+    let refused = &capsule["gates"][2]["report"];
+    assert_eq!(refused["completed"], json!([0, 1, 2]));
+    assert_eq!(refused["substituted"], json!([]));
+    assert_eq!(
+        refused["result_comparison"],
+        json!({
+            "status": "mismatch", "observed_changes": 1, "replay_changes": 2,
+            "missing": 0, "different": 1, "unexpected": 1
+        })
+    );
+    assert!(!refused.to_string().contains("private-extra.txt"));
+    assert_eq!(
+        capsule["gates"][5]["report"]["result_comparison"]["status"],
+        "matched"
+    );
+    assert_eq!(fs::read_to_string(&live_output).unwrap(), "subsequent edit");
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_old_trace_without_result_evidence_cannot_qualify() {
+    let stand = Stand::new().await;
+    let (sid, generation) = stand.observed().await;
+    fs::remove_file(
+        stand
+            .store
+            .state
+            .join("skillcache/snapshots")
+            .join(&generation)
+            .join("observed-result.json"),
+    )
+    .unwrap();
+    let (_, session) = stand
+        .http(
+            Method::GET,
+            &format!("/api/sessions/{sid}/skillcache"),
+            None,
+        )
+        .await;
+    assert_eq!(session["traces"][0]["replayable"], false);
+    assert!(
+        session["traces"][0]["replay_reason"]
+            .as_str()
+            .unwrap()
+            .contains("observed workspace result")
+    );
+
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "failed", "{capsule}");
+    assert_eq!(capsule["compile"]["rounds"], 0);
+    assert!(
+        capsule["compile"]["outcome"]
+            .as_str()
+            .unwrap()
+            .contains("observe a new turn")
+    );
     stand.close().await;
 }
 
@@ -1569,7 +1671,7 @@ impl Stand {
             .codex_turn(
                 "$pdf extract the rows of invoices/",
                 json!({"skillcache": {"mode": "auto"}}),
-                None,
+                Some(&writing_agent("codex")),
             )
             .await;
         let events = self.skillcache_events(&sid);
@@ -2224,6 +2326,11 @@ async fn non_git_workspace_snapshots_and_replays_gate3() {
         .unwrap()
         .to_owned();
     stand.script("claude", &skill_turn(&plain));
+    fs::write(
+        stand.root.join("bin/claude-agent.sh"),
+        writing_agent("claude"),
+    )
+    .unwrap();
     let (status, created) = stand
         .http(
             Method::POST,

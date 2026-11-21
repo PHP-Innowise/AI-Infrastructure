@@ -4,9 +4,10 @@
 //! sandbox: a minimal root, the candidate package read-only, the network off
 //! unless the capsule declares the need. Gate 2 runs every program's own
 //! check in an empty folder. Gate 3 replays the whole plan on a fresh copy of
-//! the task with the observed values answering for the agent, and collects
-//! every failure in one pass. A host without a sandbox qualifies nothing:
+//! the task with the observed values answering for the agent, and checks
+//! its workspace effects against the observation. A host without a sandbox qualifies nothing:
 //! there is no unconfined fallback.
+use super::replay_result::{self, Changes};
 use crate::{HarnessError, Result};
 use infra_host::{
     capture::{self, Stream},
@@ -331,16 +332,25 @@ pub fn gate2(
 
 /// Gate 3: the end-to-end replay on a fresh copy of the task. `copy` makes
 /// that copy below the folder it is given and returns the copy's workspace.
-pub fn gate3(
+pub(super) fn gate3(
     engine: &Engine,
     round: &Round,
     candidate: &Candidate,
     copy: &dyn Fn(&Path) -> Result<Value>,
+    expected: Option<&Changes>,
     cancel: &Arc<AtomicBool>,
 ) -> Value {
+    let Some(expected) = expected else {
+        return json!({
+            "gate": "gate3",
+            "passed": false,
+            "result_comparison": {"status": "unavailable"},
+            "violations": [result_unavailable("Observe a new turn with a capturable workspace result.")],
+        });
+    };
     let package = round.package();
     let top = round.workspace("gate3");
-    let attempt = (|| -> Result<(Ran, Value)> {
+    let attempt = (|| {
         let _ = std::fs::remove_dir_all(&top);
         let _ = std::fs::remove_dir_all(&round.state);
         infra_core::fs::ensure_directory(&round.state, true)?;
@@ -360,6 +370,7 @@ pub fn gate3(
             .map(|program| 2 * program.timeout_seconds + 5)
             .sum::<u64>()
             + 30;
+        let before = replay_result::capture(&workspace, None);
         let ran = run_sandboxed(
             &spec(
                 &top,
@@ -385,7 +396,7 @@ pub fn gate3(
             seconds,
             cancel,
         )?;
-        Ok((ran, copied))
+        Ok::<_, HarnessError>((ran, copied, workspace, before))
     })();
     let report = match attempt {
         Err(error) if error.code == "unavailable" && error.message.contains("isolation") => {
@@ -396,7 +407,7 @@ pub fn gate3(
             "passed": false,
             "violations": [{"code": "replay_unavailable", "at": "", "message": error.to_string()}],
         }),
-        Ok((ran, copied)) => {
+        Ok((ran, copied, workspace, before)) => {
             let replay = infra_core::strict_json::parse(
                 String::from_utf8_lossy(&ran.stdout).trim().as_bytes(),
                 8 * 1024 * 1024,
@@ -438,6 +449,22 @@ pub fn gate3(
                     "message": format!("The replay did not run to the end of the plan: {text}"),
                 }));
             }
+            let comparison = if violations.is_empty() {
+                match before.and_then(|before| {
+                    let after = replay_result::capture(&workspace, None)?;
+                    Ok(replay_result::changes(before, after))
+                }) {
+                    Ok(actual) => compare_results(expected, &actual, &mut violations),
+                    Err(_) => {
+                        violations.push(result_unavailable(
+                            "The replay workspace could not be captured within the comparison limits.",
+                        ));
+                        json!({"status": "unavailable"})
+                    }
+                }
+            } else {
+                json!({"status": "not_checked"})
+            };
             json!({
                 "gate": "gate3",
                 "passed": violations.is_empty(),
@@ -445,6 +472,7 @@ pub fn gate3(
                 "network": candidate.capsule.capabilities.network.as_str(),
                 "completed": replay["completed"],
                 "substituted": replay["substituted"],
+                "result_comparison": comparison,
                 "copy": {
                     "ignored_files": copied["ignored_files"],
                     "ignored_truncated": copied["ignored_truncated"],
@@ -456,6 +484,48 @@ pub fn gate3(
     let _ = std::fs::remove_dir_all(&top);
     let _ = std::fs::remove_dir_all(&round.state);
     report
+}
+
+fn result_unavailable(message: &str) -> Value {
+    json!({"code": "replay_result_unavailable", "at": "", "message": message})
+}
+
+fn compare_results(expected: &Changes, actual: &Changes, violations: &mut Vec<Value>) -> Value {
+    let mut missing = 0;
+    let mut different = 0;
+    for (path, digest) in expected {
+        match actual.get(path) {
+            None => missing += 1,
+            Some(found) if found != digest => different += 1,
+            Some(_) => {}
+        }
+    }
+    let unexpected = actual
+        .keys()
+        .filter(|path| !expected.contains_key(*path))
+        .count();
+    let status = if missing + different + unexpected != 0 {
+        violations.push(json!({
+            "code": "replay_result_mismatch",
+            "at": "",
+            "message": format!(
+                "Workspace changes differ from the observed turn: {missing} missing, {different} with different contents or deletion, {unexpected} unexpected. Reproduce the observed file changes."
+            ),
+        }));
+        "mismatch"
+    } else if expected.is_empty() {
+        "no_file_changes"
+    } else {
+        "matched"
+    };
+    json!({
+        "status": status,
+        "observed_changes": expected.len(),
+        "replay_changes": actual.len(),
+        "missing": missing,
+        "different": different,
+        "unexpected": unexpected,
+    })
 }
 
 #[cfg(test)]

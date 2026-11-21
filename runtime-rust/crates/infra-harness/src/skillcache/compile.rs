@@ -13,7 +13,7 @@ use crate::{
     skillcache::{
         db,
         gates::{self, Engine, Round},
-        snapshot, trace,
+        replay_result, snapshot, trace,
     },
     store::SessionStore,
 };
@@ -684,6 +684,7 @@ async fn qualify(
                     &round,
                     &candidate,
                     &|destination: &Path| snapshot::materialize(&state, &generation, destination),
+                    replay_result::load(&state, &generation).ok().as_ref(),
                     &runtime.cancel,
                 )
             })
@@ -802,6 +803,12 @@ async fn compile(
         return Err(HarnessError::unavailable(
             "This turn has no snapshot of its starting state, so its capsule cannot be replayed: the workspace could not be captured or exceeded the snapshot limits.",
         ));
+    }
+    if needs_replay && !replay_result::available(&runtime.store.state, &job.generation) {
+        return Err(HarnessError::unavailable(format!(
+            "This turn cannot be replayed: {}.",
+            replay_result::MISSING
+        )));
     }
     let dir = compile_dir(&runtime.store, &job.compile_id);
     let agentbox = dir.join("agentbox");

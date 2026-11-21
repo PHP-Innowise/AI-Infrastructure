@@ -2454,7 +2454,7 @@ impl Sessions {
             }),
             None => Arc::new(binding.clone()),
         };
-        if recorder.is_some() {
+        let observed_before = if recorder.is_some() {
             // A capsule compiled from this turn is replayed on the workspace
             // as it is now, before the turn changes it.
             let (state, root, generation) = (
@@ -2462,11 +2462,16 @@ impl Sessions {
                 workspace.clone(),
                 job.generation.clone(),
             );
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::skillcache::snapshot::take(&state, &root, &generation)
+            tokio::task::spawn_blocking(move || {
+                crate::skillcache::snapshot::take(&state, &root, &generation).ok()??;
+                crate::skillcache::replay_result::capture(&root, Some(&state)).ok()
             })
-            .await;
-        }
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
         let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
         let workspace_for_stream = workspace.clone();
@@ -2595,6 +2600,21 @@ impl Sessions {
             return Err(HarnessError::conflict(
                 "The assigned inbox turn has no matching native identity proof.",
             ));
+        }
+        if result.ok
+            && let Some(before) = observed_before
+        {
+            // Capture the primary turn's effects before lifecycle recovery
+            // or publication can change the project.
+            let (state, root, generation) = (
+                self.store.state.clone(),
+                workspace.clone(),
+                job.generation.clone(),
+            );
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::skillcache::replay_result::record(&state, &root, &generation, before)
+            })
+            .await;
         }
         let mut recovery = NativeRecovery {
             adapter: recovery_adapter,

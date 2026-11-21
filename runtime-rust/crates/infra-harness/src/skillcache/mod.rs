@@ -8,6 +8,7 @@
 pub mod compile;
 pub(crate) mod db;
 pub mod gates;
+pub(crate) mod replay_result;
 pub mod settings;
 pub mod snapshot;
 pub mod trace;
@@ -612,13 +613,18 @@ impl SkillCacheDomain {
         let mut traces = db::session_traces(&db, session_id)?;
         for listed in &mut traces {
             let generation = listed["generation"].as_str().unwrap_or("").to_string();
-            let replayable =
-                snapshot::load(&store.state, &generation).is_ok_and(|snapshot| snapshot.is_some());
-            listed["replayable"] = replayable.into();
-            if !replayable {
-                // Why the turn cannot be compiled, for the person looking
-                // at it: what keeps a snapshot and what a folder may be.
-                listed["replay_reason"] = snapshot::unavailable_reason().into();
+            let reason = if !snapshot::load(&store.state, &generation)
+                .is_ok_and(|snapshot| snapshot.is_some())
+            {
+                Some(snapshot::unavailable_reason())
+            } else if !replay_result::available(&store.state, &generation) {
+                Some(replay_result::MISSING.to_owned())
+            } else {
+                None
+            };
+            listed["replayable"] = reason.is_none().into();
+            if let Some(reason) = reason {
+                listed["replay_reason"] = reason.into();
             }
             listed["compiling"] = db::compile_pending(&db, &generation)?.into();
         }

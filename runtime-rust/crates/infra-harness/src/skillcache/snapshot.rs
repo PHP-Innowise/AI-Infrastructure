@@ -60,7 +60,7 @@ impl Default for Limits {
     }
 }
 
-fn folder(state: &Path, generation: &str) -> Result<PathBuf> {
+pub(super) fn folder(state: &Path, generation: &str) -> Result<PathBuf> {
     if generation.is_empty()
         || !generation
             .bytes()
@@ -151,7 +151,7 @@ fn tree_bytes(root: &Path) -> u64 {
     total
 }
 
-fn should_skip_name(name: &OsStr, depth: usize) -> bool {
+pub(super) fn should_skip_name(name: &OsStr, depth: usize) -> bool {
     name.to_str()
         .is_some_and(|name| name == ".git" || (depth == 0 && ROOT_SKIPPED_NAMES.contains(&name)))
 }

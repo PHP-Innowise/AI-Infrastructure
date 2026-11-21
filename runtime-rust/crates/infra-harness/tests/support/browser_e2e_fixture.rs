@@ -1014,6 +1014,14 @@ fn seed_skillcache(
         }),
     )?;
     infra_harness::skillcache::snapshot::take(&store.state, project, &generation)?;
+    infra_core::fs::atomic_json(
+        &store
+            .state
+            .join("skillcache/snapshots")
+            .join(&generation)
+            .join("observed-result.json"),
+        &json!({}),
+    )?;
     let skill_files = json!({
         "skills": [{
             "name": "pdf",

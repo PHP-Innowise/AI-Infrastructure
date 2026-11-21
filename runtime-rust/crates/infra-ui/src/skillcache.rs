@@ -299,15 +299,13 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
         .find(|trace| trace["generation"] == generation)
     {
         Some(trace) if trace["replayable"] == false => {
-            // The starting state is a Git snapshot or a bounded copy of the
-            // folder; a workspace that fits neither cannot be replayed.
             let why = trace["replay_reason"]
                 .as_str()
                 .filter(|reason| !reason.is_empty())
                 .map(|reason| format!(" ({})", esc(reason)))
                 .unwrap_or_default();
             out.push_str(&format!(
-                "<span class=\"skillcache-compile\" data-status=\"unavailable\">This turn cannot be compiled: the workspace's starting state was not kept{why}, so the turn cannot be replayed.</span>"
+                "<span class=\"skillcache-compile\" data-status=\"unavailable\">This turn cannot be compiled: replay evidence is unavailable{why}.</span>"
             ));
         }
         Some(_) => out.push_str(&action_button(
@@ -864,12 +862,12 @@ mod tests {
         assert!(payloads(&html, "skillcache-compile").is_empty());
         assert!(html.contains("Compilation completed: Qualified as a hybrid capsule"));
         assert_eq!(payloads(&html, "skillcache-open-capsule"), [json!("c1")]);
-        // No snapshot of the turn's start, no replay, no compilation.
+        // The server can refuse replay when either observation is missing.
         let unreplayable =
             json!({"traces": [{"generation": "g1", "replayable": false}], "compiles": []});
         let html = event_actions_html(&observed(), &unreplayable);
         assert!(payloads(&html, "skillcache-compile").is_empty());
-        assert!(html.contains("starting state was not kept"));
+        assert!(html.contains("replay evidence is unavailable"));
         assert!(
             !html.contains("Git repository"),
             "a folder copy replays too"

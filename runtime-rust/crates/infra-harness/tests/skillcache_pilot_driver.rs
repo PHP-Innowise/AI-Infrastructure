@@ -333,27 +333,32 @@ case "$prompt" in
     exit 0
     ;;
   *"skillcache-run run"*)
-    printf '%s\n' "arm=executor" > .fake-arm.txt
+    mkdir -p .harness-tmp
+    printf '%s\n' "arm=executor" > .harness-tmp/.fake-arm.txt
     run_out=$(skillcache-run run '{"input_dir":"invoices"}')
     printf '%s\n' "$run_out" > .fake-run-out.json
     ;;
   *"run each program step with \`skillcache-tool\`"*)
-    printf '%s\n' "arm=agent" > .fake-arm.txt
+    mkdir -p .harness-tmp
+    printf '%s\n' "arm=agent" > .harness-tmp/.fake-arm.txt
     tool_out=$(skillcache-tool extract --input '{"input_dir":"invoices"}')
     printf '%s\n' "$tool_out" > .fake-tool-out.json
     ;;
   *"This written procedure was compiled from the skill"*)
-    printf '%s\n' "arm=written_procedure" > .fake-arm.txt
+    mkdir -p .harness-tmp
+    printf '%s\n' "arm=written_procedure" > .harness-tmp/.fake-arm.txt
     mkdir -p out && printf 'rows\n' > out/rows.txt
     ;;
   *"Observed trace reference for this request (\`raw_trace\`"*)
-    printf '%s\n' "arm=raw_trace" > .fake-arm.txt
+    mkdir -p .harness-tmp
+    printf '%s\n' "arm=raw_trace" > .harness-tmp/.fake-arm.txt
     mkdir -p out && printf 'rows\n' > out/rows.txt
     ;;
   *)
-    printf '%s\n' "arm=cold_or_observe" > .fake-arm.txt
+    mkdir -p .harness-tmp
+    printf '%s\n' "arm=cold_or_observe" > .harness-tmp/.fake-arm.txt
     mkdir -p out && printf 'rows\n' > out/rows.txt
-    printf '%s\n' "$prompt" > .fake-prompt.txt
+    printf '%s\n' "$prompt" > .harness-tmp/.fake-prompt.txt
     cat <<'EOF'
 {"type":"system","subtype":"init","session_id":"nat-claude-1"}
 {"type":"assistant","session_id":"nat-claude-1","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":0}},"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":".claude/skills/pdf/SKILL.md"}}]}}
@@ -397,8 +402,9 @@ case " $* " in
   *) exit 0 ;;
 esac
 prompt=$(cat)
-printf '%s\n' "arm=codex" > .fake-arm.txt
-printf '%s\n' "$prompt" > .fake-prompt.txt
+mkdir -p .harness-tmp
+printf '%s\n' "arm=codex" > .harness-tmp/.fake-arm.txt
+printf '%s\n' "$prompt" > .harness-tmp/.fake-prompt.txt
 mkdir -p out && printf 'rows\n' > out/rows.txt
 cat <<'EOF'
 {"type":"thread.started","thread_id":"codex-t1"}
@@ -417,7 +423,8 @@ case " $* " in
   *) exit 0 ;;
 esac
 prompt=$(cat)
-printf '%s\n' "arm=cursor" > .fake-arm.txt
+mkdir -p .harness-tmp
+printf '%s\n' "arm=cursor" > .harness-tmp/.fake-arm.txt
 mkdir -p out && printf 'rows\n' > out/rows.txt
 cat <<'EOF'
 {"type":"system","subtype":"init","session_id":"cursor-1"}
@@ -670,7 +677,7 @@ fn all_six_arms_and_shared_observation_work_end_to_end() {
         assert!(!ws.starts_with(&stand.protocol_dir));
         assert!(ws.join("out/rows.txt").is_file(), "{arm} produced output");
 
-        let marker = fs::read_to_string(ws.join(".fake-arm.txt")).unwrap();
+        let marker = fs::read_to_string(ws.join(".harness-tmp/.fake-arm.txt")).unwrap();
         match *arm {
             "cold" => {
                 assert_eq!(marker.trim(), "arm=cold_or_observe");
@@ -678,7 +685,7 @@ fn all_six_arms_and_shared_observation_work_end_to_end() {
                 assert_eq!(attempt["model_calls"], 2);
                 assert!(attempt["program_steps"].is_null());
                 assert!(attempt["failed_steps"].is_null());
-                let prompt = fs::read_to_string(ws.join(".fake-prompt.txt")).unwrap();
+                let prompt = fs::read_to_string(ws.join(".harness-tmp/.fake-prompt.txt")).unwrap();
                 assert!(prompt.contains("$pdf"), "{prompt}");
             }
             "raw_trace" => {
@@ -816,7 +823,9 @@ fn missing_or_failed_preparation_runs_cold_and_non_git_fixture_works() {
     assert!(missing["failed_steps"].is_null());
     let ws = PathBuf::from(missing["workspace"].as_str().unwrap());
     assert_eq!(
-        fs::read_to_string(ws.join(".fake-arm.txt")).unwrap().trim(),
+        fs::read_to_string(ws.join(".harness-tmp/.fake-arm.txt"))
+            .unwrap()
+            .trim(),
         "arm=cold_or_observe"
     );
 
