@@ -2026,11 +2026,15 @@ mod tests {
         ));
         // One experiment is judged one way.
         assert!(refused(&|d| d["tasks"][0]["verifier"] = json!(["true"])));
+        // An absolute folder on the platform the test runs on: `/verifiers`
+        // is not one on Windows.
+        let root = std::env::temp_dir().join("verifiers");
+        assert!(root.is_absolute());
         assert!(refused(&|d| {
-            d["verifiers"] = json!({"root": "/verifiers", "timeout_seconds": 60});
+            d["verifiers"] = json!({"root": root, "timeout_seconds": 60});
         }));
         let mut verified = protocol();
-        verified["verifiers"] = json!({"root": "/verifiers", "timeout_seconds": 60});
+        verified["verifiers"] = json!({"root": root, "timeout_seconds": 60});
         for task in verified["tasks"].as_array_mut().unwrap() {
             task["verifier"] = json!(["sh", "{verifiers}/check.sh"]);
         }

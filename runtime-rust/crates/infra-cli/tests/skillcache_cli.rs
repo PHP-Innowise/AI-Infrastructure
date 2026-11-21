@@ -24,7 +24,10 @@ fn program() -> (&'static str, &'static str, &'static str, Vec<&'static str>) {
     (
         "powershell",
         "programs/echo/main.ps1",
-        "param([string]$Mode)\r\nif ($Mode -eq '--check') {\r\n  Write-Output '{\"status\":\"complete\",\"result\":{}}'\r\n  exit 0\r\n}\r\nWrite-Output ('{\"status\":\"complete\",\"result\":{\"greeting\":\"hello\",\"input\":' + $env:SKILLCACHE_INPUT + '}}')\r\n",
+        // `powershell -File` reads an argument that starts with a dash as a
+        // parameter's name, so `--check` arrives in `$args`, not in `$Mode`.
+        // Both are looked at, whatever number of dashes the host kept.
+        "param([string]$Mode)\r\nif (\"$Mode $args\" -match '-check') {\r\n  Write-Output '{\"status\":\"complete\",\"result\":{}}'\r\n  exit 0\r\n}\r\nWrite-Output ('{\"status\":\"complete\",\"result\":{\"greeting\":\"hello\",\"input\":' + $env:SKILLCACHE_INPUT + '}}')\r\n",
         vec![
             "powershell",
             "-NoProfile",

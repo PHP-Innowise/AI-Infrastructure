@@ -6,6 +6,10 @@
 //! private index: the project's own repository is read and never written.
 //! Ignored files (installed dependencies, build output) are not part of the
 //! tree; they are copied from the workspace when the replay copy is made.
+//! The tree holds a file as Git would commit it and the replay copy gets it
+//! as Git would check it out, so line endings follow the checkout's Git
+//! settings: where Git converts them (`core.autocrlf`, `eol` attributes), a
+//! file that did not have the converted endings comes back with them.
 //! When the workspace is not a Git checkout, a bounded directory copy
 //! captures its files into a private snapshot folder instead, skipping
 //! every `.git`, the `target` and `.harness-tmp` of the workspace's own
@@ -827,6 +831,36 @@ mod tests {
         assert!(status.success(), "git {arguments:?}");
     }
 
+    /// The replay copy is what Git checks out. With `core.autocrlf` on, a file
+    /// a tool wrote with line feeds comes back with the converted endings,
+    /// like every file of that checkout.
+    #[test]
+    fn line_endings_of_a_git_replay_follow_the_checkouts_git_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(root.path()).unwrap();
+        let project = base.join("project");
+        let state = base.join("state");
+        std::fs::create_dir_all(&project).unwrap();
+        run(&project, &["init", "-q"]);
+        run(&project, &["config", "core.autocrlf", "true"]);
+        run(&project, &["config", "core.safecrlf", "false"]);
+        std::fs::write(project.join("checked-out.txt"), "one\r\ntwo\r\n").unwrap();
+        run(&project, &["add", "-A"]);
+        run(&project, &["commit", "-q", "-m", "base"]);
+        std::fs::write(project.join("tool.txt"), "written with\nline feeds\n").unwrap();
+        take(&state, &project, "gen-1").unwrap().unwrap();
+        let replay = base.join("replay");
+        materialize(&state, "gen-1", &replay).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replay.join("checked-out.txt")).unwrap(),
+            "one\r\ntwo\r\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(replay.join("tool.txt")).unwrap(),
+            "written with\r\nline feeds\r\n"
+        );
+    }
+
     #[test]
     fn a_snapshot_restores_the_state_before_the_turn_without_touching_the_repository() {
         let root = tempfile::tempdir().unwrap();
@@ -836,6 +870,10 @@ mod tests {
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::create_dir_all(project.join("vendor/lib")).unwrap();
         run(&project, &["init", "-q"]);
+        // Byte for byte where Git converts nothing: a host whose Git is set
+        // to convert line endings (Git for Windows by default) would write
+        // these files back with its own.
+        run(&project, &["config", "core.autocrlf", "false"]);
         std::fs::write(project.join(".gitignore"), "vendor/\n").unwrap();
         std::fs::write(project.join("src/a.txt"), "committed\n").unwrap();
         run(&project, &["add", "-A"]);

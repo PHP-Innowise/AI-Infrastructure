@@ -517,7 +517,10 @@ root, the Harness state folder and special files, up to 50,000 files /
 ownership refusal, a timeout) keeps no snapshot: it is not copied as a folder.
 In both kinds a symbolic link is kept when it is relative and stays inside the
 tree, which is what installed dependencies are made of; a link that leaves the
-tree is not copied.
+tree is not copied. A Git snapshot holds a file as Git would commit it and
+writes it back as Git would check it out, so line endings follow the
+checkout's Git settings: with `core.autocrlf` on (the default of Git for
+Windows), a file a tool wrote with line feeds comes back with CRLF.
 `GET /api/sessions/{session_id}/skillcache` lists a session's mode, its kept
 traces without their steps, and what was compiled from them.
 
