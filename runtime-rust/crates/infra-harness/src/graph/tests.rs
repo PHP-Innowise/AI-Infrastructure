@@ -3911,3 +3911,41 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
         assert!(lock(&fixture.graphs.chosen).unwrap().len() <= Graphs::CHOSEN_LRU_CAP);
     }
 }
+
+#[test]
+fn a_folder_that_cannot_go_yet_is_tried_again_only_while_it_may_settle() {
+    use std::sync::atomic::AtomicUsize;
+    let busy = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "still open");
+    let home = Path::new("graph-home");
+    // Two refusals, then the file is let go: the removal succeeds.
+    let calls = AtomicUsize::new(0);
+    remove_until(home, Duration::from_secs(5), |_| {
+        if calls.fetch_add(1, Ordering::AcqRel) < 2 {
+            Err(busy())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap();
+    assert_eq!(calls.load(Ordering::Acquire), 3);
+    // No time to settle: the first refusal is the answer.
+    let calls = AtomicUsize::new(0);
+    let refused = remove_until(home, Duration::ZERO, |_| {
+        calls.fetch_add(1, Ordering::AcqRel);
+        Err(busy())
+    });
+    assert_eq!(
+        refused.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    // A refusal that does not pass is reported once the time is up.
+    let started = Instant::now();
+    assert!(remove_until(home, Duration::from_millis(120), |_| Err(busy())).is_err());
+    assert!(started.elapsed() >= Duration::from_millis(120));
+    // A folder that is already gone was removed.
+    remove_until(home, Duration::ZERO, |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    })
+    .unwrap();
+}

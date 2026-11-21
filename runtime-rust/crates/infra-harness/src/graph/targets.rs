@@ -1113,7 +1113,7 @@ impl Graphs {
                         // Under a commit's build the folder may not go at
                         // once: what that build still writes goes with it.
                         if home.exists()
-                            && let Err(error) = std::fs::remove_dir_all(home)
+                            && let Err(error) = remove_settling(&home)
                             && !growing
                         {
                             return Err(error.into());

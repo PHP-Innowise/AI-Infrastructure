@@ -167,6 +167,37 @@ pub struct Tool {
     pub path: PathBuf,
     pub version: Option<String>,
 }
+/// How long the removal of a graph's folder is tried again on Windows.
+pub(super) const REMOVAL_SETTLE: Duration = Duration::from_secs(3);
+/// Removes a graph's folder. On Windows a file that was closed a moment ago,
+/// by the store that was just let go or by a scanner reading what a build
+/// wrote, can still refuse to be deleted, and its folder with it. There the
+/// removal is tried again for a short while before its error is believed;
+/// elsewhere an open file does not hold its folder, and one attempt is the
+/// answer.
+pub(super) fn remove_settling(home: &Path) -> std::io::Result<()> {
+    let settle = if cfg!(windows) {
+        REMOVAL_SETTLE
+    } else {
+        Duration::ZERO
+    };
+    remove_until(home, settle, |home| std::fs::remove_dir_all(home))
+}
+pub(super) fn remove_until(
+    home: &Path,
+    settle: Duration,
+    remove: impl Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let until = Instant::now() + settle;
+    loop {
+        match remove(home) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if Instant::now() >= until => return Err(error),
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
 pub(super) fn probe(program: &Path, arguments: &[&str]) -> Option<String> {
     let mut child = Command::new(program)
         .args(arguments)
