@@ -237,7 +237,13 @@ fn display_diff_path(path: &str) -> String {
         && let Some(s) = norm.to_str()
         && !s.is_empty()
     {
-        return s.to_owned();
+        // A diff names its files with forward slashes on every host; a path
+        // rebuilt from its components comes back with the host's separator.
+        return if cfg!(windows) {
+            s.replace('\\', "/")
+        } else {
+            s.to_owned()
+        };
     }
     trimmed.to_owned()
 }
