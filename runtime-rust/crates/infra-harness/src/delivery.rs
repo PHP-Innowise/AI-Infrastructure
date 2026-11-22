@@ -1181,12 +1181,12 @@ impl TargetCheckWorkflow for Delivery {
                     .ok_or_else(|| invalid("Check timeout is missing"))?;
                 let result = self
                     .results
-                    .capture(
+                    .capture_sandboxed(
                         &argv,
                         &check_root,
                         timeout,
                         cancel,
-                        &BTreeMap::new(),
+                        crate::results::SandboxOptions::default(),
                         |output| {
                             check["output"] = output.into();
                             self.results.save_check(check)

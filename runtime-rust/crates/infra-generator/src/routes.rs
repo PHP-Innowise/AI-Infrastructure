@@ -277,6 +277,21 @@ pub fn execute(
                 runtime_contract: assets::runtime_contract(),
             };
             let errors = generated::validate(&options, services)?;
+            if flag(request, "json") {
+                let items: Vec<Diagnostic> = errors
+                    .iter()
+                    .map(|message| Diagnostic {
+                        severity: "error".into(),
+                        code: "GENERATED_VALIDATION".into(),
+                        message: message.clone(),
+                    })
+                    .collect();
+                let count = errors.len();
+                let mut payload = report(items);
+                payload["error_count"] = object!(count);
+                payload["errors"] = object!(errors);
+                return GeneratorOutput::json(&payload, i32::from(count > 0));
+            }
             if errors.is_empty() {
                 Ok(GeneratorOutput::text("generated accelerator OK\n", 0))
             } else {
@@ -656,5 +671,98 @@ fn quality_route(request: &Value) -> Result<GeneratorOutput> {
             stdout: stdout.into_bytes(),
             stderr: stderr.into_bytes(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "infra-generator-routes-test-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct DummyServices;
+    impl generated::NativeGateServices for DummyServices {
+        fn validate_host(
+            &self,
+            _: &Path,
+            _: &Path,
+            _: &str,
+            _: &BTreeMap<String, String>,
+        ) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn runtime_command(
+            &self,
+            _: &Path,
+            _: &[String],
+            _: std::time::Duration,
+        ) -> Result<generated::NativeOutput> {
+            Ok(generated::NativeOutput {
+                code: 0,
+                stdout: b"{}".to_vec(),
+                stderr: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn validate_generated_respects_json_flag_with_coded_diagnostics() {
+        let dir = TempDir::new();
+        let registry = dir.0.join("registry.json");
+        std::fs::write(&registry, b"{}").unwrap();
+        let manifest = ownership::build_manifest(
+            &dir.0,
+            &[],
+            &ownership::ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-001".into(),
+                profile: "minimal".into(),
+                editions: vec!["codex".into()],
+                mode: "full".into(),
+                decisions: object!({}),
+                generated_at: None,
+            },
+            Some(BTreeMap::new()),
+        )
+        .unwrap();
+        ownership::write_manifest(&dir.0, &manifest).unwrap();
+        let out = execute(
+            "validate-generated",
+            &object!({
+                "target": &dir.0,
+                "editions": ["codex"],
+                "registry": &registry,
+                "json": true,
+            }),
+            &DummyServices,
+        )
+        .unwrap();
+        assert_ne!(out.code, 0);
+        let payload: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(payload["valid"], false);
+        assert!(payload["error_count"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            payload["diagnostics"].as_array().is_some_and(
+                |items| !items.is_empty() && items[0]["code"] == "GENERATED_VALIDATION"
+            )
+        );
     }
 }

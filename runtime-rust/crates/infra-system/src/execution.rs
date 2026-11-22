@@ -697,7 +697,7 @@ pub fn dispatch_receipt(directory: &Path, state: &Value, step: &Value) -> Result
             "ok",
             "report",
         ],
-        &["rejection", "failure"],
+        &["rejection", "failure", "usage_components", "deterministic"],
     )?;
     if ["rejection", "failure"].iter().any(|key| {
         receipt
@@ -766,4 +766,392 @@ pub fn task_id(run: &str, change: &str, sid: &str) -> String {
 }
 pub fn run_summary(state: &Value, directory: &Path) -> Value {
     object!({"kind":state["kind"],"run_id":state["run_id"],"change_id":state["change_id"],"run_dir":directory,"status":state["status"],"error":state["error"],"provider":state["provider"],"mode":state["mode"],"access":access_scope(state),"steps":state["steps"],"tasks":state["tasks"].as_object().map(|tasks|tasks.iter().map(|(sid,task)|(sid.clone(),object!({"external_id":task["external_id"],"uuid":task["uuid"],"closed":texts(&state["closed_tasks"]).contains(sid)}))).collect::<serde_json::Map<_,_>>()).unwrap_or_default(),"meaning":"Historical dispatch state; checks and completion are worker-reported"})
+}
+
+/// Output cap matching `infra_skillcache::tool::STDOUT_BYTES`.
+pub const PROGRAM_STDOUT_BYTES: usize = 256 * 1024;
+/// Failure diagnostic summary cap matching `infra_skillcache::tool::DIAGNOSTIC_BYTES`.
+pub const PROGRAM_DIAGNOSTIC_BYTES: usize = 4 * 1024;
+
+fn add_opt_u64(target: &mut Option<u64>, add: Option<u64>) {
+    if let Some(value) = add {
+        *target = Some(target.unwrap_or(0).saturating_add(value));
+    }
+}
+
+fn opt_u64(value: &Value) -> Option<u64> {
+    value.as_u64()
+}
+
+#[derive(Clone, Debug, Default)]
+struct ComponentCounts {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_write_5m_input_tokens: Option<u64>,
+    cache_write_1h_input_tokens: Option<u64>,
+    model_calls: Option<u64>,
+}
+
+impl ComponentCounts {
+    fn add(&mut self, other: &Self) {
+        add_opt_u64(&mut self.input_tokens, other.input_tokens);
+        add_opt_u64(&mut self.output_tokens, other.output_tokens);
+        add_opt_u64(
+            &mut self.cache_read_input_tokens,
+            other.cache_read_input_tokens,
+        );
+        add_opt_u64(
+            &mut self.cache_write_5m_input_tokens,
+            other.cache_write_5m_input_tokens,
+        );
+        add_opt_u64(
+            &mut self.cache_write_1h_input_tokens,
+            other.cache_write_1h_input_tokens,
+        );
+        add_opt_u64(&mut self.model_calls, other.model_calls);
+    }
+
+    fn to_json(&self, source: Option<&str>) -> Value {
+        object!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_write_5m_input_tokens": self.cache_write_5m_input_tokens,
+            "cache_write_1h_input_tokens": self.cache_write_1h_input_tokens,
+            "model_calls": self.model_calls,
+            "source": source,
+        })
+    }
+}
+
+fn claude_message_counts(usage: &Value) -> ComponentCounts {
+    let cache = &usage["cache_creation"];
+    let mut write_5m = opt_u64(&cache["ephemeral_5m_input_tokens"]);
+    let write_1h = opt_u64(&cache["ephemeral_1h_input_tokens"]);
+    if write_5m.is_none() && write_1h.is_none() {
+        write_5m = opt_u64(&usage["cache_creation_input_tokens"]);
+    }
+    ComponentCounts {
+        input_tokens: opt_u64(&usage["input_tokens"]),
+        output_tokens: opt_u64(&usage["output_tokens"]),
+        cache_read_input_tokens: opt_u64(&usage["cache_read_input_tokens"]),
+        cache_write_5m_input_tokens: write_5m,
+        cache_write_1h_input_tokens: write_1h,
+        model_calls: Some(1),
+    }
+}
+
+fn codex_turn_counts(usage: &Value) -> ComponentCounts {
+    let cached = opt_u64(&usage["cached_input_tokens"]);
+    let input = opt_u64(&usage["input_tokens"]).map(|raw| match cached {
+        Some(read) => raw.saturating_sub(read),
+        None => raw,
+    });
+    ComponentCounts {
+        input_tokens: input,
+        output_tokens: opt_u64(&usage["output_tokens"]),
+        cache_read_input_tokens: cached,
+        cache_write_5m_input_tokens: None,
+        cache_write_1h_input_tokens: None,
+        model_calls: Some(1),
+    }
+}
+
+/// Normalizes provider token telemetry into `UsageComponents` per system step receipt,
+/// matching `infra_harness::cost_observation::UsageComponents`.
+pub struct StepUsageTracker {
+    provider: String,
+    claude_messages: std::collections::BTreeMap<String, ComponentCounts>,
+    claude_result_outputs: Vec<Option<u64>>,
+    codex_totals: ComponentCounts,
+}
+
+impl StepUsageTracker {
+    pub fn new(provider: &str) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            claude_messages: std::collections::BTreeMap::new(),
+            claude_result_outputs: Vec::new(),
+            codex_totals: ComponentCounts::default(),
+        }
+    }
+
+    pub fn observe(&mut self, event: &Value) {
+        let kind = event["type"].as_str().unwrap_or("");
+        match self.provider.as_str() {
+            "claude" if kind == "assistant" => {
+                let msg = &event["message"];
+                let usage = &msg["usage"];
+                if !usage.is_object() {
+                    return;
+                }
+                let id = msg["id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("msg-{}", self.claude_messages.len()));
+                let mut counts = claude_message_counts(usage);
+                counts.output_tokens = None;
+                self.claude_messages.insert(id, counts);
+            }
+            "claude" if kind == "result" => {
+                self.claude_result_outputs
+                    .push(opt_u64(&event["usage"]["output_tokens"]));
+            }
+            "codex" if kind == "turn.completed" && event["usage"].is_object() => {
+                self.codex_totals.add(&codex_turn_counts(&event["usage"]));
+            }
+            _ => {}
+        }
+    }
+
+    pub fn snapshot(&self) -> Value {
+        let mut total = ComponentCounts::default();
+        match self.provider.as_str() {
+            "claude" => {
+                for counts in self.claude_messages.values() {
+                    total.add(counts);
+                }
+                total.output_tokens = match self.claude_result_outputs.as_slice() {
+                    [Some(output)] => Some(*output),
+                    _ => None,
+                };
+            }
+            "codex" => total.add(&self.codex_totals),
+            _ => {}
+        }
+        let source = ["claude", "codex", "cursor"]
+            .contains(&self.provider.as_str())
+            .then_some(self.provider.as_str());
+        total.to_json(source)
+    }
+}
+
+/// Returns zero-token / zero-call `usage_components` for deterministic steps,
+/// or null-valued components for unknown/unobserved LLM steps.
+pub fn empty_usage_components(source: Option<&str>, model_calls: u64) -> Value {
+    if source == Some("deterministic") && model_calls == 0 {
+        ComponentCounts {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cache_read_input_tokens: Some(0),
+            cache_write_5m_input_tokens: Some(0),
+            cache_write_1h_input_tokens: Some(0),
+            model_calls: Some(0),
+        }
+        .to_json(Some("deterministic"))
+    } else {
+        ComponentCounts::default().to_json(source)
+    }
+}
+
+/// Extracts normalized `usage_components` from a step's raw worker NDJSON stream.
+pub fn usage_components_from_raw(raw: &[u8], provider: &str) -> Value {
+    let mut tracker = StepUsageTracker::new(provider);
+    for line in String::from_utf8_lossy(raw).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
+            tracker.observe(&event);
+        }
+    }
+    tracker.snapshot()
+}
+
+pub struct DeterministicVerifyOutcome {
+    pub all_passed: bool,
+    pub checks: Vec<Value>,
+    pub diagnostics_summary: String,
+    pub duration_seconds: f64,
+}
+
+fn bound_diagnostic(raw: &str, cap: usize) -> String {
+    let masked = match infra_core::domain::mask_secrets(raw) {
+        Ok((text, _)) => text,
+        Err(_) => "[diagnostics withheld: a possible secret could not be masked]".into(),
+    };
+    let trimmed = masked.trim();
+    if trimmed.len() <= cap {
+        return trimmed.to_owned();
+    }
+    let mut end = cap;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_owned()
+}
+
+/// Executes deterministic verification checks declared on the `verify` plan step
+/// inside a network-off `Profile::Gate` sandbox with scrubbed environment and bounded output.
+pub async fn run_deterministic_verify_checks(
+    specs: &[Value],
+    state: &Value,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    runner_lock: Option<std::sync::Arc<std::fs::File>>,
+) -> Result<DeterministicVerifyOutcome> {
+    let started = std::time::Instant::now();
+    let mut checks = Vec::with_capacity(specs.len());
+    let mut failure_lines = Vec::new();
+    let mut all_passed = true;
+
+    for (index, item) in specs.iter().take(MAX_ITEMS).enumerate() {
+        fields(item, &["name", "argv"], &["cwd_service", "timeout_seconds"])?;
+        let name = text(&item["name"], "program check name", 200)?;
+        let argv = texts(&item["argv"]);
+        if argv.is_empty() {
+            return Err(fail(format!(
+                "Deterministic verify check `{name}` has empty argv"
+            )));
+        }
+        let cwd_service = item["cwd_service"].as_str().unwrap_or("__system__");
+        let root_str = state["roots"][cwd_service].as_str().ok_or_else(|| {
+            fail(format!(
+                "Unknown service root `{cwd_service}` for check `{name}`"
+            ))
+        })?;
+        let cwd_canon = infra_core::fs::canonicalize(root_str)?;
+        let timeout = item["timeout_seconds"].as_u64().unwrap_or(60).clamp(1, 600);
+
+        let mut readable = Vec::new();
+        if let Some(roots_obj) = state["roots"].as_object() {
+            for (_, val) in roots_obj {
+                if let Some(s) = val.as_str()
+                    && let Ok(canon) = infra_core::fs::canonicalize(s)
+                    && !canon.starts_with(&cwd_canon)
+                    && !readable.contains(&canon)
+                {
+                    readable.push(canon);
+                }
+            }
+        }
+        let path_env = std::env::var("PATH").ok();
+        let env =
+            infra_host::sandbox::scrub_env(std::env::vars(), &std::collections::BTreeMap::new());
+        let wrapped = if infra_host::sandbox::available() {
+            let spec = infra_host::sandbox::Spec {
+                workspace: cwd_canon.clone(),
+                target: cwd_canon.clone(),
+                protected: vec![],
+                readable,
+                accounts: vec![],
+                runtime: infra_host::sandbox::runtime_dirs_for_argv(&argv, path_env.as_deref()),
+                codex: None,
+                evidence: None,
+                network: false,
+            };
+            infra_host::sandbox::gate(&spec, &argv).map_err(host)?
+        } else {
+            argv.clone()
+        };
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = captured.clone();
+        let result = infra_host::process::run_raw_with_lock(
+            &wrapped,
+            &cwd_canon,
+            &env,
+            &[],
+            infra_host::process::Limits {
+                seconds: Some(timeout),
+                output: PROGRAM_STDOUT_BYTES,
+                line: PROGRAM_STDOUT_BYTES,
+            },
+            cancel.clone(),
+            runner_lock.clone(),
+            move |chunk| {
+                let mut out = sink.lock().map_err(|_| {
+                    infra_host::HarnessError::unavailable("Program check capture lock failed")
+                })?;
+                let left = PROGRAM_STDOUT_BYTES.saturating_sub(out.len());
+                out.extend_from_slice(&chunk[..chunk.len().min(left)]);
+                Ok(())
+            },
+        )
+        .await;
+
+        let raw = captured
+            .lock()
+            .map(|guard| String::from_utf8_lossy(&guard).into_owned())
+            .unwrap_or_default();
+        let bounded = bound_diagnostic(&raw, PROGRAM_DIAGNOSTIC_BYTES);
+        match result {
+            Ok(output) if output.code == 0 => {
+                let detail = if bounded.is_empty() {
+                    format!("passed (check {})", index + 1)
+                } else {
+                    bounded
+                };
+                checks.push(object!({"name": name, "status": "passed", "detail": detail}));
+            }
+            Ok(output) => {
+                all_passed = false;
+                let reason = format!("exited with code {}", output.code);
+                let detail = if bounded.is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {bounded}")
+                };
+                let detail = bound_diagnostic(&detail, 2000);
+                failure_lines.push(format!("- [{name}] {detail}"));
+                checks.push(object!({"name": name, "status": "failed", "detail": detail}));
+            }
+            Err(error) => {
+                all_passed = false;
+                let detail = bound_diagnostic(
+                    &format!("execution failed ({}): {}", error.code, error.message),
+                    2000,
+                );
+                failure_lines.push(format!("- [{name}] {detail}"));
+                checks.push(object!({"name": name, "status": "failed", "detail": detail}));
+            }
+        }
+    }
+
+    let diagnostics_summary = bound_diagnostic(&failure_lines.join("\n"), PROGRAM_DIAGNOSTIC_BYTES);
+    Ok(DeterministicVerifyOutcome {
+        all_passed,
+        checks,
+        diagnostics_summary,
+        duration_seconds: (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
+    })
+}
+
+#[cfg(test)]
+mod usage_components_tests {
+    use super::*;
+
+    #[test]
+    fn step_usage_tracker_dedupes_claude_messages_and_normalizes_codex() {
+        let claude_raw = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":400,\"cache_creation\":{\"ephemeral_5m_input_tokens\":50,\"ephemeral_1h_input_tokens\":10}}}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":400,\"cache_creation\":{\"ephemeral_5m_input_tokens\":50,\"ephemeral_1h_input_tokens\":10}}}}\n",
+            "{\"type\":\"result\",\"usage\":{\"output_tokens\":33}}\n"
+        );
+        let parsed = usage_components_from_raw(claude_raw.as_bytes(), "claude");
+        assert_eq!(parsed["input_tokens"], 120);
+        assert_eq!(parsed["output_tokens"], 33);
+        assert_eq!(parsed["cache_read_input_tokens"], 400);
+        assert_eq!(parsed["cache_write_5m_input_tokens"], 50);
+        assert_eq!(parsed["cache_write_1h_input_tokens"], 10);
+        assert_eq!(parsed["model_calls"], 1);
+        assert_eq!(parsed["source"], "claude");
+
+        let codex_raw = concat!(
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":25}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":25,\"output_tokens\":10}}\n"
+        );
+        let codex_parsed = usage_components_from_raw(codex_raw.as_bytes(), "codex");
+        assert_eq!(codex_parsed["input_tokens"], 375);
+        assert_eq!(codex_parsed["cache_read_input_tokens"], 225);
+        assert_eq!(codex_parsed["output_tokens"], 35);
+        assert_eq!(codex_parsed["model_calls"], 2);
+
+        let det = empty_usage_components(Some("deterministic"), 0);
+        assert_eq!(det["model_calls"], 0);
+        assert_eq!(det["input_tokens"], 0);
+        assert_eq!(det["source"], "deterministic");
+    }
 }

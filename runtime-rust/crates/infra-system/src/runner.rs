@@ -653,6 +653,8 @@ fn finalize_worker_report(
     untrusted_context: bool,
     receipt: &mut Value,
 ) {
+    receipt["usage_components"] = execution::usage_components_from_raw(raw_bytes, provider);
+    receipt["deterministic"] = object!(false);
     match native::worker_result(raw_bytes, provider).and_then(|report| {
         if untrusted_context && infra_core::domain::secret_label(&encoded(&report)?)?.is_some() {
             return Err(fail("Sensitive experimental worker result"));
@@ -1234,7 +1236,48 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 None => vec![],
             };
             let step_offers = crate::workers::offers_for_step(state, &preview, &raw_offers);
-            let prompt = match dispatch_context {
+            let verify_plan_step = (preview["id"] == "verify")
+                .then(|| {
+                    plan["steps"]
+                        .as_array()
+                        .and_then(|steps| steps.iter().find(|s| s["id"] == "verify"))
+                })
+                .flatten();
+            let verify_programs = verify_plan_step
+                .and_then(|s| s["program_checks"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            let deterministic_only =
+                verify_plan_step.is_some_and(|s| s["deterministic_only"] == true);
+            let require_llm_review =
+                verify_plan_step.is_some_and(|s| s["require_llm_review"] == true);
+            let mut deterministic_short_circuit = None;
+            let mut det_prompt_note: Option<String> = None;
+            if !verify_programs.is_empty() {
+                let det = execution::run_deterministic_verify_checks(
+                    &verify_programs,
+                    state,
+                    cancel.clone(),
+                    runner_lock.clone(),
+                )
+                .await?;
+                if (det.all_passed && !require_llm_review)
+                    || (!det.all_passed && deterministic_only)
+                {
+                    deterministic_short_circuit = Some(det);
+                } else if det.all_passed {
+                    det_prompt_note = Some(format!(
+                        "\n\nDeterministic verification pre-checks passed ({} check(s)).",
+                        det.checks.len()
+                    ));
+                } else {
+                    det_prompt_note = Some(format!(
+                        "\n\nDeterministic verification pre-checks failed (waking verification worker with bounded diagnostics):\n{}",
+                        det.diagnostics_summary
+                    ));
+                }
+            }
+            let mut prompt = match dispatch_context {
                 Some(context) => context
                     .lock()
                     .map_err(|_| fail("Dispatch context lock poisoned"))?
@@ -1248,6 +1291,9 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                     &step_offers,
                 )?,
             };
+            if let Some(note) = &det_prompt_note {
+                prompt.push_str(note);
+            }
             let step_permissions = if step["mode"] == "edit" {
                 state
                     .get("permissions")
@@ -1268,7 +1314,9 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
             let mut prepared_opt = None;
             let mut host_launch_opt = None;
             let mut active_transport = infra_host::provider::Transport::Text;
-            if use_host_permissions {
+            if deterministic_short_circuit.is_some() {
+                // Resolved deterministically without spawning a worker LLM.
+            } else if use_host_permissions {
                 let perm_mode = step_permissions.unwrap();
                 let mut launch = infra_host::provider::Launch {
                     provider: provider.clone(),
@@ -1418,7 +1466,55 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 "ok": false,
                 "report": null
             });
-            let (native_collector, mut receipt) = if let Some(launch) = host_launch_opt {
+            let (native_collector, mut receipt) = if let Some(det) = deterministic_short_circuit {
+                let mut det_receipt = receipt;
+                det_receipt["duration_seconds"] = object!(det.duration_seconds);
+                det_receipt["deterministic"] = object!(true);
+                det_receipt["usage_components"] =
+                    execution::empty_usage_components(Some("deterministic"), 0);
+                if det.all_passed {
+                    let report = object!({
+                        "status": "completed",
+                        "summary": format!(
+                            "Deterministic verification passed ({} check(s), 0 model calls).",
+                            det.checks.len()
+                        ),
+                        "checks": det.checks,
+                        "changed_files": [],
+                        "service_order": []
+                    });
+                    execution::validate_report(
+                        &report,
+                        &preview,
+                        &texts(&state["selected"]),
+                        access_scope(state),
+                    )?;
+                    det_receipt["returncode"] = object!(0);
+                    det_receipt["report"] = report;
+                    det_receipt["ok"] = object!(true);
+                } else {
+                    let summary = if det.diagnostics_summary.is_empty() {
+                        "Deterministic verification checks failed.".to_owned()
+                    } else {
+                        format!(
+                            "Deterministic verification failed: {}",
+                            det.diagnostics_summary
+                        )
+                    };
+                    let report = object!({
+                        "status": "blocked",
+                        "summary": summary,
+                        "checks": det.checks,
+                        "changed_files": [],
+                        "service_order": []
+                    });
+                    det_receipt["returncode"] = object!(1);
+                    det_receipt["report"] = report;
+                    det_receipt["ok"] = object!(false);
+                    det_receipt["error"] = "worker_blocked_or_verification_incomplete".into();
+                }
+                (NativeEvidenceCollector::default(), det_receipt)
+            } else if let Some(launch) = host_launch_opt {
                 let launch_adapter = SystemLaunchAdapter {
                     inner: adapter.clone(),
                     schema: schema.clone(),
