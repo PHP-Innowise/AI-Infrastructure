@@ -1305,6 +1305,142 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
     value
 }
 
+fn skill_prefix_for_asset(asset_path: &str) -> Option<String> {
+    for (_, base, _) in AGENTS {
+        let prefix = format!("{base}/");
+        if let Some(rest) = asset_path.strip_prefix(&prefix)
+            && let Some(name) = rest.split('/').next()
+            && !name.is_empty()
+        {
+            return Some(format!("{base}/{name}"));
+        }
+    }
+    None
+}
+
+/// Gate-1-inspired static compilability & safety screen for skill assets
+/// (markdown byte cap, secret scanning, and safe `programs/` hygiene).
+pub fn screen_skill_payloads(assets: &BTreeMap<String, Vec<u8>>) -> V {
+    let mut has_secret = false;
+    let mut warnings = Vec::new();
+    let mut violations = Vec::new();
+    let mut has_programs = false;
+
+    for (path, bytes) in assets {
+        let text = String::from_utf8_lossy(bytes);
+        if infra_core::domain::secret_label(&text)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            has_secret = true;
+            violations.push(json!({
+                "code": "secret_detected",
+                "path": path,
+                "message": "Skill payload contains a possible secret or token.",
+            }));
+        }
+        let rel = skill_prefix_for_asset(path)
+            .and_then(|p| path.strip_prefix(&format!("{p}/")).map(str::to_owned))
+            .unwrap_or_else(|| path.clone());
+        if rel == "SKILL.md" {
+            if bytes.len() > infra_skillcache::gate1::MARKDOWN_BYTES {
+                warnings.push(json!({
+                    "code": "skill_md_exceeds_textual_cap",
+                    "path": path,
+                    "bytes": bytes.len(),
+                    "limit": infra_skillcache::gate1::MARKDOWN_BYTES,
+                }));
+            }
+            if !text.trim_start().starts_with("---") {
+                warnings.push(json!({
+                    "code": "missing_frontmatter",
+                    "path": path,
+                }));
+            }
+        } else if rel.starts_with("programs/") {
+            has_programs = true;
+            let lower = rel.to_ascii_lowercase();
+            if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+                violations.push(json!({
+                    "code": "argv_windows_script",
+                    "path": path,
+                    "message": "Skill programs must not use .cmd or .bat wrappers.",
+                }));
+            }
+            if rel.split(['/', '\\']).any(|part| part == "..") {
+                violations.push(json!({
+                    "code": "argv_parent_traversal",
+                    "path": path,
+                    "message": "Program path must stay inside the skill directory.",
+                }));
+            }
+        }
+    }
+
+    if let (Some(capsule_bytes), Some(md_bytes)) = (
+        assets
+            .iter()
+            .find(|(p, _)| p.ends_with("/capsule.json") || *p == "capsule.json")
+            .map(|(_, b)| b.as_slice()),
+        assets
+            .iter()
+            .find(|(p, _)| p.ends_with("/SKILL.md") || *p == "SKILL.md")
+            .map(|(_, b)| b.as_slice()),
+    ) {
+        let mut files = infra_skillcache::package::Files::new();
+        for (p, b) in assets {
+            let rel = skill_prefix_for_asset(p)
+                .and_then(|pref| p.strip_prefix(&format!("{pref}/")).map(str::to_owned))
+                .unwrap_or_else(|| p.clone());
+            if rel != "capsule.json" && rel != "SKILL.md" {
+                files.insert(&rel, b.clone());
+            }
+        }
+        let report = if files.is_empty() && !has_programs {
+            infra_skillcache::gate1::check_textual(capsule_bytes, md_bytes, None)
+        } else {
+            infra_skillcache::gate1::check(
+                capsule_bytes,
+                &files,
+                None,
+                &infra_skillcache::gate1::Context::default(),
+            )
+        };
+        for v in report.violations {
+            violations.push(json!({"code": v.code, "at": v.at, "message": v.message}));
+        }
+    }
+
+    let compilable = !has_secret && violations.is_empty();
+    json!({
+        "compilable": compilable,
+        "has_secret": has_secret,
+        "has_programs": has_programs,
+        "violations": violations,
+        "warnings": warnings,
+    })
+}
+
+/// Invalidates active and `needs_recompile` SkillCache capsules tied to any skill path
+/// modified or removed via `SkillsDomain::apply`, publishing SSE `"stale"` events.
+fn invalidate_skillcache_for_skills(
+    store: &SessionStore,
+    project_id: &str,
+    affected_prefixes: &BTreeSet<String>,
+) -> usize {
+    const REASON: &str = "Skill files were updated or removed via SkillsDomain.";
+    let mut count = 0usize;
+    for prefix in affected_prefixes {
+        if let Ok(updated) =
+            crate::skillcache::invalidate_for_skill_path(store, project_id, prefix, REASON)
+        {
+            count += updated;
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod apply_tests {
     use super::*;
@@ -1769,6 +1905,11 @@ mod apply_tests {
         };
         crate::skillcache::db::activate_capsule(&db, &q).unwrap();
         drop(db);
+        let crate::store::ReplayStart::Frames { mut rx, .. } =
+            fixture.domain.store.stream().subscribe(None)
+        else {
+            panic!("expected frames");
+        };
         let invalidated = invalidate_skillcache_for_skills(
             &fixture.domain.store,
             fixture.project["id"].as_str().unwrap(),
@@ -1780,169 +1921,10 @@ mod apply_tests {
             .unwrap()
             .unwrap();
         assert_eq!(cap["status"], "stale");
+        let frame = rx.try_recv().expect("stale SSE frame");
+        assert_eq!(frame.event, "skillcache_capsule");
+        assert_eq!(frame.data["state"], "stale");
+        assert_eq!(frame.data["capsule_id"], capsule_id);
+        assert_eq!(frame.project_id.as_deref(), fixture.project["id"].as_str());
     }
-}
-
-fn skill_prefix_for_asset(asset_path: &str) -> Option<String> {
-    for (_, base, _) in AGENTS {
-        let prefix = format!("{base}/");
-        if let Some(rest) = asset_path.strip_prefix(&prefix)
-            && let Some(name) = rest.split('/').next()
-            && !name.is_empty()
-        {
-            return Some(format!("{base}/{name}"));
-        }
-    }
-    None
-}
-
-/// Gate-1-inspired static compilability & safety screen for skill assets
-/// (markdown byte cap, secret scanning, and safe `programs/` hygiene).
-pub fn screen_skill_payloads(assets: &BTreeMap<String, Vec<u8>>) -> V {
-    let mut has_secret = false;
-    let mut warnings = Vec::new();
-    let mut violations = Vec::new();
-    let mut has_programs = false;
-
-    for (path, bytes) in assets {
-        let text = String::from_utf8_lossy(bytes);
-        if infra_core::domain::secret_label(&text)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            has_secret = true;
-            violations.push(json!({
-                "code": "secret_detected",
-                "path": path,
-                "message": "Skill payload contains a possible secret or token.",
-            }));
-        }
-        let rel = skill_prefix_for_asset(path)
-            .and_then(|p| path.strip_prefix(&format!("{p}/")).map(str::to_owned))
-            .unwrap_or_else(|| path.clone());
-        if rel == "SKILL.md" {
-            if bytes.len() > infra_skillcache::gate1::MARKDOWN_BYTES {
-                warnings.push(json!({
-                    "code": "skill_md_exceeds_textual_cap",
-                    "path": path,
-                    "bytes": bytes.len(),
-                    "limit": infra_skillcache::gate1::MARKDOWN_BYTES,
-                }));
-            }
-            if !text.trim_start().starts_with("---") {
-                warnings.push(json!({
-                    "code": "missing_frontmatter",
-                    "path": path,
-                }));
-            }
-        } else if rel.starts_with("programs/") {
-            has_programs = true;
-            let lower = rel.to_ascii_lowercase();
-            if lower.ends_with(".cmd") || lower.ends_with(".bat") {
-                violations.push(json!({
-                    "code": "argv_windows_script",
-                    "path": path,
-                    "message": "Skill programs must not use .cmd or .bat wrappers.",
-                }));
-            }
-            if rel.split(['/', '\\']).any(|part| part == "..") {
-                violations.push(json!({
-                    "code": "argv_parent_traversal",
-                    "path": path,
-                    "message": "Program path must stay inside the skill directory.",
-                }));
-            }
-        }
-    }
-
-    if let (Some(capsule_bytes), Some(md_bytes)) = (
-        assets
-            .iter()
-            .find(|(p, _)| p.ends_with("/capsule.json") || *p == "capsule.json")
-            .map(|(_, b)| b.as_slice()),
-        assets
-            .iter()
-            .find(|(p, _)| p.ends_with("/SKILL.md") || *p == "SKILL.md")
-            .map(|(_, b)| b.as_slice()),
-    ) {
-        let mut files = infra_skillcache::package::Files::new();
-        for (p, b) in assets {
-            let rel = skill_prefix_for_asset(p)
-                .and_then(|pref| p.strip_prefix(&format!("{pref}/")).map(str::to_owned))
-                .unwrap_or_else(|| p.clone());
-            if rel != "capsule.json" && rel != "SKILL.md" {
-                files.insert(&rel, b.clone());
-            }
-        }
-        let report = if files.is_empty() && !has_programs {
-            infra_skillcache::gate1::check_textual(capsule_bytes, md_bytes, None)
-        } else {
-            infra_skillcache::gate1::check(
-                capsule_bytes,
-                &files,
-                None,
-                &infra_skillcache::gate1::Context::default(),
-            )
-        };
-        for v in report.violations {
-            violations.push(json!({"code": v.code, "at": v.at, "message": v.message}));
-        }
-    }
-
-    let compilable = !has_secret && violations.is_empty();
-    json!({
-        "compilable": compilable,
-        "has_secret": has_secret,
-        "has_programs": has_programs,
-        "violations": violations,
-        "warnings": warnings,
-    })
-}
-
-/// Invalidates active SkillCache capsules tied to any skill path modified or removed
-/// via `SkillsDomain::apply` so stale compiled capsules are never reused silently.
-fn invalidate_skillcache_for_skills(
-    store: &SessionStore,
-    project_id: &str,
-    affected_prefixes: &BTreeSet<String>,
-) -> usize {
-    if affected_prefixes.is_empty() {
-        return 0;
-    }
-    let Ok(db) = store.connection() else {
-        return 0;
-    };
-    let Ok(active) =
-        crate::skillcache::db::capsules(&db, project_id, None, Some("active"), None, false, true)
-    else {
-        return 0;
-    };
-    let affected_names: BTreeSet<&str> = affected_prefixes
-        .iter()
-        .filter_map(|p| p.rsplit('/').next())
-        .collect();
-    let mut count = 0usize;
-    for capsule in active {
-        let Some(cid) = capsule["capsule_id"].as_str() else {
-            continue;
-        };
-        let sp = capsule["skill_path"].as_str().unwrap_or("");
-        let sn = capsule["skill_name"].as_str().unwrap_or("");
-        let matches = affected_prefixes.iter().any(|pref| {
-            sp == pref || sp.starts_with(&format!("{pref}/")) || sp.ends_with(&format!("/{sn}"))
-        }) || (!sn.is_empty() && affected_names.contains(sn));
-        if matches
-            && crate::skillcache::db::set_capsule_status(
-                &db,
-                cid,
-                "stale",
-                Some("Skill files were updated or removed via SkillsDomain."),
-            )
-            .is_ok()
-        {
-            count += 1;
-        }
-    }
-    count
 }

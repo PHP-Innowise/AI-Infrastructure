@@ -1331,7 +1331,7 @@ impl<'a> AgentView<'a> {
         }
     }
 
-    pub(super) fn from_evidence(&self) -> bool {
+    pub(super) fn is_from_evidence(&self) -> bool {
         match self {
             Self::Live { record, .. } => record.from_evidence,
             Self::Synth(record) => record.from_evidence,
@@ -2310,7 +2310,7 @@ pub(crate) fn snapshot_for_root(root: &str) -> InspectorSnapshot {
                 plan_items.extend(ag_plan);
 
                 let live_evs = agent.events();
-                if live_evs.is_empty() && agent.from_evidence() {
+                if live_evs.is_empty() && agent.is_from_evidence() {
                     timeline_events
                         .extend(build_synthetic_timeline(key, agent, &ag_files, &ag_cmds));
                 } else {
@@ -2330,7 +2330,7 @@ pub(crate) fn snapshot_for_root(root: &str) -> InspectorSnapshot {
             commands = build_agent_commands(&selected, agent, d, r);
             plan_items = build_agent_plan_items(&selected, agent, d, step_item, true);
             let live_evs = agent.events();
-            timeline_events = if live_evs.is_empty() && agent.from_evidence() {
+            timeline_events = if live_evs.is_empty() && agent.is_from_evidence() {
                 build_synthetic_timeline(&selected, agent, &files, &commands)
             } else {
                 live_evs.to_vec()

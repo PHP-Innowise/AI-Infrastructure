@@ -1566,12 +1566,8 @@ impl Index {
             if relation.starts_with('_') {
                 continue;
             }
-            let Some(&source_sym) = endpoint_id_to_sym.get(link.source.as_str()) else {
-                return None;
-            };
-            let Some(&target_sym) = endpoint_id_to_sym.get(link.target.as_str()) else {
-                return None;
-            };
+            let &source_sym = endpoint_id_to_sym.get(link.source.as_str())?;
+            let &target_sym = endpoint_id_to_sym.get(link.target.as_str())?;
             if source_sym == target_sym {
                 continue;
             }

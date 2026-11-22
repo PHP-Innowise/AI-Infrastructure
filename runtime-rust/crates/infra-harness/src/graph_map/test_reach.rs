@@ -1022,6 +1022,7 @@ fn walk_bridged(
     true
 }
 
+#[cfg(test)]
 fn walk(
     net: &Net<'_>,
     starts: Vec<u32>,

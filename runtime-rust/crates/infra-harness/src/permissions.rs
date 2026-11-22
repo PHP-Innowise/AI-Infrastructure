@@ -540,6 +540,272 @@ impl Approvals for SessionApprovals {
     }
 }
 
+const READ_ONLY_INLINE_FLAGS: &[&str] = &[
+    "-c", "-e", "-E", "--eval", "-p", "--print", "-Command", "/c", "/C", "/k", "/K",
+];
+
+fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, String> {
+    if command.is_empty() || command.len() > 2048 {
+        return Err("command length out of bounds".into());
+    }
+    if command.chars().any(|c| {
+        matches!(
+            c,
+            '|' | ';' | '&' | '>' | '<' | '`' | '$' | '\n' | '\r' | '\0'
+        )
+    }) {
+        return Err("shell operators are not permitted in deterministic read-only commands".into());
+    }
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => {
+                quote = None;
+                in_token = true;
+            }
+            Some('"') if c == '\\' => {
+                let next = chars
+                    .next()
+                    .ok_or_else(|| "unterminated escape in command".to_owned())?;
+                cur.push(next);
+                in_token = true;
+            }
+            Some(_) => {
+                cur.push(c);
+                in_token = true;
+            }
+            None if c.is_whitespace() => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut cur));
+                    in_token = false;
+                }
+            }
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                in_token = true;
+            }
+            None if c == '\\' => {
+                let next = chars
+                    .next()
+                    .ok_or_else(|| "unterminated escape in command".to_owned())?;
+                cur.push(next);
+                in_token = true;
+            }
+            None => {
+                cur.push(c);
+                in_token = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err("unclosed quote in command".into());
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    Ok(tokens)
+}
+
+fn check_read_only_capsule_program(
+    workspace: &std::path::Path,
+    tokens: &[String],
+) -> std::result::Result<bool, String> {
+    let Some(rel_prog) = tokens.iter().skip(1).find_map(|arg| {
+        let mut rest = arg.split_once('=').map_or(arg.as_str(), |(_, v)| v);
+        while let Some(t) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
+            rest = t;
+        }
+        rest.starts_with("programs/").then(|| rest.to_owned())
+    }) else {
+        return Ok(false);
+    };
+    let prog_path = workspace.join(&rel_prog);
+    let body = std::fs::read(&prog_path)
+        .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?;
+    let mut files = infra_skillcache::package::Files::new();
+    files.insert(&rel_prog, body);
+    let runtime = tokens.first().cloned().unwrap_or_default();
+    let capsule_json = json!({
+        "schema_version": infra_skillcache::SCHEMA_VERSION,
+        "form": "hybrid",
+        "mu": {
+            "name": "readonly-check",
+            "description": "Read-only permission rule program check"
+        },
+        "source": {
+            "skills": [{
+                "name": "readonly-check",
+                "path": ".agents/skills/readonly-check/SKILL.md",
+                "tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            }]
+        },
+        "capabilities": {
+            "network": "none",
+            "runtimes": [runtime]
+        },
+        "bindings": [],
+        "programs": [{
+            "id": "main",
+            "entry": tokens,
+            "inputs": [],
+            "outputs": [],
+            "check": tokens,
+            "timeout_seconds": 60,
+            "read_only": true
+        }],
+        "steps": [{
+            "kind": "program",
+            "program": "main"
+        }],
+        "verification": []
+    });
+    let capsule =
+        infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).map_err(|v| {
+            v.into_iter()
+                .map(|e| format!("{}: {}", e.code, e.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
+    let violations = infra_skillcache::gate1::structure(&capsule, &files);
+    if !violations.is_empty() {
+        return Err(violations
+            .into_iter()
+            .map(|v| format!("{}: {}", v.code, v.message))
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    Ok(true)
+}
+
+fn is_known_read_only_cli(tokens: &[String]) -> bool {
+    let Some(cmd) = tokens.first().map(|s| {
+        std::path::Path::new(s)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(s.as_str())
+    }) else {
+        return false;
+    };
+    let lower = cmd.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "rg" | "grep" | "cat" | "head" | "tail" | "ls" | "stat" | "wc" | "pwd" | "find"
+    ) {
+        return !tokens.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "-delete" | "-exec" | "-execdir" | "-ok" | "-fprint"
+            )
+        });
+    }
+    if lower == "git" {
+        return tokens.get(1).is_some_and(|sub| {
+            matches!(
+                sub.as_str(),
+                "status" | "diff" | "log" | "show" | "rev-parse"
+            )
+        });
+    }
+    if lower == "php" {
+        return tokens.get(1).is_some_and(|f| f == "-l");
+    }
+    if lower == "composer" {
+        return tokens
+            .get(1)
+            .is_some_and(|s| matches!(s.as_str(), "validate" | "show"));
+    }
+    if lower == "cargo" {
+        return tokens
+            .get(1)
+            .is_some_and(|s| matches!(s.as_str(), "check" | "metadata"));
+    }
+    false
+}
+
+/// Verifies whether `command` is a Gate-1 / verification-safe read-only program command
+/// and returns its deterministic scoped `session_rule_key` (`readonly:program:...`).
+pub fn classify_read_only_program_command(
+    workspace: Option<&std::path::Path>,
+    command: &str,
+) -> std::result::Result<Option<String>, String> {
+    let tokens = tokenize_program_command(command)?;
+    let Some(runtime) = tokens.first() else {
+        return Ok(None);
+    };
+    if runtime.is_empty() {
+        return Ok(None);
+    }
+    for (idx, arg) in tokens.iter().enumerate() {
+        let lower = arg.to_ascii_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            return Err("argv_windows_script: Windows .cmd/.bat launchers are not admitted".into());
+        }
+        if idx > 0 && READ_ONLY_INLINE_FLAGS.contains(&arg.as_str()) {
+            return Err("argv_inline_code: inline code flags are not admitted".into());
+        }
+        let path_part = arg.split_once('=').map_or(arg.as_str(), |(_, v)| v);
+        if path_part.starts_with('~')
+            || path_part
+                .split(['/', '\\'])
+                .any(|part| part == ".." || (part.starts_with('-') && part.ends_with("..")))
+        {
+            return Err("argv_parent_traversal: parent or home traversal is not admitted".into());
+        }
+        if path_part.starts_with('/') || path_part.starts_with('\\') {
+            return Err("argv_absolute_path: absolute paths are not admitted in auto rules".into());
+        }
+    }
+
+    if let Some(ws) = workspace
+        && check_read_only_capsule_program(ws, &tokens)?
+    {
+        return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
+    }
+    let generator_safe = workspace
+        .and_then(|ws| infra_generator::commands::is_verification_safe(ws, command).ok())
+        .unwrap_or(false);
+    if is_known_read_only_cli(&tokens) || generator_safe {
+        return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
+    }
+    Ok(None)
+}
+
+impl PermissionDesk {
+    fn read_only_auto_rule_for_ask(
+        &self,
+        session: &str,
+        ask: &PermissionAsk,
+    ) -> Result<Option<String>> {
+        if ask.kind != "command" || ask.summary.trim().is_empty() {
+            return Ok(None);
+        }
+        let workspace = self
+            .read_only_auto_workspaces
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session).cloned());
+        let Some(ws) = workspace else {
+            return Ok(None);
+        };
+        let Ok(Some(scoped_key)) = classify_read_only_program_command(Some(&ws), &ask.summary)
+        else {
+            return Ok(None);
+        };
+        if let Some(requested_key) = ask.session_rule_key.as_deref()
+            && !requested_key.is_empty()
+            && requested_key != scoped_key
+        {
+            return Ok(None);
+        }
+        self.remember_session_rule_with_ask(session, &scoped_key, Some(ask))?;
+        Ok(Some(scoped_key))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,271 +1272,5 @@ mod tests {
         assert_eq!(evs[0]["state"], "allowed_session");
         assert_eq!(evs[0]["by"], "gate1_read_only_rule");
         assert!(desk.has_session_rule("s-ro", &capsule_key).unwrap());
-    }
-}
-
-const READ_ONLY_INLINE_FLAGS: &[&str] = &[
-    "-c", "-e", "-E", "--eval", "-p", "--print", "-Command", "/c", "/C", "/k", "/K",
-];
-
-fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, String> {
-    if command.is_empty() || command.len() > 2048 {
-        return Err("command length out of bounds".into());
-    }
-    if command.chars().any(|c| {
-        matches!(
-            c,
-            '|' | ';' | '&' | '>' | '<' | '`' | '$' | '\n' | '\r' | '\0'
-        )
-    }) {
-        return Err("shell operators are not permitted in deterministic read-only commands".into());
-    }
-    let mut tokens = Vec::new();
-    let mut cur = String::new();
-    let mut in_token = false;
-    let mut quote: Option<char> = None;
-    let mut chars = command.chars();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) if c == q => {
-                quote = None;
-                in_token = true;
-            }
-            Some('"') if c == '\\' => {
-                let next = chars
-                    .next()
-                    .ok_or_else(|| "unterminated escape in command".to_owned())?;
-                cur.push(next);
-                in_token = true;
-            }
-            Some(_) => {
-                cur.push(c);
-                in_token = true;
-            }
-            None if c.is_whitespace() => {
-                if in_token {
-                    tokens.push(std::mem::take(&mut cur));
-                    in_token = false;
-                }
-            }
-            None if c == '\'' || c == '"' => {
-                quote = Some(c);
-                in_token = true;
-            }
-            None if c == '\\' => {
-                let next = chars
-                    .next()
-                    .ok_or_else(|| "unterminated escape in command".to_owned())?;
-                cur.push(next);
-                in_token = true;
-            }
-            None => {
-                cur.push(c);
-                in_token = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        return Err("unclosed quote in command".into());
-    }
-    if in_token {
-        tokens.push(cur);
-    }
-    Ok(tokens)
-}
-
-fn check_read_only_capsule_program(
-    workspace: &std::path::Path,
-    tokens: &[String],
-) -> std::result::Result<bool, String> {
-    let Some(rel_prog) = tokens.iter().skip(1).find_map(|arg| {
-        let mut rest = arg.split_once('=').map_or(arg.as_str(), |(_, v)| v);
-        while let Some(t) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
-            rest = t;
-        }
-        rest.starts_with("programs/").then(|| rest.to_owned())
-    }) else {
-        return Ok(false);
-    };
-    let prog_path = workspace.join(&rel_prog);
-    let body = std::fs::read(&prog_path)
-        .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?;
-    let mut files = infra_skillcache::package::Files::new();
-    files.insert(&rel_prog, body);
-    let runtime = tokens.first().cloned().unwrap_or_default();
-    let capsule_json = json!({
-        "schema_version": infra_skillcache::SCHEMA_VERSION,
-        "form": "hybrid",
-        "mu": {
-            "name": "readonly-check",
-            "description": "Read-only permission rule program check"
-        },
-        "source": {
-            "skills": [{
-                "name": "readonly-check",
-                "path": ".agents/skills/readonly-check/SKILL.md",
-                "tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-            }]
-        },
-        "capabilities": {
-            "network": "none",
-            "runtimes": [runtime]
-        },
-        "bindings": [],
-        "programs": [{
-            "id": "main",
-            "entry": tokens,
-            "inputs": [],
-            "outputs": [],
-            "check": tokens,
-            "timeout_seconds": 60,
-            "read_only": true
-        }],
-        "steps": [{
-            "kind": "program",
-            "program": "main"
-        }],
-        "verification": []
-    });
-    let capsule =
-        infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).map_err(|v| {
-            v.into_iter()
-                .map(|e| format!("{}: {}", e.code, e.message))
-                .collect::<Vec<_>>()
-                .join("; ")
-        })?;
-    let violations = infra_skillcache::gate1::structure(&capsule, &files);
-    if !violations.is_empty() {
-        return Err(violations
-            .into_iter()
-            .map(|v| format!("{}: {}", v.code, v.message))
-            .collect::<Vec<_>>()
-            .join("; "));
-    }
-    Ok(true)
-}
-
-fn is_known_read_only_cli(tokens: &[String]) -> bool {
-    let Some(cmd) = tokens.first().map(|s| {
-        std::path::Path::new(s)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(s.as_str())
-    }) else {
-        return false;
-    };
-    let lower = cmd.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "rg" | "grep" | "cat" | "head" | "tail" | "ls" | "stat" | "wc" | "pwd" | "find"
-    ) {
-        return !tokens.iter().any(|a| {
-            matches!(
-                a.as_str(),
-                "-delete" | "-exec" | "-execdir" | "-ok" | "-fprint"
-            )
-        });
-    }
-    if lower == "git" {
-        return tokens.get(1).is_some_and(|sub| {
-            matches!(
-                sub.as_str(),
-                "status" | "diff" | "log" | "show" | "rev-parse"
-            )
-        });
-    }
-    if lower == "php" {
-        return tokens.get(1).is_some_and(|f| f == "-l");
-    }
-    if lower == "composer" {
-        return tokens
-            .get(1)
-            .is_some_and(|s| matches!(s.as_str(), "validate" | "show"));
-    }
-    if lower == "cargo" {
-        return tokens
-            .get(1)
-            .is_some_and(|s| matches!(s.as_str(), "check" | "metadata"));
-    }
-    false
-}
-
-/// Verifies whether `command` is a Gate-1 / verification-safe read-only program command
-/// and returns its deterministic scoped `session_rule_key` (`readonly:program:...`).
-pub fn classify_read_only_program_command(
-    workspace: Option<&std::path::Path>,
-    command: &str,
-) -> std::result::Result<Option<String>, String> {
-    let tokens = tokenize_program_command(command)?;
-    let Some(runtime) = tokens.first() else {
-        return Ok(None);
-    };
-    if runtime.is_empty() {
-        return Ok(None);
-    }
-    for (idx, arg) in tokens.iter().enumerate() {
-        let lower = arg.to_ascii_lowercase();
-        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
-            return Err("argv_windows_script: Windows .cmd/.bat launchers are not admitted".into());
-        }
-        if idx > 0 && READ_ONLY_INLINE_FLAGS.contains(&arg.as_str()) {
-            return Err("argv_inline_code: inline code flags are not admitted".into());
-        }
-        let path_part = arg.split_once('=').map_or(arg.as_str(), |(_, v)| v);
-        if path_part.starts_with('~')
-            || path_part
-                .split(['/', '\\'])
-                .any(|part| part == ".." || (part.starts_with('-') && part.ends_with("..")))
-        {
-            return Err("argv_parent_traversal: parent or home traversal is not admitted".into());
-        }
-        if path_part.starts_with('/') || path_part.starts_with('\\') {
-            return Err("argv_absolute_path: absolute paths are not admitted in auto rules".into());
-        }
-    }
-
-    if let Some(ws) = workspace
-        && check_read_only_capsule_program(ws, &tokens)?
-    {
-        return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
-    }
-    let generator_safe = workspace
-        .and_then(|ws| infra_generator::commands::is_verification_safe(ws, command).ok())
-        .unwrap_or(false);
-    if is_known_read_only_cli(&tokens) || generator_safe {
-        return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
-    }
-    Ok(None)
-}
-
-impl PermissionDesk {
-    fn read_only_auto_rule_for_ask(
-        &self,
-        session: &str,
-        ask: &PermissionAsk,
-    ) -> Result<Option<String>> {
-        if ask.kind != "command" || ask.summary.trim().is_empty() {
-            return Ok(None);
-        }
-        let workspace = self
-            .read_only_auto_workspaces
-            .lock()
-            .ok()
-            .and_then(|m| m.get(session).cloned());
-        let Some(ws) = workspace else {
-            return Ok(None);
-        };
-        let Ok(Some(scoped_key)) = classify_read_only_program_command(Some(&ws), &ask.summary)
-        else {
-            return Ok(None);
-        };
-        if let Some(requested_key) = ask.session_rule_key.as_deref()
-            && !requested_key.is_empty()
-            && requested_key != scoped_key
-        {
-            return Ok(None);
-        }
-        self.remember_session_rule_with_ask(session, &scoped_key, Some(ask))?;
-        Ok(Some(scoped_key))
     }
 }

@@ -34,6 +34,8 @@ use std::{
 const SYSTEM_SUMMARY_CACHE_CAP: usize = 32;
 const SYSTEM_SUMMARY_LIVE_TTL: Duration = Duration::from_secs(2);
 
+type ServiceSummaryStamp = (String, u64, Option<u64>, Option<bool>, Option<(u64, i128)>);
+
 #[derive(Clone, PartialEq, Eq)]
 struct SystemSummaryKey {
     catalog_hash: [u8; 32],
@@ -41,7 +43,7 @@ struct SystemSummaryKey {
     run_id: Option<String>,
     agent_filter: Option<String>,
     run_stamp: Option<(u64, i128)>,
-    service_stamps: Vec<(String, u64, Option<u64>, Option<bool>, Option<(u64, i128)>)>,
+    service_stamps: Vec<ServiceSummaryStamp>,
 }
 
 type SystemSummaryEntry = (

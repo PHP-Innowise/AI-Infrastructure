@@ -702,25 +702,48 @@ impl Domain for SkillCacheDomain {
 
 /// Marks every `active` or `needs_recompile` capsule for `(project_id, skill_path)`
 /// as `stale` with `reason` and publishes SSE `"stale"` events. Returns the count updated.
-#[allow(dead_code)] // Exposed for SkillsDomain invalidation hookup across branches.
 pub(crate) fn invalidate_for_skill_path(
     store: &SessionStore,
     project_id: &str,
     skill_path: &str,
     reason: &str,
 ) -> Result<usize> {
+    let needle = skill_path.trim().replace('\\', "/");
+    let needle = needle.trim_end_matches('/');
+    if needle.is_empty() {
+        return Ok(0);
+    }
     let db = store.connection()?;
-    let ids = {
+    let rows = {
         let mut query = db.prepare(
-            "SELECT capsule_id FROM skillcache_capsules
-             WHERE project_id=?1 AND skill_path=?2 AND status IN ('active','needs_recompile')",
+            "SELECT capsule_id, skill_path FROM skillcache_capsules
+             WHERE project_id=?1 AND status IN ('active','needs_recompile')",
         )?;
         query
-            .query_map(rusqlite::params![project_id, skill_path], |row| {
-                row.get::<_, String>(0)
+            .query_map(rusqlite::params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let needle_prefix = format!("{needle}/");
+    let needle_suffix = format!("/{needle}");
+    let needle_mid = format!("/{needle}/");
+    let ids: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(id, raw_path)| {
+            let normalized = raw_path.trim().replace('\\', "/");
+            let sp = normalized.trim_end_matches('/');
+            if sp.is_empty() {
+                return None;
+            }
+            let matches = sp == needle
+                || sp.starts_with(&needle_prefix)
+                || needle.starts_with(&format!("{sp}/"))
+                || sp.ends_with(&needle_suffix)
+                || sp.contains(&needle_mid);
+            matches.then_some(id)
+        })
+        .collect();
     for id in &ids {
         db::set_capsule_status(&db, id, "stale", Some(reason))?;
     }
@@ -902,38 +925,76 @@ mod tests {
             .unwrap()
             .to_owned();
         let db = store.connection().unwrap();
-        let skill =
+        let pdf_file =
             json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": "0"});
-        db::begin_capsule(&db, "c-act", "k-1", &project_id, "s1", "g1", &skill, None).unwrap();
-        db::activate_capsule(
+        let pdf_dir = json!({"name": "pdf", "path": ".agents/skills/pdf", "tree_sha256": "0"});
+        let pdf_v2 =
+            json!({"name": "pdf-v2", "path": ".agents/skills/pdf-v2/SKILL.md", "tree_sha256": "0"});
+        db::begin_capsule(
             &db,
-            &db::Qualified {
-                capsule_id: "c-act",
-                mu_name: "pdf",
-                mu_description: "d",
-                form: "textual",
-                capsule_sha256: "a",
-                package_sha256: "b",
-                skill_files: &json!({}),
-                env_fingerprint: "e",
-                engine_digest: "",
-                artifact_dir: "/tmp/no",
-                capabilities: &json!({}),
-            },
+            "c-act",
+            "k-1",
+            &project_id,
+            "s1",
+            "g1",
+            &pdf_file,
+            None,
         )
         .unwrap();
+        db::begin_capsule(&db, "c-dir", "k-2", &project_id, "s1", "g2", &pdf_dir, None).unwrap();
+        db::begin_capsule(&db, "c-v2", "k-3", &project_id, "s1", "g3", &pdf_v2, None).unwrap();
+        for (id, name) in [("c-act", "pdf"), ("c-dir", "pdf"), ("c-v2", "pdf-v2")] {
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: id,
+                    mu_name: name,
+                    mu_description: "d",
+                    form: "textual",
+                    capsule_sha256: "a",
+                    package_sha256: "b",
+                    skill_files: &json!({}),
+                    env_fingerprint: "e",
+                    engine_digest: "",
+                    artifact_dir: "/tmp/no",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+        }
         drop(db);
+        let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
+        else {
+            panic!("expected frames");
+        };
         let changed = invalidate_for_skill_path(
             &store,
             &project_id,
-            ".agents/skills/pdf/SKILL.md",
+            ".agents/skills/pdf",
             "Skill edited on disk.",
         )
         .unwrap();
-        assert_eq!(changed, 1);
+        assert_eq!(changed, 2);
         let db = store.connection().unwrap();
-        let cap = db::capsule(&db, "c-act").unwrap().unwrap();
-        assert_eq!(cap["status"], "stale");
-        assert_eq!(cap["reason"], "Skill edited on disk.");
+        assert_eq!(
+            db::capsule(&db, "c-act").unwrap().unwrap()["status"],
+            "stale"
+        );
+        assert_eq!(
+            db::capsule(&db, "c-dir").unwrap().unwrap()["status"],
+            "stale"
+        );
+        assert_eq!(
+            db::capsule(&db, "c-v2").unwrap().unwrap()["status"],
+            "active"
+        );
+        let mut stale_ids = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if frame.event == "skillcache_capsule" && frame.data["state"] == "stale" {
+                stale_ids.push(frame.data["capsule_id"].as_str().unwrap().to_owned());
+            }
+        }
+        stale_ids.sort();
+        assert_eq!(stale_ids, vec!["c-act", "c-dir"]);
     }
 }

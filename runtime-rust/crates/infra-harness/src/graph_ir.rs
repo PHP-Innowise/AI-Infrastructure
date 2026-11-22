@@ -128,6 +128,7 @@ pub(crate) struct IrSyncStats {
 /// Incremental update summary + affected file lists returned by `update_paths_with_delta`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IrUpdateDelta {
+    #[cfg(test)]
     pub stats: IrSyncStats,
     pub edited_files: Vec<String>,
     pub re_resolved_files: Vec<String>,
@@ -717,6 +718,7 @@ impl GraphIrStore {
     /// Incrementally re-indexes ONLY the specified changed or deleted relative paths in one transaction,
     /// and re-resolves reverse dependents, re-export consumers, and matching unresolved imports.
     /// All CPU/disk parsing and manifest reads run before opening the `Immediate` write transaction.
+    #[cfg(test)]
     pub(crate) fn update_paths(&self, root: &Path, rel_paths: &[String]) -> Result<IrSyncStats> {
         self.update_paths_with_delta(root, rel_paths)
             .map(|delta| delta.stats)
@@ -745,8 +747,10 @@ impl GraphIrStore {
             }
         }
         if normalized.is_empty() {
+            #[cfg(test)]
             let summary = self.summary_counts()?.unwrap_or_default();
             return Ok(IrUpdateDelta {
+                #[cfg(test)]
                 stats: IrSyncStats {
                     summary,
                     ..IrSyncStats::default()
@@ -1012,7 +1016,16 @@ impl GraphIrStore {
         };
 
         let edited_files: Vec<String> = parsed_units.into_iter().map(|u| u.rel_path).collect();
+        #[cfg(not(test))]
+        let _ = (
+            files_scanned,
+            files_parsed,
+            skipped,
+            files_removed,
+            &summary,
+        );
         Ok(IrUpdateDelta {
+            #[cfg(test)]
             stats: IrSyncStats {
                 files_scanned,
                 files_parsed,
@@ -3662,17 +3675,15 @@ fn collect_symbol_nodes_and_maps<'a>(
     )
 }
 
+type ResolvedEdgeTargets<'a> = BTreeMap<&'a str, Vec<(&'a str, Option<&'a str>)>>;
+
 fn collect_resolved_edge_links<'a>(
     edges: &'a [StoredEdgeRow],
     file_set: &BTreeSet<&str>,
     maps: &SymbolResolutionMaps<'_>,
-) -> (
-    Vec<IrLinkSpec>,
-    BTreeMap<&'a str, Vec<(&'a str, Option<&'a str>)>>,
-) {
+) -> (Vec<IrLinkSpec>, ResolvedEdgeTargets<'a>) {
     let mut links = Vec::with_capacity(edges.len());
-    let mut resolved_targets_by_source: BTreeMap<&'a str, Vec<(&'a str, Option<&'a str>)>> =
-        BTreeMap::new();
+    let mut resolved_targets_by_source: ResolvedEdgeTargets<'a> = BTreeMap::new();
     for edge in edges {
         if !file_set.contains(edge.source_file.as_str())
             || !file_set.contains(edge.target_file.as_str())

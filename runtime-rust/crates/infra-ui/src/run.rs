@@ -25,6 +25,11 @@ use files_map::{
     FileTouchEntry, OUTSIDE,
 };
 
+type ActiveNotificationSlot = Option<(
+    web_sys::Notification,
+    wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+)>;
+
 thread_local! {
     pub(super) static DISMISS_ON_GRAPH_CLICK: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)> =
         wasm_bindgen::closure::Closure::new(|_: web_sys::Event| {
@@ -32,12 +37,8 @@ thread_local! {
         });
     pub(super) static CARD_OPENER: std::cell::RefCell<Option<web_sys::Element>> =
         const { std::cell::RefCell::new(None) };
-    static ACTIVE_NOTIFICATION: std::cell::RefCell<
-        Option<(
-            web_sys::Notification,
-            wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
-        )>,
-    > = const { std::cell::RefCell::new(None) };
+    static ACTIVE_NOTIFICATION: std::cell::RefCell<ActiveNotificationSlot> =
+        const { std::cell::RefCell::new(None) };
 }
 
 pub(super) fn clean(s: &str) -> String {

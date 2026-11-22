@@ -670,10 +670,10 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                 None => (hop, left),
             });
         }
-        if let Some(c) = node.get("circle").filter(|v| !v.is_null()) {
-            if entry.circle.is_none() || c.is_object() {
-                entry.circle = Some(c.clone());
-            }
+        if let Some(c) = node.get("circle").filter(|v| !v.is_null())
+            && (entry.circle.is_none() || c.is_object())
+        {
+            entry.circle = Some(c.clone());
         }
         if let Some(layer) = node.get("architecture_layer").filter(|v| v.is_object()) {
             match &mut entry.arch_layer {

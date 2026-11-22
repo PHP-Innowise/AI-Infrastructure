@@ -442,12 +442,8 @@ impl Crates {
         };
         let workspace_dirs = read
             .iter()
-            .filter_map(|(dir, found)| {
-                found
-                    .as_ref()
-                    .is_some_and(|m| m.name.is_none())
-                    .then(|| (*dir).to_owned())
-            })
+            .filter(|(_, found)| found.as_ref().is_some_and(|m| m.name.is_none()))
+            .map(|(dir, _)| (*dir).to_owned())
             .collect();
         let folder_manifests = manifests.into_iter().map(|m| m.cloned()).collect();
         let folders = folders.into_iter().map(str::to_owned).collect();

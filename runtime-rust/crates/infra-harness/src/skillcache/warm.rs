@@ -78,6 +78,23 @@ impl Warm {
     fn agent_only(&self) -> bool {
         self.eval_arm.as_deref() == Some("skillcache_agent")
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_changes_test(state_dir: PathBuf) -> Self {
+        Self {
+            capsule_id: "c-test".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "test".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: None,
+            state_dir: Some(state_dir),
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        }
+    }
 }
 
 pub enum Decision {

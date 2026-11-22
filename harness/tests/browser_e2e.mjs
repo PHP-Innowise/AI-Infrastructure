@@ -4063,7 +4063,7 @@ async function suite12SkillCache(driver, opts) {
   assert(inspected.text.includes('Compilation cost$0.0512'), `Compilation cost is shown: ${inspected.text.slice(0, 200)}`);
   assert(inspected.text.includes('Saving per reuse—') && inspected.text.includes('Break-even—'), 'An unknown saving is a dash, not a zero');
   assert(!inspected.text.includes('printf'), 'The inspector lists package files and never their contents');
-  assert(JSON.stringify(inspected.actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']), `Actions follow the status: ${inspected.actions}`);
+  assert(JSON.stringify(inspected.actions) === JSON.stringify(['Requalify', 'Invalidate', 'Stop using', 'Delete…']), `Actions follow the status: ${inspected.actions}`);
   assert(!inspected.inlineColors, `No inline colors in the inspector: ${inspected.inlineColors}`);
 
   // Verify Command Palette indexes live SkillCache capsules when loaded
@@ -4150,7 +4150,7 @@ async function suite12SkillCache(driver, opts) {
       const actions = Array.from(detail?.querySelectorAll('.skill-capsule-actions button') || []).map((b) => b.textContent);
       return Boolean(row && (row.textContent || '').includes('Active')
         && detail && !detail.hidden
-        && JSON.stringify(actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']));
+        && JSON.stringify(actions) === JSON.stringify(['Requalify', 'Invalidate', 'Stop using', 'Delete…']));
     }, 'Use again requalifies the retired capsule back to Active', 20_000);
   }
   const armSel = '#skill-capsule-detail [data-action="skill-capsule-arm"]';

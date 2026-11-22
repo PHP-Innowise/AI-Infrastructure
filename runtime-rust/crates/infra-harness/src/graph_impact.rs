@@ -4693,10 +4693,11 @@ fn entity_matches_symbol(entity: &EntityChange, raw_sym: &str) -> bool {
 }
 
 type ArchImpactResult = (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>);
+type ArchImpactCache = std::sync::Mutex<Vec<([u8; 32], ArchImpactResult)>>;
 
 const ARCH_IMPACT_CACHE_CAP: usize = 256;
 
-static ARCH_IMPACT_CACHE: std::sync::LazyLock<std::sync::Mutex<Vec<([u8; 32], ArchImpactResult)>>> =
+static ARCH_IMPACT_CACHE: std::sync::LazyLock<ArchImpactCache> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 #[cfg(test)]
