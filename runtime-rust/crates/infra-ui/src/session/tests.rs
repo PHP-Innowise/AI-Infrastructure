@@ -1478,4 +1478,53 @@ mod update_tests {
             "checks", "sessions", ""
         ));
     }
+
+    #[test]
+    fn send_outcome_preserves_draft_and_attachments_on_409_422_500_and_missing_session() {
+        for (status, msg) in [
+            (409, "Conflict while creating session."),
+            (422, "Validation failed: invalid workflow."),
+            (500, "Runner internal error."),
+        ] {
+            let err = crate::api::Error {
+                status,
+                message: msg.to_owned(),
+                aborted: false,
+            };
+            let plan = super::composer::plan_send_outcome(false, Err(&err));
+            assert!(!plan.clear_draft, "HTTP {status} must preserve draft");
+            assert!(
+                !plan.clear_files,
+                "HTTP {status} must preserve attached files"
+            );
+            assert_eq!(plan.error, msg);
+
+            let follow_plan = super::composer::plan_send_outcome(true, Err(&err));
+            assert!(!follow_plan.clear_draft);
+            assert!(!follow_plan.clear_files);
+            assert_eq!(follow_plan.error, msg);
+        }
+
+        let blank_500 = crate::api::Error {
+            status: 500,
+            message: "   ".to_owned(),
+            aborted: false,
+        };
+        let fallback_plan = super::composer::plan_send_outcome(false, Err(&blank_500));
+        assert!(!fallback_plan.clear_draft);
+        assert!(!fallback_plan.clear_files);
+        assert!(fallback_plan.error.contains("HTTP 500"));
+
+        let missing_id = json!({"session": {"id": ""}});
+        let missing_plan = super::composer::plan_send_outcome(false, Ok(&missing_id));
+        assert!(!missing_plan.clear_draft);
+        assert!(!missing_plan.clear_files);
+        assert!(missing_plan.error.contains("No session returned"));
+
+        let created = json!({"session": {"id": "sess-123"}});
+        let ok_plan = super::composer::plan_send_outcome(false, Ok(&created));
+        assert!(ok_plan.clear_draft);
+        assert!(ok_plan.clear_files);
+        assert!(ok_plan.error.is_empty());
+    }
 }

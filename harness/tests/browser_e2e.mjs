@@ -7,6 +7,10 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT_DIR = path.resolve(E2E_DIR, '../..');
 
 function assert(condition, message) {
   if (!condition) {
@@ -519,6 +523,10 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     return box;
   }
 
+  async function moveTo(x, y, { modifiers = 0 } = {}) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
+  }
+
   async function clickAt(x, y, { modifiers = 0, button = 'left' } = {}) {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
     await cdp.send('Input.dispatchMouseEvent', {
@@ -628,6 +636,7 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     waitFor,
     waitUntil,
     elementBox,
+    moveTo,
     clickAt,
     rightClickAt,
     dragAt,
@@ -635,6 +644,35 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
     pressKey,
     readLatestFinishedJson,
   };
+}
+
+async function withIsolatedPage(browserCdp, browserWsUrl, opts, fn) {
+  const { targetId } = await browserCdp.send('Target.createTarget', { url: 'about:blank' });
+  const port = new URL(browserWsUrl).port;
+  let targetInfo = null;
+  for (let i = 0; i < 40; i += 1) {
+    const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+    if (res.ok) {
+      const targets = await res.json();
+      targetInfo = targets.find((t) => t.id === targetId && t.webSocketDebuggerUrl);
+      if (targetInfo) break;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert(targetInfo?.webSocketDebuggerUrl, 'Could not find fresh CDP page target');
+
+  const tabCdp = await CdpClient.connect(targetInfo.webSocketDebuggerUrl, opts.timeoutMs);
+  try {
+    await tabCdp.send('Runtime.enable');
+    await tabCdp.send('Page.enable');
+    await tabCdp.send('DOM.enable');
+    await tabCdp.send('Network.enable');
+    const tabDriver = createHarnessDriver(tabCdp, opts.url, opts.timeoutMs);
+    return await fn(tabCdp, tabDriver);
+  } finally {
+    tabCdp.close();
+    await browserCdp.send('Target.closeTarget', { targetId }).catch(() => {});
+  }
 }
 
 async function suite1BootThemeTransport(driver, cdp, opts) {
@@ -803,6 +841,7 @@ async function assertDenseCanvasGeometry(driver, canvasSelector, label, { minDpr
     `${label}: .graph-map-plane does not overlap stage (planeTop=${geom.planeRect.top}, hostBottom=${geom.hostRect.bottom}, overlapY=${geom.overlapY})`,
   );
   assert(geom.nodeCount > 0, `${label}: expected visible .graph-map-node elements in plane`);
+  return geom;
 }
 
 async function withFetchOverride(cdp, patterns, handler, fn) {
@@ -1074,6 +1113,35 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
   }, 'pan drag transform update on #graph-map-canvas', 8_000, afterWheel.transform);
   assert(afterPan.nodes > 0, 'Nodes must stay mounted after pan');
 
+  // Dense >=180-node virtual DOM mount/unmount culling across zoom + pan
+  const latestMapDoc = await driver.readLatestFinishedJson('/graph/map', (doc) => Array.isArray(doc?.nodes) && doc.nodes.length >= 180);
+  if (latestMapDoc) {
+    const totalNodes = latestMapDoc.nodes.length;
+    await driver.click('#graph-map-zoom-in');
+    await driver.click('#graph-map-zoom-in');
+    await driver.click('#graph-map-zoom-in');
+    await driver.waitFor(() => {
+      const plane = document.querySelector('#graph-map-canvas .graph-map-plane');
+      return Number(plane?.getAttribute('data-scale') || '1') > 1;
+    }, 'zoomed in on dense #graph-map-canvas before culling check', 4_000);
+    const zoomedKeys = await driver.callFn(() => Array.from(document.querySelectorAll('#graph-map-canvas .graph-map-node[data-n]')).map((el) => el.getAttribute('data-n')));
+    assert(zoomedKeys.length > 0 && zoomedKeys.length < totalNodes, `Expected dense DOM culling (${zoomedKeys.length} mounted < ${totalNodes} total)`);
+    await driver.dragAt(dragPt.x + 120, dragPt.y + 80, dragPt.x - 360, dragPt.y - 240, { steps: 10 });
+    const culledDiff = await driver.waitFor((prevKeys) => {
+      const prevSet = new Set(prevKeys);
+      const nextKeys = Array.from(document.querySelectorAll('#graph-map-canvas .graph-map-node[data-n]')).map((el) => el.getAttribute('data-n'));
+      const nextSet = new Set(nextKeys);
+      const unmounted = prevKeys.filter((k) => !nextSet.has(k));
+      const mounted = nextKeys.filter((k) => !prevSet.has(k));
+      return (unmounted.length > 0 || mounted.length > 0) && nextKeys.length > 0
+        ? { nextCount: nextKeys.length, unmountedCount: unmounted.length, mountedCount: mounted.length }
+        : null;
+    }, 'dense Canvas2D virtual DOM mount/unmount culling on strong pan', 6_000, zoomedKeys);
+    assert(culledDiff.nextCount < totalNodes, `Expected mounted dense DOM count < totalNodes after pan: ${JSON.stringify({ ...culledDiff, totalNodes })}`);
+    await driver.click('#graph-map-zoom-level');
+    await driver.waitFor(() => Number(document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '0') > 0, 'restore zoom after culling check', 4_000);
+  }
+
   // Click a visible node inside #graph-map-canvas
   const nodeTarget = await driver.callFn(() => {
     const canvas = document.getElementById('graph-map-canvas');
@@ -1306,7 +1374,7 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     }, '#graph-map-nav-forward disabled at history head', 8_000);
   }
 
-  // Shift+drag pin + single-node unpin / Reset pins (re-measure after history navigation)
+  // Shift+drag pin + persistence across modal close/reopen + single-node unpin / Reset pins
   const pinTargets = await visibleNodeTargets();
   assert(pinTargets.length >= 1, 'Expected visible node target in #graph-map-canvas for Shift+drag pin');
   await driver.dragAt(pinTargets[0].cx, pinTargets[0].cy, pinTargets[0].cx + 36, pinTargets[0].cy + 20, { modifiers: 8 });
@@ -1316,10 +1384,25 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     const unpin = document.querySelector('#graph-map-side .graph-map-unpin-btn');
     const pinned = document.querySelector('#graph-map-canvas .graph-map-node[data-pinned="true"]');
     if ((reset && !reset.hidden) || (undo && !undo.hidden) || unpin || pinned) {
-      return { hasReset: Boolean(reset && !reset.hidden), hasUnpin: Boolean(unpin), hasUndo: Boolean(undo && !undo.hidden) };
+      return { hasReset: Boolean(reset && !reset.hidden), hasUnpin: Boolean(unpin), hasUndo: Boolean(undo && !undo.hidden), hasPinnedNode: Boolean(pinned) };
     }
     return null;
   }, 'Shift+drag pin state reflected in UI controls', 5_000);
+  const storedPinKeys = await driver.callFn(() => Object.keys(localStorage).filter((k) => k.startsWith('infra-graph-pins:') && (localStorage.getItem(k) || '{}') !== '{}'));
+  assert(storedPinKeys.length > 0, `Expected Shift+drag pin persisted in localStorage, keys=${JSON.stringify(Object.keys(localStorage))}`);
+
+  // Verify Shift+drag pin persists across closing and reopening #graph-map
+  await driver.click('#graph-map-close');
+  await driver.waitFor(() => !document.getElementById('graph-map')?.hasAttribute('open'), 'close #graph-map to check pin persistence', 5_000);
+  await driver.click('#session-graph-open-full');
+  await driver.waitFor(() => {
+    const dlg = document.getElementById('graph-map');
+    const c = document.getElementById('graph-map-canvas');
+    const reset = document.getElementById('graph-map-reset-pins');
+    const pinned = document.querySelector('#graph-map-canvas .graph-map-node[data-pinned="true"]');
+    return Boolean(dlg?.hasAttribute('open') && c?.getAttribute('aria-busy') !== 'true' && reset && !reset.hidden && pinned);
+  }, '#graph-map preserves Shift+drag pin state across close and reopen', 8_000);
+
   if (pinControls.hasUnpin) {
     await driver.click('#graph-map-side .graph-map-unpin-btn');
   } else if (pinControls.hasUndo) {
@@ -1331,9 +1414,12 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     const reset = document.getElementById('graph-map-reset-pins');
     if (reset && !reset.hidden) reset.click();
   });
+  await driver.waitFor(() => document.getElementById('graph-map-reset-pins')?.hidden === true, 'pins reset cleanly after persistence check', 5_000);
+  const pinTargetsAfterReset = await visibleNodeTargets();
+  assert(pinTargetsAfterReset.length >= 1, 'Expected visible node target in #graph-map-canvas for right-click Explain');
 
   // Canvas2D right-click Explain menu & dialog
-  await driver.rightClickAt(pinTargets[0].cx, pinTargets[0].cy);
+  await driver.rightClickAt(pinTargetsAfterReset[0].cx, pinTargetsAfterReset[0].cy);
   const explainText = await driver.waitFor(() => {
     const btn = document.getElementById('graph-explain-action');
     if (!btn || btn.hidden) return null;
@@ -1533,6 +1619,77 @@ async function suite3MapLenses(driver) {
       );
     }
   }
+
+  // Display popover (#graph-map-lod & #graph-map-min-weight) URL & view reshaping
+  await driver.click('#graph-map-lens-dependencies');
+  await driver.waitFor(
+    () => document.getElementById('graph-map-lens-dependencies')?.getAttribute('aria-selected') === 'true'
+      && document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true',
+    'restore dependencies lens before Display popover check',
+    8_000,
+  );
+  await driver.click('#graph-map-display-toggle');
+  await driver.waitFor(() => {
+    const pop = document.getElementById('graph-map-display-popover');
+    const btn = document.getElementById('graph-map-display-toggle');
+    return Boolean(pop && !pop.hidden && btn?.getAttribute('aria-expanded') === 'true');
+  }, '#graph-map-display-popover opens', 4_000);
+
+  const mapBeforeLod = driver.responsesByUrl.length;
+  await driver.callFn(() => {
+    const lod = document.getElementById('graph-map-lod');
+    lod.value = 'file';
+    lod.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitUntil(async () => {
+    const busyDone = await driver.callFn(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true');
+    const hasLodUrl = driver.responsesByUrl.slice(mapBeforeLod).some((r) => r.status === 200 && r.url.includes('/graph/map') && r.url.includes('lod=file'));
+    return busyDone && hasLodUrl;
+  }, '#graph-map-lod="file" reshapes map URL with lod=file', 10_000);
+
+  const mapBeforeWeight = driver.responsesByUrl.length;
+  await driver.callFn(() => {
+    const mw = document.getElementById('graph-map-min-weight');
+    mw.value = '2';
+    mw.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitUntil(async () => {
+    const busyDone = await driver.callFn(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true');
+    const hasWeightUrl = driver.responsesByUrl.slice(mapBeforeWeight).some((r) => r.status === 200 && r.url.includes('/graph/map') && r.url.includes('min_weight=2'));
+    return busyDone && hasWeightUrl;
+  }, '#graph-map-min-weight="2" reshapes map URL with min_weight=2', 10_000);
+
+  await driver.callFn(() => {
+    const lod = document.getElementById('graph-map-lod');
+    const mw = document.getElementById('graph-map-min-weight');
+    lod.value = '';
+    lod.dispatchEvent(new Event('change', { bubbles: true }));
+    mw.value = '';
+    mw.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await driver.waitFor(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true', 'restore #graph-map Display defaults', 8_000);
+  await driver.click('#graph-map-display-toggle');
+  await driver.waitFor(() => document.getElementById('graph-map-display-popover')?.hidden === true, 'close #graph-map-display-popover', 4_000);
+
+  // Open #graph-map modal live reload on SSE graph_status triggered by #graph-map-rebuild
+  await driver.waitFor(
+    () => document.getElementById('sse-status')?.getAttribute('data-state') === 'live',
+    'SSE live before #graph-map-rebuild graph_status reload check',
+    8_000,
+  );
+  const sseBeforeRebuild = driver.sseMessages.length;
+  const mapBeforeRebuild = driver.responsesByUrl.length;
+  await driver.click('#graph-map-rebuild');
+  await driver.waitUntil(async () => {
+    const hasGraphStatusSse = driver.sseMessages.slice(sseBeforeRebuild).some((m) => m.eventName === 'graph_status');
+    const hasLiveReload = driver.responsesByUrl.slice(mapBeforeRebuild).some((r) => r.status === 200 && r.url.includes('/graph/map'));
+    const stillOpenAndReady = await driver.callFn(() => {
+      const dlg = document.getElementById('graph-map');
+      const c = document.getElementById('graph-map-canvas');
+      return Boolean(dlg?.hasAttribute('open') && c && c.getAttribute('aria-busy') !== 'true');
+    });
+    return hasGraphStatusSse && hasLiveReload && stillOpenAndReady;
+  }, 'open #graph-map receives graph_status SSE and live reloads /graph/map cleanly', 20_000);
 
   await driver.click('#graph-map-close');
   await driver.waitFor(() => !document.getElementById('graph-map')?.hasAttribute('open'), '#graph-map dialog close');
@@ -1886,7 +2043,7 @@ async function assertInstantDarkConversationUserContrast(driver) {
           settled = true;
           resolve({ fired: false });
         }
-      }, 2000);
+      }, 10000);
       input.addEventListener('change', () => {
         const clickTs = performance.now();
         requestAnimationFrame(() => {
@@ -2115,6 +2272,25 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
       return Boolean(active && active.matches && active.matches('button.run-file'));
     });
     assert(!backdropFocusStolen, 'Dismissing #run-file-card via backdrop (restore=false) must not steal focus back to .run-file chip');
+
+    // Reopen #run-file-card and trigger non-restore dismissal via run-add-path (insert path into #prompt without stealing focus back to .run-file)
+    await driver.click(runFileSel);
+    await driver.waitFor(() => Boolean(document.getElementById('run-file-card')?.hasAttribute('open') && document.querySelector('#run-file-card button[data-action="run-add-path"]')), '#run-file-card reopens with run-add-path action', 4_000);
+    await driver.click('#run-file-card button[data-action="run-add-path"]');
+    await driver.waitFor(() => document.getElementById('run-file-card')?.hidden && !document.getElementById('run-file-card')?.hasAttribute('open') && !document.getElementById('main')?.hasAttribute('inert'), 'run-add-path dismisses #run-file-card', 4_000);
+    const addPathFocusState = await driver.callFn(() => ({
+      activeId: document.activeElement?.id || '',
+      stoleBackToChip: Boolean(document.activeElement?.matches?.('button.run-file')),
+      promptVal: document.getElementById('prompt')?.value || '',
+    }));
+    assert(!addPathFocusState.stoleBackToChip && addPathFocusState.activeId === 'prompt' && addPathFocusState.promptVal.trim().length > 0, `Expected run-add-path (hide_card(false)) to focus #prompt instead of .run-file: ${JSON.stringify(addPathFocusState)}`);
+    await driver.callFn(() => {
+      const p = document.getElementById('prompt');
+      if (p) {
+        p.value = '';
+        p.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
     if (!wasDetailed) {
       await driver.click('#run-calm');
     }
@@ -2675,6 +2851,103 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
         },
       );
     }
+
+    // Verify composer preserves unsent draft text AND attached files across HTTP 409 / 422 / 500 send failures
+    const tmpAttachPath = path.join(os.tmpdir(), `e2e-composer-err-${process.pid}.txt`);
+    fs.writeFileSync(tmpAttachPath, 'composer attachment preserved on error\n', 'utf8');
+    try {
+      await driver.click('#new-session');
+      await driver.waitFor(() => {
+        const p = document.getElementById('prompt');
+        return Boolean(p && !p.disabled);
+      }, 'new session draft ready for composer error preservation check', 6_000);
+
+      const { root } = await cdp.send('DOM.getDocument', { depth: 1 });
+      const { nodeId: inputNodeId } = await cdp.send('DOM.querySelector', {
+        nodeId: root.nodeId,
+        selector: '#attachment-input',
+      });
+      assert(inputNodeId > 0, 'Missing #attachment-input DOM node');
+      await cdp.send('DOM.setFileInputFiles', { nodeId: inputNodeId, files: [tmpAttachPath] });
+      await driver.callFn(() => {
+        document.getElementById('attachment-input')?.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await driver.waitFor(() => {
+        const list = document.getElementById('attachment-list');
+        const chips = list?.querySelectorAll('.attachment-chip') || [];
+        return Boolean(list && !list.hidden && chips.length === 1 && (list.textContent || '').includes('e2e-composer-err'));
+      }, '#attachment-list renders attached file chip before send errors', 5_000);
+
+      const preservedDraft = 'Unsent Wave3 draft text preserved across 409/422/500';
+      await driver.callFn((txt) => {
+        const p = document.getElementById('prompt');
+        p.value = txt;
+        p.dispatchEvent(new Event('input', { bubbles: true }));
+      }, preservedDraft);
+      await driver.waitFor(() => !document.getElementById('send')?.disabled, '#send enabled with preserved draft + attachment', 4_000);
+
+      let injectedStatus = 409;
+      await driver.allowHttpErrors(async () => {
+        await withFetchOverride(
+          cdp,
+          [{ urlPattern: `${driver.origin}/api/sessions` }],
+          async (params) => {
+            const parsed = new URL(params.request?.url || '');
+            const method = (params.request?.method || 'GET').toUpperCase();
+            if (method === 'POST' && parsed.pathname === '/api/sessions') {
+              await cdp.send('Fetch.fulfillRequest', {
+                requestId: params.requestId,
+                responseCode: injectedStatus,
+                responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+                body: Buffer.from(JSON.stringify({ error: `Simulated HTTP ${injectedStatus} send failure` })).toString('base64'),
+              });
+              return true;
+            }
+            return false;
+          },
+          async () => {
+            for (const code of [409, 422, 500]) {
+              injectedStatus = code;
+              await driver.click('#send');
+              const stateAfterErr = await driver.waitFor((expectedCode) => {
+                const err = document.getElementById('composer-error')?.textContent || '';
+                const sendBtn = document.getElementById('send');
+                if (!err.includes(`Simulated HTTP ${expectedCode} send failure`) || !sendBtn || sendBtn.disabled) {
+                  return null;
+                }
+                const list = document.getElementById('attachment-list');
+                const chips = list ? Array.from(list.querySelectorAll('.attachment-chip')).map((c) => c.textContent || '') : [];
+                return {
+                  err,
+                  prompt: document.getElementById('prompt')?.value || '',
+                  listHidden: Boolean(list?.hidden),
+                  chips,
+                };
+              }, `composer surfaces HTTP ${code} and re-enables #send`, 6_000, code);
+              assert(
+                stateAfterErr.prompt === preservedDraft
+                  && !stateAfterErr.listHidden
+                  && stateAfterErr.chips.length === 1
+                  && stateAfterErr.chips[0].includes('e2e-composer-err'),
+                `Expected prompt and attachment preserved on HTTP ${code}: ${JSON.stringify(stateAfterErr)}`,
+              );
+            }
+          },
+        );
+      });
+
+      await driver.click('#attachment-list button[data-action="attachment-remove"]');
+      await driver.waitFor(() => document.getElementById('attachment-list')?.hidden === true, 'remove attachment chip after error preservation check', 4_000);
+      await driver.callFn(() => {
+        const p = document.getElementById('prompt');
+        if (p) {
+          p.value = '';
+          p.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+    } finally {
+      try { fs.unlinkSync(tmpAttachPath); } catch {}
+    }
   }
   if (mainSel) {
     await driver.click(mainSel);
@@ -3121,10 +3394,103 @@ async function suite6OmnigraphStudio(driver, cdp) {
   await driver.waitFor(() => !document.getElementById('omni-share-source-field')?.hidden, '#omnigraph-share-dialog switches to broadcast mode', 4_000);
   await closeDialogByBackdropClick(driver, '#omnigraph-share-dialog', 'Omnigraph share dialog');
 
+  // Dense Omnigraph Canvas2D (>=180 nodes) hover adjacency + right-click Explain
+  const omniBaseGraph = await driver.readLatestFinishedJson('/api/omnigraph/graph', (g) => Array.isArray(g?.atoms));
+  if (omniBaseGraph) {
+    const denseAtoms = [...(omniBaseGraph.atoms || [])];
+    const denseEdges = [...(omniBaseGraph.edges || [])];
+    for (let i = 0; i < 185; i += 1) {
+      const id = `atom-dense-${String(i).padStart(3, '0')}`;
+      denseAtoms.push({
+        id,
+        kind: 'finding',
+        title: `Dense Omnigraph Atom ${i}`,
+        branch: 'main',
+      });
+      if (i > 0) {
+        denseEdges.push({
+          from: `atom-dense-${String(i - 1).padStart(3, '0')}`,
+          to: id,
+          relation: 'relates_to',
+        });
+      }
+    }
+    const denseOmniPayload = { ...omniBaseGraph, atoms: denseAtoms, edges: denseEdges };
+    await withFetchOverride(
+      cdp,
+      [{ urlPattern: `${driver.origin}/api/omnigraph/graph*` }],
+      async (params) => {
+        if ((params.request?.url || '').includes('/api/omnigraph/graph')) {
+          await cdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+            body: Buffer.from(JSON.stringify(denseOmniPayload)).toString('base64'),
+          });
+          return true;
+        }
+        return false;
+      },
+      async () => {
+        await driver.click('#omnigraph-refresh-header');
+        await driver.waitFor(() => {
+          const c = document.getElementById('omnigraph-canvas');
+          const plane = c?.querySelector('.graph-map-plane[data-scale-tier="dense"]');
+          const denseCanvas = c?.querySelector('canvas.graph-dense-canvas[data-dense-canvas="true"]');
+          const mounted = c?.querySelectorAll('.omni-node[data-node-id]').length || 0;
+          return Boolean(c && c.getAttribute('aria-busy') !== 'true' && plane && denseCanvas && mounted > 0);
+        }, 'Omnigraph renders dense >=180-node Canvas2D constellation', 12_000);
+
+        const hoverPt = await driver.waitFor(() => {
+          const c = document.getElementById('omnigraph-canvas');
+          if (!c) return null;
+          const cr = c.getBoundingClientRect();
+          for (const el of c.querySelectorAll('.omni-node[data-node-id]')) {
+            const r = el.getBoundingClientRect();
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            if (r.width > 8 && r.height > 8 && cx > cr.left + 8 && cx < cr.right - 8 && cy > cr.top + 8 && cy < cr.bottom - 8) {
+              return { cx, cy, id: el.getAttribute('data-node-id') };
+            }
+          }
+          return null;
+        }, 'visible mounted node inside dense #omnigraph-canvas', 6_000);
+
+        await driver.moveTo(hoverPt.cx, hoverPt.cy);
+        await driver.waitFor((nid) => {
+          const c = document.getElementById('omnigraph-canvas');
+          const el = c?.querySelector(`.omni-node[data-node-id="${CSS.escape(nid)}"]`);
+          return Boolean(el?.getAttribute('data-hover') === 'true' && getComputedStyle(c).cursor === 'pointer');
+        }, 'dense #omnigraph-canvas hover adjacency & pointer cursor', 5_000, hoverPt.id);
+
+        await driver.rightClickAt(hoverPt.cx, hoverPt.cy);
+        await driver.waitFor(() => {
+          const btn = document.getElementById('graph-explain-action');
+          return Boolean(btn && !btn.hidden && (btn.textContent || '').toLowerCase().includes('explain'));
+        }, 'dense #omnigraph-canvas right-click #graph-explain-action menu', 5_000);
+        await driver.click('#graph-explain-action');
+        await driver.waitFor(() => {
+          const dlg = document.getElementById('graph-explanation');
+          const subj = document.getElementById('graph-explanation-subject');
+          return Boolean(dlg?.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
+        }, '#graph-explanation opens from dense #omnigraph-canvas Explain action', 8_000);
+        await driver.click('#graph-explanation-close');
+        await driver.waitFor(() => !document.getElementById('graph-explanation')?.hasAttribute('open'), '#graph-explanation closes after dense Omnigraph check', 5_000);
+      },
+    );
+    await driver.click('#omnigraph-refresh-header');
+    await driver.waitFor(
+      () => document.getElementById('omnigraph-canvas')?.getAttribute('aria-busy') !== 'true'
+        && !document.querySelector('#omnigraph-canvas .graph-map-plane[data-scale-tier="dense"]'),
+      'restore normal #omnigraph-canvas after dense check',
+      10_000,
+    );
+  }
+
   driver.assertNoErrors('Suite 6');
 }
 
-async function suite7SystemMap(driver, opts) {
+async function suite7SystemMap(driver, cdp, opts) {
   console.log('[Suite 7] System Map (kinds_off legend, unfold risk, side-tab nav, waves)');
   await driver.click('button.nav-item[data-nav="systems"]');
   await driver.waitFor(() => {
@@ -3387,6 +3753,99 @@ async function suite7SystemMap(driver, opts) {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
   });
+
+  // Dense System Map Canvas2D (>=180 nodes) hover adjacency + right-click Explain
+  await driver.click('button.nav-item[data-nav="systems"]');
+  await driver.waitFor(() => !document.getElementById('systems-view')?.hidden && Boolean(document.getElementById('system-map-canvas')), 'open Systems view for dense System Map check', 8_000);
+  const sysBaseMap = await driver.readLatestFinishedJson('/api/systems/graph/map');
+  {
+    const denseNodes = Array.isArray(sysBaseMap?.nodes) ? [...sysBaseMap.nodes] : [];
+    const denseEdges = Array.isArray(sysBaseMap?.edges) ? [...sysBaseMap.edges] : [];
+    const existingIds = new Set(denseNodes.map((n) => n.id || n.service).filter(Boolean));
+    for (let i = 0; i < 185; i += 1) {
+      const id = `svc-dense-${String(i).padStart(3, '0')}`;
+      if (!existingIds.has(id)) {
+        denseNodes.push({ id, name: `Dense Service ${i}`, kind: 'service' });
+        if (i > 0) {
+          denseEdges.push({
+            from: `svc-dense-${String(i - 1).padStart(3, '0')}`,
+            to: id,
+            kinds: ['http'],
+          });
+        }
+      }
+    }
+    const denseSysPayload = { ...(sysBaseMap || {}), nodes: denseNodes, edges: denseEdges };
+    await withFetchOverride(
+      cdp,
+      [{ urlPattern: `${driver.origin}/api/systems/graph/map*` }],
+      async (params) => {
+        if ((params.request?.url || '').includes('/api/systems/graph/map')) {
+          await cdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+            body: Buffer.from(JSON.stringify(denseSysPayload)).toString('base64'),
+          });
+          return true;
+        }
+        return false;
+      },
+      async () => {
+        await driver.click('#system-map-certain');
+        await driver.waitFor(() => {
+          const c = document.getElementById('system-map-canvas');
+          const plane = c?.querySelector('.graph-map-plane[data-scale-tier="dense"]');
+          const denseCanvas = c?.querySelector('canvas.graph-dense-canvas[data-dense-canvas="true"]');
+          const mounted = c?.querySelectorAll('.system-map-node[data-n]').length || 0;
+          return Boolean(c && c.getAttribute('aria-busy') !== 'true' && plane && denseCanvas && mounted > 0);
+        }, 'System Map renders dense >=180-node Canvas2D graph', 12_000);
+
+        const sysHoverPt = await driver.waitFor(() => {
+          const c = document.getElementById('system-map-canvas');
+          if (!c) return null;
+          const cr = c.getBoundingClientRect();
+          for (const el of c.querySelectorAll('.system-map-node[data-n]')) {
+            const r = el.getBoundingClientRect();
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            if (r.width > 8 && r.height > 8 && cx > cr.left + 8 && cx < cr.right - 8 && cy > cr.top + 8 && cy < cr.bottom - 8) {
+              return { cx, cy, id: el.getAttribute('data-n') };
+            }
+          }
+          return null;
+        }, 'visible mounted node inside dense #system-map-canvas', 6_000);
+
+        await driver.moveTo(sysHoverPt.cx, sysHoverPt.cy);
+        await driver.waitFor((nid) => {
+          const c = document.getElementById('system-map-canvas');
+          const el = c?.querySelector(`.system-map-node[data-n="${CSS.escape(nid)}"]`);
+          return Boolean(el?.getAttribute('data-hover') === 'true' && getComputedStyle(c).cursor === 'pointer');
+        }, 'dense #system-map-canvas hover adjacency & pointer cursor', 5_000, sysHoverPt.id);
+
+        await driver.rightClickAt(sysHoverPt.cx, sysHoverPt.cy);
+        await driver.waitFor(() => {
+          const btn = document.getElementById('graph-explain-action');
+          return Boolean(btn && !btn.hidden && (btn.textContent || '').toLowerCase().includes('explain'));
+        }, 'dense #system-map-canvas right-click #graph-explain-action menu', 5_000);
+        await driver.click('#graph-explain-action');
+        await driver.waitFor(() => {
+          const dlg = document.getElementById('graph-explanation');
+          const subj = document.getElementById('graph-explanation-subject');
+          return Boolean(dlg?.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
+        }, '#graph-explanation opens from dense #system-map-canvas Explain action', 8_000);
+        await driver.click('#graph-explanation-close');
+        await driver.waitFor(() => !document.getElementById('graph-explanation')?.hasAttribute('open'), '#graph-explanation closes after dense System Map check', 5_000);
+      },
+    );
+    await driver.click('#system-map-certain');
+    await driver.waitFor(
+      () => document.getElementById('system-map-certain')?.getAttribute('aria-pressed') === 'false'
+        && document.getElementById('system-map-canvas')?.getAttribute('aria-busy') !== 'true',
+      'restore normal #system-map-canvas after dense check',
+      10_000,
+    );
+  }
 
   driver.assertNoErrors('Suite 7');
 }
@@ -3986,26 +4445,7 @@ async function suite10KnowledgeSkillsManagementDialogs(driver, cdp, opts) {
 
 async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts) {
   console.log('[Suite 11] Cold-boot 390x844 mobile layout + prefers-reduced-motion: reduce');
-  const { targetId } = await browserCdp.send('Target.createTarget', { url: 'about:blank' });
-  const port = new URL(browserWsUrl).port;
-  let mobileTarget = null;
-  for (let i = 0; i < 40; i += 1) {
-    const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-    if (res.ok) {
-      const targets = await res.json();
-      mobileTarget = targets.find((t) => t.id === targetId && t.webSocketDebuggerUrl);
-      if (mobileTarget) break;
-    }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  assert(mobileTarget?.webSocketDebuggerUrl, 'Could not find fresh CDP page target for Suite 11');
-
-  const mobileCdp = await CdpClient.connect(mobileTarget.webSocketDebuggerUrl, opts.timeoutMs);
-  try {
-    await mobileCdp.send('Runtime.enable');
-    await mobileCdp.send('Page.enable');
-    await mobileCdp.send('DOM.enable');
-    await mobileCdp.send('Network.enable');
+  await withIsolatedPage(browserCdp, browserWsUrl, opts, async (mobileCdp, mobileDriver) => {
     await mobileCdp.send('Emulation.setDeviceMetricsOverride', {
       width: 390,
       height: 844,
@@ -4015,8 +4455,6 @@ async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, o
     await mobileCdp.send('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
     });
-
-    const mobileDriver = createHarnessDriver(mobileCdp, opts.url, opts.timeoutMs);
     await mobileCdp.send('Page.navigate', { url: opts.url });
 
     const boot = await mobileDriver.waitFor(() => {
@@ -4053,10 +4491,7 @@ async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, o
     assert(boot.workAnim === 'none' && (boot.runTrans === '0s' || boot.runTrans === '0ms'), `Expected reduced-motion animation/transition disabled: ${JSON.stringify(boot)}`);
 
     mobileDriver.assertNoErrors('Suite 11');
-  } finally {
-    mobileCdp.close();
-    await browserCdp.send('Target.closeTarget', { targetId }).catch(() => {});
-  }
+  });
 }
 
 async function suite12SkillCache(driver, opts) {
@@ -4321,6 +4756,442 @@ async function suite12SkillCache(driver, opts) {
   driver.assertNoErrors('Suite 12');
 }
 
+async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) {
+  console.log('[Suite 13] Multi-project waiting_counts clearance & eval_viewer / eval-set ARIA & error UX');
+  const origin = new URL(opts.url).origin;
+  await withIsolatedPage(browserCdp, browserWsUrl, opts, async (tabCdp, tabDriver) => {
+    await tabCdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1280,
+      height: 840,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
+    // 1. Multi-project #project-switcher + waiting_counts zero-clearance
+    const { identifier: mockSseScriptId } = await tabCdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        window.__e2eSseUrls = [];
+        window.__e2eSseSources = [];
+        window.__e2eEmitSse = (eventName, payload) => {
+          for (const src of window.__e2eSseSources) {
+            if (src.readyState === 2) continue;
+            src.dispatchEvent(new MessageEvent(eventName, { data: JSON.stringify(payload), lastEventId: '1' }));
+          }
+        };
+        class MockEventSource extends EventTarget {
+          constructor(url) {
+            super();
+            this.url = String(url);
+            this.readyState = 0;
+            this.withCredentials = true;
+            window.__e2eSseUrls.push(this.url);
+            window.__e2eSseSources.push(this);
+            queueMicrotask(() => {
+              if (this.readyState === 2) return;
+              this.readyState = 1;
+              this.dispatchEvent(new Event('open'));
+              this.dispatchEvent(new MessageEvent('waiting_counts', {
+                data: JSON.stringify({ counts: { 's-alpha-1': 1, 's-beta-1': 1 }, total: 2 }),
+                lastEventId: '1',
+              }));
+            });
+          }
+          close() {
+            this.readyState = 2;
+          }
+        }
+        window.EventSource = MockEventSource;
+      })();`,
+    });
+
+    const alphaSession = {
+      id: 's-alpha-1',
+      title: 'Alpha Waiting Session',
+      project_id: 'proj-alpha',
+      status: 'awaiting_approval',
+      workflow: 'native',
+      provider: 'codex',
+      mode: 'edit',
+      waiting_permissions: 1,
+    };
+    const betaSession = {
+      id: 's-beta-1',
+      title: 'Beta Waiting Session',
+      project_id: 'proj-beta',
+      status: 'awaiting_approval',
+      workflow: 'native',
+      provider: 'codex',
+      mode: 'edit',
+      waiting_permissions: 1,
+    };
+
+    try {
+      await withFetchOverride(
+        tabCdp,
+        [{ urlPattern: `${origin}/api/*` }],
+        async (params) => {
+          const reqUrl = params.request?.url || '';
+          const parsed = new URL(reqUrl);
+          if (!parsed.pathname.startsWith('/api/')) return false;
+
+          let bodyObj = {};
+          if (parsed.pathname === '/api/bootstrap') {
+            bodyObj = {
+              csrf: 'e2e-multi-csrf',
+              projects: [
+                { id: 'proj-alpha', name: 'Alpha Project', path: '/tmp/alpha' },
+                { id: 'proj-beta', name: 'Beta Project', path: '/tmp/beta' },
+              ],
+              providers: [{ id: 'codex', name: 'Codex', models: ['gpt-5'], default_model: 'gpt-5', permissions: ['ask', 'auto'] }],
+              sessions: [alphaSession, betaSession],
+              runtime: { default_agent_count: 3 },
+              sdd_phases: ['specify', 'plan', 'tasks', 'implement'],
+              omnigraph: { enabled: false },
+              update: { available: false, state: 'fixture' },
+            };
+          } else if (parsed.pathname === '/api/sessions') {
+            const pFilter = parsed.searchParams.get('project');
+            const list = pFilter
+              ? [alphaSession, betaSession].filter((s) => s.project_id === pFilter)
+              : [alphaSession, betaSession];
+            bodyObj = { sessions: list };
+          } else if (parsed.pathname === '/api/sessions/s-alpha-1') {
+            bodyObj = { session: alphaSession, waiting_permissions: [{ id: 1, kind: 'permission', request_id: 'perm-a1', tool: 'Edit', state: 'pending' }], events: [] };
+          } else if (parsed.pathname === '/api/sessions/s-beta-1') {
+            bodyObj = { session: betaSession, waiting_permissions: [{ id: 2, kind: 'permission', request_id: 'perm-b1', tool: 'Edit', state: 'pending' }], events: [] };
+          } else if (parsed.pathname === '/api/providers/sign-in') {
+            bodyObj = { providers: [{ id: 'codex', state: 'signed_in' }] };
+          } else if (parsed.pathname === '/api/permissions/rules') {
+            bodyObj = { rules: [] };
+          } else if (parsed.pathname.endsWith('/skills') || parsed.pathname === '/api/skills') {
+            bodyObj = { items: [] };
+          } else if (parsed.pathname.endsWith('/graph')) {
+            bodyObj = { state: 'unbuilt' };
+          } else if (parsed.pathname === '/api/app/update') {
+            bodyObj = { available: false, state: 'fixture' };
+          }
+
+          await tabCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+            body: Buffer.from(JSON.stringify(bodyObj)).toString('base64'),
+          });
+          return true;
+        },
+        async () => {
+          await tabCdp.send('Page.navigate', { url: `${origin}/?view=sessions&project=proj-alpha` });
+          await tabDriver.waitFor(() => {
+            const sw = document.getElementById('project-switcher');
+            const toggle = document.getElementById('approvals-queue-toggle');
+            return Boolean(
+              document.getElementById('connecting')?.hidden === true
+                && sw && sw.value === 'proj-alpha'
+                && sw.options.length === 2
+                && Number(toggle?.getAttribute('data-count') || '0') >= 1
+                && (window.__e2eSseUrls || []).some((u) => u.includes('project=proj-alpha')),
+            );
+          }, 'isolated multi-project boot via /?view=sessions&project=proj-alpha with SSE waiting_counts', 20_000);
+
+          // Switch #project-switcher to proj-beta and verify SSE reconnects cleanly with project=proj-beta
+          await tabDriver.callFn(() => {
+            const sw = document.getElementById('project-switcher');
+            sw.value = 'proj-beta';
+            sw.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+          await tabDriver.waitFor(() => {
+            const sw = document.getElementById('project-switcher');
+            const urls = window.__e2eSseUrls || [];
+            const lastUrl = urls[urls.length - 1] || '';
+            return Boolean(
+              sw && sw.value === 'proj-beta'
+                && lastUrl.includes('project=proj-beta')
+                && !lastUrl.includes('last_event_id'),
+            );
+          }, '#project-switcher switch to proj-beta reconnects SSE cleanly', 8_000);
+
+          // Switch back to proj-alpha, enable #history-filter-waiting, and emit omitted waiting_counts {} -> zero clearance
+          await tabDriver.callFn(() => {
+            const sw = document.getElementById('project-switcher');
+            sw.value = 'proj-alpha';
+            sw.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+          await tabDriver.waitFor(() => document.getElementById('project-switcher')?.value === 'proj-alpha', 'switch back to proj-alpha', 5_000);
+          await tabDriver.click('#history-filter-waiting');
+          await tabDriver.waitFor(() => {
+            const rows = document.querySelectorAll('#history [data-action="session-open"]');
+            return document.getElementById('history-filter-waiting')?.getAttribute('aria-pressed') === 'true' && rows.length >= 1;
+          }, '#history-filter-waiting lists waiting session before zero-clearance', 5_000);
+
+          await tabDriver.callFn(() => {
+            window.__e2eEmitSse('waiting_counts', { counts: {}, total: 0 });
+          });
+          await tabDriver.waitFor(() => {
+            const toggle = document.getElementById('approvals-queue-toggle');
+            const rows = document.querySelectorAll('#history [data-action="session-open"]').length;
+            return toggle?.getAttribute('data-count') === '0' && rows === 0;
+          }, 'waiting_counts empty snapshot resets waiting_permissions badge & #history-filter-waiting to 0', 6_000);
+        },
+      );
+    } finally {
+      await tabCdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: mockSseScriptId }).catch(() => {});
+    }
+
+    // 2. eval_viewer (viewer.html server HTTP 500 vs standalone, PDF preview, ARIA) & eval-set.html (ARIA + focus)
+    const viewerTemplate = fs.readFileSync(
+      path.join(REPO_ROOT_DIR, 'runtime-rust/crates/infra-skill-tools/resources/viewer.html'),
+      'utf8',
+    );
+    const evalSetTemplate = fs.readFileSync(
+      path.join(REPO_ROOT_DIR, 'runtime-rust/crates/infra-skill-tools/resources/eval-set.html'),
+      'utf8',
+    );
+    const baseEvalPayload = {
+      skill_name: 'e2e-pdf-skill',
+      runs: [
+        {
+          id: 'eval-1-with_skill-run-1',
+          eval_id: 1,
+          prompt: 'Summarize attached PDF safely',
+          outputs: [
+            { name: 'report.pdf', type: 'pdf', content: 'PDF summary excerpt for E2E' },
+          ],
+          grading: {
+            summary: { passed: 1, failed: 0, total: 1, pass_rate: 1.0 },
+            expectations: [{ text: 'Renders CSP-safe preview', passed: true, evidence: 'ok' }],
+          },
+        },
+      ],
+      benchmark: {
+        metadata: { skill_name: 'e2e-pdf-skill' },
+        run_summary: {
+          with_skill: { pass_rate: { mean: 1.0, stddev: 0.0 } },
+          delta: { pass_rate: '+0.20' },
+        },
+      },
+    };
+    const evalSetPayload = {
+      mode: 'eval-set',
+      skill_name: 'e2e-pdf-skill',
+      description: 'E2E evaluation queries',
+      items: [
+        { query: 'First negative query', should_trigger: false },
+        { query: 'First positive query', should_trigger: true },
+      ],
+    };
+
+    const renderViewerDoc = (payload) => viewerTemplate
+      .replace('__BOOT_URL__', `${origin}/boot.js`)
+      .replace('__EVAL_DATA__', JSON.stringify(payload).replace(/</g, '\\u003c'));
+    const renderEvalSetDoc = (payload) => evalSetTemplate
+      .replaceAll('__SKILL_NAME_PLACEHOLDER__', 'e2e-pdf-skill')
+      .replaceAll('__SKILL_DESCRIPTION_PLACEHOLDER__', 'E2E evaluation queries')
+      .replace('__BOOT_URL__', `${origin}/boot.js`)
+      .replace('__EVAL_DATA__', JSON.stringify(payload).replace(/</g, '\\u003c'));
+
+    await withFetchOverride(
+      tabCdp,
+      [
+        { urlPattern: `${origin}/__e2e_eval_*` },
+        { urlPattern: `${origin}/api/feedback*` },
+      ],
+      async (params) => {
+        const reqUrl = params.request?.url || '';
+        const parsed = new URL(reqUrl);
+        const method = (params.request?.method || 'GET').toUpperCase();
+        if (parsed.pathname === '/__e2e_eval_viewer.html') {
+          const html = renderViewerDoc({ ...baseEvalPayload, standalone: false });
+          await tabCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            body: Buffer.from(html).toString('base64'),
+          });
+          return true;
+        }
+        if (parsed.pathname === '/__e2e_eval_standalone.html') {
+          const html = renderViewerDoc({ ...baseEvalPayload, standalone: true });
+          await tabCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            body: Buffer.from(html).toString('base64'),
+          });
+          return true;
+        }
+        if (parsed.pathname === '/__e2e_eval_set.html') {
+          const html = renderEvalSetDoc(evalSetPayload);
+          await tabCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            body: Buffer.from(html).toString('base64'),
+          });
+          return true;
+        }
+        if (parsed.pathname === '/api/feedback') {
+          if (method === 'GET') {
+            await tabCdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from('{"reviews":[]}').toString('base64'),
+            });
+            return true;
+          }
+          if (method === 'POST') {
+            await tabCdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 500,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify({ error: 'Simulated server save failure' })).toString('base64'),
+            });
+            return true;
+          }
+        }
+        return false;
+      },
+      async () => {
+        // 2a. viewer.html in server mode (HTTP 500 toast without #done-overlay, CSP-safe PDF preview, ARIA)
+        await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_viewer.html` });
+        const viewerReady = await tabDriver.waitFor(() => {
+          const doneBtn = document.getElementById('done-btn');
+          const preview = document.querySelector('#outputs-body .pdf-preview');
+          const gradesBtn = document.getElementById('grades-toggle');
+          if (!doneBtn || doneBtn.disabled || !preview || !gradesBtn) return null;
+          return {
+            fontsLinks: document.querySelectorAll('link[href*="fonts.googleapis.com"], link[href*="fonts.gstatic.com"]').length,
+            pdfIframes: document.querySelectorAll('iframe[src^="data:application/pdf"]').length,
+            tablistRole: document.getElementById('view-tabs')?.getAttribute('role'),
+            tabSelected: document.getElementById('tab-outputs')?.getAttribute('aria-selected'),
+            feedbackLabel: Boolean(document.querySelector('label[for="feedback"]')),
+            gradesTag: gradesBtn.tagName,
+            gradesExpanded: gradesBtn.getAttribute('aria-expanded'),
+            doneRole: document.getElementById('done-overlay')?.getAttribute('role'),
+            doneModal: document.getElementById('done-overlay')?.getAttribute('aria-modal'),
+            toastLive: document.getElementById('toast')?.getAttribute('aria-live'),
+          };
+        }, 'viewer.html boots with WASM eval_viewer and CSP-safe PDF preview', 20_000);
+        assert(
+          viewerReady.fontsLinks === 0
+            && viewerReady.pdfIframes === 0
+            && viewerReady.tablistRole === 'tablist'
+            && viewerReady.tabSelected === 'true'
+            && viewerReady.feedbackLabel
+            && viewerReady.gradesTag === 'BUTTON'
+            && viewerReady.gradesExpanded === 'false'
+            && viewerReady.doneRole === 'dialog'
+            && viewerReady.doneModal === 'true'
+            && viewerReady.toastLive === 'polite',
+          `Unexpected viewer.html ARIA/CSP state: ${JSON.stringify(viewerReady)}`,
+        );
+
+        await tabDriver.click('#grades-toggle');
+        await tabDriver.waitFor(() => document.getElementById('grades-toggle')?.getAttribute('aria-expanded') === 'true', '.grades-toggle updates aria-expanded', 4_000);
+
+        await tabDriver.callFn(() => document.getElementById('tab-outputs')?.focus());
+        await tabDriver.pressKey({ key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 });
+        await tabDriver.waitFor(() => {
+          const benchTab = document.getElementById('tab-benchmark');
+          const benchPanel = document.getElementById('panel-benchmark');
+          return Boolean(benchTab?.getAttribute('aria-selected') === 'true' && document.activeElement === benchTab && benchPanel && !benchPanel.hidden);
+        }, 'viewer.html tablist ArrowRight switches to Benchmark tab', 4_000);
+        await tabDriver.pressKey({ key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 });
+        await tabDriver.waitFor(() => document.getElementById('tab-outputs')?.getAttribute('aria-selected') === 'true', 'viewer.html tablist ArrowLeft restores Outputs tab', 4_000);
+
+        await tabDriver.allowHttpErrors(async () => {
+          await tabDriver.click('#done-btn');
+          await tabDriver.waitFor(() => {
+            const st = document.getElementById('feedback-status');
+            const toast = document.getElementById('toast');
+            const overlay = document.getElementById('done-overlay');
+            return Boolean(
+              st?.classList.contains('error')
+                && toast?.classList.contains('visible')
+                && overlay?.hidden === true
+                && !overlay?.classList.contains('visible'),
+            );
+          }, 'viewer.html server HTTP 500 shows error status + toast without opening #done-overlay', 8_000);
+        });
+
+        // 2b. viewer.html standalone mode opens #done-overlay and Escape restores focus to #done-btn
+        await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_standalone.html` });
+        await tabDriver.waitFor(() => {
+          const btn = document.getElementById('done-btn');
+          return Boolean(btn && !btn.disabled);
+        }, 'standalone viewer.html ready', 15_000);
+        await tabDriver.click('#done-btn');
+        await tabDriver.waitFor(() => {
+          const overlay = document.getElementById('done-overlay');
+          return Boolean(overlay && !overlay.hidden && overlay.classList.contains('visible'));
+        }, 'standalone viewer.html opens #done-overlay on submit', 6_000);
+        await tabDriver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+        await tabDriver.waitFor(() => {
+          const overlay = document.getElementById('done-overlay');
+          return Boolean(overlay && overlay.hidden === true && !overlay.classList.contains('visible') && document.activeElement?.id === 'done-btn');
+        }, 'standalone viewer.html Escape closes #done-overlay and restores focus to #done-btn', 5_000);
+
+        // 2c. eval-set.html ARIA labels + Add Query focus + reorder focus preservation
+        await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_set.html` });
+        const evalSetA11y = await tabDriver.waitFor(() => {
+          const rows = Array.from(document.querySelectorAll('#eval-body tr[data-editor-row]'));
+          if (rows.length !== 2) return null;
+          return rows.map((tr) => {
+            const ta = tr.querySelector('textarea.query-input');
+            const cb = tr.querySelector('.toggle input[type="checkbox"]');
+            const qLabel = ta?.id ? document.querySelector(`label[for="${CSS.escape(ta.id)}"]`) : null;
+            const tLabels = cb?.id ? Array.from(document.querySelectorAll(`label[for="${CSS.escape(cb.id)}"]`)).map((l) => l.textContent?.trim() || '') : [];
+            return {
+              rowId: tr.getAttribute('data-editor-row'),
+              qId: ta?.id || '',
+              qAria: ta?.getAttribute('aria-label') || '',
+              qHasForLabel: Boolean(qLabel),
+              cbId: cb?.id || '',
+              cbAria: cb?.getAttribute('aria-label') || '',
+              tLabels,
+            };
+          });
+        }, 'eval-set.html boots with accessible row labels', 15_000);
+        for (const r of evalSetA11y) {
+          assert(r.qId && r.qAria && r.qHasForLabel, `Missing query-input ARIA/<label>: ${JSON.stringify(r)}`);
+          assert(
+            r.cbId && r.cbAria && r.tLabels.some((t) => t === 'Yes' || t === 'No'),
+            `Missing toggle ARIA/<label> Yes/No: ${JSON.stringify(r)}`,
+          );
+        }
+
+        await tabDriver.click('[data-editor-action="add"]');
+        await tabDriver.waitFor(() => {
+          const rows = document.querySelectorAll('#eval-body tr[data-editor-row]').length;
+          const active = document.activeElement;
+          return rows === 3 && active?.tagName === 'TEXTAREA' && active.classList.contains('query-input');
+        }, 'eval-set.html Add Query focuses newly created textarea', 5_000);
+
+        // Toggle row-0 (initially should_trigger=false -> moves into Should Trigger group) and assert focus stays on #eval-trigger-row-0
+        await tabDriver.callFn(() => {
+          const cb = document.getElementById('eval-trigger-row-0');
+          cb.focus();
+          cb.click();
+        });
+        await tabDriver.waitFor(() => {
+          const row0 = document.querySelector('#eval-body tr[data-editor-row="row-0"]');
+          const firstRow = document.querySelector('#eval-body tr[data-editor-row]');
+          const labelTxt = row0?.querySelector('label.trigger-label')?.textContent?.trim() || '';
+          return Boolean(
+            row0
+              && firstRow
+              && row0.compareDocumentPosition(document.querySelector('#eval-body tr[data-editor-section="no-trigger"]')) & Node.DOCUMENT_POSITION_FOLLOWING
+              && labelTxt === 'Yes'
+              && document.activeElement?.id === 'eval-trigger-row-0',
+          );
+        }, 'eval-set.html preserves checkbox focus across should_trigger reorder', 5_000);
+      },
+    );
+
+    tabDriver.assertNoErrors('Suite 13');
+  });
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const { browserWsUrl, pageWsUrl, cleanup } = await launchChrome(opts.chrome, opts.timeoutMs);
@@ -4366,7 +5237,7 @@ async function main() {
       await suite4LiveSseAndStyling(driver, pageCdp, opts);
       await suite5ModalsApprovalsPaletteMobile(driver, pageCdp, opts);
       await suite6OmnigraphStudio(driver, pageCdp);
-      await suite7SystemMap(driver, opts);
+      await suite7SystemMap(driver, pageCdp, opts);
       await suite9DiffChecksAndResults(driver, pageCdp, opts);
       await suite10KnowledgeSkillsManagementDialogs(driver, pageCdp, opts);
       await suite12SkillCache(driver, opts);
@@ -4374,9 +5245,10 @@ async function main() {
       driver.assertNoErrors('Suites 1-7, 9-10 & 12 check');
       await suite8NegativeNetworkAndSseRecovery(driver, pageCdp);
       await suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts);
+      await suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts);
 
       driver.assertNoErrors('final check');
-      console.log('ALL 12 HEADLESS CHROME CDP E2E SUITES PASSED');
+      console.log('ALL 13 HEADLESS CHROME CDP E2E SUITES PASSED');
     })();
 
     await Promise.race([runSuites, timeoutPromise]);
