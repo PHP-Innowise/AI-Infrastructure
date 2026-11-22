@@ -37,6 +37,9 @@ non-cached input normalized on Codex, `null` on Cursor) plus `skillcache_runs`.
 The regression that runs in CI uses a scripted driver and calls no provider
 (`runtime-rust/crates/infra-cli/tests/skillcache_eval.rs`).
 
+The runs made against a real provider so far, their verdicts and what they
+found are in [SkillCache pilots](SKILLCACHE-PILOT.md).
+
 ## The protocol
 
 `seal` takes a plan and writes the sealed protocol once: the same document

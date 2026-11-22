@@ -773,6 +773,9 @@ eval-only ablation modes `raw_trace`, `written_procedure`, `skillcache_agent`,
 and `skillcache_no_replay` unlocked only when store setting
 `skillcache.eval_arms` is `true`), the isolated verifiers, and the verdict.
 A report is evidence for the question that was sealed; it turns nothing on.
+The runs made so far are in
+[docs/SKILLCACHE-PILOT.md](../docs/SKILLCACHE-PILOT.md): three sealed pilots
+with three different verdicts, which is why every mode stays opt-in.
 
 ### Starting the server
 
