@@ -102,6 +102,8 @@ pub struct Capabilities {
     pub network: Network,
     /// Bare names of the interpreters the programs start, such as `python3`.
     pub runtimes: Vec<String>,
+    /// Optional safe folder/file names re-enabled for change tracking when ignored by default.
+    pub allow_ignored: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -671,10 +673,33 @@ impl SkillCapsule {
         if self.form == Form::Textual {
             return capsule.into();
         }
-        capsule.insert(
-            "capabilities".into(),
-            json!({"network": self.capabilities.network.as_str(), "runtimes": self.capabilities.runtimes}),
+        let mut capabilities = Map::new();
+        capabilities.insert("network".into(), self.capabilities.network.as_str().into());
+        capabilities.insert(
+            "runtimes".into(),
+            Value::Array(
+                self.capabilities
+                    .runtimes
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
         );
+        if !self.capabilities.allow_ignored.is_empty() {
+            capabilities.insert(
+                "allow_ignored".into(),
+                Value::Array(
+                    self.capabilities
+                        .allow_ignored
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        capsule.insert("capabilities".into(), Value::Object(capabilities));
         capsule.insert(
             "bindings".into(),
             self.bindings
@@ -857,6 +882,7 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
             capabilities: Capabilities {
                 network: Network::None,
                 runtimes: Vec::new(),
+                allow_ignored: Vec::new(),
             },
             bindings: Vec::new(),
             programs: Vec::new(),
@@ -865,7 +891,11 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
         });
     }
     let capabilities = reader.required(map, "capabilities", "").and_then(|value| {
-        let capabilities = reader.object(value, "capabilities", &["network", "runtimes"])?;
+        let capabilities = reader.object(
+            value,
+            "capabilities",
+            &["network", "runtimes", "allow_ignored"],
+        )?;
         let network = match capabilities.get("network").and_then(Value::as_str) {
             Some("none") => Some(Network::None),
             Some("required") => Some(Network::Required),
@@ -898,9 +928,32 @@ fn read_capsule(value: &Value, violations: &mut Vec<Violation>) -> Option<SkillC
                 }
             }
         }
+        let mut allow_ignored = Vec::new();
+        if let Some(items) = capabilities
+            .get("allow_ignored")
+            .filter(|v| !v.is_null())
+            .and_then(|items| reader.array(items, "capabilities.allow_ignored", RUNTIMES))
+        {
+            for (index, item) in items.iter().enumerate() {
+                match item.as_str() {
+                    Some(name)
+                        if crate::executor::is_safe_allowlist_name(name)
+                            && !allow_ignored.iter().any(|known| known == name) =>
+                    {
+                        allow_ignored.push(name.to_string());
+                    }
+                    _ => reader.refuse(
+                        "invalid_value",
+                        &format!("capabilities.allow_ignored[{index}]"),
+                        "An allowed entry must be a distinct non-sensitive folder or file name.",
+                    ),
+                }
+            }
+        }
         Some(Capabilities {
             network: network?,
             runtimes,
+            allow_ignored,
         })
     });
     let mut bindings = Vec::new();

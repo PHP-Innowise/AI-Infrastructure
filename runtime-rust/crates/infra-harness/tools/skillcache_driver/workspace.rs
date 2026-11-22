@@ -96,7 +96,7 @@ fn overlay_skills(task: &TaskConfig, dst: &Path) -> Result<bool> {
     let mut budget = CopyBudget { files: 0, bytes: 0 };
     for skill_src in &task.skills {
         let name = skill_dir_name(skill_src)?;
-        for target_base in [".claude/skills", ".agents/skills"] {
+        for target_base in [".claude/skills", ".agents/skills", ".cursor/skills"] {
             let target = dst.join(target_base).join(&name);
             core_fs::admit_descendant(dst, &target)?;
             copy_tree_no_links(skill_src, &target, 0, &mut budget, true)?;

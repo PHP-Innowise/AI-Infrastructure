@@ -17,6 +17,7 @@ const ENTRIES: usize = 50_000;
 const BYTES: usize = 256 * 1024 * 1024;
 const DEPTH: usize = 32;
 const EVIDENCE_BYTES: usize = 8 * 1024 * 1024;
+const OBSERVED_TEXT_BYTES: usize = 16 * 1024;
 const FILE: &str = "observed-result.json";
 const META_FILE: &str = "observed-meta.json";
 pub(super) const MISSING: &str = "the observed workspace result was not captured within its file, size, depth and time limits; observe a new turn in a workspace the Harness can capture";
@@ -37,6 +38,8 @@ pub(super) struct ObservedResult {
     pub(super) changes: Changes,
     pub(super) structural: Manifest,
     pub(super) paths: BTreeMap<String, String>,
+    pub(super) observed_text: Option<String>,
+    pub(super) observed_json: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -44,14 +47,21 @@ struct ObservedMeta {
     #[serde(default)]
     created: BTreeSet<String>,
     #[serde(default)]
+    mutated: BTreeSet<String>,
+    #[serde(default)]
     structural: Manifest,
     #[serde(default)]
     paths: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_json: Option<Value>,
 }
 
 struct Capture<'a> {
     workspace: &'a Path,
     excluded: Option<&'a Path>,
+    allowlist: &'a [String],
     captured: Captured,
     entries_left: usize,
     bytes_left: usize,
@@ -74,9 +84,11 @@ impl Capture<'_> {
             }
             let entry = entry?;
             let path = entry.path();
-            if snapshot::should_skip_name(&entry.file_name(), depth)
-                || self.excluded == Some(path.as_path())
-            {
+            let ignored = entry.file_name().to_str().is_some_and(|name| {
+                infra_skillcache::executor::is_ignored_workspace_name_with(name, self.allowlist)
+                    || (depth == 0 && snapshot::is_root_skipped_name(name))
+            });
+            if ignored || self.excluded == Some(path.as_path()) {
                 continue;
             }
             let metadata = fs::symlink_metadata(&path)?;
@@ -210,10 +222,20 @@ pub(super) fn values_structurally_equal(expected: &Value, actual: &Value) -> boo
     }
 }
 
+#[cfg(test)]
 pub(crate) fn capture(workspace: &Path, excluded: Option<&Path>) -> Result<Captured> {
+    capture_with(workspace, excluded, &[])
+}
+
+pub(crate) fn capture_with(
+    workspace: &Path,
+    excluded: Option<&Path>,
+    allowlist: &[String],
+) -> Result<Captured> {
     let mut capture = Capture {
         workspace,
         excluded,
+        allowlist,
         captured: Captured::default(),
         entries_left: ENTRIES,
         bytes_left: BYTES,
@@ -257,6 +279,8 @@ pub(super) fn diff(before: &Captured, after: &Captured) -> ObservedResult {
         changes: changed,
         structural,
         paths,
+        observed_text: None,
+        observed_json: None,
     }
 }
 
@@ -268,7 +292,9 @@ fn meta_path(state: &Path, generation: &str) -> Result<PathBuf> {
     Ok(snapshot::folder(state, generation)?.join(META_FILE))
 }
 
-pub(super) fn created_hashes(snapshot_folder: &Path) -> BTreeSet<String> {
+/// Returns path hashes created or mutated/deleted during the observed turn so
+/// fallback dependency copying in Git materialization skips them.
+pub(super) fn contaminated_hashes(snapshot_folder: &Path) -> BTreeSet<String> {
     let Ok(mut files) = PublicationFiles::new(snapshot_folder) else {
         return BTreeSet::new();
     };
@@ -276,22 +302,97 @@ pub(super) fn created_hashes(snapshot_folder: &Path) -> BTreeSet<String> {
         return BTreeSet::new();
     };
     serde_json::from_slice::<ObservedMeta>(&bytes)
-        .map(|meta| meta.created)
+        .map(|mut meta| {
+            meta.created.extend(meta.mutated);
+            meta.created
+        })
         .unwrap_or_default()
 }
 
+fn extract_observed_output(text: Option<&str>) -> (Option<String>, Option<Value>) {
+    let Some(raw) = text else {
+        return (None, None);
+    };
+    let masked = match infra_core::domain::mask_secrets(raw) {
+        Ok((masked, _)) => masked,
+        Err(_) => return (None, None),
+    };
+    let trimmed = masked.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    let bounded = if trimmed.len() <= OBSERVED_TEXT_BYTES {
+        trimmed.to_owned()
+    } else {
+        let mut end = OBSERVED_TEXT_BYTES;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        trimmed[..end].to_owned()
+    };
+    let parsed_json = parse_observed_json(&bounded);
+    (Some(bounded), parsed_json)
+}
+
+fn parse_observed_json(text: &str) -> Option<Value> {
+    let parse_obj_or_arr = |candidate: &str| -> Option<Value> {
+        let trimmed = candidate.trim();
+        if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            return None;
+        }
+        let val =
+            infra_core::strict_json::parse(trimmed.as_bytes(), OBSERVED_TEXT_BYTES, 32, 10_000)
+                .ok()?;
+        match &val {
+            Value::Object(map) if !map.is_empty() => Some(val),
+            Value::Array(arr) if !arr.is_empty() => Some(val),
+            _ => None,
+        }
+    };
+    if let Some(val) = parse_obj_or_arr(text) {
+        return Some(val);
+    }
+    let mut candidate = None;
+    let mut cursor = text;
+    while let Some(start) = cursor.find("```") {
+        let after = &cursor[start + 3..];
+        let body_start = after.find('\n').map_or(0, |n| n + 1);
+        let body_rest = &after[body_start..];
+        let Some(end) = body_rest.find("```") else {
+            break;
+        };
+        if let Some(val) = parse_obj_or_arr(&body_rest[..end]) {
+            candidate = Some(val);
+        }
+        cursor = &body_rest[end + 3..];
+    }
+    candidate
+}
+
+#[cfg(test)]
 pub(crate) fn record(
     state: &Path,
     workspace: &Path,
     generation: &str,
     before: Captured,
 ) -> Result<()> {
+    record_with_output(state, workspace, generation, before, None, &[])
+}
+
+pub(crate) fn record_with_output(
+    state: &Path,
+    workspace: &Path,
+    generation: &str,
+    before: Captured,
+    observed_output: Option<&str>,
+    allowlist: &[String],
+) -> Result<()> {
     if snapshot::load(state, generation)?.is_none() {
         return Err(HarnessError::unavailable(
             "The starting workspace snapshot is unavailable.",
         ));
     }
-    let after = capture(workspace, Some(state))?;
+    let after = capture_with(workspace, Some(state), allowlist)?;
     let diff = diff(&before, &after);
     let created = diff
         .changes
@@ -299,6 +400,13 @@ pub(crate) fn record(
         .filter(|(hash, digest)| digest.is_some() && !before.digests.contains_key(*hash))
         .map(|(hash, _)| hash.clone())
         .collect::<BTreeSet<_>>();
+    let mutated = diff
+        .changes
+        .iter()
+        .filter(|(hash, _)| before.digests.contains_key(*hash))
+        .map(|(hash, _)| hash.clone())
+        .collect::<BTreeSet<_>>();
+    let (observed_text, observed_json) = extract_observed_output(observed_output);
     let bytes = serde_json::to_vec(&diff.changes)?;
     if bytes.len() > EVIDENCE_BYTES {
         return Err(HarnessError::unavailable(
@@ -307,8 +415,11 @@ pub(crate) fn record(
     }
     let meta = ObservedMeta {
         created,
+        mutated,
         structural: diff.structural,
         paths: diff.paths,
+        observed_text,
+        observed_json,
     };
     let meta_bytes = serde_json::to_vec(&meta)?;
     if meta_bytes.len() > EVIDENCE_BYTES {
@@ -345,6 +456,8 @@ pub(super) fn load_expected(state: &Path, generation: &str) -> Result<ObservedRe
         changes,
         structural: meta.structural,
         paths: meta.paths,
+        observed_text: meta.observed_text,
+        observed_json: meta.observed_json,
     })
 }
 
@@ -412,5 +525,42 @@ mod tests {
             structural_digest("report.md", text_a),
             structural_digest("report.md", text_c)
         );
+    }
+
+    #[test]
+    fn capture_skips_dependency_trees_unless_allowlisted_and_records_observed_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = core_fs::canonicalize(temp.path()).unwrap();
+        let state = workspace.join(".state");
+        fs::create_dir_all(workspace.join("node_modules/pkg")).unwrap();
+        fs::write(workspace.join("node_modules/pkg/index.js"), b"v1").unwrap();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/a.txt"), b"hello").unwrap();
+
+        let snap = snapshot::take(&state, &workspace, "g1").unwrap().unwrap();
+        assert_eq!(snap["kind"], "tree");
+        let before = capture(&workspace, Some(&state)).unwrap();
+        assert_eq!(before.digests.len(), 1);
+
+        fs::write(workspace.join("node_modules/pkg/index.js"), b"v2").unwrap();
+        record_with_output(
+            &state,
+            &workspace,
+            "g1",
+            before,
+            Some("```json\n{\"total\": 42, \"currency\": \"USD\"}\n```"),
+            &[],
+        )
+        .unwrap();
+        let expected = load_expected(&state, "g1").unwrap();
+        assert!(expected.changes.is_empty());
+        assert_eq!(
+            expected.observed_json,
+            Some(serde_json::json!({"total": 42, "currency": "USD"}))
+        );
+
+        let allow = vec!["node_modules".into()];
+        let with_allow = capture_with(&workspace, Some(&state), &allow).unwrap();
+        assert_eq!(with_allow.digests.len(), 2);
     }
 }

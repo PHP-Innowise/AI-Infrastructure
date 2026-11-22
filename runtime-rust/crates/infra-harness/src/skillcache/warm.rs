@@ -320,41 +320,60 @@ fn block(stored: &package::Package, skill_path: &str) -> String {
 }
 
 /// Deterministic fallback when multiple eligible active capsules match one skill:
-/// fewest recent post-requalify deopts, then hybrid form, then newest update.
+/// lowest smoothed recent post-requalify failure/incomplete rate, then hybrid form,
+/// then newest update.
 fn best_by_health_and_recency(store: &SessionStore, candidates: &[Value]) -> Value {
     let db = store.connection().ok();
-    let recent_deopts = |capsule_id: &str| -> i64 {
-        db.as_ref()
+    let health_rate = |capsule_id: &str| -> f64 {
+        let (total, unhealthy) = db
+            .as_ref()
             .and_then(|conn| {
                 conn.query_row(
-                    "SELECT COALESCE(SUM(deopts),0) FROM skillcache_runs
+                    "SELECT COUNT(*),
+                            COALESCE(SUM(CASE WHEN deopts > 0 OR outcome IN ('unfinished','not_started') THEN 1 ELSE 0 END), 0)
+                     FROM skillcache_runs
                      WHERE capsule_id=?1
                        AND rowid>COALESCE((SELECT runs_reset_rowid FROM skillcache_capsules WHERE capsule_id=?1),0)",
                     [capsule_id],
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .ok()
             })
-            .unwrap_or(0)
+            .unwrap_or((0, 0));
+        (unhealthy as f64 + 0.5) / (total as f64 + 3.0)
     };
     candidates
         .iter()
         .min_by(|a, b| {
-            let da = recent_deopts(a["capsule_id"].as_str().unwrap_or(""));
-            let db_val = recent_deopts(b["capsule_id"].as_str().unwrap_or(""));
+            let ra = health_rate(a["capsule_id"].as_str().unwrap_or(""));
+            let rb = health_rate(b["capsule_id"].as_str().unwrap_or(""));
             let ha = a["form"] != "hybrid";
             let hb = b["form"] != "hybrid";
             let ua = a["updated_at"].as_str().unwrap_or("");
             let ub = b["updated_at"].as_str().unwrap_or("");
             let ida = a["capsule_id"].as_str().unwrap_or("");
             let idb = b["capsule_id"].as_str().unwrap_or("");
-            da.cmp(&db_val)
+            ra.total_cmp(&rb)
                 .then_with(|| ha.cmp(&hb))
                 .then_with(|| ub.cmp(ua))
                 .then_with(|| ida.cmp(idb))
         })
         .cloned()
         .unwrap_or_else(|| candidates[0].clone())
+}
+
+fn is_read_only_capsule(capsule_row: &Value) -> bool {
+    if capsule_row["form"] == "textual" {
+        return true;
+    }
+    let warm_dir = PathBuf::from(capsule_row["artifact_dir"].as_str().unwrap_or("")).join("warm");
+    package::load(&warm_dir).is_ok_and(|stored| {
+        stored
+            .capsule
+            .programs
+            .iter()
+            .all(|program| program.read_only)
+    })
 }
 
 /// Among several active capsules of one skill, the one whose description
@@ -591,12 +610,7 @@ fn decide_for(
             "a native command goes to the CLI as typed, without Harness instructions",
         );
     }
-    if session["mode"] != "edit" {
-        return miss(
-            "plan_mode",
-            "a capsule's programs write, and this is a read-only turn",
-        );
-    }
+    let plan_only = session["mode"] != "edit";
     if !["claude", "codex", "cursor"].contains(&provider) {
         return miss(
             "provider",
@@ -667,6 +681,12 @@ fn decide_for(
                 "Cursor runs textual capsules only; hybrid capsules require Claude or Codex",
             );
         }
+        if plan_only && !is_read_only_capsule(&row) {
+            return miss(
+                "plan_mode",
+                "a capsule's programs write, and this is a read-only turn",
+            );
+        }
         let skill_path = row["skill_path"].as_str().unwrap_or("").to_string();
         (row, skill_path)
     } else {
@@ -685,12 +705,6 @@ fn decide_for(
             .as_str()
             .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
         else {
-            if provider == "cursor" {
-                return miss(
-                    "provider",
-                    "Cursor warm turns require an active textual capsule",
-                );
-            }
             return miss(
                 "no_capsule",
                 "the routed skill is not a skill folder of this project or of your home",
@@ -714,6 +728,7 @@ fn decide_for(
             Ok(candidates) => candidates,
             Err(error) => return miss("unavailable", error.to_string()),
         };
+        let has_any = !candidates.is_empty();
         let eligible = if provider == "cursor" {
             candidates
                 .into_iter()
@@ -722,11 +737,29 @@ fn decide_for(
         } else {
             candidates
         };
-        let chosen = match eligible.len() {
-            0 if provider == "cursor" => {
+        if eligible.is_empty() {
+            if has_any && provider == "cursor" {
                 return miss(
                     "provider",
                     "Cursor runs textual capsules only; no active textual capsule exists for this skill",
+                );
+            }
+            return miss("no_capsule", "no qualified capsule exists for this skill");
+        }
+        let had_provider_eligible = !eligible.is_empty();
+        let eligible = if plan_only {
+            eligible
+                .into_iter()
+                .filter(is_read_only_capsule)
+                .collect::<Vec<_>>()
+        } else {
+            eligible
+        };
+        let chosen = match eligible.len() {
+            0 if plan_only && had_provider_eligible => {
+                return miss(
+                    "plan_mode",
+                    "a capsule's programs write, and this is a read-only turn",
                 );
             }
             0 => return miss("no_capsule", "no qualified capsule exists for this skill"),
@@ -1171,7 +1204,7 @@ impl Warm {
             let _ = db::touch_capsule(&db, &self.capsule_id);
             // Behind its setting only: enough failing warm turns since the
             // last qualification hand back to a person.
-            if deopts > 0
+            if (deopts > 0 || matches!(outcome, "unfinished" | "not_started"))
                 && let Some((window, failed)) = thresholds
                 && let Ok(Some(cap)) = db::capsule(&db, &self.capsule_id)
                 && let Some(since) = cap["updated_at"].as_str()
@@ -1179,7 +1212,10 @@ impl Warm {
             {
                 let handed_back = recent
                     .iter()
-                    .filter(|run| run["deopts"].as_i64().unwrap_or_default() > 0)
+                    .filter(|run| {
+                        run["deopts"].as_i64().unwrap_or_default() > 0
+                            || matches!(run["outcome"].as_str(), Some("unfinished" | "not_started"))
+                    })
                     .count();
                 let reason = format!(
                     "{handed_back} of its last {} warm turns handed a program step back.",
@@ -1371,11 +1407,11 @@ mod tests {
         );
         assert_eq!(
             decide(&session("codex", "plan", "auto", "auto"), &one),
-            "plan_mode"
+            "no_capsule"
         );
         assert_eq!(
             decide(&session("cursor", "edit", "auto", "warm_only"), &one),
-            "provider"
+            "no_capsule"
         );
         // warm_disabled_for_codex_manual
         assert_eq!(
@@ -1893,6 +1929,20 @@ mod tests {
             Decision::Hit(warm) => assert_eq!(warm.capsule_id, "cap-hybrid"),
             other => panic!("expected deterministic hit, got {:?}", reason(&other)),
         }
+
+        // Removing the textual capsule leaves only cap-hybrid, so Cursor reports "provider".
+        let db = runtime.store.connection().unwrap();
+        db::set_capsule_status(&db, "cap-text", "retired", None).unwrap();
+        drop(db);
+        let hybrid_only = decide_for(
+            &runtime,
+            &session("cursor"),
+            &route,
+            "do pdf",
+            &workspace,
+            None,
+        );
+        assert_eq!(reason(&hybrid_only), "provider");
     }
 
     #[test]
@@ -1952,5 +2002,209 @@ mod tests {
             std::fs::read_link(bin.join("skillcache-run")).unwrap(),
             engine
         );
+    }
+
+    #[test]
+    fn health_rate_and_plan_mode_eligibility_behave_cleanly() {
+        let root = crate::skillcache::test_support::scratch();
+        let workspace = root.path().join("project");
+        let skill_dir = workspace.join(".agents/skills/pdf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# PDF\n").unwrap();
+        let tree = infra_skillcache::fingerprint::tree_sha256(&skill_dir).unwrap();
+        let runtime = runtime(root.path());
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&[]),
+        );
+        let project_id = runtime.store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let db = runtime.store.connection().unwrap();
+        let skill_ref = json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": tree.sha256});
+        let skill_files_json = json!({"skills": [{"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": tree.sha256, "files": tree.files}]});
+
+        let ro_dir = root.path().join("ro/warm");
+        let ro_manifest = json!({
+            "schema_version": 1, "form": "hybrid",
+            "mu": {"name": "pdf-ro", "description": "Read-only inspector"},
+            "source": {"skills": [skill_ref.clone()]},
+            "capabilities": {"network": "none", "runtimes": []},
+            "bindings": [],
+            "programs": [{"id": "inspect", "entry": ["python3", "programs/inspect/main.py"], "inputs": [], "outputs": [], "check": ["python3", "programs/inspect/main.py", "--check"], "timeout_seconds": 30, "read_only": true}],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        });
+        let ro_pkg = SkillCapsule::parse(&serde_json::to_vec(&ro_manifest).unwrap()).unwrap();
+        let mut ro_files = package::Files::new();
+        ro_files.insert("programs/inspect/main.py", b"print('{}')\n".to_vec());
+        let ro_sha = package::write_warm(&ro_dir, &ro_pkg, None, &ro_files).unwrap();
+        let ro_loaded = package::load(&ro_dir).unwrap();
+        db::begin_capsule(
+            &db,
+            "cap-ro",
+            "comp-ro",
+            &project_id,
+            "s1",
+            "g1",
+            &skill_ref,
+            None,
+        )
+        .unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "cap-ro",
+                mu_name: "pdf-ro",
+                mu_description: "Read-only inspector",
+                form: "hybrid",
+                capsule_sha256: &ro_loaded.capsule_sha256,
+                package_sha256: &ro_sha,
+                skill_files: &skill_files_json,
+                env_fingerprint: &env_fp,
+                engine_digest: "",
+                artifact_dir: ro_dir.parent().unwrap().to_str().unwrap(),
+                capabilities: &json!({"network": "none", "runtimes": []}),
+            },
+        )
+        .unwrap();
+
+        let rw_dir = root.path().join("rw/warm");
+        let rw_manifest = json!({
+            "schema_version": 1, "form": "hybrid",
+            "mu": {"name": "pdf-rw", "description": "Writer"},
+            "source": {"skills": [skill_ref.clone()]},
+            "capabilities": {"network": "none", "runtimes": []},
+            "bindings": [],
+            "programs": [{"id": "write", "entry": ["python3", "programs/write/main.py"], "inputs": [], "outputs": [], "check": ["python3", "programs/write/main.py", "--check"], "timeout_seconds": 30, "read_only": false}],
+            "steps": [{"kind": "program", "program": "write"}],
+            "verification": []
+        });
+        let rw_pkg = SkillCapsule::parse(&serde_json::to_vec(&rw_manifest).unwrap()).unwrap();
+        let mut rw_files = package::Files::new();
+        rw_files.insert("programs/write/main.py", b"print('{}')\n".to_vec());
+        let rw_sha = package::write_warm(&rw_dir, &rw_pkg, None, &rw_files).unwrap();
+        let rw_loaded = package::load(&rw_dir).unwrap();
+        db::begin_capsule(
+            &db,
+            "cap-rw",
+            "comp-rw",
+            &project_id,
+            "s1",
+            "g2",
+            &skill_ref,
+            None,
+        )
+        .unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "cap-rw",
+                mu_name: "pdf-rw",
+                mu_description: "Writer",
+                form: "hybrid",
+                capsule_sha256: &rw_loaded.capsule_sha256,
+                package_sha256: &rw_sha,
+                skill_files: &skill_files_json,
+                env_fingerprint: &env_fp,
+                engine_digest: "",
+                artifact_dir: rw_dir.parent().unwrap().to_str().unwrap(),
+                capabilities: &json!({"network": "none", "runtimes": []}),
+            },
+        )
+        .unwrap();
+        drop(db);
+
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "do pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md"})],
+            notice: None,
+        };
+        let plan_session = json!({
+            "id": "s-plan", "project_id": project_id, "provider": "claude", "mode": "plan",
+            "workflow": "native", "permissions": "auto",
+            "skillcache": settings::validate(&json!({"mode": "warm_only"})).unwrap(),
+        });
+        match decide_for(&runtime, &plan_session, &route, "do pdf", &workspace, None) {
+            Decision::Hit(warm) => assert_eq!(warm.capsule_id, "cap-ro"),
+            other => panic!(
+                "expected read-only hit in plan mode, got {:?}",
+                reason(&other)
+            ),
+        }
+
+        {
+            let db = runtime.store.connection().unwrap();
+            db::set_capsule_status(&db, "cap-ro", "retired", None).unwrap();
+        }
+        assert_eq!(
+            reason(&decide_for(
+                &runtime,
+                &plan_session,
+                &route,
+                "do pdf",
+                &workspace,
+                None
+            )),
+            "plan_mode"
+        );
+
+        {
+            let db = runtime.store.connection().unwrap();
+            db::set_capsule_status(&db, "cap-ro", "active", None).unwrap();
+            for i in 0..19 {
+                db::record_run(
+                    &db,
+                    &db::Run {
+                        capsule_id: "cap-ro",
+                        session_id: "s1",
+                        generation: &format!("ok-{i}"),
+                        provider: "claude",
+                        model: None,
+                        outcome: "complete",
+                        deopts: 0,
+                        steps: &json!([]),
+                    },
+                )
+                .unwrap();
+            }
+            db::record_run(
+                &db,
+                &db::Run {
+                    capsule_id: "cap-ro",
+                    session_id: "s1",
+                    generation: "bad",
+                    provider: "claude",
+                    model: None,
+                    outcome: "unfinished",
+                    deopts: 0,
+                    steps: &json!([]),
+                },
+            )
+            .unwrap();
+            db::record_run(
+                &db,
+                &db::Run {
+                    capsule_id: "cap-rw",
+                    session_id: "s1",
+                    generation: "bad2",
+                    provider: "claude",
+                    model: None,
+                    outcome: "not_started",
+                    deopts: 0,
+                    steps: &json!([]),
+                },
+            )
+            .unwrap();
+        }
+        let best = best_by_health_and_recency(
+            &runtime.store,
+            &[
+                json!({"capsule_id": "cap-rw", "form": "hybrid", "updated_at": "2026-12-01T00:00:00Z"}),
+                json!({"capsule_id": "cap-ro", "form": "hybrid", "updated_at": "2026-01-01T00:00:00Z"}),
+            ],
+        );
+        assert_eq!(best["capsule_id"], "cap-ro");
     }
 }

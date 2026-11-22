@@ -86,9 +86,8 @@ fn produces(step: &Step) -> &[String] {
     }
 }
 
-/// Workspace directory/file names ignored across snapshots, workspace comparisons,
-/// and observed-result captures.
-pub const IGNORED_WORKSPACE_NAMES: [&str; 6] = [
+/// Workspace directory/file names always ignored regardless of allowlist overrides.
+pub const ALWAYS_IGNORED_WORKSPACE_NAMES: [&str; 6] = [
     ".git",
     "__pycache__",
     ".pytest_cache",
@@ -97,9 +96,50 @@ pub const IGNORED_WORKSPACE_NAMES: [&str; 6] = [
     ".DS_Store",
 ];
 
+/// Large toolchain/vendor directory names ignored by default during workspace
+/// hashing and diffing unless explicitly allowlisted.
+pub const DEFAULT_IGNORED_WORKSPACE_NAMES: [&str; 6] =
+    ["node_modules", "vendor", ".venv", "dist", "build", ".next"];
+
+/// Workspace directory/file names ignored across workspace comparisons and
+/// observed-result captures.
+pub const IGNORED_WORKSPACE_NAMES: [&str; 12] = [
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+    "node_modules",
+    "vendor",
+    ".venv",
+    "dist",
+    "build",
+    ".next",
+];
+
+/// Whether `name` may appear in an allowlist overriding default workspace ignores.
+/// Rejects path traversal, separators, empty names, and always-ignored metadata.
+pub fn is_safe_allowlist_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', '\0'])
+        && !ALWAYS_IGNORED_WORKSPACE_NAMES.contains(&name)
+}
+
 /// Whether `name` is an ignored workspace metadata or cache entry at any depth.
 pub fn is_ignored_workspace_name(name: &str) -> bool {
-    IGNORED_WORKSPACE_NAMES.contains(&name)
+    is_ignored_workspace_name_with(name, &[])
+}
+
+/// Whether `name` is ignored when `allowlist` lists explicitly tracked names.
+pub fn is_ignored_workspace_name_with(name: &str, allowlist: &[String]) -> bool {
+    if ALWAYS_IGNORED_WORKSPACE_NAMES.contains(&name) {
+        return true;
+    }
+    DEFAULT_IGNORED_WORKSPACE_NAMES.contains(&name)
+        && !allowlist.iter().any(|allowed| allowed == name)
 }
 
 pub type WorkspaceEntry = (PathBuf, u64, Option<std::time::SystemTime>, Option<String>);
@@ -107,7 +147,16 @@ pub type WorkspaceEntry = (PathBuf, u64, Option<std::time::SystemTime>, Option<S
 /// Bounded workspace snapshot for tracking regular file creations/edits/deletions
 /// during a warm program step without walking huge monorepos.
 pub fn workspace_snapshot_for_changes(root: &Path) -> Option<Vec<WorkspaceEntry>> {
-    workspace_listing_limited(root, 10_000)
+    workspace_snapshot_for_changes_with(root, &[])
+}
+
+/// Like [`workspace_snapshot_for_changes`], honoring `allowlist` overrides for
+/// default-ignored dependency directories.
+pub fn workspace_snapshot_for_changes_with(
+    root: &Path,
+    allowlist: &[String],
+) -> Option<Vec<WorkspaceEntry>> {
+    workspace_listing_limited(root, 10_000, allowlist)
 }
 
 /// Computes bounded `{"path", "kind"}` entries between `before` and `after` snapshots.
@@ -162,11 +211,15 @@ pub fn diff_workspace_changes(
 
 /// `(path, size, modified, digest)` of everything below `root`, or `None` when
 /// the tree exceeds `max_entries`.
-fn workspace_listing(root: &Path) -> Option<Vec<WorkspaceEntry>> {
-    workspace_listing_limited(root, 200_000)
+fn workspace_listing(root: &Path, allowlist: &[String]) -> Option<Vec<WorkspaceEntry>> {
+    workspace_listing_limited(root, 200_000, allowlist)
 }
 
-fn workspace_listing_limited(root: &Path, max_entries: usize) -> Option<Vec<WorkspaceEntry>> {
+fn workspace_listing_limited(
+    root: &Path,
+    max_entries: usize,
+    allowlist: &[String],
+) -> Option<Vec<WorkspaceEntry>> {
     const HASH_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
     let mut entries = Vec::new();
     let mut folders = vec![root.to_path_buf()];
@@ -180,7 +233,7 @@ fn workspace_listing_limited(root: &Path, max_entries: usize) -> Option<Vec<Work
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_str();
-            if name_str.is_some_and(is_ignored_workspace_name)
+            if name_str.is_some_and(|n| is_ignored_workspace_name_with(n, allowlist))
                 || (folder == root
                     && name_str.is_some_and(|n| n == ".harness-tmp" || n == "target"))
             {
@@ -473,10 +526,11 @@ impl<'a> Runner<'a> {
                 "program_started",
                 json!({"step_index": step_index, "program": program.id, "attempt": attempt}),
             )?;
+            let allowlist = &self.session.package.capsule.capabilities.allow_ignored;
             let before = if self.check_read_only && program.read_only {
-                workspace_listing(self.session.workspace)
+                workspace_listing(self.session.workspace, allowlist)
             } else if !self.check_read_only {
-                workspace_snapshot_for_changes(self.session.workspace)
+                workspace_snapshot_for_changes_with(self.session.workspace, allowlist)
             } else {
                 None
             };
@@ -488,9 +542,9 @@ impl<'a> Runner<'a> {
             )?;
             let after = if before.is_some() {
                 if self.check_read_only && program.read_only {
-                    workspace_listing(self.session.workspace)
+                    workspace_listing(self.session.workspace, allowlist)
                 } else {
-                    workspace_snapshot_for_changes(self.session.workspace)
+                    workspace_snapshot_for_changes_with(self.session.workspace, allowlist)
                 }
             } else {
                 None
@@ -1049,4 +1103,53 @@ fn names(value: &Value) -> Vec<String> {
         .flatten()
         .filter_map(|name| name.as_str().map(String::from))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_workspace_names_skip_dependency_trees_unless_safely_allowlisted() {
+        let root = std::env::temp_dir().join(format!(
+            "sc-exec-ignore-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for dir in [
+            "node_modules",
+            "vendor",
+            ".venv",
+            "dist",
+            "build",
+            ".next",
+            ".git",
+            "src",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("item.txt"), b"x").unwrap();
+        }
+        let default = workspace_snapshot_for_changes(&root).unwrap();
+        assert_eq!(default.len(), 1);
+        assert!(default[0].0.ends_with("src/item.txt"));
+
+        assert!(!is_safe_allowlist_name(".git"));
+        assert!(!is_safe_allowlist_name("../dist"));
+        assert!(is_safe_allowlist_name("dist"));
+
+        let allow = vec!["dist".into(), ".git".into()];
+        let custom = workspace_snapshot_for_changes_with(&root, &allow).unwrap();
+        let rels: Vec<String> = custom
+            .iter()
+            .filter_map(|e| e.0.strip_prefix(&root).ok())
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(rels.contains(&"src/item.txt".into()));
+        assert!(rels.contains(&"dist/item.txt".into()));
+        assert!(!rels.iter().any(|r| r.starts_with(".git")));
+        assert!(!rels.iter().any(|r| r.starts_with("node_modules")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

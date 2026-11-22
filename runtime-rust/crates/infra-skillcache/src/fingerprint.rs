@@ -135,6 +135,19 @@ pub fn stat_tree(root: &Path) -> Result<Vec<FileStat>> {
         .collect())
 }
 
+/// Computes the tree SHA-256 over explicit `(relative_path, content)` pairs
+/// using the exact canonical framing as [`tree_sha256`].
+pub fn digest_entries<'a>(entries: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> String {
+    let sorted: BTreeMap<&'a str, &'a [u8]> = entries.into_iter().collect();
+    let mut hasher = Sha256::new();
+    for (name, bytes) in sorted {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(Sha256::digest(bytes));
+    }
+    hex(hasher.finalize())
+}
+
 /// Digest of every regular file below `root`: its path, then the SHA-256 of
 /// its bytes. A changed, added, removed or renamed file changes the digest.
 pub fn tree_sha256(root: &Path) -> Result<Tree> {
@@ -187,25 +200,87 @@ pub fn verify_tree(root: &Path, known: &Tree) -> Result<(bool, Option<Tree>)> {
 }
 
 fn sandbox_visible_executable(name: &str) -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    sandbox_visible_executable_in(name, &path_env, home.as_deref(), &default_temp_roots())
+}
+
+fn default_temp_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    if let Ok(canon) = infra_core::fs::canonicalize(std::env::temp_dir()) {
+        roots.push(canon);
+    }
+    for fixed in ["/tmp", "/var/tmp", "/private/tmp", "/private/var/folders"] {
+        let path = PathBuf::from(fixed);
+        roots.push(path.clone());
+        if let Ok(canon) = infra_core::fs::canonicalize(&path) {
+            roots.push(canon);
+        }
+    }
+    roots
+}
+
+fn sandbox_visible_executable_in(
+    name: &str,
+    path_env: &std::ffi::OsStr,
+    home: Option<&Path>,
+    temp_roots: &[PathBuf],
+) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     const VISIBLE_PREFIXES: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64"];
     #[cfg(target_os = "macos")]
     const VISIBLE_PREFIXES: &[&str] = &["/usr", "/bin", "/sbin", "/System", "/Library/Apple"];
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let path_env = std::env::var_os("PATH")?;
-        let is_visible = |p: &Path| VISIBLE_PREFIXES.iter().any(|prefix| p.starts_with(prefix));
-        for dir in std::env::split_paths(&path_env) {
-            if !is_visible(&dir) {
+        let is_os_visible = |p: &Path| VISIBLE_PREFIXES.iter().any(|prefix| p.starts_with(prefix));
+        let is_temp = |p: &Path| temp_roots.iter().any(|tmp| p.starts_with(tmp));
+        let canon_home = home.and_then(|h| infra_core::fs::canonicalize(h).ok());
+        let is_home_root = |dir: &Path| {
+            home.is_some_and(|h| dir == h)
+                || canon_home
+                    .as_deref()
+                    .is_some_and(|h| infra_core::fs::canonicalize(dir).ok().as_deref() == Some(h))
+        };
+        let path_str = path_env.to_str();
+        for dir in std::env::split_paths(path_env) {
+            if !dir.is_absolute() {
                 continue;
             }
             let candidate = dir.join(name);
             if !candidate.is_file() {
                 continue;
             }
-            if let Ok(canonical) = std::fs::canonicalize(&candidate)
-                && is_visible(&canonical)
-            {
+            let Ok(canonical) = std::fs::canonicalize(&candidate) else {
+                continue;
+            };
+            if is_os_visible(&dir) && is_os_visible(&canonical) {
+                return Some(candidate);
+            }
+            if is_temp(&dir) || is_temp(&canonical) || is_home_root(&dir) {
+                continue;
+            }
+            let Some(canon_parent) = canonical.parent() else {
+                continue;
+            };
+            if is_home_root(canon_parent) {
+                continue;
+            }
+            let dir_ok = std::fs::symlink_metadata(&dir).is_ok_and(|m| !infra_core::fs::linked(&m));
+            if !dir_ok {
+                continue;
+            }
+            let runtime_dirs = infra_host::sandbox::runtime_dirs_for_argv(
+                &[candidate.to_string_lossy().into_owned()],
+                path_str,
+            );
+            let canonical_ok = is_os_visible(&canonical)
+                || !infra_host::sandbox::runtime_dirs_for_argv(
+                    &[canonical.to_string_lossy().into_owned()],
+                    path_str,
+                )
+                .is_empty();
+            if !runtime_dirs.is_empty() && canonical_ok {
                 return Some(candidate);
             }
         }
@@ -213,6 +288,7 @@ fn sandbox_visible_executable(name: &str) -> Option<PathBuf> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        let _ = (path_env, home, temp_roots);
         infra_host::provider::find_executable(name)
     }
 }
@@ -316,4 +392,58 @@ pub fn runtime_versions(names: &[String]) -> BTreeMap<String, Option<String>> {
         .iter()
         .map(|name| (name.clone(), runtime_version(name)))
         .collect()
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn sandbox_visible_executable_accepts_userspace_runtime_dirs_and_rejects_home_or_tmp() {
+        let base = std::env::temp_dir().join(format!(
+            "sc-fp-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = base.join("home");
+        let bin_dir = home.join(".local/bin");
+        let tmp_dir = base.join("tmp");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let make_exec = |p: &Path| {
+            std::fs::write(p, b"#!/bin/sh\necho 1.0\n").unwrap();
+            let mut perms = std::fs::metadata(p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(p, perms).unwrap();
+        };
+
+        let user_bin = bin_dir.join("node-custom");
+        let home_bin = home.join("direct-home-bin");
+        let tmp_bin = tmp_dir.join("tmp-bin");
+        make_exec(&user_bin);
+        make_exec(&home_bin);
+        make_exec(&tmp_bin);
+
+        let temp_roots = vec![tmp_dir.clone()];
+        let joined = std::env::join_paths([&home, &bin_dir, &tmp_dir]).unwrap();
+
+        assert_eq!(
+            sandbox_visible_executable_in("node-custom", &joined, Some(&home), &temp_roots),
+            Some(user_bin)
+        );
+        assert_eq!(
+            sandbox_visible_executable_in("direct-home-bin", &joined, Some(&home), &temp_roots),
+            None
+        );
+        assert_eq!(
+            sandbox_visible_executable_in("tmp-bin", &joined, Some(&home), &temp_roots),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

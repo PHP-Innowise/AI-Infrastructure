@@ -335,6 +335,8 @@ pub struct Package {
     pub capsule: SkillCapsule,
     /// SHA-256 of `capsule.json` as stored.
     pub capsule_sha256: String,
+    /// SHA-256 of the full package tree, matching [`digest`].
+    pub package_sha256: String,
     pub markdown: Option<String>,
     pub files: Files,
 }
@@ -396,6 +398,7 @@ pub fn load(root: &Path) -> Result<Package> {
     })?;
     let mut files = Files::new();
     let mut markdown = None;
+    let mut markdown_bytes: Option<Vec<u8>> = None;
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -406,7 +409,11 @@ pub fn load(root: &Path) -> Result<Package> {
         match name.to_str() {
             Some(CAPSULE_FILE) if metadata.is_file() => {}
             Some(MARKDOWN_FILE) if metadata.is_file() && capsule.form == Form::Textual => {
-                markdown = Some(infra_core::fs::read_text(&entry.path())?);
+                let raw = infra_core::fs::read_regular(&entry.path())?;
+                let text = String::from_utf8(raw.clone())
+                    .map_err(|_| RuntimeError::invalid("A package file is not UTF-8."))?;
+                markdown_bytes = Some(raw);
+                markdown = Some(text);
             }
             Some("programs" | "assets") if metadata.is_dir() && capsule.form == Form::Hybrid => {
                 collect(root, &entry.path(), 1, &mut files)?;
@@ -434,9 +441,15 @@ pub fn load(root: &Path) -> Result<Package> {
             "A textual capsule has no `capsule.md`.",
         ));
     }
+    let package_sha256 = fingerprint::digest_entries(
+        std::iter::once((CAPSULE_FILE, bytes.as_slice()))
+            .chain(markdown_bytes.as_deref().map(|raw| (MARKDOWN_FILE, raw)))
+            .chain(files.iter()),
+    );
     Ok(Package {
         root: root.to_path_buf(),
         capsule_sha256: fingerprint::sha256(&bytes),
+        package_sha256,
         capsule,
         markdown,
         files,
