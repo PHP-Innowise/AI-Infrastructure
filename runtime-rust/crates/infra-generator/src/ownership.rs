@@ -407,7 +407,24 @@ pub fn classify_update(target: &Path, staging: &Path, manifest: &Value) -> Resul
         } else {
             ("new-file", "new-generated-path".into())
         };
-        output.push(object!({"path":relative,"classification":classification,"reason":reason}));
+        let mut row = object!({"path":relative,"classification":classification,"reason":reason});
+        if classification == "safe-update"
+            && let (Some(expected), Some(proposal)) = (expected, proposal)
+            && manifest
+                .get("validation_stamps")
+                .and_then(|stamps| stamps.get(&relative))
+                .and_then(|stamp| stamp.get("sha256"))
+                .and_then(Value::as_str)
+                .is_some_and(|stamped| {
+                    stamped == text(expected)
+                        && fs::read_regular(proposal)
+                            .ok()
+                            .is_some_and(|bytes| sha(&bytes) == stamped)
+                })
+        {
+            row["verified_unchanged"] = true.into();
+        }
+        output.push(row);
     }
     Ok(output)
 }
@@ -456,9 +473,24 @@ pub fn refresh_manifest(target: &Path) -> Result<Value> {
         }
         identities.insert(name.clone(), before);
         if let Some(bytes) = bytes {
-            manifest["files"][name] = sha(&bytes).into();
+            let next_hash = sha(&bytes);
+            let prev_hash = manifest["files"][name].as_str().map(str::to_owned);
+            manifest["files"][name] = next_hash.clone().into();
+            if prev_hash.as_deref() != Some(next_hash.as_str())
+                && let Some(stamps) = manifest
+                    .get_mut("validation_stamps")
+                    .and_then(Value::as_object_mut)
+            {
+                stamps.remove(name);
+            }
             updated += 1;
         } else {
+            if let Some(stamps) = manifest
+                .get_mut("validation_stamps")
+                .and_then(Value::as_object_mut)
+            {
+                stamps.remove(name);
+            }
             missing.push(name.clone());
         }
     }
@@ -487,4 +519,126 @@ pub fn refresh_manifest(target: &Path) -> Result<Value> {
     Ok(
         object!({"manifest":target.join(MANIFEST),"listed_count":names.len(),"updated_count":updated,"missing":missing,"membership_preserved":true}),
     )
+}
+
+/// Records per-artifact validation stamps inside `.infra-manifest.json` so subsequent
+/// `infra-update` runs can skip unchanged verified slices.
+pub fn stamp_validated_artifacts(
+    manifest: &mut Value,
+    stamps: &BTreeMap<String, String>,
+    slice_tag: Option<&str>,
+) -> Result<()> {
+    let files = manifest["files"]
+        .as_object()
+        .ok_or_else(|| RuntimeError::invalid("Manifest files must be an object"))?
+        .clone();
+    let mut existing = manifest
+        .get("validation_stamps")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let verified_at = infra_core::domain::utc_now();
+    for (rel, digest) in stamps {
+        let rel = normalize(rel)?;
+        if !files.contains_key(&rel) {
+            return Err(RuntimeError::policy(format!(
+                "validation stamp references non-manifest path: {rel}"
+            )));
+        }
+        if !hex(digest, 64) {
+            return Err(RuntimeError::invalid(format!(
+                "validation stamp sha256 invalid: {rel}"
+            )));
+        }
+        let mut entry = object!({
+            "sha256": digest,
+            "verified_at": &verified_at,
+        });
+        if let Some(tag) = slice_tag.filter(|t| !t.trim().is_empty()) {
+            entry["slice"] = tag.into();
+        }
+        existing.insert(rel, entry);
+    }
+    manifest["validation_stamps"] = Value::Object(existing);
+    Ok(())
+}
+
+/// Returns owned relative paths whose on-disk target hash, staged proposal hash, and
+/// `.infra-manifest.json` validation stamp all match, allowing `infra-update` to skip them.
+pub fn unchanged_verified_slices(
+    target: &Path,
+    staging: &Path,
+    manifest: &Value,
+) -> Result<Vec<String>> {
+    let entries = classify_update(target, staging, manifest)?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry["verified_unchanged"] == true)
+        .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+        .collect())
+}
+
+#[cfg(test)]
+mod manifest_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_validation_stamps_skip_unchanged_slices_and_invalidate_on_drift() {
+        let dir = std::env::temp_dir().join(format!(
+            "infra-manifest-stamps-{}",
+            infra_core::domain::uuid4()
+        ));
+        let target = dir.join("target");
+        let staging = dir.join("staging");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        let a_bytes = b"# Policy unchanged\n";
+        let b_bytes_v1 = b"# Changed skill v1\n";
+        let b_bytes_v2 = b"# Changed skill v2\n";
+        std::fs::write(target.join("AGENTS.md"), a_bytes).unwrap();
+        std::fs::write(staging.join("AGENTS.md"), a_bytes).unwrap();
+        std::fs::write(target.join("SKILL.md"), b_bytes_v1).unwrap();
+        std::fs::write(staging.join("SKILL.md"), b_bytes_v2).unwrap();
+
+        let plan = vec!["AGENTS.md".to_owned(), "SKILL.md".to_owned()];
+        let mut manifest = build_manifest(
+            &target,
+            &plan,
+            &ManifestRequest {
+                generator: "test".into(),
+                version: "1.0.0".into(),
+                task: "TASK-1".into(),
+                profile: "php-core".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: object!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let stamps = BTreeMap::from([
+            ("AGENTS.md".to_owned(), sha(a_bytes)),
+            ("SKILL.md".to_owned(), sha(b_bytes_v1)),
+        ]);
+        stamp_validated_artifacts(&mut manifest, &stamps, Some("batch-1")).unwrap();
+        write_manifest(&target, &manifest).unwrap();
+
+        let unchanged = unchanged_verified_slices(&target, &staging, &manifest).unwrap();
+        assert_eq!(unchanged, vec!["AGENTS.md".to_owned()]);
+
+        // Editing AGENTS.md on disk + refreshing manifest prunes stale stamp cleanly.
+        std::fs::write(target.join("AGENTS.md"), b"# Policy edited\n").unwrap();
+        refresh_manifest(&target).unwrap();
+        let refreshed = load_manifest(&target).unwrap();
+        assert!(
+            refreshed["validation_stamps"].get("AGENTS.md").is_none(),
+            "modified artifact stamp must be pruned on refresh"
+        );
+        let unchanged_after = unchanged_verified_slices(&target, &staging, &refreshed).unwrap();
+        assert!(unchanged_after.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

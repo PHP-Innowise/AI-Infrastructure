@@ -233,6 +233,7 @@ impl Fleet {
         }
         {
             let db = self.store.connection()?;
+            let _ = crate::clash::ensure_health_table(&db);
             if db
                 .query_row(
                     "SELECT 1 FROM native_fleet_runs WHERE thread_id=?1",
@@ -576,7 +577,22 @@ impl Fleet {
                                 "duration_seconds":result.duration_seconds,
                                 "limit_reached":result.limit_reached
                             }))?;
-                            engine.finish(&thread, &tid, &result, &usage_components, schema_error.as_deref())
+                            let finish_res = engine.finish(&thread, &tid, &result, &usage_components, schema_error.as_deref());
+                            if !cfg.dry_run {
+                                crate::clash::record_workflow_health(
+                                    &engine.store,
+                                    "fleet",
+                                    &cfg.provider,
+                                    cfg.model.as_deref(),
+                                    &format!("{thread}:{tid}"),
+                                    reviewer_status,
+                                    schema_error.is_some() || finish_res.is_err(),
+                                    !result.ok || schema_error.is_some(),
+                                    result.cost_usd,
+                                    result.duration_seconds,
+                                );
+                            }
+                            finish_res
                         });
                     }
                     let mut failure = None;
@@ -605,8 +621,14 @@ impl Fleet {
                     emit(json!({"kind":"fleet_stage","stage":"gate","status":"waiting"}))?;
                 }
                 "gate" => {
+                    let warnings = crate::clash::workflow_health_warnings(
+                        &self.store,
+                        "fleet",
+                        &c.provider,
+                        c.model.as_deref(),
+                    );
                     return Ok(
-                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
                     );
                 }
                 "record" => {
@@ -643,8 +665,14 @@ impl Fleet {
                     self.transition(thread, rev, &state, "done")?;
                 }
                 "done" => {
+                    let warnings = crate::clash::workflow_health_warnings(
+                        &self.store,
+                        "fleet",
+                        &c.provider,
+                        c.model.as_deref(),
+                    );
                     return Ok(
-                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"health_warnings":warnings,"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
                     );
                 }
                 _ => return Err(HarnessError::invalid("Invalid native Fleet stage.")),

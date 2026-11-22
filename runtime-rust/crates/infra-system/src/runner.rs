@@ -1253,12 +1253,17 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 verify_plan_step.is_some_and(|s| s["require_llm_review"] == true);
             let mut deterministic_short_circuit = None;
             let mut det_prompt_note: Option<String> = None;
+            let health_db_path = directory
+                .parent()
+                .unwrap_or(directory)
+                .join("system_health.sqlite3");
             if !verify_programs.is_empty() {
-                let det = execution::run_deterministic_verify_checks(
+                let det = execution::run_deterministic_verify_checks_cached(
                     &verify_programs,
                     state,
                     cancel.clone(),
                     runner_lock.clone(),
+                    Some(&health_db_path),
                 )
                 .await?;
                 if (det.all_passed && !require_llm_review)
@@ -1698,6 +1703,47 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 &serde_json::to_value(&evidence)?,
                 false,
             )?;
+            let err_label = receipt["error"].as_str().unwrap_or("");
+            let is_schema_err = err_label.contains("schema") || err_label.contains("report");
+            let is_deopt = receipt["ok"] != true || attempt > 1;
+            let step_provider = if receipt["deterministic"] == true {
+                "deterministic"
+            } else {
+                provider.as_str()
+            };
+            let run_key = format!(
+                "{}:{}:{}",
+                string(&state["run_id"]),
+                string(&preview["id"]),
+                attempt
+            );
+            execution::record_system_health(
+                &health_db_path,
+                "system",
+                step_provider,
+                state["model"].as_str(),
+                &run_key,
+                string(&preview["id"]),
+                if receipt["ok"] == true {
+                    "completed"
+                } else if is_schema_err {
+                    "schema_error"
+                } else {
+                    "blocked"
+                },
+                is_schema_err,
+                is_deopt,
+                elapsed,
+            );
+            let health = execution::summarize_system_health(
+                &health_db_path,
+                "system",
+                step_provider,
+                state["model"].as_str(),
+            );
+            if !health.warnings.is_empty() {
+                state["health_warnings"] = object!(health.warnings);
+            }
             let finished = object!({
                 "type": "dispatch_finished",
                 "phase": preview["id"],

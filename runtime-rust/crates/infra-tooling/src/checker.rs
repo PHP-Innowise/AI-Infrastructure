@@ -325,7 +325,276 @@ struct GateContext<'a> {
     logs: &'a Path,
     cancel: Arc<AtomicBool>,
 }
+
+const CHECKER_RACY_NS: i128 = 2_000_000_000;
+
+fn time_to_unix_ns(time: std::time::SystemTime) -> Option<i128> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_nanos()).ok(),
+        Err(err) => i128::try_from(err.duration().as_nanos())
+            .ok()
+            .and_then(|ns| ns.checked_neg()),
+    }
+}
+
+fn now_unix_ns() -> i128 {
+    time_to_unix_ns(std::time::SystemTime::now()).unwrap_or(0)
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CheckReceiptStore {
+    entries: std::collections::BTreeMap<String, CheckReceiptEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CheckReceiptEntry {
+    group: String,
+    gate: String,
+    cached_at: String,
+}
+
+fn load_receipt_store(path: &Path) -> CheckReceiptStore {
+    let Ok(bytes) = safe::read_regular(path) else {
+        return CheckReceiptStore::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn save_receipt_store(path: &Path, store: &CheckReceiptStore) {
+    if let Some(parent) = path.parent() {
+        let _ = safe::ensure_directory(parent, true);
+    }
+    if let Ok(bytes) = serde_json::to_vec(store) {
+        let _ = safe::atomic_write(path, &bytes);
+    }
+}
+
+fn resolve_tool_binary_stamp(program: &str, root: &Path) -> Option<String> {
+    let direct = Path::new(program);
+    let found = if direct.components().count() > 1 {
+        let candidate = if direct.is_absolute() {
+            direct.to_path_buf()
+        } else {
+            root.join(direct)
+        };
+        candidate.is_file().then_some(candidate)
+    } else {
+        std::env::var_os("PATH").and_then(|path_var| {
+            std::env::split_paths(&path_var)
+                .map(|dir| dir.join(program))
+                .find(|candidate| candidate.is_file())
+        })
+    }?;
+    let meta = std::fs::symlink_metadata(&found).ok()?;
+    let mtime = meta.modified().ok().and_then(time_to_unix_ns).unwrap_or(0);
+    Some(format!("{}:{}:{mtime}", found.display(), meta.len()))
+}
+
+fn input_closure_stamp(root: &Path, extra_paths: &[String]) -> Option<(String, i128)> {
+    const MAX_CLOSURE_FILES: usize = 4000;
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut max_mtime_ns = root
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(time_to_unix_ns)
+        .unwrap_or(0);
+
+    while let Some(dir) = queue.pop_front() {
+        let mut children: Vec<_> = std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .collect();
+        children.sort_by_key(|e| e.file_name());
+        for entry in children {
+            let name = entry.file_name();
+            let name_s = name.to_string_lossy();
+            if matches!(
+                name_s.as_ref(),
+                ".git" | "target" | "vendor" | "node_modules" | ".phpunit.cache" | ".c2p"
+            ) {
+                continue;
+            }
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if meta.file_type().is_symlink() {
+                return None;
+            }
+            if meta.is_dir() {
+                queue.push_back(path);
+            } else if meta.is_file() {
+                let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+                max_mtime_ns = max_mtime_ns.max(mtime);
+                let rel = path
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if seen.insert(rel.clone()) {
+                    entries.push(format!("{rel}:{}:{mtime}", meta.len()));
+                    if entries.len() >= MAX_CLOSURE_FILES {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    for rel in extra_paths {
+        if !seen.contains(rel) {
+            let candidate = root.join(rel);
+            if let Ok(meta) = std::fs::symlink_metadata(&candidate)
+                && !meta.file_type().is_symlink()
+                && meta.is_file()
+            {
+                let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+                max_mtime_ns = max_mtime_ns.max(mtime);
+                entries.push(format!("{rel}:{}:{mtime}", meta.len()));
+            } else {
+                entries.push(format!("{rel}:absent"));
+            }
+        }
+    }
+    entries.sort();
+    if let Ok(Some(frame)) = infra_core::git::GitFrame::discover(root) {
+        let head_txt = std::fs::read_to_string(frame.admin.join("HEAD")).unwrap_or_default();
+        let trimmed = head_txt.trim();
+        let resolved = if let Some(ref_name) = trimmed.strip_prefix("ref:") {
+            let ref_rel = ref_name.trim();
+            frame
+                .common_dir()
+                .ok()
+                .and_then(|common| std::fs::read_to_string(common.join(ref_rel)).ok())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        entries.push(format!("git_head:{trimmed}:{}", resolved.trim()));
+    }
+    Some((common::sha256(entries.join("\n").as_bytes()), max_mtime_ns))
+}
+
+fn gate_receipt_key(
+    context: &GateContext<'_>,
+    gate_spec: &Gate,
+    closure_digest: &str,
+) -> Option<String> {
+    let GateContext {
+        root,
+        base,
+        group,
+        strict,
+        oracle_allowed: _,
+        logs: _,
+        cancel: _,
+    } = context;
+    if *strict {
+        return None;
+    }
+    match gate_spec {
+        Gate::Tool {
+            name,
+            operation,
+            request,
+        } => {
+            let interpolated = interpolate(request, root, base);
+            Some(common::sha256(
+                json!({
+                    "kind": "tool",
+                    "group": group.name,
+                    "name": name,
+                    "operation": operation,
+                    "request": interpolated,
+                    "base": base,
+                    "closure": closure_digest,
+                })
+                .to_string()
+                .as_bytes(),
+            ))
+        }
+        Gate::Process {
+            name,
+            program,
+            arguments,
+            cwd,
+            tools: _,
+            fallback: _,
+            paths,
+            timeout_seconds: _,
+            oracle,
+        } => {
+            if *oracle {
+                return None;
+            }
+            let expand = |value: &str| process_argument(value, root, base, &group.rust_toolchain);
+            let expanded_prog = expand(program);
+            let expanded_args: Vec<String> = arguments.iter().map(|v| expand(v)).collect();
+            let expanded_cwd = expand(cwd);
+            let tool_stamp = resolve_tool_binary_stamp(&expanded_prog, root).unwrap_or_default();
+            Some(common::sha256(
+                json!({
+                    "kind": "process",
+                    "group": group.name,
+                    "name": name,
+                    "program": expanded_prog,
+                    "arguments": expanded_args,
+                    "cwd": expanded_cwd,
+                    "paths": paths,
+                    "tool": tool_stamp,
+                    "toolchain": group.rust_toolchain,
+                    "base": base,
+                    "closure": closure_digest,
+                })
+                .to_string()
+                .as_bytes(),
+            ))
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
+    gate_with_receipts(context, gate, None, None, now_unix_ns())
+}
+
+fn gate_with_receipts(
+    context: GateContext<'_>,
+    gate: &Gate,
+    receipt_store: Option<&Arc<Mutex<CheckReceiptStore>>>,
+    closure: Option<&(String, i128)>,
+    now_ns: i128,
+) -> Outcome {
+    let gate_cache_key = if let (Some(store), Some((closure_digest, max_mtime))) =
+        (receipt_store, closure)
+        && !context.strict
+        && *max_mtime > 0
+        && now_ns > CHECKER_RACY_NS
+        && *max_mtime <= now_ns - CHECKER_RACY_NS
+    {
+        if let Some(key) = gate_receipt_key(&context, gate, closure_digest) {
+            if let Ok(guard) = store.lock()
+                && guard.entries.contains_key(&key)
+            {
+                return Outcome {
+                    group: context.group.name.clone(),
+                    name: gate.name().into(),
+                    status: "pass".into(),
+                    seconds: 0.0,
+                    code: Some(0),
+                    reason: Some("cached local receipt".into()),
+                    log: None,
+                    excerpt: Vec::new(),
+                };
+            }
+            Some(key)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let GateContext {
         root,
         base,
@@ -496,10 +765,29 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
         if safe::atomic_write(&path, &bytes).is_ok() {
             outcome.log = Some(path);
         }
+    } else if outcome.status == "pass"
+        && let (Some(store), Some(key)) = (receipt_store, gate_cache_key)
+        && let Ok(mut guard) = store.lock()
+    {
+        if guard.entries.len() >= 512 {
+            guard.entries.clear();
+        }
+        guard.entries.insert(
+            key,
+            CheckReceiptEntry {
+                group: group.name.clone(),
+                gate: gate.name().into(),
+                cached_at: infra_core::domain::utc_now(),
+            },
+        );
     }
     outcome
 }
 pub fn execute(request: &Value) -> Result<Value> {
+    execute_at(request, now_unix_ns())
+}
+
+fn execute_at(request: &Value, now_ns: i128) -> Result<Value> {
     let root = infra_core::fs::canonicalize(request["root"].as_str().unwrap_or("."))?;
     let catalog = load_catalog(&root, true)?;
     let names = request["groups"]
@@ -569,6 +857,50 @@ pub fn execute(request: &Value) -> Result<Value> {
             (Some(temporary), logs)
         }
     };
+    let no_cache = strict
+        || request["no_cache"] == true
+        || request["cache"] == false
+        || std::env::var("INFRA_CHECK_NO_CACHE").as_deref() == Ok("1");
+    let use_cache = !no_cache
+        && (request["cache"] == true || std::env::var("INFRA_CHECK_CACHE").as_deref() == Ok("1"));
+    let receipt_path = use_cache.then(|| {
+        request["cache_file"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                infra_core::git::GitFrame::discover(&root)
+                    .ok()
+                    .flatten()
+                    .map(|frame| frame.admin.join("infra-check-receipts.json"))
+            })
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!(
+                    "infra-check-receipts-{}.json",
+                    common::sha256(root.to_string_lossy().as_bytes())
+                ))
+            })
+    });
+    let extra_paths: Vec<String> = if use_cache {
+        groups
+            .iter()
+            .flat_map(|g| g.gates.iter())
+            .flat_map(|g| match g {
+                Gate::Process { paths, .. } => paths.clone(),
+                Gate::Tool { .. } => vec![],
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let closure_stamp = use_cache
+        .then(|| input_closure_stamp(&root, &extra_paths))
+        .flatten();
+    let receipt_store = receipt_path
+        .as_ref()
+        .filter(|_| closure_stamp.is_some())
+        .map(|path| Arc::new(Mutex::new(load_receipt_store(path))));
+
     let queue = Arc::new(Mutex::new(VecDeque::from(groups)));
     let cancelled = Arc::new(AtomicBool::new(false));
     let outcomes = Arc::new(Mutex::new(Vec::new()));
@@ -608,6 +940,8 @@ pub fn execute(request: &Value) -> Result<Value> {
             let root = &root;
             let base = &base;
             let logs = &logs;
+            let receipt_store = receipt_store.as_ref();
+            let closure_stamp = closure_stamp.as_ref();
             scope.spawn(move || {
                 loop {
                     if INTERRUPTED.load(Ordering::Acquire) {
@@ -618,7 +952,7 @@ pub fn execute(request: &Value) -> Result<Value> {
                         break;
                     };
                     for check in &group.gates {
-                        let result = gate(
+                        let result = gate_with_receipts(
                             GateContext {
                                 root,
                                 base,
@@ -629,6 +963,9 @@ pub fn execute(request: &Value) -> Result<Value> {
                                 cancel: cancelled.clone(),
                             },
                             check,
+                            receipt_store,
+                            closure_stamp,
+                            now_ns,
                         );
                         if fail_fast && result.status == "fail" {
                             cancelled.store(true, Ordering::Release);
@@ -641,6 +978,11 @@ pub fn execute(request: &Value) -> Result<Value> {
             });
         }
     });
+    if let (Some(path), Some(store)) = (receipt_path.as_ref(), receipt_store.as_ref())
+        && let Ok(guard) = store.lock()
+    {
+        save_receipt_store(path, &guard);
+    }
     #[cfg(unix)]
     unsafe {
         for (signal, previous) in signals {
@@ -1733,5 +2075,122 @@ mod fallback_tests {
         .unwrap();
         let error = load_catalog(root, false).unwrap_err();
         assert_eq!(error.kind, infra_core::ErrorKind::Policy);
+    }
+
+    #[test]
+    fn selective_receipt_cache_hits_only_when_opted_in_settled_and_never_under_strict_or_no_cache()
+    {
+        let temporary = Temporary::new("infra-check-receipts").unwrap();
+        let root = infra_core::fs::canonicalize(temporary.path()).unwrap();
+        let marker =
+            std::env::temp_dir().join(format!("infra-check-count-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::write(root.join(".github/workflows/probe.yml"), b"name: probe\n").unwrap();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::write(
+            root.join("install/check-catalog.json"),
+            serde_json::to_vec(&json!({"schema_version":1,"groups":[{
+                "name":"probe","workflow":"probe.yml","job":"probe","timeout_minutes":1,
+                "gates":[
+                    {"kind":"process","name":"echo probe","program":"sh","arguments":["-c",&format!("printf x >> '{}'", marker.display())]},
+                    {"kind":"tool","name":"json syntax","operation":"json-syntax","request":{}}
+                ]
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "init"],
+        ] {
+            let st = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {:?} failed", args);
+        }
+        let cache_dir = Temporary::new("infra-check-receipts-store").unwrap();
+        let cache_file = cache_dir.path().join("receipts.json");
+        let (_digest, max_mtime) = input_closure_stamp(&root, &[]).unwrap();
+
+        // Inside 2s RACY_NS window -> executes live even with cache: true.
+        let racy = execute_at(
+            &json!({"root":&root,"groups":["probe"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            max_mtime + CHECKER_RACY_NS - 1,
+        )
+        .unwrap();
+        assert_eq!(racy["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+
+        // Outside RACY_NS window -> run 1 populates receipts, run 2 hits cached receipts cleanly.
+        let settled_now = max_mtime + CHECKER_RACY_NS + 100;
+        let first = execute_at(
+            &json!({"root":&root,"groups":["probe"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            settled_now,
+        )
+        .unwrap();
+        assert_eq!(first["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "xx");
+
+        let second = execute_at(
+            &json!({"root":&root,"groups":["probe"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            settled_now + 50,
+        )
+        .unwrap();
+        assert_eq!(second["result"]["exit_code"], 0);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "xx",
+            "cached run must not re-run process gate"
+        );
+        let reasons: Vec<&str> = second["result"]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g["reason"].as_str())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec!["cached local receipt", "cached local receipt"]
+        );
+
+        // `--strict` MUST disable caching even when cache: true + settled receipts exist!
+        let strict_res = execute_at(
+            &json!({"root":&root,"groups":["probe"],"strict":true,"cache":true,"cache_file":&cache_file}),
+            settled_now + 60,
+        )
+        .unwrap();
+        assert_eq!(strict_res["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "xxx");
+
+        // `no_cache: true` MUST disable caching even under non-strict.
+        let no_cache_res = execute_at(
+            &json!({"root":&root,"groups":["probe"],"strict":false,"cache":true,"no_cache":true,"cache_file":&cache_file}),
+            settled_now + 70,
+        )
+        .unwrap();
+        assert_eq!(no_cache_res["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "xxxx");
+
+        // Modifying tracked repo file invalidates input closure and runs live again.
+        std::fs::write(
+            root.join(".github/workflows/probe.yml"),
+            b"name: probe-v2\n",
+        )
+        .unwrap();
+        let (_d2, new_mtime) = input_closure_stamp(&root, &[]).unwrap();
+        let after_edit = execute_at(
+            &json!({"root":&root,"groups":["probe"],"strict":false,"cache":true,"cache_file":&cache_file}),
+            new_mtime + CHECKER_RACY_NS + 100,
+        )
+        .unwrap();
+        assert_eq!(after_edit["result"]["exit_code"], 0);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "xxxxx");
+
+        let _ = std::fs::remove_file(&marker);
     }
 }

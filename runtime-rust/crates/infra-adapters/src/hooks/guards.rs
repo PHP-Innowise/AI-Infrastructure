@@ -105,6 +105,97 @@ pub fn bash_without_context(root: &Path, raw: &[u8]) -> Result<Output> {
     };
     Ok(refusal(&command, &policy).unwrap_or_default())
 }
+/// Normalizes a shell command into a canonical signature so trivial output paging/redirection
+/// tweaks (`2>&1`, `| head -n 20`, extra whitespace) still register as repeated retries.
+pub(crate) fn normalize_command_signature(command: &str) -> String {
+    let mut trimmed = command.trim();
+    loop {
+        let next = trimmed.trim_end();
+        let stripped = if let Some(idx) = next.rfind('|') {
+            let tail = next[idx + 1..].trim_start();
+            let head_word = tail.split_whitespace().next().unwrap_or("");
+            if [
+                "head", "tail", "cat", "less", "more", "wc", "grep", "rg", "tee",
+            ]
+            .contains(&head_word)
+            {
+                &next[..idx]
+            } else {
+                next
+            }
+        } else {
+            next
+        };
+        let without_redir = stripped
+            .trim_end()
+            .strip_suffix("2>&1")
+            .or_else(|| stripped.trim_end().strip_suffix("1>/dev/null"))
+            .or_else(|| stripped.trim_end().strip_suffix(">/dev/null"))
+            .map(str::trim_end);
+        match without_redir {
+            Some(shorter) if shorter.len() < next.len() => trimmed = shorter,
+            _ if stripped.len() < next.len() => trimmed = stripped,
+            _ => break,
+        }
+    }
+    trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalized_error_signature(payload: &Value) -> String {
+    for key in ["error", "stderr", "last_error", "tool_error"] {
+        if let Some(raw) = first(payload, key) {
+            let sig: String = raw
+                .split_whitespace()
+                .filter(|w| !w.chars().all(|c| c.is_ascii_digit()))
+                .take(12)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !sig.is_empty() {
+                return sig;
+            }
+        }
+    }
+    String::new()
+}
+
+fn diagnostic_hint(normalized: &str, err_sig: &str, debugger_name: &str) -> String {
+    let lower = normalized.to_ascii_lowercase();
+    let base = if lower.contains("cargo test")
+        || lower.contains("cargo check")
+        || lower.contains("cargo clippy")
+    {
+        "Hint: isolate one failing test with `-- --nocapture` or inspect the first compiler diagnostic instead of rerunning the full workspace."
+    } else if lower.contains("phpunit")
+        || lower.contains("pest")
+        || lower.contains("phpstan")
+        || lower.contains("composer")
+    {
+        "Hint: narrow to the failing test/file (`--filter <Name>` or single path) and verify dependencies/config before retrying."
+    } else if lower.contains("pytest") || lower.contains("python") {
+        "Hint: isolate the failing test with `-k <name> --tb=short` to inspect the underlying assertion or traceback."
+    } else if lower.contains("npm ")
+        || lower.contains("pnpm ")
+        || lower.contains("yarn ")
+        || lower.contains("vitest")
+        || lower.contains("jest")
+        || lower.contains("tsc")
+    {
+        "Hint: run a single test file or standalone typecheck to read the first failing diagnostic cleanly."
+    } else if lower.starts_with("git ") {
+        "Hint: inspect `git status` and `git diff --stat` to resolve conflicts or hooks before retrying."
+    } else {
+        "Hint: narrow the scope, read full stderr without truncation, or check recent edits before retrying."
+    };
+    if err_sig.is_empty() {
+        format!("{base} Escalate to {debugger_name} if the failure repeats.")
+    } else {
+        format!(
+            "{base} Repeated error signature: `{}`. Escalate to {debugger_name} if unresolved.",
+            err_sig.chars().take(80).collect::<String>()
+        )
+    }
+}
+
 pub fn bash(scope: &Context) -> Result<Output> {
     let command = strings(&scope.payload, &["command", "cmd"]).join("\n");
     if command.is_empty() {
@@ -120,29 +211,47 @@ pub fn bash(scope: &Context) -> Result<Output> {
     if shell::polling(&command) {
         return Ok(Output::default());
     }
-    let count = match counters::advance(
-        &project_root(&scope.roots.project),
-        &scope.payload,
-        "cmd",
-        &command,
-        true,
-    ) {
+    let root = project_root(&scope.roots.project);
+    let exact_count = match counters::advance(&root, &scope.payload, "cmd", &command, true) {
         Ok(count) => count,
         Err(_) => return Ok(Output::default()),
     };
+    let normalized = normalize_command_signature(&command);
+    let err_sig = normalized_error_signature(&scope.payload);
+    let norm_identity = if err_sig.is_empty() {
+        format!("norm:{normalized}")
+    } else {
+        format!("norm:{normalized}\0{err_sig}")
+    };
+    let norm_count = if normalized != command.trim() || !err_sig.is_empty() {
+        counters::advance(&root, &scope.payload, "cmd", &norm_identity, true).unwrap_or(exact_count)
+    } else {
+        exact_count
+    };
+    let count = exact_count.max(norm_count);
     let debugger = debugger(&scope.host);
+    let hint = diagnostic_hint(&normalized, &err_sig, debugger);
     if count >= 12 {
         return Ok(Output::error(
             2,
             format!(
-                "BLOCKED: this exact command has run {count} times this session.\n   Repeating it again is not a new attempt. Either change the\n   command (narrow it, add the failing case, read the output\n   differently) or escalate to {debugger} for a root cause."
+                "BLOCKED: this {} has run {count} times this session.\n   Repeating it again is not a new attempt. Either change the\n   command (narrow it, add the failing case, read the output\n   differently) or escalate to {debugger} for a root cause.\n   {hint}",
+                if exact_count >= 12 {
+                    "exact command"
+                } else {
+                    "normalized command signature"
+                }
             ),
         ));
     }
     if count >= 6 {
-        let message = format!(
-            "WARNING: this exact command has run {count} times this session. If it keeps failing, {debugger} instead of another rerun."
-        );
+        let kind_label = if exact_count >= 6 {
+            "exact command"
+        } else {
+            "command signature"
+        };
+        let message =
+            format!("WARNING: this {kind_label} has run {count} times this session. {hint}");
         return if scope.host == "cursor" {
             Ok(Output::error(1, message))
         } else {
@@ -554,4 +663,94 @@ pub fn subagent_dispatch(scope: &Context) -> Result<Output> {
         stderr: format!("{message}\n").into_bytes(),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod smart_loop_breaker_tests {
+    use super::*;
+    use crate::hooks;
+
+    #[test]
+    fn normalized_bash_signature_warns_with_diagnostic_hints_before_blocking_at_12() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let session = format!("smart-loop-{}", infra_core::domain::uuid4());
+        let variants = [
+            "cargo test foo --lib | head -n 20",
+            "cargo test foo --lib 2>&1 | tail -n 10",
+            "cargo   test   foo   --lib >/dev/null",
+        ];
+
+        // 5 invocations produce zero warning.
+        for i in 0..5 {
+            let cmd = variants[i % variants.len()];
+            let payload = json!({
+                "session_id": session,
+                "tool_name": "Bash",
+                "command": cmd,
+                "stderr": "error[E0308]: mismatched types"
+            });
+            let out = hooks::execute(
+                root,
+                "claude",
+                "bash-validator",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(out.code, 0, "attempt {i} should pass: {out:?}");
+            assert!(
+                out.stdout.is_empty(),
+                "attempt {i} should be silent: {out:?}"
+            );
+        }
+
+        // Attempts 6..=11 emit deterministic diagnostic hint before blocking.
+        for i in 6..=11 {
+            let cmd = variants[i % variants.len()];
+            let payload = json!({
+                "session_id": session,
+                "tool_name": "Bash",
+                "command": cmd,
+                "stderr": "error[E0308]: mismatched types"
+            });
+            let out = hooks::execute(
+                root,
+                "claude",
+                "bash-validator",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(out.code, 0, "attempt {i} should warn, not block: {out:?}");
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            assert!(stdout.contains("WARNING:"), "{stdout}");
+            assert!(
+                stdout.contains("Hint:") && stdout.contains("--nocapture"),
+                "{stdout}"
+            );
+            assert!(stdout.contains("mismatched types"), "{stdout}");
+        }
+
+        // Attempt 12 blocks cleanly.
+        let payload_12 = json!({
+            "session_id": session,
+            "tool_name": "Bash",
+            "command": variants[0],
+            "stderr": "error[E0308]: mismatched types"
+        });
+        let blocked = hooks::execute(
+            root,
+            "claude",
+            "bash-validator",
+            &serde_json::to_vec(&payload_12).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(blocked.code, 2);
+        let stderr = String::from_utf8(blocked.stderr).unwrap();
+        assert!(
+            stderr.contains("BLOCKED:") && stderr.contains("Hint:"),
+            "{stderr}"
+        );
+    }
 }

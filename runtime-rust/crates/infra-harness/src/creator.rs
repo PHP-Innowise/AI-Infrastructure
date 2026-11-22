@@ -328,6 +328,17 @@ impl CreatorManager {
             request["sandbox_executable"] =
                 serde_json::to_value(sessions.providers.get("codex")?.executable)?;
         }
+        if phase == "scan" {
+            let target_path = Path::new(run["target"].as_str().unwrap_or(""));
+            if let Ok(facts) = write_verified_scan_facts(
+                target_path,
+                &directory,
+                run["operation"].as_str().unwrap_or("generate"),
+            ) {
+                request["verified_scan_facts_sha256"] =
+                    store::sha(serde_json::to_vec(&facts).unwrap_or_default().as_slice()).into();
+            }
+        }
         files::write(&directory, &format!("request-{nonce}.json"), &request)?;
         let session = sessions.launch_internal(
             &json!({
@@ -653,6 +664,153 @@ impl CreatorManager {
             "This action is not available in the current Creator phase.",
         ))
     }
+}
+
+fn resolve_executable_on_path(bin: &str) -> Option<PathBuf> {
+    let p = Path::new(bin);
+    if p.components().count() > 1 {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let exe = dir.join(format!("{bin}.exe"));
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+fn run_gate_stack_probe(target: &Path, id: &str, argv: &[String]) -> Value {
+    let Some(first) = argv.first() else {
+        return json!({"id": id, "argv": argv, "available": false, "ok": false});
+    };
+    if resolve_executable_on_path(first).is_none() {
+        return json!({"id": id, "argv": argv, "available": false, "ok": false});
+    }
+    let Ok(target_canon) = infra_core::fs::canonicalize(target) else {
+        return json!({"id": id, "argv": argv, "available": false, "ok": false});
+    };
+    let path_env = std::env::var("PATH").ok();
+    let wrapped = if crate::sandbox::available() {
+        let spec = infra_host::sandbox::Spec {
+            workspace: target_canon.clone(),
+            target: target_canon.clone(),
+            protected: vec![],
+            readable: vec![],
+            accounts: vec![],
+            runtime: infra_host::sandbox::runtime_dirs_for_argv(argv, path_env.as_deref()),
+            codex: None,
+            evidence: None,
+            network: false,
+        };
+        match crate::sandbox::gate(&spec, argv) {
+            Ok(cmd) => cmd,
+            Err(_) => return json!({"id": id, "argv": argv, "available": false, "ok": false}),
+        }
+    } else {
+        argv.to_vec()
+    };
+    let env_map =
+        infra_host::sandbox::scrub_env(std::env::vars(), &std::collections::BTreeMap::new());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut output_buf = Vec::new();
+    let mut exit_code = None;
+    let res = infra_host::capture::run(
+        infra_host::capture::Request {
+            argv: &wrapped,
+            cwd: &target_canon,
+            environment: &env_map,
+            input: &[],
+            deadline,
+            output_limit: 16 * 1024,
+        },
+        || false,
+        |exit| exit_code = exit.code,
+        |_stream, bytes| {
+            let left = (4 * 1024usize).saturating_sub(output_buf.len());
+            output_buf.extend_from_slice(&bytes[..bytes.len().min(left)]);
+            Ok(())
+        },
+    );
+    let raw = String::from_utf8_lossy(&output_buf).trim().to_owned();
+    let summary = infra_core::domain::mask_secrets(&raw)
+        .map(|(t, _)| t)
+        .unwrap_or_else(|_| "[redacted]".into());
+    json!({
+        "id": id,
+        "argv": argv,
+        "available": true,
+        "ok": res.is_ok() && exit_code == Some(0),
+        "exit_code": exit_code,
+        "summary": summary.chars().take(512).collect::<String>(),
+    })
+}
+
+/// Runs deterministic `Profile::Gate` stack probes (`ManifestIndex`, `CommandAnalyzer`,
+/// surface inventory, and read-only CLI probes) and writes `verified_scan_facts.json`
+/// before LLM `infra-scan` begins.
+pub(crate) fn write_verified_scan_facts(
+    target: &Path,
+    directory: &Path,
+    operation: &str,
+) -> Result<Value> {
+    let manifest_index = crate::graph_manifests::ManifestIndex::from_root(target);
+    let surface_facts = infra_generator::coverage::detect_pre_scan_surfaces(target);
+    let command_facts = infra_generator::commands::pre_scan_command_facts(target)
+        .unwrap_or_else(|err| json!({"error": err.to_string(), "scripts": [], "gate_probes": []}));
+    let mut probe_results = Vec::new();
+    for probe in command_facts["gate_probes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let id = probe["id"].as_str().unwrap_or("");
+        let argv: Vec<String> = probe["argv"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        if !id.is_empty() && !argv.is_empty() {
+            probe_results.push(run_gate_stack_probe(target, id, &argv));
+        }
+    }
+    let existing_manifest = infra_generator::ownership::load_manifest(target).ok();
+    let validation_stamp_count = existing_manifest
+        .as_ref()
+        .and_then(|m| m.get("validation_stamps"))
+        .and_then(Value::as_object)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let facts = json!({
+        "schema_version": 1,
+        "kind": "verified_scan_facts",
+        "operation": operation,
+        "manifests_detected": !manifest_index.is_empty(),
+        "surfaces": surface_facts,
+        "commands": command_facts,
+        "gate_probes": probe_results,
+        "existing_manifest_present": existing_manifest.is_some(),
+        "validation_stamp_count": validation_stamp_count,
+        "generated_at": store::now(),
+    });
+    let task_dir = directory.join("agent").join(files::TASK);
+    if task_dir.is_dir() {
+        files::write(&task_dir, "verified_scan_facts.json", &facts)?;
+    }
+    if directory.is_dir() {
+        files::write(directory, "verified_scan_facts.json", &facts)?;
+    }
+    Ok(facts)
 }
 impl Domain for CreatorManager {
     fn execute<'a>(&'a self, op: &'a str, request: Value) -> Reply<'a> {
@@ -991,6 +1149,78 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(req3["permissions"], "manual");
+
+        let _ = sessions.close();
+        let _ = sessions.wait_closed().await;
+    }
+
+    #[tokio::test]
+    async fn launch_scan_emits_verified_scan_facts_from_manifest_and_command_analyzer() {
+        let (_dir, sessions, manager, project_id) = test_harness().await;
+        let target = manager.store.project(&project_id).unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let target_path = PathBuf::from(&target);
+        std::fs::create_dir_all(target_path.join("src")).unwrap();
+        std::fs::write(
+            target_path.join("composer.json"),
+            r#"{"name":"acme/shop","autoload":{"psr-4":{"App\\":"src/"}},"scripts":{"test":"vendor/bin/phpunit","mutate":"php artisan migrate --force"}}"#,
+        )
+        .unwrap();
+        std::fs::write(target_path.join("src/App.php"), "<?php\nnamespace App;\n").unwrap();
+
+        let id = store::hexid();
+        let run_dir = manager.root.join(&id);
+        std::fs::create_dir_all(run_dir.join("agent").join(files::TASK)).unwrap();
+        let identity = files::identity(&target_path).unwrap();
+        let run = json!({
+            "id": id,
+            "project_id": project_id,
+            "target": target,
+            "identity": identity,
+            "workspace": "project",
+            "branch": Value::Null,
+            "operation": "generate",
+            "tools": ["claude"],
+            "provider": "claude",
+            "model": Value::Null,
+            "thinking_effort": Value::Null,
+            "agents_enabled": false,
+            "agent_count": 3,
+            "permissions": "auto",
+            "budgets": {"usd": Value::Null, "tokens": Value::Null, "seconds": 120},
+            "goal": "scan facts",
+            "created_at": store::now(),
+            "revision": 1,
+            "status": "new",
+            "answers": "",
+            "phase": "scan"
+        });
+        let launched = manager.launch(run, "scan").unwrap();
+        let nonce = launched["session"]["creator"]["nonce"].as_str().unwrap();
+        let req = files::object(&run_dir, &format!("request-{nonce}.json"), true)
+            .unwrap()
+            .unwrap();
+        assert!(req["verified_scan_facts_sha256"].as_str().is_some());
+
+        let task_facts = files::object(
+            &run_dir.join("agent").join(files::TASK),
+            "verified_scan_facts.json",
+            true,
+        )
+        .unwrap()
+        .expect("verified_scan_facts.json should be staged before scan LLM runs");
+        assert_eq!(task_facts["manifests_detected"], true);
+        assert_eq!(task_facts["commands"]["safe_script_count"], 1);
+        assert_eq!(task_facts["commands"]["unsafe_script_count"], 1);
+        assert!(
+            task_facts["surfaces"]["surfaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s == "composer.json")
+        );
 
         let _ = sessions.close();
         let _ = sessions.wait_closed().await;

@@ -1,7 +1,32 @@
 use super::usage::LIMIT;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+
+fn canonical_sha256(value: &Value) -> Result<String> {
+    let encoded = infra_core::domain::json::canonical(value)?;
+    Ok(Sha256::digest(encoded.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+fn attach_sealed_envelope(mut report: Value, input_digest: &str) -> Result<Value> {
+    let mut envelope = report.clone();
+    if let Some(obj) = envelope.as_object_mut() {
+        obj.insert("schema".into(), json!("memory-incremental-comparison-v1"));
+        obj.insert("input_digest".into(), json!(input_digest));
+        obj.insert(
+            "sealed_at".into(),
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+        let seal_sha256 = canonical_sha256(&Value::Object(obj.clone()))?;
+        obj.insert("seal_sha256".into(), json!(seal_sha256));
+    }
+    report["sealed_envelope"] = envelope;
+    Ok(report)
+}
 const DIMENSIONS: [(&str, &str); 3] = [
     ("tokens", "tokens"),
     ("usd_micros", "billing"),
@@ -217,7 +242,12 @@ pub fn compare_incremental(
         let delta = difference("product");
         metrics[metric] = json!({"baseline":left["product"],"treatment":right["product"],"incremental_acquisition":difference("acquisition"),"incremental_future":difference("future"),"incremental_total":delta,"amortized_incremental":delta.map(|d|d as f64/horizon as f64),"savings":delta.map(|d|-d)});
     }
-    Ok(
-        json!({"profile":"memory-incremental-comparison-v1","usage_profile":"inclusive-input-output-v1","evidence":"supplied-observations","acquisition_scope":"memory-only","common_task_excluded":true,"horizon":horizon,"arms":arms,"metrics":metrics}),
-    )
+    let report = json!({"profile":"memory-incremental-comparison-v1","usage_profile":"inclusive-input-output-v1","evidence":"supplied-observations","acquisition_scope":"memory-only","common_task_excluded":true,"horizon":horizon,"arms":arms,"metrics":metrics});
+    let input_digest = canonical_sha256(&json!({
+        "baseline": baseline,
+        "treatment": treatment,
+        "acquisition_baseline": acquisition_baseline,
+        "acquisition_treatment": acquisition_treatment,
+    }))?;
+    attach_sealed_envelope(report, &input_digest)
 }
