@@ -1005,10 +1005,254 @@ pub async fn run_deterministic_verify_checks(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     runner_lock: Option<std::sync::Arc<std::fs::File>>,
 ) -> Result<DeterministicVerifyOutcome> {
+    run_deterministic_verify_checks_cached(specs, state, cancel, runner_lock, None).await
+}
+
+const VERIFY_RACY_NS: i128 = 2_000_000_000;
+
+fn time_to_unix_ns(time: std::time::SystemTime) -> Option<i128> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_nanos()).ok(),
+        Err(err) => i128::try_from(err.duration().as_nanos())
+            .ok()
+            .and_then(|ns| ns.checked_neg()),
+    }
+}
+
+fn now_unix_ns() -> i128 {
+    time_to_unix_ns(std::time::SystemTime::now()).unwrap_or(0)
+}
+
+fn verify_tree_stamp(root: &Path) -> Option<(String, i128)> {
+    const MAX_FILES: usize = 3000;
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    let mut entries = Vec::new();
+    let mut max_mtime = root
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(time_to_unix_ns)
+        .unwrap_or(0);
+    while let Some(dir) = queue.pop_front() {
+        let mut sorted: Vec<_> = std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .collect();
+        sorted.sort_by_key(|e| e.file_name());
+        for entry in sorted {
+            let name = entry.file_name();
+            let name_s = name.to_string_lossy();
+            if matches!(
+                name_s.as_ref(),
+                ".git" | "target" | "vendor" | "node_modules" | ".phpunit.cache" | ".infra-work"
+            ) {
+                continue;
+            }
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if meta.file_type().is_symlink() {
+                return None;
+            }
+            if meta.is_dir() {
+                queue.push_back(path);
+            } else if meta.is_file() {
+                let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+                max_mtime = max_mtime.max(mtime);
+                let rel = path
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                entries.push(format!("{rel}:{}:{mtime}", meta.len()));
+                if entries.len() >= MAX_FILES {
+                    return None;
+                }
+            }
+        }
+    }
+    let head = crate::catalog::git_head(root).unwrap_or_default();
+    entries.push(format!("git_head:{head}"));
+    Some((digest(entries.join("\n").as_bytes()), max_mtime))
+}
+
+fn ensure_system_ledger(db_path: &Path) -> Result<rusqlite::Connection> {
+    if let Some(parent) = db_path.parent() {
+        infra_core::fs::ensure_directory(parent, true)?;
+    }
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.busy_timeout(Duration::from_secs(2))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_health_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            run_key TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            schema_error INTEGER NOT NULL DEFAULT 0,
+            deopt INTEGER NOT NULL DEFAULT 0,
+            duration_seconds REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS workflow_health_lookup
+            ON workflow_health_runs(workflow, provider, model, id DESC);
+        CREATE TABLE IF NOT EXISTS verify_step_receipts(
+            cache_key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+    Ok(conn)
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SystemHealthSummary {
+    pub total_runs: usize,
+    pub schema_error_runs: usize,
+    pub deopt_runs: usize,
+    pub schema_error_rate: f64,
+    pub deopt_rate: f64,
+    pub warnings: Vec<String>,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tracks per-step system workflow health cleanly in SQLite."
+)]
+pub fn record_system_health(
+    db_path: &Path,
+    workflow: &str,
+    provider: &str,
+    model: Option<&str>,
+    run_key: &str,
+    step_id: &str,
+    outcome: &str,
+    schema_error: bool,
+    deopt: bool,
+    duration_seconds: f64,
+) {
+    let Ok(conn) = ensure_system_ledger(db_path) else {
+        return;
+    };
+    let _ = conn.execute(
+        "INSERT INTO workflow_health_runs(workflow,provider,model,run_key,step_id,outcome,schema_error,deopt,duration_seconds,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        rusqlite::params![
+            workflow,
+            provider,
+            model.unwrap_or("default"),
+            run_key,
+            step_id,
+            outcome,
+            i64::from(schema_error),
+            i64::from(deopt),
+            duration_seconds,
+            now(),
+        ],
+    );
+}
+
+pub fn summarize_system_health(
+    db_path: &Path,
+    workflow: &str,
+    provider: &str,
+    model: Option<&str>,
+) -> SystemHealthSummary {
+    let mut summary = SystemHealthSummary::default();
+    let Ok(conn) = ensure_system_ledger(db_path) else {
+        return summary;
+    };
+    let model_key = model.unwrap_or("default");
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT schema_error, deopt FROM workflow_health_runs WHERE workflow=?1 AND provider=?2 AND model=?3 ORDER BY id DESC LIMIT 20",
+    ) else {
+        return summary;
+    };
+    let Ok(rows) = stmt.query_map(rusqlite::params![workflow, provider, model_key], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    }) else {
+        return summary;
+    };
+    for row in rows.flatten() {
+        summary.total_runs += 1;
+        if row.0 != 0 {
+            summary.schema_error_runs += 1;
+        }
+        if row.1 != 0 {
+            summary.deopt_runs += 1;
+        }
+    }
+    if summary.total_runs > 0 {
+        summary.schema_error_rate = summary.schema_error_runs as f64 / summary.total_runs as f64;
+        summary.deopt_rate = summary.deopt_runs as f64 / summary.total_runs as f64;
+    }
+    if summary.total_runs >= 3 {
+        if summary.schema_error_rate > 0.25 {
+            summary.warnings.push(format!(
+                "High schema error rate for {workflow}/{provider}/{model_key}: {:.0}% ({}/{})",
+                summary.schema_error_rate * 100.0,
+                summary.schema_error_runs,
+                summary.total_runs
+            ));
+        }
+        if summary.deopt_rate > 0.30 {
+            summary.warnings.push(format!(
+                "Degraded ROI/deopt warning for {workflow}/{provider}/{model_key}: {:.0}% deopted ({}/{})",
+                summary.deopt_rate * 100.0,
+                summary.deopt_runs,
+                summary.total_runs
+            ));
+        }
+    }
+    summary
+}
+
+/// Executes deterministic verification checks with `VERIFY_RACY_NS`-guarded cross-run
+/// receipt reuse backed by `health_db` (SQLite `verify_step_receipts`).
+pub async fn run_deterministic_verify_checks_cached(
+    specs: &[Value],
+    state: &Value,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    runner_lock: Option<std::sync::Arc<std::fs::File>>,
+    health_db: Option<&Path>,
+) -> Result<DeterministicVerifyOutcome> {
+    run_deterministic_verify_checks_at(
+        specs,
+        state,
+        cancel,
+        runner_lock,
+        health_db,
+        now_unix_ns(),
+        None,
+    )
+    .await
+}
+
+type VerifyStepExec<'a> = &'a (
+        dyn Fn(
+    &[String],
+    &Path,
+    &std::collections::BTreeMap<String, String>,
+) -> std::result::Result<(i32, String), (String, String)>
+            + Sync
+    );
+
+async fn run_deterministic_verify_checks_at(
+    specs: &[Value],
+    state: &Value,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    runner_lock: Option<std::sync::Arc<std::fs::File>>,
+    health_db: Option<&Path>,
+    now_ns: i128,
+    custom_runner: Option<VerifyStepExec<'_>>,
+) -> Result<DeterministicVerifyOutcome> {
     let started = std::time::Instant::now();
     let mut checks = Vec::with_capacity(specs.len());
     let mut failure_lines = Vec::new();
     let mut all_passed = true;
+    let disable_cache = std::env::var("HARNESS_DISABLE_CHECK_CACHE").as_deref() == Ok("1");
 
     for (index, item) in specs.iter().take(MAX_ITEMS).enumerate() {
         fields(item, &["name", "argv"], &["cwd_service", "timeout_seconds"])?;
@@ -1043,6 +1287,44 @@ pub async fn run_deterministic_verify_checks(
         let path_env = std::env::var("PATH").ok();
         let env =
             infra_host::sandbox::scrub_env(std::env::vars(), &std::collections::BTreeMap::new());
+        let cache_key = if !disable_cache {
+            health_db.and_then(|_| {
+                let (tree_digest, max_mtime) = verify_tree_stamp(&cwd_canon)?;
+                (max_mtime > 0 && now_ns > VERIFY_RACY_NS && max_mtime <= now_ns - VERIFY_RACY_NS)
+                    .then(|| {
+                        let env_digest =
+                            digest(serde_json::to_vec(&env).unwrap_or_default().as_slice());
+                        digest(
+                            object!({
+                                "name": &name,
+                                "argv": &argv,
+                                "cwd": cwd_canon.to_string_lossy(),
+                                "timeout": timeout,
+                                "env": env_digest,
+                                "tree": tree_digest,
+                            })
+                            .to_string()
+                            .as_bytes(),
+                        )
+                    })
+            })
+        } else {
+            None
+        };
+        if let (Some(db_path), Some(key)) = (health_db, cache_key.as_deref())
+            && let Ok(conn) = ensure_system_ledger(db_path)
+            && let Ok(Some(detail)) = rusqlite::OptionalExtension::optional(conn.query_row(
+                "SELECT detail FROM verify_step_receipts WHERE cache_key=?1",
+                [key],
+                |r| r.get::<_, String>(0),
+            ))
+        {
+            checks.push(
+                object!({"name": name, "status": "passed", "detail": detail, "cached": true}),
+            );
+            continue;
+        }
+
         let wrapped = if infra_host::sandbox::available() {
             let spec = infra_host::sandbox::Spec {
                 workspace: cwd_canon.clone(),
@@ -1060,48 +1342,68 @@ pub async fn run_deterministic_verify_checks(
             argv.clone()
         };
 
-        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let sink = captured.clone();
-        let result = infra_host::process::run_raw_with_lock(
-            &wrapped,
-            &cwd_canon,
-            &env,
-            &[],
-            infra_host::process::Limits {
-                seconds: Some(timeout),
-                output: PROGRAM_STDOUT_BYTES,
-                line: PROGRAM_STDOUT_BYTES,
-            },
-            cancel.clone(),
-            runner_lock.clone(),
-            move |chunk| {
-                let mut out = sink.lock().map_err(|_| {
-                    infra_host::HarnessError::unavailable("Program check capture lock failed")
-                })?;
-                let left = PROGRAM_STDOUT_BYTES.saturating_sub(out.len());
-                out.extend_from_slice(&chunk[..chunk.len().min(left)]);
-                Ok(())
-            },
-        )
-        .await;
-
-        let raw = captured
-            .lock()
-            .map(|guard| String::from_utf8_lossy(&guard).into_owned())
-            .unwrap_or_default();
+        let (result, raw) = if let Some(runner) = custom_runner {
+            match runner(&wrapped, &cwd_canon, &env) {
+                Ok((code, out)) => (Ok(code), out),
+                Err((code, msg)) => (Err((code, msg)), String::new()),
+            }
+        } else {
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            let sink = captured.clone();
+            let res = infra_host::process::run_raw_with_lock(
+                &wrapped,
+                &cwd_canon,
+                &env,
+                &[],
+                infra_host::process::Limits {
+                    seconds: Some(timeout),
+                    output: PROGRAM_STDOUT_BYTES,
+                    line: PROGRAM_STDOUT_BYTES,
+                },
+                cancel.clone(),
+                runner_lock.clone(),
+                move |chunk| {
+                    let mut out = sink.lock().map_err(|_| {
+                        infra_host::HarnessError::unavailable("Program check capture lock failed")
+                    })?;
+                    let left = PROGRAM_STDOUT_BYTES.saturating_sub(out.len());
+                    out.extend_from_slice(&chunk[..chunk.len().min(left)]);
+                    Ok(())
+                },
+            )
+            .await;
+            let raw = captured
+                .lock()
+                .map(|guard| String::from_utf8_lossy(&guard).into_owned())
+                .unwrap_or_default();
+            let mapped = match res {
+                Ok(output) => Ok(output.code),
+                Err(error) => Err((error.code.to_string(), error.message)),
+            };
+            (mapped, raw)
+        };
         let bounded = bound_diagnostic(&raw, PROGRAM_DIAGNOSTIC_BYTES);
         match result {
-            Ok(output) if output.code == 0 => {
+            Ok(0) => {
                 let detail = if bounded.is_empty() {
                     format!("passed (check {})", index + 1)
                 } else {
                     bounded
                 };
+                if let (Some(db_path), Some(key)) = (health_db, cache_key.as_deref())
+                    && let Ok(conn) = ensure_system_ledger(db_path)
+                {
+                    let _ = conn.execute(
+                        "INSERT INTO verify_step_receipts(cache_key,name,detail,created_at) VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(cache_key) DO UPDATE SET detail=excluded.detail,created_at=excluded.created_at",
+                        rusqlite::params![key, &name, &detail, now()],
+                    );
+                }
                 checks.push(object!({"name": name, "status": "passed", "detail": detail}));
             }
-            Ok(output) => {
+            Ok(code) => {
                 all_passed = false;
-                let reason = format!("exited with code {}", output.code);
+                let reason = format!("exited with code {code}");
                 let detail = if bounded.is_empty() {
                     reason
                 } else {
@@ -1111,12 +1413,10 @@ pub async fn run_deterministic_verify_checks(
                 failure_lines.push(format!("- [{name}] {detail}"));
                 checks.push(object!({"name": name, "status": "failed", "detail": detail}));
             }
-            Err(error) => {
+            Err((code, message)) => {
                 all_passed = false;
-                let detail = bound_diagnostic(
-                    &format!("execution failed ({}): {}", error.code, error.message),
-                    2000,
-                );
+                let detail =
+                    bound_diagnostic(&format!("execution failed ({code}): {message}"), 2000);
                 failure_lines.push(format!("- [{name}] {detail}"));
                 checks.push(object!({"name": name, "status": "failed", "detail": detail}));
             }
@@ -1185,5 +1485,136 @@ mod usage_components_tests {
             usage_components_from_raw(b"{\"type\":\"result\",\"subtype\":\"success\"}\n", "cursor");
         assert_eq!(cursor_empty["model_calls"], Value::Null);
         assert_eq!(cursor_empty["source"], "cursor");
+    }
+
+    #[tokio::test]
+    async fn system_health_ledger_and_verify_receipt_cache_respect_racy_ns() {
+        let dir = std::env::temp_dir().join(format!("infra-sys-health-{}", uuid::Uuid::new_v4()));
+        let svc = dir.join("svc");
+        std::fs::create_dir_all(&svc).unwrap();
+        std::fs::write(svc.join("ok.txt"), "v1\n").unwrap();
+        let db = dir.join("system_health.sqlite3");
+
+        for i in 0..4 {
+            record_system_health(
+                &db,
+                "system",
+                "codex",
+                Some("gpt-5"),
+                &format!("r-{i}"),
+                "verify",
+                if i < 2 { "blocked" } else { "completed" },
+                i < 2,
+                i < 2,
+                1.0,
+            );
+        }
+        let health = summarize_system_health(&db, "system", "codex", Some("gpt-5"));
+        assert_eq!(health.total_runs, 4);
+        assert_eq!(health.schema_error_runs, 2);
+        assert!(
+            health
+                .warnings
+                .iter()
+                .any(|w| w.contains("schema error rate"))
+        );
+        assert!(health.warnings.iter().any(|w| w.contains("ROI/deopt")));
+
+        let svc_canon = infra_core::fs::canonicalize(&svc).unwrap();
+        let (_digest, max_mtime) = verify_tree_stamp(&svc_canon).unwrap();
+        let specs = vec![object!({
+            "name": "svc:echo",
+            "argv": ["/bin/sh", "-c", "echo verify-ok"],
+            "cwd_service": "svc",
+            "timeout_seconds": 10
+        })];
+        let state = object!({"roots": {"svc": svc.to_string_lossy().as_ref()}});
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exec_calls = std::sync::atomic::AtomicUsize::new(0);
+        let run_local = |wrapped: &[String],
+                         cwd: &Path,
+                         env: &std::collections::BTreeMap<String, String>|
+         -> std::result::Result<(i32, String), (String, String)> {
+            exec_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let out = std::process::Command::new(&wrapped[0])
+                .args(&wrapped[1..])
+                .current_dir(cwd)
+                .env_clear()
+                .envs(env)
+                .output()
+                .map_err(|e| ("spawn".to_owned(), e.to_string()))?;
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            Ok((out.status.code().unwrap_or(1), text))
+        };
+
+        // Inside VERIFY_RACY_NS window -> never reads/writes cache.
+        let racy = run_deterministic_verify_checks_at(
+            &specs,
+            &state,
+            cancel.clone(),
+            None,
+            Some(&db),
+            max_mtime + VERIFY_RACY_NS - 1,
+            Some(&run_local),
+        )
+        .await
+        .unwrap();
+        assert!(racy.all_passed, "racy failed: {:?}", racy.checks);
+        assert!(racy.checks[0].get("cached").is_none());
+        assert_eq!(exec_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // Outside VERIFY_RACY_NS -> first executes live, second hits SQLite receipt cache.
+        let settled_now = max_mtime + VERIFY_RACY_NS + 100;
+        let first = run_deterministic_verify_checks_at(
+            &specs,
+            &state,
+            cancel.clone(),
+            None,
+            Some(&db),
+            settled_now,
+            Some(&run_local),
+        )
+        .await
+        .unwrap();
+        assert!(first.all_passed, "first failed: {:?}", first.checks);
+        assert!(first.checks[0].get("cached").is_none());
+        assert_eq!(exec_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        let second = run_deterministic_verify_checks_at(
+            &specs,
+            &state,
+            cancel.clone(),
+            None,
+            Some(&db),
+            settled_now + 10,
+            Some(&run_local),
+        )
+        .await
+        .unwrap();
+        assert!(second.all_passed);
+        assert_eq!(second.checks[0]["cached"], true);
+        assert_eq!(second.checks[0]["detail"], first.checks[0]["detail"]);
+        assert_eq!(exec_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        // Modifying workspace file invalidates cached verify receipt cleanly.
+        std::fs::write(svc.join("ok.txt"), "v2\n").unwrap();
+        let (_new_digest, new_mtime) = verify_tree_stamp(&svc_canon).unwrap();
+        let third = run_deterministic_verify_checks_at(
+            &specs,
+            &state,
+            cancel,
+            None,
+            Some(&db),
+            new_mtime + VERIFY_RACY_NS + 100,
+            Some(&run_local),
+        )
+        .await
+        .unwrap();
+        assert!(third.all_passed);
+        assert!(third.checks[0].get("cached").is_none());
+        assert_eq!(exec_calls.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

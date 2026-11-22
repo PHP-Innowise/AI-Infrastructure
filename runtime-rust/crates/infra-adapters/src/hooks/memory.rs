@@ -1,10 +1,229 @@
 use super::{Context, valid_path};
 use crate::TailTrim;
 use crate::output::Output;
-use infra_core::Result;
+use infra_core::{Result, Store, storage::OpenOptions};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 const UNSAVED: &str = "Previous native memory result was not saved completely.";
+const HOOK_PREFLIGHT_RACY_NS: i128 = 2_000_000_000;
+const HOOK_PREFLIGHT_CACHE_FILE: &str = "memory-bank/local/hook-refresh-preflight.json";
+
+fn time_to_unix_ns(time: SystemTime) -> Option<i128> {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_nanos()).ok(),
+        Err(err) => i128::try_from(err.duration().as_nanos())
+            .ok()
+            .and_then(|ns| ns.checked_neg()),
+    }
+}
+
+fn now_unix_ns() -> i128 {
+    time_to_unix_ns(SystemTime::now()).unwrap_or(0)
+}
+
+fn settled_mtime(mtime_ns: i128, now_ns: i128) -> bool {
+    mtime_ns > 0 && now_ns > HOOK_PREFLIGHT_RACY_NS && mtime_ns <= now_ns - HOOK_PREFLIGHT_RACY_NS
+}
+
+fn max_dir_mtime_ns(dir: &Path, remaining: &mut usize) -> i128 {
+    if !dir.is_dir() || *remaining == 0 {
+        return 0;
+    }
+    let mut max_ns = dir
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(time_to_unix_ns)
+        .unwrap_or(0);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return max_ns;
+    };
+    for entry in entries.flatten() {
+        if *remaining == 0 {
+            break;
+        }
+        *remaining -= 1;
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            return i128::MAX;
+        }
+        if let Some(ns) = meta.modified().ok().and_then(time_to_unix_ns) {
+            max_ns = max_ns.max(ns);
+        }
+        if meta.is_dir() && path.file_name().is_none_or(|n| n != "local") {
+            max_ns = max_ns.max(max_dir_mtime_ns(&path, remaining));
+        }
+    }
+    max_ns
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RefreshPreflightRecord {
+    task_id: String,
+    index_gen: String,
+    git_head: String,
+    host: String,
+    query_digest: String,
+    db_mtime_ns: i128,
+    db_len: u64,
+    pending_deltas: i64,
+    task_updated_at: String,
+    tree_max_mtime_ns: i128,
+    transcript_stamp: String,
+    stdout: Vec<u8>,
+}
+
+fn preflight_key_snapshot(
+    scope: &Context,
+    query: &str,
+    now_ns: i128,
+) -> Option<RefreshPreflightRecord> {
+    if std::env::var("HARNESS_DISABLE_HOOK_PREFLIGHT").as_deref() == Ok("1") {
+        return None;
+    }
+    let task_id = scope.task.as_deref().filter(|t| !t.is_empty())?.to_owned();
+    if query.trim().is_empty() || query.starts_with("INTERNAL_NATIVE_MEMORY_RESULT ") {
+        return None;
+    }
+    if scope.host == "cursor"
+        && scope.roots.state == scope.roots.tooling
+        && !scope
+            .roots
+            .tooling
+            .join(".cursor/rules/working-memory.mdc")
+            .is_file()
+    {
+        return None;
+    }
+    let db_path = infra_core::storage::default_database(&scope.roots).ok()?;
+    let db_meta = std::fs::symlink_metadata(&db_path).ok()?;
+    if db_meta.file_type().is_symlink() || !db_meta.is_file() {
+        return None;
+    }
+    let db_mtime_ns = db_meta.modified().ok().and_then(time_to_unix_ns)?;
+    if !settled_mtime(db_mtime_ns, now_ns) {
+        return None;
+    }
+
+    let mut budget = 1500usize;
+    let chunks_mtime = max_dir_mtime_ns(&scope.roots.state.join("memory-bank/chunks"), &mut budget);
+    let brain_mtime = max_dir_mtime_ns(&scope.roots.brain_root(), &mut budget);
+    let mut tree_max_mtime_ns = chunks_mtime.max(brain_mtime).max(db_mtime_ns);
+    let git_head =
+        if let Ok(Some(frame)) = infra_core::git::GitFrame::discover(&scope.roots.project) {
+            if let Some(git_idx_mtime) = std::fs::symlink_metadata(frame.admin.join("index"))
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(time_to_unix_ns)
+            {
+                tree_max_mtime_ns = tree_max_mtime_ns.max(git_idx_mtime);
+            }
+            let head_txt = std::fs::read_to_string(frame.admin.join("HEAD")).unwrap_or_default();
+            let trimmed = head_txt.trim();
+            let resolved = if let Some(ref_name) = trimmed.strip_prefix("ref:") {
+                let ref_rel = ref_name.trim();
+                frame
+                    .common_dir()
+                    .ok()
+                    .and_then(|common| {
+                        std::fs::read_to_string(common.join(ref_rel))
+                            .ok()
+                            .or_else(|| std::fs::read_to_string(common.join("packed-refs")).ok())
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            format!("{trimmed}:{}", resolved.trim())
+        } else {
+            String::new()
+        };
+    if tree_max_mtime_ns == i128::MAX || !settled_mtime(tree_max_mtime_ns, now_ns) {
+        return None;
+    }
+
+    let store = Store::open_read_only(&db_path, Duration::from_millis(250))
+        .or_else(|_| Store::open(&db_path, OpenOptions::default()))
+        .ok()?;
+    let index_gen = infra_core::storage::index_generation(&store.conn).ok()?;
+    let pending_deltas: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM turn_deltas WHERE task_id=?1",
+            [&task_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let task_updated_at: String = store
+        .conn
+        .query_row(
+            "SELECT COALESCE(MAX(updated_at), '') FROM working_tasks WHERE task_id=?1",
+            [&task_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+
+    let transcript_stamp = valid_path(scope.payload["transcript_path"].as_str(), 4096)
+        .and_then(|p| std::fs::symlink_metadata(p).ok())
+        .and_then(|m| {
+            let mt = m.modified().ok().and_then(time_to_unix_ns)?;
+            Some(format!("{}:{mt}", m.len()))
+        })
+        .unwrap_or_default();
+
+    Some(RefreshPreflightRecord {
+        task_id,
+        index_gen,
+        git_head,
+        host: scope.host.clone(),
+        query_digest: infra_core::query::sha256(query.as_bytes()),
+        db_mtime_ns,
+        db_len: db_meta.len(),
+        pending_deltas,
+        task_updated_at,
+        tree_max_mtime_ns,
+        transcript_stamp,
+        stdout: Vec::new(),
+    })
+}
+
+fn preflight_cache_matches(
+    cached: &RefreshPreflightRecord,
+    current: &RefreshPreflightRecord,
+) -> bool {
+    cached.task_id == current.task_id
+        && cached.index_gen == current.index_gen
+        && cached.git_head == current.git_head
+        && cached.host == current.host
+        && cached.query_digest == current.query_digest
+        && cached.db_mtime_ns == current.db_mtime_ns
+        && cached.db_len == current.db_len
+        && cached.pending_deltas == current.pending_deltas
+        && cached.task_updated_at == current.task_updated_at
+        && cached.tree_max_mtime_ns == current.tree_max_mtime_ns
+        && cached.transcript_stamp == current.transcript_stamp
+}
+
+fn load_preflight_cache(scope: &Context) -> Option<RefreshPreflightRecord> {
+    let path = scope.roots.state.join(HOOK_PREFLIGHT_CACHE_FILE);
+    let bytes = infra_core::fs::read_regular(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn save_preflight_cache(scope: &Context, mut record: RefreshPreflightRecord, stdout: Vec<u8>) {
+    record.stdout = stdout;
+    let path = scope.roots.state.join(HOOK_PREFLIGHT_CACHE_FILE);
+    if let Ok(bytes) = serde_json::to_vec(&record) {
+        let _ = infra_core::fs::atomic_write(&path, &bytes);
+    }
+}
 fn task_args(scope: &Context) -> Vec<String> {
     scope
         .task
@@ -48,6 +267,20 @@ fn cursor(scope: &Context, args: &[String], input: &[u8]) -> (Vec<u8>, Option<Va
     )
 }
 pub fn read(scope: &Context) -> Result<Output> {
+    read_with_runner(scope, now_unix_ns(), true, |ctx, args| {
+        ctx.call("refresh", args, &[], ctx.budget)
+    })
+}
+
+fn read_with_runner<F>(
+    scope: &Context,
+    now_ns: i128,
+    run_native_prompt: bool,
+    mut refresh_runner: F,
+) -> Result<Output>
+where
+    F: FnMut(&Context, &[String]) -> Result<Output>,
+{
     let cursor_host = scope.host == "cursor";
     let pass = || {
         if cursor_host {
@@ -94,7 +327,7 @@ pub fn read(scope: &Context) -> Result<Output> {
         args
     };
     let mut prompt_notice = String::new();
-    let native = if scope.task.is_some() {
+    let native = if run_native_prompt && scope.task.is_some() {
         if cursor_host {
             if let Ok(output) = scope.call("native-prompt", &native_args, &scope.raw, scope.budget)
                 && output.code == 0
@@ -118,6 +351,33 @@ pub fn read(scope: &Context) -> Result<Output> {
         }
         return Ok(pass());
     }
+
+    let preflight = preflight_key_snapshot(scope, &query, now_ns);
+    if let Some(current) = &preflight
+        && let Some(cached) = load_preflight_cache(scope)
+        && preflight_cache_matches(&cached, current)
+    {
+        if let Some(native) = native
+            && let Ok(Ok(output)) = native.join()
+            && output.code == 0
+            && String::from_utf8_lossy(&output.stdout).tail() == UNSAVED
+        {
+            prompt_notice = format!("{UNSAVED}\n");
+        }
+        scope.append("refresh-health.ndjson",&json!({"at":infra_core::domain::clock::proof_now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),"hook_status":0,"source":"hook-preflight-cache"}));
+        if cursor_host {
+            return Ok(pass());
+        }
+        let mut rendered = prompt_notice;
+        if !cached.stdout.is_empty() {
+            rendered.push_str(&String::from_utf8_lossy(&cached.stdout));
+            if !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+        }
+        return Ok(Output::text(rendered));
+    }
+
     let mut args = vec!["--host".into(), scope.host.clone()];
     if cursor_host {
         args.extend([
@@ -154,7 +414,7 @@ pub fn read(scope: &Context) -> Result<Output> {
             }
         }
     }
-    let result = scope.call("refresh", &args, &[], scope.budget);
+    let result = refresh_runner(scope, &args);
     if let Some(native) = native
         && let Ok(Ok(output)) = native.join()
         && output.code == 0
@@ -166,6 +426,11 @@ pub fn read(scope: &Context) -> Result<Output> {
         Ok(output) => output,
         Err(error) => Output::error(1, error.to_string()),
     };
+    if output.code == 0
+        && let Some(record) = preflight
+    {
+        save_preflight_cache(scope, record, output.stdout.clone());
+    }
     scope.append("refresh-health.ndjson",&json!({"at":infra_core::domain::clock::proof_now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),"hook_status":output.code,"source":"hook"}));
     if cursor_host {
         let mut pass = pass();
@@ -380,4 +645,118 @@ pub fn session_cursor(scope: &Context) -> Result<Vec<u8>> {
         }
     };
     Ok(cursor(scope, &maintenance, input).0)
+}
+
+#[cfg(test)]
+mod hook_preflight_tests {
+    use super::*;
+    use infra_core::Roots;
+
+    fn test_git_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::python_realpath(dir.path()).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        std::fs::write(root.join("README.md"), "init\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--quiet", "-m", "init"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        std::fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+        let db_path = root.join("memory-bank/local/context.db");
+        let _store = Store::open(&db_path, OpenOptions::refresh(None)).unwrap();
+        (dir, root, db_path)
+    }
+
+    #[test]
+    fn memory_read_skips_heavy_refresh_when_task_index_and_head_settled_and_invalidates_on_drift() {
+        let (_dir, root, db_path) = test_git_project();
+        let roots = Roots::discover(&root, &root).unwrap();
+        let payload = json!({"prompt": "How do invoices number per tenant?"});
+        let scope = Context {
+            roots,
+            host: "claude".into(),
+            payload: payload.clone(),
+            raw: serde_json::to_vec(&payload).unwrap(),
+            task: Some("TASK-42".into()),
+            inferred: false,
+            entered: false,
+            other_worktree: false,
+            outside: None,
+            budget: Duration::from_secs(3),
+        };
+        let prompt_txt = scope.payload["prompt"].as_str().unwrap();
+
+        let db_mtime = std::fs::symlink_metadata(&db_path)
+            .unwrap()
+            .modified()
+            .ok()
+            .and_then(time_to_unix_ns)
+            .unwrap();
+        let racy_now = db_mtime + HOOK_PREFLIGHT_RACY_NS - 1;
+        assert!(preflight_key_snapshot(&scope, prompt_txt, racy_now).is_none());
+
+        let settled_now = db_mtime + HOOK_PREFLIGHT_RACY_NS + 500_000_000;
+        let mut calls = 0usize;
+        let first = read_with_runner(&scope, settled_now, false, |_s, _args| {
+            calls += 1;
+            Ok(Output::text("CAPSULE v1\n"))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "CAPSULE v1\n");
+
+        // Second turn with unchanged (task_id, index_gen, git_head) outside RACY_NS skips refresh!
+        let second = read_with_runner(&scope, settled_now + 100, false, |_s, _args| {
+            calls += 1;
+            Ok(Output::text("SHOULD_NOT_RUN\n"))
+        })
+        .unwrap();
+        assert_eq!(
+            calls, 1,
+            "unchanged settled turn must skip refresh subprocess"
+        );
+        assert_eq!(String::from_utf8_lossy(&second.stdout), "CAPSULE v1\n");
+
+        // Advancing git HEAD invalidates preflight cleanly and runs refresh again.
+        std::fs::write(root.join("README.md"), "v2\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--quiet", "-m", "v2"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        let after_git = now_unix_ns() + HOOK_PREFLIGHT_RACY_NS + 1_000_000_000;
+        let third = read_with_runner(&scope, after_git, false, |_s, _args| {
+            calls += 1;
+            Ok(Output::text("CAPSULE v2\n"))
+        })
+        .unwrap();
+        assert_eq!(calls, 2, "changed git_head must trigger fresh refresh");
+        assert_eq!(String::from_utf8_lossy(&third.stdout), "CAPSULE v2\n");
+    }
 }

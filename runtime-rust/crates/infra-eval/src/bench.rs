@@ -156,9 +156,16 @@ impl Checkpoint {
             && self.steps[n - 2]["step"] == "flush"
             && self.steps[n - 1]["step"] == "update"
             && self.steps[n - 2..].iter().all(|s| s["ok"] == true);
-        Ok(
-            json!({"cli":self.cli,"status_on_detached_head":self.takes_status(),"task":self.task,"steps":self.steps,"stopped":self.stopped,"landed":landed,"ok":ok}),
-        )
+        let mut summary = json!({"cli":self.cli,"status_on_detached_head":self.takes_status(),"task":self.task,"steps":self.steps,"stopped":self.stopped,"landed":landed,"ok":ok});
+        let input_digest =
+            artifact::digest(&json!({"task":task,"cli":&self.cli,"steps":&self.steps}))?;
+        let sealed_envelope = crate::sealed_ab::seal_experiment_envelope(
+            "native-checkpoint-report-v1",
+            summary.clone(),
+            &input_digest,
+        )?;
+        summary["sealed_envelope"] = sealed_envelope;
+        Ok(summary)
     }
 }
 pub fn result_for(source: &str) -> Value {
@@ -185,6 +192,13 @@ pub fn run(driver: &mut impl BenchmarkDriver, host: &str, request: &Value) -> Re
     observed["provider_requests"] = json!(provider.requests());
     observed["real_provider_contacted"] = false.into();
     observed["provider_tokens_spent"] = 0.into();
+    let input_digest = artifact::digest(&json!({"host":host,"request":request}))?;
+    let sealed_envelope = crate::sealed_ab::seal_experiment_envelope(
+        "native-benchmark-run-v1",
+        observed.clone(),
+        &input_digest,
+    )?;
+    observed["sealed_envelope"] = sealed_envelope;
     Ok(observed)
 }
 #[derive(Default)]
@@ -955,5 +969,78 @@ mod codex_output_tests {
         let failed = "Chunk ID: 1\nWall time: 0.1 seconds\nProcess exited with code 128\nOutput:\nfatal: ref HEAD is not a symbolic ref\n";
         assert_eq!(codex_output(failed).1, Some(false));
         assert_eq!(codex_output("plain text"), ("plain text".to_string(), None));
+    }
+
+    #[test]
+    fn bench_run_and_longmemeval_comparison_attach_verifiable_sealed_ab_envelopes() {
+        struct StubDriver;
+        impl super::BenchmarkDriver for StubDriver {
+            fn run(
+                &mut self,
+                host: &str,
+                request: &serde_json::Value,
+                _provider: &super::ScriptedProvider,
+            ) -> crate::Result<serde_json::Value> {
+                Ok(serde_json::json!({"ok": true, "host": host, "source": request["source"]}))
+            }
+        }
+        let mut driver = StubDriver;
+        let report = super::run(
+            &mut driver,
+            "codex",
+            &serde_json::json!({"source": "src/App.php"}),
+        )
+        .unwrap();
+        let envelope = &report["sealed_envelope"];
+        assert_eq!(envelope["schema"], "native-benchmark-run-v1");
+        crate::sealed_ab::verify_sealed_digest(envelope, "bench envelope tampered").unwrap();
+
+        let mut tampered = envelope.clone();
+        tampered["ok"] = serde_json::json!(false);
+        assert!(crate::sealed_ab::verify_sealed_digest(&tampered, "tamper").is_err());
+
+        let phase = |tokens: u64| {
+            serde_json::json!({
+                "attempts": 1,
+                "expected_units": 1,
+                "finished_attempts": 1,
+                "closed_units": 1,
+                "overflow": false,
+                "outcomes": {"succeeded": 1, "failed": 0, "cancelled": 0, "pending": 0, "conflict": 0},
+                "complete": {"coverage": true, "tokens": true, "billing": true, "timing": true},
+                "tokens": tokens,
+                "input_tokens": tokens,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "usd_micros": 100,
+                "component_ns": 1000
+            })
+        };
+        let ledger = |t: u64| {
+            serde_json::json!({
+                "horizon": 1,
+                "profile": "memory-benchmark-ledger-v1",
+                "usage_profile": "inclusive-input-output-v1",
+                "phases": {"build": phase(t), "query": phase(t), "reader": phase(t), "judge": phase(t)}
+            })
+        };
+        let acq = |t: u64| serde_json::json!({"scope": "memory-only", "common_task_excluded": true, "ledger": ledger(t)});
+        let cmp = infra_pilots::longmemeval::comparison::compare_incremental(
+            &ledger(30),
+            &ledger(10),
+            &acq(5),
+            &acq(15),
+        )
+        .unwrap();
+        assert_eq!(
+            cmp["sealed_envelope"]["schema"],
+            "memory-incremental-comparison-v1"
+        );
+        crate::sealed_ab::verify_sealed_digest(
+            &cmp["sealed_envelope"],
+            "comparison envelope invalid",
+        )
+        .unwrap();
     }
 }

@@ -753,9 +753,20 @@ fn initialize(conn: &Connection, require_write: bool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS document_links(path TEXT NOT NULL,ref_path TEXT NOT NULL,ref_kind TEXT NOT NULL,PRIMARY KEY(path,ref_path,ref_kind));
         CREATE TABLE IF NOT EXISTS index_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS identifier_terms(path TEXT NOT NULL,identifier TEXT NOT NULL,expansion TEXT NOT NULL,PRIMARY KEY(path,identifier,expansion));
+        CREATE TABLE IF NOT EXISTS query_plan_cache(
+            plan_key TEXT PRIMARY KEY,
+            word_tokens TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            capsule_profile TEXT NOT NULL,
+            index_generation TEXT NOT NULL,
+            working_rev TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS document_links_ref ON document_links(ref_path);
         CREATE INDEX IF NOT EXISTS document_links_source_path ON document_links(ref_path,ref_kind,path);
-        CREATE INDEX IF NOT EXISTS identifier_terms_expansion ON identifier_terms(expansion);")?;
+        CREATE INDEX IF NOT EXISTS identifier_terms_expansion ON identifier_terms(expansion);
+        CREATE INDEX IF NOT EXISTS query_plan_cache_gen ON query_plan_cache(index_generation,created_at);")?;
     if !columns(conn, "working_tasks")?.contains("auto_checkpoint") {
         conn.execute_batch(
             "ALTER TABLE working_tasks ADD COLUMN auto_checkpoint TEXT NOT NULL DEFAULT ''",
@@ -977,6 +988,277 @@ pub fn derive_goal(id: &str) -> String {
     format!("{label} (auto-provisioned from {id})")
 }
 
+const QUERY_PLAN_CACHE_LIMIT: i64 = 256;
+
+/// Cache key dimensions for persisted FTS5 candidate query plans in `context.db`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryPlanKey {
+    pub word_tokens: Vec<String>,
+    pub task_id: String,
+    pub capsule_profile: String,
+    pub index_generation: String,
+    pub working_rev: String,
+}
+
+impl QueryPlanKey {
+    pub fn digest(&self) -> String {
+        let encoded = serde_json::to_vec(&(
+            &self.word_tokens,
+            &self.task_id,
+            &self.capsule_profile,
+            &self.index_generation,
+            &self.working_rev,
+        ))
+        .unwrap_or_default();
+        crate::query::sha256(&encoded)
+    }
+}
+
+/// Admitted FTS5 document span stored in [`QueryPlanCache`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CachedCandidateSpan {
+    pub path: String,
+    pub doc_stamp: String,
+    pub score: f64,
+    pub adjusted_score: f64,
+    pub rank: Option<usize>,
+    pub match_strength: Option<String>,
+    pub snippet: String,
+    pub estimated_tokens: usize,
+}
+
+/// Persisted FTS5 query plan payload inside `query_plan_cache`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CachedQueryPlan {
+    pub index_generation: String,
+    pub working_rev: String,
+    pub informative_terms: usize,
+    pub distinctive_matches: usize,
+    pub top_score: Option<f64>,
+    pub coverage: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub evidence_terms: usize,
+    #[serde(default)]
+    pub required_terms: Option<usize>,
+    #[serde(default)]
+    pub funnel_events: Option<Value>,
+    pub candidates: Vec<CachedCandidateSpan>,
+}
+
+/// Result restored from [`QueryPlanCache::lookup`], including cached Trace metadata.
+pub struct CachedQueryHit {
+    pub candidates: Vec<crate::query::Candidate>,
+    pub diagnostics: crate::query::Diagnostics,
+    pub evidence_terms: usize,
+    pub required_terms: Option<usize>,
+    pub funnel_events: Option<Value>,
+}
+
+fn document_cache_stamp(doc: &crate::index::Document) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        doc.source_hash,
+        doc.updated_at,
+        doc.lifecycle,
+        doc.authority,
+        doc.confidence.to_bits(),
+        doc.attestation,
+        doc.conflicts.join(",")
+    )
+}
+
+/// Computes a deterministic generation digest over the live SQLite index tables so
+/// `QueryPlanCache` invalidates automatically on any index update or deletion.
+pub fn index_generation(conn: &Connection) -> Result<String> {
+    let docs: (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM documents",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let episodes: (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM episodes",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let terms: i64 = conn.query_row("SELECT COUNT(*) FROM identifier_terms", [], |row| {
+        row.get(0)
+    })?;
+    let links: i64 = conn.query_row("SELECT COUNT(*) FROM document_links", [], |row| row.get(0))?;
+    let mut statement = conn.prepare(
+        "SELECT path,category,privacy,owner,authority,lifecycle,source_hash,record_id,conflicts,source_fingerprints,updated_at,confidence,attestation FROM document_metadata ORDER BY path",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, f64>(11)?.to_bits(),
+                row.get::<_, String>(12)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let encoded = serde_json::to_vec(&(docs, episodes, terms, links, rows))?;
+    Ok(crate::query::sha256(&encoded))
+}
+
+/// SQLite-backed FTS5 query plan cache in `context.db` with automatic fallback on
+/// stale index generations, missing docs, or corrupted cache rows.
+pub struct QueryPlanCache;
+
+impl QueryPlanCache {
+    /// Attempts to load cached admitted FTS5 candidates and diagnostics matching `key`.
+    /// Returns `None` on any cache miss, stale generation, or verification error.
+    pub fn lookup(conn: &Connection, key: &QueryPlanKey) -> Option<CachedQueryHit> {
+        let plan_key = key.digest();
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT payload, index_generation, working_rev FROM query_plan_cache WHERE plan_key=?1",
+                [&plan_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let (raw, stored_gen, stored_rev) = row?;
+        if stored_gen != key.index_generation || stored_rev != key.working_rev {
+            return None;
+        }
+        let plan: CachedQueryPlan = serde_json::from_str(&raw).ok()?;
+        if plan.index_generation != key.index_generation || plan.working_rev != key.working_rev {
+            return None;
+        }
+        let sql = format!(
+            "SELECT {} FROM documents d JOIN document_metadata m ON m.path=d.path WHERE d.path=?1",
+            crate::index::DOCUMENT_SELECT
+        );
+        let mut stmt = conn.prepare_cached(&sql).ok()?;
+        let mut candidates = Vec::with_capacity(plan.candidates.len());
+        for span in plan.candidates {
+            let document = stmt
+                .query_row([&span.path], crate::index::document_from_row)
+                .optional()
+                .ok()
+                .flatten()?;
+            if document_cache_stamp(&document) != span.doc_stamp {
+                return None;
+            }
+            candidates.push(crate::query::Candidate {
+                document,
+                score: span.score,
+                adjusted_score: span.adjusted_score,
+                rank: span.rank,
+                match_strength: span.match_strength,
+                selection: None,
+                source_changed: vec![],
+                snippet: span.snippet,
+                estimated_tokens: span.estimated_tokens,
+                delivery_identity: None,
+                via: None,
+                hint_raw_sha256: None,
+                held_image: None,
+                held_source_hash: None,
+            });
+        }
+        let diagnostics = crate::query::Diagnostics {
+            informative_terms: plan.informative_terms,
+            distinctive_matches: plan.distinctive_matches,
+            top_score: plan.top_score,
+            coverage: plan.coverage,
+        };
+        Some(CachedQueryHit {
+            candidates,
+            diagnostics,
+            evidence_terms: plan.evidence_terms,
+            required_terms: plan.required_terms,
+            funnel_events: plan.funnel_events,
+        })
+    }
+
+    /// Persists a verified FTS5 query plan into `context.db`. Best-effort only;
+    /// ignores read-only handles and prunes old entries past `QUERY_PLAN_CACHE_LIMIT`.
+    pub fn store(
+        store: &mut Store,
+        key: &QueryPlanKey,
+        candidates: &[crate::query::Candidate],
+        diagnostics: &crate::query::Diagnostics,
+        trace: Option<&crate::observability::Trace>,
+    ) {
+        if store.read_only {
+            return;
+        }
+        let spans = candidates
+            .iter()
+            .map(|c| CachedCandidateSpan {
+                path: c.document.path.clone(),
+                doc_stamp: document_cache_stamp(&c.document),
+                score: c.score,
+                adjusted_score: c.adjusted_score,
+                rank: c.rank,
+                match_strength: c.match_strength.clone(),
+                snippet: c.snippet.clone(),
+                estimated_tokens: c.estimated_tokens,
+            })
+            .collect();
+        let plan = CachedQueryPlan {
+            index_generation: key.index_generation.clone(),
+            working_rev: key.working_rev.clone(),
+            informative_terms: diagnostics.informative_terms,
+            distinctive_matches: diagnostics.distinctive_matches,
+            top_score: diagnostics.top_score,
+            coverage: diagnostics.coverage.clone(),
+            evidence_terms: trace.map(|t| t.evidence_terms).unwrap_or(0),
+            required_terms: trace.and_then(|t| t.required_terms),
+            funnel_events: trace.map(|t| t.funnel["events"].clone()),
+            candidates: spans,
+        };
+        let Ok(payload) = serde_json::to_string(&plan) else {
+            return;
+        };
+        let Ok(tokens_json) = serde_json::to_string(&key.word_tokens) else {
+            return;
+        };
+        let plan_key = key.digest();
+        let now = utc_now();
+        let _ = store.transaction(|conn| {
+            conn.execute(
+                "INSERT INTO query_plan_cache(plan_key,word_tokens,task_id,capsule_profile,index_generation,working_rev,payload,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(plan_key) DO UPDATE SET
+                     index_generation=excluded.index_generation,
+                     working_rev=excluded.working_rev,
+                     payload=excluded.payload,
+                     created_at=excluded.created_at",
+                params![
+                    plan_key,
+                    tokens_json,
+                    key.task_id,
+                    key.capsule_profile,
+                    key.index_generation,
+                    key.working_rev,
+                    payload,
+                    now
+                ],
+            )?;
+            conn.execute(
+                "DELETE FROM query_plan_cache WHERE plan_key IN (
+                     SELECT plan_key FROM query_plan_cache ORDER BY created_at DESC LIMIT -1 OFFSET ?1
+                 )",
+                [QUERY_PLAN_CACHE_LIMIT],
+            )?;
+            Ok(())
+        });
+    }
+}
+
 #[cfg(test)]
 mod schema_mark_tests {
     use super::*;
@@ -1042,5 +1324,49 @@ mod schema_mark_tests {
         drop(store);
         let store = Store::open(&path, OpenOptions::default()).unwrap();
         assert!(schema_current(&store.conn));
+    }
+
+    #[test]
+    fn query_plan_cache_rejects_stale_working_rev_and_preserves_readonly_open() {
+        let (_temp, path) = database();
+        let mut store = Store::open(&path, OpenOptions::refresh(None)).unwrap();
+        store
+            .transaction(|conn| {
+                conn.execute(
+                    "INSERT INTO documents(path,layer,kind,title,summary,content) VALUES('docs/a.md','semantic','note','Title','Sum','Body content')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO document_metadata(path,category,privacy,owner,authority,lifecycle,source_hash,record_id,conflicts,source_fingerprints,updated_at,confidence,attestation) VALUES('docs/a.md','durable','team','*','verified','active','00',NULL,'[]','[]','2026-01-01T00:00:00Z',1.0,'')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let (candidates, diag) =
+            crate::query::rank_candidates_observed(&store.conn, "body content", 20, None, None)
+                .unwrap();
+        assert_eq!(candidates.len(), 1);
+        let gen_id = index_generation(&store.conn).unwrap();
+        let key = QueryPlanKey {
+            word_tokens: vec!["body".into(), "content".into()],
+            task_id: "TASK-9".into(),
+            capsule_profile: "full".into(),
+            index_generation: gen_id.clone(),
+            working_rev: "rev-1".into(),
+        };
+        QueryPlanCache::store(&mut store, &key, &candidates, &diag, None);
+        assert!(QueryPlanCache::lookup(&store.conn, &key).is_some());
+
+        let stale_rev = QueryPlanKey {
+            working_rev: "rev-2".into(),
+            ..key.clone()
+        };
+        assert!(QueryPlanCache::lookup(&store.conn, &stale_rev).is_none());
+
+        drop(store);
+        let ro = Store::open_read_only(&path, Duration::from_secs(1)).unwrap();
+        assert!(ro.read_only);
+        assert!(QueryPlanCache::lookup(&ro.conn, &key).is_some());
     }
 }
