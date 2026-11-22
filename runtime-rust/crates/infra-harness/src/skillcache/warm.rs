@@ -584,6 +584,106 @@ fn decide_raw_trace(
     }))
 }
 
+fn message_matches_mu(message: &str, capsule: &Value, hint: Option<&str>) -> bool {
+    let mu_name = capsule["mu"]["name"].as_str().unwrap_or("");
+    if let Some(hint) = hint
+        && hint.eq_ignore_ascii_case(mu_name)
+    {
+        return true;
+    }
+    let tokenize = |text: &str| -> std::collections::BTreeSet<String> {
+        text.split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|tok| tok.len() >= 3)
+            .map(|tok| tok.to_ascii_lowercase())
+            .collect()
+    };
+    let msg_tokens = tokenize(message);
+    if msg_tokens.is_empty() {
+        return false;
+    }
+    let desc = capsule["mu"]["description"].as_str().unwrap_or("");
+    let mu_tokens = tokenize(&format!("{mu_name} {desc}"));
+    msg_tokens.iter().any(|tok| mu_tokens.contains(tok))
+}
+
+fn decide_toolchain_candidate(
+    runtime: &Runtime,
+    session: &Value,
+    provider: &str,
+    arm: Option<&str>,
+    plan_only: bool,
+    workspace: &Path,
+    message: &str,
+) -> std::result::Result<(Value, String), Decision> {
+    let project_id = session["project_id"].as_str().unwrap_or("");
+    let tree_sha = match trace::workspace_tree_sha(workspace) {
+        Ok(sha) => sha,
+        Err(_) => return Err(miss("no_single_skill", "the message names no skill")),
+    };
+    let candidates = match runtime.store.connection().and_then(|db| match arm {
+        None => db::active_toolchain_capsules(&db, project_id, &tree_sha, None),
+        Some("written_procedure" | "skillcache_no_replay") => {
+            db::active_toolchain_capsules(&db, project_id, &tree_sha, arm)
+        }
+        Some("skillcache_agent" | "skillcache_executor") => {
+            let dedicated = db::active_toolchain_capsules(&db, project_id, &tree_sha, arm)?;
+            Ok(if dedicated.is_empty() {
+                db::active_toolchain_capsules(&db, project_id, &tree_sha, None)?
+            } else {
+                dedicated
+            })
+        }
+        Some(_) => Ok(Vec::new()),
+    }) {
+        Ok(rows) => rows,
+        Err(error) => return Err(miss("unavailable", error.to_string())),
+    };
+    let hint = settings::skill_hint(session);
+    let matching: Vec<Value> = candidates
+        .into_iter()
+        .filter(|capsule| message_matches_mu(message, capsule, hint))
+        .collect();
+    if matching.is_empty() {
+        return Err(miss("no_single_skill", "the message names no skill"));
+    }
+    let has_any = !matching.is_empty();
+    let eligible: Vec<Value> = if provider == "cursor" {
+        matching
+            .into_iter()
+            .filter(|capsule| capsule["form"] == "textual")
+            .collect()
+    } else {
+        matching
+    };
+    if eligible.is_empty() {
+        if has_any && provider == "cursor" {
+            return Err(miss(
+                "provider",
+                "Cursor runs textual capsules only; no active textual tool-chain capsule exists",
+            ));
+        }
+        return Err(miss("no_single_skill", "the message names no skill"));
+    }
+    let had_provider_eligible = !eligible.is_empty();
+    let eligible: Vec<Value> = if plan_only {
+        eligible.into_iter().filter(is_read_only_capsule).collect()
+    } else {
+        eligible
+    };
+    let chosen = match eligible.len() {
+        0 if plan_only && had_provider_eligible => {
+            return Err(miss(
+                "plan_mode",
+                "a capsule's programs write, and this is a read-only turn",
+            ));
+        }
+        0 => return Err(miss("no_single_skill", "the message names no skill")),
+        1 => eligible[0].clone(),
+        _ => best_by_health_and_recency(&runtime.store, &eligible),
+    };
+    Ok((chosen, String::new()))
+}
+
 fn decide_for(
     runtime: &Runtime,
     session: &Value,
@@ -689,6 +789,13 @@ fn decide_for(
         }
         let skill_path = row["skill_path"].as_str().unwrap_or("").to_string();
         (row, skill_path)
+    } else if route.requests.is_empty() && settings::tool_chain_enabled(&runtime.store, session) {
+        match decide_toolchain_candidate(
+            runtime, session, provider, arm, plan_only, workspace, message,
+        ) {
+            Ok(chosen) => chosen,
+            Err(missed) => return missed,
+        }
     } else {
         if route.requests.len() != 1 {
             return miss(
@@ -818,11 +925,16 @@ fn decide_for(
         );
     }
     let name = stored.capsule.mu.name.clone();
+    let skill_label = if skill_path.is_empty() {
+        "workspace tool-chain"
+    } else {
+        skill_path.as_str()
+    };
     let agent_only = arm == Some("skillcache_agent");
     let text = if agent_only {
-        prompt::render_agent_driven(&stored, &skill_path)
+        prompt::render_agent_driven(&stored, skill_label)
     } else {
-        block(&stored, &skill_path)
+        block(&stored, skill_label)
     };
     let eval_arm = arm.map(String::from);
     let (true, Some(generation)) = (stored.capsule.form == Form::Hybrid, generation) else {
@@ -2206,5 +2318,122 @@ mod tests {
             ],
         );
         assert_eq!(best["capsule_id"], "cap-ro");
+    }
+
+    #[test]
+    fn tool_chain_capsule_hits_across_worktrees_on_same_tree_sha() {
+        let root = crate::skillcache::test_support::scratch();
+        let wt1 = root.path().join("wt1");
+        let wt2 = root.path().join("wt2");
+        for wt in [&wt1, &wt2] {
+            std::fs::create_dir_all(wt).unwrap();
+            std::fs::write(wt.join("app.php"), "<?php\n").unwrap();
+        }
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project = store.register(&wt1).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let tree_sha = trace::workspace_tree_sha(&wt1).unwrap();
+        assert_eq!(tree_sha, trace::workspace_tree_sha(&wt2).unwrap());
+
+        let warm_dir = root.path().join("artifacts/tc-1/warm");
+        let capsule_val = json!({
+            "schema_version": 1,
+            "form": "textual",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-php", "description": "Inspect PHP entrypoints safely"},
+            "source": {"skills": [], "tool_chain": {"tree_sha256": tree_sha}},
+        });
+        let cap = SkillCapsule::from_value(&capsule_val).unwrap();
+        let pkg_sha = infra_skillcache::package::write_warm(
+            &warm_dir,
+            &cap,
+            Some(b"# Inspect PHP\n1. Read `app.php`.\n"),
+            &infra_skillcache::package::Files::default(),
+        )
+        .unwrap();
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&[]),
+        );
+        let sess = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude", "mode": "edit", "workflow": "native", "permissions": "auto"}),
+                "inspect php",
+                &[],
+            )
+            .unwrap();
+        let db = store.connection().unwrap();
+        let sid = sess["id"].as_str().unwrap().to_owned();
+        db::begin_capsule(
+            &db,
+            "cap-tc-1",
+            "cmp-tc-1",
+            &project_id,
+            &sid,
+            "g-tc",
+            &json!({"name": "tool-chain", "path": "", "tree_sha256": tree_sha}),
+            None,
+        )
+        .unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "cap-tc-1",
+                mu_name: "inspect-php",
+                mu_description: "Inspect PHP entrypoints safely",
+                form: "textual",
+                capsule_sha256: "a",
+                package_sha256: &pkg_sha,
+                skill_files: &json!({}),
+                env_fingerprint: &env_fp,
+                engine_digest: "eng",
+                artifact_dir: root.path().join("artifacts/tc-1").to_str().unwrap(),
+                capabilities: &json!({"network": "none", "runtimes": []}),
+            },
+        )
+        .unwrap();
+        db::set_capsule_kind_meta(&db, "cap-tc-1", "tool_chain", &tree_sha).unwrap();
+        drop(db);
+
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect php entrypoints".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let mut s_off = sess.clone();
+        s_off["skillcache"] = json!({"mode": "auto"});
+        assert_eq!(
+            reason(&decide_for(
+                &rt,
+                &s_off,
+                &route,
+                "inspect php entrypoints",
+                &wt2,
+                None
+            )),
+            "no_single_skill"
+        );
+        let mut s_on = sess;
+        s_on["skillcache"] = json!({"mode": "auto", "tool_chain": true});
+        match decide_for(&rt, &s_on, &route, "inspect php entrypoints", &wt2, None) {
+            Decision::Hit(warm) => {
+                assert_eq!(warm.capsule_id, "cap-tc-1");
+                assert!(warm.block.contains("workspace tool-chain"));
+            }
+            other => panic!(
+                "expected tool-chain hit on second worktree, got {}",
+                reason(&other)
+            ),
+        }
     }
 }

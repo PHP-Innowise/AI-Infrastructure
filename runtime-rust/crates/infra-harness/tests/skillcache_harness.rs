@@ -2811,3 +2811,111 @@ async fn compile_after_observe_queues_compilation_automatically() {
     assert!(trace_usage.is_some());
     stand.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tool_chain_observe_compile_and_warm_reuse() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    let project = stand.project();
+    let ro_turn = vec![
+        json!({"type": "system", "subtype": "init", "session_id": "native-tc-1"}),
+        json!({"type": "assistant", "session_id": "native-tc-1", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": project.join("invoices/a.txt")}},
+            {"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "total", "path": project.join("invoices")}}
+        ]}}),
+        json!({"type": "user", "session_id": "native-tc-1", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "a.txt ok", "is_error": false},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "total=42", "is_error": false}
+        ]}}),
+        json!({"type": "assistant", "session_id": "native-tc-1", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Checked invoices total."}
+        ]}}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": "Checked invoices total.", "session_id": "native-tc-1", "total_cost_usd": 0.01}),
+    ];
+    stand.script("claude", &ro_turn);
+    let sid = stand
+        .turn(
+            "Inspect invoices total across files",
+            json!({"mode": "observe", "tool_chain": true}),
+        )
+        .await;
+    let traces = stand.traces();
+    assert_eq!(traces.len(), 1, "expected tool-chain trace to be recorded");
+    let generation = stand.skillcache_events(&sid)[0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tc_answer = json!({
+        "form": "hybrid",
+        "capsule": {
+            "mu": {"name": "inspect-invoices", "description": "Inspect invoices files without modifying workspace"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": [runtime()]},
+            "bindings": [],
+            "programs": [{
+                "id": "inspect",
+                "description": "Inspect invoices",
+                "entry": [runtime(), "programs/inspect/program.json"],
+                "inputs": [],
+                "outputs": [],
+                "check": [runtime(), "programs/inspect/program.json", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "inspect"}],
+            "verification": []
+        },
+        "files": [{
+            "path": "programs/inspect/program.json",
+            "content": json!({"result": {"summary": "total=42"}, "require_file": "invoices/a.txt"}).to_string()
+        }],
+        "examples": {
+            "bindings": {},
+            "steps": {"0": {"result": {"summary": "total=42"}}}
+        }
+    });
+    stand.compiler(1, &tc_answer);
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(capsule["kind"], "tool_chain");
+
+    let (_, off_preflight) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{}/preflight", stand.project_id),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "edit", "permissions": "auto"},
+            })),
+        )
+        .await;
+    assert_eq!(off_preflight["skillcache"]["reason"], "no_single_skill");
+
+    let (status, on_preflight) = stand
+        .http(
+            Method::POST,
+            &format!("/api/projects/{}/preflight", stand.project_id),
+            Some(json!({
+                "prompt": "Please inspect invoices files",
+                "risk_caller_hints": false,
+                "skillcache": {"mode": "auto", "provider": "claude", "session_mode": "plan", "permissions": "auto", "tool_chain": true},
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{on_preflight}");
+    assert_eq!(
+        on_preflight["skillcache"]["decision"], "hit",
+        "{on_preflight}"
+    );
+    assert_eq!(
+        on_preflight["skillcache"]["capsule"]["capsule_id"],
+        capsule_id
+    );
+    stand.close().await;
+}

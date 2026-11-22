@@ -191,6 +191,23 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
     if capsule["compile_rules_version"].as_str() != Some(compile_rules::version().as_str()) {
         return Some("The compiler's rules changed since this capsule was compiled.".into());
     }
+    if capsule["kind"] == "tool_chain"
+        && let Some(expected_tree) = capsule["tool_chain_tree_sha"]
+            .as_str()
+            .filter(|sha| !sha.is_empty())
+    {
+        match trace::workspace_tree_sha(workspace) {
+            Ok(now_tree) if now_tree == expected_tree => {}
+            Ok(_) => {
+                return Some(
+                    "The workspace tree changed since this tool-chain capsule was compiled.".into(),
+                );
+            }
+            Err(_) => {
+                return Some("The workspace tree could not be fingerprinted.".into());
+            }
+        }
+    }
     for skill in capsule["skill_files"]["skills"]
         .as_array()
         .into_iter()
@@ -252,6 +269,81 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
+struct RequalifyHook {
+    runtime: std::sync::Weak<Runtime>,
+    work: std::sync::Weak<WorkQueue>,
+}
+
+fn requalify_hooks() -> &'static Mutex<BTreeMap<PathBuf, RequalifyHook>> {
+    static HOOKS: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, RequalifyHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn register_requalify_hook(runtime: &Arc<Runtime>, work: &Arc<WorkQueue>) {
+    let key =
+        std::fs::canonicalize(&runtime.store.state).unwrap_or_else(|_| runtime.store.state.clone());
+    if let Ok(mut guard) = requalify_hooks().lock() {
+        guard.insert(
+            key,
+            RequalifyHook {
+                runtime: Arc::downgrade(runtime),
+                work: Arc::downgrade(work),
+            },
+        );
+    }
+}
+
+fn trigger_background_requalify(db: &rusqlite::Connection, project_id: &str, capsule_id: &str) {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let Some(db_path) = db.path().filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let Some(state_dir) = Path::new(db_path).parent() else {
+        return;
+    };
+    let key = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let hook = requalify_hooks()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&key).cloned());
+    let Some(hook) = hook else {
+        return;
+    };
+    let (Some(rt), Some(wq)) = (hook.runtime.upgrade(), hook.work.upgrade()) else {
+        return;
+    };
+    let Ok(pending_compiles) = db::pending_compiles(db) else {
+        return;
+    };
+    {
+        let Ok(mut pending) = wq.requalifying.lock() else {
+            return;
+        };
+        if pending.contains(capsule_id) || pending_compiles + pending.len() as i64 >= WAITING as i64
+        {
+            return;
+        }
+        pending.insert(capsule_id.to_owned());
+    }
+    if wq
+        .queue(
+            &rt,
+            Work::Requalify {
+                project_id: project_id.to_owned(),
+                capsule_id: capsule_id.to_owned(),
+            },
+        )
+        .is_err()
+        && let Ok(mut pending) = wq.requalifying.lock()
+    {
+        pending.remove(capsule_id);
+    }
+}
+
 impl SkillCacheDomain {
     pub fn new(
         store: SessionStore,
@@ -264,7 +356,7 @@ impl SkillCacheDomain {
         let enqueuer: EnqueueCompileFn = Arc::new(move |rt: &Arc<Runtime>, job: Job| {
             queue_for_runtime.queue(rt, Work::Compile(job))
         });
-        Self {
+        let domain = Self {
             runtime: Arc::new(Runtime {
                 store,
                 providers,
@@ -275,7 +367,9 @@ impl SkillCacheDomain {
             }),
             work,
             requalifying,
-        }
+        };
+        register_requalify_hook(&domain.runtime, &domain.work);
+        domain
     }
     /// Names the engine the gates run, for a process that is not one itself.
     pub fn with_engine(mut self, engine: PathBuf) -> Self {
@@ -288,6 +382,7 @@ impl SkillCacheDomain {
             enqueuer: runtime.enqueuer.clone(),
             requalifying: runtime.requalifying.clone(),
         });
+        register_requalify_hook(&self.runtime, &self.work);
         self
     }
     pub fn runtime(&self) -> Arc<Runtime> {
@@ -691,6 +786,9 @@ fn summary(capsule: &Value) -> Value {
     ] {
         summary[field] = capsule[field].clone();
     }
+    if let Some(kind) = capsule["kind"].as_str().filter(|k| *k != "skill") {
+        summary["kind"] = kind.into();
+    }
     summary
 }
 
@@ -794,6 +892,73 @@ pub(crate) fn invalidate_for_skill_path(
         );
     }
     Ok(ids.len())
+}
+
+/// Evaluates IR path/caller updates against each active or needs_recompile
+/// capsule's `ArtifactDependencyManifest` with a 2-second `RACY_NS` guard.
+/// Marks drifted capsules `stale`, publishes SSE `"stale"`, and queues
+/// background `Work::Requalify` when non-skill workspace dependencies drifted.
+pub fn on_ir_paths_updated(
+    db: &rusqlite::Connection,
+    hub: &crate::store::StreamHub,
+    project_id: &str,
+    changed_paths: &[String],
+    caller_files: &[String],
+    ir_revision: u64,
+) -> Result<usize> {
+    if changed_paths.is_empty() && caller_files.is_empty() {
+        return Ok(0);
+    }
+    let capsules = db::active_or_needs_recompile_capsules(db, project_id)?;
+    let now_ns = db::current_unix_ns();
+    let mut touched = Vec::new();
+    for capsule in capsules {
+        let Some(capsule_id) = capsule["capsule_id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let mut manifest =
+            db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+        if manifest.skill_paths.is_empty()
+            && let Some(skill_path) = capsule["skill_path"]
+                .as_str()
+                .filter(|p| !p.trim().is_empty())
+        {
+            manifest
+                .skill_paths
+                .push(db::normalize_rel_path(skill_path));
+        }
+        let delta = manifest.evaluate_delta(changed_paths, caller_files, ir_revision, now_ns);
+        if delta == db::DeltaMatch::None {
+            continue;
+        }
+        let reason = match delta {
+            db::DeltaMatch::ExactSkill => "The source skill changed.",
+            db::DeltaMatch::Dependency => "Watched project files or IR dependencies changed.",
+            db::DeltaMatch::None => unreachable!(),
+        };
+        db::set_capsule_status(db, &capsule_id, "stale", Some(reason))?;
+        touched.push((capsule_id, delta, reason));
+    }
+    for (id, _, reason) in &touched {
+        hub.publish(
+            "skillcache_capsule",
+            None,
+            Some(project_id.to_owned()),
+            json!({
+                "state": "stale",
+                "project_id": project_id,
+                "capsule_id": id,
+                "reason": reason,
+                "ir_revision": ir_revision,
+            }),
+        );
+    }
+    for (id, delta, _) in &touched {
+        if *delta == db::DeltaMatch::Dependency {
+            trigger_background_requalify(db, project_id, id);
+        }
+    }
+    Ok(touched.len())
 }
 
 /// Enqueues compilation of an observed turn when `compile_after_observe` is set
@@ -933,11 +1098,27 @@ fn enqueue_compile_for_trace(
         let stored = db::trace(&db, generation)?
             .filter(|trace| trace["session_id"] == session_id)
             .ok_or_else(|| HarnessError::missing("This session kept no trace of that turn."))?;
-        let skill = stored["skill_refs"]
+        let (skill, tool_chain_sha) = match stored["skill_refs"]
             .as_array()
             .and_then(|skills| skills.first())
             .cloned()
-            .ok_or_else(|| HarnessError::invalid("The trace names no skill."))?;
+        {
+            Some(skill) => (skill, None),
+            None if stored["redaction"]["trace_kind"] == "tool_chain" => {
+                let tree_sha = stored["redaction"]["tool_chain_tree_sha"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        HarnessError::invalid("Tool-chain trace lacks workspace digest.")
+                    })?
+                    .to_string();
+                (
+                    json!({"name": "tool-chain", "path": "", "tree_sha256": tree_sha}),
+                    Some(tree_sha),
+                )
+            }
+            None => return Err(HarnessError::invalid("The trace names no skill.")),
+        };
         if db::compile_pending(&db, generation)? {
             return Err(HarnessError::conflict(
                 "This turn is already being compiled.",
@@ -963,6 +1144,9 @@ fn enqueue_compile_for_trace(
             &skill,
             eval_arm.as_deref(),
         )?;
+        if let Some(tree_sha) = &tool_chain_sha {
+            db::set_capsule_kind_meta(&db, &capsule_id, "tool_chain", tree_sha)?;
+        }
         db::begin_compile(
             &db,
             &compile_id,
@@ -1196,5 +1380,130 @@ mod tests {
         assert!(lock_b.try_lock().is_ok());
         assert!(queue.project_lock("proj-a").try_lock().is_err());
         assert!(!rt.cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn on_ir_paths_updated_invalidates_dependencies_with_racy_ns_guard() {
+        let scratch = test_support::scratch();
+        let workspace = scratch.path().join("project");
+        std::fs::create_dir_all(workspace.join(".claude/skills/deploy")).unwrap();
+        std::fs::write(
+            workspace.join(".claude/skills/deploy/SKILL.md"),
+            "# Deploy\n",
+        )
+        .unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let session = store
+            .create(
+                &json!({
+                    "project_id": project_id,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "workflow": "native",
+                    "permissions": "auto"
+                }),
+                "deploy",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let db = store.connection().unwrap();
+        let skill = json!({
+            "name": "deploy",
+            "path": ".claude/skills/deploy/SKILL.md",
+            "tree_sha256": "a".repeat(64)
+        });
+        db::begin_capsule(
+            &db,
+            "cap-ir",
+            "cmp-ir",
+            &project_id,
+            &sid,
+            "g-ir",
+            &skill,
+            None,
+        )
+        .unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "cap-ir",
+                mu_name: "deploy",
+                mu_description: "Deploy app",
+                form: "textual",
+                capsule_sha256: "b",
+                package_sha256: "p",
+                skill_files: &json!({}),
+                env_fingerprint: "e",
+                engine_digest: "d",
+                artifact_dir: "/tmp/cap-ir",
+                capabilities: &json!({}),
+            },
+        )
+        .unwrap();
+        let stale_old_rev = db::ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/deploy/SKILL.md".into()],
+            manifest_files: vec!["composer.json".into()],
+            watched_globs: vec!["routes/**".into()],
+            caller_files: vec!["app/Deployer.php".into()],
+            ir_revision: 50,
+            verified_ns: 0,
+            ..Default::default()
+        };
+        db::set_dependency_manifest(&db, "cap-ir", &stale_old_rev).unwrap();
+        let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
+        else {
+            panic!("expected replay frames");
+        };
+        // Unrelated file changes nothing.
+        assert_eq!(
+            on_ir_paths_updated(
+                &db,
+                store.stream(),
+                &project_id,
+                &["README.md".into()],
+                &[],
+                51
+            )
+            .unwrap(),
+            0
+        );
+        // Old revision outside RACY_NS is already covered -> no invalidation.
+        assert_eq!(
+            on_ir_paths_updated(
+                &db,
+                store.stream(),
+                &project_id,
+                &["composer.json".into()],
+                &[],
+                49
+            )
+            .unwrap(),
+            0
+        );
+        // Newer IR revision matching watched_globs marks stale and publishes SSE "stale".
+        assert_eq!(
+            on_ir_paths_updated(
+                &db,
+                store.stream(),
+                &project_id,
+                &["routes/web.php".into()],
+                &[],
+                51
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db::capsule(&db, "cap-ir").unwrap().unwrap()["status"],
+            "stale"
+        );
+        let frame = rx.try_recv().unwrap();
+        assert_eq!(frame.event, "skillcache_capsule");
+        assert_eq!(frame.data["state"], "stale");
+        assert_eq!(frame.data["capsule_id"], "cap-ir");
+        assert_eq!(frame.data["ir_revision"], 51);
     }
 }
