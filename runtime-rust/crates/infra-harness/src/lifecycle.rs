@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -1347,6 +1347,9 @@ impl RunnerLifecycle {
         if let Some(reply) = extract_deterministic_memory_draft(&self.store, &state.sid, result) {
             return Ok(RecoveryPlan::Deterministic { reply });
         }
+        if let Some(reply) = synthesize_empty_worktree_draft(&state.session, result) {
+            return Ok(RecoveryPlan::Deterministic { reply });
+        }
         let Some(mut launch) = state.launch.clone() else {
             return Ok(RecoveryPlan::Skip {
                 state: "failed",
@@ -1597,6 +1600,56 @@ fn extract_deterministic_memory_draft(
         }
     }
     None
+}
+
+/// Synthesizes a valid `no_reusable_knowledge` `memory-draft` deterministically when the
+/// session ran inside a Git worktree with zero uncommitted or committed workspace changes,
+/// avoiding a wasted follow-up recovery LLM round-trip.
+fn synthesize_empty_worktree_draft(session: &Value, result: &WorkerResult) -> Option<String> {
+    let project_path = session["project_path"].as_str().filter(|s| !s.is_empty())?;
+    let root = Path::new(project_path);
+    if !root.is_dir() {
+        return None;
+    }
+    let has_git = core::git::GitFrame::discover(root).ok().flatten().is_some();
+    if !has_git {
+        return None;
+    }
+    if !infra_system::system_graph::git_worktree_changes(root).is_empty() {
+        return None;
+    }
+    if let Some(base_head) = session["result_base"]["head"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        && !infra_system::system_graph::git_changes_since(root, Some(base_head)).is_empty()
+    {
+        return None;
+    }
+    let first_line = result
+        .text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
+        .unwrap_or("");
+    let progress = if first_line.is_empty()
+        || core::domain::indexed_secret_policy_reason(&[first_line]).is_some()
+    {
+        "Completed session work with an unchanged Git worktree.".to_owned()
+    } else {
+        let mut s: String = first_line.chars().take(240).collect();
+        if s.len() < first_line.len() {
+            s.push_str("...");
+        }
+        s
+    };
+    let obj = json!({
+        "progress": progress,
+        "next_steps": [],
+        "learnings": [],
+        "capture_decision": "no_reusable_knowledge"
+    });
+    let fenced = format!("```memory-draft\n{}\n```", obj);
+    memory_draft::parse(&fenced).map(|_| fenced)
 }
 
 fn memory_notice(brain: &Value) -> Result<String> {
@@ -2246,6 +2299,140 @@ mod usage_components_tests {
             events
                 .iter()
                 .any(|e| e["kind"] == "memory" && e["recovery"] == "recovered"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_git_worktree_synthesizes_no_reusable_knowledge_and_skips_recovery_llm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        run_git(&["init", "--quiet"]);
+        std::fs::write(project.join("README.md"), "# Demo\n").unwrap();
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "--quiet", "--no-verify", "-m", "init"]);
+
+        let store = SessionStore::open(&tmp.path().join("state")).unwrap();
+        let reg = store.register(&project).unwrap();
+        let session = store
+            .create(
+                &json!({
+                    "project_id": reg["id"],
+                    "provider": "claude",
+                    "workflow": "native",
+                    "mode": "edit",
+                }),
+                "Clean git worktree skips recovery LLM",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let generation = store.generation(&sid).unwrap();
+        let results = Results::new(
+            store.clone(),
+            Arc::new(TestBackend {
+                project: PathBuf::from(session["project_path"].as_str().unwrap()),
+                operation: Arc::new(tokio::sync::Mutex::new(())),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .unwrap();
+        results.start_launch(&sid, &generation, None).unwrap();
+        let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
+        let lifecycle = RunnerLifecycle::new(store.clone(), knowledge, source);
+        let launch = Launch {
+            provider: "claude".into(),
+            executable: PathBuf::from("claude"),
+            project: PathBuf::from(session["project_path"].as_str().unwrap()),
+            prompt: "Inspect repo".into(),
+            mode: "edit".into(),
+            model: None,
+            session: None,
+            agents: false,
+            count: 1,
+            effort: None,
+            usd: None,
+            hook_events: false,
+            permissions: None,
+            approvals: None,
+        };
+        let binding = lifecycle
+            .begin(
+                &session,
+                "Inspect repo",
+                &generation,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        lifecycle.before_dispatch(&binding, &launch).unwrap();
+        store
+            .guarded_event(
+                &sid,
+                &generation,
+                &json!({"kind": "text", "text": "Plain prose summary with no draft."}),
+            )
+            .unwrap();
+        lifecycle
+            .boundary(&binding, "cleanup_confirmed", &Value::Null)
+            .unwrap();
+        locked(&binding).unwrap().session["brain"] = json!({"review": false});
+
+        struct PanickingRecovery;
+        impl RecoveryRunner for PanickingRecovery {
+            fn run<'a>(
+                &'a mut self,
+                _request: RecoveryRequest,
+                _observer: Arc<dyn RunEvents>,
+                _emit: Event,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<WorkerResult>> + Send + 'a>,
+            > {
+                panic!("recovery LLM runner must be skipped when git worktree has zero changes");
+            }
+        }
+        let emit: Event = Arc::new(|_| Ok(()));
+        let mut recovery = PanickingRecovery;
+        lifecycle
+            .finish(
+                &binding,
+                &WorkerResult {
+                    text: "Checked repo status and found no changes needed.".into(),
+                    ok: true,
+                    cost_usd: Some(0.01),
+                    session_id: Some("nat-git-clean".into()),
+                    duration_seconds: 0.1,
+                    error: None,
+                    limit_reached: None,
+                },
+                &emit,
+                &mut recovery,
+            )
+            .await
+            .unwrap();
+        let events = store.events(&sid, 0).unwrap();
+        assert!(
+            events.iter().any(|e| {
+                e["kind"] == "text"
+                    && e["memory_recovery"] == true
+                    && e["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("no_reusable_knowledge"))
+            }),
             "{events:?}"
         );
     }
