@@ -3065,7 +3065,12 @@ async fn serve(
     if method == "GET"
         && let Some(asset) = app.assets.get(&path)
     {
-        let q = query(request.uri().query(), &["v"])?;
+        let allowed: &[&str] = if path == "/" {
+            &["v", "project", "view", "session"]
+        } else {
+            &["v"]
+        };
+        let q = query(request.uri().query(), allowed)?;
         let immutable = q["v"] == asset.version;
         return asset_response(asset, &request, immutable, head);
     }
@@ -3560,6 +3565,143 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&gz_dec).unwrap(), huge);
+    }
+
+    struct StubServices;
+
+    impl crate::services::Services for StubServices {
+        fn request<'a>(
+            &'a self,
+            _operation: &'a str,
+            _request: Value,
+        ) -> crate::services::Reply<'a> {
+            Box::pin(async { Ok(Payload::Json(json!({}))) })
+        }
+
+        fn close<'a>(&'a self) -> crate::services::CloseFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn test_http_app(port: u16) -> App {
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "/".into(),
+            Asset::from_bytes(
+                b"<!doctype html><html><body>Harness</body></html>".to_vec(),
+                "text/html; charset=utf-8",
+            ),
+        );
+        assets.insert(
+            "/app.css".into(),
+            Asset::from_bytes(b"body{margin:0}".to_vec(), "text/css; charset=utf-8"),
+        );
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        App {
+            services: Arc::new(StubServices),
+            token: "test-csrf-token".into(),
+            instance: "test-instance".into(),
+            port,
+            source: PathBuf::from("."),
+            shutdown,
+            assets: Arc::new(assets),
+        }
+    }
+
+    #[tokio::test]
+    async fn root_route_accepts_spa_deep_link_query_params_while_keeping_assets_strict() {
+        let app = test_http_app(8765);
+        let root_version = app.assets["/"].version.clone();
+        let css_version = app.assets["/app.css"].version.clone();
+
+        let send = |method: &str, uri: &str| {
+            let app = app.clone();
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, "127.0.0.1:8765")
+                .body(Body::empty())
+                .unwrap();
+            async move { handle(State(app), req).await }
+        };
+
+        let root = send("GET", "/?view=sessions&project=foo").await;
+        assert_eq!(root.status(), StatusCode::OK);
+        assert_eq!(
+            root.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
+        let body = to_bytes(root.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"<!doctype html><html><body>Harness</body></html>"
+        );
+
+        let with_session = send("GET", "/?project=foo&view=sessions&session=s-1").await;
+        assert_eq!(with_session.status(), StatusCode::OK);
+
+        let root_head = send("HEAD", "/?view=sessions&project=foo").await;
+        assert_eq!(root_head.status(), StatusCode::OK);
+        assert!(
+            to_bytes(root_head.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let versioned_root = send("GET", &format!("/?v={root_version}&project=foo")).await;
+        assert_eq!(versioned_root.status(), StatusCode::OK);
+        assert_eq!(
+            versioned_root
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("private, max-age=31536000, immutable")
+        );
+
+        let unknown_root = send("GET", "/?unknown=1").await;
+        assert_eq!(unknown_root.status(), StatusCode::BAD_REQUEST);
+
+        let css_with_project = send("GET", "/app.css?project=foo").await;
+        assert_eq!(css_with_project.status(), StatusCode::BAD_REQUEST);
+
+        let css_versioned = send("GET", &format!("/app.css?v={css_version}")).await;
+        assert_eq!(css_versioned.status(), StatusCode::OK);
+        assert_eq!(
+            css_versioned
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("private, max-age=31536000, immutable")
+        );
+    }
+
+    #[test]
+    fn sse_filter_allows_global_waiting_counts_while_scoping_session_status() {
+        let waiting = StreamFrame {
+            seq: 10,
+            event: "waiting_counts",
+            session_id: Some("s-b".into()),
+            project_id: Some("proj-b".into()),
+            data: json!({"counts": {"s-b": 1}, "total": 1, "session_id": "s-b"}),
+        };
+        assert!(matches_sse_filter(&waiting, Some("s-a"), Some("proj-a")));
+        assert!(matches_sse_filter(&waiting, None, Some("proj-a")));
+
+        let status = StreamFrame {
+            seq: 11,
+            event: "session_status",
+            session_id: Some("s-b".into()),
+            project_id: Some("proj-b".into()),
+            data: json!({"id": "s-b", "waiting_permissions": 0}),
+        };
+        assert!(!matches_sse_filter(&status, Some("s-a"), Some("proj-a")));
+        assert!(!matches_sse_filter(&status, None, Some("proj-a")));
+        assert!(matches_sse_filter(&status, None, Some("proj-b")));
+        assert!(!matches_sse_filter(&status, Some("s-a"), Some("proj-b")));
+        assert!(matches_sse_filter(&status, Some("s-b"), Some("proj-b")));
     }
 }
 
