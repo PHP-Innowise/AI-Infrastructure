@@ -92,6 +92,31 @@ impl Rules {
         Ok(rules)
     }
 
+    /// Deterministic SHA-256 fingerprint over architecture version and all layer definitions.
+    pub(crate) fn sha256(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(self.version.to_le_bytes());
+        h.update((self.layers.len() as u64).to_le_bytes());
+        for layer in &self.layers {
+            h.update(layer.id.as_bytes());
+            h.update([0]);
+            h.update(layer.name.as_bytes());
+            h.update([0]);
+            h.update((layer.paths.len() as u64).to_le_bytes());
+            for path in &layer.paths {
+                h.update(path.as_bytes());
+                h.update([0]);
+            }
+            h.update((layer.allows.len() as u64).to_le_bytes());
+            for allow in &layer.allows {
+                h.update(allow.as_bytes());
+                h.update([0]);
+            }
+        }
+        h.finalize().into()
+    }
+
     pub(super) fn layer(&self, path: &str) -> Option<usize> {
         let clean = path.trim_matches('/');
         if clean.is_empty() || clean.split('/').any(|part| matches!(part, "" | "." | "..")) {

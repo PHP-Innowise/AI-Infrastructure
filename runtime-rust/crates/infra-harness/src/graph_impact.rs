@@ -721,7 +721,7 @@ pub(crate) fn file_impact_with_ir(
 
     let arch_caller_cache = scan_index.dep_cache.borrow();
     let (new_cycles, resolved_cycles, new_violations, resolved_violations) =
-        compute_architecture_impact(
+        compute_architecture_impact_cached(
             &rel_path,
             &status,
             exists,
@@ -4692,8 +4692,152 @@ fn entity_matches_symbol(entity: &EntityChange, raw_sym: &str) -> bool {
         .is_some_and(|tail| tail == clean_name)
 }
 
+type ArchImpactResult = (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>);
+
+const ARCH_IMPACT_CACHE_CAP: usize = 256;
+
+static ARCH_IMPACT_CACHE: std::sync::LazyLock<std::sync::Mutex<Vec<([u8; 32], ArchImpactResult)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[cfg(test)]
+static ARCH_IMPACT_CACHE_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn clear_architecture_impact_cache() {
+    if let Ok(mut guard) = ARCH_IMPACT_CACHE.lock() {
+        guard.clear();
+    }
+    ARCH_IMPACT_CACHE_HITS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn architecture_impact_cache_stats() -> (usize, usize) {
+    let entries = ARCH_IMPACT_CACHE.lock().map(|g| g.len()).unwrap_or(0);
+    let hits = ARCH_IMPACT_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed);
+    (entries, hits)
+}
+
+fn read_rules_bytes_and_sha(root: &Path) -> (Option<Rules>, Option<[u8; 32]>) {
+    let path = root.join(crate::graph_map::layer_rules::FILE);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (None, None);
+    };
+    let digest: [u8; 32] = {
+        use sha2::Digest;
+        sha2::Sha256::digest(&bytes).into()
+    };
+    let rules = Rules::parse(&bytes).ok();
+    (rules, Some(digest))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn compute_architecture_impact(
+fn arch_impact_cache_key(
+    rel_path: &str,
+    status: &str,
+    exists: bool,
+    certain: bool,
+    rules_sha: Option<[u8; 32]>,
+    dep_diff: &DepDiff,
+    used_by: &[CallerReport],
+    ctx: &TargetContext<'_>,
+    index: Option<&Index>,
+    caller_cache: &HashMap<String, (String, Vec<DepRef>)>,
+) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(rel_path.as_bytes());
+    h.update([0]);
+    h.update(status.as_bytes());
+    h.update([u8::from(exists), u8::from(certain)]);
+    if let Some(sha) = rules_sha {
+        h.update([1]);
+        h.update(sha);
+    } else {
+        h.update([0]);
+    }
+    if let Some(idx) = index {
+        h.update([1]);
+        h.update(idx.index_id().to_le_bytes());
+    } else {
+        h.update([0]);
+    }
+    h.update([u8::from(ctx.ir_fresh)]);
+    if let Some(ir) = ctx.ir() {
+        h.update(ir.current_write_epoch().to_le_bytes());
+    }
+    if let Some(rev) = ctx.revision.as_deref() {
+        h.update(rev.as_bytes());
+    }
+    h.update([0]);
+    if let Some(base) = ctx.base_commit.as_deref() {
+        h.update(base.as_bytes());
+    }
+    h.update([0]);
+
+    for (tag, list) in [
+        (b'A', &dep_diff.added),
+        (b'R', &dep_diff.removed),
+        (b'U', &dep_diff.unchanged),
+    ] {
+        h.update([tag]);
+        let mut sorted: Vec<(&str, bool)> = list
+            .iter()
+            .map(|d| (d.target.as_str(), d.resolved))
+            .collect();
+        sorted.sort_unstable();
+        for (target, res) in sorted {
+            h.update([u8::from(res)]);
+            h.update(target.as_bytes());
+            h.update([0]);
+        }
+    }
+
+    let mut callers_sorted: Vec<(&str, bool, &str)> = used_by
+        .iter()
+        .map(|c| (c.path.as_str(), c.exists, c.impact))
+        .collect();
+    callers_sorted.sort_unstable();
+    for (p, ex, imp) in callers_sorted {
+        h.update([u8::from(ex)]);
+        h.update(p.as_bytes());
+        h.update([0]);
+        h.update(imp.as_bytes());
+        h.update([0]);
+    }
+
+    let mut dirty_sorted: Vec<&str> = ctx.dirty_or_unindexed.iter().map(String::as_str).collect();
+    dirty_sorted.sort_unstable();
+    for p in dirty_sorted {
+        h.update(p.as_bytes());
+        if let Some((sz, mtime)) = file_disk_stamp(ctx.root, p) {
+            h.update(sz.to_le_bytes());
+            h.update(mtime.to_le_bytes());
+        }
+        h.update([0]);
+    }
+
+    let mut cached_keys: Vec<(&str, &(String, Vec<DepRef>))> =
+        caller_cache.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    cached_keys.sort_unstable_by_key(|(k, _)| *k);
+    for (src_path, (stamp_or_src, deps)) in cached_keys {
+        h.update(src_path.as_bytes());
+        h.update([0]);
+        h.update(stamp_or_src.as_bytes());
+        h.update([0]);
+        for d in deps {
+            h.update([u8::from(d.resolved)]);
+            h.update(d.target.as_bytes());
+            h.update([0]);
+        }
+    }
+    h.finalize().into()
+}
+
+/// Computes architecture violations and cycle impact with bounded LRU memoization keyed by
+/// `(rules_sha256, graph_rev, dirty_stamps, target_deps)`.
+#[allow(clippy::too_many_arguments)]
+fn compute_architecture_impact_cached(
     rel_path: &str,
     status: &str,
     exists: bool,
@@ -4703,7 +4847,68 @@ fn compute_architecture_impact(
     index: Option<&Index>,
     certain: bool,
     caller_cache: &HashMap<String, (String, Vec<DepRef>)>,
-) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+) -> ArchImpactResult {
+    let (rules_opt, rules_sha) = read_rules_bytes_and_sha(ctx.root);
+    let key = arch_impact_cache_key(
+        rel_path,
+        status,
+        exists,
+        certain,
+        rules_sha,
+        dep_diff,
+        used_by,
+        ctx,
+        index,
+        caller_cache,
+    );
+    if let Ok(mut guard) = ARCH_IMPACT_CACHE.lock()
+        && let Some(pos) = guard.iter().position(|(k, _)| *k == key)
+    {
+        #[cfg(test)]
+        ARCH_IMPACT_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = guard.remove(pos);
+        let res = entry.1.clone();
+        guard.push(entry);
+        return res;
+    }
+
+    let res = compute_architecture_impact_inner(
+        rel_path,
+        status,
+        exists,
+        dep_diff,
+        used_by,
+        ctx,
+        index,
+        certain,
+        caller_cache,
+        rules_opt.as_ref(),
+    );
+    if let Ok(mut guard) = ARCH_IMPACT_CACHE.lock() {
+        if let Some(pos) = guard.iter().position(|(k, _)| *k == key) {
+            guard.remove(pos);
+        }
+        if guard.len() >= ARCH_IMPACT_CACHE_CAP {
+            guard.remove(0);
+        }
+        guard.push((key, res.clone()));
+    }
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_architecture_impact_inner(
+    rel_path: &str,
+    status: &str,
+    exists: bool,
+    dep_diff: &DepDiff,
+    used_by: &[CallerReport],
+    ctx: &TargetContext<'_>,
+    index: Option<&Index>,
+    certain: bool,
+    caller_cache: &HashMap<String, (String, Vec<DepRef>)>,
+    rules_opt: Option<&Rules>,
+) -> ArchImpactResult {
     let mut base_adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let has_indexed_baseline = index.is_some() || ctx.ir_fresh;
 
@@ -4855,10 +5060,10 @@ fn compute_architecture_impact(
         .map(|nodes| json!({ "steps": nodes.len().saturating_sub(1), "nodes": nodes }))
         .collect::<Vec<_>>();
 
-    let (new_violations, resolved_violations) = match Rules::read(ctx.root) {
-        Ok(Some(rules)) => {
-            let before_v = collect_file_violations(&before_adj, rel_path, &rules);
-            let after_v = collect_file_violations(&after_adj, rel_path, &rules);
+    let (new_violations, resolved_violations) = match rules_opt {
+        Some(rules) => {
+            let before_v = collect_file_violations(&before_adj, rel_path, rules);
+            let after_v = collect_file_violations(&after_adj, rel_path, rules);
             let new_v = after_v
                 .difference(&before_v)
                 .map(violation_json)
@@ -4869,7 +5074,7 @@ fn compute_architecture_impact(
                 .collect::<Vec<_>>();
             (new_v, resolved_v)
         }
-        _ => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new()),
     };
 
     (
@@ -7337,5 +7542,101 @@ mod tests {
             false,
         );
         assert_eq!(catalog["test_reach"]["truncated"], true, "{catalog}");
+    }
+
+    #[test]
+    fn architecture_impact_cache_hits_and_invalidates_on_rules_sha() {
+        clear_architecture_impact_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/domain")).unwrap();
+        std::fs::create_dir_all(root.join("src/infra")).unwrap();
+        std::fs::write(root.join("src/domain/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("src/infra/b.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::write(
+            root.join(crate::graph_map::layer_rules::FILE),
+            r#"{"version":1,"layers":[{"id":"domain","name":"Domain","paths":["src/domain/**"],"allows":["domain","infra"]},{"id":"infra","name":"Infra","paths":["src/infra/**"],"allows":["infra"]}]}"#,
+        )
+        .unwrap();
+
+        let graph_val = json!({
+            "nodes": [
+                {"id": "a", "label": "a()", "source_file": "src/domain/a.rs", "source_location": "L1"},
+                {"id": "b", "label": "b()", "source_file": "src/infra/b.rs", "source_location": "L1"}
+            ],
+            "links": []
+        });
+        let idx = Index::read(graph_val.to_string().as_bytes(), root).unwrap();
+        let ctx = TargetContext::build(root, Some(&idx), None, None, None, &[]);
+        let diff = DepDiff {
+            added: vec![DepRef {
+                target: "src/infra/b.rs".into(),
+                kind: "import".into(),
+                line: Some(1),
+                resolved: true,
+                exists: true,
+                symbols: Vec::new(),
+                evidence: Some(String::new()),
+                member_refs: Vec::new(),
+                target_members: Vec::new(),
+            }],
+            removed: Vec::new(),
+            unchanged: Vec::new(),
+        };
+        let empty_cache = HashMap::new();
+
+        let r1 = compute_architecture_impact_cached(
+            "src/domain/a.rs",
+            "modified",
+            true,
+            &diff,
+            &[],
+            &ctx,
+            Some(&idx),
+            false,
+            &empty_cache,
+        );
+        assert!(r1.2.is_empty());
+        let (_entries_before, hits_before) = architecture_impact_cache_stats();
+
+        let r2 = compute_architecture_impact_cached(
+            "src/domain/a.rs",
+            "modified",
+            true,
+            &diff,
+            &[],
+            &ctx,
+            Some(&idx),
+            false,
+            &empty_cache,
+        );
+        assert_eq!(r1, r2);
+        let (_, hits_after) = architecture_impact_cache_stats();
+        assert!(
+            hits_after > hits_before,
+            "expected architecture impact cache hit"
+        );
+
+        // Tightening `.harness-architecture.json` changes rules_sha256 -> cache miss & detects violation.
+        std::fs::write(
+            root.join(crate::graph_map::layer_rules::FILE),
+            r#"{"version":1,"layers":[{"id":"domain","name":"Domain","paths":["src/domain/**"],"allows":["domain"]},{"id":"infra","name":"Infra","paths":["src/infra/**"],"allows":["infra"]}]}"#,
+        )
+        .unwrap();
+        let r3 = compute_architecture_impact_cached(
+            "src/domain/a.rs",
+            "modified",
+            true,
+            &diff,
+            &[],
+            &ctx,
+            Some(&idx),
+            false,
+            &empty_cache,
+        );
+        assert!(
+            !r3.2.is_empty(),
+            "expected new layer violation after rule change"
+        );
     }
 }

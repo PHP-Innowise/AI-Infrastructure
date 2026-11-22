@@ -1188,6 +1188,9 @@ impl Graphs {
         if let Ok(mut stores) = self.ir_stores.lock() {
             stores.clear();
         }
+        if let Ok(mut stores_ro) = self.ir_stores_ro.lock() {
+            stores_ro.clear();
+        }
         let workers = match self.workers.lock() {
             Ok(mut workers) => std::mem::take(&mut *workers),
             Err(_) => return,

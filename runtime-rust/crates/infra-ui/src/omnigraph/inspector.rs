@@ -364,12 +364,49 @@ pub(super) fn render_atom_inspector_html(
         html.push_str("</div></div>");
     }
 
+    let ui_st = ui_state();
+    let ctx_filter = ui_st["query"].as_str().unwrap_or("").trim().to_owned();
+    let ctx_commit = {
+        let from_atom = atom["commit_id"]
+            .as_str()
+            .or_else(|| atom["commit_sha"].as_str())
+            .unwrap_or("")
+            .trim();
+        if !from_atom.is_empty() {
+            from_atom.to_owned()
+        } else {
+            ui_st["selected_commit_id"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        }
+    };
+    let ctx_sem_kind = {
+        let from_ui = ui_st["kind"].as_str().unwrap_or("").trim();
+        if !from_ui.is_empty() {
+            from_ui.to_owned()
+        } else {
+            kind.trim().to_owned()
+        }
+    };
+
     let files = m::array(&atom["files"]);
     if !files.is_empty() {
         html.push_str("<div class=\"omni-inspector-group\"><h4>Linked files</h4><div class=\"omni-chip-list\">");
         for file in &files {
             if let Some(f) = file.as_str().filter(|s| !s.is_empty()) {
-                let jump_payload = json!({ "path": f }).to_string();
+                let mut jump_obj = json!({ "path": f });
+                if !ctx_filter.is_empty() {
+                    jump_obj["filter"] = json!(ctx_filter);
+                }
+                if !ctx_commit.is_empty() {
+                    jump_obj["target_commit"] = json!(ctx_commit);
+                }
+                if !ctx_sem_kind.is_empty() {
+                    jump_obj["semantic_kind"] = json!(ctx_sem_kind);
+                }
+                let jump_payload = jump_obj.to_string();
                 html.push_str(&format!(
                     "<button type=\"button\" class=\"omni-session-atom-chip omni-mono\" data-action=\"omnigraph-select-node\" data-node-id=\"{}\">▤ {}</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-code-map\" data-payload=\"{}\" title=\"Open {} in Code Map\">Map ↗</button>",
                     esc(f),
@@ -438,13 +475,22 @@ pub(super) fn render_atom_inspector_html(
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .unwrap_or(fqn.as_str());
-                let jump_payload = json!({
+                let mut jump_obj = json!({
                     "path": file_path,
                     "symbol_id": sym_id,
                     "fqn": fqn,
                     "symbol": label,
-                })
-                .to_string();
+                });
+                if !ctx_filter.is_empty() {
+                    jump_obj["filter"] = json!(ctx_filter);
+                }
+                if !ctx_commit.is_empty() {
+                    jump_obj["target_commit"] = json!(ctx_commit);
+                }
+                if !ctx_sem_kind.is_empty() {
+                    jump_obj["semantic_kind"] = json!(ctx_sem_kind);
+                }
+                let jump_payload = jump_obj.to_string();
                 html.push_str(&format!(
                     "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-code-map\" data-payload=\"{}\" title=\"Open {} in Code Map\">Code Map ↗</button>",
                     esc(&jump_payload),
@@ -818,13 +864,34 @@ pub(super) fn render_symbol_node_inspector_html(graph: &V, symbol: &V) -> String
 
     html.push_str("<div class=\"omni-chip-list\">");
     if !file_path.is_empty() {
-        let jump_payload = json!({
+        let ui_st = ui_state();
+        let mut jump_obj = json!({
             "path": file_path,
             "symbol_id": sym_id,
             "fqn": fqn,
             "symbol": title,
-        })
-        .to_string();
+        });
+        let q = ui_st["query"].as_str().unwrap_or("").trim();
+        if !q.is_empty() {
+            jump_obj["filter"] = json!(q);
+        }
+        let commit = symbol["commit_id"]
+            .as_str()
+            .or_else(|| ui_st["selected_commit_id"].as_str())
+            .unwrap_or("")
+            .trim();
+        if !commit.is_empty() {
+            jump_obj["target_commit"] = json!(commit);
+        }
+        let sem = ui_st["kind"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(skind)
+            .trim();
+        if !sem.is_empty() {
+            jump_obj["semantic_kind"] = json!(sem);
+        }
+        let jump_payload = jump_obj.to_string();
         html.push_str(&format!(
             "<button type=\"button\" class=\"button compact primary\" data-action=\"omnigraph-open-code-map\" data-payload=\"{}\">Open in Code Map ↗</button>",
             esc(&jump_payload),

@@ -119,26 +119,31 @@ pub(in crate::graph_map) fn nudge_surface_node_pin(
     dy_world: f64,
 ) -> bool {
     let info = SURFACE_PLAN_CACHE.with(|cache| {
-        cache.borrow().get(surface.canvas).and_then(|entry| {
-            let placed = entry.nodes.get(node_idx)?;
-            let key = entry.node_keys.get(node_idx)?.clone();
-            Some((placed.x, placed.y, entry.width, entry.height, key))
-        })
+        let mut guard = cache.borrow_mut();
+        let entry = guard.get_mut(surface.canvas)?;
+        let placed = entry.nodes.get(node_idx)?;
+        let key = entry.node_keys.get(node_idx)?.clone();
+        if key.is_empty() {
+            return None;
+        }
+        let nx = (placed.x + dx_world).clamp(8.0, (entry.width - BOX_WIDTH - 8.0).max(8.0));
+        let ny = (placed.y + dy_world).clamp(8.0, (entry.height - BOX_HEIGHT - 8.0).max(8.0));
+        entry.nodes[node_idx].x = nx;
+        entry.nodes[node_idx].y = ny;
+        let is_dense = entry.is_dense;
+        let pairs = entry.pairs.clone();
+        let node_coords: Vec<(f64, f64)> = entry.nodes.iter().map(|n| (n.x, n.y)).collect();
+        Some((nx, ny, key, is_dense, pairs, node_coords))
     });
-    let Some((orig_x, orig_y, width, height, node_key)) = info else {
+    let Some((nx, ny, node_key, is_dense, pairs, node_coords)) = info else {
         return false;
     };
-    if node_key.is_empty() {
-        return false;
-    }
-    let nx = (orig_x + dx_world).clamp(8.0, (width - BOX_WIDTH - 8.0).max(8.0));
-    let ny = (orig_y + dy_world).clamp(8.0, (height - BOX_HEIGHT - 8.0).max(8.0));
     let state = surface_state(surface);
     let pin_key = surface_pin_key(surface, &state);
     push_pin_undo_snapshot(surface, &pin_key);
     graph_viewport::save_pin(&pin_key, &node_key, (nx, ny));
     sync_history_and_pin_controls(surface, &state);
-    rerender_surface_preserving_camera(surface);
+    apply_live_node_pin_visuals(surface, node_idx, nx, ny, is_dense, &pairs, &node_coords);
     let live_id = if surface.embedded {
         format!("{}-live-announce", surface.id_prefix)
     } else {

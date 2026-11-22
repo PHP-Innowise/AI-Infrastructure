@@ -824,6 +824,135 @@ pub(in crate::graph_map) fn active_drag_surface() -> Option<(MapSurface, graph_v
     }
     None
 }
+pub(in crate::graph_map) fn apply_live_node_pin_visuals(
+    surface: MapSurface,
+    idx: usize,
+    nx: f64,
+    ny: f64,
+    is_dense: bool,
+    pairs: &[(usize, usize)],
+    node_coords: &[(f64, f64)],
+) {
+    let cam = load_surface_camera(surface);
+    if let Some(canvas) = dom::get(surface.canvas) {
+        if let Ok(Some(node_el)) =
+            canvas.query_selector(&format!(".graph-map-node[data-n='{idx}']"))
+        {
+            let _ = node_el.set_attribute("data-pinned", "true");
+            if let Ok(html_el) = node_el.dyn_into::<web_sys::HtmlElement>() {
+                let _ = html_el.style().set_property("left", &format!("{nx:.1}px"));
+                let _ = html_el.style().set_property("top", &format!("{ny:.1}px"));
+            }
+        }
+        // Live-update wires and SpatialHitGrid attached to the moved node in Dense Canvas2D and SVG modes.
+        if is_dense {
+            let moved_edges: Vec<usize> = pairs
+                .iter()
+                .enumerate()
+                .filter_map(|(ei, &(from, to))| (from == idx || to == idx).then_some(ei))
+                .collect();
+            graph_viewport::canvas2d::update_scene_and_grid(
+                surface.canvas,
+                &[idx],
+                &moved_edges,
+                |scene| {
+                    if let Some(dn) = scene.nodes.iter_mut().find(|n| n.index == idx) {
+                        dn.x = nx;
+                        dn.y = ny;
+                        dn.pinned = true;
+                    }
+                    for de in &mut scene.edges {
+                        let Some(&(from, to)) = pairs.get(de.index) else {
+                            continue;
+                        };
+                        if from != idx && to != idx {
+                            continue;
+                        }
+                        let a = if from == idx {
+                            (nx, ny)
+                        } else if let Some(&(ax, ay)) = node_coords.get(from) {
+                            (ax, ay)
+                        } else {
+                            continue;
+                        };
+                        let b = if to == idx {
+                            (nx, ny)
+                        } else if let Some(&(bx, by)) = node_coords.get(to) {
+                            (bx, by)
+                        } else {
+                            continue;
+                        };
+                        let d = route_pinned_wire_path(a, b, 0.0, 0.0, de.detour);
+                        de.set_svg_path(&d);
+                    }
+                },
+            );
+            graph_viewport::canvas2d::paint_scene(
+                surface.canvas,
+                cam.viewport_cam(),
+                current_dense_hover(surface.canvas),
+                true,
+            );
+        } else {
+            let mut detour_pairs: std::collections::HashSet<(usize, usize)> =
+                std::collections::HashSet::new();
+            if let Ok(detours) =
+                canvas.query_selector_all(".graph-map-edge[data-detour='true'][data-ends]")
+            {
+                for i in 0..detours.length() {
+                    if let Some(pair) = detours
+                        .item(i)
+                        .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                        .and_then(|el| el.get_attribute("data-ends").as_deref().and_then(ends_of))
+                    {
+                        detour_pairs.insert(pair);
+                    }
+                }
+            }
+            if let Ok(wires) = canvas.query_selector_all(
+                ".graph-map-edge[data-ends], .graph-map-edge-core[data-ends], .graph-map-violation-halo[data-ends], .graph-map-hit[data-ends]",
+            ) {
+                for i in 0..wires.length() {
+                    let Some(w_el) = wires
+                        .item(i)
+                        .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                    else {
+                        continue;
+                    };
+                    let Some((from, to)) = w_el
+                        .get_attribute("data-ends")
+                        .as_deref()
+                        .and_then(ends_of)
+                    else {
+                        continue;
+                    };
+                    if from != idx && to != idx {
+                        continue;
+                    }
+                    let a = if from == idx {
+                        (nx, ny)
+                    } else if let Some(&(ax, ay)) = node_coords.get(from) {
+                        (ax, ay)
+                    } else {
+                        continue;
+                    };
+                    let b = if to == idx {
+                        (nx, ny)
+                    } else if let Some(&(bx, by)) = node_coords.get(to) {
+                        (bx, by)
+                    } else {
+                        continue;
+                    };
+                    let is_detour = detour_pairs.contains(&(from, to))
+                        || w_el.get_attribute("data-detour").as_deref() == Some("true");
+                    let d = route_pinned_wire_path(a, b, 0.0, 0.0, is_detour);
+                    let _ = w_el.set_attribute("d", &d);
+                }
+            }
+        }
+    }
+}
+
 fn handle_surface_node_pin_drag(
     kind: &str,
     event: &web_sys::Event,
@@ -950,127 +1079,7 @@ fn handle_surface_node_pin_drag(
                     return true;
                 };
                 let idx = session.node_idx;
-                if let Some(canvas) = dom::get(surface.canvas) {
-                    if let Ok(Some(node_el)) =
-                        canvas.query_selector(&format!(".graph-map-node[data-n='{idx}']"))
-                    {
-                        let _ = node_el.set_attribute("data-pinned", "true");
-                        if let Ok(html_el) = node_el.dyn_into::<web_sys::HtmlElement>() {
-                            let _ = html_el.style().set_property("left", &format!("{nx:.1}px"));
-                            let _ = html_el.style().set_property("top", &format!("{ny:.1}px"));
-                        }
-                    }
-                    // Live-update wires and SpatialHitGrid attached to the dragged node in Dense Canvas2D and SVG modes.
-                    if is_dense {
-                        let moved_edges: Vec<usize> = pairs
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(ei, &(from, to))| {
-                                (from == idx || to == idx).then_some(ei)
-                            })
-                            .collect();
-                        graph_viewport::canvas2d::update_scene_and_grid(
-                            surface.canvas,
-                            &[idx],
-                            &moved_edges,
-                            |scene| {
-                                if let Some(dn) = scene.nodes.iter_mut().find(|n| n.index == idx) {
-                                    dn.x = nx;
-                                    dn.y = ny;
-                                    dn.pinned = true;
-                                }
-                                for de in &mut scene.edges {
-                                    let Some(&(from, to)) = pairs.get(de.index) else {
-                                        continue;
-                                    };
-                                    if from != idx && to != idx {
-                                        continue;
-                                    }
-                                    let a = if from == idx {
-                                        (nx, ny)
-                                    } else if let Some(&(ax, ay)) = node_coords.get(from) {
-                                        (ax, ay)
-                                    } else {
-                                        continue;
-                                    };
-                                    let b = if to == idx {
-                                        (nx, ny)
-                                    } else if let Some(&(bx, by)) = node_coords.get(to) {
-                                        (bx, by)
-                                    } else {
-                                        continue;
-                                    };
-                                    let d = route_pinned_wire_path(a, b, 0.0, 0.0, de.detour);
-                                    de.set_svg_path(&d);
-                                }
-                            },
-                        );
-                        graph_viewport::canvas2d::paint_scene(
-                            surface.canvas,
-                            cam.viewport_cam(),
-                            current_dense_hover(surface.canvas),
-                            true,
-                        );
-                    } else {
-                        let mut detour_pairs: std::collections::HashSet<(usize, usize)> =
-                            std::collections::HashSet::new();
-                        if let Ok(detours) = canvas
-                            .query_selector_all(".graph-map-edge[data-detour='true'][data-ends]")
-                        {
-                            for i in 0..detours.length() {
-                                if let Some(pair) = detours
-                                    .item(i)
-                                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
-                                    .and_then(|el| {
-                                        el.get_attribute("data-ends").as_deref().and_then(ends_of)
-                                    })
-                                {
-                                    detour_pairs.insert(pair);
-                                }
-                            }
-                        }
-                        if let Ok(wires) = canvas.query_selector_all(
-                            ".graph-map-edge[data-ends], .graph-map-edge-core[data-ends], .graph-map-violation-halo[data-ends], .graph-map-hit[data-ends]",
-                        ) {
-                            for i in 0..wires.length() {
-                                let Some(w_el) = wires
-                                    .item(i)
-                                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
-                                else {
-                                    continue;
-                                };
-                                let Some((from, to)) = w_el
-                                    .get_attribute("data-ends")
-                                    .as_deref()
-                                    .and_then(ends_of)
-                                else {
-                                    continue;
-                                };
-                                if from != idx && to != idx {
-                                    continue;
-                                }
-                                let a = if from == idx {
-                                    (nx, ny)
-                                } else if let Some(&(ax, ay)) = node_coords.get(from) {
-                                    (ax, ay)
-                                } else {
-                                    continue;
-                                };
-                                let b = if to == idx {
-                                    (nx, ny)
-                                } else if let Some(&(bx, by)) = node_coords.get(to) {
-                                    (bx, by)
-                                } else {
-                                    continue;
-                                };
-                                let is_detour = detour_pairs.contains(&(from, to))
-                                    || w_el.get_attribute("data-detour").as_deref() == Some("true");
-                                let d = route_pinned_wire_path(a, b, 0.0, 0.0, is_detour);
-                                let _ = w_el.set_attribute("d", &d);
-                            }
-                        }
-                    }
-                }
+                apply_live_node_pin_visuals(surface, idx, nx, ny, is_dense, &pairs, &node_coords);
                 let mut drag_val = session.to_json();
                 drag_val["surface"] = json!(surface.name);
                 m::set("surface-node-drag", drag_val);

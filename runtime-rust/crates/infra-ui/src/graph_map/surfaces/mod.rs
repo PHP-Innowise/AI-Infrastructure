@@ -165,6 +165,13 @@ pub use camera_dom::{focus_strip_chips_html, focus_strip_chips_html_for_surface}
 #[allow(unused_imports)]
 pub(super) use embedded::embedded_unbuilt_note;
 #[allow(unused_imports)]
+pub(crate) use embedded::{
+    apply_code_map_jump_context, apply_system_live_focus, focus_system_file,
+    focus_system_from_prompt, focus_system_target, focus_target_in_session,
+    focus_target_in_session_with_context, load_system_embedded, localize_failure_request,
+    localize_failures_on_map, open_system_service_map,
+};
+#[allow(unused_imports)]
 pub use embedded::{
     apply_focus, focus_file_in_session, focus_from_prompt, sync_embedded, sync_embedded_changes,
 };
@@ -175,12 +182,6 @@ pub(super) use embedded::{
     focus_target_on_surface, jump_to_surface_entity_or_target, load_embedded_surface,
     move_roving_node_focus, open_full_from_surface, redraw_surface_overlay,
     render_embedded_surface, transfer_surface_state_to_modal,
-};
-#[allow(unused_imports)]
-pub(crate) use embedded::{
-    apply_system_live_focus, focus_system_file, focus_system_from_prompt, focus_system_target,
-    focus_target_in_session, load_system_embedded, localize_failure_request,
-    localize_failures_on_map, open_system_service_map,
 };
 #[allow(unused_imports)]
 pub(crate) use history::focused_dense_hit_for_canvas;
@@ -213,8 +214,8 @@ pub(super) use inspector::{
 };
 #[allow(unused_imports)]
 pub(super) use interactions::{
-    active_drag_surface, handle_surface_click, handle_surface_input, resolve_system_click_surface,
-    target_pan_surface,
+    active_drag_surface, apply_live_node_pin_visuals, handle_surface_click, handle_surface_input,
+    resolve_system_click_surface, target_pan_surface,
 };
 #[allow(unused_imports)]
 pub use interactions::{handle_session_graph_click, handle_session_graph_input, pointer_event};
@@ -228,11 +229,6 @@ pub(super) use modal_lifecycle::{
     clear_lens_submodes, load, parent, place, reconcile_view_state, render, set_surface_attrs,
     switch_surface_to_service_file, ClickOutcome,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(super) use state_urls::build_map_path;
-#[allow(unused_imports)]
-pub(crate) use state_urls::show_non_destructive_stale_banner;
 #[allow(unused_imports)]
 pub(super) use state_urls::{
     active_modal_lens, build_overlay_extras, cached_impact_for_selection, changes_count_of,
@@ -247,4 +243,12 @@ pub(super) use state_urls::{
 pub use state_urls::{
     build_changes_path, build_file_impact_path, build_scoped_changes_path,
     build_scoped_file_impact_path, build_scoped_map_path, selected_impact_file, state_focus_file,
+};
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(super) use state_urls::{build_map_path, progressive_lod_for_state};
+#[allow(unused_imports)]
+pub(crate) use state_urls::{
+    invalidate_surface_analysis_caches, invalidate_surface_analysis_caches_for_live_project,
+    maybe_schedule_idle_refresh, show_non_destructive_stale_banner,
 };

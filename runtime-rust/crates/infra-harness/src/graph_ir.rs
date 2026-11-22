@@ -83,6 +83,7 @@ pub(crate) struct IrNodeSpec {
     pub label: String,
     pub source_file: String,
     pub source_location: Option<String>,
+    pub end_line: u32,
     pub file_type: Option<String>,
     pub node_kind: Option<String>,
     pub community: Option<u32>,
@@ -122,6 +123,29 @@ pub(crate) struct IrSyncStats {
     pub files_skipped: usize,
     pub files_removed: usize,
     pub summary: IrSummary,
+}
+
+/// Incremental update summary + affected file lists returned by `update_paths_with_delta`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct IrUpdateDelta {
+    pub stats: IrSyncStats,
+    pub edited_files: Vec<String>,
+    pub re_resolved_files: Vec<String>,
+    pub removed_files: Vec<String>,
+    pub manifest_changed: bool,
+    pub semantic_changed: bool,
+}
+
+/// Incremental Graph IR elements exported strictly for dirty files and their incident edges.
+pub(crate) struct IrDeltaElements {
+    pub files: Vec<String>,
+    pub edited_files: BTreeSet<String>,
+    pub dirty_files: BTreeSet<String>,
+    pub removed_files: BTreeSet<String>,
+    pub neighbor_files: Vec<String>,
+    pub rs_touched: bool,
+    pub node_specs: Vec<IrNodeSpec>,
+    pub link_specs: Vec<IrLinkSpec>,
 }
 
 const MAX_READ_POOL_CONNS: usize = 4;
@@ -177,6 +201,7 @@ struct StoredSymbolRow {
     name: String,
     parent_name: Option<String>,
     start_line: u32,
+    end_line: u32,
     is_abstract: bool,
     is_test: bool,
 }
@@ -199,6 +224,28 @@ struct StoredSemanticRow {
     source_symbol: Option<String>,
     line: u32,
     evidence: String,
+}
+
+fn map_stored_symbol_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSymbolRow> {
+    let kind: String = row.get(3)?;
+    let mods_json: String = row.get(9)?;
+    let has_abstract = serde_json::from_str::<Vec<String>>(&mods_json)
+        .unwrap_or_default()
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case("abstract"));
+    let is_abstract = matches!(kind.as_str(), "interface" | "trait" | "protocol") || has_abstract;
+    Ok(StoredSymbolRow {
+        row_id: row.get(0)?,
+        file_path: row.get(1)?,
+        symbol_id: row.get(2)?,
+        kind,
+        name: row.get(4)?,
+        parent_name: row.get(5)?,
+        start_line: row.get::<_, i64>(6)?.max(0) as u32,
+        end_line: row.get::<_, i64>(7)?.max(0) as u32,
+        is_abstract,
+        is_test: row.get::<_, i64>(8)? != 0,
+    })
 }
 
 impl GraphIrStore {
@@ -671,6 +718,17 @@ impl GraphIrStore {
     /// and re-resolves reverse dependents, re-export consumers, and matching unresolved imports.
     /// All CPU/disk parsing and manifest reads run before opening the `Immediate` write transaction.
     pub(crate) fn update_paths(&self, root: &Path, rel_paths: &[String]) -> Result<IrSyncStats> {
+        self.update_paths_with_delta(root, rel_paths)
+            .map(|delta| delta.stats)
+    }
+
+    /// Incrementally re-indexes changed/deleted relative paths and reports exact edited,
+    /// re-resolved, and removed file lists for downstream incremental `Index` updates.
+    pub(crate) fn update_paths_with_delta(
+        &self,
+        root: &Path,
+        rel_paths: &[String],
+    ) -> Result<IrUpdateDelta> {
         if self.read_only {
             return Err(HarnessError::invalid("Graph IR store is read-only."));
         }
@@ -688,9 +746,12 @@ impl GraphIrStore {
         }
         if normalized.is_empty() {
             let summary = self.summary_counts()?.unwrap_or_default();
-            return Ok(IrSyncStats {
-                summary,
-                ..IrSyncStats::default()
+            return Ok(IrUpdateDelta {
+                stats: IrSyncStats {
+                    summary,
+                    ..IrSyncStats::default()
+                },
+                ..IrUpdateDelta::default()
             });
         }
 
@@ -768,7 +829,7 @@ impl GraphIrStore {
         let files_parsed = parsed_units.len();
 
         let mut parsed_re_resolve: BTreeMap<String, ParsedUnit> = BTreeMap::new();
-        let (files_removed, summary) = loop {
+        let (files_removed, summary, removed_out, re_resolved_out, semantic_changed) = loop {
             let (
                 existing_files,
                 removed_files,
@@ -868,6 +929,26 @@ impl GraphIrStore {
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = store::now();
+            let mut semantic_changed = parsed_units.iter().any(|u| !u.ir.semantic_edges.is_empty());
+            if !semantic_changed {
+                for path in removed_files
+                    .iter()
+                    .chain(parsed_units.iter().map(|u| &u.rel_path))
+                {
+                    let exists: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM ir_semantic_edges WHERE file_path = ?1)",
+                            [path],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or(false);
+                    if exists {
+                        semantic_changed = true;
+                        break;
+                    }
+                }
+            }
             for path in &removed_files {
                 delete_file_records(&tx, path)?;
             }
@@ -920,15 +1001,30 @@ impl GraphIrStore {
             let next_epoch = bump_meta_write_epoch(&tx)?;
             tx.commit()?;
             self.write_epoch.store(next_epoch, Ordering::Release);
-            break (actually_removed, summary);
+            let removed_vec: Vec<String> = removed_files.into_iter().collect();
+            break (
+                actually_removed,
+                summary,
+                removed_vec,
+                re_resolve_paths,
+                semantic_changed,
+            );
         };
 
-        Ok(IrSyncStats {
-            files_scanned,
-            files_parsed,
-            files_skipped: skipped,
-            files_removed,
-            summary,
+        let edited_files: Vec<String> = parsed_units.into_iter().map(|u| u.rel_path).collect();
+        Ok(IrUpdateDelta {
+            stats: IrSyncStats {
+                files_scanned,
+                files_parsed,
+                files_skipped: skipped,
+                files_removed,
+                summary,
+            },
+            edited_files,
+            re_resolved_files: re_resolved_out,
+            removed_files: removed_out,
+            manifest_changed,
+            semantic_changed,
         })
     }
 
@@ -1410,6 +1506,150 @@ impl GraphIrStore {
         ))
     }
 
+    /// Exports only nodes of edited files and edges incident to `dirty` files
+    /// (`edited ∪ re-resolved ∪ removed`), returning `None` when semantic or manifest changes
+    /// warrant a full graph element export.
+    pub(crate) fn export_ir_delta_for_files(
+        &self,
+        delta: &IrUpdateDelta,
+    ) -> Result<Option<IrDeltaElements>> {
+        if delta.semantic_changed || delta.manifest_changed {
+            return Ok(None);
+        }
+        let edited_files: BTreeSet<String> = delta.edited_files.iter().cloned().collect();
+        let removed_files: BTreeSet<String> = delta.removed_files.iter().cloned().collect();
+        let mut dirty_files: BTreeSet<String> = edited_files.clone();
+        dirty_files.extend(removed_files.iter().cloned());
+        dirty_files.extend(delta.re_resolved_files.iter().cloned());
+        if dirty_files.is_empty() || dirty_files.len() > 256 {
+            return Ok(None);
+        }
+        let rs_touched = edited_files
+            .iter()
+            .chain(removed_files.iter())
+            .any(|p| p.ends_with(".rs") || p.ends_with(".rs.modules"));
+
+        self.with_read_conn(|conn| {
+            let files = {
+                let mut stmt = conn.prepare("SELECT path FROM ir_files ORDER BY path")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+
+            let dirty_vec: Vec<&str> = dirty_files.iter().map(String::as_str).collect();
+            let placeholders = vec!["?"; dirty_vec.len()].join(", ");
+            let sem_sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM ir_semantic_edges WHERE file_path IN ({placeholders}))"
+            );
+            let has_sem: bool = conn
+                .query_row(
+                    &sem_sql,
+                    rusqlite::params_from_iter(dirty_vec.iter().copied()),
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if has_sem {
+                return Ok(None);
+            }
+
+            let edge_sql = format!(
+                "SELECT DISTINCT id, source_file, source_symbol, target_file, target_symbol, relation, context, line, confidence
+                 FROM ir_edges
+                 WHERE source_file IN ({placeholders}) OR target_file IN ({placeholders})
+                 ORDER BY id"
+            );
+            let mut edge_params: Vec<&str> = Vec::with_capacity(dirty_vec.len() * 2);
+            edge_params.extend(dirty_vec.iter().copied());
+            edge_params.extend(dirty_vec.iter().copied());
+            let edges: Vec<StoredEdgeRow> = {
+                let mut stmt = conn.prepare(&edge_sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(edge_params), |row| {
+                    Ok(StoredEdgeRow {
+                        source_file: row.get(1)?,
+                        source_symbol: row.get(2)?,
+                        target_file: row.get(3)?,
+                        target_symbol: row.get(4)?,
+                        relation: row.get(5)?,
+                        context: row.get(6)?,
+                        line: row.get::<_, i64>(7)?.max(0) as u32,
+                        confidence: row.get(8)?,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let mut needed_symbol_files: BTreeSet<String> = edited_files.clone();
+            for edge in &edges {
+                if file_set.contains(edge.source_file.as_str()) {
+                    needed_symbol_files.insert(edge.source_file.clone());
+                }
+                if file_set.contains(edge.target_file.as_str()) {
+                    needed_symbol_files.insert(edge.target_file.clone());
+                }
+            }
+            let sym_files_vec: Vec<&str> =
+                needed_symbol_files.iter().map(String::as_str).collect();
+            let symbols = if sym_files_vec.is_empty() {
+                Vec::new()
+            } else if sym_files_vec.len() > 400 {
+                return Ok(None);
+            } else {
+                let sym_placeholders = vec!["?"; sym_files_vec.len()].join(", ");
+                let sym_sql = format!(
+                    "SELECT id, file_path, symbol_id, kind, name, parent_name, start_line, end_line, is_test, modifiers_json
+                     FROM ir_symbols
+                     WHERE file_path IN ({sym_placeholders})
+                     ORDER BY file_path, start_line, id"
+                );
+                let mut stmt = conn.prepare(&sym_sql)?;
+                let rows = stmt.query_map(
+                    rusqlite::params_from_iter(sym_files_vec),
+                    map_stored_symbol_row,
+                )?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let emit_files: Vec<String> = edited_files
+                .iter()
+                .filter(|f| file_set.contains(f.as_str()))
+                .cloned()
+                .collect();
+            let empty_comm = BTreeMap::new();
+            let mut used_node_ids = BTreeSet::new();
+            for path in &needed_symbol_files {
+                if !edited_files.contains(path) {
+                    used_node_ids.insert(format!("file:{path}"));
+                }
+            }
+            let (node_specs, mut link_specs, maps) = collect_symbol_nodes_and_maps(
+                &emit_files,
+                Some(&edited_files),
+                &symbols,
+                &empty_comm,
+                &mut used_node_ids,
+            );
+            let (edge_links, _) = collect_resolved_edge_links(&edges, &file_set, &maps);
+            link_specs.extend(edge_links);
+            let neighbor_files: Vec<String> = needed_symbol_files
+                .into_iter()
+                .filter(|f| !edited_files.contains(f) && !removed_files.contains(f))
+                .collect();
+
+            Ok(Some(IrDeltaElements {
+                files,
+                edited_files,
+                dirty_files,
+                removed_files,
+                neighbor_files,
+                rs_touched,
+                node_specs,
+                link_specs,
+            }))
+        })
+    }
+
     fn load_graph_rows(&self) -> Result<LoadedGraphRows> {
         self.with_read_conn(|conn| {
             let files = {
@@ -1420,33 +1660,11 @@ impl GraphIrStore {
 
             let symbols = {
                 let mut stmt = conn.prepare(
-                    "SELECT id, file_path, symbol_id, kind, name, parent_name, start_line, is_test, modifiers_json
+                    "SELECT id, file_path, symbol_id, kind, name, parent_name, start_line, end_line, is_test, modifiers_json
                      FROM ir_symbols
                      ORDER BY file_path, start_line, id",
                 )?;
-                let rows = stmt.query_map([], |row| {
-                    let kind: String = row.get(3)?;
-                    let mods_json: String = row.get(8)?;
-                    let has_abstract = serde_json::from_str::<Vec<String>>(&mods_json)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|m| m.eq_ignore_ascii_case("abstract"));
-                    let is_abstract = matches!(
-                        kind.as_str(),
-                        "interface" | "trait" | "protocol"
-                    ) || has_abstract;
-                    Ok(StoredSymbolRow {
-                        row_id: row.get(0)?,
-                        file_path: row.get(1)?,
-                        symbol_id: row.get(2)?,
-                        kind,
-                        name: row.get(4)?,
-                        parent_name: row.get(5)?,
-                        start_line: row.get::<_, i64>(6)?.max(0) as u32,
-                        is_abstract,
-                        is_test: row.get::<_, i64>(7)? != 0,
-                    })
-                })?;
+                let rows = stmt.query_map([], map_stored_symbol_row)?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
 
@@ -3200,26 +3418,104 @@ fn compute_file_communities<'a>(
     out
 }
 
-fn collect_graph_elements(
-    files: &[String],
-    symbols: &[StoredSymbolRow],
-    edges: &[StoredEdgeRow],
-    sem_edges: &[StoredSemanticRow],
-) -> (Vec<IrNodeSpec>, Vec<IrLinkSpec>, u64, u64) {
-    let mut nodes = Vec::with_capacity(files.len() + symbols.len());
-    let mut links = Vec::with_capacity(symbols.len() + edges.len() + sem_edges.len());
+type SymbolCandidate<'a> = (&'a str, u32, u32, String);
 
-    let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
-    let communities = compute_file_communities(files, edges);
-    let mut used_node_ids: BTreeSet<String> = BTreeSet::new();
-    type SymbolCandidate<'a> = (&'a str, u32, String);
-    let mut by_symbol_id: BTreeMap<(&str, &str), String> = BTreeMap::new();
-    let mut by_member: BTreeMap<(&str, &str, &str), Vec<SymbolCandidate<'_>>> = BTreeMap::new();
-    let mut by_name: BTreeMap<(&str, &str), Vec<SymbolCandidate<'_>>> = BTreeMap::new();
-    let mut type_by_file_and_name: BTreeMap<(&str, &str), String> = BTreeMap::new();
-    let mut type_ids_by_name: BTreeMap<String, Vec<(String, &str)>> = BTreeMap::new();
+struct SymbolResolutionMaps<'a> {
+    by_symbol_id: BTreeMap<(&'a str, &'a str), String>,
+    by_member: BTreeMap<(&'a str, &'a str, &'a str), Vec<SymbolCandidate<'a>>>,
+    by_name: BTreeMap<(&'a str, &'a str), Vec<SymbolCandidate<'a>>>,
+    type_by_file_and_name: BTreeMap<(&'a str, &'a str), String>,
+    type_ids_by_name: BTreeMap<String, Vec<(String, &'a str)>>,
+}
 
-    for path in files {
+fn pick_parent_node_id(
+    sym_kind: &str,
+    sym_line: u32,
+    candidates: &[SymbolCandidate<'_>],
+) -> Option<String> {
+    let kind_rank = |k: &str| match sym_kind {
+        "calls" | "method" => u8::from(!matches!(k, "function" | "method" | "constructor")),
+        "type" => u8::from(!is_type_kind(k)),
+        _ => 0,
+    };
+    candidates
+        .iter()
+        .min_by_key(|(k, start, end, id)| {
+            let enclosing_rank = if sym_line > 0 && *end >= *start && *end > 0 {
+                u8::from(!(sym_line >= *start && sym_line <= *end))
+            } else {
+                1
+            };
+            (
+                kind_rank(k),
+                enclosing_rank,
+                if sym_line > 0 {
+                    start.abs_diff(sym_line)
+                } else {
+                    *start
+                },
+                *start,
+                id.as_str(),
+            )
+        })
+        .map(|(_, _, _, id)| id.clone())
+}
+
+impl<'a> SymbolResolutionMaps<'a> {
+    fn resolve_symbol(
+        &self,
+        file_path: &str,
+        sym_hint: Option<&str>,
+        pref_kind: &str,
+        pref_line: u32,
+    ) -> String {
+        if let Some(hint) = sym_hint.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(id) = self.by_symbol_id.get(&(file_path, hint)) {
+                return id.clone();
+            }
+            if let Some((parent, member)) = hint.split_once("::") {
+                let clean_member = member.trim_start_matches('$');
+                if let Some(cands) = self
+                    .by_member
+                    .get(&(file_path, parent, member))
+                    .or_else(|| self.by_member.get(&(file_path, parent, clean_member)))
+                    && let Some(id) = pick_parent_node_id(pref_kind, pref_line, cands)
+                {
+                    return id;
+                }
+            }
+            let clean_hint = hint.trim_start_matches('$');
+            if let Some(cands) = self
+                .by_name
+                .get(&(file_path, hint))
+                .or_else(|| self.by_name.get(&(file_path, clean_hint)))
+                && let Some(id) = pick_parent_node_id(pref_kind, pref_line, cands)
+            {
+                return id;
+            }
+        }
+        format!("file:{file_path}")
+    }
+}
+
+fn collect_symbol_nodes_and_maps<'a>(
+    emit_file_nodes_for: &[String],
+    emit_struct_filter: Option<&BTreeSet<String>>,
+    symbols: &'a [StoredSymbolRow],
+    communities: &BTreeMap<&str, (u32, String)>,
+    used_node_ids: &mut BTreeSet<String>,
+) -> (Vec<IrNodeSpec>, Vec<IrLinkSpec>, SymbolResolutionMaps<'a>) {
+    let mut nodes = Vec::with_capacity(emit_file_nodes_for.len() + symbols.len());
+    let mut links = Vec::with_capacity(symbols.len());
+
+    let mut by_symbol_id: BTreeMap<(&'a str, &'a str), String> = BTreeMap::new();
+    let mut by_member: BTreeMap<(&'a str, &'a str, &'a str), Vec<SymbolCandidate<'a>>> =
+        BTreeMap::new();
+    let mut by_name: BTreeMap<(&'a str, &'a str), Vec<SymbolCandidate<'a>>> = BTreeMap::new();
+    let mut type_by_file_and_name: BTreeMap<(&'a str, &'a str), String> = BTreeMap::new();
+    let mut type_ids_by_name: BTreeMap<String, Vec<(String, &'a str)>> = BTreeMap::new();
+
+    for path in emit_file_nodes_for {
         let fid = format!("file:{path}");
         used_node_ids.insert(fid.clone());
         let label = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -3231,6 +3527,7 @@ fn collect_graph_elements(
             label,
             source_file: path.clone(),
             source_location: None,
+            end_line: 0,
             file_type: Some("code".to_owned()),
             node_kind: Some("page".to_owned()),
             community: comm_id,
@@ -3258,12 +3555,22 @@ fn collect_graph_elements(
         by_name
             .entry((&sym.file_path, &sym.name))
             .or_default()
-            .push((sym.kind.as_str(), sym.start_line, node_id.clone()));
+            .push((
+                sym.kind.as_str(),
+                sym.start_line,
+                sym.end_line,
+                node_id.clone(),
+            ));
         if let Some(parent) = sym.parent_name.as_deref() {
             by_member
                 .entry((&sym.file_path, parent, &sym.name))
                 .or_default()
-                .push((sym.kind.as_str(), sym.start_line, node_id.clone()));
+                .push((
+                    sym.kind.as_str(),
+                    sym.start_line,
+                    sym.end_line,
+                    node_id.clone(),
+                ));
         }
         if is_type_kind(&sym.kind) {
             type_by_file_and_name
@@ -3275,6 +3582,9 @@ fn collect_graph_elements(
                 .push((node_id.clone(), sym.file_path.as_str()));
         }
 
+        if emit_struct_filter.is_some_and(|filter| !filter.contains(&sym.file_path)) {
+            continue;
+        }
         let is_method = matches!(sym.kind.as_str(), "method" | "constructor");
         let has_parent = sym.parent_name.is_some();
         let label = if is_method && has_parent {
@@ -3293,6 +3603,7 @@ fn collect_graph_elements(
             label,
             source_file: sym.file_path.clone(),
             source_location: Some(format!("L{}", sym.start_line)),
+            end_line: sym.end_line,
             file_type: None,
             node_kind: Some(sym.kind.clone()),
             community: comm_id,
@@ -3303,46 +3614,22 @@ fn collect_graph_elements(
         });
     }
 
-    let parent_node_id = |_file_path: &str,
-                          sym_kind: &str,
-                          sym_line: u32,
-                          candidates: &[(&str, u32, String)]|
-     -> Option<String> {
-        let kind_rank = |k: &str| match sym_kind {
-            "calls" | "method" => u8::from(!matches!(k, "function" | "method" | "constructor")),
-            "type" => u8::from(!is_type_kind(k)),
-            _ => 0,
-        };
-        candidates
-            .iter()
-            .min_by_key(|(k, line, id)| {
-                (
-                    kind_rank(k),
-                    if sym_line > 0 {
-                        line.abs_diff(sym_line)
-                    } else {
-                        *line
-                    },
-                    *line,
-                    id.as_str(),
-                )
-            })
-            .map(|(_, _, id)| id.clone())
-    };
-    let resolve_parent = |file_path: &str, parent_name: &str, child_line: u32| -> Option<String> {
-        if let Some(id) = type_by_file_and_name.get(&(file_path, parent_name)) {
-            return Some(id.clone());
-        }
-        by_name
-            .get(&(file_path, parent_name))
-            .and_then(|cands| parent_node_id(file_path, "type", child_line, cands))
-    };
-
     for (sym, node_id) in symbols.iter().zip(assigned_ids.iter()) {
+        if emit_struct_filter.is_some_and(|filter| !filter.contains(&sym.file_path)) {
+            continue;
+        }
         let Some(parent_name) = sym.parent_name.as_deref() else {
             continue;
         };
-        if let Some(parent_id) = resolve_parent(&sym.file_path, parent_name, sym.start_line)
+        let parent_id = if let Some(id) = type_by_file_and_name.get(&(&sym.file_path, parent_name))
+        {
+            Some(id.clone())
+        } else {
+            by_name
+                .get(&(&sym.file_path, parent_name))
+                .and_then(|cands| pick_parent_node_id("type", sym.start_line, cands))
+        };
+        if let Some(parent_id) = parent_id
             && &parent_id != node_id
         {
             let rel = if matches!(sym.kind.as_str(), "method" | "constructor") {
@@ -3362,35 +3649,30 @@ fn collect_graph_elements(
         }
     }
 
-    let resolve_symbol =
-        |file_path: &str, sym_hint: Option<&str>, pref_kind: &str, pref_line: u32| -> String {
-            if let Some(hint) = sym_hint.map(str::trim).filter(|s| !s.is_empty()) {
-                if let Some(id) = by_symbol_id.get(&(file_path, hint)) {
-                    return id.clone();
-                }
-                if let Some((parent, member)) = hint.split_once("::") {
-                    let clean_member = member.trim_start_matches('$');
-                    if let Some(cands) = by_member
-                        .get(&(file_path, parent, member))
-                        .or_else(|| by_member.get(&(file_path, parent, clean_member)))
-                        && let Some(id) = parent_node_id(file_path, pref_kind, pref_line, cands)
-                    {
-                        return id;
-                    }
-                }
-                let clean_hint = hint.trim_start_matches('$');
-                if let Some(cands) = by_name
-                    .get(&(file_path, hint))
-                    .or_else(|| by_name.get(&(file_path, clean_hint)))
-                    && let Some(id) = parent_node_id(file_path, pref_kind, pref_line, cands)
-                {
-                    return id;
-                }
-            }
-            format!("file:{file_path}")
-        };
+    (
+        nodes,
+        links,
+        SymbolResolutionMaps {
+            by_symbol_id,
+            by_member,
+            by_name,
+            type_by_file_and_name,
+            type_ids_by_name,
+        },
+    )
+}
 
-    let mut resolved_targets_by_source: BTreeMap<&str, Vec<(&str, Option<&str>)>> = BTreeMap::new();
+fn collect_resolved_edge_links<'a>(
+    edges: &'a [StoredEdgeRow],
+    file_set: &BTreeSet<&str>,
+    maps: &SymbolResolutionMaps<'_>,
+) -> (
+    Vec<IrLinkSpec>,
+    BTreeMap<&'a str, Vec<(&'a str, Option<&'a str>)>>,
+) {
+    let mut links = Vec::with_capacity(edges.len());
+    let mut resolved_targets_by_source: BTreeMap<&'a str, Vec<(&'a str, Option<&'a str>)>> =
+        BTreeMap::new();
     for edge in edges {
         if !file_set.contains(edge.source_file.as_str())
             || !file_set.contains(edge.target_file.as_str())
@@ -3417,17 +3699,22 @@ fn collect_graph_elements(
         } else {
             ""
         };
-        let src_id = resolve_symbol(
+        let src_id = maps.resolve_symbol(
             &edge.source_file,
             edge.source_symbol.as_deref(),
             "calls",
             edge.line,
         );
-        let dst_id = resolve_symbol(
+        let dst_line = if edge.source_file == edge.target_file {
+            edge.line
+        } else {
+            0
+        };
+        let dst_id = maps.resolve_symbol(
             &edge.target_file,
             edge.target_symbol.as_deref(),
             dst_pref,
-            0,
+            dst_line,
         );
         if src_id == dst_id {
             continue;
@@ -3454,6 +3741,23 @@ fn collect_graph_elements(
             evidence: None,
         });
     }
+    (links, resolved_targets_by_source)
+}
+
+fn collect_graph_elements(
+    files: &[String],
+    symbols: &[StoredSymbolRow],
+    edges: &[StoredEdgeRow],
+    sem_edges: &[StoredSemanticRow],
+) -> (Vec<IrNodeSpec>, Vec<IrLinkSpec>, u64, u64) {
+    let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let communities = compute_file_communities(files, edges);
+    let mut used_node_ids: BTreeSet<String> = BTreeSet::new();
+    let (mut nodes, mut links, maps) =
+        collect_symbol_nodes_and_maps(files, None, symbols, &communities, &mut used_node_ids);
+    let (edge_links, resolved_targets_by_source) =
+        collect_resolved_edge_links(edges, &file_set, &maps);
+    links.extend(edge_links);
 
     let canonical_sem_target = |kind: &str, target: &str| -> String {
         if matches!(kind, "exposes_route" | "route" | "calls_route")
@@ -3497,7 +3801,7 @@ fn collect_graph_elements(
         if short.is_empty() {
             return None;
         }
-        if let Some(same_file) = type_by_file_and_name.get(&(source_file, short))
+        if let Some(same_file) = maps.type_by_file_and_name.get(&(source_file, short))
             && same_file != src_id
         {
             return Some(same_file.clone());
@@ -3512,7 +3816,7 @@ fn collect_graph_elements(
                             .is_some_and(|tail| tail == short)
                 });
                 if (sym_matches || target_sym.is_none())
-                    && let Some(id) = type_by_file_and_name.get(&(target_file, short))
+                    && let Some(id) = maps.type_by_file_and_name.get(&(target_file, short))
                     && id != src_id
                     && !candidates.contains(id)
                 {
@@ -3523,7 +3827,7 @@ fn collect_graph_elements(
                 return candidates.into_iter().next();
             }
         }
-        if let Some(all_matches) = type_ids_by_name.get(short) {
+        if let Some(all_matches) = maps.type_ids_by_name.get(short) {
             let qual_norm = svc.replace(['\\', '.'], "/").replace("::", "/");
             if qual_norm.contains('/') {
                 let mut qual_hits: Vec<String> = all_matches
@@ -3549,12 +3853,13 @@ fn collect_graph_elements(
     };
 
     let mut emitted_semantic_nodes: BTreeMap<String, String> = BTreeMap::new();
+    let mut di_groups: BTreeMap<(&str, Option<&str>, u32, &str), Vec<String>> = BTreeMap::new();
     for edge in sem_edges {
         if !file_set.contains(edge.file_path.as_str()) {
             continue;
         }
         let target_key = canonical_sem_target(&edge.kind, &edge.target);
-        let src_id = resolve_symbol(
+        let src_id = maps.resolve_symbol(
             &edge.file_path,
             edge.source_symbol.as_deref(),
             "calls",
@@ -3567,6 +3872,17 @@ fn collect_graph_elements(
         } else {
             None
         };
+        if let Some(ref type_id) = matched_type_id {
+            di_groups
+                .entry((
+                    edge.file_path.as_str(),
+                    edge.source_symbol.as_deref(),
+                    edge.line,
+                    edge.evidence.as_str(),
+                ))
+                .or_default()
+                .push(type_id.clone());
+        }
 
         let dst_id = if let Some(type_id) = matched_type_id {
             type_id
@@ -3586,6 +3902,7 @@ fn collect_graph_elements(
                 label: target_key.clone(),
                 source_file: anchor_file.to_owned(),
                 source_location: Some(format!("L{anchor_line}")),
+                end_line: 0,
                 file_type: None,
                 node_kind: Some("semantic".to_owned()),
                 community: comm_id,
@@ -3612,6 +3929,27 @@ fn collect_graph_elements(
         });
     }
 
+    let mut seen_di_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    for ((_, _, _, evidence), targets) in di_groups {
+        if targets.len() < 2 {
+            continue;
+        }
+        let iface_id = &targets[0];
+        for impl_id in &targets[1..] {
+            if iface_id != impl_id && seen_di_pairs.insert((iface_id.clone(), impl_id.clone())) {
+                links.push(IrLinkSpec {
+                    source: iface_id.clone(),
+                    target: impl_id.clone(),
+                    relation: Some("di_binds".to_owned()),
+                    confidence: Some("EXTRACTED".to_owned()),
+                    source_file: None,
+                    context: Some("di_binds".to_owned()),
+                    evidence: Some(evidence.to_owned()),
+                });
+            }
+        }
+    }
+
     let node_count = nodes.len() as u64;
     let link_count = links.len() as u64;
     (nodes, links, node_count, link_count)
@@ -3628,6 +3966,9 @@ fn node_link_payload_from_elements(node_specs: &[IrNodeSpec], link_specs: &[IrLi
             });
             if let Some(loc) = &spec.source_location {
                 node["source_location"] = json!(loc);
+            }
+            if spec.end_line > 0 {
+                node["end_line"] = json!(spec.end_line);
             }
             if let Some(ft) = &spec.file_type {
                 node["file_type"] = json!(ft);
@@ -4207,6 +4548,117 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "manifest edit must invalidate cached outgoing deps"
+        );
+    }
+
+    #[test]
+    fn di_binds_links_interface_to_impl_and_callsite_line_disambiguates_same_file_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let state = dir.path().join("state");
+        fs::create_dir_all(root.join("src/Contracts")).unwrap();
+        fs::create_dir_all(root.join("src/Infra")).unwrap();
+        fs::create_dir_all(root.join("src/Providers")).unwrap();
+
+        fs::write(
+            root.join("src/Contracts/PaymentGateway.php"),
+            "<?php\nnamespace App\\Contracts;\ninterface PaymentGateway { public function charge(): void; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/Infra/StripeGateway.php"),
+            "<?php\nnamespace App\\Infra;\nclass StripeGateway { public function charge(): void {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/Providers/BillingProvider.php"),
+            "<?php\nnamespace App\\Providers;\nuse App\\Contracts\\PaymentGateway;\nuse App\\Infra\\StripeGateway;\nclass BillingProvider {\n    public function register(): void {\n        $this->app->bind(PaymentGateway::class, StripeGateway::class);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let store = GraphIrStore::open(&state, "p-di").unwrap();
+        store.sync_workspace(&root).unwrap();
+        let (_, links, _, _) = store.export_ir_graph_elements().unwrap();
+        let (nodes, _, _, _) = store.export_ir_graph_elements().unwrap();
+
+        let iface_id = nodes
+            .iter()
+            .find(|n| {
+                n.source_file == "src/Contracts/PaymentGateway.php" && n.label == "PaymentGateway"
+            })
+            .expect("interface node")
+            .id
+            .clone();
+        let impl_id = nodes
+            .iter()
+            .find(|n| n.source_file == "src/Infra/StripeGateway.php" && n.label == "StripeGateway")
+            .expect("impl node")
+            .id
+            .clone();
+        assert!(
+            links.iter().any(|l| {
+                l.source == iface_id
+                    && l.target == impl_id
+                    && l.relation.as_deref() == Some("di_binds")
+            }),
+            "expected direct Interface -> Impl di_binds link: {links:?}"
+        );
+
+        let files = vec!["src/same.ts".to_owned()];
+        let symbols = vec![
+            StoredSymbolRow {
+                row_id: 1,
+                symbol_id: "sym:first".to_owned(),
+                file_path: "src/same.ts".to_owned(),
+                kind: "function".to_owned(),
+                name: "dup".to_owned(),
+                parent_name: None,
+                start_line: 10,
+                end_line: 20,
+                is_abstract: false,
+                is_test: false,
+            },
+            StoredSymbolRow {
+                row_id: 2,
+                symbol_id: "sym:second".to_owned(),
+                file_path: "src/same.ts".to_owned(),
+                kind: "function".to_owned(),
+                name: "dup".to_owned(),
+                parent_name: None,
+                start_line: 40,
+                end_line: 60,
+                is_abstract: false,
+                is_test: false,
+            },
+            StoredSymbolRow {
+                row_id: 3,
+                symbol_id: "sym:caller".to_owned(),
+                file_path: "src/same.ts".to_owned(),
+                kind: "function".to_owned(),
+                name: "run".to_owned(),
+                parent_name: None,
+                start_line: 45,
+                end_line: 55,
+                is_abstract: false,
+                is_test: false,
+            },
+        ];
+        let edges = vec![StoredEdgeRow {
+            source_file: "src/same.ts".to_owned(),
+            target_file: "src/same.ts".to_owned(),
+            source_symbol: Some("run".to_owned()),
+            target_symbol: Some("dup".to_owned()),
+            relation: "calls".to_owned(),
+            confidence: "EXTRACTED".to_owned(),
+            context: None,
+            line: 48,
+        }];
+        let (_, same_links, _, _) = collect_graph_elements(&files, &symbols, &edges, &[]);
+        assert!(
+            same_links
+                .iter()
+                .any(|l| l.source == "sym:caller" && l.target == "sym:second"),
+            "same-file edge should resolve to line-closest/enclosing target: {same_links:?}"
         );
     }
 }

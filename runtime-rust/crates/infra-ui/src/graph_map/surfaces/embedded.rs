@@ -727,11 +727,50 @@ pub(in crate::graph_map) fn focus_file_on_surface(surface: MapSurface, raw_path:
     }
     true
 }
+/// Applies cross-graph `{filter, target_commit, semantic_kind}` context from Omnigraph
+/// onto a Code Map surface state without discarding explicit symbol/file focus.
+pub(crate) fn apply_code_map_jump_context(
+    st: &mut V,
+    filter: Option<&str>,
+    target_commit: Option<&str>,
+    semantic_kind: Option<&str>,
+    short_sym: Option<&str>,
+) {
+    if let Some(commit) = target_commit.map(str::trim).filter(|s| !s.is_empty()) {
+        let valid_sha = commit.len() >= 7 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+        if valid_sha {
+            st["target"] = json!(format!("commit:{commit}"));
+        } else if commit.starts_with("commit:") || commit.starts_with("range:") {
+            st["target"] = json!(commit);
+        }
+    }
+    if let Some(sk) = semantic_kind.map(str::trim).filter(|s| !s.is_empty()) {
+        st["semantic_kind"] = json!(sk);
+    }
+    if let Some(raw_filter) = filter.map(str::trim).filter(|s| !s.is_empty()) {
+        st["omnigraph_filter"] = json!(raw_filter);
+        if short_sym.is_none_or(|s| s.trim().is_empty()) {
+            st["filter"] = json!(raw_filter);
+        }
+    }
+}
+
 /// Focuses a workspace-relative file path and optional symbol FQN on a map surface.
 pub(in crate::graph_map) fn focus_target_on_surface(
     surface: MapSurface,
     path: &str,
     symbol_fqn: Option<&str>,
+) -> bool {
+    focus_target_on_surface_with_context(surface, path, symbol_fqn, None, None, None)
+}
+
+pub(in crate::graph_map) fn focus_target_on_surface_with_context(
+    surface: MapSurface,
+    path: &str,
+    symbol_fqn: Option<&str>,
+    filter: Option<&str>,
+    target_commit: Option<&str>,
+    semantic_kind: Option<&str>,
 ) -> bool {
     let clean_path = normalize_rel_path(strip_symbol_suffix(path));
     if let Some(fqn) = symbol_fqn.map(str::trim).filter(|s| !s.is_empty()) {
@@ -746,6 +785,13 @@ pub(in crate::graph_map) fn focus_target_on_surface(
         if !short_sym.is_empty() {
             st["filter"] = json!(short_sym);
         }
+        apply_code_map_jump_context(
+            &mut st,
+            filter,
+            target_commit,
+            semantic_kind,
+            Some(short_sym),
+        );
         if !surface.pan_target_key.is_empty() {
             m::set(surface.pan_target_key, json!(fqn));
         }
@@ -757,7 +803,8 @@ pub(in crate::graph_map) fn focus_target_on_surface(
         let view = m::data(surface.view_key);
         let needs_reload = clean_path.is_empty()
             || view["mode"] != "file"
-            || normalize_rel_path(&m::text(&view, "scope")) != clean_path;
+            || normalize_rel_path(&m::text(&view, "scope")) != clean_path
+            || target_commit.is_some_and(|c| !c.trim().is_empty());
         let view_opt = view["nodes"].is_array().then_some(&view);
         ensure_surface_impact(surface, &st, view_opt, true);
         if needs_reload {
@@ -768,6 +815,18 @@ pub(in crate::graph_map) fn focus_target_on_surface(
             rerender_surface_preserving_camera(surface);
         }
         return true;
+    }
+    let has_ctx = filter.is_some_and(|s| !s.trim().is_empty())
+        || target_commit.is_some_and(|s| !s.trim().is_empty())
+        || semantic_kind.is_some_and(|s| !s.trim().is_empty());
+    if has_ctx {
+        let mut st = surface_state(surface);
+        apply_code_map_jump_context(&mut st, filter, target_commit, semantic_kind, None);
+        save_surface_state(surface, &st);
+        dom::set_value(
+            &format!("{}-filter", surface.id_prefix),
+            &m::text(&st, "filter"),
+        );
     }
     focus_file_on_surface(surface, path)
 }
@@ -780,6 +839,24 @@ pub fn focus_file_in_session(path: &str) {
 /// Focuses a workspace-relative file path and optional symbol FQN on the Sessions dependency map.
 pub(crate) fn focus_target_in_session(path: &str, symbol_fqn: Option<&str>) {
     let _ = focus_target_on_surface(SESSION_SURFACE, path, symbol_fqn);
+}
+
+/// Focuses a target on the Sessions dependency map while preserving `{filter, target_commit, semantic_kind}`.
+pub(crate) fn focus_target_in_session_with_context(
+    path: &str,
+    symbol_fqn: Option<&str>,
+    filter: Option<&str>,
+    target_commit: Option<&str>,
+    semantic_kind: Option<&str>,
+) {
+    let _ = focus_target_on_surface_with_context(
+        SESSION_SURFACE,
+        path,
+        symbol_fqn,
+        filter,
+        target_commit,
+        semantic_kind,
+    );
 }
 
 /// Localizes failing tests, Activity commands, or failed System service checks directly on the

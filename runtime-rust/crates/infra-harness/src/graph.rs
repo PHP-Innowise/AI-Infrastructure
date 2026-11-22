@@ -339,6 +339,7 @@ pub struct Graphs {
     autostarting: AtomicBool,
     maps: crate::graph_map::Maps,
     ir_stores: Mutex<BTreeMap<String, Arc<crate::graph_ir::GraphIrStore>>>,
+    ir_stores_ro: Mutex<BTreeMap<String, Arc<crate::graph_ir::GraphIrStore>>>,
     watchers: Mutex<BTreeMap<String, ProjectWatcher>>,
     history: Mutex<BTreeMap<String, HistoryEntry>>,
     /// Open pull requests of each project as last listed, or why not.
@@ -355,6 +356,8 @@ pub struct Graphs {
     refused: Mutex<BTreeMap<(String, String), String>>,
     /// Synthetic system service graph targets (`sys-<hash>` -> `(root, name)`).
     targets: Mutex<BTreeMap<String, (PathBuf, String)>>,
+    /// Bounded LRU cache of immutable revision `structural_diff_overlay` results.
+    diff_overlays: Mutex<Vec<(DiffOverlayCacheKey, Value)>>,
     /// Broadcast channel for real-time `graph_status` SSE updates.
     events: tokio::sync::broadcast::Sender<GraphStatusEvent>,
     /// Monotonic per-project revision counter bumped on IR/architecture/build updates.
@@ -400,11 +403,14 @@ pub(super) enum PendingLiveJson {
     },
 }
 
+const LIVE_JSON_COOLDOWN: Duration = Duration::from_millis(800);
+
 #[derive(Default)]
 pub(super) struct LiveJsonState {
     pub(super) dirty: bool,
     pub(super) active: bool,
     pub(super) pending: Option<PendingLiveJson>,
+    pub(super) last_written: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -425,6 +431,19 @@ pub(super) struct HistoryEntry {
     pub(super) revision: String,
     pub(super) read_at: Instant,
     pub(super) data: Arc<graph_changes::History>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct DiffOverlayCacheKey {
+    pub(super) project: String,
+    pub(super) head_rev: String,
+    pub(super) base_rev: String,
+    pub(super) head_index_id: u64,
+    pub(super) base_index_id: Option<u64>,
+    pub(super) rules_hash: Option<[u8; 32]>,
+    pub(super) certain: bool,
+    pub(super) notests: bool,
+    pub(super) changed_hash: [u8; 32],
 }
 impl Graphs {
     /// `HARNESS_GRAPHIFY` names the executable when it is not on `PATH`.
@@ -464,6 +483,7 @@ impl Graphs {
             autostarting: AtomicBool::new(false),
             maps: crate::graph_map::Maps::default(),
             ir_stores: Mutex::new(BTreeMap::new()),
+            ir_stores_ro: Mutex::new(BTreeMap::new()),
             watchers: Mutex::new(BTreeMap::new()),
             history: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(BTreeMap::new()),
@@ -473,6 +493,7 @@ impl Graphs {
             revisions: Mutex::new(BTreeMap::new()),
             refused: Mutex::new(BTreeMap::new()),
             targets: Mutex::new(BTreeMap::new()),
+            diff_overlays: Mutex::new(Vec::new()),
             events: tokio::sync::broadcast::channel(256).0,
             ir_revisions: Mutex::new(BTreeMap::new()),
             live_json_writers: Mutex::new(BTreeMap::new()),
@@ -764,6 +785,33 @@ impl Graphs {
                     let Some(graphs) = weak_me.upgrade() else {
                         break;
                     };
+                    let wait_for = {
+                        let Ok(st) = worker_slot.state.lock() else {
+                            break;
+                        };
+                        if !st.dirty
+                            || graphs.stopping.load(Ordering::Acquire)
+                            || worker_slot.cancel.load(Ordering::Acquire)
+                        {
+                            None
+                        } else {
+                            st.last_written
+                                .and_then(|last| LIVE_JSON_COOLDOWN.checked_sub(last.elapsed()))
+                        }
+                    };
+                    if let Some(delay) = wait_for {
+                        let mut left = delay;
+                        while !left.is_zero() {
+                            if graphs.stopping.load(Ordering::Acquire)
+                                || worker_slot.cancel.load(Ordering::Acquire)
+                            {
+                                break;
+                            }
+                            let step = left.min(Duration::from_millis(50));
+                            std::thread::sleep(step);
+                            left = left.saturating_sub(step);
+                        }
+                    }
                     let (should_run, queued_snapshot) = {
                         let Ok(mut st) = worker_slot.state.lock() else {
                             break;
@@ -818,6 +866,9 @@ impl Graphs {
                                 .and_then(|ir| ir.write_live_graph_atomic(&live_graph).ok()),
                         };
                         if let Some(latest_counts) = written {
+                            if let Ok(mut st) = worker_slot.state.lock() {
+                                st.last_written = Some(Instant::now());
+                            }
                             let fresh_print = graphs.print(&proj, &root, false);
                             let commit = fresh_print.as_ref().and_then(|p| p.commit.as_deref());
                             write_live_summary(&live_graph, commit, Some(latest_counts), None);

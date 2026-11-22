@@ -375,6 +375,16 @@ impl Maps {
         Some(out)
     }
 
+    /// Returns the most recently cached live IR `Index` for `project`, if any.
+    pub(crate) fn latest_live_ir_index(&self, project: &str) -> Option<Arc<Index>> {
+        let cache = self.cache.lock().ok()?;
+        cache
+            .kept_live_ir
+            .iter()
+            .rfind(|(name, ..)| name == project)
+            .map(|entry| entry.3.clone())
+    }
+
     /// Returns a live IR `Index` iff cached at exact `(ir_revision, write_epoch)` without blocking.
     pub(crate) fn cached_live_ir(
         &self,

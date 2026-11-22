@@ -189,6 +189,8 @@ pub(super) fn discover_manifest_dirs(root: &Path, files: &[String]) -> Vec<Strin
         "pyproject.toml",
     ];
     let mut dirs = BTreeSet::new();
+    // Always inspect the repository root `""` so single-crate or workspace-root files group under `"."`.
+    dirs.insert(String::new());
     for file in files {
         let mut cursor = file.as_str();
         while let Some((dir, _)) = cursor.rsplit_once('/') {
@@ -199,21 +201,38 @@ pub(super) fn discover_manifest_dirs(root: &Path, files: &[String]) -> Vec<Strin
     let mut roots: Vec<String> = dirs
         .into_iter()
         .filter(|dir| {
-            let abs = root.join(dir);
+            let abs = if dir.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(dir)
+            };
             MANIFESTS.iter().any(|m| abs.join(m).is_file())
         })
         .collect();
-    // Match deepest crate/package directory first.
+    // Match deepest crate/package directory first (root `""` sorts last).
     roots.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
     roots
 }
 
+impl Index {
+    pub(super) fn manifest_dirs(&self) -> &[String] {
+        self.manifest_dirs
+            .get_or_init(|| discover_manifest_dirs(&self.root, &self.files))
+    }
+}
+
 pub(super) fn crate_bucket(manifest_dirs: &[String], path: &str) -> String {
     if let Some(dir) = manifest_dirs.iter().find(|dir| {
-        path.strip_prefix(dir.as_str())
-            .is_some_and(|rest| rest.starts_with('/'))
+        dir.is_empty()
+            || path
+                .strip_prefix(dir.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
     }) {
-        return dir.clone();
+        return if dir.is_empty() {
+            ".".to_owned()
+        } else {
+            dir.clone()
+        };
     }
     match path.split_once('/') {
         Some((top, _)) if !top.is_empty() => top.to_owned(),
@@ -236,15 +255,15 @@ pub(super) fn node_bucket(manifest_dirs: &[String], lod: Lod, path: &str) -> Str
     }
 }
 
-pub(super) struct LodFilter<'a> {
-    pub(super) scope: &'a str,
-    pub(super) focus: Option<&'a str>,
-    pub(super) filter: &'a str,
-    pub(super) certain: bool,
-    pub(super) paginated: bool,
+pub(crate) struct LodFilter<'a> {
+    pub(crate) scope: &'a str,
+    pub(crate) focus: Option<&'a str>,
+    pub(crate) filter: &'a str,
+    pub(crate) certain: bool,
+    pub(crate) paginated: bool,
 }
 
-pub(super) fn rebuild_default_map_at_lod(
+pub(crate) fn rebuild_default_map_at_lod(
     index: &Index,
     view: &mut Value,
     lod: Lod,
@@ -367,21 +386,15 @@ pub(super) fn rebuild_default_map_at_lod(
         return true;
     }
 
-    if !matches!(lod, Lod::Crate | Lod::File) {
+    if !matches!(lod, Lod::Crate | Lod::Folder | Lod::File) {
         return false;
     }
-    let manifest_dirs = if lod == Lod::Crate {
-        discover_manifest_dirs(&index.root, &index.files)
+    let manifest_dirs: &[String] = if lod == Lod::Crate {
+        index.manifest_dirs()
     } else {
-        Vec::new()
+        &[]
     };
-    let bucket_for_file = |path: &str| -> String {
-        if lod == Lod::Crate {
-            crate_bucket(&manifest_dirs, path)
-        } else {
-            path.to_owned()
-        }
-    };
+    let bucket_for_file = |path: &str| -> String { node_bucket(manifest_dirs, lod, path) };
 
     #[derive(Default)]
     struct BucketTally {
@@ -404,6 +417,7 @@ pub(super) fn rebuild_default_map_at_lod(
         file_to_bucket.insert(id as u32, b);
     }
     let mut flows: BTreeMap<(String, String), EdgeFlow> = BTreeMap::new();
+    let mut focus_kinds: BTreeMap<u16, u64> = BTreeMap::new();
     for (from, to, pair) in &index.pairs {
         let w = pair.weight(certain);
         if w == 0 {
@@ -424,6 +438,9 @@ pub(super) fn rebuild_default_map_at_lod(
         if let Some(t) = tallies.get_mut(tb) {
             t.into += w;
         }
+        if focus == Some(sb.as_str()) {
+            add_kind_counts(&mut focus_kinds, pair.kinds_for(certain));
+        }
         flows
             .entry((sb.clone(), tb.clone()))
             .or_default()
@@ -441,26 +458,111 @@ pub(super) fn rebuild_default_map_at_lod(
             .cmp(&(a.out + a.into + a.within))
             .then(a_k.cmp(b_k))
     });
+    let mut beyond = false;
+    let focus_bucket = focus.filter(|f| !f.is_empty()).map(|f| {
+        let trimmed = f.split('#').next().unwrap_or(f);
+        if rows.iter().any(|(k, _)| k == trimmed) {
+            trimmed.to_owned()
+        } else {
+            node_bucket(manifest_dirs, lod, trimmed)
+        }
+    });
     if !paginated {
-        rows.truncate(max_default);
+        if let Some(ref fb) = focus_bucket
+            && let Some(pos) = rows.iter().position(|(k, _)| k == fb)
+            && pos >= max_default
+        {
+            let focused_row = rows.remove(pos);
+            rows.truncate(max_default.saturating_sub(1));
+            rows.push(focused_row);
+            rows.sort_by(|(a_k, a), (b_k, b)| {
+                (b.out + b.into + b.within)
+                    .cmp(&(a.out + a.into + a.within))
+                    .then(a_k.cmp(b_k))
+            });
+            beyond = true;
+        } else {
+            rows.truncate(max_default);
+        }
     }
     let kept: HashSet<String> = rows.iter().map(|(k, _)| k.clone()).collect();
     let mut edges: Vec<((String, String), EdgeFlow)> = flows
-        .into_iter()
+        .iter()
         .filter(|((s, t), _)| kept.contains(s) && kept.contains(t))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     edges.sort_by(|a, b| b.1.flow.links.cmp(&a.1.flow.links).then(a.0.cmp(&b.0)));
     let between = edges.len();
     if !paginated {
         edges.truncate(NORMAL_LIMITS.drawn);
     }
+    let focused_entry = focus_bucket
+        .as_deref()
+        .and_then(|fb| rows.iter().find(|(k, _)| k == fb));
+    if let Some((fb_path, fb_tally)) = focused_entry {
+        let side = |outgoing: bool| -> (Vec<Value>, usize) {
+            let mut side_rows: Vec<(&str, Flow)> = flows
+                .iter()
+                .filter_map(|((s, t), edge)| {
+                    let other = if outgoing {
+                        (s == fb_path).then_some(t.as_str())
+                    } else {
+                        (t == fb_path).then_some(s.as_str())
+                    }?;
+                    Some((other, edge.flow))
+                })
+                .collect();
+            side_rows.sort_by(|(a, l), (b, r)| r.links.cmp(&l.links).then(a.cmp(b)));
+            let more = side_rows.len().saturating_sub(LISTED);
+            side_rows.truncate(LISTED);
+            let out = side_rows
+                .into_iter()
+                .map(|(p, flow)| {
+                    json!({
+                        "path": p,
+                        "name": if p == "." { "." } else { name(p) },
+                        "folder": matches!(lod, Lod::Crate | Lod::Folder) && p != ".",
+                        "inside": true,
+                        "links": flow.links,
+                        "guessed": flow.guessed,
+                    })
+                })
+                .collect();
+            (out, more)
+        };
+        let (uses, uses_more) = side(true);
+        let (used_by, used_by_more) = side(false);
+        view["focus"] = json!({
+            "path": fb_path,
+            "name": if fb_path == "." { "." } else { name(fb_path) },
+            "folder": matches!(lod, Lod::Crate | Lod::Folder) && fb_path != ".",
+            "inside": true,
+            "files": fb_tally.files,
+            "symbols": fb_tally.symbols,
+            "within": fb_tally.within,
+            "out": fb_tally.out,
+            "in": fb_tally.into,
+            "uses": uses,
+            "uses_more": uses_more,
+            "used_by": used_by,
+            "used_by_more": used_by_more,
+            "kinds": index.kinds_json(&focus_kinds),
+        });
+    }
+    if view.get("frames").is_none() {
+        view["frames"] = json!([]);
+    }
+    if view.get("backbone").is_none() {
+        view["backbone"] = json!(false);
+    }
+    view["beyond"] = json!(beyond);
     view["children"] = json!(total);
     view["matching"] = json!(matching);
     view["between"] = json!(between);
     view["nodes"] = Value::Array(
         rows.into_iter()
             .map(|(k, t)| {
-                let is_folder = lod == Lod::Crate && k != ".";
+                let is_folder = matches!(lod, Lod::Crate | Lod::Folder) && k != ".";
                 json!({
                     "path": k,
                     "name": if k == "." { ".".to_owned() } else { name(&k).to_owned() },
@@ -493,10 +595,10 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
     let Some(nodes) = view.get("nodes").and_then(Value::as_array) else {
         return false;
     };
-    let manifest_dirs = if lod == Lod::Crate {
-        discover_manifest_dirs(&index.root, &index.files)
+    let manifest_dirs: &[String] = if lod == Lod::Crate {
+        index.manifest_dirs()
     } else {
-        Vec::new()
+        &[]
     };
 
     #[derive(Default)]
@@ -507,6 +609,20 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
         out: u64,
         into: u64,
         folder: bool,
+        changed: u64,
+        touched: u64,
+        patterns: u64,
+        shell_read: u64,
+        opened: bool,
+        start: bool,
+        end: bool,
+        focus_target: bool,
+        statuses: BTreeSet<String>,
+        suspect: Option<u64>,
+        blast: Option<(u64, f64)>,
+        circle: Option<Value>,
+        arch_layer: Option<Option<Value>>,
+        role: Option<Option<String>>,
     }
     let mut buckets: BTreeMap<String, Bucket> = BTreeMap::new();
     let mut path_to_bucket: HashMap<String, String> = HashMap::new();
@@ -519,18 +635,75 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
             continue;
         };
         let file_part = raw_path.split('#').next().unwrap_or(raw_path);
-        let b = node_bucket(&manifest_dirs, lod, file_part);
+        let b = node_bucket(manifest_dirs, lod, file_part);
         path_to_bucket.insert(raw_path.to_owned(), b.clone());
-        let entry = buckets.entry(b).or_default();
+        let entry = buckets.entry(b.clone()).or_default();
         entry.files += node.get("files").and_then(Value::as_u64).unwrap_or(1);
         entry.symbols += node.get("symbols").and_then(Value::as_u64).unwrap_or(0);
         entry.within += node.get("within").and_then(Value::as_u64).unwrap_or(0);
-        entry.folder |= lod == Lod::Crate
-            || node.get("folder").and_then(Value::as_bool).unwrap_or(false)
-            || file_part.contains('/');
+        entry.folder |= b != "."
+            && (matches!(lod, Lod::Crate | Lod::Folder)
+                || node.get("folder").and_then(Value::as_bool).unwrap_or(false)
+                || file_part.contains('/'));
+        entry.changed += node
+            .get("changed")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| u64::from(node.get("status").is_some()));
+        entry.touched += node.get("touched").and_then(Value::as_u64).unwrap_or(0);
+        entry.patterns += node.get("patterns").and_then(Value::as_u64).unwrap_or(0);
+        entry.shell_read += node.get("shell_read").and_then(Value::as_u64).unwrap_or(0);
+        entry.opened |= node.get("opened").and_then(Value::as_bool) == Some(true);
+        entry.start |= node.get("start").and_then(Value::as_bool) == Some(true);
+        entry.end |= node.get("end").and_then(Value::as_bool) == Some(true);
+        entry.focus_target |= node.get("focus_target").and_then(Value::as_bool) == Some(true);
+        if let Some(st) = node.get("status").and_then(Value::as_str) {
+            entry.statuses.insert(st.to_owned());
+        }
+        if let Some(rank) = node.get("suspect").and_then(Value::as_u64) {
+            entry.suspect = Some(entry.suspect.map_or(rank, |prev| prev.min(rank)));
+        }
+        if let Some(blast_obj) = node.get("blast").filter(|v| v.is_object()) {
+            let hop = blast_obj.get("hop").and_then(Value::as_u64).unwrap_or(1);
+            let left = blast_obj.get("left").and_then(Value::as_f64).unwrap_or(0.0);
+            entry.blast = Some(match entry.blast {
+                Some((ph, pl)) => (ph.min(hop), pl.max(left)),
+                None => (hop, left),
+            });
+        }
+        if let Some(c) = node.get("circle").filter(|v| !v.is_null()) {
+            if entry.circle.is_none() || c.is_object() {
+                entry.circle = Some(c.clone());
+            }
+        }
+        if let Some(layer) = node.get("architecture_layer").filter(|v| v.is_object()) {
+            match &mut entry.arch_layer {
+                None => entry.arch_layer = Some(Some(layer.clone())),
+                Some(Some(prev)) if prev.get("id") != layer.get("id") => {
+                    entry.arch_layer = Some(None);
+                }
+                _ => {}
+            }
+        }
+        if let Some(role) = node.get("role").and_then(Value::as_str) {
+            match &mut entry.role {
+                None => entry.role = Some(Some(role.to_owned())),
+                Some(Some(prev)) if prev != role => entry.role = Some(None),
+                _ => {}
+            }
+        }
     }
 
-    let mut aggregated: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    #[derive(Default)]
+    struct AggEdge {
+        links: u64,
+        guessed: u64,
+        kinds: BTreeMap<String, u64>,
+        against: bool,
+        added: bool,
+        detour: bool,
+        arch_violation: u64,
+    }
+    let mut aggregated: BTreeMap<(String, String), AggEdge> = BTreeMap::new();
     if let Some(edges) = view.get("edges").and_then(Value::as_array) {
         for edge in edges {
             let from = edge
@@ -547,11 +720,11 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
             let fb = path_to_bucket
                 .get(f)
                 .cloned()
-                .unwrap_or_else(|| node_bucket(&manifest_dirs, lod, f));
+                .unwrap_or_else(|| node_bucket(manifest_dirs, lod, f));
             let tb = path_to_bucket
                 .get(t)
                 .cloned()
-                .unwrap_or_else(|| node_bucket(&manifest_dirs, lod, t));
+                .unwrap_or_else(|| node_bucket(manifest_dirs, lod, t));
             let links = edge
                 .get("links")
                 .or_else(|| edge.get("weight"))
@@ -570,17 +743,41 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                     b.into += links;
                 }
                 let entry = aggregated.entry((fb, tb)).or_default();
-                entry.0 += links;
-                entry.1 += guessed;
+                entry.links += links;
+                entry.guessed += guessed;
+                entry.against |= edge.get("against").and_then(Value::as_bool) == Some(true);
+                entry.added |= edge.get("added").and_then(Value::as_bool) == Some(true);
+                entry.detour |= edge.get("detour").and_then(Value::as_bool) == Some(true);
+                entry.arch_violation += edge
+                    .get("architecture_violation")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| (v.as_bool() == Some(true)).then_some(links))
+                    })
+                    .unwrap_or(0);
+                if let Some(kinds) = edge.get("kinds").and_then(Value::as_array) {
+                    for k in kinds {
+                        if let Some(name) = k.get("kind").and_then(Value::as_str) {
+                            let count = k.get("links").and_then(Value::as_u64).unwrap_or(1);
+                            *entry.kinds.entry(name.to_owned()).or_default() += count;
+                        }
+                    }
+                }
             }
         }
     }
 
+    let bucket_total = buckets.len() as u64;
+    view["children"] = json!(bucket_total);
+    view["matching"] = json!(bucket_total);
+    if let Some(frames) = view.get_mut("frames") {
+        *frames = json!([]);
+    }
     view["nodes"] = Value::Array(
         buckets
             .into_iter()
             .map(|(k, b)| {
-                json!({
+                let mut obj = json!({
                     "path": k,
                     "name": if k == "." { ".".to_owned() } else { name(&k).to_owned() },
                     "folder": b.folder,
@@ -589,22 +786,91 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
                     "within": b.within,
                     "out": b.out,
                     "in": b.into,
-                })
+                });
+                if b.changed > 0 {
+                    obj["changed"] = json!(b.changed);
+                }
+                if b.touched > 0 {
+                    obj["touched"] = json!(b.touched);
+                }
+                if b.statuses.len() == 1
+                    && let Some(only) = b.statuses.into_iter().next()
+                {
+                    obj["status"] = json!(only);
+                }
+                if b.patterns > 0 {
+                    obj["patterns"] = json!(b.patterns);
+                }
+                if b.shell_read > 0 {
+                    obj["shell_read"] = json!(b.shell_read);
+                }
+                if b.opened {
+                    obj["opened"] = json!(true);
+                }
+                if b.start {
+                    obj["start"] = json!(true);
+                }
+                if b.end {
+                    obj["end"] = json!(true);
+                }
+                if b.focus_target {
+                    obj["focus_target"] = json!(true);
+                }
+                if let Some(rank) = b.suspect {
+                    obj["suspect"] = json!(rank);
+                }
+                if let Some((hop, left)) = b.blast {
+                    obj["blast"] = json!({"hop": hop, "left": left});
+                }
+                if let Some(circle) = b.circle {
+                    obj["circle"] = circle;
+                }
+                if let Some(Some(layer)) = b.arch_layer {
+                    obj["architecture_layer"] = layer;
+                }
+                if let Some(Some(role)) = b.role {
+                    obj["role"] = json!(role);
+                }
+                obj
             })
             .collect(),
     );
     let mut edge_rows: Vec<_> = aggregated.into_iter().collect();
-    edge_rows.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
+    edge_rows.sort_by(|a, b| b.1.links.cmp(&a.1.links).then(a.0.cmp(&b.0)));
+    view["between"] = json!(edge_rows.len());
     view["edges"] = Value::Array(
         edge_rows
             .into_iter()
-            .map(|((from, to), (links, guessed))| {
-                json!({
+            .map(|((from, to), agg)| {
+                let mut obj = json!({
                     "from": from,
                     "to": to,
-                    "links": links,
-                    "guessed": guessed,
-                })
+                    "links": agg.links,
+                    "guessed": agg.guessed,
+                });
+                if !agg.kinds.is_empty() {
+                    let mut kinds_sorted: Vec<(String, u64)> = agg.kinds.into_iter().collect();
+                    kinds_sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    obj["kinds"] = Value::Array(
+                        kinds_sorted
+                            .into_iter()
+                            .map(|(kind, links)| json!({"kind": kind, "links": links}))
+                            .collect(),
+                    );
+                }
+                if agg.against {
+                    obj["against"] = json!(true);
+                }
+                if agg.added {
+                    obj["added"] = json!(true);
+                }
+                if agg.detour {
+                    obj["detour"] = json!(true);
+                }
+                if agg.arch_violation > 0 {
+                    obj["architecture_violation"] = json!(agg.arch_violation);
+                }
+                obj
             })
             .collect(),
     );
@@ -612,6 +878,49 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
         obj.remove("paging");
     }
     true
+}
+
+/// Builds a default-mode view directly at `lod` (avoiding building a discarded folder view first).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn view_at_lod(
+    index: &Index,
+    project: &str,
+    lod: Lod,
+    min_weight: Option<u64>,
+    opts: &LodFilter<'_>,
+) -> Value {
+    let scope_norm = opts.scope.trim_matches('/');
+    let scope_val = if index.folder(scope_norm) {
+        scope_norm
+    } else {
+        ""
+    };
+    let mut out = json!({
+        "scope": scope_val,
+        "crumbs": Index::crumbs(project, scope_val),
+        "certain": opts.certain,
+        "totals": index.totals(),
+        "beyond": false,
+        "nodes": [],
+        "frames": [],
+        "backbone": false,
+        "focus": null,
+    });
+    if let Some(ref backend) = index.backend {
+        out["backend"] = json!(backend);
+    }
+    apply_lod_and_min_weight(
+        index,
+        &mut out,
+        Some(lod),
+        min_weight,
+        opts.scope,
+        opts.focus,
+        opts.filter,
+        opts.certain,
+        opts.paginated,
+    );
+    out
 }
 
 /// Applies optional progressive level-of-detail (`lod`) re-bucketing/expansion and minimum edge

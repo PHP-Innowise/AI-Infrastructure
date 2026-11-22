@@ -552,6 +552,8 @@ pub const ROUTES: &[Route] = &[
             "offset",
             "limit",
             "depth",
+            "lod",
+            "min_weight",
         ],
     },
     Route {
@@ -3496,7 +3498,7 @@ mod tests {
         assert!(matches_sse_filter(&sys, Some("s1"), Some("p1")));
         assert!(!matches_sse_filter(&sys, Some("s1"), Some("p2")));
 
-        // Verify `graph.map` advertises `lod` & `min_weight` while `system_graph.service_map` does not.
+        // Verify both `graph.map` and `system_graph.service_map` advertise `lod` & `min_weight`.
         let gmap = ROUTES.iter().find(|r| r.operation == "graph.map").unwrap();
         assert!(gmap.query.contains(&"lod"));
         assert!(gmap.query.contains(&"min_weight"));
@@ -3504,8 +3506,8 @@ mod tests {
             .iter()
             .find(|r| r.operation == "system_graph.service_map")
             .unwrap();
-        assert!(!smap.query.contains(&"lod"));
-        assert!(!smap.query.contains(&"min_weight"));
+        assert!(smap.query.contains(&"lod"));
+        assert!(smap.query.contains(&"min_weight"));
 
         // `>= 16 KiB` JSON offloaded to `spawn_blocking` round-trips cleanly via Brotli & Gzip.
         let huge = json!({

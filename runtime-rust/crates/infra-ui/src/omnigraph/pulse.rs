@@ -170,14 +170,68 @@ pub fn local_service_match_ids(graph: &V, service: &str, sys_catalog: &V) -> Vec
     ids
 }
 
-pub(crate) async fn open_from_system_service(service: String) {
-    let query = service.trim().to_owned();
+fn non_empty_trimmed(val: Option<&str>) -> Option<&str> {
+    val.map(str::trim).filter(|s| !s.is_empty())
+}
+
+pub fn apply_system_jump_context_to_state(
+    s: &mut V,
+    service: &str,
+    contract: Option<&str>,
+    file: Option<&str>,
+    run_id: Option<&str>,
+) -> String {
+    let svc = service.trim();
+    let contract_opt = non_empty_trimmed(contract);
+    let file_opt = non_empty_trimmed(file);
+    let run_opt = non_empty_trimmed(run_id);
     // Focus/highlight matching nodes in the constellation instead of filtering
     // `#omnigraph-search` (which hides unrelated context nodes).
+    s["query"] = json!("");
+    s["stage_tab"] = json!("constellation");
+    s["drawer_tab"] = json!("inspector");
+    if let Some(run) = run_opt {
+        s["run_id"] = json!(run);
+        s["filter_run_id"] = json!(run);
+    } else {
+        s["run_id"] = V::Null;
+        s["filter_run_id"] = V::Null;
+    }
+    if svc.is_empty() && contract_opt.is_none() && file_opt.is_none() && run_opt.is_none() {
+        s["system_context"] = V::Null;
+    } else {
+        s["system_context"] = json!({
+            "service": (!svc.is_empty()).then_some(svc),
+            "contract": contract_opt,
+            "file": file_opt,
+            "run_id": run_opt,
+        });
+    }
+    file_opt
+        .or(contract_opt)
+        .or((!svc.is_empty()).then_some(svc))
+        .unwrap_or("")
+        .to_owned()
+}
+
+pub(crate) async fn open_from_system_context(
+    service: String,
+    contract: Option<String>,
+    file: Option<String>,
+    run_id: Option<String>,
+) {
+    let svc = service.trim().to_owned();
+    let contract_norm = non_empty_trimmed(contract.as_deref()).map(str::to_owned);
+    let file_norm = non_empty_trimmed(file.as_deref()).map(str::to_owned);
+    let mut query = String::new();
     set_ui_state(|s| {
-        s["query"] = json!("");
-        s["stage_tab"] = json!("constellation");
-        s["drawer_tab"] = json!("inspector");
+        query = apply_system_jump_context_to_state(
+            s,
+            &svc,
+            contract_norm.as_deref(),
+            file_norm.as_deref(),
+            run_id.as_deref(),
+        );
     });
     dom::set_value("omnigraph-search", "");
     m::set("omnigraph-search-results", V::Null);
@@ -189,30 +243,59 @@ pub(crate) async fn open_from_system_service(service: String) {
 
     let project = current_project_id();
     let st = ui_state();
-    let mut matched_ids = local_service_match_ids(
-        &m::data("omnigraph-graph"),
-        &query,
-        &m::data("system-map-catalog-cache"),
-    );
-    let search_path = format!(
-        "/api/omnigraph/search{}",
-        dom::query(&[
-            ("project_id", project),
-            ("q", query.clone()),
-            ("branch", m::text(&st, "branch")),
-            ("limit", "20".into()),
-        ])
-    );
-    if let Ok((epoch, res)) = api::scoped("omnigraph-service-focus", &search_path).await {
-        if m::current("omnigraph-service-focus", epoch) {
-            let (merged_graph, _) =
-                merge_search_subgraph_into_graph(m::data("omnigraph-graph"), &res);
-            m::set("omnigraph-graph", merged_graph);
-            for id in collect_search_hit_ids(&res) {
-                if !matched_ids.contains(&id) {
-                    matched_ids.push(id);
+    let local_graph = m::data("omnigraph-graph");
+    let sys_catalog = m::data("system-map-catalog-cache");
+    let mut matched_ids = Vec::new();
+    let push_unique = |out: &mut Vec<String>, id: String| {
+        if !id.is_empty() && !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    if let Some(ref fpath) = file_norm {
+        if let Some(fid) = find_context_node_for_file(&local_graph, fpath) {
+            push_unique(&mut matched_ids, fid);
+        }
+        for id in local_service_match_ids(&local_graph, fpath, &sys_catalog) {
+            push_unique(&mut matched_ids, id);
+        }
+    }
+    if let Some(ref c) = contract_norm {
+        for id in local_service_match_ids(&local_graph, c, &sys_catalog) {
+            push_unique(&mut matched_ids, id);
+        }
+    }
+    if !svc.is_empty() {
+        for id in local_service_match_ids(&local_graph, &svc, &sys_catalog) {
+            push_unique(&mut matched_ids, id);
+        }
+    }
+
+    let mut search_queries = vec![query.clone()];
+    if !svc.is_empty() && svc != query {
+        search_queries.push(svc.clone());
+    }
+    for sq in &search_queries {
+        let search_path = format!(
+            "/api/omnigraph/search{}",
+            dom::query(&[
+                ("project_id", project.clone()),
+                ("q", sq.clone()),
+                ("branch", m::text(&st, "branch")),
+                ("limit", "20".into()),
+            ])
+        );
+        if let Ok((epoch, res)) = api::scoped("omnigraph-service-focus", &search_path).await {
+            if m::current("omnigraph-service-focus", epoch) {
+                let (merged_graph, _) =
+                    merge_search_subgraph_into_graph(m::data("omnigraph-graph"), &res);
+                m::set("omnigraph-graph", merged_graph);
+                for id in collect_search_hit_ids(&res) {
+                    push_unique(&mut matched_ids, id);
                 }
             }
+        }
+        if !matched_ids.is_empty() {
+            break;
         }
     }
     let first_id = matched_ids.first().cloned();
@@ -228,15 +311,21 @@ pub(crate) async fn open_from_system_service(service: String) {
         fly_to_node(fid);
     } else {
         render_studio();
+        let label = if !svc.is_empty() { &svc } else { &query };
         dom::text(
             "omnigraph-status-message",
             &format!(
-                "No Omnigraph atoms matched service '{query}' yet — showing full constellation."
+                "No Omnigraph atoms matched service '{label}' yet — showing full constellation."
             ),
         );
         dom::attr("omnigraph-status-message", "data-degraded", "false");
         dom::hidden("omnigraph-status-message", false);
     }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn open_from_system_service(service: String) {
+    open_from_system_context(service, None, None, None).await;
 }
 
 pub(super) fn schedule_pulse_poll() {
@@ -1239,10 +1328,37 @@ pub fn resolve_code_map_target_path(payload: &V) -> Option<String> {
     resolve_code_map_target(payload).map(|(p, _)| p)
 }
 
-pub(crate) async fn open_target_in_code_map(
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodeMapJumpContext {
+    pub filter: Option<String>,
+    pub target_commit: Option<String>,
+    pub semantic_kind: Option<String>,
+}
+
+fn non_empty_v_str(val: &V) -> Option<String> {
+    val.as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+pub fn resolve_code_map_jump_context(payload: &V, ui_st: &V) -> CodeMapJumpContext {
+    CodeMapJumpContext {
+        filter: non_empty_v_str(&payload["filter"]).or_else(|| non_empty_v_str(&ui_st["query"])),
+        target_commit: non_empty_v_str(&payload["target_commit"])
+            .or_else(|| non_empty_v_str(&payload["commit"]))
+            .or_else(|| non_empty_v_str(&ui_st["selected_commit_id"])),
+        semantic_kind: non_empty_v_str(&payload["semantic_kind"])
+            .or_else(|| non_empty_v_str(&payload["kind"]))
+            .or_else(|| non_empty_v_str(&ui_st["kind"])),
+    }
+}
+
+pub(crate) async fn open_target_in_code_map_with_context(
     project: Option<&str>,
     path: &str,
     symbol_fqn: Option<&str>,
+    ctx: CodeMapJumpContext,
 ) {
     let resolved_project = project
         .map(str::trim)
@@ -1256,7 +1372,23 @@ pub(crate) async fn open_target_in_code_map(
         crate::session::open_view("sessions", true).await;
     }
     crate::session::set_mobile_pane("graph");
-    crate::graph_map::focus_target_in_session(path, symbol_fqn);
+    crate::graph_map::focus_target_in_session_with_context(
+        path,
+        symbol_fqn,
+        ctx.filter.as_deref(),
+        ctx.target_commit.as_deref(),
+        ctx.semantic_kind.as_deref(),
+    );
+}
+
+#[allow(dead_code)]
+pub(crate) async fn open_target_in_code_map(
+    project: Option<&str>,
+    path: &str,
+    symbol_fqn: Option<&str>,
+) {
+    open_target_in_code_map_with_context(project, path, symbol_fqn, CodeMapJumpContext::default())
+        .await;
 }
 
 #[allow(dead_code)]
