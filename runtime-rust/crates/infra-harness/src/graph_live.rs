@@ -963,11 +963,25 @@ impl LiveFocusTracker {
         if !self.root.as_os_str().is_empty() {
             let full_path = self.root.join(&rel);
             if let Some(after_text) = read_bounded_utf8(&full_path) {
-                let (before_opt, is_new_file) = match self.baselines.get(&rel) {
-                    Some(None) => (None, true),
-                    Some(Some(old)) => (Some(old.clone()), false),
-                    None => (None, matches!(kind.as_str(), "a" | "add" | "added")),
-                };
+                let is_create_kind =
+                    matches!(kind.as_str(), "a" | "add" | "added" | "create" | "created");
+                let is_edit_kind = matches!(
+                    kind.as_str(),
+                    "e" | "edit"
+                        | "edited"
+                        | "m"
+                        | "modify"
+                        | "modified"
+                        | "u"
+                        | "update"
+                        | "updated"
+                );
+                let (before_opt, is_new_file, missing_edit_baseline) =
+                    match self.baselines.get(&rel) {
+                        Some(None) => (None, true, false),
+                        Some(Some(old)) => (Some(old.clone()), false, false),
+                        None => (None, is_create_kind, !is_create_kind && is_edit_kind),
+                    };
                 let added =
                     diff_new_entities(&rel, before_opt.as_deref(), &after_text, is_new_file);
                 for mut entity in added {
@@ -991,6 +1005,22 @@ impl LiveFocusTracker {
                             self.focus.created_entities.push(entity);
                             changed = true;
                         }
+                    }
+                } else if missing_edit_baseline
+                    && self.focus.created_entities.len() < MAX_CREATED_ENTITIES
+                {
+                    let parent_folder = (!folder.is_empty()).then_some(folder.clone());
+                    let file_entity = CreatedEntity::modified_from_decl(&CreatedEntity::new(
+                        "file",
+                        file_name(&rel),
+                        parent_folder,
+                        rel.clone(),
+                        Some(1),
+                    ));
+                    let key = file_entity.identity_key();
+                    if self.entity_keys.insert(key) {
+                        self.focus.created_entities.push(file_entity);
+                        changed = true;
                     }
                 }
                 if self.baselines.len() < MAX_BASELINE_FILES || self.baselines.contains_key(&rel) {
@@ -2710,5 +2740,100 @@ class Guard:
         assert!(java_spans.iter().any(|d| d.entity.kind == "method"
             && d.entity.name == "ok"
             && d.visibility.as_deref() == Some("public")));
+    }
+
+    #[test]
+    fn live_focus_tracker_accepts_create_and_edit_without_prior_baseline() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/Auth")).expect("auth dir");
+
+        let warm_file = root.join("src/Auth/WarmGuard.php");
+        fs::write(
+            &warm_file,
+            "<?php\nclass WarmGuard {\n    public function allow(): bool { return true; }\n}\n",
+        )
+        .expect("write warm created file");
+
+        let mut tracker = LiveFocusTracker::new(root.to_path_buf());
+        let create_delta = tracker
+            .observe_tool_event(&json!({
+                "kind": "tool",
+                "state": "completed",
+                "ok": true,
+                "tool": "file_change",
+                "changes": [{"path": "src/Auth/WarmGuard.php", "kind": "create"}]
+            }))
+            .expect("create delta");
+        assert_eq!(create_delta["phase"], "active");
+        let created = &tracker.focus().created_entities;
+        assert!(
+            created.iter().any(|e| e.kind == "file"
+                && e.path == "src/Auth/WarmGuard.php"
+                && e.change.as_deref() == Some("created")),
+            "expected file entity from kind=create: {created:?}"
+        );
+        assert!(
+            created.iter().any(|e| e.kind == "class"
+                && e.name == "WarmGuard"
+                && e.change.as_deref() == Some("created")),
+            "expected class entity from kind=create: {created:?}"
+        );
+        assert!(
+            created.iter().any(|e| e.kind == "method"
+                && e.name == "allow"
+                && e.parent.as_deref() == Some("WarmGuard")
+                && e.change.as_deref() == Some("created")),
+            "expected method entity from kind=create: {created:?}"
+        );
+
+        let created_alias_file = root.join("src/Auth/WarmAlias.rs");
+        fs::write(&created_alias_file, "pub fn alias_entry() {}\n").expect("write alias rs");
+        assert!(tracker.record_mutation_complete("src/Auth/WarmAlias.rs", Some("created")));
+        assert!(
+            tracker
+                .focus()
+                .created_entities
+                .iter()
+                .any(|e| e.kind == "function"
+                    && e.name == "alias_entry"
+                    && e.change.as_deref() == Some("created"))
+        );
+
+        let existing_edit_file = root.join("src/Auth/ExistingService.rs");
+        fs::write(&existing_edit_file, "pub fn pre_existing() {}\n").expect("write existing rs");
+        assert!(tracker.record_mutation_complete("src/Auth/ExistingService.rs", Some("edit")));
+        let after_edit = &tracker.focus().created_entities;
+        assert!(
+            after_edit.iter().any(|e| {
+                e.kind == "file"
+                    && e.path == "src/Auth/ExistingService.rs"
+                    && e.change.as_deref() == Some("modified")
+            }),
+            "expected modified file entity on edit without baseline: {after_edit:?}"
+        );
+        assert!(
+            !after_edit
+                .iter()
+                .any(|e| e.name == "pre_existing" && e.change.as_deref() == Some("created")),
+            "pre-existing symbol must not be marked created when baseline was missing: {after_edit:?}"
+        );
+
+        // Subsequent edit now diffs cleanly against the seeded baseline.
+        fs::write(
+            &existing_edit_file,
+            "pub fn pre_existing() {}\npub fn follow_up_fn() {}\n",
+        )
+        .expect("write follow-up edit");
+        assert!(tracker.record_mutation_complete("src/Auth/ExistingService.rs", Some("modify")));
+        assert!(
+            tracker.focus().created_entities.iter().any(|e| {
+                e.kind == "function"
+                    && e.name == "follow_up_fn"
+                    && e.change.as_deref() == Some("created")
+            }),
+            "expected follow_up_fn after baseline seeded by missing-baseline edit: {:?}",
+            tracker.focus().created_entities
+        );
     }
 }
