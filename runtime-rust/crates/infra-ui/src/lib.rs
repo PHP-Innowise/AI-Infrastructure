@@ -217,6 +217,19 @@ pub fn start() -> Result<(), JsValue> {
                     return;
                 }
                 if key.key() == "Escape" {
+                    if let Some(top_dialog) = dom::top_open_dialog_id() {
+                        match top_dialog.as_str() {
+                            "command-palette" => commands::close_palette(),
+                            "approvals-drawer" => run::close_approvals_drawer(),
+                            "run-file-card" => {
+                                run::dismiss_file_card(true);
+                                activity::dismiss_file_card(true);
+                            }
+                            id => dom::dialog(id, false),
+                        }
+                        event.prevent_default();
+                        return;
+                    }
                     if run::escape()
                         || activity::escape()
                         || dom::collapse_active_expanded_workspace()
@@ -225,11 +238,6 @@ pub fn start() -> Result<(), JsValue> {
                         return;
                     }
                     session::set_sidebar_open(false, true);
-                    dom::dialog("folder-picker", false);
-                    dom::dialog("merge-picker", false);
-                    dom::dialog("omni-settings-dialog", false);
-                    dom::dialog("omnigraph-transfer-dialog", false);
-                    dom::dialog("omnigraph-share-dialog", false);
                 }
                 session::resize_key(key);
                 session::workspace_split_key(key);

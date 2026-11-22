@@ -860,20 +860,26 @@ pub(crate) fn dismiss_file_card(restore: bool) {
 pub(super) fn hide_card(restore: bool) {
     let opener = CARD_OPENER.with(|cell| cell.borrow_mut().take());
     let path = m::take("run-card");
-    if path.is_string()
+    let owned_by_run = path.is_string()
         || dom::get(CARD)
             .and_then(|c| c.get_attribute("data-owner"))
             .as_deref()
-            == Some("run")
-    {
-        dom::hidden(CARD, true);
+            == Some("run");
+    if !owned_by_run {
+        return;
     }
-    if restore {
-        if let Some(el) = opener.filter(|el| dom::document().contains(Some(el))) {
-            focus_node(&el);
-        } else if let Some(chip) = path.as_str().and_then(chip_of) {
-            focus_node(&chip);
-        }
+    if !restore {
+        dom::hidden_with_restore(CARD, true, false);
+        return;
+    }
+    let explicit_target = opener
+        .filter(|el| dom::document().contains(Some(el)))
+        .or_else(|| path.as_str().and_then(chip_of));
+    if let Some(el) = explicit_target {
+        dom::hidden_with_restore(CARD, true, false);
+        focus_node(&el);
+    } else {
+        dom::hidden_with_restore(CARD, true, true);
     }
 }
 

@@ -698,6 +698,44 @@ async function suite1BootThemeTransport(driver, opts) {
   await driver.waitFor((expected) => {
     return document.documentElement.getAttribute('data-theme') === expected;
   }, `data-theme restore to ${initialTheme}`, 5_000, initialTheme);
+
+  // Verify direct navigation to /?view=sessions&project=... boots cleanly with HTTP 200 and live SSE
+  if (opts.projectId) {
+    const deepUrl = `${driver.origin}/?view=sessions&project=${encodeURIComponent(opts.projectId)}`;
+    const respBefore = driver.responsesByUrl.length;
+    await cdp.send('Page.navigate', { url: deepUrl });
+    await driver.waitFor((pid) => {
+      const connecting = document.getElementById('connecting');
+      const banner = document.getElementById('connection-banner');
+      const sessionsView = document.getElementById('sessions-view');
+      const sw = document.getElementById('project-switcher');
+      return Boolean(
+        document.readyState === 'complete'
+          && connecting?.hidden === true
+          && banner?.hidden === true
+          && sessionsView && !sessionsView.hidden
+          && sw && sw.value === pid,
+      );
+    }, 'Cold boot via /?view=sessions&project=... root query URL', 20_000, opts.projectId);
+    const rootResp = driver.responsesByUrl
+      .slice(respBefore)
+      .find((r) => {
+        try {
+          const u = new URL(r.url);
+          return u.pathname === '/'
+            && u.searchParams.get('view') === 'sessions'
+            && u.searchParams.get('project') === opts.projectId;
+        } catch {
+          return false;
+        }
+      });
+    assert(rootResp && rootResp.status === 200, `Expected HTTP 200 for ${deepUrl}, got ${JSON.stringify(rootResp)}`);
+    await driver.waitFor(
+      () => document.getElementById('sse-status')?.getAttribute('data-state') === 'live',
+      'SSE live after /?view=sessions&project=... cold boot',
+      12_000,
+    );
+  }
   driver.assertNoErrors('Suite 1');
 }
 
@@ -1590,6 +1628,11 @@ async function suite4LiveSseAndStyling(driver, cdp, opts) {
       const btn = document.getElementById('events-jump-latest');
       return Boolean(btn && !btn.hidden && (btn.textContent || '').includes('Jump to latest ('));
     }, '#events-jump-latest shows unseen count when scrolled up during live SSE', 8_000);
+    const scrollPinned = await driver.callFn(() => {
+      const conv = document.getElementById('conversation');
+      return conv ? conv.scrollTop : -1;
+    });
+    assert(scrollPinned === 0, `Expected scrolled-up #conversation scrollTop to stay anchored at 0 during live SSE, got ${scrollPinned}`);
     await driver.click('#events-jump-latest');
     await driver.waitFor(() => {
       const btn = document.getElementById('events-jump-latest');
@@ -2067,6 +2110,11 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     await driver.click(runFileSel);
     await driver.waitFor(() => !document.getElementById('run-file-card')?.hidden && document.getElementById('run-file-card')?.hasAttribute('open'), '#run-file-card reopens for backdrop click dismiss');
     await closeDialogByBackdropClick(driver, '#run-file-card', '#run-file-card');
+    const backdropFocusStolen = await driver.callFn(() => {
+      const active = document.activeElement;
+      return Boolean(active && active.matches && active.matches('button.run-file'));
+    });
+    assert(!backdropFocusStolen, 'Dismissing #run-file-card via backdrop (restore=false) must not steal focus back to .run-file chip');
     if (!wasDetailed) {
       await driver.click('#run-calm');
     }
@@ -2119,6 +2167,25 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   assert(drawerState.ariaModal === 'true', `Expected approvals-drawer aria-modal="true", got ${drawerState.ariaModal}`);
   assert(drawerState.mainInert === true && drawerState.sidebarInert === true, `Expected #main and #sidebar inert while #approvals-drawer open: ${JSON.stringify(drawerState)}`);
 
+  // Verify approvals drawer deduplicates items by key and request_id
+  const drawerDedup = await driver.callFn(() => {
+    const items = Array.from(document.querySelectorAll('#approvals-drawer-list .approvals-queue-item'));
+    const keys = items.map((el) => el.getAttribute('data-approval-key') || '').filter(Boolean);
+    const reqIds = Array.from(document.querySelectorAll('#approvals-drawer-list [data-permission-id]'))
+      .map((el) => el.getAttribute('data-permission-id') || '')
+      .filter(Boolean);
+    return {
+      keyCount: keys.length,
+      uniqueKeyCount: new Set(keys).size,
+      reqCount: reqIds.length,
+      uniqueReqCount: new Set(reqIds).size,
+    };
+  });
+  assert(
+    drawerDedup.keyCount === drawerDedup.uniqueKeyCount && drawerDedup.reqCount === drawerDedup.uniqueReqCount,
+    `Expected deduplicated approval cards in #approvals-drawer-list: ${JSON.stringify(drawerDedup)}`,
+  );
+
   // Tab and Shift+Tab trap cycle through #approvals-drawer including <details><summary>
   const visitedTags = [];
   for (let i = 0; i < drawerState.focusableCount + 2; i += 1) {
@@ -2163,6 +2230,49 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const sidebar = document.getElementById('sidebar');
     return d?.hidden === true && !main?.hasAttribute('inert') && !sidebar?.hasAttribute('inert');
   }, '#approvals-drawer closes on Escape and clears inert');
+
+  // Verify Ctrl+K stacked above an open modal (#approvals-drawer): inert, Tab trap, and navigating execution closes underlying modal
+  await driver.click('#approvals-queue-toggle');
+  await driver.waitFor(() => !document.getElementById('approvals-drawer')?.hidden, '#approvals-drawer opens before stacked Ctrl+K check');
+  await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
+  const stackedState = await driver.waitFor(() => {
+    const pal = document.getElementById('command-palette');
+    const drawer = document.getElementById('approvals-drawer');
+    if (!pal || pal.hidden || !pal.hasAttribute('open')) return null;
+    return {
+      paletteInert: pal.hasAttribute('inert'),
+      drawerInert: Boolean(drawer?.hasAttribute('inert')),
+      activeId: document.activeElement?.id || '',
+    };
+  }, '#command-palette stacks above #approvals-drawer and marks drawer inert', 5_000);
+  assert(!stackedState.paletteInert && stackedState.drawerInert && stackedState.activeId === 'command-palette-input', `Unexpected stacked palette state: ${JSON.stringify(stackedState)}`);
+  await driver.pressKey({ key: 'Tab', code: 'Tab', keyCode: 9 });
+  const stackedTabInside = await driver.callFn(() => {
+    const pal = document.getElementById('command-palette');
+    return Boolean(pal && document.activeElement && pal.contains(document.activeElement));
+  });
+  assert(stackedTabInside, 'Tab focus escaped #command-palette while stacked over #approvals-drawer');
+  await driver.callFn(() => {
+    const input = document.getElementById('command-palette-input');
+    input.value = 'Sessions';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const viewSessionsOptIdx = await driver.waitFor(() => {
+    const items = Array.from(document.querySelectorAll('#command-palette-list .command-palette-item'));
+    const idx = items.findIndex((el) => {
+      const cat = el.querySelector('.command-palette-cat')?.textContent?.trim() || '';
+      const title = el.querySelector('.command-palette-title')?.textContent?.trim() || '';
+      return cat === 'View' && title === 'Sessions';
+    });
+    return idx >= 0 ? idx + 1 : null;
+  }, 'Command Palette filters to View: Sessions while stacked over #approvals-drawer', 4_000);
+  await driver.click(`#command-palette-option-${viewSessionsOptIdx - 1}`);
+  await driver.waitFor(() => {
+    const pal = document.getElementById('command-palette');
+    const drawer = document.getElementById('approvals-drawer');
+    const main = document.getElementById('main');
+    return Boolean(pal?.hidden && !pal?.hasAttribute('open') && drawer?.hidden && !drawer?.hasAttribute('open') && !main?.hasAttribute('inert'));
+  }, 'Executing navigating Command Palette entry closes underlying #approvals-drawer and clears inert', 6_000);
 
   // WCAG AA >=4.5:1 contrast on .composer textarea::placeholder & .skill-hint[aria-selected="true"] .skill-hint-argument (Light & Dark)
   // Switch to idle completed other_session_id so composer slash hints open (#skill-hints-panel suppresses while session is running)
@@ -3842,6 +3952,34 @@ async function suite10KnowledgeSkillsManagementDialogs(driver, cdp, opts) {
     return Boolean(btn && !btn.disabled && cnt.includes('2'));
   }, '#merge-picker enables continue button with 2 selected sessions', 4_000);
   await closeDialogByBackdropClick(driver, '#merge-picker', '#merge-picker');
+
+  // 5. Command Palette "palette-skill" deep-link populates #skills-filter and navigates cleanly to #skills-view
+  await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
+  await driver.waitFor(() => !document.getElementById('command-palette')?.hidden, '#command-palette opens for palette-skill check', 4_000);
+  await driver.callFn(() => {
+    const input = document.getElementById('command-palette-input');
+    input.value = 'pdf';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const skillItemIdx = await driver.waitFor(() => {
+    const items = Array.from(document.querySelectorAll('#command-palette-list .command-palette-item'));
+    const idx = items.findIndex((el) => {
+      const cat = el.querySelector('.command-palette-cat')?.textContent?.trim() || '';
+      const title = el.querySelector('.command-palette-title')?.textContent?.toLowerCase() || '';
+      return cat === 'Skill' && title.includes('pdf');
+    });
+    return idx >= 0 ? idx + 1 : null;
+  }, 'Command Palette surfaces Skill entry for "pdf"', 5_000);
+  await driver.click(`#command-palette-option-${skillItemIdx - 1}`);
+  await driver.waitFor(() => {
+    const pal = document.getElementById('command-palette');
+    const sv = document.getElementById('skills-view');
+    const filterVal = document.getElementById('skills-filter')?.value || '';
+    const installedTxt = document.getElementById('skills-installed-list')?.textContent?.toLowerCase() || '';
+    return Boolean(pal?.hidden && sv && !sv.hidden && filterVal.toLowerCase() === 'pdf' && installedTxt.includes('pdf'));
+  }, 'palette-skill navigates to #skills-view, sets #skills-filter="pdf", and displays matching skill', 8_000);
+  await driver.click('button.nav-item[data-nav="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'return to #sessions-view after palette-skill check', 6_000);
 
   driver.assertNoErrors('Suite 10');
 }
