@@ -50,14 +50,7 @@ pub const PROBES: [&str; 4] = ["exact", "instance", "rename", "reword"];
 const COMPILE_FREE: [&str; 2] = ["cold", "raw_trace"];
 /// The normalized token components recorded on each attempt or preparation.
 /// `input_tokens` holds non-cached input tokens only.
-const USAGE_COMPONENTS: [&str; 6] = [
-    "input_tokens",
-    "output_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-    "cache_write_5m_input_tokens",
-    "cache_write_1h_input_tokens",
-];
+use crate::sealed_ab::USAGE_COMPONENTS;
 const PRICE_COLUMNS: [&str; 6] = [
     "input",
     "output",
@@ -486,11 +479,7 @@ fn planned(protocol: &Value) -> (BTreeSet<Preparation>, BTreeSet<Slot>) {
 }
 
 fn seal_digest(protocol: &Value) -> Result<String> {
-    let mut body = protocol.clone();
-    if let Some(members) = body.as_object_mut() {
-        members.remove("seal_sha256");
-    }
-    artifact::digest(&body)
+    crate::sealed_ab::seal_digest(protocol)
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -622,9 +611,10 @@ pub fn seal(protocol: &Path, out: &Path) -> Result<Value> {
 fn load(path: &Path) -> Result<Value> {
     let sealed = artifact::read_json(path, LIMIT)?;
     validate(&sealed, true)?;
-    if sealed["seal_sha256"].as_str() != Some(seal_digest(&sealed)?.as_str()) {
-        return Err(invalid("the protocol was changed after it was sealed"));
-    }
+    crate::sealed_ab::verify_sealed_digest(
+        &sealed,
+        "the protocol was changed after it was sealed",
+    )?;
     Ok(sealed)
 }
 
@@ -632,50 +622,12 @@ fn count(value: &Value) -> Option<u64> {
     process::token(value)
 }
 fn empty_usage() -> Value {
-    USAGE_COMPONENTS
-        .iter()
-        .map(|component| ((*component).to_string(), Value::Null))
-        .collect::<Map<_, _>>()
-        .into()
+    crate::sealed_ab::empty_usage()
 }
 /// Normalized token components of a usage; unnormalized `cached_input_tokens`
 /// is refused so cached tokens are never double-counted.
 fn parse_usage(source: &Value) -> std::result::Result<Value, &'static str> {
-    if source.is_null() {
-        return Ok(empty_usage());
-    }
-    if !source.is_object() {
-        return Err("driver-answer-invalid");
-    }
-    if source
-        .get("cached_input_tokens")
-        .is_some_and(|value| !value.is_null())
-    {
-        return Err("driver-answer-invalid");
-    }
-    let write_5m = count(&source["cache_write_5m_input_tokens"])
-        .or_else(|| count(&source["cache_creation"]["ephemeral_5m_input_tokens"]));
-    let write_1h = count(&source["cache_write_1h_input_tokens"])
-        .or_else(|| count(&source["cache_creation"]["ephemeral_1h_input_tokens"]));
-    let write_total =
-        count(&source["cache_creation_input_tokens"]).or_else(|| match (write_5m, write_1h) {
-            (Some(m5), Some(h1)) => m5.checked_add(h1),
-            _ => None,
-        });
-    let mut map = Map::new();
-    map.insert("input_tokens".into(), json!(count(&source["input_tokens"])));
-    map.insert(
-        "output_tokens".into(),
-        json!(count(&source["output_tokens"])),
-    );
-    map.insert(
-        "cache_read_input_tokens".into(),
-        json!(count(&source["cache_read_input_tokens"])),
-    );
-    map.insert("cache_creation_input_tokens".into(), json!(write_total));
-    map.insert("cache_write_5m_input_tokens".into(), json!(write_5m));
-    map.insert("cache_write_1h_input_tokens".into(), json!(write_1h));
-    Ok(Value::Object(map))
+    crate::sealed_ab::normalize_usage(source)
 }
 fn known_seconds(value: &Value) -> Value {
     json!(
@@ -685,7 +637,7 @@ fn known_seconds(value: &Value) -> Value {
     )
 }
 fn round_millis(seconds: f64) -> f64 {
-    (seconds * 1000.0).round() / 1000.0
+    crate::sealed_ab::round_millis(seconds)
 }
 
 struct Driver {
@@ -782,11 +734,7 @@ impl Verifiers {
 }
 
 fn shuffled(arms: &[String], order: &mut rng::Random) -> Vec<String> {
-    let mut arms = arms.to_vec();
-    for index in (1..arms.len()).rev() {
-        arms.swap(index, order.below(index + 1));
-    }
-    arms
+    crate::sealed_ab::shuffled_arms(arms, order)
 }
 fn stop_if_interrupted() -> Result<()> {
     if crate::cancel::interrupted() {

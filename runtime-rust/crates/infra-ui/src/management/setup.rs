@@ -124,17 +124,17 @@ pub(super) fn selection(scope: &str) -> V {
         "setup" => {
             let mut tools = dom::selected_checks("setup-tools");
             tools.sort_by_key(V::to_string);
-            json!({"project_id":dom::value("setup-project"),"edition":dom::value("setup-edition"),"tools":tools})
+            json!({"project_id":m::current_project(),"edition":dom::value("setup-edition"),"tools":tools})
         }
         "skills" => {
             let mut skills = dom::selected_checks("skills-list");
             skills.sort_by_key(V::to_string);
             let mut agents = dom::selected_checks("skills-agents");
             agents.sort_by_key(V::to_string);
-            json!({"project_id":dom::value("skills-project"),"source_id":dom::value("skills-source"),"skills":skills,"agents":agents})
+            json!({"project_id":m::current_project(),"source_id":dom::value("skills-source"),"skills":skills,"agents":agents})
         }
         _ => {
-            json!({"project_id":dom::value("create-skill-project"),"name":dom::value("create-skill-name").trim(),"description":dom::value("create-skill-description").trim(),"instructions":dom::value("create-skill-instructions"),"agents":dom::selected_checks("create-skill-agents")})
+            json!({"project_id":m::current_project(),"name":dom::value("create-skill-name").trim(),"description":dom::value("create-skill-description").trim(),"instructions":dom::value("create-skill-instructions"),"agents":dom::selected_checks("create-skill-agents")})
         }
     }
 }
@@ -447,7 +447,7 @@ fn render_setup_card(class: &str, card: &SetupCheckCard) -> web_sys::Element {
 
 pub async fn load_setup() {
     invalidate("setup");
-    let project = dom::value("setup-project");
+    let project = m::current_project();
     if project.is_empty() {
         dom::hidden("setup-readiness", true);
         return;
@@ -458,7 +458,7 @@ pub async fn load_setup() {
     )
     .await
     {
-        Ok((e, v)) if m::current("setup", e) && dom::value("setup-project") == project => {
+        Ok((e, v)) if m::current("setup", e) && m::current_project() == project => {
             if v["project_id"] != project || !v["editions"].is_array() || !v["tools"].is_array() {
                 dom::hidden("setup-readiness", true);
                 dom::error(
@@ -761,11 +761,45 @@ pub(super) async fn install(scope: &str) {
         &format!("{scope}-preview-note"),
         "Preview consumed. Create a new preview before another installation.",
     );
-    match api::post(url,json!({"preview_id":preview["preview_id"]})).await{Ok(v)=>{
-  m::set(&format!("{scope}-result"),v.clone());m::set(&format!("{scope}-result-project"),json!(project));dom::hidden(&format!("{scope}-result"),false);dom::text(&format!("{scope}-result-summary"),&m::summary(&v));
-  let mut rows=vec![];for kind in ["installed","merged","repaired","unchanged","changed"]{for path in m::array(&v[kind]){rows.push(json!({"path":path,"status":kind}));}}file_list(if scope=="setup"{"setup-result-paths"}else if scope=="skills"{"skills-result-files"}else{"create-skill-result-files"},&rows);
-  if v["ok"]!=true{dom::error(&format!("{scope}-action-error"),v["error"].as_str().unwrap_or("Installation may be partial. Inspect the reported files before retrying."));}
- },Err(e)=>dom::error(&format!("{scope}-action-error"),&format!("{} The preview is consumed; installation may have partially completed. Refresh before preparing another preview.",e.message))}
+    match api::post(url, json!({"preview_id":preview["preview_id"]})).await {
+        Ok(v) => {
+            m::set(&format!("{scope}-result"), v.clone());
+            m::set(&format!("{scope}-result-project"), json!(project));
+            dom::hidden(&format!("{scope}-result"), false);
+            dom::text(&format!("{scope}-result-summary"), &m::summary(&v));
+            let mut rows = vec![];
+            for kind in ["installed", "merged", "repaired", "unchanged", "changed"] {
+                for path in m::array(&v[kind]) {
+                    rows.push(json!({"path":path,"status":kind}));
+                }
+            }
+            file_list(
+                if scope == "setup" {
+                    "setup-result-paths"
+                } else if scope == "skills" {
+                    "skills-result-files"
+                } else {
+                    "create-skill-result-files"
+                },
+                &rows,
+            );
+            if v["ok"] != true {
+                dom::error(
+                    &format!("{scope}-action-error"),
+                    v["error"].as_str().unwrap_or(
+                        "Installation may be partial. Inspect the reported files before retrying.",
+                    ),
+                );
+            }
+        }
+        Err(e) => dom::error(
+            &format!("{scope}-action-error"),
+            &format!(
+                "{} The preview is consumed; installation may have partially completed. Refresh before preparing another preview.",
+                e.message
+            ),
+        ),
+    }
     m::set(&format!("{scope}-pending"), json!(false));
     dom::hidden(&format!("{scope}-preview"), true);
     if scope == "setup" {

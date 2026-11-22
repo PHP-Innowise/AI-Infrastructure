@@ -614,7 +614,7 @@ pub(super) fn render_creator() {
         .enumerate()
         .map(|(idx, item)| json!({"idx": idx, "item": item}))
         .collect::<Vec<_>>();
-    dom::keyed_render(
+    dom::keyed_render_or_empty(
         "creator-reports",
         &reports,
         |entry| {
@@ -630,13 +630,10 @@ pub(super) fn render_creator() {
             dom::add(&details, &dom::el("pre", "knowledge-result", &report.text));
             details
         },
+        "p",
+        "fleet-note",
+        "No reports recorded yet.",
     );
-    if reports.is_empty() {
-        dom::append(
-            "creator-reports",
-            &dom::el("p", "fleet-note", "No reports recorded yet."),
-        );
-    }
     events_card::render_structured_events("creator-events", &m::array(&v["events"]));
 
     let run_id = m::text(run, "id");

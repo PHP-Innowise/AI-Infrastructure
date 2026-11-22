@@ -269,11 +269,31 @@ impl System {
                 )
             })
             .collect::<serde_json::Map<_, _>>();
+        let taken_ns = now_unix_ns();
+        let file_stamps = self
+            .snapshot
+            .keys()
+            .filter_map(|(sid, path)| {
+                let root = if sid == "__system__" {
+                    &self.root
+                } else {
+                    &self.services.get(sid)?.root
+                };
+                let (size, mtime_ns) = file_stamp(root, path)?;
+                Some(object!({
+                    "service": sid,
+                    "path": path,
+                    "size": size,
+                    "mtime_ns": mtime_ns.to_string(),
+                    "taken_ns": taken_ns.to_string(),
+                }))
+            })
+            .collect::<Vec<_>>();
         Ok(
             object!({"schema_version":1,"kind":"ai-system-plan","change_id":change_id,"system":self.config_data["name"],"status":if selected.is_empty(){"needs_selection"}else{"needs_review"},"executed":false,"routing":routing,"impact":selected,
  "relationships":self.edges.iter().filter(|edge|selected_ids.iter().any(|sid|edge["provider"]==*sid)&&selected_ids.iter().any(|sid|edge["consumer"]==*sid)).cloned().collect::<Vec<_>>(),
  "context":capsule,"context_chars":length,"context_budget_chars":budget,"memory_layout":{"system":{"brain":"project-brain","bank":"memory-bank"},"services":selected_ids.iter().map(|sid|object!({"service":sid,"brain":"project-brain","bank":"memory-bank","tasks_created":false})).collect::<Vec<_>>()},"omitted_sources":omissions,"warnings":self.warnings,"steps":steps,
- "snapshot":{"files":self.snapshot.iter().map(|((sid,path),digest)|object!({"service":sid,"path":path,"sha256":digest})).collect::<Vec<_>>(),"missing":self.missing.iter().map(|(sid,path)|object!({"service":sid,"path":path})).collect::<Vec<_>>(),"heads":heads}}),
+ "snapshot":{"files":self.snapshot.iter().map(|((sid,path),digest)|object!({"service":sid,"path":path,"sha256":digest})).collect::<Vec<_>>(),"missing":self.missing.iter().map(|(sid,path)|object!({"service":sid,"path":path})).collect::<Vec<_>>(),"heads":heads,"file_stamps":file_stamps}}),
         )
     }
     pub fn verify(&mut self, plan: &Value) -> Result<Value> {
@@ -281,7 +301,8 @@ impl System {
             return Err(fail("Not an ai-system plan"));
         }
         let snapshot = &plan["snapshot"];
-        fields(snapshot, &["files", "missing", "heads"], &[])?;
+        fields(snapshot, &["files", "missing", "heads"], &["file_stamps"])?;
+        let stamps = parse_file_stamps(&snapshot["file_stamps"]);
         let heads = snapshot["heads"]
             .as_object()
             .filter(|heads| heads.len() <= MAX_SERVICES)
@@ -312,6 +333,15 @@ impl System {
                 changed.push(object!({"service":sid,"path":path,"reason":"unavailable"}));
                 continue;
             };
+            let stamp_match = stamps.get(&(sid.to_string(), path.clone())).is_some_and(
+                |&(size, mtime_ns, taken_ns)| {
+                    mtime_ns <= taken_ns.saturating_sub(RACY_NS)
+                        && file_stamp(&root, &path) == Some((size, mtime_ns))
+                },
+            );
+            if stamp_match {
+                continue;
+            }
             match read_file(&root, &path, MAX_BYTES) {
                 Ok(raw) if digest(&raw) == hash => {}
                 Ok(_) => {
@@ -608,4 +638,92 @@ fn fit_excerpt(mut content: Value, limit: usize) -> Result<Value> {
         return Err(fail("Updated context exceeds original budget"));
     }
     Ok(content)
+}
+
+/// Nanosecond racy-stat threshold matching `infra_skillcache::fingerprint::RACY_NS`:
+/// files modified within 2s before the snapshot was taken are always re-read and hashed.
+const RACY_NS: i128 = 2_000_000_000;
+
+fn time_to_unix_ns(time: std::time::SystemTime) -> Option<i128> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => i128::try_from(delta.as_nanos()).ok(),
+        Err(err) => i128::try_from(err.duration().as_nanos())
+            .ok()
+            .and_then(|ns| ns.checked_neg()),
+    }
+}
+
+fn now_unix_ns() -> i128 {
+    time_to_unix_ns(std::time::SystemTime::now()).unwrap_or_default()
+}
+
+fn file_stamp(root: &std::path::Path, path: &str) -> Option<(u64, i128)> {
+    let meta = std::fs::symlink_metadata(root.join(path)).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mtime = time_to_unix_ns(meta.modified().ok()?)?;
+    Some((meta.len(), mtime))
+}
+
+fn parse_file_stamps(value: &Value) -> BTreeMap<(String, String), (u64, i128, i128)> {
+    let mut stamps = BTreeMap::new();
+    for entry in value.as_array().into_iter().flatten() {
+        let Some(sid) = entry["service"].as_str() else {
+            continue;
+        };
+        let Some(path) = entry["path"].as_str() else {
+            continue;
+        };
+        let Some(size) = entry["size"].as_u64() else {
+            continue;
+        };
+        let Some(mtime_ns) = entry["mtime_ns"].as_str().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        let Some(taken_ns) = entry["taken_ns"].as_str().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        stamps.insert(
+            (sid.to_string(), path.to_string()),
+            (size, mtime_ns, taken_ns),
+        );
+    }
+    stamps
+}
+
+#[cfg(test)]
+mod racy_verify_tests {
+    use super::*;
+
+    #[test]
+    fn racy_ns_threshold_guards_recent_edits_and_skips_settled_identical_stats() {
+        let dir = std::env::temp_dir().join(format!("infra-sys-racy-{}", uuid::Uuid::new_v4()));
+        let path = "src/example.txt";
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join(path), b"hello world\n").unwrap();
+        let (size, mtime_ns) = file_stamp(&dir, path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Settled file (> RACY_NS older than snapshot) is trusted via stat without hashing.
+        let settled_taken = mtime_ns + RACY_NS + 1;
+        assert!(mtime_ns <= settled_taken.saturating_sub(RACY_NS));
+
+        // File modified inside RACY_NS window is never skipped.
+        let racy_taken = mtime_ns + RACY_NS - 1;
+        assert!(!(mtime_ns <= racy_taken.saturating_sub(RACY_NS)));
+
+        let raw_stamps = object!([{
+            "service": "__system__",
+            "path": path,
+            "size": size,
+            "mtime_ns": mtime_ns.to_string(),
+            "taken_ns": settled_taken.to_string(),
+        }]);
+        let parsed = parse_file_stamps(&raw_stamps);
+        assert_eq!(
+            parsed.get(&("__system__".into(), path.into())),
+            Some(&(size, mtime_ns, settled_taken))
+        );
+    }
 }

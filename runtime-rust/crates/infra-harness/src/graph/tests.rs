@@ -3910,6 +3910,168 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
         }
         assert!(lock(&fixture.graphs.chosen).unwrap().len() <= Graphs::CHOSEN_LRU_CAP);
     }
+
+    #[tokio::test]
+    async fn ro_ir_store_cache_incremental_update_parity_and_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let ws = dir.path().join("repo");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/a.rs"), "pub fn alpha() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            ws.join("src/b.rs"),
+            "pub fn beta() -> i32 { crate::a::alpha() }\n",
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let proj = store.register(&ws).unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let graphs = Graphs::with_native_backend(store, Duration::ZERO);
+        let Payload::Json(enabled) = crate::services::Domain::execute(
+            &*graphs,
+            "graph.act",
+            json!({"params":{"project_id":pid},"query":{},"body":{"action":"enable"}}),
+        )
+        .await
+        .unwrap() else {
+            panic!("expected json");
+        };
+        assert_eq!(enabled["enabled"], true);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let Payload::Json(st) = crate::services::Domain::execute(
+                &*graphs,
+                "graph.status",
+                json!({"params":{"project_id":pid},"query":{"visit":"1"},"body":{}}),
+            )
+            .await
+            .unwrap() else {
+                panic!("expected json");
+            };
+            if st["state"] == "ready" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(graphs.live_index(&pid).is_some());
+
+        // Read-only `GraphIrStore` handle cache hits and `evict_ir_store` clears both caches.
+        let ro1 = graphs.get_ir_store_readonly(&pid).expect("ro1");
+        let ro2 = graphs.get_ir_store_readonly(&pid).expect("ro2");
+        assert!(Arc::ptr_eq(&ro1, &ro2));
+        graphs.evict_ir_store(&pid);
+        let ro3 = graphs.get_ir_store_readonly(&pid).expect("ro3");
+        assert!(!Arc::ptr_eq(&ro1, &ro3));
+
+        // Rapid incremental updates coalesce via cooldown and produce exact full-rebuild parity.
+        std::fs::write(
+            ws.join("src/c.rs"),
+            "pub fn gamma() -> i32 { crate::b::beta() }\n",
+        )
+        .unwrap();
+        graphs
+            .apply_ir_path_updates(&pid, &ws, &["src/c.rs".to_owned()])
+            .unwrap();
+        std::fs::write(
+            ws.join("src/c.rs"),
+            "pub fn gamma() -> i32 { crate::a::alpha() + crate::b::beta() }\n",
+        )
+        .unwrap();
+        graphs
+            .apply_ir_path_updates(&pid, &ws, &["src/c.rs".to_owned()])
+            .unwrap();
+
+        let inc_idx = graphs.live_index(&pid).expect("incremental index");
+        let ir = graphs.get_ir_store_readonly(&pid).expect("ro4");
+        let (full_nodes, full_links, _, _) = ir.export_ir_graph_elements().unwrap();
+        let full_idx = crate::graph_map::Index::from_ir_parts(
+            &ws,
+            Some(ir.db_path().to_path_buf()),
+            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+            full_nodes,
+            full_links,
+        )
+        .unwrap();
+        assert_eq!(inc_idx.files(), full_idx.files());
+        assert_eq!(
+            inc_idx.view("demo", "", None, false, ""),
+            full_idx.view("demo", "", None, false, "")
+        );
+
+        let live_json = state.join("graphs").join(&pid).join("live/graph.json");
+        let flush_deadline = Instant::now() + Duration::from_secs(5);
+        let mut flushed = false;
+        while Instant::now() < flush_deadline {
+            if let Ok(text) = std::fs::read_to_string(&live_json)
+                && text.contains("gamma()")
+            {
+                flushed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(flushed, "expected coalesced live/graph.json update");
+
+        // `cached_diff_overlay` memoizes immutable (head, base, index, rules) and invalidates cleanly.
+        let base_g = json!({
+            "nodes": [{"id": "a", "label": "a()", "source_file": "src/a.rs", "source_location": "L1"}],
+            "links": []
+        });
+        let base_idx = crate::graph_map::Index::read(base_g.to_string().as_bytes(), &ws).unwrap();
+        let renamed = std::collections::HashMap::new();
+        let changed = vec!["src/c.rs".to_owned()];
+        let rules_a = crate::graph_map::layer_rules::Rules::parse(
+            br#"{"version":1,"layers":[{"id":"app","name":"App","paths":["src/**"],"allows":["app"]}]}"#,
+        )
+        .unwrap();
+        let rules_b = crate::graph_map::layer_rules::Rules::parse(
+            br#"{"version":1,"layers":[{"id":"core","name":"Core","paths":["src/**"],"allows":[]}]}"#,
+        )
+        .unwrap();
+        let ov1 = graphs.cached_diff_overlay(
+            &pid,
+            Some("rev1"),
+            Some("rev0"),
+            &inc_idx,
+            Some(&base_idx),
+            &changed,
+            &renamed,
+            false,
+            false,
+            Some(&rules_a),
+        );
+        let ov2 = graphs.cached_diff_overlay(
+            &pid,
+            Some("rev1"),
+            Some("rev0"),
+            &inc_idx,
+            Some(&base_idx),
+            &changed,
+            &renamed,
+            false,
+            false,
+            Some(&rules_a),
+        );
+        assert_eq!(ov1, ov2);
+        assert_eq!(lock(&graphs.diff_overlays).unwrap().len(), 1);
+        let _ov3 = graphs.cached_diff_overlay(
+            &pid,
+            Some("rev1"),
+            Some("rev0"),
+            &inc_idx,
+            Some(&base_idx),
+            &changed,
+            &renamed,
+            false,
+            false,
+            Some(&rules_b),
+        );
+        assert_eq!(lock(&graphs.diff_overlays).unwrap().len(), 2);
+
+        graphs.close();
+    }
 }
 
 #[test]

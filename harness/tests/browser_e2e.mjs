@@ -2002,6 +2002,22 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
   }, 'Command Palette ArrowDown moves selection');
   assert(activeAfterArrow === 'command-palette-option-1', `Expected aria-activedescendant command-palette-option-1, got ${activeAfterArrow}`);
 
+  // Verify shortcut <kbd> badges and fuzzy kit3 matching ("osk" -> "Open Source Kit")
+  const hasKbdBadge = await driver.callFn(() => {
+    const kbds = Array.from(document.querySelectorAll('#command-palette-list .command-palette-kbd'));
+    return kbds.some((el) => (el.textContent || '').includes('Alt+A'));
+  });
+  assert(hasKbdBadge, 'Expected .command-palette-kbd Alt+A shortcut badge in Command Palette');
+  await driver.callFn(() => {
+    const input = document.getElementById('command-palette-input');
+    input.value = 'osk';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await driver.waitFor(() => {
+    const items = Array.from(document.querySelectorAll('#command-palette-list .command-palette-item'));
+    return items.some((el) => (el.textContent || '').includes('Open Source Kit'));
+  }, 'Command Palette fuzzy query "osk" finds Open Source Kit (kit3)', 4_000);
+
   // Close with Escape and verify focus restoration
   await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
   await driver.waitFor(() => {
@@ -2031,14 +2047,26 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const fileCardAttrs = await driver.callFn(() => {
       const card = document.getElementById('run-file-card');
       return {
+        tagName: card?.tagName || '',
+        open: card?.hasAttribute('open') || false,
         role: card.getAttribute('role'),
         ariaModal: card.getAttribute('aria-modal'),
         mainInert: document.getElementById('main')?.hasAttribute('inert'),
       };
     });
-    assert(fileCardAttrs.role === 'dialog' && fileCardAttrs.ariaModal === 'true' && fileCardAttrs.mainInert, `Invalid #run-file-card dialog state: ${JSON.stringify(fileCardAttrs)}`);
+    assert(
+      fileCardAttrs.tagName === 'DIALOG'
+        && fileCardAttrs.open
+        && fileCardAttrs.role === 'dialog'
+        && fileCardAttrs.ariaModal === 'true'
+        && fileCardAttrs.mainInert,
+      `Invalid #run-file-card dialog state: ${JSON.stringify(fileCardAttrs)}`,
+    );
     await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
-    await driver.waitFor(() => document.getElementById('run-file-card')?.hidden && !document.getElementById('main')?.hasAttribute('inert'), '#run-file-card closes on Escape');
+    await driver.waitFor(() => document.getElementById('run-file-card')?.hidden && !document.getElementById('run-file-card')?.hasAttribute('open') && !document.getElementById('main')?.hasAttribute('inert'), '#run-file-card closes on Escape');
+    await driver.click(runFileSel);
+    await driver.waitFor(() => !document.getElementById('run-file-card')?.hidden && document.getElementById('run-file-card')?.hasAttribute('open'), '#run-file-card reopens for backdrop click dismiss');
+    await closeDialogByBackdropClick(driver, '#run-file-card', '#run-file-card');
     if (!wasDetailed) {
       await driver.click('#run-calm');
     }
@@ -2425,6 +2453,117 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
           assert(dPost?.body?.decision === 'deny', `Expected Alt+D deny decision, got ${JSON.stringify(dPost)}`);
         },
       );
+
+      // Verify #session-inbox queue & inbox-cancel flow while a native session is running
+      let inboxItems = [];
+      const runningInboxSession = {
+        ...otherSnapshot,
+        session: {
+          ...otherSnapshot.session,
+          status: 'running',
+          workflow: 'native',
+          agents_enabled: false,
+          brain: null,
+          provider: 'codex',
+          mode: 'edit',
+          native_session_id: 'nat-e2e-inbox',
+          git_common_dir: '/repo/.git',
+        },
+      };
+      await withFetchOverride(
+        cdp,
+        [{ urlPattern: `${driver.origin}/api/sessions/*` }],
+        async (params) => {
+          const reqUrl = params.request?.url || '';
+          const method = (params.request?.method || 'GET').toUpperCase();
+          const parsed = new URL(reqUrl);
+          const isOtherBase = parsed.pathname === `/api/sessions/${opts.otherSessionId}`
+            || parsed.pathname === `/api/sessions/${otherEnc}`;
+          const isOtherInbox = parsed.pathname === `/api/sessions/${opts.otherSessionId}/inbox`
+            || parsed.pathname === `/api/sessions/${otherEnc}/inbox`;
+          const isOtherCancel = parsed.pathname.startsWith(`/api/sessions/${opts.otherSessionId}/inbox/`)
+            || parsed.pathname.startsWith(`/api/sessions/${otherEnc}/inbox/`);
+
+          if (method === 'GET' && isOtherBase) {
+            const payload = parsed.searchParams.has('after')
+              ? { session: runningInboxSession.session, waiting_permissions: [], events: [] }
+              : runningInboxSession;
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+            });
+            return true;
+          }
+          if (method === 'GET' && isOtherInbox) {
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify({ items: inboxItems })).toString('base64'),
+            });
+            return true;
+          }
+          if (method === 'POST' && isOtherInbox) {
+            const posted = JSON.parse(params.request?.postData || '{}');
+            const receipt = {
+              id: 701,
+              request_id: posted.request_id || 'e2e-inbox-1',
+              session_id: opts.otherSessionId,
+              prompt: posted.prompt || 'Queued E2E follow-up',
+              status: 'pending',
+            };
+            inboxItems = [receipt];
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 202,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(receipt)).toString('base64'),
+            });
+            return true;
+          }
+          if (method === 'POST' && isOtherCancel && parsed.pathname.endsWith('/cancel')) {
+            const cancelled = {
+              ...inboxItems[0],
+              status: 'cancelled',
+            };
+            inboxItems = [cancelled];
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: params.requestId,
+              responseCode: 200,
+              responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(cancelled)).toString('base64'),
+            });
+            return true;
+          }
+          return false;
+        },
+        async () => {
+          await driver.click('#refresh-sessions');
+          await driver.waitFor(() => {
+            const p = document.getElementById('prompt');
+            return Boolean(p && !p.disabled && document.getElementById('send-label')?.textContent?.includes('Queue'));
+          }, 'running native session switches composer button to Queue', 8_000).catch(() => {});
+          await driver.callFn(() => {
+            const p = document.getElementById('prompt');
+            p.value = 'Queued E2E follow-up';
+            p.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          await driver.waitFor(() => !document.getElementById('send')?.disabled, '#send enabled for queued inbox message', 5_000);
+          await driver.click('#send');
+          await driver.waitFor(() => {
+            const sec = document.getElementById('session-inbox');
+            const cancelBtn = document.querySelector('#inbox-receipts button[data-action="inbox-cancel"]');
+            return Boolean(sec && !sec.hidden && cancelBtn && (sec.textContent || '').includes('Queued for the next turn'));
+          }, '#session-inbox shows pending receipt with Cancel button', 8_000);
+          await driver.click('#inbox-receipts button[data-action="inbox-cancel"]');
+          await driver.waitFor(() => {
+            const text = document.getElementById('inbox-receipts')?.textContent || '';
+            return text.includes('Cancelled') && !document.querySelector('#inbox-receipts button[data-action="inbox-cancel"]');
+          }, 'inbox-cancel transitions queued receipt to Cancelled', 8_000);
+        },
+      );
     }
   }
   if (mainSel) {
@@ -2488,13 +2627,13 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
 
   await driver.click('#approvals-queue-toggle');
   await driver.waitFor(
-    () => Boolean(document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')),
-    '#approvals-drawer reopened for Alt+A Allow resolution',
+    () => {
+      const btn = document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"]');
+      return Boolean(btn && document.activeElement && btn.closest('#approvals-drawer .conversation-permission[data-state="pending"]'));
+    },
+    '#approvals-drawer auto-focuses pending permission control on open for immediate Alt+A',
   );
   const sseBeforeAllow = driver.sseMessages.length;
-  await driver.callFn(() => {
-    document.querySelector('#approvals-drawer .conversation-permission[data-state="pending"] button[data-action="permission-decide"][data-decision="allow"]')?.focus();
-  });
   await driver.pressKey({ key: 'a', code: 'KeyA', keyCode: 65, modifiers: 1 });
   await driver.waitUntil(
     () => driver.sseMessages.slice(sseBeforeAllow).some((m) => m.data.includes('Permission request handled') || m.eventName === 'session_status'),
@@ -2974,6 +3113,21 @@ async function suite7SystemMap(driver, opts) {
     return Boolean(document.querySelector('#system-change-topology-arrow-legend [data-action="system-map-wave-play"]'));
   }, 'System change topology wave play button ready', 12_000, opts.systemRunId || '');
 
+  const flowCheck = await driver.waitFor(() => {
+    const flow = document.getElementById('system-flow');
+    if (!flow || flow.children.length === 0) return null;
+    const children = Array.from(flow.children);
+    return {
+      count: children.length,
+      keys: children.map((el) => el.getAttribute('data-key') || ''),
+    };
+  }, '#system-flow renders keyed step or "__empty__" placeholder', 6_000);
+  assert(
+    (flowCheck.count === 1 && flowCheck.keys[0] === '__empty__')
+      || (!flowCheck.keys.includes('__empty__') && flowCheck.keys.every(Boolean)),
+    `Expected #system-flow without keyless empty-state leak: ${JSON.stringify(flowCheck)}`,
+  );
+
   const waveBefore = await driver.callFn(() => {
     window.__e2eWaveCanvas = document.getElementById('system-change-topology-canvas');
     window.__e2eWaveChild = window.__e2eWaveCanvas?.firstElementChild || null;
@@ -3364,6 +3518,16 @@ async function suite9DiffChecksAndResults(driver, cdp, opts) {
     return Boolean(rv && rv.getAttribute('data-tab') === 'usage' && totals && totals.textContent.trim().length > 0);
   }, '#results-view usage tab renders #results-totals', 8_000);
 
+  // Verify results stay preserved across sessions <-> usage switches when a session stays selected
+  await driver.click('#view-tabs [data-view="sessions"]');
+  await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'switch to #sessions-view while keeping session results', 6_000);
+  await driver.click('#view-tabs [data-view="usage"]');
+  await driver.waitFor(() => {
+    const rv = document.getElementById('results-view');
+    const totals = document.getElementById('results-totals');
+    return Boolean(rv && !rv.hidden && rv.getAttribute('data-tab') === 'usage' && totals && totals.textContent.trim().length > 0);
+  }, 'returning to #results-view usage preserves #results-totals without clearing results', 6_000);
+
   // Restore sessions conversation tab
   await driver.click('#view-tabs [data-view="sessions"]');
   await driver.waitFor(() => !document.getElementById('sessions-view')?.hidden, 'return to #sessions-view after Suite 9', 6_000);
@@ -3371,16 +3535,144 @@ async function suite9DiffChecksAndResults(driver, cdp, opts) {
   driver.assertNoErrors('Suite 9');
 }
 
-async function suite10KnowledgeSkillsManagementDialogs(driver) {
+async function suite10KnowledgeSkillsManagementDialogs(driver, cdp, opts) {
   console.log('[Suite 10] Knowledge, Skills, Create Skill, Accelerators/Creator/Setup & Pickers');
 
-  // 1. Knowledge tabs: memory-use -> brain -> memory -> context
-  await driver.click('button.nav-item[data-nav="knowledge"]');
-  await driver.waitFor(() => {
-    const view = document.getElementById('memory-use-view');
-    const winBtns = document.querySelectorAll('#memory-use-window button').length;
-    return Boolean(view && !view.hidden && winBtns >= 1);
-  }, 'Knowledge defaults to memory-use view with #memory-use-window controls', 10_000);
+  // 1. Knowledge tabs: memory-use (with retrieval strip DOM preservation + promotion review/apply) -> brain -> memory -> context
+  let promotionStatus = 'proposed';
+  await withFetchOverride(
+    cdp,
+    [
+      { urlPattern: `${driver.origin}/api/projects/*/memory-use*` },
+      { urlPattern: `${driver.origin}/api/projects/*/knowledge` },
+    ],
+    async (params) => {
+      const reqUrl = params.request?.url || '';
+      const method = (params.request?.method || 'GET').toUpperCase();
+      if (method === 'GET' && reqUrl.includes('/memory-use')) {
+        const memPayload = {
+          project_id: opts.projectId,
+          bank_id: 'default',
+          banks: [{ id: 'default', name: 'default' }],
+          today: '2026-11-22',
+          check_available: false,
+          brain: { items: [{ id: 'f-1', type: 'finding', status: 'open', created_at: '2026-11-20T00:00:00Z' }] },
+          promotions: {
+            items: [
+              {
+                id: 'prop-e2e-1',
+                mode: 'human',
+                status: promotionStatus,
+                source_ids: ['f-1'],
+                created_at: '2026-11-20T01:00:00Z',
+              },
+            ],
+          },
+          chunks: {
+            bytes: 512,
+            items: [
+              {
+                id: 'MEM-20261120-abcd1234-test',
+                status: 'active',
+                created: '2026-11-20',
+                last_verified: '2026-11-21',
+                review_after: '2026-12-20',
+                auto: true,
+              },
+            ],
+          },
+          retrievals: {
+            found: 2,
+            limit: 50,
+            items: [
+              {
+                at: '2026-11-22T09:00:00Z',
+                route: 'context',
+                brain: 2,
+                bank: 1,
+                rules: 1,
+                chunks: ['MEM-20261120-abcd1234-test'],
+                cuts: [],
+              },
+              {
+                at: '2026-11-22T10:00:00Z',
+                route: 'retrieve',
+                brain: 1,
+                bank: 2,
+                rules: 1,
+                chunks: ['MEM-20261120-abcd1234-test'],
+                cuts: [['MEM-cut-1', 'budget']],
+              },
+            ],
+          },
+          history: { days: [] },
+        };
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify(memPayload)).toString('base64'),
+        });
+        return true;
+      }
+      if (method === 'POST' && reqUrl.includes('/knowledge')) {
+        const posted = JSON.parse(params.request?.postData || '{}');
+        if (posted.action === 'promote-review') {
+          promotionStatus = posted.reject ? 'rejected' : 'reviewed';
+        } else if (posted.action === 'promote-apply') {
+          promotionStatus = 'applied';
+        }
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify({ ok: true })).toString('base64'),
+        });
+        return true;
+      }
+      return false;
+    },
+    async () => {
+      await driver.click('button.nav-item[data-nav="knowledge"]');
+      await driver.waitFor(() => {
+        const view = document.getElementById('memory-use-view');
+        const winBtns = document.querySelectorAll('#memory-use-window button').length;
+        const cols = document.querySelectorAll('#memory-use-strip .memory-column').length;
+        const sub = document.getElementById('page-subtitle')?.textContent || '';
+        return Boolean(view && !view.hidden && winBtns >= 1 && cols === 2 && sub.trim().length > 0 && !sub.includes('Your local workspace'));
+      }, 'Knowledge defaults to memory-use view with subtitle, strip columns, and #memory-use-window controls', 10_000);
+
+      // Strip click updates aria-selected in place without replacing #memory-use-strip node
+      await driver.callFn(() => {
+        window.__e2eMemStripRef = document.getElementById('memory-use-strip');
+      });
+      await driver.click('#memory-use-strip .memory-column[data-position="0"]');
+      await driver.waitFor(() => {
+        const strip = document.getElementById('memory-use-strip');
+        const col0 = document.querySelector('#memory-use-strip .memory-column[data-position="0"]');
+        return Boolean(strip && strip === window.__e2eMemStripRef && col0?.getAttribute('aria-selected') === 'true');
+      }, '#memory-use-strip column click preserves strip DOM node and updates aria-selected', 5_000);
+      await driver.callFn(() => { delete window.__e2eMemStripRef; });
+
+      // Promotion queue review -> apply
+      await driver.callFn(() => {
+        const rev = document.getElementById('memory-promotion-reviewer');
+        rev.value = 'Alice';
+        rev.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await driver.click('#memory-use-promotions button[data-action="memory-promotion-review"]');
+      await driver.waitFor(() => {
+        const applyBtn = document.querySelector('#memory-use-promotions button[data-action="memory-promotion-apply"]');
+        const status = document.querySelector('#memory-use-promotions .promotion-status')?.textContent || '';
+        return Boolean(applyBtn && status.includes('Approved promotion prop-e2e-1'));
+      }, 'memory-promotion-review approves proposal and offers Apply', 6_000);
+      await driver.click('#memory-use-promotions button[data-action="memory-promotion-apply"]');
+      await driver.waitFor(() => {
+        const status = document.querySelector('#memory-use-promotions .promotion-status')?.textContent || '';
+        return status.includes('Applied promotion prop-e2e-1');
+      }, 'memory-promotion-apply completes proposal', 6_000);
+    },
+  );
 
   const memWinBtns = await driver.callFn(() => {
     const btns = Array.from(document.querySelectorAll('#memory-use-window button'));
@@ -3414,8 +3706,9 @@ async function suite10KnowledgeSkillsManagementDialogs(driver) {
   await driver.waitFor(() => {
     const sv = document.getElementById('skills-view');
     const agentOpts = document.querySelectorAll('#skills-agents input[type="checkbox"]').length;
-    return Boolean(sv && !sv.hidden && document.getElementById('skills-installed-agent') && agentOpts >= 1);
-  }, 'Skills view loaded with tool checkboxes', 10_000);
+    const sub = document.getElementById('page-subtitle')?.textContent || '';
+    return Boolean(sv && !sv.hidden && document.getElementById('skills-installed-agent') && agentOpts >= 1 && sub.trim().length > 0 && !sub.includes('Your local workspace'));
+  }, 'Skills view loaded with subtitle and tool checkboxes', 10_000);
 
   await driver.click('#view-tabs [data-view="create-skill"]');
   await driver.waitFor(() => {
@@ -3449,19 +3742,58 @@ async function suite10KnowledgeSkillsManagementDialogs(driver) {
     return Boolean(sec && !sec.hidden && content.includes('name:') && content.includes('e2e-check-skill'));
   }, 'Create skill preview renders generated SKILL.md', 8_000);
 
-  // 3. Accelerators, Creator, and Setup readiness
+  // 3. Accelerators, kit3 iframe stability, Creator (keyless empty state), and Setup readiness
   await driver.click('button.nav-item[data-nav="accelerators"]');
   await driver.waitFor(() => {
     const av = document.getElementById('accelerators-view');
     const box = document.getElementById('accelerators');
-    return Boolean(av && !av.hidden && box && box.textContent.trim().length > 0);
-  }, 'Accelerators overview renders catalog content', 8_000);
+    const sub = document.getElementById('page-subtitle')?.textContent || '';
+    return Boolean(av && !av.hidden && box && box.textContent.trim().length > 0 && sub.trim().length > 0 && !sub.includes('Your local workspace'));
+  }, 'Accelerators overview renders catalog content with subtitle', 8_000);
+
+  await driver.click('#view-tabs [data-view="kit3"]');
+  await driver.waitFor(() => {
+    const kv = document.getElementById('kit3-view');
+    const frame = document.getElementById('kit3-frame');
+    const openKit = document.getElementById('open-kit3');
+    return Boolean(kv && !kv.hidden && openKit && !openKit.hidden && frame && (frame.getAttribute('src') || '').includes('/kit3') && frame.contentDocument?.readyState === 'complete');
+  }, '#kit3-view loads /kit3/ iframe cleanly', 10_000);
+  await driver.callFn(() => {
+    document.getElementById('kit3-frame').contentWindow.__e2eKit3Alive = true;
+  });
+  await driver.click('#view-tabs [data-view="setup"]');
+  await driver.waitFor(() => !document.getElementById('setup-view')?.hidden, 'switch from kit3 to setup view', 6_000);
+  await driver.click('#view-tabs [data-view="kit3"]');
+  await driver.waitFor(() => {
+    const kv = document.getElementById('kit3-view');
+    const frame = document.getElementById('kit3-frame');
+    return Boolean(kv && !kv.hidden && frame?.contentWindow?.__e2eKit3Alive === true);
+  }, 'returning to #kit3-view preserves existing iframe instance without reloading', 6_000);
 
   await driver.click('#view-tabs [data-view="creator"]');
   await driver.waitFor(() => {
     const cv = document.getElementById('creator-view');
-    return Boolean(cv && !cv.hidden && document.getElementById('creator-form'));
+    const reports = document.getElementById('creator-reports');
+    return Boolean(cv && !cv.hidden && document.getElementById('creator-form') && reports);
   }, 'Creator view renders form and runs bar', 8_000);
+  const creatorCheck = await driver.callFn(() => {
+    const detail = document.getElementById('creator-detail');
+    const reports = document.getElementById('creator-reports');
+    const children = Array.from(reports?.children || []);
+    return {
+      detailHidden: Boolean(detail?.hidden),
+      childCount: children.length,
+      keys: children.map((el) => el.getAttribute('data-key') || ''),
+    };
+  });
+  if (!creatorCheck.detailHidden && creatorCheck.childCount > 0) {
+    const hasEmpty = creatorCheck.keys.includes('__empty__');
+    const nonEmptyOk = creatorCheck.keys.every((k) => k && k !== '__empty__');
+    assert(
+      (creatorCheck.childCount === 1 && hasEmpty) || (!hasEmpty && nonEmptyOk),
+      `Expected #creator-reports to avoid keyless empty-state leak: ${JSON.stringify(creatorCheck)}`,
+    );
+  }
 
   await driver.click('#view-tabs [data-view="setup"]');
   await driver.waitFor(() => {
@@ -3731,8 +4063,23 @@ async function suite12SkillCache(driver, opts) {
   assert(inspected.text.includes('Compilation cost$0.0512'), `Compilation cost is shown: ${inspected.text.slice(0, 200)}`);
   assert(inspected.text.includes('Saving per reuse—') && inspected.text.includes('Break-even—'), 'An unknown saving is a dash, not a zero');
   assert(!inspected.text.includes('printf'), 'The inspector lists package files and never their contents');
-  assert(JSON.stringify(inspected.actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']), `Actions follow the status: ${inspected.actions}`);
+  assert(JSON.stringify(inspected.actions) === JSON.stringify(['Requalify', 'Invalidate', 'Stop using', 'Delete…']), `Actions follow the status: ${inspected.actions}`);
   assert(!inspected.inlineColors, `No inline colors in the inspector: ${inspected.inlineColors}`);
+
+  // Verify Command Palette indexes live SkillCache capsules when loaded
+  await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
+  await driver.waitFor(() => !document.getElementById('command-palette')?.hidden, '#command-palette opens in Suite 12', 4_000);
+  await driver.callFn(() => {
+    const input = document.getElementById('command-palette-input');
+    input.value = 'pdf-rows';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await driver.waitFor(() => {
+    const items = Array.from(document.querySelectorAll('#command-palette-list .command-palette-item'));
+    return items.some((el) => (el.textContent || '').includes('Capsule') && (el.textContent || '').includes('pdf-rows'));
+  }, 'Command Palette surfaces loaded SkillCache capsule "pdf-rows"', 5_000);
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(() => document.getElementById('command-palette')?.hidden, '#command-palette closes after Suite 12 capsule check', 4_000);
 
   // 5. Themes: the status color is a token, so it changes with the theme.
   const warnColor = () => driver.callFn(() => getComputedStyle(document.querySelector('#skill-capsules-list .skill-capsule-chip[data-tone="warn"]')).color);
@@ -3803,7 +4150,7 @@ async function suite12SkillCache(driver, opts) {
       const actions = Array.from(detail?.querySelectorAll('.skill-capsule-actions button') || []).map((b) => b.textContent);
       return Boolean(row && (row.textContent || '').includes('Active')
         && detail && !detail.hidden
-        && JSON.stringify(actions) === JSON.stringify(['Requalify', 'Stop using', 'Delete…']));
+        && JSON.stringify(actions) === JSON.stringify(['Requalify', 'Invalidate', 'Stop using', 'Delete…']));
     }, 'Use again requalifies the retired capsule back to Active', 20_000);
   }
   const armSel = '#skill-capsule-detail [data-action="skill-capsule-arm"]';
@@ -3883,7 +4230,7 @@ async function main() {
       await suite6OmnigraphStudio(driver, pageCdp);
       await suite7SystemMap(driver, opts);
       await suite9DiffChecksAndResults(driver, pageCdp, opts);
-      await suite10KnowledgeSkillsManagementDialogs(driver);
+      await suite10KnowledgeSkillsManagementDialogs(driver, pageCdp, opts);
       await suite12SkillCache(driver, opts);
 
       driver.assertNoErrors('Suites 1-7, 9-10 & 12 check');

@@ -1937,6 +1937,21 @@ pub(super) fn normalize_map_state(mut state: V) -> V {
     if !state["side_pinned"].is_boolean() {
         state["side_pinned"] = json!(false);
     }
+    if let Some(raw_lod) = state["lod"].as_str() {
+        let norm = raw_lod.trim().to_ascii_lowercase();
+        if matches!(norm.as_str(), "crate" | "folder" | "file" | "symbol") {
+            state["lod"] = json!(norm);
+        } else {
+            state["lod"] = V::Null;
+        }
+    }
+    if let Some(mw) = state["min_weight"].as_u64() {
+        if mw == 0 {
+            state["min_weight"] = V::Null;
+        } else {
+            state["min_weight"] = json!(mw.clamp(1, 1_000_000));
+        }
+    }
     state
 }
 pub(super) fn state() -> V {

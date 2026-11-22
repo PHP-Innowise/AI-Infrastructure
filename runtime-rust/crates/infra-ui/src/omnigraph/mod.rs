@@ -776,16 +776,19 @@ pub use interactions::{
 };
 #[allow(unused_imports)]
 pub use pulse::{
-    branch_merge_outcome, classify_changes_poll_response, collect_search_hit_ids,
-    extract_baseline_graph_patch, find_context_node_for_file, focus_branch,
+    apply_system_jump_context_to_state, branch_merge_outcome, classify_changes_poll_response,
+    collect_search_hit_ids, extract_baseline_graph_patch, find_context_node_for_file, focus_branch,
     graph_pagination_summary, merge_graph_page, merge_search_subgraph_into_graph,
-    open_knowledge_atom, render_pagination_bar_html, resolve_code_map_target,
-    resolve_code_map_target_path, resolve_code_map_target_with_symbol_id,
+    open_knowledge_atom, render_pagination_bar_html, resolve_code_map_jump_context,
+    resolve_code_map_target, resolve_code_map_target_path, resolve_code_map_target_with_symbol_id,
     resolve_system_service_target, resolve_workspace_drift_docs, ChangesPollDecision,
-    GraphPaginationSummary,
+    CodeMapJumpContext, GraphPaginationSummary,
 };
 #[allow(unused_imports)]
-pub(crate) use pulse::{focus_context_for_file, open_from_system_service, open_target_in_code_map};
+pub(crate) use pulse::{
+    focus_context_for_file, open_from_system_context, open_from_system_service,
+    open_target_in_code_map, open_target_in_code_map_with_context,
+};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use session_bar::session_payload_from_fields;

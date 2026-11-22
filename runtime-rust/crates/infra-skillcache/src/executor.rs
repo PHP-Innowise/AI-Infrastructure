@@ -50,6 +50,8 @@ pub enum Command {
     Continue(Option<Value>),
     /// Reports where the run stands. Changes nothing.
     Status,
+    /// Clears an in-progress run state so the agent can restart with corrected bindings.
+    Reset,
 }
 
 /// Where one run lives.
@@ -84,10 +86,88 @@ fn produces(step: &Step) -> &[String] {
     }
 }
 
-/// `(path, size, modified)` of everything below `root`, or `None` when the
-/// tree is too large to compare.
-fn workspace_listing(root: &Path) -> Option<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
-    const ENTRIES: usize = 200_000;
+/// Workspace directory/file names ignored across snapshots, workspace comparisons,
+/// and observed-result captures.
+pub const IGNORED_WORKSPACE_NAMES: [&str; 6] = [
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+];
+
+/// Whether `name` is an ignored workspace metadata or cache entry at any depth.
+pub fn is_ignored_workspace_name(name: &str) -> bool {
+    IGNORED_WORKSPACE_NAMES.contains(&name)
+}
+
+pub type WorkspaceEntry = (PathBuf, u64, Option<std::time::SystemTime>, Option<String>);
+
+/// Bounded workspace snapshot for tracking regular file creations/edits/deletions
+/// during a warm program step without walking huge monorepos.
+pub fn workspace_snapshot_for_changes(root: &Path) -> Option<Vec<WorkspaceEntry>> {
+    workspace_listing_limited(root, 10_000)
+}
+
+/// Computes bounded `{"path", "kind"}` entries between `before` and `after` snapshots.
+pub fn diff_workspace_changes(
+    before: &[WorkspaceEntry],
+    after: &[WorkspaceEntry],
+    root: &Path,
+) -> Vec<Value> {
+    const LIMIT: usize = 64;
+    let map = |entries: &[WorkspaceEntry]| -> std::collections::BTreeMap<
+        String,
+        (u64, Option<std::time::SystemTime>, Option<String>),
+    > {
+        let mut out = std::collections::BTreeMap::new();
+        for (path, len, mtime, digest) in entries {
+            if let Ok(rel) = path.strip_prefix(root)
+                && let Some(rel) = rel.to_str()
+            {
+                let normalized = if cfg!(windows) {
+                    rel.replace('\\', "/")
+                } else {
+                    rel.to_owned()
+                };
+                if !normalized.is_empty() {
+                    out.insert(normalized, (*len, *mtime, digest.clone()));
+                }
+            }
+        }
+        out
+    };
+    let mut prev = map(before);
+    let next = map(after);
+    let mut changes = Vec::new();
+    for (path, sig) in next {
+        match prev.remove(&path) {
+            None => changes.push(json!({"path": path, "kind": "create"})),
+            Some(old) if old != sig => changes.push(json!({"path": path, "kind": "edit"})),
+            Some(_) => {}
+        }
+        if changes.len() >= LIMIT {
+            return changes;
+        }
+    }
+    for path in prev.into_keys() {
+        changes.push(json!({"path": path, "kind": "delete"}));
+        if changes.len() >= LIMIT {
+            break;
+        }
+    }
+    changes
+}
+
+/// `(path, size, modified, digest)` of everything below `root`, or `None` when
+/// the tree exceeds `max_entries`.
+fn workspace_listing(root: &Path) -> Option<Vec<WorkspaceEntry>> {
+    workspace_listing_limited(root, 200_000)
+}
+
+fn workspace_listing_limited(root: &Path, max_entries: usize) -> Option<Vec<WorkspaceEntry>> {
+    const HASH_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
     let mut entries = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
@@ -98,16 +178,29 @@ fn workspace_listing(root: &Path) -> Option<Vec<(PathBuf, u64, Option<std::time:
         names.sort_by_key(|entry| entry.file_name());
         for entry in names {
             let path = entry.path();
-            // The sandbox's own scratch folder is not the task's.
-            if folder == root && entry.file_name() == ".harness-tmp" {
+            let name = entry.file_name();
+            let name_str = name.to_str();
+            if name_str.is_some_and(is_ignored_workspace_name)
+                || (folder == root
+                    && name_str.is_some_and(|n| n == ".harness-tmp" || n == "target"))
+            {
                 continue;
             }
             let metadata = std::fs::symlink_metadata(&path).ok()?;
             if metadata.is_dir() && !infra_core::fs::linked(&metadata) {
                 folders.push(path.clone());
+            } else if metadata.is_file() {
+                let digest =
+                    if !infra_core::fs::linked(&metadata) && metadata.len() <= HASH_LIMIT_BYTES {
+                        std::fs::read(&path)
+                            .ok()
+                            .map(|bytes| crate::fingerprint::sha256(&bytes))
+                    } else {
+                        None
+                    };
+                entries.push((path, metadata.len(), metadata.modified().ok(), digest));
             }
-            entries.push((path, metadata.len(), metadata.modified().ok()));
-            if entries.len() > ENTRIES {
+            if entries.len() > max_entries {
                 return None;
             }
         }
@@ -305,11 +398,12 @@ impl<'a> Runner<'a> {
         // program's source is not offered: its check must stay independent.
         if !self.capsule.is_verification(step_index)
             && let Some(file) = program.and_then(|program| {
-                program
-                    .entry
-                    .iter()
-                    .skip(1)
-                    .find(|argument| argument.starts_with("programs/"))
+                program.entry.iter().skip(1).find_map(|argument| {
+                    let candidate = argument
+                        .split_once('=')
+                        .map_or(argument.as_str(), |(_, value)| value);
+                    candidate.starts_with("programs/").then_some(candidate)
+                })
             })
         {
             answer.insert(
@@ -379,18 +473,47 @@ impl<'a> Runner<'a> {
                 "program_started",
                 json!({"step_index": step_index, "program": program.id, "attempt": attempt}),
             )?;
-            let before = (self.check_read_only && program.read_only)
-                .then(|| workspace_listing(self.session.workspace))
-                .flatten();
+            let before = if self.check_read_only && program.read_only {
+                workspace_listing(self.session.workspace)
+            } else if !self.check_read_only {
+                workspace_snapshot_for_changes(self.session.workspace)
+            } else {
+                None
+            };
             let outcome = tool::run(
                 self.session.package,
                 program,
                 tool::Mode::Run(&self.state.bindings),
                 self.session.workspace,
             )?;
+            let after = if before.is_some() {
+                if self.check_read_only && program.read_only {
+                    workspace_listing(self.session.workspace)
+                } else {
+                    workspace_snapshot_for_changes(self.session.workspace)
+                }
+            } else {
+                None
+            };
+            let changed_files = match (&before, &after) {
+                (Some(prev), Some(next)) if !self.check_read_only => {
+                    diff_workspace_changes(prev, next, self.session.workspace)
+                }
+                _ => Vec::new(),
+            };
+            if !changed_files.is_empty() {
+                let _ = crate::state::append_changes(
+                    self.log.path(),
+                    self.log.generation(),
+                    &changed_files,
+                );
+            }
             let outcome = match outcome {
                 tool::Outcome::Completed(completed)
-                    if before.is_some() && workspace_listing(self.session.workspace) != before =>
+                    if self.check_read_only
+                        && program.read_only
+                        && before.is_some()
+                        && after != before =>
                 {
                     tool::Outcome::Failed(tool::Failed {
                         reason: "read_only_violation",
@@ -526,11 +649,98 @@ impl<'a> Runner<'a> {
     fn complete(&self) -> Value {
         json!({
             "status": "complete",
-            "result": self.state.results,
+            "result": self.bounded_complete_results(),
             "failed": self.state.failed.iter().map(|failure| json!({
                 "step_index": failure.step_index, "reason": failure.reason,
             })).collect::<Vec<_>>(),
         })
+    }
+
+    /// Trims large non-output/raw fields from `complete["result"]` while preserving
+    /// declared program outputs up to bounded limits so `complete` stays small.
+    fn bounded_complete_results(&self) -> Map<String, Value> {
+        const DECLARED_STR_LIMIT: usize = 4096;
+        const EXTRA_STR_LIMIT: usize = 512;
+        const TOTAL_BYTES_LIMIT: usize = 16 * 1024;
+        fn trim_str(text: &str, max_bytes: usize) -> Value {
+            if text.len() <= max_bytes {
+                return Value::String(text.to_owned());
+            }
+            let mut end = max_bytes;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            Value::String(format!(
+                "{}... [truncated {} bytes]",
+                &text[..end],
+                text.len() - end
+            ))
+        }
+        fn trim_value(value: &Value, str_limit: usize, array_limit: usize) -> Value {
+            match value {
+                Value::String(text) => trim_str(text, str_limit),
+                Value::Array(items) => {
+                    let mut out: Vec<Value> = items
+                        .iter()
+                        .take(array_limit)
+                        .map(|item| trim_value(item, str_limit.min(512), 16))
+                        .collect();
+                    if items.len() > array_limit {
+                        out.push(Value::String(format!(
+                            "... [+{} more items]",
+                            items.len() - array_limit
+                        )));
+                    }
+                    Value::Array(out)
+                }
+                Value::Object(map) => {
+                    let mut out = Map::new();
+                    for (k, v) in map {
+                        out.insert(k.clone(), trim_value(v, str_limit.min(512), 16));
+                    }
+                    Value::Object(out)
+                }
+                other => other.clone(),
+            }
+        }
+        let mut total = 0usize;
+        let mut out = Map::new();
+        for (program_id, step_value) in &self.state.results {
+            let declared: &[String] = self
+                .capsule
+                .program(program_id)
+                .map(|p| p.outputs.as_slice())
+                .unwrap_or(&[]);
+            let over_budget = total >= TOTAL_BYTES_LIMIT;
+            let trimmed = match step_value {
+                Value::Object(fields) => {
+                    let mut obj = Map::new();
+                    for (key, value) in fields {
+                        let is_declared = declared.contains(key);
+                        let str_limit = if over_budget {
+                            128
+                        } else if is_declared {
+                            DECLARED_STR_LIMIT
+                        } else {
+                            EXTRA_STR_LIMIT
+                        };
+                        let arr_limit = if over_budget {
+                            4
+                        } else if is_declared {
+                            64
+                        } else {
+                            16
+                        };
+                        obj.insert(key.clone(), trim_value(value, str_limit, arr_limit));
+                    }
+                    Value::Object(obj)
+                }
+                other => trim_value(other, EXTRA_STR_LIMIT, 16),
+            };
+            total += serde_json::to_vec(&trimmed).map_or(0, |b| b.len());
+            out.insert(program_id.clone(), trimmed);
+        }
+        out
     }
     fn start(&mut self, supplied: Option<&Value>) -> Reply {
         let (leading, names) = self.instruction_steps(0);
@@ -701,6 +911,24 @@ pub fn execute(session: &Session<'_>, command: Command) -> Reply {
             "Another skillcache-run command is still working on this run.",
         ));
     }
+    if matches!(command, Command::Reset) {
+        let had_state = match std::fs::remove_file(session.state_file) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(Refusal::new(
+                    "unavailable",
+                    format!("The run's state could not be cleared: {error}"),
+                ));
+            }
+        };
+        let mut log = RunLog::open(session.state_file, session.generation)?;
+        log.append(
+            "reset",
+            json!({"capsule_sha256": session.package.capsule_sha256, "cleared": had_state}),
+        )?;
+        return Ok(json!({"status": "reset", "cleared": had_state}));
+    }
     let stored = RunState::load(session.state_file)?;
     if let Some(state) = &stored
         && state.capsule_sha256 != session.package.capsule_sha256
@@ -711,6 +939,7 @@ pub fn execute(session: &Session<'_>, command: Command) -> Reply {
         ));
     }
     match (command, stored) {
+        (Command::Reset, _) => unreachable!(),
         (Command::Run(_), Some(_)) => Err(Refusal::new(
             "already_started",
             "This run has started. Use `skillcache-run continue` or `skillcache-run status`.",
@@ -809,6 +1038,7 @@ pub fn replay(session: &Session<'_>, examples: &Examples) -> Reply {
         "completed": runner.state.completed,
         "failures": runner.failures,
         "substituted": substituted,
+        "results": runner.state.results,
     }))
 }
 

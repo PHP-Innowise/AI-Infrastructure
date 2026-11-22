@@ -387,7 +387,7 @@ pub(super) fn memory_model(v: &V, window: u64) -> V {
  "selected":{"retrievals":rows.len(),"with_chunk":rows.iter().filter(|r|!m::array(&r["chunks"]).is_empty()).count(),"selections":rows.iter().map(|r|m::array(&r["chunks"]).len()).sum::<usize>(),"distinct":selected.len(),"reused":tasksets.values().filter(|s|s.len()>1).count(),"cuts":cuts,"cut_total":cuts.values().sum::<u64>(),"routes":routes,"kinds":kinds,"since":since,"dropped":health.iter().filter(|h|h["dropped"]==true).count(),"measured":health.iter().filter(|h|!h["dropped"].is_null()).count(),"merged":v["retrievals"]["merged"],"found":v["retrievals"]["found"],"limit":v["retrievals"]["limit"]}})
 }
 pub async fn load_memory_use() {
-    let p = dom::value("memory-use-project");
+    let p = m::current_project();
     let bank = dom::value("memory-use-bank");
     let previous = m::data("memory-use");
     if previous["project_id"] != p || previous["bank_id"] != bank {
@@ -412,7 +412,7 @@ pub async fn load_memory_use() {
         dom::query(&[("bank", bank)])
     );
     match api::scoped("memory-use", &path).await {
-        Ok((e, v)) if m::current("memory-use", e) && dom::value("memory-use-project") == p => {
+        Ok((e, v)) if m::current("memory-use", e) && m::current_project() == p => {
             dom::options(
                 "memory-use-bank",
                 &m::array(&v["banks"]),
@@ -715,8 +715,8 @@ pub(super) fn sync_memory_promotions(v: &V, window: u64) {
         .as_str()
         .unwrap_or("")
         .to_owned();
-    let base_sig = json!([items, since]).to_string();
-    let full_sig = json!([items, since, reviewer, busy, status]).to_string();
+    let base_sig = dom::json_signature(&json!([items, since]));
+    let full_sig = dom::json_signature(&json!([items, since, reviewer, busy, status]));
     if host.get_attribute("data-full-signature").as_deref() == Some(full_sig.as_str()) {
         return;
     }
@@ -900,7 +900,7 @@ pub(super) fn render_memory() {
 
     let anchor_key = format!(
         "harness.memory-use.v1:{}:{}",
-        dom::value("memory-use-project"),
+        m::current_project(),
         m::text(&v, "bank_id")
     );
     let before = dom::json_storage(&anchor_key);
@@ -1042,7 +1042,7 @@ pub(super) async fn promotion_action(action: &str, payload: &V) {
     else {
         return;
     };
-    let project = dom::value("memory-use-project");
+    let project = m::current_project();
     let data = m::data("memory-use");
     if project.is_empty()
         || data["project_id"] != project
@@ -1108,7 +1108,7 @@ pub(super) async fn promotion_action(action: &str, payload: &V) {
         }
         Err(e) => dom::error("memory-use-error", &e.message),
     }
-    if dom::value("memory-use-project") == project {
+    if m::current_project() == project {
         // Drawn again at once, so a failed reload leaves no button waiting.
         render_memory();
         load_memory_use().await;
@@ -1200,6 +1200,45 @@ pub(super) fn memory_table_sort_dir(
     })
 }
 
+const RETRIEVAL_KINDS: [(&str, &str); 3] = [
+    ("brain", "Project Brain"),
+    ("bank", "Memory bank"),
+    ("rules", "Rules & docs"),
+];
+
+pub(super) fn retrieval_strip_column_max(shown: &[V]) -> [u64; 3] {
+    let mut maxes = [1u64; 3];
+    for r in shown {
+        for (idx, (kind, _)) in RETRIEVAL_KINDS.iter().enumerate() {
+            let count = r[*kind].as_u64().unwrap_or(0)
+                + if *kind == "bank" {
+                    m::array(&r["cuts"]).len() as u64
+                } else {
+                    0
+                };
+            maxes[idx] = maxes[idx].max(count);
+        }
+    }
+    maxes
+}
+
+pub(super) fn sync_retrieval_strip_selection(section: &web_sys::Element, selected_pos: usize) {
+    if let Ok(cols) = section.query_selector_all(".memory-column[data-position]") {
+        let target_pos = selected_pos.to_string();
+        for i in 0..cols.length() {
+            if let Some(col) = cols
+                .item(i)
+                .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+            {
+                let selected =
+                    col.get_attribute("data-position").as_deref() == Some(target_pos.as_str());
+                let _ = col.set_attribute("tabindex", if selected { "0" } else { "-1" });
+                let _ = col.set_attribute("aria-selected", if selected { "true" } else { "false" });
+            }
+        }
+    }
+}
+
 pub(super) fn analytics(data: &V, _model: &V) {
     let raw = m::array(&data["retrievals"]["items"]);
     let mobile = viewport_is_mobile();
@@ -1211,9 +1250,20 @@ pub(super) fn analytics(data: &V, _model: &V) {
             .as_u64()
             .map(|n| n as usize)
             .unwrap_or_else(|| raw.len().saturating_sub(1));
-        let strip_sig = json!([shown, mobile, selected_pos]).to_string();
-        if section.get_attribute("data-signature").as_deref() != Some(strip_sig.as_str()) {
-            let _ = section.set_attribute("data-signature", &strip_sig);
+        let base_sig = dom::json_signature(&json!([shown, mobile]));
+        if section.get_attribute("data-base-signature").as_deref() == Some(base_sig.as_str())
+            && section
+                .query_selector(".memory-strip-columns")
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            sync_retrieval_strip_selection(&section, selected_pos);
+            if !raw.is_empty() {
+                retrieval_detail(selected_pos);
+            }
+        } else {
+            let _ = section.set_attribute("data-base-signature", &base_sig);
             section.set_text_content(None);
             dom::add(
                 &section,
@@ -1225,24 +1275,8 @@ pub(super) fn analytics(data: &V, _model: &V) {
             let _ = columns.set_attribute("role", "listbox");
             let _ = columns.set_attribute("data-memory-options", "retrieval");
             let _ = columns.set_attribute("aria-label", "Recorded retrievals");
-            for (kind, label) in [
-                ("brain", "Project Brain"),
-                ("bank", "Memory bank"),
-                ("rules", "Rules & docs"),
-            ] {
-                let most = shown
-                    .iter()
-                    .map(|r| {
-                        r[kind].as_u64().unwrap_or(0)
-                            + if kind == "bank" {
-                                m::array(&r["cuts"]).len() as u64
-                            } else {
-                                0
-                            }
-                    })
-                    .max()
-                    .unwrap_or(1)
-                    .max(1);
+            let most_by_kind = retrieval_strip_column_max(shown);
+            for ((_, label), most) in RETRIEVAL_KINDS.iter().zip(most_by_kind) {
                 let e = dom::el("span", "memory-strip-label", label);
                 style(&e, "--row", &format!("{}px", most * 4));
                 dom::add(&labels, &e);
@@ -1252,6 +1286,7 @@ pub(super) fn analytics(data: &V, _model: &V) {
                 let col = dom::button("", "memory-retrieval", json!(position));
                 col.set_class_name("memory-column");
                 let _ = col.set_attribute("role", "option");
+                let _ = col.set_attribute("data-position", &position.to_string());
                 let selected = m::data("memory-pinned-retrieval")
                     .as_u64()
                     .map(|n| n as usize == position)
@@ -1267,34 +1302,18 @@ pub(super) fn analytics(data: &V, _model: &V) {
                         m::array(&row["chunks"]).len()
                     ),
                 );
-                for kind in ["brain", "bank", "rules"] {
-                    let most = shown
-                        .iter()
-                        .map(|r| {
-                            r[kind].as_u64().unwrap_or(0)
-                                + if kind == "bank" {
-                                    m::array(&r["cuts"]).len() as u64
-                                } else {
-                                    0
-                                }
-                        })
-                        .max()
-                        .unwrap_or(1)
-                        .max(1);
+                for ((kind, _), most) in RETRIEVAL_KINDS.iter().zip(most_by_kind) {
                     let cell = dom::el("span", "memory-cell", "");
                     let _ = cell.set_attribute("data-kind", kind);
                     style(&cell, "--row", &format!("{}px", most * 4));
-                    if kind == "bank" && !m::array(&row["cuts"]).is_empty() {
-                        let cuts = dom::el("span", "memory-units cut", "");
-                        style(
-                            &cuts,
-                            "--units",
-                            &format!("{}px", m::array(&row["cuts"]).len() * 4),
-                        );
-                        dom::add(&cell, &cuts);
+                    let cuts = m::array(&row["cuts"]);
+                    if *kind == "bank" && !cuts.is_empty() {
+                        let cut_el = dom::el("span", "memory-units cut", "");
+                        style(&cut_el, "--units", &format!("{}px", cuts.len() * 4));
+                        dom::add(&cell, &cut_el);
                     }
                     let units = dom::el("span", "memory-units", "");
-                    let count = row[kind].as_u64().unwrap_or(0);
+                    let count = row[*kind].as_u64().unwrap_or(0);
                     style(&units, "--units", &format!("{}px", count * 4));
                     dom::hide(&units, count == 0);
                     dom::add(&cell, &units);
@@ -1324,15 +1343,14 @@ pub(super) fn analytics(data: &V, _model: &V) {
     let filters = m::array(&m::data("memory-filters"));
 
     if let Some(horizon) = dom::get("memory-use-horizon") {
-        let base_sig = json!([
+        let base_sig = dom::json_signature(&json!([
             chunks,
             data["today"],
             data["retrievals"]["items"],
             data["history"]["days"],
             mobile
-        ])
-        .to_string();
-        let filters_sig = json!(filters).to_string();
+        ]));
+        let filters_sig = dom::json_signature(&json!(filters));
         if horizon.get_attribute("data-base-signature").as_deref() == Some(base_sig.as_str()) {
             if horizon.get_attribute("data-filters-signature").as_deref()
                 != Some(filters_sig.as_str())
@@ -1639,7 +1657,7 @@ pub(super) fn sortable(kind: &str, rows: &[V], columns: &[(&str, &str)]) {
     let Some(details) = dom::get(&format!("memory-table-{kind}")) else {
         return;
     };
-    let table_sig = json!([rows, sort]).to_string();
+    let table_sig = dom::json_signature(&json!([rows, sort]));
     if details.get_attribute("data-signature").as_deref() == Some(table_sig.as_str()) {
         return;
     }

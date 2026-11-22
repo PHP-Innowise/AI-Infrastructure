@@ -2,6 +2,16 @@ use super::*;
 
 pub(super) const PREFS: &str = "harness.sessions.preferences.v1";
 pub(super) const TAB_DRAFTS: &str = "harness.sessions.tab-drafts.v1";
+pub(super) const PREFS_SAVE_TIMER: &str = "save-preferences";
+pub(super) const PREFS_DEBOUNCE_MS: i32 = 300;
+
+thread_local! {
+    static PREFS_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn should_flush_preferences(dirty: bool, restoring: bool, booted: bool) -> bool {
+    dirty && !restoring && booted
+}
 pub(super) const PREF_FIELDS: &[&str] = &[
     "provider",
     "workflow",
@@ -100,7 +110,7 @@ pub(super) fn draft_project(selected: &str) -> String {
         .map(str::to_owned)
         .unwrap_or_else(|| selected.to_owned())
 }
-pub fn save_preferences() {
+fn write_preferences_now() {
     if m::read(|s| s.restoring || s.boot.is_null()) {
         return;
     }
@@ -155,6 +165,34 @@ pub fn save_preferences() {
     }
     shared["defaults"][&project] = fields;
     dom::save(PREFS, Some(&shared.to_string()));
+}
+
+/// Persists workspace preferences immediately and cancels any pending debounced write.
+pub fn save_preferences() {
+    dom::cancel_timer(PREFS_SAVE_TIMER);
+    PREFS_DIRTY.with(|dirty| dirty.set(false));
+    write_preferences_now();
+}
+
+/// Marks draft/composer preferences dirty and schedules a single debounced persistence pass.
+pub fn schedule_save_preferences() {
+    if m::read(|s| s.restoring || s.boot.is_null()) {
+        return;
+    }
+    PREFS_DIRTY.with(|dirty| dirty.set(true));
+    dom::later(PREFS_SAVE_TIMER, PREFS_DEBOUNCE_MS, || {
+        flush_preferences();
+    });
+}
+
+/// Flushes pending preference changes immediately when dirty (e.g., on blur, pagehide, or submit).
+pub fn flush_preferences() {
+    dom::cancel_timer(PREFS_SAVE_TIMER);
+    let dirty = PREFS_DIRTY.with(|flag| flag.replace(false));
+    let (restoring, booted) = m::read(|s| (s.restoring, !s.boot.is_null()));
+    if should_flush_preferences(dirty, restoring, booted) {
+        write_preferences_now();
+    }
 }
 /// Chooses the initial workspace project from URL route, saved preferences, or the first bootstrap project.
 pub(super) fn resolve_initial_project(
@@ -287,25 +325,16 @@ pub(crate) async fn switch_project_from_shell(id: &str) -> bool {
 pub fn sync_project(id: &str) {
     let previous_global = m::current_project();
     m::set_current_project(id);
-    for select in [
-        "project",
-        "project-switcher",
-        "context-project",
-        "memory-use-project",
-        "memory-project",
-        "brain-project",
-        "skills-project",
-        "create-skill-project",
-        "setup-project",
-        "creator-project",
-        "accelerator-project",
-        "system-project",
-        "omnigraph-project",
+    dom::set_value("project-switcher", id);
+    for (select, scope) in [
+        ("creator-project", Some("creator-scope")),
+        ("system-project", Some("editor-scope")),
+        ("memory-project", Some("memory-knowledge-scope")),
+        ("brain-project", Some("brain-knowledge-scope")),
+        ("omnigraph-project", None),
     ] {
-        let prev = if dom::get(select).is_some()
-            || m::read(|s| s.workspace.scoped_projects.contains_key(select))
-        {
-            dom::value(select)
+        let prev = if m::read(|s| s.workspace.scoped_projects.contains_key(select)) {
+            m::scoped_project(select)
         } else {
             previous_global.clone()
         };
@@ -314,17 +343,10 @@ pub fn sync_project(id: &str) {
                 || m::yes(&m::data("editor-pending"))
                 || m::yes(&m::data("system-pending")))
             || select == "creator-project" && m::yes(&m::data("creator-pending"));
-        let scope = match select {
-            "creator-project" => Some("creator-scope"),
-            "system-project" => Some("editor-scope"),
-            "memory-project" => Some("memory-knowledge-scope"),
-            "brain-project" => Some("brain-knowledge-scope"),
-            _ => None,
-        };
         let changed =
             scope.is_some_and(|scope| m::project_scope_transition(scope, &prev, id, held));
         if !held {
-            dom::set_value(select, id);
+            m::clear_scoped_project(select);
         }
         if select == "omnigraph-project" && prev != id {
             omnigraph::on_project_changed();
@@ -342,6 +364,7 @@ pub fn sync_project(id: &str) {
     m::set("composer-project", json!(id));
     if previous_global != id && !m::read(|s| s.boot.is_null()) {
         if !m::yes(&m::data("bootstrapping")) {
+            crate::api::reconnect_sse_for_project_scope();
             spawn_local(async {
                 crate::graph::load(false).await;
             });
@@ -384,7 +407,9 @@ pub(crate) fn permissions_hint(provider: &str, mode: &str, permission: &str) -> 
         (_, "cursor") => {
             "Cursor edits the workspace and runs commands in its sandbox; anything else that needs approval is declined. Nothing waits for you."
         }
-        _ => "The agent works on its own and the host declines what needs approval; nothing waits for you.",
+        _ => {
+            "The agent works on its own and the host declines what needs approval; nothing waits for you."
+        }
     }
 }
 pub(crate) fn mark_dirty(group: &str) {

@@ -256,8 +256,30 @@ pub(super) fn extract_inspect_file_path(payload: &V) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn invokes_skillcache_run_mutation(ev: &V, text: &str) -> bool {
+    let tail = text.split_once(": ").map(|(_, s)| s).unwrap_or(text);
+    let candidate = ev["detail"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(tail);
+    let mut parts = candidate.split_whitespace();
+    while let Some(tok) = parts.next() {
+        let cmd = tok.rsplit('/').next().unwrap_or(tok);
+        if cmd.eq_ignore_ascii_case("skillcache-run") {
+            return matches!(parts.next(), Some("run" | "continue"));
+        }
+    }
+    false
+}
+
 pub(super) fn is_mutation_tool_event(ev: &V) -> bool {
-    if m::text(ev, "kind") != "tool" {
+    let kind = m::text(ev, "kind");
+    if kind == "skillcache" {
+        return ev["ok"] != json!(false)
+            && (!m::array(&ev["changes"]).is_empty()
+                || matches!(ev["phase"].as_str(), Some("program_completed" | "complete")));
+    }
+    if kind != "tool" {
         return false;
     }
     if ev["state"]
@@ -287,8 +309,16 @@ pub(super) fn is_mutation_tool_event(ev: &V) -> bool {
         .to_ascii_lowercase();
     matches!(
         norm.as_str(),
-        "edit" | "write" | "multiedit" | "notebookedit" | "file_change" | "delete"
+        "edit"
+            | "write"
+            | "multiedit"
+            | "notebookedit"
+            | "file_change"
+            | "delete"
+            | "skillcache-run"
     ) || !m::array(&ev["changes"]).is_empty()
+        || (matches!(norm.as_str(), "bash" | "shell" | "command_execution")
+            && invokes_skillcache_run_mutation(ev, &text))
 }
 
 pub(super) fn should_sync_embedded_changes(
@@ -526,7 +556,7 @@ pub fn initialize() {
         true,
     );
     capture_click.forget();
-    dom::wire_a11y_widgets();
+    dom::sync_a11y_widgets();
 }
 pub(super) fn apply_theme(preference: &str) {
     let dark = dom::window()
@@ -648,23 +678,7 @@ pub async fn bootstrap() {
 pub fn populate() {
     let boot = m::read(|s| s.boot.clone());
     let projects = m::array(&boot["projects"]);
-    for id in [
-        "project",
-        "project-switcher",
-        "context-project",
-        "memory-use-project",
-        "memory-project",
-        "brain-project",
-        "skills-project",
-        "create-skill-project",
-        "setup-project",
-        "creator-project",
-        "accelerator-project",
-        "system-project",
-        "omnigraph-project",
-    ] {
-        dom::options(id, &projects, m::summary, None);
-    }
+    dom::options("project-switcher", &projects, m::summary, None);
     dom::options(
         "provider",
         &m::array(&boot["providers"]),
@@ -1253,9 +1267,13 @@ pub fn controls() {
     dom::text(
         "sdd-hint",
         &format!(
-        "{description} Documents: specs/{}/. Feature stays fixed; phase can change between turns.",
-        if feature.is_empty() {"<feature>"} else {&feature}
-    ),
+            "{description} Documents: specs/{}/. Feature stays fixed; phase can change between turns.",
+            if feature.is_empty() {
+                "<feature>"
+            } else {
+                &feature
+            }
+        ),
     );
     dom::error(
         "sdd-error",
@@ -1479,7 +1497,7 @@ pub async fn event(
         return true;
     }
     if kind == "input" && id == "prompt" {
-        save_preferences();
+        schedule_save_preferences();
         update_send_control();
         let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed && !m::active(&s.selected));
         if ready
@@ -1653,7 +1671,7 @@ pub async fn event(
             || id == "skillcache-compiler-model")
     {
         if id.starts_with("omnigraph-") || id.starts_with("skillcache-") {
-            save_preferences();
+            schedule_save_preferences();
         }
         mark_dirty_for_id(id);
         controls();

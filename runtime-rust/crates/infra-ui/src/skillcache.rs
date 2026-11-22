@@ -272,6 +272,9 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
     let compile = m::array(&state["compiles"])
         .into_iter()
         .find(|compile| compile["source_generation"] == generation);
+    let trace = m::array(&state["traces"])
+        .into_iter()
+        .find(|trace| trace["generation"] == generation);
     if let Some(compile) = compile {
         let status = compile["status"].as_str().unwrap_or("queued");
         let outcome = compile["outcome"].as_str().unwrap_or("");
@@ -285,19 +288,37 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
                 format!(": {}", esc(outcome))
             }
         ));
-        if let Some(capsule) = compile["capsule_id"].as_str().filter(|id| !id.is_empty()) {
+        let capsule_present = |id: &str| {
+            !state["capsules"].is_array()
+                || m::array(&state["capsules"])
+                    .iter()
+                    .any(|cap| cap["capsule_id"].as_str() == Some(id))
+        };
+        if status == "completed" {
+            if let Some(capsule) = compile["capsule_id"].as_str().filter(|id| !id.is_empty()) {
+                if capsule_present(capsule) {
+                    out.push_str(&action_button(
+                        "Open capsule",
+                        "skillcache-open-capsule",
+                        &json!(capsule),
+                    ));
+                }
+            }
+        }
+        if matches!(status, "failed" | "interrupted")
+            && trace
+                .as_ref()
+                .is_some_and(|trace| trace["replayable"] != false)
+        {
             out.push_str(&action_button(
-                "Open capsule",
-                "skillcache-open-capsule",
-                &json!(capsule),
+                "Compile into a capsule",
+                "skillcache-compile",
+                &json!({"generation": generation}),
             ));
         }
         return out;
     }
-    match m::array(&state["traces"])
-        .into_iter()
-        .find(|trace| trace["generation"] == generation)
-    {
+    match trace {
         Some(trace) if trace["replayable"] == false => {
             let why = trace["replay_reason"]
                 .as_str()
@@ -880,6 +901,18 @@ mod tests {
         assert_no_inline_hex_colors(&html);
         let gone = json!({"traces": [], "compiles": []});
         assert!(event_actions_html(&observed(), &gone).contains("no longer kept"));
+        // Failed or interrupted compilations hide "Open capsule" and allow retrying when replayable.
+        let failed = json!({
+            "traces": [{"generation": "g1", "replayable": true}],
+            "compiles": [{"source_generation": "g1", "status": "failed", "capsule_id": "c-dead", "outcome": "Gate 3 mismatch."}],
+            "capsules": [],
+        });
+        let html = event_actions_html(&observed(), &failed);
+        assert!(payloads(&html, "skillcache-open-capsule").is_empty());
+        assert_eq!(
+            payloads(&html, "skillcache-compile"),
+            [json!({"generation": "g1"})]
+        );
     }
 
     #[test]

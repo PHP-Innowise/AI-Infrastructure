@@ -170,6 +170,40 @@ impl Accelerators {
         }
         Ok(())
     }
+
+    /// Resolves and verifies a canonical workspace path owned by a registered project,
+    /// enabling Gate-1 read-only program auto-approval for `session_id` on `desk`.
+    pub fn register_read_only_auto_rules(
+        &self,
+        desk: &crate::permissions::PermissionDesk,
+        session_id: &str,
+        workspace: &Path,
+    ) -> Result<()> {
+        let canon = infra_core::fs::canonicalize(workspace)?;
+        let registered = self.store.projects()?.into_iter().any(|p| {
+            p["path"]
+                .as_str()
+                .and_then(|s| infra_core::fs::canonicalize(s).ok())
+                .is_some_and(|proj| canon == proj || canon.starts_with(&proj))
+        });
+        if !registered {
+            return Err(HarnessError::forbidden(
+                "Read-only rule workspace is not registered with Harness.",
+            ));
+        }
+        desk.enable_read_only_auto_rules(session_id, canon);
+        Ok(())
+    }
+
+    /// Computes a deterministic scoped `session_rule_key` (`readonly:program:...`) for a
+    /// verified read-only / Gate-1 program command inside `workspace`.
+    pub fn read_only_session_rule_key(
+        workspace: &Path,
+        command: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        crate::permissions::classify_read_only_program_command(Some(workspace), command)
+    }
+
     pub fn overlay(&self, project: &str, host: &str, cwd: &Path) -> Result<Option<Overlay>> {
         self.store.project(project)?;
         if Self::installed(cwd)? {
@@ -934,6 +968,43 @@ mod system_launch_tests {
         assert_eq!(
             refused.message,
             "System dispatch folder is not inside a registered project."
+        );
+    }
+
+    #[test]
+    fn register_read_only_auto_rules_enforces_registered_workspace_and_gate1_safety() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = infra_core::fs::canonicalize(root.path())
+            .unwrap()
+            .join("proj");
+        let outside = infra_core::fs::canonicalize(root.path())
+            .unwrap()
+            .join("outside");
+        std::fs::create_dir_all(proj.join("programs")).unwrap();
+        std::fs::write(proj.join("programs/ro.py"), "print('hi')\n").unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        store.register(&proj).unwrap();
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::new())),
+        });
+        let accelerators =
+            Accelerators::new(store, root.path().into(), providers, Weak::new()).unwrap();
+        let desk = crate::permissions::PermissionDesk::default();
+        assert!(
+            accelerators
+                .register_read_only_auto_rules(&desk, "s1", &outside)
+                .is_err()
+        );
+        accelerators
+            .register_read_only_auto_rules(&desk, "s1", &proj)
+            .unwrap();
+        assert_eq!(
+            Accelerators::read_only_session_rule_key(&proj, "python3 programs/ro.py")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:python3 programs/ro.py")
         );
     }
 }

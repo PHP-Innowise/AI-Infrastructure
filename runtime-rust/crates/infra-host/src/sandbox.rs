@@ -23,8 +23,8 @@ pub struct Spec {
     pub network: bool,
 }
 /// What a sandbox is for, which decides how much of the host it shows.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Profile {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Profile {
     /// The whole filesystem read-only, the workspace writable.
     Creator,
     /// The operating system's runtime and the named folders only; the target
@@ -38,6 +38,103 @@ impl Profile {
     fn minimal(self) -> bool {
         self != Self::Creator
     }
+}
+
+/// Returns whether a host environment variable looks like a secret/credential
+/// that should be scrubbed from sandboxed or check child processes.
+pub fn is_credential_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["KEY", "TOKEN", "PASSWORD"]
+        .iter()
+        .any(|part| upper.contains(part))
+}
+
+/// Scrubs credentials (`KEY`/`TOKEN`/`PASSWORD`) and `GIT_*` overrides from an
+/// inherited environment, enables non-interactive Git/Python defaults, and
+/// overlays caller-approved variables from `extra`.
+pub fn scrub_env(
+    inherited: impl IntoIterator<Item = (String, String)>,
+    extra: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    for (k, v) in inherited {
+        if k.starts_with("GIT_") || is_credential_var(&k) {
+            continue;
+        }
+        env.insert(k, v);
+    }
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    env.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
+    env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env
+}
+
+/// Returns whether the current OS exposes a supported non-agent sandbox binary.
+pub fn available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        Path::new("/usr/bin/sandbox-exec").is_file()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        provider::find_executable("bwrap").is_some()
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
+}
+
+/// Collects non-symlink parent binary directories required to resolve `argv[0]`
+/// inside `Profile::Gate`'s minimal root without exposing `$HOME` itself.
+pub fn runtime_dirs_for_argv(argv: &[String], path_env: Option<&str>) -> Vec<PathBuf> {
+    let Some(program) = argv.first().filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .and_then(|p| infra_core::fs::canonicalize(Path::new(&p)).ok());
+    let mut candidates = Vec::new();
+    let program_path = Path::new(program);
+    if program_path.components().count() > 1 {
+        if let Some(parent) = program_path.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    } else {
+        if let Some(resolved) = provider::find_executable(program)
+            && let Some(parent) = resolved.parent()
+        {
+            candidates.push(parent.to_path_buf());
+        }
+        if let Some(path_env) = path_env {
+            for entry in std::env::split_paths(path_env) {
+                if entry.join(program).exists() {
+                    candidates.push(entry);
+                }
+            }
+        }
+    }
+    let os_roots = ["/usr", "/bin", "/sbin", "/lib", "/lib64"];
+    let mut out = Vec::new();
+    for dir in candidates {
+        let Ok(canon) = infra_core::fs::canonicalize(&dir) else {
+            continue;
+        };
+        if !canon.is_dir()
+            || std::fs::symlink_metadata(&dir).is_ok_and(|m| infra_core::fs::linked(&m))
+        {
+            continue;
+        }
+        if home.as_ref().is_some_and(|h| h == &canon) {
+            continue;
+        }
+        if os_roots.iter().any(|root| canon.starts_with(root)) {
+            continue;
+        }
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+    out
 }
 fn canonical(path: &Path) -> Result<PathBuf> {
     let root = infra_core::fs::canonicalize(path)?;
@@ -208,6 +305,9 @@ pub fn trusted_helper(workspace: &Path) -> Result<PathBuf> {
     destination.check()?;
     Ok(control.join(relative))
 }
+pub fn wrap(spec: &Spec, argv: &[String], kind: Profile) -> Result<Vec<String>> {
+    command(spec, argv, kind)
+}
 pub fn creator(spec: &Spec, argv: &[String]) -> Result<Vec<String>> {
     command(spec, argv, Profile::Creator)
 }
@@ -305,9 +405,13 @@ fn command(spec: &Spec, argv: &[String], kind: Profile) -> Result<Vec<String>> {
     #[cfg(not(windows))]
     {
         if let Some(bwrap) = provider::find_executable("bwrap") {
-            // The private scratch folder exists on every platform: the discovery
-            // probe proves the workspace is writable by creating a file in it.
-            infra_core::fs::ensure_directory(&spec.workspace.join(".harness-tmp"), true)?;
+            if kind != Profile::Gate {
+                // The private scratch folder exists on Creator/Discovery: the discovery
+                // probe proves the workspace is writable by creating a file in it.
+                // Gate on Linux mounts `--tmpfs /tmp` directly and avoids polluting clean
+                // workspaces or git worktrees with `.harness-tmp`.
+                infra_core::fs::ensure_directory(&spec.workspace.join(".harness-tmp"), true)?;
+            }
             let mut out = vec![
                 arg(&bwrap)?,
                 "--die-with-parent".into(),
@@ -703,4 +807,66 @@ pub fn boundary_request_with(
     ];
     receipt.command = discovery(spec, &argv)?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod generalize_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn scrub_env_withholds_secrets_and_git_overrides() {
+        let inherited = vec![
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
+            ("OPENAI_API_KEY".to_owned(), "sk-secret".to_owned()),
+            ("github_token".to_owned(), "ghp_secret".to_owned()),
+            ("DB_PASSWORD".to_owned(), "hunter2".to_owned()),
+            ("GIT_DIR".to_owned(), "/tmp/evil".to_owned()),
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+        ];
+        let extra = BTreeMap::from([("CUSTOM_FLAG".to_owned(), "1".to_owned())]);
+        let scrubbed = scrub_env(inherited, &extra);
+        assert_eq!(scrubbed.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(scrubbed.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(
+            scrubbed.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            scrubbed.get("PYTHONDONTWRITEBYTECODE").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(scrubbed.get("CUSTOM_FLAG").map(String::as_str), Some("1"));
+        assert!(!scrubbed.contains_key("OPENAI_API_KEY"));
+        assert!(!scrubbed.contains_key("github_token"));
+        assert!(!scrubbed.contains_key("DB_PASSWORD"));
+        assert!(!scrubbed.contains_key("GIT_DIR"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_wrap_never_creates_harness_tmp_in_workspace() {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("repo");
+        std::fs::create_dir_all(&ws).unwrap();
+        let spec = Spec {
+            workspace: ws.clone(),
+            target: ws.clone(),
+            protected: vec![],
+            readable: vec![],
+            accounts: vec![],
+            runtime: vec![],
+            codex: None,
+            evidence: None,
+            network: false,
+        };
+        let cmd = wrap(&spec, &["/bin/true".into()], Profile::Gate).unwrap();
+        assert!(cmd.contains(&"--unshare-net".to_owned()));
+        assert!(!ws.join(".harness-tmp").exists());
+    }
 }

@@ -1819,10 +1819,12 @@ pub async fn event(
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
                     .unwrap_or_else(current_project_id);
-                open_target_in_code_map(
+                let ctx = resolve_code_map_jump_context(payload, &ui_state());
+                open_target_in_code_map_with_context(
                     (!proj.is_empty()).then_some(proj.as_str()),
                     &path,
                     fqn.as_deref(),
+                    ctx,
                 )
                 .await;
             }

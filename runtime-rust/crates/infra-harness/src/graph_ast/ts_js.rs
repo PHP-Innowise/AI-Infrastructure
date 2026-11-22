@@ -75,7 +75,22 @@ fn walk_ts_js(
         | "abstract_class_declaration"
         | "interface_declaration"
         | "enum_declaration" => {
+            let body_node = node.child_by_field_name("body");
             if fn_depth > 0 {
+                if let Some(body) = body_node {
+                    let mut nested_this = this_props.clone();
+                    let mut nested_vars = var_types.clone();
+                    walk_ts_js(
+                        ctx,
+                        body,
+                        depth + 1,
+                        None,
+                        fn_depth + 1,
+                        false,
+                        &mut nested_this,
+                        &mut nested_vars,
+                    );
+                }
                 return;
             }
             let decl_kind = match kind {
@@ -89,7 +104,6 @@ fn walk_ts_js(
                 .unwrap_or_default();
             let line = start_line(node);
             let e_line = end_line(node);
-            let body_node = node.child_by_field_name("body");
             let sig_end = body_node.map_or(node.end_byte(), |b| b.start_byte());
             let mut sig = header_without_comments(node, sig_end, ctx.source);
             if is_exported && !sig.starts_with("export ") {
@@ -166,9 +180,6 @@ fn walk_ts_js(
             return;
         }
         "function_declaration" | "generator_function_declaration" | "function_signature" => {
-            if fn_depth > 0 {
-                return;
-            }
             let name = node
                 .child_by_field_name("name")
                 .map(|n| ctx.text(n).trim().to_owned())
@@ -176,19 +187,19 @@ fn walk_ts_js(
             let line = start_line(node);
             let e_line = end_line(node);
             let body_node = node.child_by_field_name("body");
-            let sig_end = body_node.map_or(node.end_byte(), |b| b.start_byte());
-            let mut sig = header_without_comments(node, sig_end, ctx.source)
-                .trim_end_matches(';')
-                .trim()
-                .to_owned();
-            if is_exported && !sig.starts_with("export ") {
-                sig = format!("export {sig}");
-            }
-            let mods = collect_ts_modifiers(node, ctx.source);
-            let body_fp = body_node
-                .map(|b| ast_body_fingerprint(b, ctx.source))
-                .unwrap_or_default();
-            if !name.is_empty() {
+            if fn_depth == 0 && !name.is_empty() {
+                let sig_end = body_node.map_or(node.end_byte(), |b| b.start_byte());
+                let mut sig = header_without_comments(node, sig_end, ctx.source)
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_owned();
+                if is_exported && !sig.starts_with("export ") {
+                    sig = format!("export {sig}");
+                }
+                let mods = collect_ts_modifiers(node, ctx.source);
+                let body_fp = body_node
+                    .map(|b| ast_body_fingerprint(b, ctx.source))
+                    .unwrap_or_default();
                 ctx.push_decl(
                     "function",
                     &name,

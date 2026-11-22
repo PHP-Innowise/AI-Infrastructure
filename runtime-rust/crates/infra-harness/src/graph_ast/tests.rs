@@ -574,3 +574,60 @@ export async function loadOrder(id: string) {
         ts_ir.semantic_edges
     );
 }
+
+#[test]
+fn ts_js_walks_nested_functions_closures_and_local_classes_without_leaking_decls() {
+    let ts = r#"
+import { BillingClient } from './billing';
+import { AuditLog } from './audit';
+
+export function orchestrate(client: BillingClient) {
+    function innerStep(audit: AuditLog) {
+        audit.record('nested');
+        return fetch('/api/internal/sync');
+    }
+    class LocalHelper {
+        run() {
+            client.charge();
+        }
+    }
+    return [innerStep, new LocalHelper()];
+}
+"#;
+    let ir = parse_file_ir("src/orchestrate.ts", ts).expect("ts ir");
+    assert!(
+        ir.declarations
+            .iter()
+            .any(|d| d.entity.name == "orchestrate"),
+        "{:?}",
+        ir.declarations
+    );
+    assert!(
+        !ir.declarations
+            .iter()
+            .any(|d| d.entity.name == "innerStep" || d.entity.name == "LocalHelper"),
+        "nested declarations should stay scoped inside outer fn: {:?}",
+        ir.declarations
+    );
+    assert!(
+        ir.calls_and_refs
+            .iter()
+            .any(|r| r.target_name == "AuditLog" && r.member.as_deref() == Some("record")),
+        "expected nested function param + call captured: {:?}",
+        ir.calls_and_refs
+    );
+    assert!(
+        ir.calls_and_refs
+            .iter()
+            .any(|r| r.target_name == "BillingClient" && r.member.as_deref() == Some("charge")),
+        "expected nested class method call with captured outer param type: {:?}",
+        ir.calls_and_refs
+    );
+    assert!(
+        ir.semantic_edges
+            .iter()
+            .any(|e| e.kind == "calls_route" && e.target == "route:GET /api/internal/sync"),
+        "expected semantic call inside nested function: {:?}",
+        ir.semantic_edges
+    );
+}

@@ -1267,7 +1267,10 @@ async fn gate3_rejects_successful_replay_with_a_different_result() {
             "missing": 0, "different": 1, "unexpected": 1
         })
     );
-    assert!(!refused.to_string().contains("private-extra.txt"));
+    assert!(!refused.to_string().contains("unobserved contents"));
+    let mismatch_msg = refused["violations"][0]["message"].as_str().unwrap_or("");
+    assert!(mismatch_msg.contains("out/rows.json"), "{mismatch_msg}");
+    assert!(mismatch_msg.contains("private-extra.txt"), "{mismatch_msg}");
     assert_eq!(
         capsule["gates"][5]["report"]["result_comparison"]["status"],
         "matched"
@@ -2710,5 +2713,101 @@ call 2 skillcache-run continue '{"rows_file":"out/rows.json"}'"#;
             .contains(&"needs_recompile".to_string())
     );
     assert_eq!(stand.capsule(&capsule_id).await["status"], "active");
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gate3_passes_when_cold_turn_writes_gitignored_output() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    fs::write(stand.project().join(".gitignore"), "out/\n").unwrap();
+    let git_out = std::process::Command::new("git")
+        .args([
+            "-C",
+            &stand.project().display().to_string(),
+            "add",
+            ".gitignore",
+        ])
+        .status()
+        .unwrap();
+    assert!(git_out.success());
+    let git_commit = std::process::Command::new("git")
+        .args([
+            "-C",
+            &stand.project().display().to_string(),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "ignore out",
+        ])
+        .status()
+        .unwrap();
+    assert!(git_commit.success());
+
+    let (sid, generation) = stand.observed().await;
+    stand.compiler(1, &hybrid_answer());
+    let (_, capsule_id) = stand.start_compile(&sid, &generation).await;
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    assert_eq!(
+        capsule["gates"][2]["report"]["result_comparison"]["status"],
+        "matched"
+    );
+    stand.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compile_after_observe_queues_compilation_automatically() {
+    if !sandbox_usable() {
+        eprintln!("skipped: no usable bubblewrap sandbox on this host");
+        return;
+    }
+    let stand = Stand::new().await;
+    stand.compiler(1, &hybrid_answer());
+    stand.script("claude", &skill_turn(&stand.project()));
+    let sid = stand
+        .claude_turn(
+            "Extract the rows of invoices-2026/",
+            json!({"mode": "observe", "compile_after_observe": true}),
+            Some(&writing_agent("claude")),
+        )
+        .await;
+    assert!(
+        stand.phases(&sid).contains(&"queued".to_string()),
+        "expected queued event in {:?}",
+        stand.phases(&sid)
+    );
+    let (_, list) = stand
+        .http(
+            Method::GET,
+            &format!("/api/projects/{}/skillcache/capsules", stand.project_id),
+            None,
+        )
+        .await;
+    let capsule_id = list["capsules"][0]["capsule_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let capsule = stand.settled(&capsule_id, "compiling").await;
+    assert_eq!(capsule["status"], "active", "{capsule}");
+    // Verify usage snapshot was persisted on the observed trace row.
+    let trace_usage: Option<String> = stand
+        .store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT usage FROM skillcache_traces WHERE session_id=?1",
+            [&sid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(trace_usage.is_some());
     stand.close().await;
 }

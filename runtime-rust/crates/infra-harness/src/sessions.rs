@@ -453,6 +453,34 @@ fn observe_tool_event_with_graphs(
     }
     delta
 }
+/// Drains SkillCache executor journal + `run-log.changes.jsonl` mutations into session
+/// events, live focus tracking, and incremental code-graph updates.
+#[allow(clippy::too_many_arguments)]
+fn ingest_warm_with_live_focus(
+    warm: &crate::skillcache::warm::Warm,
+    store: &SessionStore,
+    sid: &str,
+    project_id: &str,
+    workspace: &Path,
+    graphs: Option<&crate::graph::Graphs>,
+    live_focus: &std::sync::Mutex<crate::graph_live::LiveFocusTracker>,
+    emit: &dyn Fn(Value) -> Result<()>,
+) {
+    warm.ingest_with_changes(emit, &|change_event| {
+        if let Ok(mut tracker) = live_focus.lock()
+            && let Some(delta) = observe_tool_event_with_graphs(
+                &mut tracker,
+                &change_event,
+                graphs,
+                project_id,
+                workspace,
+            )
+        {
+            let _ = crate::graph_live::save_session_focus(store, sid, tracker.focus());
+            let _ = emit(delta);
+        }
+    });
+}
 impl Sessions {
     pub fn new(
         store: SessionStore,
@@ -1055,6 +1083,18 @@ impl Sessions {
         if let Some(w) = warm {
             if let Some(bin) = &w.bin {
                 extra_readable.push(bin.clone());
+                for name in ["skillcache-run", "skillcache-tool"] {
+                    let link = bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                    if let Ok(target) = std::fs::read_link(&link)
+                        && let Some(parent) = target.parent()
+                        && let Ok(canonical_parent) = infra_core::fs::canonicalize(parent)
+                        && !protected_cfg.protected.iter().any(|p| {
+                            canonical_parent.starts_with(p) || p.starts_with(&canonical_parent)
+                        })
+                    {
+                        extra_readable.push(canonical_parent);
+                    }
+                }
             }
             if let Some(pkg) = &w.package {
                 extra_readable.push(pkg.clone());
@@ -1126,6 +1166,8 @@ impl Sessions {
                     providers: self.providers.clone(),
                     engine: None,
                     cancel: self.stopping.clone(),
+                    enqueuer: None,
+                    requalifying: None,
                 })
             })
     }
@@ -2472,8 +2514,10 @@ impl Sessions {
         } else {
             None
         };
-        let graphs_for_stream = lock(&self.graphs).ok().and_then(|slot| slot.clone());
-        let project_id_for_stream = session["project_id"].as_str().unwrap_or("").to_owned();
+        let graphs = lock(&self.graphs).ok().and_then(|slot| slot.clone());
+        let graphs_for_stream = graphs.clone();
+        let project_id = session["project_id"].as_str().unwrap_or("").to_owned();
+        let project_id_for_stream = project_id.clone();
         let workspace_for_stream = workspace.clone();
         let observed = Box::pin(provider::run_monitored_locked(
             &launch,
@@ -2534,7 +2578,16 @@ impl Sessions {
                 // The executor journals each phase beside its state; a tool
                 // event is when a new line can have appeared.
                 if tool && let Some(warm) = &warm_for_stream {
-                    warm.ingest(&|event| emit_events(event));
+                    ingest_warm_with_live_focus(
+                        warm,
+                        &store,
+                        &sid,
+                        &project_id_for_stream,
+                        &workspace_for_stream,
+                        graphs_for_stream.as_deref(),
+                        &focus_for_stream,
+                        &*emit_events,
+                    );
                 }
                 Ok(())
             },
@@ -2543,9 +2596,6 @@ impl Sessions {
         drop(forwarding);
         // Whatever the run left waiting is answered no.
         self.permissions.expire(&job.sid);
-        if let Some(warm) = &warm {
-            warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
-        }
         let observed = observed.map_err(|error| {
             if error.code == "native-cancelled"
                 && budget_stop.load(Ordering::Acquire)
@@ -2563,6 +2613,9 @@ impl Sessions {
         let result = match observed {
             Ok(result) => result,
             Err(error) => {
+                if let Some(warm) = &warm {
+                    warm.cleanup_abandoned();
+                }
                 if error.code == "cleanup-unconfirmed" {
                     self.stopping.store(true, Ordering::Release);
                     let _ = self
@@ -2596,10 +2649,26 @@ impl Sessions {
             && (expected_native.is_none()
                 || result.session_id.as_deref() != expected_native.as_deref())
         {
+            if let Some(warm) = &warm {
+                warm.cleanup_abandoned();
+            }
             let _ = self.lifecycle.abort(&binding, "failed");
             return Err(HarnessError::conflict(
                 "The assigned inbox turn has no matching native identity proof.",
             ));
+        }
+        if let Some(warm) = &warm {
+            ingest_warm_with_live_focus(
+                warm,
+                &self.store,
+                &job.sid,
+                &project_id,
+                &workspace,
+                graphs.as_deref(),
+                &live_focus,
+                &|event| emit(event),
+            );
+            warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
         }
         if result.ok
             && let Some(before) = observed_before
@@ -2649,6 +2718,7 @@ impl Sessions {
                     message: &job.prompt,
                     route: &route,
                     workspace: &workspace,
+                    usage: &Value::Null,
                 },
                 &binding.environment,
                 &emit,
@@ -2765,11 +2835,19 @@ impl Sessions {
                 .filter_map(|(name, value)| Some((name.clone(), value.clone()?))),
         );
         let redactor = crate::skillcache::trace::SessionRedactor::new(turn.workspace, launched);
-        let Some(trace) = recorder.finish(&redactor) else {
+        let Some((trace, usage)) = recorder.finish_with_usage(&redactor) else {
             let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
             return;
         };
-        let event = crate::skillcache::trace::save(&self.store, turn, trace, &redactor)
+        let usage_turn = crate::skillcache::trace::ObservedTurn {
+            session: turn.session,
+            generation: turn.generation,
+            message: turn.message,
+            route: turn.route,
+            workspace: turn.workspace,
+            usage: &usage,
+        };
+        let event = crate::skillcache::trace::save(&self.store, &usage_turn, trace, &redactor)
             .unwrap_or_else(|error| {
                 json!({
                     "kind": "skillcache",
@@ -2779,6 +2857,7 @@ impl Sessions {
                 })
             });
         // A snapshot lives exactly as long as the trace it belongs to.
+        let mut auto_queued = None;
         if event["phase"] == "observed" {
             let kept = self
                 .store
@@ -2787,10 +2866,18 @@ impl Sessions {
             if let Ok(kept) = kept {
                 crate::skillcache::snapshot::collect(&self.store.state, &kept);
             }
+            auto_queued = crate::skillcache::maybe_enqueue_after_observe(
+                &self.skillcache_runtime(),
+                turn.session,
+                turn.generation,
+            );
         } else {
             let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
         }
         let _ = emit(event);
+        if let Some(queued) = auto_queued {
+            let _ = emit(queued);
+        }
     }
     pub fn send(&self, sid: &str, prompt: &str, options: &Value) -> Result<Value> {
         let session = self.store.get(sid)?;
@@ -5696,6 +5783,98 @@ mod graph_focus_tests {
         assert_eq!(delta["created_entities"][0]["name"], "newly_added_fn");
 
         let found = graphs.find(&pid, None, "newly_added_fn", false).unwrap();
+        assert_eq!(found["rows"][0]["file"], "src/service.rs", "{found}");
+        graphs.close();
+    }
+
+    #[test]
+    fn ingest_warm_with_live_focus_forwards_changes_to_graph_and_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/service.rs"),
+            "pub fn initial_fn() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let pid = store.register(&root).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({
+                    "project_id": pid,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "workflow": "native",
+                }),
+                "Run compiled skill",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let graphs =
+            crate::graph::Graphs::with_native_backend(store.clone(), std::time::Duration::ZERO);
+        graphs.act(&pid, "enable").unwrap();
+        let started = std::time::Instant::now();
+        while graphs.status(&pid, false).unwrap()["state"] == "building" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
+
+        std::fs::write(
+            root.join("src/service.rs"),
+            "pub fn initial_fn() -> i32 {\n    1\n}\npub fn warm_script_fn() -> i32 {\n    2\n}\n",
+        )
+        .unwrap();
+        let warm_dir = dir.path().join("warm-state");
+        std::fs::create_dir_all(&warm_dir).unwrap();
+        let state_file = warm_dir.join("plan-state.json");
+        let mut run_log = infra_skillcache::state::RunLog::open(&state_file, "g1").unwrap();
+        run_log
+            .append(
+                "program_completed",
+                json!({"step_index": 0, "program": "mutate"}),
+            )
+            .unwrap();
+        infra_skillcache::state::append_changes(
+            &infra_skillcache::state::log_path(&state_file),
+            "g1",
+            &[json!({"path": "src/service.rs", "kind": "edit"})],
+        )
+        .unwrap();
+
+        let warm = crate::skillcache::warm::Warm::for_changes_test(warm_dir);
+        let live_focus =
+            std::sync::Mutex::new(crate::graph_live::LiveFocusTracker::new(root.clone()));
+        let emitted = std::sync::Mutex::new(Vec::<Value>::new());
+        ingest_warm_with_live_focus(
+            &warm,
+            &store,
+            &sid,
+            &pid,
+            &root,
+            Some(&graphs),
+            &live_focus,
+            &|event| {
+                emitted.lock().unwrap().push(event);
+                Ok(())
+            },
+        );
+        let events = emitted.lock().unwrap();
+        assert!(events.iter().any(|e| e["kind"] == "skillcache"));
+        assert!(events.iter().any(|e| {
+            e["kind"] == "graph_focus"
+                && e["target_paths"]
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|p| p == "src/service.rs"))
+        }));
+        let found = graphs.find(&pid, None, "warm_script_fn", false).unwrap();
         assert_eq!(found["rows"][0]["file"], "src/service.rs", "{found}");
         graphs.close();
     }

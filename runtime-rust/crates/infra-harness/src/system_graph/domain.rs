@@ -27,8 +27,67 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
+
+const SYSTEM_SUMMARY_CACHE_CAP: usize = 32;
+const SYSTEM_SUMMARY_LIVE_TTL: Duration = Duration::from_secs(2);
+
+type ServiceSummaryStamp = (String, u64, Option<u64>, Option<bool>, Option<(u64, i128)>);
+
+#[derive(Clone, PartialEq, Eq)]
+struct SystemSummaryKey {
+    catalog_hash: [u8; 32],
+    target_spec: Option<String>,
+    run_id: Option<String>,
+    agent_filter: Option<String>,
+    run_stamp: Option<(u64, i128)>,
+    service_stamps: Vec<ServiceSummaryStamp>,
+}
+
+type SystemSummaryEntry = (
+    SystemSummaryKey,
+    Instant,
+    Arc<BTreeMap<String, ServiceCodeSummary>>,
+);
+
+fn file_mtime_len_stamp(path: &std::path::Path) -> Option<(u64, i128)> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    let ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as i128);
+    Some((meta.len(), ns))
+}
+
+fn system_catalog_hash(system: &System, targets: &[ResolvedServiceTarget]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(system.config.to_string_lossy().as_bytes());
+    h.update([0]);
+    if let Ok(cfg_bytes) = serde_json::to_vec(&system.config_data) {
+        h.update(&cfg_bytes);
+    }
+    h.update([0]);
+    for target in targets {
+        h.update(target.service_id.as_bytes());
+        h.update([0]);
+        h.update(target.graph_id.as_bytes());
+        h.update([0]);
+        h.update(target.root.to_string_lossy().as_bytes());
+        h.update([0]);
+        if let Some(svc) = system.services.get(&target.service_id)
+            && let Some(manifest) = &svc.manifest
+            && let Ok(bytes) = serde_json::to_vec(manifest)
+        {
+            h.update(&bytes);
+        }
+        h.update([1]);
+    }
+    h.finalize().into()
+}
 
 // ---------------------------------------------------------------------------
 // `SystemGraphDomain` (`impl Domain`) — Member-Service & System-Wide Endpoints
@@ -39,6 +98,7 @@ pub struct SystemGraphDomain {
     pub graphs: Arc<Graphs>,
     pub bridge: Arc<HarnessCodeGraphBridge>,
     pub manager: Option<Arc<SystemManager>>,
+    summary_cache: Arc<Mutex<Vec<SystemSummaryEntry>>>,
 }
 
 impl SystemGraphDomain {
@@ -53,7 +113,13 @@ impl SystemGraphDomain {
             graphs,
             bridge,
             manager,
+            summary_cache: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_summary_cache(mut self, summary_cache: Arc<Mutex<Vec<SystemSummaryEntry>>>) -> Self {
+        self.summary_cache = summary_cache;
+        self
     }
 
     fn parse_check_flag(query: &Value) -> Result<bool> {
@@ -288,6 +354,59 @@ impl SystemGraphDomain {
         run_id: Option<&str>,
         agent_filter: Option<&str>,
     ) -> Result<BTreeMap<String, ServiceCodeSummary>> {
+        let run_stamp = run_id.and_then(|rid| {
+            file_mtime_len_stamp(
+                &self
+                    .store
+                    .state
+                    .join("ai-system")
+                    .join(rid)
+                    .join("execution")
+                    .join("run.json"),
+            )
+        });
+        let mut service_stamps = Vec::with_capacity(targets.len());
+        for target in targets {
+            let ir_rev = self
+                .graphs
+                .status(&target.graph_id, false)
+                .ok()
+                .and_then(|st| st["ir_revision"].as_u64())
+                .unwrap_or(0);
+            let idx_info = self
+                .graphs
+                .index_for_target_or_live(&target.graph_id, target_spec)
+                .map(|(idx, commit)| (idx.index_id(), commit));
+            let arch_stamp = file_mtime_len_stamp(&target.root.join(graph_map::layer_rules::FILE));
+            service_stamps.push((
+                target.service_id.clone(),
+                ir_rev,
+                idx_info.as_ref().map(|(id, _)| *id),
+                idx_info.map(|(_, is_commit)| is_commit),
+                arch_stamp,
+            ));
+        }
+        let cache_key = SystemSummaryKey {
+            catalog_hash: system_catalog_hash(system, targets),
+            target_spec: target_spec.map(str::to_owned),
+            run_id: run_id.map(str::to_owned),
+            agent_filter: agent_filter.map(str::to_owned),
+            run_stamp,
+            service_stamps,
+        };
+        let is_live_work = run_id.is_none()
+            && target_spec.is_none_or(|t| t.is_empty() || t == "work" || t == "uncommitted");
+        if let Ok(mut guard) = self.summary_cache.lock()
+            && let Some(pos) = guard.iter().position(|(k, ts, _)| {
+                k == &cache_key && (!is_live_work || ts.elapsed() < SYSTEM_SUMMARY_LIVE_TTL)
+            })
+        {
+            let entry = guard.remove(pos);
+            let cached = Arc::clone(&entry.2);
+            guard.push(entry);
+            return Ok((*cached).clone());
+        }
+
         let dispatches: Vec<DispatchEvidence> = match run_id {
             Some(rid) => self
                 .load_dispatches_for_run(rid)
@@ -514,6 +633,15 @@ impl SystemGraphDomain {
             }
         }
 
+        if let Ok(mut guard) = self.summary_cache.lock() {
+            if let Some(pos) = guard.iter().position(|(k, ..)| k == &cache_key) {
+                guard.remove(pos);
+            }
+            if guard.len() >= SYSTEM_SUMMARY_CACHE_CAP {
+                guard.remove(0);
+            }
+            guard.push((cache_key, Instant::now(), Arc::new(summaries.clone())));
+        }
         Ok(summaries)
     }
 
@@ -1514,9 +1642,11 @@ impl Domain for SystemGraphDomain {
                         let graphs = self.graphs.clone();
                         let bridge = self.bridge.clone();
                         let manager = self.manager.clone();
+                        let summary_cache = self.summary_cache.clone();
                         let op = operation.to_owned();
                         let val = tokio::task::spawn_blocking(move || {
-                            let domain = SystemGraphDomain::new(store, graphs, bridge, manager);
+                            let domain = SystemGraphDomain::new(store, graphs, bridge, manager)
+                                .with_summary_cache(summary_cache);
                             domain.execute_blocking(&op, &request)
                         })
                         .await
@@ -1729,4 +1859,77 @@ fn parse_system_map_query(query: &Value) -> Result<SystemMapQuery> {
         contracts: parse_csv_or_json_list(query["contracts"].as_str(), 32)?,
         depth,
     })
+}
+
+#[cfg(test)]
+mod domain_cache_tests {
+    use super::*;
+
+    #[test]
+    fn system_summary_cache_hits_and_invalidates_on_run_stamp_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let sys_dir = dir.path().join("sys");
+        let svc_dir = sys_dir.join("svc-a");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        std::fs::write(
+            svc_dir.join("ai-service.json"),
+            r#"{"schema_version":1,"id":"svc-a","description":"Service A","owner":"platform","capabilities":[],"sources":[],"provides":[],"consumes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sys_dir.join("ai-system.json"),
+            r#"{"schema_version":1,"name":"sys-1","shared_sources":[],"services":[{"id":"svc-a","root":"svc-a","manifest":"ai-service.json"}]}"#,
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let proj = store.register(&sys_dir).unwrap();
+        let sys_proj_id = proj["id"].as_str().unwrap().to_owned();
+        let (system, _, _) =
+            crate::system_graph::resolve_system(&store, None, &sys_proj_id, Some("ai-system.json"))
+                .unwrap();
+        let svc_proj = store.register(&svc_dir).unwrap();
+        let graph_id = svc_proj["id"].as_str().unwrap().to_owned();
+
+        let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+        let bridge = HarnessCodeGraphBridge::new(store.clone(), graphs.clone());
+        let domain = SystemGraphDomain::new(store.clone(), graphs.clone(), bridge, None);
+
+        let run_dir = state.join("ai-system/run-1/execution");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("run.json"), "{\"status\":\"running\"}\n").unwrap();
+
+        let targets = vec![ResolvedServiceTarget {
+            project_id: sys_proj_id,
+            config_path: "ai-system.json".to_owned(),
+            service_id: "svc-a".to_owned(),
+            graph_id,
+            root: svc_dir,
+            name: "Service A".to_owned(),
+            reused_project: true,
+        }];
+
+        let _ = domain
+            .build_enriched_system_graph_summaries(&system, &targets, None, Some("run-1"), None)
+            .unwrap();
+        assert_eq!(domain.summary_cache.lock().unwrap().len(), 1);
+        let _ = domain
+            .build_enriched_system_graph_summaries(&system, &targets, None, Some("run-1"), None)
+            .unwrap();
+        assert_eq!(domain.summary_cache.lock().unwrap().len(), 1);
+
+        // Changing `run.json` bytes/size changes `run_stamp` -> inserts updated cache entry.
+        std::fs::write(
+            run_dir.join("run.json"),
+            "{\"status\":\"completed\",\"done\":true}\n",
+        )
+        .unwrap();
+        let _ = domain
+            .build_enriched_system_graph_summaries(&system, &targets, None, Some("run-1"), None)
+            .unwrap();
+        assert_eq!(domain.summary_cache.lock().unwrap().len(), 2);
+
+        graphs.close();
+    }
 }

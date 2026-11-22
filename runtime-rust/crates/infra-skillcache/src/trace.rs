@@ -193,13 +193,90 @@ fn unnumbered(text: &str) -> String {
     }
 }
 
+fn unwrap_shell_command(command: &str) -> &str {
+    static SHELL: OnceLock<Regex> = OnceLock::new();
+    let trimmed = command.trim();
+    if let Some(captures) = SHELL
+        .get_or_init(|| {
+            Regex::new(r#"^(?:(?:/usr)?/bin/)?(?:bash|sh|zsh)\s+-(?:lc|c)\s+(.+)$"#)
+                .expect("a fixed expression")
+        })
+        .captures(trimmed)
+        && let Some(inner) = captures.get(1)
+    {
+        let body = inner.as_str().trim();
+        if body.len() >= 2
+            && ((body.starts_with('\'') && body.ends_with('\''))
+                || (body.starts_with('"') && body.ends_with('"')))
+        {
+            return body[1..body.len() - 1].trim();
+        }
+        return body;
+    }
+    trimmed
+}
+
+fn reads_python_inline(body: &str) -> bool {
+    static PY: OnceLock<Regex> = OnceLock::new();
+    let Some(found) = PY
+        .get_or_init(|| {
+            Regex::new(r#"^(?:(?:/usr(?:/local)?)?/bin/)?python3?\s+-c\s+"#)
+                .expect("a fixed expression")
+        })
+        .find(body)
+    else {
+        return false;
+    };
+    let rest = body[found.end()..].trim();
+    let code = if rest.len() >= 2
+        && ((rest.starts_with('\'') && rest.ends_with('\''))
+            || (rest.starts_with('"') && rest.ends_with('"')))
+    {
+        &rest[1..rest.len() - 1]
+    } else {
+        return false;
+    };
+    let reads =
+        code.contains("open(") || code.contains(".read_text(") || code.contains(".read_bytes(");
+    let writes = code.contains(".write_text(")
+        || code.contains(".write_bytes(")
+        || code.contains("'w'")
+        || code.contains("\"w\"");
+    reads && !writes
+}
+
 fn reads_one_file(command: &str) -> bool {
-    static CAT: OnceLock<Regex> = OnceLock::new();
-    CAT.get_or_init(|| {
-        Regex::new(r#"^\s*(?:(?:/usr)?/bin/)?(?:bash|sh|zsh)?\s*(?:-lc\s+)?["']?\s*(?:cat|type|Get-Content)\s+[^|;&<>]+["']?\s*$"#)
-            .expect("a fixed expression")
-    })
-    .is_match(command)
+    let body = unwrap_shell_command(command);
+    if reads_python_inline(body) {
+        return true;
+    }
+    if body.is_empty() || body.contains(['|', ';', '&', '<', '>', '\n']) {
+        return false;
+    }
+    let parts: Vec<&str> = body.split_whitespace().collect();
+    let Some(cmd) = parts.first().copied() else {
+        return false;
+    };
+    let cmd = cmd.rsplit('/').next().unwrap_or(cmd);
+    let args = &parts[1..];
+    match cmd {
+        "cat" | "type" | "Get-Content" => !args.is_empty(),
+        "head" | "tail" => {
+            !args.iter().any(|arg| *arg == "-f" || *arg == "--follow")
+                && args.iter().any(|arg| !arg.starts_with('-'))
+        }
+        "sed" => {
+            let mutating = args.iter().any(|arg| {
+                *arg == "-i"
+                    || *arg == "--in-place"
+                    || arg.starts_with("--in-place=")
+                    || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('i'))
+            });
+            !mutating && args.iter().filter(|arg| !arg.starts_with('-')).count() >= 2
+        }
+        "jq" => args.iter().filter(|arg| !arg.starts_with('-')).count() >= 2,
+        _ => false,
+    }
 }
 
 fn skill_paths(text: &str) -> Vec<String> {
@@ -1061,6 +1138,12 @@ mod tests {
             "bash -lc 'cat src/a.rs'",
             "Get-Content a.txt",
             "/bin/cat a",
+            "head -n 20 src/a.rs",
+            "tail -n 10 logs/out.log",
+            "sed -n '1,20p' config.yaml",
+            "jq '.routes' routes.json",
+            "python3 -c \"print(open('data.txt').read())\"",
+            "python -c \"from pathlib import Path; print(Path('a.txt').read_text())\"",
         ] {
             assert!(reads_one_file(command), "{command}");
         }
@@ -1068,6 +1151,11 @@ mod tests {
             "cat a | grep b",
             "ls",
             "python3 x.py",
+            "bash -c \"",
+            "bash -lc '",
+            "sed -i 's/a/b/' src/a.rs",
+            "tail -f logs/out.log",
+            "python3 -c \"Path('a.txt').write_text('x')\"",
             "cat a > b",
             "cat a; rm b",
         ] {

@@ -18,7 +18,7 @@ use crate::{
     graph_ast::{AstFileExtraction, parse_file_ir},
     graph_crates::Crates,
     graph_deps::{
-        DeclaredMember, DepMemberRef, extract_declared_members, find_matching_member_references,
+        DeclaredMember, DepMemberRef, find_matching_member_references,
         find_matching_member_references_from_ir,
     },
     graph_impact::{
@@ -69,7 +69,8 @@ use self::file_inspect::{Named, named};
 use self::follow::*;
 pub use self::lod::Lod;
 pub(crate) use self::lod::{
-    apply_lod_and_min_weight, finalize_telemetry, paginate_lens_view, structural_diff_overlay,
+    LodFilter, apply_lod_and_min_weight, finalize_telemetry, paginate_lens_view,
+    structural_diff_overlay, view_at_lod,
 };
 use self::paths::*;
 use self::view::*;
@@ -248,6 +249,8 @@ pub(super) struct Node {
     #[serde(default)]
     pub(super) source_location: Loose,
     #[serde(default)]
+    pub(super) end_line: Loose,
+    #[serde(default)]
     pub(super) file_type: Loose,
     #[serde(default)]
     pub(super) node_kind: Loose,
@@ -304,6 +307,8 @@ pub(crate) struct Symbol {
     pub(crate) parent: u32,
     /// Where it starts, or 0 when the graph does not say.
     pub(crate) line: u32,
+    /// Where it ends (inclusive), or 0 when the graph does not say.
+    pub(crate) end_line: u32,
     pub(crate) at: u32,
     pub(crate) len: u16,
     pub(crate) kind: Kind,
@@ -463,6 +468,8 @@ pub(super) struct Builder<'a> {
     pub(super) file_ids: HashMap<String, u32>,
     pub(super) node_symbol: HashMap<String, u32>,
     pub(super) symbols: Vec<Symbol>,
+    pub(super) symbol_ir_ids: Vec<String>,
+    pub(super) store_ir_ids: bool,
     pub(super) community_names: BTreeMap<u32, String>,
     pub(super) names: String,
     pub(super) uses: Vec<Use>,
@@ -479,17 +486,68 @@ pub(super) struct Builder<'a> {
     pub(super) listed: bool,
     pub(super) backend: Option<String>,
 }
-impl Builder<'_> {
-    pub(super) fn path(&self, raw: &str) -> Option<String> {
-        let mut path = raw.replace('\\', "/");
-        if let Some(inside) = path
-            .strip_prefix(self.root)
-            .and_then(|rest| rest.strip_prefix('/'))
-        {
-            path = inside.to_owned();
+fn clean_graph_path(root: &str, raw: &str) -> Option<String> {
+    let mut path = raw.replace('\\', "/");
+    if let Some(inside) = path
+        .strip_prefix(root)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        path = inside.to_owned();
+    }
+    let path = path.trim_start_matches("./").trim_matches('/');
+    (!path.is_empty()).then(|| path.to_owned())
+}
+fn classify_symbol_kind(
+    label: &str,
+    file_type: Option<&str>,
+    node_kind: Option<&str>,
+    callable_class: Option<&str>,
+) -> (Kind, bool) {
+    let kind = if file_type == Some("rationale") {
+        Kind::Note
+    } else if node_kind == Some("page") {
+        Kind::File
+    } else if file_type == Some("document") {
+        Kind::Heading
+    } else if callable_class == Some("true") {
+        Kind::Type
+    } else if label.ends_with("()") {
+        if label.starts_with('.') {
+            Kind::Method
+        } else {
+            Kind::Function
         }
-        let path = path.trim_start_matches("./").trim_matches('/');
-        (!path.is_empty()).then(|| path.to_owned())
+    } else {
+        Kind::Name
+    };
+    (kind, kind == Kind::Note)
+}
+impl<'a> Builder<'a> {
+    pub(super) fn new(root: &'a str, store_ir_ids: bool, backend: Option<String>) -> Self {
+        Self {
+            root,
+            files: Vec::new(),
+            file_ids: HashMap::new(),
+            node_symbol: HashMap::new(),
+            symbols: Vec::new(),
+            symbol_ir_ids: Vec::new(),
+            store_ir_ids,
+            community_names: BTreeMap::new(),
+            names: String::new(),
+            uses: Vec::new(),
+            ties: Vec::new(),
+            kinds: Vec::new(),
+            kind_ids: HashMap::new(),
+            nodes: 0,
+            links: 0,
+            unplaced: 0,
+            early: Vec::new(),
+            listed: false,
+            backend,
+        }
+    }
+    pub(super) fn path(&self, raw: &str) -> Option<String> {
+        clean_graph_path(self.root, raw)
     }
     pub(super) fn file(&mut self, path: String) -> u32 {
         if let Some(found) = self.file_ids.get(&path) {
@@ -507,25 +565,14 @@ impl Builder<'_> {
         };
         let file = self.file(path);
         let label = node.label.0.unwrap_or_default();
-        let kind = if node.file_type.0.as_deref() == Some("rationale") {
-            Kind::Note
-        } else if node.node_kind.0.as_deref() == Some("page") {
-            Kind::File
-        } else if node.file_type.0.as_deref() == Some("document") {
-            Kind::Heading
-        } else if node.class.0.as_deref() == Some("true") {
-            Kind::Type
-        } else if label.ends_with("()") {
-            if label.starts_with('.') {
-                Kind::Method
-            } else {
-                Kind::Function
-            }
-        } else {
-            Kind::Name
-        };
+        let (kind, is_note) = classify_symbol_kind(
+            &label,
+            node.file_type.0.as_deref(),
+            node.node_kind.0.as_deref(),
+            node.class.0.as_deref(),
+        );
         // A note is the text of a comment, which the map never shows.
-        let kept = if kind == Kind::Note {
+        let kept = if is_note {
             ""
         } else {
             clip(label.trim(), NAME_LIMIT)
@@ -547,6 +594,7 @@ impl Builder<'_> {
             community,
             parent: NONE,
             line: line(node.source_location.0.as_deref()),
+            end_line: line(node.end_line.0.as_deref()),
             at: self.names.len() as u32,
             len: kept.len() as u16,
             kind,
@@ -555,32 +603,40 @@ impl Builder<'_> {
             is_semantic,
         };
         self.names.push_str(kept);
+        if self.store_ir_ids {
+            self.symbol_ir_ids.push(node.id.0.clone());
+        }
         // Of two nodes that share an id, links go to the later one.
         self.node_symbol
             .insert(node.id.0, self.symbols.len() as u32);
         self.symbols.push(symbol);
     }
+}
+fn apply_nest(symbols: &mut [Symbol], holder: u32, held: u32, relation: &str) {
+    let inside = &mut symbols[held as usize];
+    if inside.parent == NONE {
+        inside.parent = holder;
+    }
+    let member = match relation {
+        "method" => Kind::Method,
+        "case_of" => Kind::Case,
+        _ => return,
+    };
+    if inside.kind == Kind::Name || (member == Kind::Method && inside.kind == Kind::Function) {
+        inside.kind = member;
+    }
+    // Whatever has methods or cases is a type, also where the tool does
+    // not say so, as for a Rust struct.
+    let outside = &mut symbols[holder as usize];
+    if outside.kind == Kind::Name {
+        outside.kind = Kind::Type;
+    }
+}
+impl Builder<'_> {
     /// Puts a symbol inside the one that holds it. The first holder stays: a
     /// key of a JSON document can be listed under several.
     pub(super) fn nest(&mut self, holder: u32, held: u32, relation: &str) {
-        let inside = &mut self.symbols[held as usize];
-        if inside.parent == NONE {
-            inside.parent = holder;
-        }
-        let member = match relation {
-            "method" => Kind::Method,
-            "case_of" => Kind::Case,
-            _ => return,
-        };
-        if inside.kind == Kind::Name || (member == Kind::Method && inside.kind == Kind::Function) {
-            inside.kind = member;
-        }
-        // Whatever has methods or cases is a type, also where the tool does
-        // not say so, as for a Rust struct.
-        let outside = &mut self.symbols[holder as usize];
-        if outside.kind == Kind::Name {
-            outside.kind = Kind::Type;
-        }
+        apply_nest(&mut self.symbols, holder, held, relation);
     }
     pub(super) fn link(&mut self, link: Link) {
         self.links += 1;
@@ -748,6 +804,7 @@ pub(super) struct Wires {
 /// the symbols of each file with the links between symbols.
 #[derive(Debug)]
 pub struct Index {
+    index_id: u64,
     /// Where the files of the graph lie, to read a source for its tests.
     root: PathBuf,
     revision_tests: Option<TestSpans>,
@@ -772,6 +829,7 @@ pub struct Index {
     /// which the first is not built with the second. They are kept out of
     /// everything that is counted and drawn.
     ruled: Vec<Use>,
+    crates: Crates,
     files: Vec<String>,
     pairs: Vec<(u32, u32, Pair)>,
     /// Ordered by file: the symbols of file `n` are `first[n]..first[n + 1]`.
@@ -779,6 +837,8 @@ pub struct Index {
     community_names: BTreeMap<u32, String>,
     first: Vec<u32>,
     names: String,
+    ir_node_ids: String,
+    ir_node_id_spans: Vec<(u32, u16)>,
     uses: Vec<Use>,
     /// Of the links, those that name a type as the type of something.
     ties: Vec<Use>,
@@ -789,6 +849,7 @@ pub struct Index {
     backend: Option<String>,
     ir_db_path: Option<PathBuf>,
     known_files_set: OnceLock<BTreeSet<String>>,
+    manifest_dirs: OnceLock<Vec<String>>,
     member_store: Mutex<PersistentMemberStore>,
 }
 /// The part of `path` that stands for it when `scope` is open: the child of
@@ -914,7 +975,18 @@ pub struct Sharing<'a> {
     /// picture begins with the one after them.
     pub skip: usize,
 }
+static NEXT_INDEX_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(super) fn next_index_id() -> u64 {
+    NEXT_INDEX_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Index {
+    /// Monotonic in-process identity of this `Index` snapshot.
+    pub(crate) fn index_id(&self) -> u64 {
+        self.index_id
+    }
+
     /// Reads a node-link graph without holding it in memory: nodes become a
     /// table from symbol to file, links are counted as they pass. The
     /// manifests of the tree under `root` say which links cannot be.
@@ -931,31 +1003,14 @@ impl Index {
     ) -> Result<Self> {
         let base = root.to_path_buf();
         let root_str = root.to_string_lossy().replace('\\', "/");
-        let mut builder = Builder {
-            root: root_str.trim_end_matches('/'),
-            files: Vec::new(),
-            file_ids: HashMap::new(),
-            node_symbol: HashMap::new(),
-            symbols: Vec::new(),
-            community_names: BTreeMap::new(),
-            names: String::new(),
-            uses: Vec::new(),
-            ties: Vec::new(),
-            kinds: Vec::new(),
-            kind_ids: HashMap::new(),
-            nodes: 0,
-            links: 0,
-            unplaced: 0,
-            early: Vec::new(),
-            listed: false,
-            backend,
-        };
+        let mut builder = Builder::new(root_str.trim_end_matches('/'), true, backend);
         for spec in ir_nodes {
             builder.node(Node {
                 id: Text(spec.id),
                 source_file: Some(Text(spec.source_file)),
                 label: Loose(Some(spec.label)),
                 source_location: Loose(spec.source_location),
+                end_line: Loose((spec.end_line > 0).then(|| spec.end_line.to_string())),
                 file_type: Loose(spec.file_type),
                 node_kind: Loose(spec.node_kind),
                 community: Loose(spec.community.map(|c| c.to_string())),
@@ -988,25 +1043,7 @@ impl Index {
     ) -> Result<Self> {
         let base = root.to_path_buf();
         let root = root.to_string_lossy().replace('\\', "/");
-        let mut builder = Builder {
-            root: root.trim_end_matches('/'),
-            files: Vec::new(),
-            file_ids: HashMap::new(),
-            node_symbol: HashMap::new(),
-            symbols: Vec::new(),
-            community_names: BTreeMap::new(),
-            names: String::new(),
-            uses: Vec::new(),
-            ties: Vec::new(),
-            kinds: Vec::new(),
-            kind_ids: HashMap::new(),
-            nodes: 0,
-            links: 0,
-            unplaced: 0,
-            early: Vec::new(),
-            listed: false,
-            backend: None,
-        };
+        let mut builder = Builder::new(root.trim_end_matches('/'), false, None);
         let mut reader = serde_json::Deserializer::from_reader(std::io::BufReader::new(source));
         Whole(&mut builder)
             .deserialize(&mut reader)
@@ -1056,6 +1093,12 @@ impl Index {
             place[*old as usize] = new as u32;
         }
         let mut first = vec![0u32; builder.files.len() + 1];
+        let mut ir_node_ids = String::new();
+        let mut ir_node_id_spans = if builder.store_ir_ids {
+            Vec::with_capacity(order.len())
+        } else {
+            Vec::new()
+        };
         let symbols = order
             .iter()
             .map(|old| {
@@ -1064,6 +1107,16 @@ impl Index {
                     symbol.parent = place[symbol.parent as usize];
                 }
                 first[symbol.file as usize + 1] += 1;
+                if builder.store_ir_ids {
+                    let raw_id = &builder.symbol_ir_ids[*old as usize];
+                    if raw_id.len() <= u16::MAX as usize {
+                        let start = ir_node_ids.len() as u32;
+                        ir_node_ids.push_str(raw_id);
+                        ir_node_id_spans.push((start, raw_id.len() as u16));
+                    } else {
+                        ir_node_id_spans.push((0, 0));
+                    }
+                }
                 symbol
             })
             .collect::<Vec<_>>();
@@ -1095,6 +1148,7 @@ impl Index {
             })
             .collect();
         Ok(Self {
+            index_id: next_index_id(),
             root: base,
             revision_tests: None,
             test_symbols: OnceLock::new(),
@@ -1105,11 +1159,14 @@ impl Index {
             circles: Default::default(),
             left: (0, 0),
             ruled,
+            crates,
             files: builder.files,
             pairs: pairs_of(&symbols, &uses),
             symbols,
             first,
             names: builder.names,
+            ir_node_ids,
+            ir_node_id_spans,
             community_names: builder.community_names,
             uses,
             ties,
@@ -1120,6 +1177,7 @@ impl Index {
             backend: builder.backend,
             ir_db_path,
             known_files_set: OnceLock::new(),
+            manifest_dirs: OnceLock::new(),
             member_store: Mutex::new(PersistentMemberStore::default()),
         })
     }
@@ -1168,6 +1226,446 @@ impl Index {
             .position(|file| file == scope)
             .map(|at| at as u32)
     }
+    pub(crate) fn node_link_counts(&self) -> (u64, u64) {
+        (self.nodes, self.links)
+    }
+
+    fn ir_node_id(&self, sym: u32) -> &str {
+        let Some(&(at, len)) = self.ir_node_id_spans.get(sym as usize) else {
+            return "";
+        };
+        let start = at as usize;
+        let end = start + len as usize;
+        self.ir_node_ids.get(start..end).unwrap_or("")
+    }
+
+    /// Builds a new `Index` by updating only dirty files and incident edges on top of `self`.
+    /// Returns `None` if `self` lacks IR symbol IDs or an incident neighbor ID cannot be mapped,
+    /// allowing the caller to fall back cleanly to a full rebuild.
+    pub(crate) fn update_files(
+        &self,
+        root: &Path,
+        delta: crate::graph_ir::IrDeltaElements,
+    ) -> Option<Self> {
+        if delta.files.is_empty() || self.ir_node_id_spans.len() != self.symbols.len() {
+            return None;
+        }
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        let root_trim = root_str.trim_end_matches('/');
+
+        let mut touched = delta.edited_files.clone();
+        touched.extend(delta.removed_files.iter().cloned());
+        let new_crates =
+            self.crates
+                .update_files(&self.files, &delta.files, &touched, false, &|path| {
+                    text_at(root, path)
+                });
+
+        let old_by_path: HashMap<&str, u32> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as u32))
+            .collect();
+        let new_by_path: HashMap<&str, u32> = delta
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as u32))
+            .collect();
+
+        let mut community_names = self.community_names.clone();
+        let mut delta_symbols: Vec<Symbol> = Vec::with_capacity(delta.node_specs.len());
+        let mut delta_labels: Vec<String> = Vec::with_capacity(delta.node_specs.len());
+        let mut delta_ir_ids: Vec<String> = Vec::with_capacity(delta.node_specs.len());
+        let mut delta_id_to_local: HashMap<String, u32> = HashMap::new();
+
+        for spec in delta.node_specs {
+            let Some(clean_file) = clean_graph_path(root_trim, &spec.source_file) else {
+                continue;
+            };
+            let Some(&new_file) = new_by_path.get(clean_file.as_str()) else {
+                continue;
+            };
+            let callable = spec.callable_class.then_some("true");
+            let (kind, is_note) = classify_symbol_kind(
+                &spec.label,
+                spec.file_type.as_deref(),
+                spec.node_kind.as_deref(),
+                callable,
+            );
+            let kept = if is_note {
+                ""
+            } else {
+                clip(spec.label.trim(), NAME_LIMIT)
+            };
+            if let Some((id, name)) = spec.community.zip(spec.community_name) {
+                let clipped = clip(name.trim(), NAME_LIMIT);
+                if !clipped.is_empty() {
+                    community_names
+                        .entry(id)
+                        .or_insert_with(|| clipped.to_owned());
+                }
+            }
+            let is_semantic =
+                spec.node_kind.as_deref() == Some("semantic") || spec.id.starts_with("sem:");
+            let file_is_test = is_test(&delta.files[new_file as usize]);
+            let sym = Symbol {
+                file: new_file,
+                community: spec.community,
+                parent: NONE,
+                line: line(spec.source_location.as_deref()),
+                end_line: spec.end_line,
+                at: 0,
+                len: kept.len() as u16,
+                kind,
+                is_abstract: spec.is_abstract,
+                is_test: spec.is_test || file_is_test,
+                is_semantic,
+            };
+            let local_idx = delta_symbols.len() as u32;
+            delta_id_to_local.insert(spec.id.clone(), local_idx);
+            delta_symbols.push(sym);
+            delta_labels.push(kept.to_owned());
+            delta_ir_ids.push(spec.id);
+        }
+
+        let delta_total_links = delta.link_specs.len() as u64;
+        let mut non_struct_links = Vec::with_capacity(delta.link_specs.len());
+        for link in delta.link_specs {
+            let rel = link.relation.as_deref().unwrap_or("");
+            if rel.starts_with('_') {
+                continue;
+            }
+            let is_structure = STRUCTURE.contains(&rel) || rel == "case_of";
+            if is_structure
+                && let (Some(&src), Some(&dst)) = (
+                    delta_id_to_local.get(&link.source),
+                    delta_id_to_local.get(&link.target),
+                )
+            {
+                let from_f = delta_symbols[src as usize].file;
+                let to_f = delta_symbols[dst as usize].file;
+                if (STRUCTURE.contains(&rel) || (rel == "case_of" && from_f == to_f))
+                    && rel != "rationale_for"
+                    && from_f == to_f
+                    && src != dst
+                {
+                    apply_nest(&mut delta_symbols, src, dst, rel);
+                    continue;
+                }
+                if STRUCTURE.contains(&rel) {
+                    continue;
+                }
+            }
+            if !STRUCTURE.contains(&rel) {
+                non_struct_links.push(link);
+            }
+        }
+
+        for idx in 0..delta_symbols.len() {
+            if delta_symbols[idx].parent != NONE || delta_symbols[idx].kind != Kind::Name {
+                continue;
+            }
+            let label = &delta_labels[idx];
+            let path = &delta.files[delta_symbols[idx].file as usize];
+            if !label.is_empty()
+                && path
+                    .strip_suffix(label.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.ends_with('/'))
+            {
+                delta_symbols[idx].kind = Kind::File;
+            }
+        }
+        for idx in 0..delta_symbols.len() {
+            let parent = delta_symbols[idx].parent;
+            if parent != NONE && delta_symbols[parent as usize].kind == Kind::File {
+                delta_symbols[idx].parent = NONE;
+            }
+        }
+
+        let mut delta_by_file: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (local_idx, sym) in delta_symbols.iter().enumerate() {
+            delta_by_file
+                .entry(sym.file)
+                .or_default()
+                .push(local_idx as u32);
+        }
+
+        let mut new_symbols: Vec<Symbol> = Vec::with_capacity(self.symbols.len());
+        let mut new_first = vec![0u32; delta.files.len() + 1];
+        let mut new_names = String::with_capacity(self.names.len());
+        let mut new_ir_node_ids = String::with_capacity(self.ir_node_ids.len());
+        let mut new_ir_node_id_spans: Vec<(u32, u16)> = Vec::with_capacity(self.symbols.len());
+        let mut old_to_new_sym = vec![NONE; self.symbols.len()];
+        let mut delta_to_new_sym = vec![NONE; delta_symbols.len()];
+        let mut is_new_delta_sym: Vec<bool> = Vec::with_capacity(self.symbols.len());
+
+        let mut push_ir_id = |ir_id: &str| {
+            if ir_id.len() <= u16::MAX as usize {
+                let start = new_ir_node_ids.len() as u32;
+                new_ir_node_ids.push_str(ir_id);
+                new_ir_node_id_spans.push((start, ir_id.len() as u16));
+            } else {
+                new_ir_node_id_spans.push((0, 0));
+            }
+        };
+
+        for (new_f, path) in delta.files.iter().enumerate() {
+            if delta.edited_files.contains(path) {
+                if let Some(locals) = delta_by_file.get(&(new_f as u32)) {
+                    let base = new_symbols.len();
+                    for &local in locals {
+                        let mut sym = delta_symbols[local as usize];
+                        sym.at = new_names.len() as u32;
+                        new_names.push_str(&delta_labels[local as usize]);
+                        push_ir_id(&delta_ir_ids[local as usize]);
+                        delta_to_new_sym[local as usize] = new_symbols.len() as u32;
+                        new_symbols.push(sym);
+                        is_new_delta_sym.push(true);
+                    }
+                    for sym in &mut new_symbols[base..] {
+                        if sym.parent != NONE {
+                            sym.parent = delta_to_new_sym[sym.parent as usize];
+                        }
+                    }
+                }
+            } else if let Some(&old_f) = old_by_path.get(path.as_str()) {
+                for old_sym in self.range(old_f) {
+                    let mut sym = self.symbols[old_sym as usize];
+                    sym.file = new_f as u32;
+                    sym.at = new_names.len() as u32;
+                    new_names.push_str(self.label(old_sym));
+                    let ir_id = self.ir_node_id(old_sym);
+                    push_ir_id(ir_id);
+                    old_to_new_sym[old_sym as usize] = new_symbols.len() as u32;
+                    new_symbols.push(sym);
+                    is_new_delta_sym.push(false);
+                }
+            }
+            new_first[new_f + 1] = new_symbols.len() as u32;
+        }
+
+        for (idx, sym) in new_symbols.iter_mut().enumerate() {
+            if !is_new_delta_sym[idx] && sym.parent != NONE {
+                let mapped = old_to_new_sym[sym.parent as usize];
+                if mapped == NONE {
+                    return None;
+                }
+                sym.parent = mapped;
+            }
+        }
+
+        let old_file_dirty: Vec<bool> = self
+            .files
+            .iter()
+            .map(|p| delta.dirty_files.contains(p))
+            .collect();
+        let mut removed_node_count = 0u64;
+        let mut dropped_struct_links = 0u64;
+        for (old_f, path) in self.files.iter().enumerate() {
+            if delta.edited_files.contains(path) || delta.removed_files.contains(path) {
+                let r = self.range(old_f as u32);
+                removed_node_count += r.len() as u64;
+                for old_sym in r {
+                    if self.symbols[old_sym as usize].parent != NONE {
+                        dropped_struct_links += 1;
+                    }
+                }
+            }
+        }
+
+        let is_dirty_old = |sym: u32| old_file_dirty[self.symbols[sym as usize].file as usize];
+        let check_multi_rs = delta.rs_touched && new_crates.is_multi_crate();
+        let mut dropped_non_struct = 0u64;
+        let mut new_uses = Vec::with_capacity(self.uses.len());
+        let mut new_ruled = Vec::with_capacity(self.ruled.len());
+        for &(from, to, kind, guessed) in &self.uses {
+            if is_dirty_old(from) || is_dirty_old(to) {
+                dropped_non_struct += 1;
+                continue;
+            }
+            let nf = old_to_new_sym[from as usize];
+            let nt = old_to_new_sym[to as usize];
+            if nf == NONE || nt == NONE {
+                return None;
+            }
+            if check_multi_rs
+                && new_crates
+                    .rules_out(new_symbols[nf as usize].file, new_symbols[nt as usize].file)
+            {
+                new_ruled.push((nf, nt, kind, guessed));
+            } else {
+                new_uses.push((nf, nt, kind, guessed));
+            }
+        }
+        for &(from, to, kind, guessed) in &self.ruled {
+            if is_dirty_old(from) || is_dirty_old(to) {
+                dropped_non_struct += 1;
+                continue;
+            }
+            let nf = old_to_new_sym[from as usize];
+            let nt = old_to_new_sym[to as usize];
+            if nf == NONE || nt == NONE {
+                return None;
+            }
+            if check_multi_rs
+                && !new_crates
+                    .rules_out(new_symbols[nf as usize].file, new_symbols[nt as usize].file)
+            {
+                new_uses.push((nf, nt, kind, guessed));
+            } else {
+                new_ruled.push((nf, nt, kind, guessed));
+            }
+        }
+        let mut new_ties = Vec::with_capacity(self.ties.len());
+        for &(from, to, how, guessed) in &self.ties {
+            if is_dirty_old(from) || is_dirty_old(to) {
+                continue;
+            }
+            let nf = old_to_new_sym[from as usize];
+            let nt = old_to_new_sym[to as usize];
+            if nf == NONE || nt == NONE {
+                return None;
+            }
+            if !check_multi_rs
+                || !new_crates
+                    .rules_out(new_symbols[nf as usize].file, new_symbols[nt as usize].file)
+            {
+                new_ties.push((nf, nt, how, guessed));
+            }
+        }
+
+        let mut endpoint_id_to_sym: HashMap<&str, u32> = HashMap::new();
+        for f_path in delta.edited_files.iter().chain(delta.neighbor_files.iter()) {
+            let Some(&new_f) = new_by_path.get(f_path.as_str()) else {
+                continue;
+            };
+            let start = new_first[new_f as usize];
+            let end = new_first[new_f as usize + 1];
+            for sym_idx in start..end {
+                let (at, len) = new_ir_node_id_spans[sym_idx as usize];
+                if len > 0
+                    && let Some(id_str) =
+                        new_ir_node_ids.get(at as usize..at as usize + len as usize)
+                {
+                    endpoint_id_to_sym.insert(id_str, sym_idx);
+                }
+            }
+        }
+
+        let mut new_kinds = self.kinds.clone();
+        let mut kind_ids: HashMap<String, u16> = new_kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as u16))
+            .collect();
+        let mut delta_unplaced = 0u64;
+        for link in non_struct_links {
+            let relation = link.relation.unwrap_or_default();
+            if relation.starts_with('_') {
+                continue;
+            }
+            let &source_sym = endpoint_id_to_sym.get(link.source.as_str())?;
+            let &target_sym = endpoint_id_to_sym.get(link.target.as_str())?;
+            if source_sym == target_sym {
+                continue;
+            }
+            let (from_f, to_f) = (
+                new_symbols[source_sym as usize].file,
+                new_symbols[target_sym as usize].file,
+            );
+            let (src, dst) = match link
+                .source_file
+                .as_deref()
+                .and_then(|raw| clean_graph_path(root_trim, raw))
+            {
+                None => (source_sym, target_sym),
+                Some(ref found) if found == &delta.files[from_f as usize] => {
+                    (source_sym, target_sym)
+                }
+                Some(ref found) if found == &delta.files[to_f as usize] => (target_sym, source_sym),
+                Some(_) if from_f == to_f => continue,
+                Some(_) => {
+                    delta_unplaced += 1;
+                    continue;
+                }
+            };
+            let named = (relation == "references")
+                .then(|| link.context.as_deref().and_then(patterns::how))
+                .flatten();
+            let kind = match kind_ids.get(&relation) {
+                Some(&k) => k,
+                None => {
+                    let k = new_kinds.len() as u16;
+                    new_kinds.push(relation.clone());
+                    kind_ids.insert(relation, k);
+                    k
+                }
+            };
+            let read = link
+                .confidence
+                .as_deref()
+                .is_none_or(|c| c.eq_ignore_ascii_case("EXTRACTED"));
+            let (src_file, dst_file) = (
+                new_symbols[src as usize].file,
+                new_symbols[dst as usize].file,
+            );
+            let link_tuple = (src, dst, kind, !read);
+            if new_crates.rules_out(src_file, dst_file) {
+                new_ruled.push(link_tuple);
+            } else {
+                new_uses.push(link_tuple);
+                if let Some(how) = named {
+                    new_ties.push((src, dst, how, !read));
+                }
+            }
+        }
+
+        let new_nodes = self
+            .nodes
+            .saturating_sub(removed_node_count)
+            .saturating_add(delta_symbols.len() as u64);
+        let new_links = self
+            .links
+            .saturating_sub(dropped_non_struct.saturating_add(dropped_struct_links))
+            .saturating_add(delta_total_links);
+
+        Some(Self {
+            index_id: next_index_id(),
+            root: self.root.clone(),
+            revision_tests: None,
+            test_symbols: OnceLock::new(),
+            plain: OnceLock::new(),
+            wires: OnceLock::new(),
+            patterns: Default::default(),
+            access: Default::default(),
+            circles: Default::default(),
+            left: (0, 0),
+            ruled: new_ruled,
+            crates: new_crates,
+            pairs: pairs_of(&new_symbols, &new_uses),
+            files: delta.files,
+            symbols: new_symbols,
+            community_names,
+            first: new_first,
+            names: new_names,
+            ir_node_ids: new_ir_node_ids,
+            ir_node_id_spans: new_ir_node_id_spans,
+            uses: new_uses,
+            ties: new_ties,
+            kinds: new_kinds,
+            nodes: new_nodes,
+            links: new_links,
+            unplaced: self.unplaced.saturating_add(delta_unplaced),
+            backend: self.backend.clone(),
+            ir_db_path: self.ir_db_path.clone(),
+            known_files_set: OnceLock::new(),
+            manifest_dirs: OnceLock::new(),
+            member_store: Mutex::new(PersistentMemberStore::default()),
+        })
+    }
+
     pub(super) fn totals(&self) -> Value {
         let (read, guessed) = self
             .pairs

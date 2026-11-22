@@ -340,6 +340,7 @@ pub(crate) struct DepDiff {
 }
 
 /// Extracts all declarations from a source file into `DeclaredMember` summaries via tree-sitter AST.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn extract_declared_members(rel_path: &str, source: &str) -> Vec<DeclaredMember> {
     let rel = clean_rel_key(rel_path);
     if rel.is_empty() || source.trim().is_empty() {
@@ -817,7 +818,7 @@ pub(crate) fn extract_file_deps_from_ir(
     let mut acc = DepAccumulator::new(&rel, known_files);
 
     match lang {
-        Language::Php => resolve_php_ir(&rel, ir, &lookup, manifests_opt, &mut acc),
+        Language::Php => resolve_php_ir(&rel, ir, &lookup, manifests_opt, reexports_opt, &mut acc),
         Language::Rust => {
             resolve_rust_ir(&rel, ir, &lookup, reexports_opt, crate_map_opt, &mut acc)
         }
@@ -2107,6 +2108,19 @@ fn resolve_reexport_step(
         }
         return None;
     }
+    if cur_file
+        .rsplit('.')
+        .next()
+        .is_some_and(|ext| PHP_EXTS.iter().any(|p| ext.eq_ignore_ascii_case(p)))
+    {
+        let dir = folder_of(cur_file);
+        let cleaned = entry.source_module_path.trim().trim_start_matches('/');
+        let target = lookup
+            .resolve_exact_or_ci(cleaned)
+            .or_else(|| lookup.resolve_relative(&dir, &entry.source_module_path))
+            .or_else(|| resolve_php_fqn(&entry.source_module_path, None, &dir, lookup))?;
+        return Some((target, next_sym));
+    }
     // TS/JS re-export `export { Foo } from './bar'`
     let dir = folder_of(cur_file);
     let target = resolve_ts_js_spec(&dir, &entry.source_module_path, lookup)?;
@@ -2259,6 +2273,7 @@ fn resolve_php_ir(
     ir: &AstFileExtraction,
     lookup: &KnownLookup,
     manifests_opt: Option<&ManifestIndex>,
+    reexports_opt: Option<&ReexportIndex>,
     acc: &mut DepAccumulator,
 ) {
     const PHP_BUILTINS: &[&str] = &[
@@ -2304,6 +2319,20 @@ fn resolve_php_ir(
     let dir = folder_of(rel_path);
     let current_ns = ir.namespace.as_deref();
     let mut aliases: BTreeMap<String, String> = BTreeMap::new();
+    let resolve_php_target = |fqn: &str, sym_hint: &str| -> (Option<String>, Option<String>) {
+        let Some(target) =
+            resolve_php_fqn_with_manifests(fqn, current_ns, &dir, lookup, manifests_opt)
+        else {
+            return (None, None);
+        };
+        if let Some(reexports) = reexports_opt
+            && let Some((rt, orig_sym)) =
+                reexports.resolve_reexport_target(&target, sym_hint, lookup.known_files, None)
+        {
+            return (Some(rt), Some(orig_sym));
+        }
+        (Some(target), None)
+    };
 
     for imp in &ir.imports {
         match imp.kind.as_str() {
@@ -2329,10 +2358,14 @@ fn resolve_php_ir(
             "trait_use" => {
                 let short = imp.symbols.first().map(String::as_str).unwrap_or(&imp.path);
                 let fqn = resolve_php_alias(&imp.path, &aliases, current_ns);
-                match resolve_php_fqn_with_manifests(&fqn, current_ns, &dir, lookup, manifests_opt)
-                {
-                    Some(t) => acc.add_resolved(t, "uses", &[short], imp.line, &imp.evidence),
-                    None => acc.add_unresolved(&fqn, "uses", &[short], imp.line, &imp.evidence),
+                match resolve_php_target(&fqn, short) {
+                    (Some(t), orig) => {
+                        let resolved_sym = orig.as_deref().unwrap_or(short);
+                        acc.add_resolved(t, "uses", &[resolved_sym], imp.line, &imp.evidence);
+                    }
+                    (None, _) => {
+                        acc.add_unresolved(&fqn, "uses", &[short], imp.line, &imp.evidence)
+                    }
                 }
             }
             _ => {
@@ -2344,9 +2377,14 @@ fn resolve_php_ir(
                     .unwrap_or_else(|| fqn.rsplit('\\').next().unwrap_or(fqn).to_owned());
                 let local = imp.alias.clone().unwrap_or_else(|| short.clone());
                 aliases.insert(local, fqn.to_owned());
-                match resolve_php_fqn_with_manifests(fqn, current_ns, &dir, lookup, manifests_opt) {
-                    Some(t) => acc.add_resolved(t, "imports", &[&short], imp.line, &imp.evidence),
-                    None => acc.add_unresolved(fqn, "imports", &[&short], imp.line, &imp.evidence),
+                match resolve_php_target(fqn, &short) {
+                    (Some(t), orig) => {
+                        let resolved_sym = orig.as_deref().unwrap_or(&short);
+                        acc.add_resolved(t, "imports", &[resolved_sym], imp.line, &imp.evidence);
+                    }
+                    (None, _) => {
+                        acc.add_unresolved(fqn, "imports", &[&short], imp.line, &imp.evidence)
+                    }
                 }
             }
         }
@@ -2358,24 +2396,32 @@ fn resolve_php_ir(
         }
         let short = inh.parent.rsplit('\\').next().unwrap_or(&inh.parent);
         let fqn = resolve_php_alias(&inh.parent, &aliases, current_ns);
-        match resolve_php_fqn_with_manifests(&fqn, current_ns, &dir, lookup, manifests_opt) {
-            Some(t) => acc.add_resolved(t, &inh.kind, &[short], inh.line, &inh.evidence),
-            None => acc.add_unresolved(&fqn, &inh.kind, &[short], inh.line, &inh.evidence),
+        match resolve_php_target(&fqn, short) {
+            (Some(t), orig) => {
+                let resolved_sym = orig.as_deref().unwrap_or(short);
+                acc.add_resolved(t, &inh.kind, &[resolved_sym], inh.line, &inh.evidence);
+            }
+            (None, _) => acc.add_unresolved(&fqn, &inh.kind, &[short], inh.line, &inh.evidence),
         }
     }
 
     for r in &ir.calls_and_refs {
-        let short = r.target_name.rsplit('\\').next().unwrap_or(&r.target_name);
+        let raw_target = r
+            .owner_type
+            .as_deref()
+            .filter(|_| r.target_name.starts_with('$'))
+            .unwrap_or(&r.target_name);
+        if raw_target.starts_with('$') {
+            continue;
+        }
+        let short = raw_target.rsplit('\\').next().unwrap_or(raw_target);
         if PHP_BUILTINS.contains(&short.to_ascii_lowercase().as_str()) {
             continue;
         }
-        let fqn = resolve_php_alias(&r.target_name, &aliases, current_ns);
-        let canon = fqn.rsplit('\\').next().unwrap_or(short).to_owned();
-        let Some(target) =
-            resolve_php_fqn_with_manifests(&fqn, current_ns, &dir, lookup, manifests_opt)
-        else {
-            continue;
-        };
+        let fqn = resolve_php_alias(raw_target, &aliases, current_ns);
+        let base_canon = fqn.rsplit('\\').next().unwrap_or(short).to_owned();
+        let (resolved_target, reexported_sym) = resolve_php_target(&fqn, &base_canon);
+        let canon = reexported_sym.unwrap_or(base_canon);
         let parent_opt = r.owner_type.clone().or_else(|| Some(canon.clone()));
         let (dep_kind, members) = ref_dep_kind_and_member(r, &canon, "property", parent_opt, true);
         let mut syms = vec![canon.as_str()];
@@ -2385,7 +2431,16 @@ fn resolve_php_ir(
                 syms.push(clean);
             }
         }
-        acc.add_resolved_members(target, dep_kind, &syms, &members, r.line, &r.evidence);
+        if let Some(target) = resolved_target {
+            acc.add_resolved_members(target, dep_kind, &syms, &members, r.line, &r.evidence);
+        } else if r.target_name.contains('\\')
+            || aliases.contains_key(short)
+            || r.owner_type.is_some()
+            || r.context == "constructor"
+            || short.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            acc.add_unresolved(&fqn, dep_kind, &syms, r.line, &r.evidence);
+        }
     }
 }
 
@@ -4741,5 +4796,64 @@ class Caller {
         let lookup_cached = KnownLookup::new(&known);
         assert!(Arc::ptr_eq(&lookup.index, &lookup_cached.index));
         assert_eq!(lookup_cached.all_entries().len(), 2);
+    }
+
+    #[test]
+    fn resolve_php_ir_records_unresolved_calls_and_follows_reexports() {
+        let known = known(&[
+            "src/Billing/Gateway.php",
+            "src/Billing/Facade.php",
+            "src/Http/PayController.php",
+        ]);
+        let php = r#"<?php
+namespace App\Http;
+
+use App\Billing\Facade;
+use Vendor\Sdk\StripeClient;
+
+class PayController {
+    public function pay(StripeClient $client): int {
+        Facade::charge();
+        $len = strlen('ok');
+        return $client->submit() + $len;
+    }
+}
+"#;
+        let mut reexports = ReexportIndex::default();
+        reexports.by_file.insert(
+            "src/Billing/Facade.php".to_owned(),
+            vec![ReexportEntry {
+                source_module_path: "src/Billing/Gateway.php".to_owned(),
+                exported_symbol: "Facade".to_owned(),
+                original_symbol: "Gateway".to_owned(),
+                is_wildcard: false,
+            }],
+        );
+        let ir = crate::graph_ast::parse_file_ir("src/Http/PayController.php", php).unwrap();
+        let deps = extract_file_deps_from_ir(
+            "src/Http/PayController.php",
+            &ir,
+            &known,
+            None,
+            Some(&reexports),
+            None,
+        );
+        assert!(
+            deps.iter()
+                .any(|d| d.target == "src/Billing/Gateway.php" && d.resolved),
+            "PHP re-export should redirect facade call/import to defining file: {deps:?}"
+        );
+        assert!(
+            deps.iter().any(|d| {
+                !d.resolved
+                    && d.target.contains("StripeClient")
+                    && matches!(d.kind.as_str(), "calls" | "uses")
+            }),
+            "unresolved external Vendor\\Sdk\\StripeClient call/type should be surfaced: {deps:?}"
+        );
+        assert!(
+            !deps.iter().any(|d| d.target == "strlen"),
+            "PHP builtin free functions should stay excluded: {deps:?}"
+        );
     }
 }

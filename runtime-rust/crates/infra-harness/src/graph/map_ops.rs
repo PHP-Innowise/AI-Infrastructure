@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph_map::layer_rules::Rules;
 
 impl Graphs {
     /// One folder of the published graph's dependency map, or, with a
@@ -10,7 +11,7 @@ impl Graphs {
     /// seconds, so callers keep this off the runtime.
     pub fn map(&self, project: &str, target: Option<&Target>, shown: &Shown) -> Result<Value> {
         let started = Instant::now();
-        let (mut view, cache_hit, active_index) = self.map_inner(project, target, shown)?;
+        let (mut view, cache_hit, _active_index) = self.map_inner(project, target, shown)?;
         if let Value::Object(obj) = &mut view {
             if !obj.contains_key("ir_revision") {
                 obj.insert("ir_revision".into(), json!(self.ir_revision_of(project)));
@@ -18,19 +19,6 @@ impl Graphs {
             if !obj.contains_key("depth") {
                 obj.insert("depth".into(), json!(shown.depth));
             }
-        }
-        if let Some(ref idx) = active_index {
-            crate::graph_map::apply_lod_and_min_weight(
-                idx,
-                &mut view,
-                shown.lod,
-                shown.min_weight,
-                shown.scope,
-                shown.focus,
-                shown.filter,
-                shown.certain,
-                shown.offset > 0 || shown.limit.is_some(),
-            );
         }
         if let Value::Object(obj) = &mut view
             && !obj.get("paging").is_some_and(Value::is_object)
@@ -84,8 +72,8 @@ impl Graphs {
             offset,
             limit,
             depth,
-            lod: _,
-            min_weight: _,
+            lod,
+            min_weight,
         } = *shown;
         if base.is_some() {
             let valid_pr_base = matches!(target, Some(Target::Pull(_)))
@@ -258,6 +246,19 @@ impl Graphs {
                 index.mark_without_incoming(view, certain, filter);
             }
         };
+        let apply_lod = |index: &crate::graph_map::Index, view: &mut Value| {
+            crate::graph_map::apply_lod_and_min_weight(
+                index,
+                view,
+                lod,
+                min_weight,
+                scope,
+                focus,
+                filter,
+                certain,
+                offset > 0 || limit.is_some(),
+            );
+        };
         let Some(target) = target else {
             let (raw_index, cache_hit) = self.live_index_with_hit(project, &root)?;
             let index = asked(raw_index);
@@ -266,11 +267,35 @@ impl Graphs {
             } else {
                 Ok(None)
             };
-            let mut view = follow(&index, &[], &|_| None, &rules).unwrap_or_else(|| {
-                index.view_with_whole_options(
-                    name, scope, spread, focus, certain, filter, whole, offset, limit, depth,
-                )
-            });
+            let mut view = match follow(&index, &[], &|_| None, &rules) {
+                Some(mut view) => {
+                    apply_lod(&index, &mut view);
+                    view
+                }
+                None => match lod.filter(|_| index.opens(scope).is_none()) {
+                    Some(level) => crate::graph_map::view_at_lod(
+                        &index,
+                        name,
+                        level,
+                        min_weight,
+                        &crate::graph_map::LodFilter {
+                            scope,
+                            focus,
+                            filter,
+                            certain,
+                            paginated: offset > 0 || limit.is_some(),
+                        },
+                    ),
+                    None => {
+                        let mut view = index.view_with_whole_options(
+                            name, scope, spread, focus, certain, filter, whole, offset, limit,
+                            depth,
+                        );
+                        apply_lod(&index, &mut view);
+                        view
+                    }
+                },
+            };
             marked(&index, &mut view, &rules);
             // The sources of the checkout say what the graph does not:
             // which state a file reads of another, and which it writes.
@@ -395,6 +420,7 @@ impl Graphs {
                 let index = asked(index);
                 let mut view = follow(&index, &[], &|_| None, &Ok(None))
                     .ok_or_else(|| HarnessError::invalid("Choose a base cycle or link."))?;
+                apply_lod(&index, &mut view);
                 view["project_id"] = json!(project);
                 view["target"] = json!(target.text());
                 view["base"] = chosen["base"].clone();
@@ -513,6 +539,7 @@ impl Graphs {
                         None => index.changes(name, &changed, scope, focus, certain, filter),
                     }
                 };
+                apply_lod(&index, &mut view);
                 marked(&index, &mut view, &rules);
                 // Reads and writes are told from the preserved sources on disk:
                 // either the fresh checkout tree or the thinned commit/PR tree.
@@ -577,6 +604,7 @@ impl Graphs {
                 let mut view = follow(&index, &changed, &|_| None, &rules).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
+                apply_lod(&index, &mut view);
                 marked(&index, &mut view, &rules);
                 view["preliminary"] = json!(true);
                 if view["pattern"]["sort"] == "layers"
@@ -720,17 +748,105 @@ impl Graphs {
                     (file.status == 'R').then_some((file.path.as_str(), file.from.as_deref()?))
                 })
                 .collect();
-            view["diff_overlay"] = crate::graph_map::structural_diff_overlay(
+            view["diff_overlay"] = self.cached_diff_overlay(
+                project,
+                resolved.revision.as_deref(),
+                resolved.base.as_ref().map(|b| b.commit.as_str()),
                 head_idx,
                 base_idx.as_deref(),
                 &changed_paths,
                 &renamed,
                 certain,
+                notests,
                 overlay_rules,
             );
         }
         told(&mut view);
         Ok((view, cache_hit, active_index))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn cached_diff_overlay(
+        &self,
+        project: &str,
+        head_rev: Option<&str>,
+        base_rev: Option<&str>,
+        head_idx: &crate::graph_map::Index,
+        base_idx: Option<&crate::graph_map::Index>,
+        changed_paths: &[String],
+        renamed: &std::collections::HashMap<&str, &str>,
+        certain: bool,
+        notests: bool,
+        rules: Option<&Rules>,
+    ) -> Value {
+        const DIFF_OVERLAY_LRU_CAP: usize = 64;
+        let (Some(head), Some(base)) = (head_rev, base_rev) else {
+            return crate::graph_map::structural_diff_overlay(
+                head_idx,
+                base_idx,
+                changed_paths,
+                renamed,
+                certain,
+                rules,
+            );
+        };
+        let changed_hash: [u8; 32] = {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            let mut sorted_changed: Vec<&str> = changed_paths.iter().map(String::as_str).collect();
+            sorted_changed.sort_unstable();
+            for p in sorted_changed {
+                h.update(p.as_bytes());
+                h.update([0]);
+            }
+            let mut sorted_renames: Vec<(&str, &str)> =
+                renamed.iter().map(|(&k, &v)| (k, v)).collect();
+            sorted_renames.sort_unstable();
+            h.update([1]);
+            for (k, v) in sorted_renames {
+                h.update(k.as_bytes());
+                h.update([0]);
+                h.update(v.as_bytes());
+                h.update([0]);
+            }
+            h.finalize().into()
+        };
+        let key = DiffOverlayCacheKey {
+            project: project.to_owned(),
+            head_rev: head.to_owned(),
+            base_rev: base.to_owned(),
+            head_index_id: head_idx.index_id(),
+            base_index_id: base_idx.map(|b| b.index_id()),
+            rules_hash: rules.map(Rules::sha256),
+            certain,
+            notests,
+            changed_hash,
+        };
+        if let Ok(mut cache) = self.diff_overlays.lock()
+            && let Some(pos) = cache.iter().position(|(k, _)| k == &key)
+        {
+            let (_, val) = cache.remove(pos);
+            cache.push((key, val.clone()));
+            return val;
+        }
+        let val = crate::graph_map::structural_diff_overlay(
+            head_idx,
+            base_idx,
+            changed_paths,
+            renamed,
+            certain,
+            rules,
+        );
+        if let Ok(mut cache) = self.diff_overlays.lock() {
+            if let Some(pos) = cache.iter().position(|(k, _)| k == &key) {
+                cache.remove(pos);
+            }
+            if cache.len() >= DIFF_OVERLAY_LRU_CAP {
+                cache.remove(0);
+            }
+            cache.push((key, val.clone()));
+        }
+        val
     }
     pub(super) fn git_history(
         &self,

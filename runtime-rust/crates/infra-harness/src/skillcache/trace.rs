@@ -24,27 +24,40 @@ use std::{
 const SECRET_CHARS: usize = 8;
 const SKILLS: usize = 8;
 
+/// Store setting JSON controlling short-turn observation admission
+/// (`{"min_tool_calls": 2, "min_output_tokens": ...}`).
+pub const OBSERVE_MIN_ROI: &str = "skillcache_observe_min_roi";
+const DEFAULT_MIN_TOOL_CALLS: usize = 2;
+
 pub struct TraceRecorder {
-    recorder: Mutex<Option<Recorder>>,
+    inner: Mutex<Option<(Recorder, crate::cost_observation::UsageComponents)>>,
 }
 impl TraceRecorder {
     pub fn new(provider: &str) -> Arc<Self> {
         Arc::new(Self {
-            recorder: Mutex::new(Some(Recorder::new(provider))),
+            inner: Mutex::new(Some((
+                Recorder::new(provider),
+                crate::cost_observation::UsageComponents::new(provider),
+            ))),
         })
     }
     /// One event in the provider's own format.
     pub fn observe(&self, raw: &Value) {
-        if let Ok(mut recorder) = self.recorder.lock()
-            && let Some(recorder) = recorder.as_mut()
+        if let Ok(mut guard) = self.inner.lock()
+            && let Some((recorder, usage)) = guard.as_mut()
         {
             recorder.observe(raw);
+            usage.observe("main", raw);
         }
+    }
+    /// The recorded trace and normalized usage snapshot; a recorder gives them once.
+    pub fn finish_with_usage(&self, redactor: &dyn Redactor) -> Option<(Trace, Value)> {
+        let (recorder, usage) = self.inner.lock().ok()?.take()?;
+        Some((recorder.finish(redactor), usage.snapshot()))
     }
     /// The recorded trace; a recorder gives it once.
     pub fn finish(&self, redactor: &dyn Redactor) -> Option<Trace> {
-        let recorder = self.recorder.lock().ok()?.take()?;
-        Some(recorder.finish(redactor))
+        self.finish_with_usage(redactor).map(|(trace, _)| trace)
     }
 }
 
@@ -335,6 +348,20 @@ pub struct ObservedTurn<'a> {
     pub message: &'a str,
     pub route: &'a ResolvedCommand,
     pub workspace: &'a Path,
+    pub usage: &'a Value,
+}
+
+fn observe_min_roi(store: &SessionStore) -> (usize, Option<u64>) {
+    let setting = store.setting(OBSERVE_MIN_ROI).ok().flatten();
+    let min_tools = setting
+        .as_ref()
+        .and_then(|value| value["min_tool_calls"].as_u64())
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(DEFAULT_MIN_TOOL_CALLS);
+    let min_output = setting
+        .as_ref()
+        .and_then(|value| value["min_output_tokens"].as_u64());
+    (min_tools, min_output)
 }
 
 /// Stores the trace of a completed turn. Returns the session event that says
@@ -364,6 +391,22 @@ pub fn save(
             "SkillCache kept no trace: no skill of this project or of your home folder was used.",
         ));
     }
+    let (min_tools, min_output) = observe_min_roi(store);
+    if tools < min_tools {
+        return Ok(skipped(
+            "low_roi",
+            "SkillCache kept no trace: this short turn is unlikely to pay back compilation.",
+        ));
+    }
+    if let Some(min_output) = min_output
+        && let Some(output_tokens) = turn.usage["output_tokens"].as_u64()
+        && output_tokens < min_output
+    {
+        return Ok(skipped(
+            "low_roi",
+            "SkillCache kept no trace: this short turn produced too few tokens to pay back compilation.",
+        ));
+    }
     let (request, _) = redactor.redact(turn.message);
     let mut redaction = trace.redaction();
     redaction["complete"] = trace.complete.into();
@@ -379,6 +422,7 @@ pub fn save(
             request: &request,
             skill_refs: &Value::Array(skills.clone()),
             steps: &steps,
+            usage: turn.usage,
             redaction: &redaction,
         },
     )?;
@@ -452,5 +496,121 @@ mod tests {
         assert!(clean.contains("src/a.rs"), "{clean}");
         assert!(changed >= 3, "{changed}");
         assert_eq!(redactor.redact("plain text").1, 0);
+    }
+
+    #[test]
+    fn save_persists_usage_components_and_enforces_roi_threshold() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = infra_core::fs::canonicalize(root.path()).unwrap();
+        let skill_dir = workspace.join(".claude/skills/pdf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# PDF\n").unwrap();
+        let store = SessionStore::open(&workspace.join(".state")).unwrap();
+        let project_id = store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let sid = store
+            .create(
+                &json!({
+                    "project_id": project_id,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "workflow": "native",
+                    "permissions": "auto"
+                }),
+                "do pdf",
+                &[],
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store.get(&sid).unwrap();
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "do pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": skill_dir.join("SKILL.md")})],
+            notice: None,
+        };
+        let redactor = SessionRedactor::new(&workspace, std::iter::empty::<(String, String)>());
+
+        // Single-tool-call turn is skipped by default low-ROI filter.
+        let one_tool = Trace {
+            provider: "claude".into(),
+            steps: vec![json!({"index": 0, "kind": "tool", "tool": "Read"})],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        let skipped = save(
+            &store,
+            &ObservedTurn {
+                session: &session,
+                generation: "g-short",
+                message: "do pdf",
+                route: &route,
+                workspace: &workspace,
+                usage: &json!({"input_tokens": 100, "output_tokens": 10, "source": "claude"}),
+            },
+            one_tool,
+            &redactor,
+        )
+        .unwrap();
+        assert_eq!(skipped["phase"], "not_observed");
+        assert_eq!(skipped["reason"], "low_roi");
+
+        // Configure min_output_tokens=500 -> low output token turn is skipped; >=500 is stored with usage.
+        store
+            .set_setting(
+                OBSERVE_MIN_ROI,
+                &json!({"min_tool_calls": 2, "min_output_tokens": 500}),
+            )
+            .unwrap();
+        let two_tools = Trace {
+            provider: "claude".into(),
+            steps: vec![
+                json!({"index": 0, "kind": "tool", "tool": "Read"}),
+                json!({"index": 1, "kind": "tool", "tool": "Bash"}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        let small_out = save(
+            &store,
+            &ObservedTurn {
+                session: &session,
+                generation: "g-small-tokens",
+                message: "do pdf",
+                route: &route,
+                workspace: &workspace,
+                usage: &json!({"input_tokens": 100, "output_tokens": 120, "source": "claude"}),
+            },
+            two_tools.clone(),
+            &redactor,
+        )
+        .unwrap();
+        assert_eq!(small_out["reason"], "low_roi");
+
+        let usage = json!({"input_tokens": 300, "output_tokens": 700, "source": "claude"});
+        let kept = save(
+            &store,
+            &ObservedTurn {
+                session: &session,
+                generation: "g-good",
+                message: "do pdf",
+                route: &route,
+                workspace: &workspace,
+                usage: &usage,
+            },
+            two_tools,
+            &redactor,
+        )
+        .unwrap();
+        assert_eq!(kept["phase"], "observed");
+        let db = store.connection().unwrap();
+        let stored = db::trace(&db, "g-good").unwrap().unwrap();
+        assert_eq!(stored["usage"], usage);
     }
 }

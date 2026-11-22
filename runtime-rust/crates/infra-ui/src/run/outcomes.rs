@@ -851,6 +851,11 @@ pub(super) fn show_card(run: &V, path: &str) {
     }
 }
 
+/// Dismisses the file detail card when open, optionally restoring focus.
+pub(crate) fn dismiss_file_card(restore: bool) {
+    hide_card(restore);
+}
+
 /// Puts the card away; `restore` gives the focus back to the control that opened it (or its chip).
 pub(super) fn hide_card(restore: bool) {
     let opener = CARD_OPENER.with(|cell| cell.borrow_mut().take());
@@ -1490,7 +1495,7 @@ pub fn outcomes(session: &V) {
         let skipped_text = fleet_skipped_text(result);
         dom::text("fleet-skipped", &skipped_text);
         dom::hidden("fleet-skipped", skipped_text.is_empty());
-        dom::keyed_render(
+        dom::keyed_render_or_empty(
             "fleet-findings",
             &cards,
             |entry| {
@@ -1502,13 +1507,10 @@ pub fn outcomes(session: &V) {
                 let card = build_fleet_finding_card(&entry["item"], idx);
                 render_outcome_finding_card(&card)
             },
+            "p",
+            "fleet-note",
+            "No findings recorded.",
         );
-        if findings.is_empty() {
-            dom::append(
-                "fleet-findings",
-                &dom::el("p", "fleet-note", "No findings recorded."),
-            );
-        }
         let report_text = result["report"]
             .as_str()
             .or_else(|| result["preview"].as_str())
@@ -1554,7 +1556,7 @@ pub fn outcomes(session: &V) {
             .enumerate()
             .map(|(idx, item)| json!({"idx": idx, "item": item}))
             .collect::<Vec<_>>();
-        dom::keyed_render(
+        dom::keyed_render_or_empty(
             "clash-items",
             &item_cards,
             |entry| {
@@ -1566,19 +1568,16 @@ pub fn outcomes(session: &V) {
                 let card = build_clash_item_card(&entry["item"], idx);
                 render_outcome_finding_card(&card)
             },
+            "p",
+            "fleet-note",
+            "No clash items recorded.",
         );
-        if items.is_empty() {
-            dom::append(
-                "clash-items",
-                &dom::el("p", "fleet-note", "No clash items recorded."),
-            );
-        }
         let turn_cards = turns
             .iter()
             .enumerate()
             .map(|(idx, turn)| json!({"idx": idx, "turn": turn}))
             .collect::<Vec<_>>();
-        dom::keyed_render(
+        dom::keyed_render_or_empty(
             "clash-turn-list",
             &turn_cards,
             |entry| {
@@ -1590,13 +1589,10 @@ pub fn outcomes(session: &V) {
                 let card = build_clash_turn_card(&entry["turn"], idx);
                 render_clash_turn_card(&card)
             },
+            "p",
+            "fleet-note",
+            "No turns recorded.",
         );
-        if turns.is_empty() {
-            dom::append(
-                "clash-turn-list",
-                &dom::el("p", "fleet-note", "No turns recorded."),
-            );
-        }
         let report = m::text(r, "report");
         dom::text("clash-report-text", report.trim());
         dom::hidden("clash-report", report.trim().is_empty());

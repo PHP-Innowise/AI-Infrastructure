@@ -688,17 +688,28 @@ pub(crate) fn sync_freshness_pill(prefix: &str, status: &V, view: &V) {
     dom::hidden(&pill_id, label.is_empty());
 }
 
-/// Processes SSE `event: "graph_status"` updates without destroying user camera or selection.
-pub(crate) fn on_graph_status_sse(event: &V) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GraphSseAction {
+    Ignored,
+    Building,
+    RefreshCandidate {
+        event_project: String,
+        banner_text: String,
+        schedule_idle: bool,
+    },
+}
+
+/// Applies non-DOM model updates for SSE `event: "graph_status"` and invalidates matching
+/// surface analysis cache keys without touching browser DOM globals.
+pub(crate) fn apply_graph_status_sse_event(event: &V, current_project: &str) -> GraphSseAction {
     if !event.is_object() {
-        return;
+        return GraphSseAction::Ignored;
     }
     m::set("graph-sse-status", event.clone());
     let event_project = m::text(event, "project_id");
-    let current_project = dom::value("project");
     if !event_project.is_empty() && !current_project.is_empty() && event_project != current_project
     {
-        return;
+        return GraphSseAction::Ignored;
     }
     let state = m::text(event, "state");
     let reason = m::text(event, "reason");
@@ -707,42 +718,91 @@ pub(crate) fn on_graph_status_sse(event: &V) {
         let mut status = m::data("graph");
         if status.is_object() {
             status["state"] = json!("building");
-            m::set("graph", status.clone());
+            m::set("graph", status);
         }
-        render();
-        return;
+        return GraphSseAction::Building;
     }
     let is_refresh_candidate = matches!(state.as_str(), "ready" | "stale" | "updated" | "rebuilt")
         || matches!(
             reason.as_str(),
-            "watcher" | "rebuild" | "completed" | "stale" | "ir_updated"
+            "watcher"
+                | "rebuild"
+                | "completed"
+                | "stale"
+                | "ir_updated"
+                | "incremental_update"
+                | "architecture_updated"
         );
-    if is_refresh_candidate {
-        let banner_text = if !message.is_empty() {
-            message
-        } else if state == "stale" {
-            "Code changed on disk — Graph may be stale".to_owned()
-        } else {
-            "Graph updated — Refresh".to_owned()
-        };
-        let mut synth_status = m::data("graph");
-        if !synth_status.is_object() {
-            synth_status = json!({});
+    if !is_refresh_candidate {
+        return GraphSseAction::Ignored;
+    }
+    let should_invalidate = state == "ready"
+        || state == "updated"
+        || state == "rebuilt"
+        || matches!(
+            reason.as_str(),
+            "watcher"
+                | "ir_updated"
+                | "incremental_update"
+                | "architecture_updated"
+                | "rebuild"
+                | "completed"
+        );
+    if should_invalidate {
+        crate::graph_map::invalidate_surface_analysis_caches_for_live_project(
+            &event_project,
+            current_project,
+        );
+    }
+    let banner_text = if !message.is_empty() {
+        message
+    } else if state == "stale" {
+        "Code changed on disk — Graph may be stale".to_owned()
+    } else {
+        "Graph updated — Refresh".to_owned()
+    };
+    let mut synth_status = m::data("graph");
+    if !synth_status.is_object() {
+        synth_status = json!({});
+    }
+    synth_status["state"] = json!(if state.is_empty() {
+        "ready"
+    } else {
+        state.as_str()
+    });
+    if let Some(rev) = event["revision"].as_u64() {
+        synth_status["ir_revision"] = json!(rev);
+    }
+    if !event["backend"].is_null() {
+        synth_status["backend"] = event["backend"].clone();
+    }
+    m::set("graph", synth_status);
+    GraphSseAction::RefreshCandidate {
+        event_project,
+        banner_text,
+        schedule_idle: state != "stale",
+    }
+}
+
+/// Processes SSE `event: "graph_status"` updates without destroying user camera or selection.
+pub(crate) fn on_graph_status_sse(event: &V) {
+    let current_project = dom::value("project");
+    match apply_graph_status_sse_event(event, &current_project) {
+        GraphSseAction::Ignored => {}
+        GraphSseAction::Building => {
+            render();
         }
-        synth_status["state"] = json!(if state.is_empty() {
-            "ready"
-        } else {
-            state.as_str()
-        });
-        if let Some(rev) = event["revision"].as_u64() {
-            synth_status["ir_revision"] = json!(rev);
+        GraphSseAction::RefreshCandidate {
+            event_project,
+            banner_text,
+            schedule_idle,
+        } => {
+            render();
+            crate::graph_map::show_non_destructive_stale_banner(&event_project, &banner_text);
+            if schedule_idle {
+                crate::graph_map::maybe_schedule_idle_refresh(&event_project);
+            }
         }
-        if !event["backend"].is_null() {
-            synth_status["backend"] = event["backend"].clone();
-        }
-        m::set("graph", synth_status);
-        render();
-        crate::graph_map::show_non_destructive_stale_banner(&event_project, &banner_text);
     }
 }
 
@@ -756,6 +816,7 @@ pub(crate) fn on_graph_resync_sse(event: &V) {
     if project.is_empty() {
         return;
     }
+    crate::graph_map::invalidate_surface_analysis_caches(&project);
     crate::graph_map::show_non_destructive_stale_banner(&project, "Graph updates lagged — Refresh");
     #[cfg(target_arch = "wasm32")]
     spawn_local(async {

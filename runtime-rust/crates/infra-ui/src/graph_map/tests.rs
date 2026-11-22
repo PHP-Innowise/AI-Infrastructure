@@ -10147,3 +10147,106 @@ fn modal_lens_switch_clears_submode_precedence_and_history_snapshot_restores_nul
     assert!(snapshot_opt_changed_scope(&restored, &cycle_only));
     assert!(!snapshot_opt_changed_scope(&restored, &initial_snap));
 }
+
+#[test]
+fn progressive_lod_urls_and_cross_graph_code_map_context_are_preserved() {
+    let coarse = json!({"auto_lod": true, "scale": 0.25, "scope": "", "focus": ""});
+    assert_eq!(
+        surfaces::progressive_lod_for_state(&coarse, None),
+        (Some("crate".to_owned()), Some(2))
+    );
+    let url_coarse = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &coarse, false);
+    assert!(url_coarse.contains("lod=crate"), "{url_coarse}");
+    assert!(url_coarse.contains("min_weight=2"), "{url_coarse}");
+
+    let mid = json!({"auto_lod": true, "scale": 0.50, "scope": "", "focus": ""});
+    assert_eq!(
+        surfaces::progressive_lod_for_state(&mid, None),
+        (Some("folder".to_owned()), None)
+    );
+    let url_mid = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &mid, false);
+    assert!(url_mid.contains("lod=folder"), "{url_mid}");
+    assert!(!url_mid.contains("min_weight="), "{url_mid}");
+
+    let explicit = json!({"lod": "folder", "min_weight": 3, "scope": "src"});
+    let url_explicit = build_scoped_map_path(&GraphTargetScope::single("proj-1"), &explicit, false);
+    assert!(url_explicit.contains("lod=folder"), "{url_explicit}");
+    assert!(url_explicit.contains("min_weight=3"), "{url_explicit}");
+
+    let mut st = json!({});
+    surfaces::apply_code_map_jump_context(
+        &mut st,
+        Some("billing"),
+        Some("deadbeef1234"),
+        Some("publishes_event"),
+        Some("charge"),
+    );
+    assert_eq!(st["target"], json!("commit:deadbeef1234"));
+    assert_eq!(st["semantic_kind"], json!("publishes_event"));
+    assert_eq!(st["omnigraph_filter"], json!("billing"));
+    assert!(st["filter"].is_null());
+
+    let mut file_st = json!({});
+    surfaces::apply_code_map_jump_context(
+        &mut file_st,
+        Some("invoice"),
+        Some("commit:abc1234"),
+        Some("di_binds"),
+        None,
+    );
+    assert_eq!(file_st["target"], json!("commit:abc1234"));
+    assert_eq!(file_st["semantic_kind"], json!("di_binds"));
+    assert_eq!(file_st["filter"], json!("invoice"));
+}
+
+#[test]
+fn graph_status_sse_invalidates_analysis_cache_keys_on_watcher_and_ir_updated() {
+    m::set(surfaces::MODAL_SURFACE.changes_key, json!("prev-changes"));
+    m::set(surfaces::MODAL_SURFACE.impact_key, json!("prev-impact"));
+    let epoch_before = m::next(surfaces::MODAL_SURFACE.changes_epoch);
+
+    let act = crate::graph::apply_graph_status_sse_event(
+        &json!({
+            "project_id": "proj-1",
+            "state": "ready",
+            "reason": "ir_updated",
+            "revision": 42
+        }),
+        "proj-1",
+    );
+    assert_eq!(
+        act,
+        crate::graph::GraphSseAction::RefreshCandidate {
+            event_project: "proj-1".to_owned(),
+            banner_text: "Graph updated — Refresh".to_owned(),
+            schedule_idle: true,
+        }
+    );
+    assert!(m::data(surfaces::MODAL_SURFACE.changes_key).is_null());
+    assert!(m::data(surfaces::MODAL_SURFACE.impact_key).is_null());
+    assert!(!m::current(
+        surfaces::MODAL_SURFACE.changes_epoch,
+        epoch_before
+    ));
+    assert_eq!(m::data("graph")["ir_revision"], json!(42));
+
+    m::set(surfaces::MODAL_SURFACE.changes_key, json!("prev-changes-2"));
+    m::set(surfaces::MODAL_SURFACE.impact_key, json!("prev-impact-2"));
+    let act_stale = crate::graph::apply_graph_status_sse_event(
+        &json!({
+            "project_id": "proj-1",
+            "state": "stale",
+            "reason": "watcher"
+        }),
+        "proj-1",
+    );
+    assert!(matches!(
+        act_stale,
+        crate::graph::GraphSseAction::RefreshCandidate {
+            schedule_idle: false,
+            ..
+        }
+    ));
+    assert!(m::data(surfaces::MODAL_SURFACE.changes_key).is_null());
+    assert!(m::data(surfaces::MODAL_SURFACE.impact_key).is_null());
+}

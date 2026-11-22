@@ -895,11 +895,95 @@ struct Candidate {
     symbol: Option<(u32, u32)>,
 }
 
-/// Breadth-first along incoming edges, stopping if this response has used
-/// its traversal budget. A place is visited only once per changed file.
-fn walk(
+fn build_semantic_bridges(
+    index: &Index,
+    certain: bool,
+) -> (HashMap<u32, Vec<u32>>, HashMap<u32, Vec<u32>>) {
+    let mut hub_groups: HashMap<u32, (Vec<u32>, Vec<u32>)> = HashMap::new();
+    let mut sym_bridges: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut file_bridges: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut add_pair = |prod: u32, cons: u32| {
+        if prod == cons {
+            return;
+        }
+        sym_bridges.entry(prod).or_default().push(cons);
+        let prod_file = index.symbols[prod as usize].file;
+        let cons_file = index.symbols[cons as usize].file;
+        if prod_file != cons_file {
+            file_bridges.entry(prod_file).or_default().push(cons_file);
+        }
+    };
+
+    for (from, to, kind, guessed) in &index.uses {
+        if certain && *guessed {
+            continue;
+        }
+        let rel = index.kinds[*kind as usize].as_str();
+        if index.symbols[*to as usize].is_semantic {
+            let entry = hub_groups.entry(*to).or_default();
+            match rel {
+                "writes_table" | "table_write" | "publishes_event" | "exposes_route" | "route" => {
+                    entry.0.push(*from);
+                }
+                "reads_table" | "table_read" | "handles_event" | "calls_route" => {
+                    entry.1.push(*from);
+                }
+                "di_binds" | "di_binding" => {
+                    entry.0.push(*from);
+                    entry.1.push(*from);
+                }
+                _ => {}
+            }
+        } else if matches!(rel, "di_binds" | "di_binding") {
+            // Direct Interface -> Impl link: edits to Interface can affect direct tests of Impl.
+            add_pair(*from, *to);
+        }
+    }
+
+    for (_, (prods, cons)) in hub_groups {
+        for &p in &prods {
+            for &c in &cons {
+                add_pair(p, c);
+            }
+        }
+    }
+    for vals in sym_bridges.values_mut() {
+        vals.sort_unstable();
+        vals.dedup();
+    }
+    for vals in file_bridges.values_mut() {
+        vals.sort_unstable();
+        vals.dedup();
+    }
+    (sym_bridges, file_bridges)
+}
+
+fn walk_visit(
+    other: u32,
+    steps: u32,
+    goal: u32,
+    budget: &mut usize,
+    seen: &mut HashSet<u32>,
+    pending: &mut VecDeque<(u32, u32, u32)>,
+) -> bool {
+    if let Some(left) = budget.checked_sub(1) {
+        *budget = left;
+        if seen.insert(other) {
+            pending.push_back((other, steps + 1, goal));
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Breadth-first along incoming edges (plus semantic producer->consumer bridges),
+/// stopping if this response has used its traversal budget. A place is visited only
+/// once per changed file.
+fn walk_bridged(
     net: &Net<'_>,
     starts: Vec<u32>,
+    bridges: Option<&HashMap<u32, Vec<u32>>>,
     budget: &mut usize,
     mut found: impl FnMut(u32, u32, u32),
 ) -> bool {
@@ -914,21 +998,38 @@ fn walk(
             found(place, steps, goal);
         }
         let mut complete = true;
-        net.each(place, false, &mut |other| {
-            if let Some(left) = budget.checked_sub(1) {
-                *budget = left;
-                if seen.insert(other) {
-                    pending.push_back((other, steps + 1, goal));
+        {
+            let budget_ref = &mut *budget;
+            let seen_ref = &mut seen;
+            let pending_ref = &mut pending;
+            net.each(place, false, &mut |other| {
+                if complete && !walk_visit(other, steps, goal, budget_ref, seen_ref, pending_ref) {
+                    complete = false;
                 }
-            } else {
-                complete = false;
-            }
-        });
+            });
+        }
         if !complete {
             return false;
         }
+        if let Some(extra) = bridges.and_then(|b| b.get(&place)) {
+            for &other in extra {
+                if !walk_visit(other, steps, goal, budget, &mut seen, &mut pending) {
+                    return false;
+                }
+            }
+        }
     }
     true
+}
+
+#[cfg(test)]
+fn walk(
+    net: &Net<'_>,
+    starts: Vec<u32>,
+    budget: &mut usize,
+    found: impl FnMut(u32, u32, u32),
+) -> bool {
+    walk_bridged(net, starts, None, budget, found)
 }
 
 fn is_candidate_test_file(path: &str, test: bool) -> bool {
@@ -1024,6 +1125,7 @@ impl Index {
         let has_inline = (0..self.symbols.len() as u32).any(inline);
         let files = Net::new(self, false, certain);
         let symbols = Net::new(self, true, certain);
+        let (sym_bridges, file_bridges) = build_semantic_bridges(self, certain);
         let names = Names::new(self, &[], &|_| None);
         let per_file_slice = (VISITS / paths.len().max(1)).clamp(1_024, VISITS);
         let rows: Vec<_> = paths.into_iter().map(|(path, status)| {
@@ -1040,16 +1142,17 @@ impl Index {
                 return json!({"path": path, "state": "test_file"});
             }
             let mut found = Vec::new();
-            let files_done = walk(&files, vec![file], &mut budget, |at, steps, _| {
+            let files_done = walk_bridged(&files, vec![file], Some(&file_bridges), &mut budget, |at, steps, _| {
                 if candidate_files[at as usize] {
                     found.push(Candidate { steps, file: at, symbol: None });
                 }
             });
-            let symbols_done = !has_inline || (files_done && walk(
+            let symbols_done = !has_inline || (files_done && walk_bridged(
                 &symbols,
                 self.range(file).filter(|at| {
                     !test_symbols[*at as usize] && self.symbols[*at as usize].kind != Kind::Note
                 }).collect(),
+                Some(&sym_bridges),
                 &mut budget,
                 |at, steps, goal| {
                     if inline(at) {
@@ -1205,6 +1308,7 @@ impl Index {
         let has_inline = (0..self.symbols.len() as u32).any(inline);
         let files = Net::new(self, false, certain);
         let symbols = Net::new(self, true, certain);
+        let (sym_bridges, file_bridges) = build_semantic_bridges(self, certain);
         let per_file_slice = (VISITS / target_paths.len().max(1)).clamp(1_024, VISITS);
 
         for &path in target_paths {
@@ -1212,11 +1316,17 @@ impl Index {
                 && !test_files[file as usize]
             {
                 let mut budget = per_file_slice;
-                let files_done = walk(&files, vec![file], &mut budget, |at, _, _| {
-                    if candidate_files[at as usize] {
-                        out.insert(self.files[at as usize].clone());
-                    }
-                });
+                let files_done = walk_bridged(
+                    &files,
+                    vec![file],
+                    Some(&file_bridges),
+                    &mut budget,
+                    |at, _, _| {
+                        if candidate_files[at as usize] {
+                            out.insert(self.files[at as usize].clone());
+                        }
+                    },
+                );
                 if has_inline && files_done {
                     let starts: Vec<u32> = self
                         .range(file)
@@ -1225,12 +1335,18 @@ impl Index {
                                 && self.symbols[*at as usize].kind != Kind::Note
                         })
                         .collect();
-                    let _ = walk(&symbols, starts, &mut budget, |at, _, _| {
-                        if inline(at) {
-                            let file_idx = self.symbols[at as usize].file as usize;
-                            out.insert(self.files[file_idx].clone());
-                        }
-                    });
+                    let _ = walk_bridged(
+                        &symbols,
+                        starts,
+                        Some(&sym_bridges),
+                        &mut budget,
+                        |at, _, _| {
+                            if inline(at) {
+                                let file_idx = self.symbols[at as usize].file as usize;
+                                out.insert(self.files[file_idx].clone());
+                            }
+                        },
+                    );
                 }
             }
             if let Some(cov) = coverage.as_ref().and_then(|report| report.files.get(path)) {
@@ -1366,6 +1482,7 @@ impl Index {
             .collect::<Vec<_>>();
         let total = failing_files.len() + failed_virtual_tns.len();
         let net = Net::new(self, false, certain);
+        let (_, file_bridges) = build_semantic_bridges(self, certain);
         let per_file_slice = (VISITS / changed.len().max(1)).clamp(1_024, VISITS);
         let mut complete = true;
         struct SuspectRow<'a> {
@@ -1395,19 +1512,25 @@ impl Index {
             let mut bfs_failing_files = BTreeSet::new();
             let mut bfs_passing_files = BTreeSet::new();
             let (mut nearest, mut far) = (u32::MAX, 0u64);
-            complete &= walk(&net, vec![file], &mut budget, |at, steps, _| {
-                if !candidates[at as usize] {
-                    return;
-                }
-                if failed[at as usize] {
-                    if bfs_failing_files.insert(at as usize) {
-                        nearest = nearest.min(steps);
-                        far += u64::from(steps);
+            complete &= walk_bridged(
+                &net,
+                vec![file],
+                Some(&file_bridges),
+                &mut budget,
+                |at, steps, _| {
+                    if !candidates[at as usize] {
+                        return;
                     }
-                } else {
-                    bfs_passing_files.insert(at as usize);
-                }
-            });
+                    if failed[at as usize] {
+                        if bfs_failing_files.insert(at as usize) {
+                            nearest = nearest.min(steps);
+                            far += u64::from(steps);
+                        }
+                    } else {
+                        bfs_passing_files.insert(at as usize);
+                    }
+                },
+            );
             let bfs_fail = bfs_failing_files.len();
             let cov = coverage
                 .as_ref()
@@ -2150,6 +2273,110 @@ end_of_record
         assert_eq!(
             updated.files["packages/billing/src/tax.ts"].covered_lines,
             0
+        );
+    }
+
+    #[test]
+    fn tests_reaching_changes_crosses_semantic_bridges_and_direct_di_binds() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("shop");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::create_dir_all(ws.join("tests")).unwrap();
+        for rel in [
+            "src/CheckoutService.php",
+            "src/OrderService.php",
+            "src/InvoiceListener.php",
+            "src/OrderController.php",
+            "src/GatewayInterface.php",
+            "src/StripeGateway.php",
+            "tests/InvoiceListenerTest.php",
+            "tests/OrderApiTest.php",
+            "tests/StripeGatewayTest.php",
+            "tests/OrderControllerTest.php",
+        ] {
+            std::fs::write(ws.join(rel), "<?php\n").unwrap();
+        }
+        // `sem:event:OrderCreated` is anchored in `src/CheckoutService.php`, NOT `src/OrderService.php`.
+        // Semantic bridge must still carry changes to `src/OrderService.php` through the shared
+        // event hub to `src/InvoiceListener.php` -> `tests/InvoiceListenerTest.php`.
+        let graph = json!({
+            "nodes": [
+                {"id": "checkout_pub", "label": "CheckoutService.submit()", "source_file": "src/CheckoutService.php", "node_kind": "method"},
+                {"id": "order_pub", "label": "OrderService.create()", "source_file": "src/OrderService.php", "node_kind": "method"},
+                {"id": "evt_created", "label": "event:OrderCreated", "source_file": "src/CheckoutService.php", "node_kind": "semantic"},
+                {"id": "listener", "label": "InvoiceListener.handle()", "source_file": "src/InvoiceListener.php", "node_kind": "method"},
+                {"id": "listener_test", "label": "InvoiceListenerTest.testMail()", "source_file": "tests/InvoiceListenerTest.php", "node_kind": "method"},
+                {"id": "ctrl_route", "label": "OrderController.store()", "source_file": "src/OrderController.php", "node_kind": "method"},
+                {"id": "route_orders", "label": "route:POST /orders", "source_file": "src/OrderController.php", "node_kind": "semantic"},
+                {"id": "api_test", "label": "OrderApiTest.testCreate()", "source_file": "tests/OrderApiTest.php", "node_kind": "method"},
+                {"id": "iface", "label": "GatewayInterface", "source_file": "src/GatewayInterface.php", "node_kind": "interface"},
+                {"id": "impl", "label": "StripeGateway", "source_file": "src/StripeGateway.php", "node_kind": "class"},
+                {"id": "impl_test", "label": "StripeGatewayTest.testCharge()", "source_file": "tests/StripeGatewayTest.php", "node_kind": "method"},
+                {"id": "ctrl_type", "label": "OrderController", "source_file": "src/OrderController.php", "node_kind": "class"},
+                {"id": "ctrl_test", "label": "OrderControllerTest.testFlow()", "source_file": "tests/OrderControllerTest.php", "node_kind": "method"}
+            ],
+            "links": [
+                {"source": "checkout_pub", "target": "evt_created", "relation": "publishes_event", "confidence": "EXTRACTED"},
+                {"source": "order_pub", "target": "evt_created", "relation": "publishes_event", "confidence": "EXTRACTED"},
+                {"source": "listener", "target": "evt_created", "relation": "handles_event", "confidence": "EXTRACTED"},
+                {"source": "listener_test", "target": "listener", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "ctrl_route", "target": "route_orders", "relation": "exposes_route", "confidence": "EXTRACTED"},
+                {"source": "api_test", "target": "route_orders", "relation": "calls_route", "confidence": "EXTRACTED"},
+                {"source": "iface", "target": "impl", "relation": "di_binds", "confidence": "EXTRACTED"},
+                {"source": "impl_test", "target": "impl", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "ctrl_type", "target": "iface", "relation": "references", "confidence": "EXTRACTED"},
+                {"source": "ctrl_test", "target": "ctrl_type", "relation": "calls", "confidence": "EXTRACTED"}
+            ]
+        });
+        let idx = Index::read(graph.to_string().as_bytes(), &ws).unwrap();
+        let mut view = json!({"mode": "changes"});
+        idx.tests_reaching_changes(
+            &mut view,
+            &[
+                ("src/OrderService.php".to_owned(), 'M'),
+                ("src/OrderController.php".to_owned(), 'M'),
+                ("src/GatewayInterface.php".to_owned(), 'M'),
+                ("src/StripeGateway.php".to_owned(), 'M'),
+            ],
+            "",
+            true,
+        );
+        let rows = view["test_reach"].as_array().unwrap();
+        let tests_for = |rel: &str| -> Vec<String> {
+            rows.iter()
+                .find(|r| r["path"] == rel)
+                .and_then(|r| r["tests"].as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t["file"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let order_tests = tests_for("src/OrderService.php");
+        assert!(
+            order_tests.contains(&"tests/InvoiceListenerTest.php".to_owned()),
+            "event publisher should reach listener test across non-local anchor: {order_tests:?}"
+        );
+
+        let ctrl_tests = tests_for("src/OrderController.php");
+        assert!(
+            ctrl_tests.contains(&"tests/OrderApiTest.php".to_owned()),
+            "route producer should reach route caller test: {ctrl_tests:?}"
+        );
+
+        let iface_tests = tests_for("src/GatewayInterface.php");
+        assert!(
+            iface_tests.contains(&"tests/StripeGatewayTest.php".to_owned())
+                && iface_tests.contains(&"tests/OrderControllerTest.php".to_owned()),
+            "interface change should reach both caller tests and bound impl tests: {iface_tests:?}"
+        );
+
+        let impl_tests = tests_for("src/StripeGateway.php");
+        assert!(
+            impl_tests.contains(&"tests/OrderControllerTest.php".to_owned()),
+            "impl change should reach interface caller tests via di_binds: {impl_tests:?}"
         );
     }
 }

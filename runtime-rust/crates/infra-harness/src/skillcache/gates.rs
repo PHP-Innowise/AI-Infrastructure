@@ -7,13 +7,18 @@
 //! the task with the observed values answering for the agent, and checks
 //! its workspace effects against the observation. A host without a sandbox qualifies nothing:
 //! there is no unconfined fallback.
-use super::replay_result::{self, Changes};
+use super::replay_result::{self, ObservedResult};
 use crate::{HarnessError, Result};
 use infra_host::{
     capture::{self, Stream},
     sandbox::{self, Spec},
 };
-use infra_skillcache::{candidate::Candidate, capsule::Network, env_filter};
+use infra_skillcache::{
+    SkillCapsule,
+    candidate::Candidate,
+    capsule::{Examples, Network, Step},
+    env_filter,
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -337,7 +342,7 @@ pub(super) fn gate3(
     round: &Round,
     candidate: &Candidate,
     copy: &dyn Fn(&Path) -> Result<Value>,
-    expected: Option<&Changes>,
+    expected: Option<&ObservedResult>,
     cancel: &Arc<AtomicBool>,
 ) -> Value {
     let Some(expected) = expected else {
@@ -452,9 +457,16 @@ pub(super) fn gate3(
             let comparison = if violations.is_empty() {
                 match before.and_then(|before| {
                     let after = replay_result::capture(&workspace, None)?;
-                    Ok(replay_result::changes(before, after))
+                    Ok(replay_result::diff(&before, &after))
                 }) {
-                    Ok(actual) => compare_results(expected, &actual, &mut violations),
+                    Ok(actual) => compare_results(
+                        expected,
+                        &actual,
+                        &replay,
+                        &candidate.capsule,
+                        candidate.examples.as_ref(),
+                        &mut violations,
+                    ),
                     Err(_) => {
                         violations.push(result_unavailable(
                             "The replay workspace could not be captured within the comparison limits.",
@@ -490,38 +502,164 @@ fn result_unavailable(message: &str) -> Value {
     json!({"code": "replay_result_unavailable", "at": "", "message": message})
 }
 
-fn compare_results(expected: &Changes, actual: &Changes, violations: &mut Vec<Value>) -> Value {
-    let mut missing = 0;
-    let mut different = 0;
-    for (path, digest) in expected {
-        match actual.get(path) {
-            None => missing += 1,
-            Some(found) if found != digest => different += 1,
-            Some(_) => {}
+fn format_path_sample(paths: &[String]) -> String {
+    const LIMIT: usize = 5;
+    if paths.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = paths.iter().take(LIMIT).map(String::as_str).collect();
+    if paths.len() > LIMIT {
+        format!(" ({}, +{} more)", shown.join(", "), paths.len() - LIMIT)
+    } else {
+        format!(" ({})", shown.join(", "))
+    }
+}
+
+fn non_empty_output(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
+    }
+}
+
+fn verify_zero_file_outputs(
+    replay: &Value,
+    capsule: Option<&SkillCapsule>,
+    examples: Option<&Examples>,
+    violations: &mut Vec<Value>,
+) -> bool {
+    let results = &replay["results"];
+    if let Some(examples) = examples
+        && !examples.steps.is_empty()
+    {
+        for (step_idx, expected_map) in &examples.steps {
+            let program_key = capsule
+                .and_then(|cap| cap.plan_step(*step_idx))
+                .and_then(Step::program);
+            let actual_step = program_key
+                .and_then(|id| results.get(id))
+                .unwrap_or(&results[step_idx.to_string()]);
+            for (key, expected_val) in expected_map {
+                let actual_val = &actual_step[key];
+                if actual_val.is_null()
+                    || !replay_result::values_structurally_equal(expected_val, actual_val)
+                {
+                    violations.push(json!({
+                        "code": "replay_result_mismatch",
+                        "at": format!("steps[{step_idx}]"),
+                        "message": format!(
+                            "Workspace made no file changes, and replay output `{step_idx}.{key}` differs from the observed example."
+                        ),
+                    }));
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    let has_non_empty = results.as_object().is_some_and(|steps| {
+        steps.values().any(|step| {
+            step.as_object()
+                .is_some_and(|outputs| outputs.values().any(non_empty_output))
+        })
+    });
+    if !has_non_empty {
+        violations.push(json!({
+            "code": "replay_result_mismatch",
+            "at": "",
+            "message": "Neither the observed turn nor the replay changed workspace files or produced verifiable non-empty step outputs.",
+        }));
+        return false;
+    }
+    true
+}
+
+fn compare_results(
+    expected: &ObservedResult,
+    actual: &ObservedResult,
+    replay: &Value,
+    capsule: &SkillCapsule,
+    examples: Option<&Examples>,
+    violations: &mut Vec<Value>,
+) -> Value {
+    compare_results_inner(
+        expected,
+        actual,
+        replay,
+        Some(capsule),
+        examples,
+        violations,
+    )
+}
+
+fn compare_results_inner(
+    expected: &ObservedResult,
+    actual: &ObservedResult,
+    replay: &Value,
+    capsule: Option<&SkillCapsule>,
+    examples: Option<&Examples>,
+    violations: &mut Vec<Value>,
+) -> Value {
+    let label_for = |path_hash: &str| {
+        expected
+            .paths
+            .get(path_hash)
+            .or_else(|| actual.paths.get(path_hash))
+            .cloned()
+            .unwrap_or_else(|| format!("hash:{}", &path_hash[..path_hash.len().min(12)]))
+    };
+    let mut missing_paths = Vec::new();
+    let mut different_paths = Vec::new();
+    for (path_hash, digest) in &expected.changes {
+        match actual.changes.get(path_hash) {
+            None => missing_paths.push(label_for(path_hash)),
+            Some(found) if found == digest => {}
+            Some(Some(_))
+                if digest.is_some()
+                    && expected
+                        .structural
+                        .get(path_hash)
+                        .is_some_and(|s| actual.structural.get(path_hash) == Some(s)) => {}
+            Some(_) => different_paths.push(label_for(path_hash)),
         }
     }
-    let unexpected = actual
+    let unexpected_paths: Vec<String> = actual
+        .changes
         .keys()
-        .filter(|path| !expected.contains_key(*path))
-        .count();
+        .filter(|path| !expected.changes.contains_key(*path))
+        .map(|path| label_for(path))
+        .collect();
+    let missing = missing_paths.len();
+    let different = different_paths.len();
+    let unexpected = unexpected_paths.len();
     let status = if missing + different + unexpected != 0 {
         violations.push(json!({
             "code": "replay_result_mismatch",
             "at": "",
             "message": format!(
-                "Workspace changes differ from the observed turn: {missing} missing, {different} with different contents or deletion, {unexpected} unexpected. Reproduce the observed file changes."
+                "Workspace changes differ from the observed turn: {missing} missing{}, {different} with different contents or deletion{}, {unexpected} unexpected{}. Reproduce the observed file changes.",
+                format_path_sample(&missing_paths),
+                format_path_sample(&different_paths),
+                format_path_sample(&unexpected_paths),
             ),
         }));
         "mismatch"
-    } else if expected.is_empty() {
-        "no_file_changes"
+    } else if expected.changes.is_empty() {
+        if verify_zero_file_outputs(replay, capsule, examples, violations) {
+            "no_file_changes"
+        } else {
+            "mismatch"
+        }
     } else {
         "matched"
     };
     json!({
         "status": status,
-        "observed_changes": expected.len(),
-        "replay_changes": actual.len(),
+        "observed_changes": expected.changes.len(),
+        "replay_changes": actual.changes.len(),
         "missing": missing,
         "different": different,
         "unexpected": unexpected,
@@ -577,5 +715,136 @@ mod tests {
             )
             .contains_key("SKILLCACHE_STATE_FILE")
         );
+    }
+
+    #[test]
+    fn compare_results_handles_structural_json_and_zero_file_output_checks() {
+        let h_cfg = infra_skillcache::fingerprint::sha256(b"out/config.json");
+        let cfg_observed = br#"{"z": 1, "a": {"k": "v"}}"#;
+        let cfg_reformatted = b"{\n  \"a\": {\n    \"k\": \"v\"\n  },\n  \"z\": 1\n}\n";
+        let cfg_dropped = br#"{"z": 1}"#;
+
+        let expected = ObservedResult {
+            changes: [(
+                h_cfg.clone(),
+                Some(infra_skillcache::fingerprint::sha256(cfg_observed)),
+            )]
+            .into_iter()
+            .collect(),
+            structural: [(
+                h_cfg.clone(),
+                replay_result::structural_digest("out/config.json", cfg_observed).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            paths: [(h_cfg.clone(), "out/config.json".into())]
+                .into_iter()
+                .collect(),
+        };
+        let actual_same_structure = ObservedResult {
+            changes: [(
+                h_cfg.clone(),
+                Some(infra_skillcache::fingerprint::sha256(cfg_reformatted)),
+            )]
+            .into_iter()
+            .collect(),
+            structural: [(
+                h_cfg.clone(),
+                replay_result::structural_digest("out/config.json", cfg_reformatted).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            paths: [(h_cfg.clone(), "out/config.json".into())]
+                .into_iter()
+                .collect(),
+        };
+        let mut violations = Vec::new();
+        let cmp = compare_results_inner(
+            &expected,
+            &actual_same_structure,
+            &json!({"results": {}}),
+            None,
+            None,
+            &mut violations,
+        );
+        assert_eq!(cmp["status"], "matched");
+        assert!(violations.is_empty(), "{violations:?}");
+
+        let actual_dropped = ObservedResult {
+            changes: [(
+                h_cfg.clone(),
+                Some(infra_skillcache::fingerprint::sha256(cfg_dropped)),
+            )]
+            .into_iter()
+            .collect(),
+            structural: [(
+                h_cfg.clone(),
+                replay_result::structural_digest("out/config.json", cfg_dropped).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            paths: [(h_cfg.clone(), "out/config.json".into())]
+                .into_iter()
+                .collect(),
+        };
+        let mut violations = Vec::new();
+        let cmp = compare_results_inner(
+            &expected,
+            &actual_dropped,
+            &json!({"results": {}}),
+            None,
+            None,
+            &mut violations,
+        );
+        assert_eq!(cmp["status"], "mismatch");
+        assert!(
+            violations[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("out/config.json")
+        );
+
+        // Zero file changes requires matching/non-empty step output.
+        let empty = ObservedResult::default();
+        let mut ex = Examples::default();
+        ex.steps.insert(
+            0,
+            serde_json::from_value(json!({"routes": "GET /a\nPOST /b\n"})).unwrap(),
+        );
+        let mut violations = Vec::new();
+        let ok = compare_results_inner(
+            &empty,
+            &empty,
+            &json!({"results": {"0": {"routes": "GET /a\r\nPOST /b\r\n"}}}),
+            None,
+            Some(&ex),
+            &mut violations,
+        );
+        assert_eq!(ok["status"], "no_file_changes");
+        assert!(violations.is_empty(), "{violations:?}");
+
+        let mut violations = Vec::new();
+        let dropped = compare_results_inner(
+            &empty,
+            &empty,
+            &json!({"results": {"0": {"routes": "GET /a\n"}}}),
+            None,
+            Some(&ex),
+            &mut violations,
+        );
+        assert_eq!(dropped["status"], "mismatch");
+        assert_eq!(violations[0]["code"], "replay_result_mismatch");
+
+        let mut violations = Vec::new();
+        let noop = compare_results_inner(
+            &empty,
+            &empty,
+            &json!({"results": {}}),
+            None,
+            None,
+            &mut violations,
+        );
+        assert_eq!(noop["status"], "mismatch");
+        assert_eq!(violations[0]["code"], "replay_result_mismatch");
     }
 }

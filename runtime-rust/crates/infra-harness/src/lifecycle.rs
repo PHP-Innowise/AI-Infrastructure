@@ -84,6 +84,9 @@ struct RunState {
 }
 enum RecoveryPlan {
     Run(Box<RecoveryRequest>),
+    Deterministic {
+        reply: String,
+    },
     Skip {
         state: &'static str,
         reason: &'static str,
@@ -1166,6 +1169,11 @@ impl RunnerLifecycle {
                         let response = recovery.run(*request, observer, emit).await;
                         self.recovery_result(binding, response)?
                     }
+                    RecoveryPlan::Deterministic { reply } => {
+                        let observed = locked(binding)?;
+                        observed.accounting.process("recovery", "deterministic");
+                        json!({"state":"recovered","reply":reply,"launched":false,"deterministic":true})
+                    }
                     RecoveryPlan::Skip { state, reason } => {
                         let observed = locked(binding)?;
                         observed.accounting.process("recovery", "skipped");
@@ -1335,6 +1343,9 @@ impl RunnerLifecycle {
                 state: "skipped",
                 reason: "The remaining monetary budget is below the native minimum.",
             });
+        }
+        if let Some(reply) = extract_deterministic_memory_draft(&self.store, &state.sid, result) {
+            return Ok(RecoveryPlan::Deterministic { reply });
         }
         let Some(mut launch) = state.launch.clone() else {
             return Ok(RecoveryPlan::Skip {
@@ -1538,6 +1549,56 @@ impl Drop for FinishGuard {
         }
     }
 }
+/// Attempts deterministic recovery of a valid fenced `memory-draft` from already-recorded
+/// structured session events or an unfenced / JSON-fenced draft in the main reply before
+/// spawning a follow-up recovery LLM call.
+fn extract_deterministic_memory_draft(
+    store: &SessionStore,
+    sid: &str,
+    result: &WorkerResult,
+) -> Option<String> {
+    let wrap_and_verify = |obj: &Value| -> Option<String> {
+        if !obj.is_object() {
+            return None;
+        }
+        let fenced = format!("```memory-draft\n{}\n```", obj);
+        memory_draft::parse(&fenced).map(|_| fenced)
+    };
+    let try_text = |raw: &str| -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if memory_draft::parse(trimmed).is_some() {
+            return Some(trimmed.to_owned());
+        }
+        let json_str = crate::clash::extract_json_fence(trimmed).unwrap_or(trimmed);
+        let obj = serde_json::from_str::<Value>(json_str).ok()?;
+        let has_draft_keys = obj.get("progress").and_then(Value::as_str).is_some()
+            && (obj.get("learnings").is_some() || obj.get("next_steps").is_some());
+        has_draft_keys.then(|| wrap_and_verify(&obj)).flatten()
+    };
+
+    if let Some(found) = try_text(&result.text) {
+        return Some(found);
+    }
+    let page = store.session_events_page(sid, None, None, 100, true).ok()?;
+    for ev in page.events.iter().rev() {
+        if let Some(draft_obj) = ev.get("memory_draft").filter(|v| v.is_object())
+            && let Some(found) = wrap_and_verify(draft_obj)
+        {
+            return Some(found);
+        }
+        if matches!(ev["kind"].as_str(), Some("text" | "result"))
+            && let Some(txt) = ev["text"].as_str()
+            && let Some(found) = try_text(txt)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn memory_notice(brain: &Value) -> Result<String> {
     let capsule = &brain["capsule"];
     let mut counts = BTreeMap::from([("brain", 0usize), ("rules", 0), ("bank", 0)]);
@@ -2114,6 +2175,78 @@ mod usage_components_tests {
                 "model_calls": null,
                 "source": "cursor"
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_memory_draft_extraction_avoids_recovery_llm_roundtrip() {
+        let (_tmp, store, _results, lifecycle, session, generation, launch) =
+            setup_launch("claude");
+        let sid = session["id"].as_str().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let binding = lifecycle
+            .begin(&session, "Deterministic recovery test", &generation, cancel)
+            .unwrap();
+        lifecycle.before_dispatch(&binding, &launch).unwrap();
+        let unfenced = json!({
+            "progress": "Completed validation deterministically.",
+            "next_steps": [],
+            "learnings": [],
+            "capture_decision": "no_reusable_knowledge"
+        })
+        .to_string();
+        store
+            .guarded_event(
+                sid,
+                &generation,
+                &json!({"kind": "text", "text": &unfenced}),
+            )
+            .unwrap();
+        lifecycle
+            .boundary(&binding, "cleanup_confirmed", &Value::Null)
+            .unwrap();
+        locked(&binding).unwrap().session["brain"] = json!({"review": false});
+
+        // Unfenced JSON memory draft returned directly by the main worker is recovered
+        // deterministically without invoking the LLM recovery runner.
+        struct PanickingRecovery;
+        impl RecoveryRunner for PanickingRecovery {
+            fn run<'a>(
+                &'a mut self,
+                _request: RecoveryRequest,
+                _observer: Arc<dyn RunEvents>,
+                _emit: Event,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<WorkerResult>> + Send + 'a>,
+            > {
+                panic!("recovery LLM runner must not be called when deterministic draft exists");
+            }
+        }
+        let emit: Event = Arc::new(|_| Ok(()));
+        let mut recovery = PanickingRecovery;
+        lifecycle
+            .finish(
+                &binding,
+                &WorkerResult {
+                    text: unfenced,
+                    ok: true,
+                    cost_usd: Some(0.01),
+                    session_id: Some("nat-det-1".into()),
+                    duration_seconds: 0.1,
+                    error: None,
+                    limit_reached: None,
+                },
+                &emit,
+                &mut recovery,
+            )
+            .await
+            .unwrap();
+        let events = store.events(sid, 0).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "memory" && e["recovery"] == "recovered"),
+            "{events:?}"
         );
     }
 }

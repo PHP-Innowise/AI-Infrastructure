@@ -212,15 +212,8 @@ pub(crate) fn on_global_project_change(project: &str) {
     let prev = m::string(&m::data("knowledge-global-project"));
     m::set("knowledge-global-project", json!(project));
     let active_view = m::read(|s| s.view.clone());
-    for scope_id in [
-        "context-project",
-        "memory-use-project",
-        "brain-project",
-        "memory-project",
-    ] {
-        if cfg!(target_arch = "wasm32") && dom::value(scope_id) != project {
-            dom::set_value(scope_id, project);
-        }
+    for scope_id in ["brain-project", "memory-project"] {
+        m::clear_scoped_project(scope_id);
     }
     if prev != project {
         reset_project("brain");
@@ -291,11 +284,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             linked_controls();
             return true;
         }
-        if id == "context-project" {
-            load_context().await;
-            return true;
-        }
-        if id == "memory-use-project" || id == "memory-use-bank" {
+        if id == "memory-use-bank" {
             load_memory_use().await;
             return true;
         }
@@ -309,7 +298,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             return true;
         }
         for scope in ["brain", "memory"] {
-            if id == format!("{scope}-project") || id == format!("{scope}-bank") {
+            if id == format!("{scope}-bank") {
                 load(scope, true).await;
                 return true;
             }
@@ -380,8 +369,12 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             chunk_detail(payload);
         }
         "memory-retrieval" => {
+            let pos = payload.as_u64().unwrap_or(0) as usize;
             m::set("memory-pinned-retrieval", payload.clone());
-            retrieval_detail(payload.as_u64().unwrap_or(0) as usize);
+            if let Some(section) = dom::get("memory-use-strip") {
+                memory_use::sync_retrieval_strip_selection(&section, pos);
+            }
+            retrieval_detail(pos);
         }
         "memory-filter-chip" => {
             let name = payload.as_str().unwrap_or("all");
@@ -407,7 +400,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             render_memory();
         }
         "memory-chunk-action" => {
-            let p = dom::value("memory-use-project");
+            let p = m::current_project();
             dom::set_value("memory-project", &p);
             let bank = m::data("memory-use")["bank_id"].clone();
             dom::set_value("memory-bank", &m::string(&bank));
@@ -443,7 +436,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             match api::post(
                 &format!(
                     "/api/projects/{}/memory-use/check",
-                    dom::enc(&dom::value("memory-use-project"))
+                    dom::enc(&m::current_project())
                 ),
                 json!({"bank":data["bank_id"]}),
             )
@@ -457,7 +450,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             }
         }
         "memory-feedback" => {
-            let project = dom::value("memory-use-project");
+            let project = m::current_project();
             let bank = m::data("memory-use")["bank_id"].clone();
             let mut body = json!({
                 "action": "retrieval-feedback",
@@ -483,7 +476,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         }
         "memory-promotion-brain" => {
             // Project Brain shows the source record Memory use names only by ID.
-            let project = dom::value("memory-use-project");
+            let project = m::current_project();
             if let Some(bank) = m::data("memory-use")["bank_id"].as_str() {
                 if dom::value("brain-project") == project {
                     dom::set_value("brain-bank", bank);
@@ -497,7 +490,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
             .await;
         }
         "memory-chunk-open" => {
-            let p = dom::value("memory-use-project");
+            let p = m::current_project();
             dom::set_value("memory-project", &p);
             let bank = m::data("memory-use")["bank_id"].clone();
             dom::set_value("memory-bank", &m::string(&bank));

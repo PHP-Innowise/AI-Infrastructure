@@ -27,8 +27,8 @@ impl Graphs {
             .or_insert_with(|| opened)
             .clone())
     }
-    /// Returns a cached `GraphIrStore` from `ir_stores` if already open, or opens an existing
-    /// store strictly read-only without creating files or writing `ir_meta`/DDL.
+    /// Returns a cached `GraphIrStore` from `ir_stores` / `ir_stores_ro` if already open, or opens an
+    /// existing store strictly read-only without creating files or writing `ir_meta`/DDL.
     pub(crate) fn get_ir_store_readonly(
         &self,
         project: &str,
@@ -38,14 +38,33 @@ impl Graphs {
         {
             return Some(existing.clone());
         }
-        crate::graph_ir::GraphIrStore::open_readonly(&self.store.state, project)
-            .ok()
-            .flatten()
-            .map(Arc::new)
+        if let Ok(stores_ro) = self.ir_stores_ro.lock()
+            && let Some(existing) = stores_ro.get(project)
+            && existing.db_path().is_file()
+        {
+            return Some(existing.clone());
+        }
+        let opened = Arc::new(
+            crate::graph_ir::GraphIrStore::open_readonly(&self.store.state, project)
+                .ok()
+                .flatten()?,
+        );
+        if let Ok(mut stores_ro) = self.ir_stores_ro.lock() {
+            return Some(
+                stores_ro
+                    .entry(project.to_owned())
+                    .or_insert_with(|| opened)
+                    .clone(),
+            );
+        }
+        Some(opened)
     }
     pub(super) fn evict_ir_store(&self, project: &str) {
         if let Ok(mut stores) = self.ir_stores.lock() {
             stores.remove(project);
+        }
+        if let Ok(mut stores_ro) = self.ir_stores_ro.lock() {
+            stores_ro.remove(project);
         }
     }
     pub(super) fn stop_watcher(&self, project: &str) {
@@ -266,11 +285,12 @@ impl Graphs {
         }
         let started = Instant::now();
         let ir = self.ir_store(project)?;
-        if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
+        let delta = if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
             let _ = ir.sync_workspace(root)?;
+            None
         } else {
-            let _ = ir.update_paths(root, rel_paths)?;
-        }
+            Some(ir.update_paths_with_delta(root, rel_paths)?)
+        };
         let backend = self.resolve_backend(false);
         let using_native = matches!(backend, Some(BuildBackend::NativeIr))
             || setting["built"]["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
@@ -281,17 +301,41 @@ impl Graphs {
             return Ok(());
         }
         let home = folder(&self.store.state, project);
-        let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
         let write_epoch = ir.current_write_epoch();
-        let shared_nodes = Arc::new(ir_nodes);
-        let shared_links = Arc::new(ir_links);
-        let index = Arc::new(crate::graph_map::Index::from_ir_parts(
-            root,
-            Some(ir.db_path().to_path_buf()),
-            Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
-            (*shared_nodes).clone(),
-            (*shared_links).clone(),
-        )?);
+        let incremental_index = if let Some(ref delta) = delta
+            && let Some(prev_index) = self.maps.latest_live_ir_index(project)
+            && let Some(ir_delta) = ir.export_ir_delta_for_files(delta)?
+        {
+            prev_index.update_files(root, ir_delta).map(Arc::new)
+        } else {
+            None
+        };
+        let (index, nodes, edges, pending_live_json) = if let Some(idx) = incremental_index {
+            let (nodes, edges) = idx.node_link_counts();
+            (idx, nodes, edges, None)
+        } else {
+            let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
+            let shared_nodes = Arc::new(ir_nodes);
+            let shared_links = Arc::new(ir_links);
+            let idx = Arc::new(crate::graph_map::Index::from_ir_parts(
+                root,
+                Some(ir.db_path().to_path_buf()),
+                Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+                (*shared_nodes).clone(),
+                (*shared_links).clone(),
+            )?);
+            (
+                idx,
+                nodes,
+                edges,
+                Some(PendingLiveJson::Elements {
+                    nodes,
+                    edges,
+                    ir_nodes: shared_nodes,
+                    ir_links: shared_links,
+                }),
+            )
+        };
         let rev = self.publish_native_index(project, write_epoch, index);
         let fresh_print = self.print(project, root, true);
         let elapsed = tenth(started.elapsed().as_secs_f64());
@@ -320,16 +364,7 @@ impl Graphs {
                 fields.remove("failure");
             }
         })?;
-        self.schedule_live_json_write(
-            project,
-            root.to_path_buf(),
-            Some(PendingLiveJson::Elements {
-                nodes,
-                edges,
-                ir_nodes: shared_nodes,
-                ir_links: shared_links,
-            }),
-        );
+        self.schedule_live_json_write(project, root.to_path_buf(), pending_live_json);
         self.emit_status_event(
             project,
             "ready",
