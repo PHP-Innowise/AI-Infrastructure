@@ -3570,7 +3570,8 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             "expected build lifecycle SSE events: {seen_reasons:?}"
         );
 
-        // Architecture-only edit bumps revision without reparsing code files.
+        // Architecture-only (and mixed non-code) edit bumps revision without reparsing or rebuilding Index.
+        let arch_before_idx_id = graphs.live_index(&proj_id).unwrap().index_id();
         graphs.record_live_paths(&proj_id, &[".harness-architecture.json".to_owned()]);
         let mut saw_arch = false;
         while let Ok(ev) = rx.try_recv() {
@@ -3579,6 +3580,29 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             }
         }
         assert!(saw_arch, "expected architecture_updated SSE event");
+        std::fs::write(ws.join("README.md"), "# Updated notes\n").unwrap();
+        graphs.record_live_paths(
+            &proj_id,
+            &[
+                ".harness-architecture.json".to_owned(),
+                "README.md".to_owned(),
+            ],
+        );
+        let mut saw_mixed_arch = false;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.project_id == proj_id && ev.reason == "architecture_updated" {
+                saw_mixed_arch = true;
+            }
+        }
+        assert!(
+            saw_mixed_arch,
+            "expected architecture_updated for arch + doc batch"
+        );
+        assert_eq!(
+            graphs.live_index(&proj_id).unwrap().index_id(),
+            arch_before_idx_id,
+            "arch/non-code batch must not rebuild Index"
+        );
 
         let mut saw_global = false;
         while let Ok(ev) = global_rx.try_recv() {
@@ -3995,6 +4019,11 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
         )
         .unwrap();
         assert_eq!(inc_idx.files(), full_idx.files());
+        assert_eq!(inc_idx.totals(), full_idx.totals());
+        assert_eq!(
+            inc_idx.modules("demo", None, false, ""),
+            full_idx.modules("demo", None, false, "")
+        );
         assert_eq!(
             inc_idx.view("demo", "", None, false, ""),
             full_idx.view("demo", "", None, false, "")

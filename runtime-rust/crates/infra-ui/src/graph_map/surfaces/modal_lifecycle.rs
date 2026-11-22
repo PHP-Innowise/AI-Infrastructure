@@ -2050,6 +2050,26 @@ pub async fn event(
         ("change", "graph-map-no-incoming", _) => {
             state["no_incoming"] = json!(checked);
         }
+        ("change", "graph-map-lod", _) => {
+            let clean = value.trim().to_ascii_lowercase();
+            if matches!(clean.as_str(), "crate" | "folder" | "file" | "symbol") {
+                state["lod"] = json!(clean);
+            } else {
+                state["lod"] = V::Null;
+                state["auto_lod"] = json!(true);
+            }
+            state["offset"] = json!(0);
+        }
+        ("change", "graph-map-min-weight", _) => {
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|&w| w >= 1)
+                .map(|w| w.min(1_000_000));
+            state["min_weight"] = parsed.map_or(V::Null, |w| json!(w));
+            state["offset"] = json!(0);
+        }
         ("change", "graph-map-modules", _) => {
             state = unfollowed(state);
             state["modules"] = json!(checked);

@@ -248,15 +248,7 @@ impl Graphs {
         };
         let apply_lod = |index: &crate::graph_map::Index, view: &mut Value| {
             crate::graph_map::apply_lod_and_min_weight(
-                index,
-                view,
-                lod,
-                min_weight,
-                scope,
-                focus,
-                filter,
-                certain,
-                offset > 0 || limit.is_some(),
+                index, view, lod, min_weight, scope, focus, filter, certain, offset, limit,
             );
         };
         let Some(target) = target else {
@@ -283,7 +275,8 @@ impl Graphs {
                             focus,
                             filter,
                             certain,
-                            paginated: offset > 0 || limit.is_some(),
+                            offset,
+                            limit,
                         },
                     ),
                     None => {

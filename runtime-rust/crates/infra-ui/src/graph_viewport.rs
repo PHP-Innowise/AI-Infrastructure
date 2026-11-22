@@ -1618,7 +1618,7 @@ pub(crate) mod canvas2d {
     const NODE_HIT_PAD: f64 = 2.0;
     const EDGE_HIT_PAD: f64 = 12.0;
 
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Clone, Debug, Default, PartialEq)]
     pub struct DenseNodeSpec {
         pub index: usize,
         pub x: f64,
@@ -2079,14 +2079,31 @@ pub(crate) mod canvas2d {
         pub commit_changes_active: bool,
         pub active_layer: Option<String>,
         pub layer_of_node: HashMap<usize, String>,
+        pub node_pos_by_idx: HashMap<usize, usize>,
+        pub edge_pos_by_idx: HashMap<usize, usize>,
         pub edge_bounds: HashMap<usize, (f64, f64, f64, f64)>,
         pub node_adjacency: HashMap<usize, Vec<(usize, usize)>>,
     }
 
     impl DenseSceneMeta {
         pub fn rebuild_caches(&mut self, scene: &DenseScene) {
+            self.hidden_kinds = self
+                .hidden_kinds
+                .drain()
+                .map(|k| k.trim().to_ascii_lowercase())
+                .filter(|k| !k.is_empty())
+                .collect();
+            self.node_pos_by_idx.clear();
+            self.node_pos_by_idx.reserve(scene.nodes.len());
+            for (pos, node) in scene.nodes.iter().enumerate() {
+                self.node_pos_by_idx.insert(node.index, pos);
+            }
+            self.edge_pos_by_idx.clear();
+            self.edge_pos_by_idx.reserve(scene.edges.len());
             self.edge_bounds.clear();
-            for edge in &scene.edges {
+            self.edge_bounds.reserve(scene.edges.len());
+            for (pos, edge) in scene.edges.iter().enumerate() {
+                self.edge_pos_by_idx.insert(edge.index, pos);
                 if let Some(b) = edge_bounds(edge) {
                     self.edge_bounds.insert(edge.index, b);
                 }
@@ -2182,23 +2199,34 @@ pub(crate) mod canvas2d {
         pub hollow_arrow: bool,
     }
 
-    pub fn edge_kind_matches(filter_kind: &str, edge_kind: &str) -> bool {
-        let want = filter_kind.trim().to_ascii_lowercase();
-        if want.is_empty() {
+    pub fn edge_kind_matches_lower(want_lower: &str, edge_kind: &str) -> bool {
+        if want_lower.is_empty() {
             return false;
         }
         edge_kind
             .split(|c: char| c.is_whitespace() || c == ',' || c == '|')
-            .map(|tok| tok.trim().to_ascii_lowercase())
-            .any(|tok| !tok.is_empty() && tok == want)
+            .map(str::trim)
+            .any(|tok| !tok.is_empty() && tok.eq_ignore_ascii_case(want_lower))
     }
 
-    pub fn edge_matches_kind(filter_kind: &str, edge: &DenseEdgeSpec) -> bool {
-        edge_kind_matches(filter_kind, &edge.kind)
+    pub fn edge_matches_kind_lower(want_lower: &str, edge: &DenseEdgeSpec) -> bool {
+        edge_kind_matches_lower(want_lower, &edge.kind)
             || edge
                 .kinds
                 .iter()
-                .any(|extra| edge_kind_matches(filter_kind, extra))
+                .any(|extra| edge_kind_matches_lower(want_lower, extra))
+    }
+
+    #[cfg(test)]
+    pub fn edge_kind_matches(filter_kind: &str, edge_kind: &str) -> bool {
+        let want = filter_kind.trim().to_ascii_lowercase();
+        edge_kind_matches_lower(&want, edge_kind)
+    }
+
+    #[cfg(test)]
+    pub fn edge_matches_kind(filter_kind: &str, edge: &DenseEdgeSpec) -> bool {
+        let want = filter_kind.trim().to_ascii_lowercase();
+        edge_matches_kind_lower(&want, edge)
     }
 
     #[allow(dead_code)]
@@ -2810,6 +2838,83 @@ pub(crate) mod canvas2d {
             }
         }
 
+        #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+        fn collect_visible_cell_indices(
+            cell_size: f64,
+            cells: &HashMap<(i32, i32), Vec<usize>>,
+            slot_len: usize,
+            index_at_slot: impl Fn(usize) -> usize,
+            bounds: (f64, f64, f64, f64),
+        ) -> Option<Vec<usize>> {
+            const MAX_VIEWPORT_CELLS: usize = 4096;
+            let (x0, y0, x1, y1) = bounds;
+            if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+                return None;
+            }
+            let gx0 = (x0 / cell_size).floor() as i32;
+            let gx1 = (x1 / cell_size).floor() as i32;
+            let gy0 = (y0 / cell_size).floor() as i32;
+            let gy1 = (y1 / cell_size).floor() as i32;
+            if gx1 < gx0 || gy1 < gy0 {
+                return Some(Vec::new());
+            }
+            let cols = (gx1 as i64 - gx0 as i64 + 1) as usize;
+            let rows = (gy1 as i64 - gy0 as i64 + 1) as usize;
+            if cols.saturating_mul(rows) > MAX_VIEWPORT_CELLS {
+                return None;
+            }
+            let mut seen = vec![false; slot_len];
+            let mut slots = Vec::new();
+            for gx in gx0..=gx1 {
+                for gy in gy0..=gy1 {
+                    if let Some(bucket) = cells.get(&(gx, gy)) {
+                        for &slot in bucket {
+                            if slot < seen.len() && !seen[slot] {
+                                seen[slot] = true;
+                                slots.push(slot);
+                            }
+                        }
+                    }
+                }
+            }
+            slots.sort_unstable();
+            Some(slots.into_iter().map(index_at_slot).collect())
+        }
+
+        #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+        pub fn visible_node_indices(
+            &self,
+            x0: f64,
+            y0: f64,
+            x1: f64,
+            y1: f64,
+        ) -> Option<Vec<usize>> {
+            Self::collect_visible_cell_indices(
+                self.cell_size,
+                &self.node_cells,
+                self.node_rects.len(),
+                |slot| self.node_rects[slot].0,
+                (x0, y0, x1, y1),
+            )
+        }
+
+        #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+        pub fn visible_edge_indices(
+            &self,
+            x0: f64,
+            y0: f64,
+            x1: f64,
+            y1: f64,
+        ) -> Option<Vec<usize>> {
+            Self::collect_visible_cell_indices(
+                self.cell_size,
+                &self.edge_cells,
+                self.edge_polys.len(),
+                |slot| self.edge_polys[slot].0,
+                (x0, y0, x1, y1),
+            )
+        }
+
         pub fn hit_test(&self, world_x: f64, world_y: f64, tol: f64) -> Option<(u8, usize)> {
             self.hit_test_filtered(world_x, world_y, tol, |_| true)
         }
@@ -2897,6 +3002,7 @@ pub(crate) mod canvas2d {
             RefCell::new(HashMap::new());
     }
 
+    #[allow(dead_code)]
     pub fn store_scene(canvas_id: &str, scene: DenseScene) {
         store_scene_with_meta(canvas_id, scene, DenseSceneMeta::default());
     }
@@ -2972,7 +3078,11 @@ pub(crate) mod canvas2d {
             let Some((_, _, meta)) = guard.get_mut(canvas_id) else {
                 return false;
             };
-            meta.hidden_kinds = hidden;
+            meta.hidden_kinds = hidden
+                .into_iter()
+                .map(|k| k.trim().to_ascii_lowercase())
+                .filter(|k| !k.is_empty())
+                .collect();
             true
         })
     }
@@ -3151,7 +3261,7 @@ pub(crate) mod canvas2d {
                 !meta
                     .hidden_kinds
                     .iter()
-                    .any(|hk| edge_matches_kind(hk, edge))
+                    .any(|hk| edge_matches_kind_lower(hk, edge))
             })
         })
     }
@@ -3615,7 +3725,7 @@ pub(crate) mod canvas2d {
                     }
                 }
                 let guard = store.borrow();
-                let Some((scene, _, meta)) = guard.get(canvas_id) else {
+                let Some((scene, grid, meta)) = guard.get(canvas_id) else {
                     return false;
                 };
                 let Some(host) = dom::get(canvas_id) else {
@@ -3661,7 +3771,11 @@ pub(crate) mod canvas2d {
                     .get_attribute("data-kind-hover")
                     .map(|s| s.trim().to_owned())
                     .filter(|s| !s.is_empty());
-                let active_kind_hover = host_kind_hover.as_deref().or(meta.kind_hover.as_deref());
+                let active_kind_hover_lower = host_kind_hover
+                    .as_deref()
+                    .or(meta.kind_hover.as_deref())
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty());
 
                 ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
                 ctx.clear_rect(0.0, 0.0, target_w as f64, target_h as f64);
@@ -3680,6 +3794,7 @@ pub(crate) mod canvas2d {
                 let view_y1 = view_y0 + vh / cam.scale.max(0.05) + 128.0;
                 let draw_arrows = cam.scale >= 0.35;
                 let badge_min_scale = 0.55;
+                let mut current_font: Option<&'static str> = None;
 
                 let mut hovered_neighbors: HashSet<usize> = HashSet::new();
                 let mut hovered_edges: HashSet<usize> = HashSet::new();
@@ -3717,16 +3832,23 @@ pub(crate) mod canvas2d {
                         width: f64,
                     }
 
-                    let mut prepared: Vec<PreparedEdge<'_>> =
-                        Vec::with_capacity(scene.edges.len().min(256));
-                    for edge in &scene.edges {
+                    #[allow(clippy::too_many_arguments)]
+                    fn push_prepared_edge<'a>(
+                        out: &mut Vec<PreparedEdge<'a>>,
+                        edge: &'a DenseEdgeSpec,
+                        meta: &DenseSceneMeta,
+                        view_bounds: (f64, f64, f64, f64),
+                        hover: Option<(u8, usize)>,
+                        hovered_edges: &HashSet<usize>,
+                        active_kind_hover_lower: Option<&str>,
+                    ) {
                         if !meta.hidden_kinds.is_empty()
                             && meta
                                 .hidden_kinds
                                 .iter()
-                                .any(|hk| edge_matches_kind(hk, edge))
+                                .any(|hk| edge_matches_kind_lower(hk, edge))
                         {
-                            continue;
+                            return;
                         }
                         let Some((ex0, ey0, ex1, ey1)) = meta
                             .edge_bounds
@@ -3734,16 +3856,17 @@ pub(crate) mod canvas2d {
                             .copied()
                             .or_else(|| edge_bounds(edge))
                         else {
-                            continue;
+                            return;
                         };
+                        let (view_x0, view_y0, view_x1, view_y1) = view_bounds;
                         if ex1 < view_x0 || ex0 > view_x1 || ey1 < view_y0 || ey0 > view_y1 {
-                            continue;
+                            return;
                         }
                         let hovered = hovered_edges.contains(&edge.index);
                         let hover_dimmed = hover.is_some() && !hovered;
-                        let kind_matched =
-                            active_kind_hover.is_some_and(|hk| edge_matches_kind(hk, edge));
-                        let kind_dimmed = active_kind_hover.is_some() && !kind_matched;
+                        let kind_matched = active_kind_hover_lower
+                            .is_some_and(|hk| edge_matches_kind_lower(hk, edge));
+                        let kind_dimmed = active_kind_hover_lower.is_some() && !kind_matched;
                         let appearance = resolve_dense_edge_stroke(edge, hovered);
                         let active = hovered || kind_matched || edge.on || edge.lit;
 
@@ -3770,7 +3893,7 @@ pub(crate) mod canvas2d {
                             (1.0 + (edge.weight.saturating_sub(1) as f64) * 0.25).min(2.6)
                         };
                         let batch = dense_edge_batch_key(active, &appearance, width, alpha);
-                        prepared.push(PreparedEdge {
+                        out.push(PreparedEdge {
                             edge,
                             batch,
                             hollow_arrow: appearance.hollow_arrow,
@@ -3778,6 +3901,44 @@ pub(crate) mod canvas2d {
                             alpha,
                             width,
                         });
+                    }
+
+                    let mut prepared: Vec<PreparedEdge<'_>> =
+                        Vec::with_capacity(scene.edges.len().min(256));
+                    let view_bounds = (view_x0, view_y0, view_x1, view_y1);
+                    if let Some(edge_indices) = grid.visible_edge_indices(
+                        view_x0 - 8.0,
+                        view_y0 - 8.0,
+                        view_x1 + 8.0,
+                        view_y1 + 8.0,
+                    ) {
+                        for edge_idx in edge_indices {
+                            if let Some(&pos) = meta.edge_pos_by_idx.get(&edge_idx) {
+                                if let Some(edge) = scene.edges.get(pos) {
+                                    push_prepared_edge(
+                                        &mut prepared,
+                                        edge,
+                                        meta,
+                                        view_bounds,
+                                        hover,
+                                        &hovered_edges,
+                                        active_kind_hover_lower.as_deref(),
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        for edge in &scene.edges {
+                            push_prepared_edge(
+                                &mut prepared,
+                                edge,
+                                meta,
+                                view_bounds,
+                                hover,
+                                &hovered_edges,
+                                active_kind_hover_lower.as_deref(),
+                            );
+                        }
                     }
 
                     prepared.sort_by_key(|p| p.batch);
@@ -3918,7 +4079,6 @@ pub(crate) mod canvas2d {
                         }
                     }
 
-                    let mut set_badge_font = false;
                     for item in &prepared {
                         let edge = item.edge;
                         if edge.weight > 1 && (item.active || cam.scale >= badge_min_scale) {
@@ -3935,9 +4095,9 @@ pub(crate) mod canvas2d {
                                 ctx.set_line_width(1.0);
                                 ctx.set_stroke_style(stroke_col);
                                 ctx.stroke_rect(bx, by, bw, bh);
-                                if !set_badge_font {
+                                if current_font != Some("600 9.5px sans-serif") {
                                     ctx.set_font("600 9.5px sans-serif");
-                                    set_badge_font = true;
+                                    current_font = Some("600 9.5px sans-serif");
                                 }
                                 ctx.set_fill_style(stroke_col);
                                 ctx.fill_text(&label, bx + 4.0, by + 10.5, bw - 8.0);
@@ -3948,13 +4108,13 @@ pub(crate) mod canvas2d {
 
                 if draw_nodes {
                     let show_labels = should_show_dense_labels(cam.scale, meta.label_min_scale);
-                    for node in &scene.nodes {
+                    let mut paint_node = |node: &DenseNodeSpec| {
                         if node.x + node.w < view_x0
                             || node.x > view_x1
                             || node.y + node.h < view_y0
                             || node.y > view_y1
                         {
-                            continue;
+                            return;
                         }
                         let nm = meta.nodes.get(&node.index);
                         let in_cycle = nm.is_some_and(|m| m.in_cycle);
@@ -4018,7 +4178,10 @@ pub(crate) mod canvas2d {
                         let mut right_reserve = 8.0;
                         if show_labels && cam.scale >= badge_min_scale {
                             if let Some(badge) = nm.and_then(dense_node_badge_label) {
-                                ctx.set_font("600 9px sans-serif");
+                                if current_font != Some("600 9px sans-serif") {
+                                    ctx.set_font("600 9px sans-serif");
+                                    current_font = Some("600 9px sans-serif");
+                                }
                                 let text_w = badge_width_cached_with(&badge, |b| {
                                     ctx.measure_text(b).width()
                                 });
@@ -4033,14 +4196,22 @@ pub(crate) mod canvas2d {
                                     ctx.set_stroke_style(border_col);
                                     ctx.stroke_rect(px, py, pill_w, pill_h);
                                     ctx.set_fill_style(&pal.muted);
-                                    ctx.fill_text_unscaled(&badge, px + 4.0, py + 9.5);
+                                    ctx.fill_text(
+                                        &badge,
+                                        px + 4.0,
+                                        py + 9.5,
+                                        (pill_w - 8.0).max(4.0),
+                                    );
                                     right_reserve = pill_w + 10.0;
                                 }
                             }
                         }
 
                         if show_labels && !node.label.is_empty() {
-                            ctx.set_font("500 11px sans-serif");
+                            if current_font != Some("500 11px sans-serif") {
+                                ctx.set_font("500 11px sans-serif");
+                                current_font = Some("500 11px sans-serif");
+                            }
                             ctx.set_fill_style(if node.dim && !node.selected {
                                 &pal.muted
                             } else {
@@ -4058,6 +4229,21 @@ pub(crate) mod canvas2d {
                                 node.x + label_left_pad,
                                 node.y + node.h * 0.62,
                             );
+                        }
+                    };
+                    if let Some(node_indices) =
+                        grid.visible_node_indices(view_x0, view_y0, view_x1, view_y1)
+                    {
+                        for node_idx in node_indices {
+                            if let Some(&pos) = meta.node_pos_by_idx.get(&node_idx) {
+                                if let Some(node) = scene.nodes.get(pos) {
+                                    paint_node(node);
+                                }
+                            }
+                        }
+                    } else {
+                        for node in &scene.nodes {
+                            paint_node(node);
                         }
                     }
                 }
@@ -4920,6 +5106,75 @@ mod tests {
         });
         assert_eq!(w1, w2);
         assert_eq!(badge_calls, 1);
+
+        // `SpatialHitGrid` viewport culling returns matching visible node and edge indices.
+        let cull_scene = canvas2d::DenseScene {
+            width: 2000.0,
+            height: 2000.0,
+            nodes: vec![
+                canvas2d::DenseNodeSpec {
+                    index: 0,
+                    x: 20.0,
+                    y: 20.0,
+                    w: 100.0,
+                    h: 40.0,
+                    label: "near".into(),
+                    ..canvas2d::DenseNodeSpec::default()
+                },
+                canvas2d::DenseNodeSpec {
+                    index: 1,
+                    x: 1500.0,
+                    y: 1500.0,
+                    w: 100.0,
+                    h: 40.0,
+                    label: "far".into(),
+                    ..canvas2d::DenseNodeSpec::default()
+                },
+            ],
+            edges: vec![
+                canvas2d::DenseEdgeSpec {
+                    index: 5,
+                    pts: vec![(30.0, 30.0), (90.0, 50.0)],
+                    kind: "Calls".into(),
+                    ..canvas2d::DenseEdgeSpec::default()
+                },
+                canvas2d::DenseEdgeSpec {
+                    index: 9,
+                    pts: vec![(1510.0, 1510.0), (1590.0, 1530.0)],
+                    kind: "Imports".into(),
+                    ..canvas2d::DenseEdgeSpec::default()
+                },
+            ],
+        };
+        let grid = canvas2d::SpatialHitGrid::build(&cull_scene, 128.0);
+        assert_eq!(
+            grid.visible_node_indices(0.0, 0.0, 300.0, 300.0),
+            Some(vec![0])
+        );
+        assert_eq!(
+            grid.visible_edge_indices(0.0, 0.0, 300.0, 300.0),
+            Some(vec![5])
+        );
+        assert_eq!(
+            grid.visible_node_indices(1400.0, 1400.0, 1700.0, 1700.0),
+            Some(vec![1])
+        );
+        let mut hidden = std::collections::HashSet::new();
+        hidden.insert("  Calls ".to_owned());
+        let mut meta = canvas2d::DenseSceneMeta {
+            hidden_kinds: hidden,
+            ..Default::default()
+        };
+        meta.rebuild_caches(&cull_scene);
+        assert!(meta.hidden_kinds.contains("calls"));
+        assert!(canvas2d::edge_matches_kind_lower(
+            "calls",
+            &cull_scene.edges[0]
+        ));
+        assert!(!canvas2d::edge_matches_kind_lower(
+            "calls",
+            &cull_scene.edges[1]
+        ));
     }
 
     trait CameraTestExt {

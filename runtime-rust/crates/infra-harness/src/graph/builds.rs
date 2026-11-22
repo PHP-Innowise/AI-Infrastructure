@@ -233,6 +233,21 @@ impl Graphs {
         let paths: Vec<String> = unique.into_iter().collect();
         let _ = self.apply_ir_path_updates(project, &root, &paths);
     }
+    fn emit_architecture_updated(&self, project: &str, setting: &Value) {
+        let rev = self.bump_ir_revision(project);
+        self.maps.rebind_live_ir_revision(project, rev);
+        let nodes = setting["built"]["nodes"].as_u64();
+        let edges = setting["built"]["edges"].as_u64();
+        self.emit_status_event(
+            project,
+            "ready",
+            "architecture_updated",
+            rev,
+            nodes,
+            edges,
+            Some("Architecture rules updated.".to_owned()),
+        );
+    }
     pub(super) fn apply_ir_path_updates(
         &self,
         project: &str,
@@ -256,18 +271,7 @@ impl Graphs {
             return Ok(());
         }
         if arch_only {
-            let rev = self.bump_ir_revision(project);
-            let nodes = setting["built"]["nodes"].as_u64();
-            let edges = setting["built"]["edges"].as_u64();
-            self.emit_status_event(
-                project,
-                "ready",
-                "architecture_updated",
-                rev,
-                nodes,
-                edges,
-                Some("Architecture rules updated.".to_owned()),
-            );
+            self.emit_architecture_updated(project, &setting);
             return Ok(());
         }
         if let Some(job) = lock(&self.jobs)?.get(project) {
@@ -283,6 +287,9 @@ impl Graphs {
             }
             return Ok(());
         }
+        let any_arch = rel_paths
+            .iter()
+            .any(|p| crate::graph_ast::is_graph_architecture_path(Path::new(p)));
         let started = Instant::now();
         let ir = self.ir_store(project)?;
         let delta = if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
@@ -291,6 +298,18 @@ impl Graphs {
         } else {
             Some(ir.update_paths_with_delta(root, rel_paths)?)
         };
+        if let Some(ref d) = delta
+            && d.edited_files.is_empty()
+            && d.removed_files.is_empty()
+            && d.re_resolved_files.is_empty()
+            && !d.manifest_changed
+            && self.maps.latest_live_ir_index(project).is_some()
+        {
+            if any_arch {
+                self.emit_architecture_updated(project, &setting);
+            }
+            return Ok(());
+        }
         let backend = self.resolve_backend(false);
         let using_native = matches!(backend, Some(BuildBackend::NativeIr))
             || setting["built"]["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
@@ -753,16 +772,11 @@ impl Graphs {
                 }),
             );
         } else {
-            let live_bytes = match crate::graph_ir::encode_node_link_payload_from_elements(
+            if let Err(err) = crate::graph_ir::write_live_graph_from_elements_atomic(
+                &live_graph,
                 &shared_nodes,
                 &shared_links,
             ) {
-                Ok(b) => b,
-                Err(err) => return Outcome::Failed(err.message),
-            };
-            if let Err(err) =
-                crate::graph_ir::write_live_graph_json_bytes_atomic(&live_graph, &live_bytes)
-            {
                 return Outcome::Failed(err.message);
             }
             if stopped() {

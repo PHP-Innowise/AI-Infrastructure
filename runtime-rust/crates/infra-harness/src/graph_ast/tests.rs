@@ -631,3 +631,114 @@ export function orchestrate(client: BillingClient) {
         ir.semantic_edges
     );
 }
+
+#[test]
+fn php_interface_extends_queue_events_and_sql_enclosing_symbol() {
+    let php = r#"<?php
+namespace App\Events;
+
+interface BaseEvent {}
+interface Auditable {}
+interface PaymentEvent extends BaseEvent, Auditable {}
+
+class OrderDispatcher {
+    public function publishOrder() {
+        $bus->enqueue('order.queued');
+        broadcast(new OrderCompleted());
+        DB::table('orders')->where('id', 1)->get();
+        return "SELECT * FROM invoices WHERE total > 0";
+    }
+}
+
+class OrderHandler {
+    public function handle(OrderCompleted $event) {}
+}
+
+#[AsMessageHandler]
+class AsyncHandler {
+    public function handle(PaymentEvent $msg) {}
+}
+"#;
+    let ir = parse_file_ir("app/Events/OrderEvents.php", php).expect("php ir");
+    assert!(
+        ir.inheritance.iter().any(|inh| {
+            inh.child == "PaymentEvent" && inh.parent == "BaseEvent" && inh.kind == "extends"
+        }),
+        "expected PHP interface extends (not implements): {:?}",
+        ir.inheritance
+    );
+    assert!(
+        !ir.inheritance
+            .iter()
+            .any(|inh| inh.child == "PaymentEvent" && inh.kind == "implements"),
+        "PHP interface must not emit implements: {:?}",
+        ir.inheritance
+    );
+    assert!(
+        ir.semantic_edges
+            .iter()
+            .any(|e| e.kind == "publishes_event" && e.target == "event:order.queued"),
+        "expected enqueue publishes_event: {:?}",
+        ir.semantic_edges
+    );
+    assert!(
+        ir.semantic_edges
+            .iter()
+            .any(|e| e.kind == "publishes_event" && e.target == "event:OrderCompleted"),
+        "expected broadcast publishes_event: {:?}",
+        ir.semantic_edges
+    );
+    assert!(
+        ir.semantic_edges.iter().any(|e| {
+            e.kind == "handles_event"
+                && e.target == "event:OrderCompleted"
+                && e.source_symbol.as_deref() == Some("OrderHandler::handle")
+        }),
+        "expected typed PHP handle() listener: {:?}",
+        ir.semantic_edges
+    );
+    assert!(
+        ir.semantic_edges.iter().any(|e| {
+            e.kind == "handles_event"
+                && e.target == "event:PaymentEvent"
+                && e.source_symbol.as_deref() == Some("AsyncHandler")
+        }),
+        "expected class-level AsMessageHandler with handle(): {:?}",
+        ir.semantic_edges
+    );
+    assert!(
+        ir.semantic_edges.iter().any(|e| {
+            e.kind == "reads_table"
+                && e.target == "table:invoices"
+                && e.source_symbol.as_deref() == Some("OrderDispatcher::publishOrder")
+        }),
+        "expected SQL string edge anchored to enclosing symbol: {:?}",
+        ir.semantic_edges
+    );
+    assert!(ir.identifiers.contains("OrderCompleted"));
+    assert!(!ir.identifiers.contains("invoices"));
+
+    let ts = r#"
+export async function syncEvents(broker: any) {
+    await broker.produce('billing.settled');
+    broker.consume('billing.refund');
+}
+"#;
+    let ts_ir = parse_file_ir("src/events.ts", ts).expect("ts ir");
+    assert!(
+        ts_ir
+            .semantic_edges
+            .iter()
+            .any(|e| e.kind == "publishes_event" && e.target == "event:billing.settled"),
+        "expected produce publishes_event: {:?}",
+        ts_ir.semantic_edges
+    );
+    assert!(
+        ts_ir
+            .semantic_edges
+            .iter()
+            .any(|e| e.kind == "handles_event" && e.target == "event:billing.refund"),
+        "expected consume handles_event: {:?}",
+        ts_ir.semantic_edges
+    );
+}

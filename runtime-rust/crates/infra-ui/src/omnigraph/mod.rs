@@ -789,6 +789,10 @@ pub(crate) use pulse::{
     focus_context_for_file, open_from_system_context, open_from_system_service,
     open_target_in_code_map, open_target_in_code_map_with_context,
 };
+
+pub(crate) async fn refresh_graph_preserving_pages() {
+    pulse::refresh_graph_preserving_pages().await;
+}
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use session_bar::session_payload_from_fields;

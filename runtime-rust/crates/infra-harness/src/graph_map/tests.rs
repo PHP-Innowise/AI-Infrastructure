@@ -7287,7 +7287,8 @@ fn lens_pagination_follow_all_seen_lod_min_weight_diff_overlay_and_sem_hubs() {
         None,
         "",
         false,
-        false,
+        0,
+        None,
     );
     assert!(reshaped);
     assert_eq!(crate_view["lod"], "crate");
@@ -7308,7 +7309,29 @@ fn lens_pagination_follow_all_seen_lod_min_weight_diff_overlay_and_sem_hubs() {
             .all(|e| e["links"].as_u64().unwrap_or(0) >= 2)
     );
 
-    // `Lod::File` & `Lod::Symbol` views build non-empty nodes/edges cleanly.
+    // `view_at_lod` respects `(offset, limit)` pagination and emits `paging` metadata.
+    let paged_lod = view_at_lod(
+        &idx,
+        "demo",
+        Lod::Crate,
+        None,
+        &LodFilter {
+            scope: "",
+            focus: None,
+            filter: "",
+            certain: false,
+            offset: 1,
+            limit: Some(1),
+        },
+    );
+    assert_eq!(paged_lod["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(paged_lod["paging"]["offset"], 1);
+    assert_eq!(paged_lod["paging"]["limit"], 1);
+    assert_eq!(paged_lod["paging"]["returned"], 1);
+    assert!(paged_lod["paging"]["total"].as_u64().unwrap_or(0) >= 2);
+
+    // `Lod::File` & `Lod::Symbol` views build non-empty nodes/edges cleanly, and focusing a
+    // symbol at `Lod::Symbol` retains its 1-hop incoming/outgoing neighbors.
     let mut sym_view = idx.view("demo", "", None, false, "");
     assert!(apply_lod_and_min_weight(
         &idx,
@@ -7319,15 +7342,43 @@ fn lens_pagination_follow_all_seen_lod_min_weight_diff_overlay_and_sem_hubs() {
         None,
         "",
         false,
-        false,
+        0,
+        None,
     ));
     assert_eq!(sym_view["lod"], "symbol");
+    let sym_paths: Vec<&str> = sym_view["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["path"].as_str())
+        .collect();
+    assert!(!sym_paths.is_empty());
+    let target_key = sym_paths
+        .iter()
+        .find(|p| p.contains("crates/beta/src/c.rs#"))
+        .copied()
+        .expect("beta symbol key");
+    let sym_focus_view = view_at_lod(
+        &idx,
+        "demo",
+        Lod::Symbol,
+        None,
+        &LodFilter {
+            scope: "",
+            focus: Some(target_key),
+            filter: "",
+            certain: false,
+            offset: 0,
+            limit: None,
+        },
+    );
     assert!(
-        sym_view["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["symbol"] == true)
+        sym_focus_view["nodes"].as_array().unwrap().len() >= 2,
+        "focused symbol should include 1-hop neighbors: {sym_focus_view}"
+    );
+    assert!(
+        !sym_focus_view["edges"].as_array().unwrap().is_empty(),
+        "focused symbol should include incident edges: {sym_focus_view}"
     );
 
     // `structural_diff_overlay`: detects added edge and SCC introduction vs base graph.
@@ -7492,7 +7543,8 @@ fn lod_folder_root_manifest_rollup_marks_end_line_and_racy_stat() {
         None,
         "",
         false,
-        false,
+        0,
+        None,
     ));
     assert_eq!(folder_view["lod"], "folder");
     let folder_paths: Vec<&str> = folder_view["nodes"]
@@ -7586,4 +7638,148 @@ fn lod_folder_root_manifest_rollup_marks_end_line_and_racy_stat() {
         .map(|m| m.name.clone())
         .collect();
     assert_eq!(names2, vec!["entry", "swap"]);
+}
+
+#[test]
+fn update_files_preserves_communities_and_exact_link_unplaced_totals() {
+    use crate::graph_ir::{IrDeltaElements, IrLinkSpec, IrNodeSpec};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("auth")).unwrap();
+    std::fs::create_dir_all(root.join("billing")).unwrap();
+
+    let node = |id: &str, label: &str, file: &str, comm: u32, cname: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        source_file: file.to_owned(),
+        source_location: Some("L1".to_owned()),
+        end_line: 10,
+        file_type: Some("code".to_owned()),
+        node_kind: Some("function".to_owned()),
+        community: Some(comm),
+        community_name: Some(cname.to_owned()),
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mut page_auth = node("file:auth/a.rs", "a.rs", "auth/a.rs", 0, "auth");
+    page_auth.node_kind = Some("page".to_owned());
+    let mut page_bill = node("file:billing/b.rs", "b.rs", "billing/b.rs", 1, "billing");
+    page_bill.node_kind = Some("page".to_owned());
+    let mut class_auth = node("cls:A", "Svc", "auth/a.rs", 0, "auth");
+    class_auth.node_kind = Some("class".to_owned());
+    class_auth.callable_class = true;
+    let sym_a1 = node("fn:a1", ".run()", "auth/a.rs", 0, "auth");
+    let sym_b1 = node("fn:b1", "charge()", "billing/b.rs", 1, "billing");
+
+    let initial_nodes = vec![
+        page_auth.clone(),
+        class_auth.clone(),
+        sym_a1.clone(),
+        page_bill.clone(),
+        sym_b1.clone(),
+    ];
+    let initial_links = vec![
+        // Nested method link (stored in parent).
+        IrLinkSpec {
+            source: "cls:A".to_owned(),
+            target: "fn:a1".to_owned(),
+            relation: Some("method".to_owned()),
+            confidence: None,
+            source_file: Some("auth/a.rs".to_owned()),
+            context: None,
+            evidence: None,
+        },
+        // Structural link whose parent is a File node (parent reset to NONE in finish_builder!).
+        IrLinkSpec {
+            source: "file:auth/a.rs".to_owned(),
+            target: "cls:A".to_owned(),
+            relation: Some("contains".to_owned()),
+            confidence: None,
+            source_file: Some("auth/a.rs".to_owned()),
+            context: None,
+            evidence: None,
+        },
+        // Self-loop and underscore-prefixed link in auth/a.rs.
+        IrLinkSpec {
+            source: "fn:a1".to_owned(),
+            target: "fn:a1".to_owned(),
+            relation: Some("calls".to_owned()),
+            confidence: Some("EXTRACTED".to_owned()),
+            source_file: Some("auth/a.rs".to_owned()),
+            context: None,
+            evidence: None,
+        },
+        IrLinkSpec {
+            source: "fn:a1".to_owned(),
+            target: "fn:b1".to_owned(),
+            relation: Some("_debug".to_owned()),
+            confidence: None,
+            source_file: Some("auth/a.rs".to_owned()),
+            context: None,
+            evidence: None,
+        },
+        // Normal cross-file link.
+        IrLinkSpec {
+            source: "fn:b1".to_owned(),
+            target: "fn:a1".to_owned(),
+            relation: Some("calls".to_owned()),
+            confidence: Some("EXTRACTED".to_owned()),
+            source_file: Some("billing/b.rs".to_owned()),
+            context: None,
+            evidence: None,
+        },
+        // Unplaced cross-file link (source_file matches neither auth/a.rs nor billing/b.rs).
+        IrLinkSpec {
+            source: "fn:a1".to_owned(),
+            target: "fn:b1".to_owned(),
+            relation: Some("calls".to_owned()),
+            confidence: Some("EXTRACTED".to_owned()),
+            source_file: Some("other/ghost.rs".to_owned()),
+            context: None,
+            evidence: None,
+        },
+    ];
+
+    let full1 = Index::from_ir_parts(
+        root,
+        None,
+        None,
+        initial_nodes.clone(),
+        initial_links.clone(),
+    )
+    .unwrap();
+    assert_eq!(full1.links, 6);
+    assert_eq!(full1.unplaced, 1);
+
+    // Re-apply an incremental edit on auth/a.rs where billing/b.rs is a dirty neighbor;
+    // omit community fields on the delta nodes to verify old-file community fallback too.
+    let mut edited_page_auth = page_auth;
+    edited_page_auth.community = None;
+    edited_page_auth.community_name = None;
+    let mut edited_class_auth = class_auth;
+    edited_class_auth.community = None;
+    edited_class_auth.community_name = None;
+    let mut edited_a1 = sym_a1;
+    edited_a1.community = None;
+    edited_a1.community_name = None;
+
+    let delta = IrDeltaElements {
+        files: vec!["auth/a.rs".to_owned(), "billing/b.rs".to_owned()],
+        edited_files: BTreeSet::from(["auth/a.rs".to_owned()]),
+        dirty_files: BTreeSet::from(["auth/a.rs".to_owned(), "billing/b.rs".to_owned()]),
+        removed_files: BTreeSet::new(),
+        neighbor_files: vec!["billing/b.rs".to_owned()],
+        rs_touched: false,
+        node_specs: vec![edited_page_auth, edited_class_auth, edited_a1],
+        link_specs: initial_links.clone(),
+    };
+
+    let inc = full1.update_files(root, delta).unwrap();
+    assert_eq!(inc.totals(), full1.totals());
+    assert_eq!(
+        inc.modules("proj", None, false, ""),
+        full1.modules("proj", None, false, "")
+    );
 }

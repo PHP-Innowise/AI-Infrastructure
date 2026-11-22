@@ -133,17 +133,28 @@ fn walk_php(
             let modifiers = collect_php_modifiers(node, ctx.source);
 
             let mut param_types = Vec::new();
+            let mut fallback_param_types = Vec::new();
             if let Some(body) = body_node {
                 for i in 0..body.child_count() {
                     if let Some(m) = body.child(i)
                         && m.kind() == "method_declaration"
-                        && m.child_by_field_name("name")
-                            .is_some_and(|n| ctx.text(n) == "__invoke")
                         && let Some(params) = m.child_by_field_name("parameters")
                     {
-                        param_types.extend(collect_php_param_type_names(params, ctx.source));
+                        let m_name = m
+                            .child_by_field_name("name")
+                            .map(|n| ctx.text(n).trim())
+                            .unwrap_or("");
+                        let pt = collect_php_param_type_names(params, ctx.source);
+                        if matches!(m_name, "__invoke" | "handle") {
+                            param_types.extend(pt);
+                        } else if fallback_param_types.is_empty() && !pt.is_empty() {
+                            fallback_param_types.extend(pt);
+                        }
                     }
                 }
+            }
+            if param_types.is_empty() {
+                param_types = fallback_param_types;
             }
             emit_php_attributes(ctx, node, Some(&name), &param_types);
 
@@ -160,15 +171,10 @@ fn walk_php(
                     sig,
                     String::new(),
                 );
-                // Inheritance: `base_clause` and `class_interface_clause`
+                // Inheritance: `base_clause` (`extends` for classes & interfaces) and `class_interface_clause`
                 if let Some(base) = child_by_kind(node, "base_clause") {
                     for p in collect_php_type_list(base, ctx.source) {
-                        let inherit_kind = if decl_kind == "interface" {
-                            "implements"
-                        } else {
-                            "extends"
-                        };
-                        ctx.push_inheritance(&name, &p, inherit_kind, line, ctx.text(base));
+                        ctx.push_inheritance(&name, &p, "extends", line, ctx.text(base));
                     }
                 }
                 if let Some(ifaces) = child_by_kind(node, "class_interface_clause") {
@@ -317,15 +323,62 @@ fn walk_php(
             let vis_final = vis.or_else(|| Some("public".to_owned()));
 
             let params_node = node.child_by_field_name("parameters");
-            let param_types = params_node
-                .map(|p| collect_php_param_type_names(p, ctx.source))
+            let params = params_node
+                .map(|p| collect_php_params(p, ctx.source))
                 .unwrap_or_default();
+            let param_types: Vec<String> = params.iter().map(|(ty, _)| ty.clone()).collect();
             let sym_label = if let Some(ref owner) = cur_class {
                 format!("{owner}::{name}")
             } else {
                 name.clone()
             };
             emit_php_attributes(ctx, node, Some(&sym_label), &param_types);
+            if matches!(name.as_str(), "handle" | "__invoke")
+                && let Some((first_ty, first_param)) = params.first()
+            {
+                let short = first_ty
+                    .rsplit(['\\', ':', '.'])
+                    .next()
+                    .unwrap_or(first_ty)
+                    .trim();
+                let is_builtin = matches!(
+                    short.to_ascii_lowercase().as_str(),
+                    "int"
+                        | "float"
+                        | "string"
+                        | "bool"
+                        | "array"
+                        | "object"
+                        | "callable"
+                        | "iterable"
+                        | "mixed"
+                        | "void"
+                        | "never"
+                        | "null"
+                        | "false"
+                        | "true"
+                        | "self"
+                        | "static"
+                        | "parent"
+                );
+                let is_event_type = short.ends_with("Event")
+                    || short.ends_with("Message")
+                    || short.ends_with("Job")
+                    || short.ends_with("Notification");
+                let is_event_param = matches!(
+                    first_param.as_str(),
+                    "$event" | "$msg" | "$message" | "$job" | "$notification"
+                );
+                if !is_builtin && (is_event_type || is_event_param) {
+                    ctx.push_semantic(
+                        "handles_event",
+                        format!("event:{short}"),
+                        Some(sym_label.clone()),
+                        line,
+                        &sig,
+                    );
+                }
+            }
 
             if !name.is_empty() {
                 ctx.push_decl(
@@ -787,20 +840,31 @@ fn collect_php_type_list(clause: Node<'_>, source: &str) -> Vec<String> {
     out
 }
 
-fn collect_php_param_type_names(params_node: Node<'_>, source: &str) -> Vec<String> {
+fn collect_php_params(params_node: Node<'_>, source: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for i in 0..params_node.child_count() {
         if let Some(ch) = params_node.child(i)
             && let Some(ty) = ch.child_by_field_name("type")
         {
             let txt = node_text(ty, source).trim().trim_start_matches('?');
-            let short = txt.rsplit('\\').next().unwrap_or(txt);
+            let short = txt.rsplit('\\').next().unwrap_or(txt).trim();
             if !short.is_empty() {
-                out.push(short.to_owned());
+                let param_name = ch
+                    .child_by_field_name("name")
+                    .map(|n| node_text(n, source).trim().to_owned())
+                    .unwrap_or_default();
+                out.push((short.to_owned(), param_name));
             }
         }
     }
     out
+}
+
+fn collect_php_param_type_names(params_node: Node<'_>, source: &str) -> Vec<String> {
+    collect_php_params(params_node, source)
+        .into_iter()
+        .map(|(ty, _)| ty)
+        .collect()
 }
 
 fn emit_php_attributes(

@@ -204,7 +204,7 @@ pub(super) fn atom_symbols_for_project(
     let ir_store = state_dir
         .filter(|_| !project_id.is_empty())
         .and_then(|state| {
-            crate::graph_ir::GraphIrStore::open_readonly(state, project_id)
+            crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
                 .ok()
                 .flatten()
         });
