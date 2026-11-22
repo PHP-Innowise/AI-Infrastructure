@@ -233,7 +233,7 @@ impl Graphs {
         let paths: Vec<String> = unique.into_iter().collect();
         let _ = self.apply_ir_path_updates(project, &root, &paths);
     }
-    fn emit_architecture_updated(&self, project: &str, setting: &Value) {
+    fn emit_architecture_updated(&self, project: &str, setting: &Value) -> u64 {
         let rev = self.bump_ir_revision(project);
         self.maps.rebind_live_ir_revision(project, rev);
         let nodes = setting["built"]["nodes"].as_u64();
@@ -247,32 +247,67 @@ impl Graphs {
             edges,
             Some("Architecture rules updated.".to_owned()),
         );
+        rev
     }
-    pub(super) fn apply_ir_path_updates(
+
+    fn invalidate_skill_paths(&self, project: &str, changed_paths: &[String]) {
+        let mut prefixes = BTreeSet::new();
+        for path in changed_paths {
+            if let Some(prefix) = crate::skills::skill_prefix_for_asset(path) {
+                prefixes.insert(prefix);
+            }
+        }
+        for prefix in prefixes {
+            let _ = crate::skillcache::invalidate_for_skill_path(
+                &self.store,
+                project,
+                &prefix,
+                "Skill files changed in workspace.",
+            );
+        }
+    }
+
+    fn emit_ir_invalidation_bus(
+        &self,
+        project: &str,
+        root: &Path,
+        delta: &crate::graph_ir::IrUpdateDelta,
+    ) {
+        let _ = crate::system_graph::SystemGraphDomain::invalidate_summary_cache_for_ir_delta(
+            &self.store.state,
+            project,
+            root,
+            delta,
+        );
+        self.invalidate_skill_paths(project, &delta.changed_paths);
+    }
+
+    fn finalize_ir_update_delta(
         &self,
         project: &str,
         root: &Path,
         rel_paths: &[String],
-    ) -> Result<()> {
-        if self.stopping.load(Ordering::Acquire) || rel_paths.is_empty() || !root.is_dir() {
-            return Ok(());
-        }
-        let arch_only = rel_paths
-            .iter()
-            .all(|p| crate::graph_ast::is_graph_architecture_path(Path::new(p)));
+    ) -> Result<Option<crate::graph_ir::IrUpdateDelta>> {
         let plock = self.project_publish_lock(project);
         let _publish_guard = lock(&plock)?;
         let _guard = lock(&self.ir_write)?;
         if self.stopping.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(None);
         }
         let setting = self.setting(project)?;
         if setting["enabled"] != true {
-            return Ok(());
+            return Ok(None);
         }
+        let arch_only = rel_paths
+            .iter()
+            .all(|p| crate::graph_ast::is_graph_architecture_path(Path::new(p)));
         if arch_only {
-            self.emit_architecture_updated(project, &setting);
-            return Ok(());
+            let rev = self.emit_architecture_updated(project, &setting);
+            return Ok(Some(crate::graph_ir::IrUpdateDelta {
+                changed_paths: rel_paths.to_vec(),
+                ir_revision: rev,
+                ..Default::default()
+            }));
         }
         if let Some(job) = lock(&self.jobs)?.get(project) {
             if let Ok(mut pending) = job.pending_paths.lock() {
@@ -285,7 +320,11 @@ impl Graphs {
                     }
                 }
             }
-            return Ok(());
+            drop(setting);
+            drop(_guard);
+            drop(_publish_guard);
+            self.invalidate_skill_paths(project, rel_paths);
+            return Ok(None);
         }
         let any_arch = rel_paths
             .iter()
@@ -298,26 +337,42 @@ impl Graphs {
         } else {
             Some(ir.update_paths_with_delta(root, rel_paths)?)
         };
-        if let Some(ref d) = delta
-            && d.edited_files.is_empty()
-            && d.removed_files.is_empty()
-            && d.re_resolved_files.is_empty()
-            && !d.manifest_changed
-            && self.maps.latest_live_ir_index(project).is_some()
+        if delta.as_ref().is_some_and(|d| {
+            d.edited_files.is_empty()
+                && d.removed_files.is_empty()
+                && d.re_resolved_files.is_empty()
+                && !d.manifest_changed
+        }) && self.maps.latest_live_ir_index(project).is_some()
         {
-            if any_arch {
-                self.emit_architecture_updated(project, &setting);
-            }
-            return Ok(());
+            let mut d = delta.expect("checked Some above");
+            d.ir_revision = if any_arch {
+                self.emit_architecture_updated(project, &setting)
+            } else {
+                self.ir_revision_of(project)
+            };
+            return Ok(Some(d));
         }
         let backend = self.resolve_backend(false);
         let using_native = matches!(backend, Some(BuildBackend::NativeIr))
             || setting["built"]["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
         if !using_native {
-            return Ok(());
+            let mut bus_delta = delta.unwrap_or_else(|| crate::graph_ir::IrUpdateDelta {
+                changed_paths: rel_paths.to_vec(),
+                manifest_changed: rel_paths
+                    .iter()
+                    .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p))),
+                ..Default::default()
+            });
+            bus_delta.incoming_caller_files = crate::graph_impact::resolve_incoming_caller_files(
+                &ir,
+                &bus_delta.changed_paths,
+                &bus_delta.incoming_caller_files,
+            );
+            bus_delta.ir_revision = self.ir_revision_of(project);
+            return Ok(Some(bus_delta));
         }
         if self.stopping.load(Ordering::Acquire) || self.setting(project)?["enabled"] != true {
-            return Ok(());
+            return Ok(None);
         }
         let home = folder(&self.store.state, project);
         let write_epoch = ir.current_write_epoch();
@@ -393,6 +448,45 @@ impl Graphs {
             Some(edges),
             Some(NATIVE_READY_MESSAGE.to_owned()),
         );
+        let mut bus_delta = delta.unwrap_or_else(|| crate::graph_ir::IrUpdateDelta {
+            changed_paths: rel_paths.to_vec(),
+            manifest_changed: rel_paths
+                .iter()
+                .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p))),
+            ..Default::default()
+        });
+        let caller_targets: Vec<String> =
+            if bus_delta.edited_files.is_empty() && bus_delta.removed_files.is_empty() {
+                bus_delta.changed_paths.clone()
+            } else {
+                bus_delta
+                    .edited_files
+                    .iter()
+                    .chain(bus_delta.removed_files.iter())
+                    .cloned()
+                    .collect()
+            };
+        bus_delta.incoming_caller_files = crate::graph_impact::resolve_incoming_caller_files(
+            &ir,
+            &caller_targets,
+            &bus_delta.incoming_caller_files,
+        );
+        bus_delta.ir_revision = rev;
+        Ok(Some(bus_delta))
+    }
+
+    pub(super) fn apply_ir_path_updates(
+        &self,
+        project: &str,
+        root: &Path,
+        rel_paths: &[String],
+    ) -> Result<()> {
+        if self.stopping.load(Ordering::Acquire) || rel_paths.is_empty() || !root.is_dir() {
+            return Ok(());
+        }
+        if let Some(delta) = self.finalize_ir_update_delta(project, root, rel_paths)? {
+            self.emit_ir_invalidation_bus(project, root, &delta);
+        }
         Ok(())
     }
     pub(super) fn print(&self, project: &str, root: &Path, fresh: bool) -> Option<Print> {
@@ -905,5 +999,142 @@ impl Graphs {
             }
             let _ = self.refresh(project, Trigger::Finish);
         }
+    }
+}
+
+#[cfg(test)]
+mod ir_bus_tests {
+    use super::*;
+
+    #[test]
+    fn apply_ir_path_updates_builds_delta_with_callers_and_invalidates_skillcache() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".claude/skills/deploy-check")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"bus\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod dep;\npub mod caller;\n").unwrap();
+        std::fs::write(root.join("src/dep.rs"), "pub fn dep_fn() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/caller.rs"),
+            "pub fn caller_fn() -> i32 { crate::dep::dep_fn() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".claude/skills/deploy-check/SKILL.md"),
+            "---\nname: \"deploy-check\"\ndescription: \"Check deploy\"\n---\n\n# Steps\nRun checks.\n",
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let proj = store.register(&root).unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+        graphs.auto_start(&pid).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if graphs.status(&pid, false).unwrap()["state"] == "ready" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
+
+        // Register active SkillCache capsules tied to .claude, .cursor, and .agents skill directories.
+        let db = store.connection().unwrap();
+        for (cid, name, path) in [
+            ("cap-claude", "deploy-check", ".claude/skills/deploy-check"),
+            ("cap-cursor", "lint-check", ".cursor/skills/lint-check"),
+            ("cap-agents", "audit-check", ".agents/skills/audit-check"),
+        ] {
+            crate::skillcache::db::begin_capsule(
+                &db,
+                cid,
+                cid,
+                &pid,
+                "sess-1",
+                "gen-1",
+                &json!({"name": name, "path": path, "tree_sha256": "0"}),
+                None,
+            )
+            .unwrap();
+            let artifact_dir = root.join(path).to_string_lossy().into_owned();
+            let q = crate::skillcache::db::Qualified {
+                capsule_id: cid,
+                mu_name: name,
+                mu_description: "test skill",
+                form: "textual",
+                capsule_sha256: "0",
+                package_sha256: "0",
+                skill_files: &json!({}),
+                env_fingerprint: "{}",
+                engine_digest: "0",
+                artifact_dir: &artifact_dir,
+                capabilities: &json!({}),
+            };
+            crate::skillcache::db::activate_capsule(&db, &q).unwrap();
+        }
+        drop(db);
+
+        let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
+        else {
+            panic!("expected frames");
+        };
+
+        // Structured delta captures changed_paths, ir_revision > 0, and 1-hop incoming caller.
+        std::fs::write(root.join("src/dep.rs"), "pub fn dep_fn() -> i32 { 2 }\n").unwrap();
+        let delta = graphs
+            .finalize_ir_update_delta(&pid, &root, &["src/dep.rs".to_owned()])
+            .unwrap()
+            .expect("delta for src/dep.rs");
+        assert_eq!(delta.changed_paths, vec!["src/dep.rs".to_owned()]);
+        assert!(delta.ir_revision > 0);
+        assert!(
+            delta
+                .incoming_caller_files
+                .contains(&"src/caller.rs".to_owned()),
+            "expected src/caller.rs in incoming_caller_files: {:?}",
+            delta.incoming_caller_files
+        );
+
+        // Non-UI edits under .claude/skills/, .cursor/skills/, and .agents/skills/ emit stale SSE.
+        graphs.record_live_paths(
+            &pid,
+            &[
+                ".claude/skills/deploy-check/SKILL.md".to_owned(),
+                ".cursor/skills/lint-check/SKILL.md".to_owned(),
+                ".agents/skills/audit-check/programs/run.sh".to_owned(),
+            ],
+        );
+
+        let db = store.connection().unwrap();
+        for cid in ["cap-claude", "cap-cursor", "cap-agents"] {
+            let cap = crate::skillcache::db::capsule(&db, cid).unwrap().unwrap();
+            assert_eq!(cap["status"], "stale", "expected {cid} to be stale");
+        }
+        let mut stale_ids = BTreeSet::new();
+        while let Ok(frame) = rx.try_recv() {
+            if frame.event == "skillcache_capsule"
+                && frame.data["state"] == "stale"
+                && let Some(cid) = frame.data["capsule_id"].as_str()
+            {
+                stale_ids.insert(cid.to_owned());
+            }
+        }
+        assert_eq!(
+            stale_ids,
+            BTreeSet::from([
+                "cap-claude".to_owned(),
+                "cap-cursor".to_owned(),
+                "cap-agents".to_owned(),
+            ])
+        );
+
+        graphs.close();
     }
 }
