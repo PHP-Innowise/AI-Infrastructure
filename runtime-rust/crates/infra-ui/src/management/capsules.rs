@@ -296,9 +296,13 @@ fn runs_html(detail: &V) -> String {
             )
         })
         .collect::<String>();
+    let warm_turns_display = match (runs["count"].as_i64(), runs["total"].as_i64()) {
+        (Some(since), Some(total)) if total > since => format!("{since} ({total} total)"),
+        _ => count(&runs["count"]),
+    };
     let body = format!(
         "<dl class=\"skill-capsule-facts-grid\"><dt>Warm turns</dt><dd>{}</dd><dt>Completed</dt><dd>{}</dd><dt>Handed a step back</dt><dd>{}</dd><dt>Compilation cost</dt><dd>{}</dd><dt>Saving per reuse</dt><dd>{}</dd><dt>Break-even</dt><dd>{}</dd></dl><p class=\"skills-note\">A saving is measured by a sealed evaluation (<code>infra-engine eval skillcache-ab</code>), not read off these turns. Until one exists it is unknown.</p>{}",
-        count(&runs["count"]),
+        warm_turns_display,
         count(&runs["complete"]),
         count(&runs["handed_back"]),
         money(&amortization["compile_usd"]),
@@ -359,6 +363,15 @@ pub(crate) fn render_capsule_detail_html(detail: &V, armed: bool, pending: bool)
                 "Requalify"
             },
             "skill-capsule-requalify",
+            id,
+            "",
+            pending,
+        ));
+    }
+    if ["active", "needs_recompile"].contains(&status) {
+        actions.push_str(&button(
+            "Invalidate",
+            "skill-capsule-invalidate",
             id,
             "",
             pending,
@@ -689,6 +702,7 @@ pub(super) async fn capsules_event(kind: &str, id: &str, action: &str, payload: 
             render_detail();
         }
         "skill-capsule-requalify" => act("requalify", capsule).await,
+        "skill-capsule-invalidate" => act("invalidate", capsule).await,
         "skill-capsule-retire" => act("retire", capsule).await,
         "skill-capsule-delete" => {
             // Only a delete that was armed for this capsule goes through.
@@ -817,6 +831,7 @@ mod tests {
             let html = html_for(status, armed);
             [
                 "skill-capsule-requalify",
+                "skill-capsule-invalidate",
                 "skill-capsule-retire",
                 "skill-capsule-arm",
                 "skill-capsule-delete",
@@ -830,6 +845,7 @@ mod tests {
             actions("active", false),
             [
                 "skill-capsule-requalify",
+                "skill-capsule-invalidate",
                 "skill-capsule-retire",
                 "skill-capsule-arm"
             ]
@@ -859,7 +875,7 @@ mod tests {
             ["skill-capsule-delete", "skill-capsule-keep"]
         );
         let pending = render_capsule_detail_html(&detail(), false, true);
-        assert_eq!(pending.matches(" disabled>").count(), 3);
+        assert_eq!(pending.matches(" disabled>").count(), 4);
         assert_eq!(
             list_query("", ""),
             vec![("include_retired", "true".to_owned())]

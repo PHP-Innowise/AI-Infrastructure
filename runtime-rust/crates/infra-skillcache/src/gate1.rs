@@ -51,8 +51,27 @@ impl Report {
 
 /// Interpreter switches that take the program as an argument instead of a file.
 const INLINE_CODE: &[&str] = &[
-    "-c", "-e", "-E", "--eval", "-p", "--print", "-Command", "/c", "/C", "/k", "/K",
+    "-c", "-e", "-E", "--eval", "-p", "--print", "-r", "-n", "-pe", "-ne", "-Command", "/c", "/C",
+    "/k", "/K",
 ];
+
+/// Whether `argument` asks an interpreter to execute inline code rather than a package file.
+fn is_inline_code_arg(argument: &str) -> bool {
+    if INLINE_CODE.contains(&argument) {
+        return true;
+    }
+    let lower = argument.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "-command" | "-encodedcommand" | "-enc" | "-ec" | "--input-type"
+    ) || lower.starts_with("-command=")
+        || lower.starts_with("-encodedcommand=")
+        || lower.starts_with("-enc=")
+        || lower.starts_with("-ec=")
+        || argument.starts_with("--input-type=")
+        || argument.starts_with("--eval=")
+        || argument.starts_with("--print=")
+}
 
 fn windows_script(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
@@ -94,7 +113,7 @@ fn check_arguments(
         if index == 0 {
             continue;
         }
-        if INLINE_CODE.contains(&argument.as_str()) {
+        if is_inline_code_arg(argument) {
             violations.push(Violation::new(
                 "argv_inline_code",
                 &here,
@@ -137,11 +156,14 @@ fn check_arguments(
         };
         if normalized.starts_with("programs/") || normalized.starts_with("assets/") {
             if !is_relative_path(path) || !files.contains(normalized) {
-                violations.push(Violation::new(
-                    "argv_missing_file",
-                    &here,
-                    format!("`{path}` is not a file of the package."),
-                ));
+                let message = if path != normalized {
+                    format!(
+                        "`{path}` must omit leading `./` (use `{normalized}`) so the executor can resolve it."
+                    )
+                } else {
+                    format!("`{path}` is not a file of the package.")
+                };
+                violations.push(Violation::new("argv_missing_file", &here, message));
             } else {
                 package_file |= normalized.starts_with("programs/");
             }
@@ -372,6 +394,7 @@ fn contains_literal(capsule_text: &str, literal: &str) -> bool {
 
 fn check_examples(
     capsule: &SkillCapsule,
+    package_files: &Files,
     capsule_text: &str,
     examples: &Examples,
     context: &Context<'_>,
@@ -468,15 +491,27 @@ fn check_examples(
                 ));
                 break;
             }
-            if text.chars().count() >= EXAMPLE_LITERAL_CHARS
-                && contains_literal(capsule_text, &text)
-            {
-                violations.push(Violation::new(
-                    "example_value_in_capsule",
-                    &at,
-                    "The capsule repeats this observed value; a capsule carries the parameter, not the instance.",
-                ));
-                break;
+            if text.chars().count() >= EXAMPLE_LITERAL_CHARS {
+                if contains_literal(capsule_text, &text) {
+                    violations.push(Violation::new(
+                        "example_value_in_capsule",
+                        &at,
+                        "The capsule repeats this observed value; a capsule carries the parameter, not the instance.",
+                    ));
+                    break;
+                }
+                if let Some((path, _)) = package_files.iter().find(|(_, content)| {
+                    std::str::from_utf8(content).is_ok_and(|source| contains_literal(source, &text))
+                }) {
+                    violations.push(Violation::new(
+                        "example_value_in_capsule",
+                        &at,
+                        format!(
+                            "The package file `{path}` repeats this observed value; a capsule carries the parameter, not the instance."
+                        ),
+                    ));
+                    break;
+                }
             }
         }
     }
@@ -647,7 +682,7 @@ pub fn check(
     }
     violations.extend(structure(&parsed, files));
     if let Some(examples) = &examples {
-        check_examples(&parsed, &text, examples, context, &mut violations);
+        check_examples(&parsed, files, &text, examples, context, &mut violations);
     }
     Report::of("gate1", violations)
 }

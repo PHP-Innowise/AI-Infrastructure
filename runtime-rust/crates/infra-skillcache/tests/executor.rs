@@ -1100,3 +1100,56 @@ fn run_log_recovers_from_a_torn_line_and_keeps_seq_monotonic() {
     assert_eq!(events[1]["seq"], 2);
     assert_eq!(events[1]["event"], "program_completed");
 }
+
+#[test]
+fn reset_clears_bad_state_and_complete_trims_bloated_results() {
+    let mut big_specs = specs();
+    big_specs[0].1 = json!({
+        "result": {
+            "rows_file": "out/rows.json",
+            "raw_stdout": "x".repeat(200_000),
+        },
+        "write": {"out/rows.json": "[]"}
+    });
+    let stand = Stand::with(capsule(), big_specs);
+    let first = stand.ok(&["run", r#"{"input_dir":"bad-dir","currency":"EUR"}"#]);
+    assert_eq!(first["status"], "your_steps");
+
+    let reset = stand.ok(&["reset"]);
+    assert_eq!(reset, json!({"status": "reset", "cleared": true}));
+    let (code, status) = stand.run(&["status"]);
+    assert_eq!(code, 2);
+    assert_eq!(status["code"], "not_started");
+
+    let mut answer = stand.ok(&["run", Stand::all_values()]);
+    if answer["status"] == "your_steps" {
+        answer = stand.ok(&["continue"]);
+    }
+    assert_eq!(answer["status"], "complete", "{answer}");
+    assert_eq!(answer["result"]["extract"]["rows_file"], "out/rows.json");
+    let raw = answer["result"]["extract"]["raw_stdout"].as_str().unwrap();
+    assert!(raw.len() < 1024 && raw.contains("[truncated"), "{raw}");
+    let serialized_len = serde_json::to_vec(&answer).unwrap().len();
+    assert!(
+        serialized_len < 16 * 1024,
+        "complete payload was {serialized_len} bytes"
+    );
+    let log = infra_skillcache::state::read_log(&stand.state_file, 0).unwrap();
+    assert!(log.iter().any(|entry| entry["event"] == "reset"), "{log:?}");
+    let log_raw =
+        std::fs::read_to_string(infra_skillcache::state::log_path(&stand.state_file)).unwrap();
+    assert!(
+        !log_raw.contains("out/rows.json"),
+        "phase journal must stay value-free: {log_raw}"
+    );
+    let changes = infra_skillcache::state::read_log_at(
+        &infra_skillcache::state::changes_path(&infra_skillcache::state::log_path(
+            &stand.state_file,
+        )),
+        0,
+    )
+    .unwrap();
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert_eq!(changes[0]["changes"][0]["path"], "out/rows.json");
+    assert_eq!(changes[1]["changes"][0]["path"], "out/summary.csv");
+}

@@ -71,6 +71,8 @@ pub struct Warm {
     pub state_dir: Option<PathBuf>,
     /// The last journal line already turned into a session event.
     seen: AtomicU64,
+    /// The last sidecar `run-log.changes.jsonl` line already forwarded to focus tracking.
+    seen_changes: AtomicU64,
 }
 impl Warm {
     fn agent_only(&self) -> bool {
@@ -178,11 +180,17 @@ fn stage_tools_for(runtime: &Runtime, include_run: bool) -> Result<PathBuf> {
     let stage = |target: &Path| -> Result<()> {
         if !target.is_file() {
             let staging = bin.join(format!(".staging-{}", crate::store::hexid()));
-            std::fs::copy(&engine, &staging)?;
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o500))?;
+            let linked = std::os::unix::fs::symlink(&engine, &staging).is_ok();
+            #[cfg(not(unix))]
+            let linked = false;
+            if !linked {
+                std::fs::copy(&engine, &staging)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o500))?;
+                }
             }
             std::fs::rename(&staging, target)?;
         }
@@ -192,8 +200,10 @@ fn stage_tools_for(runtime: &Runtime, include_run: bool) -> Result<PathBuf> {
     if include_run {
         let first = name("skillcache-run");
         stage(&first)?;
-        if !tool.is_file() && std::fs::hard_link(&first, &tool).is_err() {
-            std::fs::copy(&first, &tool)?;
+        if std::fs::symlink_metadata(&first).is_ok_and(|meta| meta.file_type().is_symlink())
+            || (!tool.is_file() && std::fs::hard_link(&first, &tool).is_err())
+        {
+            stage(&tool)?;
         }
     } else {
         stage(&tool)?;
@@ -216,6 +226,7 @@ fn protocol(skill: &str) -> String {
          \x20 - `your_steps`: do those steps yourself with your normal tools, then `skillcache-run continue '{{...}}'` with what they produce.\n\
          \x20 - `program_failed`: do that one step yourself with your normal tools, following the source skill at `{skill}`. Do not repair or re-run the program. Then `skillcache-run continue '{{...}}'` with its `required_outputs`. The rest of the plan stays compiled.\n\
          \x20 - `complete`: the plan is done; `result` holds what the programs found. Answer from it.\n\
+         - If the initial bindings were wrong and the run is not finished, `skillcache-run reset` clears state so you can restart with `skillcache-run run`.\n\
          - Do not start the programs yourself and do not look for the capsule's files.\n\
          - If `skillcache-run` itself cannot be started, read `{skill}` and follow the skill as usual.\n"
     )
@@ -289,6 +300,44 @@ fn block(stored: &package::Package, skill_path: &str) -> String {
     text.push('\n');
     text.push_str(&protocol(skill_path));
     text
+}
+
+/// Deterministic fallback when multiple eligible active capsules match one skill:
+/// fewest recent post-requalify deopts, then hybrid form, then newest update.
+fn best_by_health_and_recency(store: &SessionStore, candidates: &[Value]) -> Value {
+    let db = store.connection().ok();
+    let recent_deopts = |capsule_id: &str| -> i64 {
+        db.as_ref()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE(SUM(deopts),0) FROM skillcache_runs
+                     WHERE capsule_id=?1
+                       AND rowid>COALESCE((SELECT runs_reset_rowid FROM skillcache_capsules WHERE capsule_id=?1),0)",
+                    [capsule_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+    };
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            let da = recent_deopts(a["capsule_id"].as_str().unwrap_or(""));
+            let db_val = recent_deopts(b["capsule_id"].as_str().unwrap_or(""));
+            let ha = a["form"] != "hybrid";
+            let hb = b["form"] != "hybrid";
+            let ua = a["updated_at"].as_str().unwrap_or("");
+            let ub = b["updated_at"].as_str().unwrap_or("");
+            let ida = a["capsule_id"].as_str().unwrap_or("");
+            let idb = b["capsule_id"].as_str().unwrap_or("");
+            da.cmp(&db_val)
+                .then_with(|| ha.cmp(&hb))
+                .then_with(|| ub.cmp(ua))
+                .then_with(|| ida.cmp(idb))
+        })
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
 }
 
 /// Among several active capsules of one skill, the one whose description
@@ -495,6 +544,7 @@ fn decide_raw_trace(
         package: None,
         state_dir: None,
         seen: AtomicU64::new(0),
+        seen_changes: AtomicU64::new(0),
     }))
 }
 
@@ -530,10 +580,16 @@ fn decide_for(
             "a capsule's programs write, and this is a read-only turn",
         );
     }
-    if !["claude", "codex"].contains(&provider) {
+    if !["claude", "codex", "cursor"].contains(&provider) {
         return miss(
             "provider",
-            "warm turns are verified for Claude and Codex only",
+            "warm turns are verified for Claude, Codex, and Cursor (textual) only",
+        );
+    }
+    if provider == "cursor" && arm == Some("skillcache_executor") {
+        return miss(
+            "provider",
+            "hybrid executor capsules run on Claude and Codex only",
         );
     }
     if provider == "codex" && manual && !matches!(arm, Some("raw_trace" | "written_procedure")) {
@@ -588,6 +644,12 @@ fn decide_for(
                 "pinned capsule is not active for this project, skill, and evaluation arm",
             );
         }
+        if provider == "cursor" && row["form"] != "textual" {
+            return miss(
+                "provider",
+                "Cursor runs textual capsules only; hybrid capsules require Claude or Codex",
+            );
+        }
         let skill_path = row["skill_path"].as_str().unwrap_or("").to_string();
         (row, skill_path)
     } else {
@@ -606,6 +668,12 @@ fn decide_for(
             .as_str()
             .and_then(|path| trace::spelled_skill(workspace, Path::new(path)))
         else {
+            if provider == "cursor" {
+                return miss(
+                    "provider",
+                    "Cursor warm turns require an active textual capsule",
+                );
+            }
             return miss(
                 "no_capsule",
                 "the routed skill is not a skill folder of this project or of your home",
@@ -629,9 +697,23 @@ fn decide_for(
             Ok(candidates) => candidates,
             Err(error) => return miss("unavailable", error.to_string()),
         };
-        let chosen = match candidates.len() {
+        let eligible = if provider == "cursor" {
+            candidates
+                .into_iter()
+                .filter(|capsule| capsule["form"] == "textual")
+                .collect::<Vec<_>>()
+        } else {
+            candidates
+        };
+        let chosen = match eligible.len() {
+            0 if provider == "cursor" => {
+                return miss(
+                    "provider",
+                    "Cursor runs textual capsules only; no active textual capsule exists for this skill",
+                );
+            }
             0 => return miss("no_capsule", "no qualified capsule exists for this skill"),
-            1 => candidates[0].clone(),
+            1 => eligible[0].clone(),
             _ => {
                 let by_description = runtime
                     .store
@@ -639,7 +721,7 @@ fn decide_for(
                     .ok()
                     .flatten()
                     .is_some_and(|value| value == true);
-                let ids = candidates
+                let ids = eligible
                     .iter()
                     .filter_map(|capsule| capsule["capsule_id"].as_str().map(String::from))
                     .collect::<Vec<_>>();
@@ -647,17 +729,13 @@ fn decide_for(
                     .then(|| best_by_description(&runtime.store, project_id, &ids, message))
                     .flatten();
                 match best.and_then(|id| {
-                    candidates
+                    eligible
                         .iter()
                         .find(|capsule| capsule["capsule_id"] == id.as_str())
+                        .cloned()
                 }) {
-                    Some(capsule) => capsule.clone(),
-                    None => {
-                        return miss(
-                            "ambiguous",
-                            "this skill has several capsules and choosing among them is not enabled",
-                        );
-                    }
+                    Some(capsule) => capsule,
+                    None => best_by_health_and_recency(&runtime.store, &eligible),
                 }
             }
         };
@@ -710,6 +788,7 @@ fn decide_for(
             package: None,
             state_dir: None,
             seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
         }));
     };
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
@@ -755,6 +834,7 @@ fn decide_for(
         package: Some(warm_dir),
         state_dir: Some(state_dir),
         seen: AtomicU64::new(0),
+        seen_changes: AtomicU64::new(0),
     }))
 }
 
@@ -799,7 +879,11 @@ impl LaunchAdapter for WarmLaunchAdapter {
                         || argument == "--dangerously-bypass-approvals-and-sandbox"
                 }) =>
             {
-                let at = command.argv.len().saturating_sub(1);
+                let at = command
+                    .argv
+                    .iter()
+                    .position(|argument| argument == "resume")
+                    .unwrap_or_else(|| command.argv.len().saturating_sub(1));
                 command.argv.splice(
                     at..at,
                     ["--add-dir".to_string(), state_dir.display().to_string()],
@@ -923,33 +1007,65 @@ impl Warm {
     /// Turns the executor's new journal lines into session events. A line is
     /// published once: the journal numbers them and the last one seen is kept.
     pub fn ingest(&self, emit: &dyn Fn(Value) -> Result<()>) {
+        self.ingest_with_changes(emit, &|_| {});
+    }
+
+    /// Like [`Self::ingest`], also forwarding workspace `changed_files` mutations
+    /// from the sibling `run-log.changes.jsonl` sidecar to `on_changes` as
+    /// normalized `file_change` tool events for live focus tracking.
+    pub fn ingest_with_changes(
+        &self,
+        emit: &dyn Fn(Value) -> Result<()>,
+        on_changes: &dyn Fn(Value),
+    ) {
         let Some(log_file) = self.log_file() else {
             return;
         };
         let after = self.seen.load(Ordering::Acquire);
-        let Ok(events) = state::read_log_at(&log_file, after) else {
-            return;
-        };
-        for event in events {
-            let Some(seq) = event["seq"].as_u64() else {
-                continue;
-            };
-            // Another caller may have published this line meanwhile.
-            if self.seen.fetch_max(seq, Ordering::AcqRel) >= seq {
-                continue;
+        if let Ok(events) = state::read_log_at(&log_file, after) {
+            for event in events {
+                let Some(seq) = event["seq"].as_u64() else {
+                    continue;
+                };
+                // Another caller may have published this line meanwhile.
+                if self.seen.fetch_max(seq, Ordering::AcqRel) >= seq {
+                    continue;
+                }
+                if let Some((phase, text)) = phase_text(&event) {
+                    let _ = emit(json!({
+                        "kind": "skillcache",
+                        "phase": phase,
+                        "capsule_id": self.capsule_id,
+                        "seq": seq,
+                        "step_index": event["step_index"],
+                        "program": event["program"],
+                        "reason": event["reason"],
+                        "verification": event["verification"],
+                        "text": text,
+                    }));
+                }
             }
-            if let Some((phase, text)) = phase_text(&event) {
-                let _ = emit(json!({
-                    "kind": "skillcache",
-                    "phase": phase,
-                    "capsule_id": self.capsule_id,
-                    "seq": seq,
-                    "step_index": event["step_index"],
-                    "program": event["program"],
-                    "reason": event["reason"],
-                    "verification": event["verification"],
-                    "text": text,
-                }));
+        }
+        let after_changes = self.seen_changes.load(Ordering::Acquire);
+        if let Ok(change_events) =
+            state::read_log_at(&state::changes_path(&log_file), after_changes)
+        {
+            for event in change_events {
+                let Some(seq) = event["seq"].as_u64() else {
+                    continue;
+                };
+                if self.seen_changes.fetch_max(seq, Ordering::AcqRel) >= seq {
+                    continue;
+                }
+                if let Some(changes) = event["changes"].as_array().filter(|arr| !arr.is_empty()) {
+                    on_changes(json!({
+                        "kind": "tool",
+                        "state": "completed",
+                        "tool": "file_change",
+                        "ok": true,
+                        "changes": changes,
+                    }));
+                }
             }
         }
     }
@@ -1092,6 +1208,13 @@ impl Warm {
             let _ = std::fs::remove_dir_all(state_dir);
         }
     }
+
+    /// Removes temporary state when a warm turn failed or was cancelled before finishing.
+    pub(crate) fn cleanup_abandoned(&self) {
+        if let Some(state_dir) = &self.state_dir {
+            let _ = std::fs::remove_dir_all(state_dir);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1125,7 +1248,7 @@ mod tests {
             ),
             (
                 1,
-                "b61df6478d380781deae6b0d9561f415437c70983cd72fe00feb10bebc7d6da4"
+                "e09f4bc6eddef119136f540493b6062d6e987acb1f633d25d2ae67524b5ec1f6"
             ),
             "the executor's contract changed: decide on ENV_ABI_VERSION, then update this pin"
         );
@@ -1167,6 +1290,8 @@ mod tests {
             }),
             engine: None,
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
         }
     }
     fn reason(decision: &Decision) -> &'static str {
@@ -1373,6 +1498,7 @@ mod tests {
             package: Some(PathBuf::from("/state/warm")),
             state_dir: Some(PathBuf::from("/state/skillcache/sessions/s/g")),
             seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
         });
         let adapter = WarmLaunchAdapter {
             inner: Arc::new(Plain),
@@ -1456,6 +1582,38 @@ mod tests {
                 "-"
             ]
         );
+        let codex_resume = adapter
+            .adapt(
+                &launch("codex"),
+                command(&[
+                    "codex",
+                    "--sandbox",
+                    "workspace-write",
+                    "exec",
+                    "--skip-git-repo-check",
+                    "resume",
+                    "--json",
+                    "thread-123",
+                    "-",
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            codex_resume.argv,
+            [
+                "codex",
+                "--sandbox",
+                "workspace-write",
+                "exec",
+                "--skip-git-repo-check",
+                "--add-dir",
+                "/state/skillcache/sessions/s/g",
+                "resume",
+                "--json",
+                "thread-123",
+                "-",
+            ]
+        );
         // A textual capsule stages nothing and changes nothing of the launch.
         let textual = WarmLaunchAdapter {
             inner: Arc::new(Plain),
@@ -1470,6 +1628,7 @@ mod tests {
                 package: None,
                 state_dir: None,
                 seen: AtomicU64::new(0),
+                seen_changes: AtomicU64::new(0),
             }),
         };
         let plain = textual
@@ -1508,6 +1667,7 @@ mod tests {
             package: None,
             state_dir: Some(state_dir.clone()),
             seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
         };
         let seen = std::sync::Mutex::new(Vec::<Value>::new());
         let emit = |event: Value| -> Result<()> {
@@ -1558,5 +1718,222 @@ mod tests {
             .unwrap();
         warm.ingest(&emit);
         assert_eq!(seen.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn cursor_runs_textual_capsules_and_multiple_capsules_resolve_deterministically() {
+        let root = crate::skillcache::test_support::scratch();
+        let workspace = root.path().join("project");
+        let skill_dir = workspace.join(".agents/skills/pdf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_file = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_file, "# PDF\nExtract invoice totals.\n").unwrap();
+        let tree = infra_skillcache::fingerprint::tree_sha256(&skill_dir).unwrap();
+        let runtime = runtime(root.path());
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&[]),
+        );
+        let project_id = runtime.store.register(&workspace).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let db = runtime.store.connection().unwrap();
+        let skill_ref = json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": tree.sha256});
+        let skill_files_json = json!({"skills": [{"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": tree.sha256, "files": tree.files}]});
+
+        // One textual capsule and one hybrid capsule for the same skill.
+        let textual_dir = root.path().join("textual/warm");
+        let textual_manifest = json!({
+            "schema_version": 1, "form": "textual",
+            "mu": {"name": "pdf-textual", "description": "Markdown guide for pdf invoices"},
+            "source": {"skills": [skill_ref.clone()]}
+        });
+        let textual_pkg =
+            SkillCapsule::parse(&serde_json::to_vec(&textual_manifest).unwrap()).unwrap();
+        let textual_sha = package::write_warm(
+            &textual_dir,
+            &textual_pkg,
+            Some(b"# PDF\n\n1. Read invoices.\n"),
+            &package::Files::new(),
+        )
+        .unwrap();
+        let textual_loaded = package::load(&textual_dir).unwrap();
+        db::begin_capsule(
+            &db,
+            "cap-text",
+            "comp-1",
+            &project_id,
+            "s1",
+            "g1",
+            &skill_ref,
+            None,
+        )
+        .unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "cap-text",
+                mu_name: "pdf-textual",
+                mu_description: "Markdown guide for pdf invoices",
+                form: "textual",
+                capsule_sha256: &textual_loaded.capsule_sha256,
+                package_sha256: &textual_sha,
+                skill_files: &skill_files_json,
+                env_fingerprint: &env_fp,
+                engine_digest: "",
+                artifact_dir: textual_dir.parent().unwrap().to_str().unwrap(),
+                capabilities: &json!({"network": "none", "runtimes": []}),
+            },
+        )
+        .unwrap();
+
+        let hybrid_dir = root.path().join("hybrid/warm");
+        let hybrid_manifest = json!({
+            "schema_version": 1, "form": "hybrid",
+            "mu": {"name": "pdf-hybrid", "description": "Automated table parser"},
+            "source": {"skills": [skill_ref.clone()]},
+            "capabilities": {"network": "none", "runtimes": []},
+            "bindings": [],
+            "programs": [],
+            "steps": [{"kind": "instruction", "text": "Read invoices.", "source": {"path": ".agents/skills/pdf/SKILL.md"}, "produces": []}],
+            "verification": []
+        });
+        let hybrid_pkg =
+            SkillCapsule::parse(&serde_json::to_vec(&hybrid_manifest).unwrap()).unwrap();
+        let hybrid_sha =
+            package::write_warm(&hybrid_dir, &hybrid_pkg, None, &package::Files::new()).unwrap();
+        let hybrid_loaded = package::load(&hybrid_dir).unwrap();
+        db::begin_capsule(
+            &db,
+            "cap-hybrid",
+            "comp-2",
+            &project_id,
+            "s1",
+            "g2",
+            &skill_ref,
+            None,
+        )
+        .unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "cap-hybrid",
+                mu_name: "pdf-hybrid",
+                mu_description: "Automated table parser",
+                form: "hybrid",
+                capsule_sha256: &hybrid_loaded.capsule_sha256,
+                package_sha256: &hybrid_sha,
+                skill_files: &skill_files_json,
+                env_fingerprint: &env_fp,
+                engine_digest: "",
+                artifact_dir: hybrid_dir.parent().unwrap().to_str().unwrap(),
+                capabilities: &json!({"network": "none", "runtimes": []}),
+            },
+        )
+        .unwrap();
+        drop(db);
+
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "do pdf".into(),
+            requests: vec![json!({"name": "pdf", "path": skill_file})],
+            notice: None,
+        };
+        let session = |provider: &str| {
+            json!({
+                "id": "s-warm", "project_id": project_id, "provider": provider, "mode": "edit",
+                "workflow": "native", "permissions": "auto",
+                "skillcache": settings::validate(&json!({"mode": "warm_only"})).unwrap(),
+            })
+        };
+        // Cursor receives Form::Textual directly instead of missing as unsupported.
+        let cursor = decide_for(
+            &runtime,
+            &session("cursor"),
+            &route,
+            "do pdf",
+            &workspace,
+            None,
+        );
+        match cursor {
+            Decision::Hit(warm) => {
+                assert_eq!(warm.capsule_id, "cap-text");
+                assert_eq!(warm.form, Form::Textual);
+                assert!(warm.bin.is_none());
+            }
+            other => panic!("expected cursor textual hit, got {:?}", reason(&other)),
+        }
+        // Multiple active capsules for Claude never collapse to miss("ambiguous").
+        let claude = decide_for(
+            &runtime,
+            &session("claude"),
+            &route,
+            "run automated steps",
+            &workspace,
+            None,
+        );
+        match claude {
+            Decision::Hit(warm) => assert_eq!(warm.capsule_id, "cap-hybrid"),
+            other => panic!("expected deterministic hit, got {:?}", reason(&other)),
+        }
+    }
+
+    #[test]
+    fn ingest_with_changes_forwards_runlog_file_changes() {
+        let root = crate::skillcache::test_support::scratch();
+        let state_dir = root.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_file = state_dir.join("plan-state.json");
+        let mut log = state::RunLog::open(&state_file, "g1").unwrap();
+        log.append(
+            "program_completed",
+            json!({"step_index": 0, "program": "extract"}),
+        )
+        .unwrap();
+        state::append_changes(
+            &state::log_path(&state_file),
+            "g1",
+            &[json!({"path": "out/rows.json", "kind": "create"})],
+        )
+        .unwrap();
+        let warm = Warm {
+            capsule_id: "c1".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "pdf".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: Some(root.path().join("bin")),
+            package: None,
+            state_dir: Some(state_dir),
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        };
+        let changes = std::sync::Mutex::new(Vec::<Value>::new());
+        warm.ingest_with_changes(&|_| Ok(()), &|ev| changes.lock().unwrap().push(ev));
+        warm.ingest_with_changes(&|_| Ok(()), &|ev| changes.lock().unwrap().push(ev));
+        let captured = changes.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["tool"], "file_change");
+        assert_eq!(captured[0]["changes"][0]["path"], "out/rows.json");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_tools_uses_symlink_instead_of_copying_engine() {
+        let scratch = crate::skillcache::test_support::scratch();
+        let engine = scratch.path().join("fake-engine");
+        std::fs::write(&engine, b"#!/bin/sh\necho ok\n").unwrap();
+        let mut rt = runtime(scratch.path());
+        rt.engine = Some(engine.clone());
+        let bin = stage_tools(&rt).unwrap();
+        let run_meta = std::fs::symlink_metadata(bin.join("skillcache-run")).unwrap();
+        let tool_meta = std::fs::symlink_metadata(bin.join("skillcache-tool")).unwrap();
+        assert!(run_meta.file_type().is_symlink());
+        assert!(tool_meta.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(bin.join("skillcache-run")).unwrap(),
+            engine
+        );
     }
 }

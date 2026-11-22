@@ -1055,6 +1055,18 @@ impl Sessions {
         if let Some(w) = warm {
             if let Some(bin) = &w.bin {
                 extra_readable.push(bin.clone());
+                for name in ["skillcache-run", "skillcache-tool"] {
+                    let link = bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                    if let Ok(target) = std::fs::read_link(&link)
+                        && let Some(parent) = target.parent()
+                        && let Ok(canonical_parent) = infra_core::fs::canonicalize(parent)
+                        && !protected_cfg.protected.iter().any(|p| {
+                            canonical_parent.starts_with(p) || p.starts_with(&canonical_parent)
+                        })
+                    {
+                        extra_readable.push(canonical_parent);
+                    }
+                }
             }
             if let Some(pkg) = &w.package {
                 extra_readable.push(pkg.clone());
@@ -1126,6 +1138,8 @@ impl Sessions {
                     providers: self.providers.clone(),
                     engine: None,
                     cancel: self.stopping.clone(),
+                    enqueuer: None,
+                    requalifying: None,
                 })
             })
     }
@@ -2534,7 +2548,24 @@ impl Sessions {
                 // The executor journals each phase beside its state; a tool
                 // event is when a new line can have appeared.
                 if tool && let Some(warm) = &warm_for_stream {
-                    warm.ingest(&|event| emit_events(event));
+                    warm.ingest_with_changes(&|event| emit_events(event), &|change_event| {
+                        if let Ok(mut tracker) = focus_for_stream.lock()
+                            && let Some(delta) = observe_tool_event_with_graphs(
+                                &mut tracker,
+                                &change_event,
+                                graphs_for_stream.as_deref(),
+                                &project_id_for_stream,
+                                &workspace_for_stream,
+                            )
+                        {
+                            let _ = crate::graph_live::save_session_focus(
+                                &store,
+                                &sid,
+                                tracker.focus(),
+                            );
+                            let _ = emit_events(delta);
+                        }
+                    });
                 }
                 Ok(())
             },
@@ -2543,9 +2574,6 @@ impl Sessions {
         drop(forwarding);
         // Whatever the run left waiting is answered no.
         self.permissions.expire(&job.sid);
-        if let Some(warm) = &warm {
-            warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
-        }
         let observed = observed.map_err(|error| {
             if error.code == "native-cancelled"
                 && budget_stop.load(Ordering::Acquire)
@@ -2563,6 +2591,9 @@ impl Sessions {
         let result = match observed {
             Ok(result) => result,
             Err(error) => {
+                if let Some(warm) = &warm {
+                    warm.cleanup_abandoned();
+                }
                 if error.code == "cleanup-unconfirmed" {
                     self.stopping.store(true, Ordering::Release);
                     let _ = self
@@ -2596,10 +2627,16 @@ impl Sessions {
             && (expected_native.is_none()
                 || result.session_id.as_deref() != expected_native.as_deref())
         {
+            if let Some(warm) = &warm {
+                warm.cleanup_abandoned();
+            }
             let _ = self.lifecycle.abort(&binding, "failed");
             return Err(HarnessError::conflict(
                 "The assigned inbox turn has no matching native identity proof.",
             ));
+        }
+        if let Some(warm) = &warm {
+            warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
         }
         if result.ok
             && let Some(before) = observed_before
@@ -2649,6 +2686,7 @@ impl Sessions {
                     message: &job.prompt,
                     route: &route,
                     workspace: &workspace,
+                    usage: &Value::Null,
                 },
                 &binding.environment,
                 &emit,
@@ -2765,11 +2803,19 @@ impl Sessions {
                 .filter_map(|(name, value)| Some((name.clone(), value.clone()?))),
         );
         let redactor = crate::skillcache::trace::SessionRedactor::new(turn.workspace, launched);
-        let Some(trace) = recorder.finish(&redactor) else {
+        let Some((trace, usage)) = recorder.finish_with_usage(&redactor) else {
             let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
             return;
         };
-        let event = crate::skillcache::trace::save(&self.store, turn, trace, &redactor)
+        let usage_turn = crate::skillcache::trace::ObservedTurn {
+            session: turn.session,
+            generation: turn.generation,
+            message: turn.message,
+            route: turn.route,
+            workspace: turn.workspace,
+            usage: &usage,
+        };
+        let event = crate::skillcache::trace::save(&self.store, &usage_turn, trace, &redactor)
             .unwrap_or_else(|error| {
                 json!({
                     "kind": "skillcache",
@@ -2779,6 +2825,7 @@ impl Sessions {
                 })
             });
         // A snapshot lives exactly as long as the trace it belongs to.
+        let mut auto_queued = None;
         if event["phase"] == "observed" {
             let kept = self
                 .store
@@ -2787,10 +2834,18 @@ impl Sessions {
             if let Ok(kept) = kept {
                 crate::skillcache::snapshot::collect(&self.store.state, &kept);
             }
+            auto_queued = crate::skillcache::maybe_enqueue_after_observe(
+                &self.skillcache_runtime(),
+                turn.session,
+                turn.generation,
+            );
         } else {
             let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
         }
         let _ = emit(event);
+        if let Some(queued) = auto_queued {
+            let _ = emit(queued);
+        }
     }
     pub fn send(&self, sid: &str, prompt: &str, options: &Value) -> Result<Value> {
         let session = self.store.get(sid)?;

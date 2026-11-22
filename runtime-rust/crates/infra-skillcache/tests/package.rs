@@ -231,6 +231,27 @@ fn the_environment_identity_names_the_contract_and_each_runtime() {
     assert_ne!(base, fingerprint::env_fingerprint(&runtimes(None)));
     assert_eq!(fingerprint::runtime_version("no-such-runtime-here"), None);
     assert_eq!(fingerprint::runtime_version("../bin/sh"), None);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let user_bin = tempfile::tempdir().unwrap();
+        let fake_tool = user_bin.path().join("fake-user-runtime");
+        std::fs::write(&fake_tool, "#!/bin/sh\necho 'Fake 1.0'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let orig = std::env::var_os("PATH").unwrap_or_default();
+        let joined = std::env::join_paths(
+            std::iter::once(user_bin.path().to_path_buf()).chain(std::env::split_paths(&orig)),
+        )
+        .unwrap();
+        // Safety: test isolates PATH restoration immediately below.
+        unsafe { std::env::set_var("PATH", &joined) };
+        let probed = fingerprint::runtime_version("fake-user-runtime");
+        unsafe { std::env::set_var("PATH", orig) };
+        assert_eq!(probed, None);
+    }
 }
 
 #[test]

@@ -20,7 +20,7 @@ use crate::{
     services::{Domain, Payload, Reply},
     store::SessionStore,
 };
-use compile::{Job, Runtime};
+use compile::{EnqueueCompileFn, Job, Runtime};
 use infra_skillcache::{compile_rules, fingerprint, package};
 use serde_json::{Value, json};
 use std::{
@@ -43,31 +43,110 @@ enum Work {
     Requalify { capsule_id: String },
 }
 
+struct WorkQueue {
+    sender: mpsc::Sender<Work>,
+    receiver: Mutex<Option<mpsc::Receiver<Work>>>,
+    requalifying: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl WorkQueue {
+    fn new() -> Arc<Self> {
+        let (sender, receiver) = mpsc::channel(WAITING);
+        Arc::new(Self {
+            sender,
+            receiver: Mutex::new(Some(receiver)),
+            requalifying: Arc::new(Mutex::new(BTreeSet::new())),
+        })
+    }
+
+    fn start(&self, runtime: &Arc<Runtime>) {
+        let Some(mut receiver) = self.receiver.lock().ok().and_then(|mut slot| slot.take()) else {
+            return;
+        };
+        let runtime = runtime.clone();
+        let requalifying = self.requalifying.clone();
+        tokio::spawn(async move {
+            while let Some(work) = receiver.recv().await {
+                if runtime.cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                match work {
+                    Work::Compile(job) => compile::run(&runtime, &job).await,
+                    Work::Requalify { capsule_id } => {
+                        let capsule = runtime
+                            .store
+                            .connection()
+                            .and_then(|db| db::capsule(&db, &capsule_id));
+                        if let Ok(Some(capsule)) = capsule
+                            && let Ok(workspace) = project_path(&runtime.store, &capsule)
+                            && let Err(error) =
+                                compile::requalify(&runtime, &capsule, &workspace).await
+                        {
+                            if let Ok(db) = runtime.store.connection() {
+                                let target = if capsule["status"] == "retired" {
+                                    "retired"
+                                } else {
+                                    "stale"
+                                };
+                                let _ = db::set_capsule_status(
+                                    &db,
+                                    &capsule_id,
+                                    target,
+                                    Some(&error.to_string()),
+                                );
+                            }
+                            runtime.publish(
+                                capsule["project_id"].as_str().unwrap_or(""),
+                                "failed",
+                                json!({"capsule_id": capsule_id, "outcome": error.to_string()}),
+                            );
+                        }
+                        if let Ok(mut pending) = requalifying.lock() {
+                            pending.remove(&capsule_id);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn queue(&self, runtime: &Arc<Runtime>, work: Work) -> Result<()> {
+        self.start(runtime);
+        self.sender.try_send(work).map_err(|_| {
+            HarnessError::conflict(
+                "The SkillCache queue is full; try again when a compilation has finished.",
+            )
+        })
+    }
+}
+
 /// The HTTP operations of SkillCache and the queue behind two of them.
 pub struct SkillCacheDomain {
     runtime: Arc<Runtime>,
-    sender: mpsc::Sender<Work>,
-    receiver: Mutex<Option<mpsc::Receiver<Work>>>,
+    work: Arc<WorkQueue>,
     requalifying: Arc<Mutex<BTreeSet<String>>>,
 }
 
 /// An installed runtime's version, remembered for a minute: the identity of
 /// the environment is asked for on every listing and every warm decision.
 fn runtime_versions(names: &[String]) -> BTreeMap<String, Option<String>> {
-    static KNOWN: Mutex<BTreeMap<String, (Instant, Option<String>)>> = Mutex::new(BTreeMap::new());
+    type RuntimeVersionCache = BTreeMap<(String, String), (Instant, Option<String>)>;
+    static KNOWN: Mutex<RuntimeVersionCache> = Mutex::new(BTreeMap::new());
+    let path_key = std::env::var("PATH").unwrap_or_default();
     let mut known = KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     names
         .iter()
         .map(|name| {
+            let key = (name.clone(), path_key.clone());
             let fresh = known
-                .get(name)
+                .get(&key)
                 .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
                 .map(|(_, version)| version.clone());
             let version = fresh.unwrap_or_else(|| {
                 let version = fingerprint::runtime_version(name);
-                known.insert(name.clone(), (Instant::now(), version.clone()));
+                known.insert(key, (Instant::now(), version.clone()));
                 version
             });
             (name.clone(), version)
@@ -152,17 +231,23 @@ impl SkillCacheDomain {
         providers: Arc<ProviderDomain>,
         cancel: Arc<AtomicBool>,
     ) -> Self {
-        let (sender, receiver) = mpsc::channel(WAITING);
+        let work = WorkQueue::new();
+        let requalifying = work.requalifying.clone();
+        let queue_for_runtime = work.clone();
+        let enqueuer: EnqueueCompileFn = Arc::new(move |rt: &Arc<Runtime>, job: Job| {
+            queue_for_runtime.queue(rt, Work::Compile(job))
+        });
         Self {
             runtime: Arc::new(Runtime {
                 store,
                 providers,
                 engine: None,
                 cancel,
+                enqueuer: Some(enqueuer),
+                requalifying: Some(requalifying.clone()),
             }),
-            sender,
-            receiver: Mutex::new(Some(receiver)),
-            requalifying: Arc::new(Mutex::new(BTreeSet::new())),
+            work,
+            requalifying,
         }
     }
     /// Names the engine the gates run, for a process that is not one itself.
@@ -173,70 +258,16 @@ impl SkillCacheDomain {
             providers: runtime.providers.clone(),
             engine: Some(engine),
             cancel: runtime.cancel.clone(),
+            enqueuer: runtime.enqueuer.clone(),
+            requalifying: runtime.requalifying.clone(),
         });
         self
     }
     pub fn runtime(&self) -> Arc<Runtime> {
         self.runtime.clone()
     }
-    /// Starts the one worker the first time work is queued.
-    fn start(&self) {
-        let Some(mut receiver) = self.receiver.lock().ok().and_then(|mut slot| slot.take()) else {
-            return;
-        };
-        let runtime = self.runtime.clone();
-        let requalifying = self.requalifying.clone();
-        tokio::spawn(async move {
-            while let Some(work) = receiver.recv().await {
-                if runtime.cancel.load(Ordering::Acquire) {
-                    break;
-                }
-                match work {
-                    Work::Compile(job) => compile::run(&runtime, &job).await,
-                    Work::Requalify { capsule_id } => {
-                        let capsule = runtime
-                            .store
-                            .connection()
-                            .and_then(|db| db::capsule(&db, &capsule_id));
-                        if let Ok(Some(capsule)) = capsule
-                            && let Ok(workspace) = project_path(&runtime.store, &capsule)
-                            && let Err(error) =
-                                compile::requalify(&runtime, &capsule, &workspace).await
-                        {
-                            if let Ok(db) = runtime.store.connection() {
-                                let target = if capsule["status"] == "retired" {
-                                    "retired"
-                                } else {
-                                    "stale"
-                                };
-                                let _ = db::set_capsule_status(
-                                    &db,
-                                    &capsule_id,
-                                    target,
-                                    Some(&error.to_string()),
-                                );
-                            }
-                            runtime.publish(
-                                capsule["project_id"].as_str().unwrap_or(""),
-                                "failed",
-                                json!({"capsule_id": capsule_id, "outcome": error.to_string()}),
-                            );
-                        }
-                        if let Ok(mut pending) = requalifying.lock() {
-                            pending.remove(&capsule_id);
-                        }
-                    }
-                }
-            }
-        });
-    }
     fn queue(&self, work: Work) -> Result<()> {
-        self.start();
-        self.sender.try_send(work).map_err(|_| {
-            HarnessError::conflict(
-                "The SkillCache queue is full; try again when a compilation has finished.",
-            )
-        })
+        self.work.queue(&self.runtime, work)
     }
     /// A capsule row as it is now: an active capsule that no longer matches
     /// what it was qualified with is marked stale before it is shown.
@@ -304,10 +335,18 @@ impl SkillCacheDomain {
             Some(id) => db::compile(&db, id)?,
             None => None,
         };
-        let (runs, complete, handed_back, deopts): (i64, i64, i64, i64) = db.query_row(
+        let (total_runs, _, _, _): (i64, i64, i64, i64) = db.query_row(
             "SELECT COUNT(*),COALESCE(SUM(outcome='complete'),0),COALESCE(SUM(deopts>0),0),
                     COALESCE(SUM(deopts),0)
              FROM skillcache_runs WHERE capsule_id=?1",
+            [capsule_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let (runs, complete, handed_back, deopts): (i64, i64, i64, i64) = db.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(outcome='complete'),0),COALESCE(SUM(deopts>0),0),
+                    COALESCE(SUM(deopts),0)
+             FROM skillcache_runs WHERE capsule_id=?1
+               AND rowid>COALESCE((SELECT runs_reset_rowid FROM skillcache_capsules WHERE capsule_id=?1),0)",
             [capsule_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
@@ -339,12 +378,14 @@ impl SkillCacheDomain {
         detail["amortization"] = json!({
             "compile_usd": compilation.as_ref().and_then(|compile| compile["usage"]["cost_usd"].as_f64()),
             "warm_turns": runs,
+            "warm_turns_total": total_runs,
             "saving_per_reuse_usd": null,
             "breakeven_reuses": null,
         });
         detail["compile"] = compilation.unwrap_or(Value::Null);
         detail["runs"] = json!({
             "count": runs,
+            "total": total_runs,
             "complete": complete,
             "handed_back": handed_back,
             "deopts": deopts,
@@ -426,14 +467,22 @@ impl SkillCacheDomain {
             ));
         }
         {
+            let db = self.runtime.store.connection()?;
+            let pending_compiles = db::pending_compiles(&db)?;
             let mut pending = self.requalifying.lock().map_err(|_| {
                 HarnessError::unavailable("SkillCache requalify state lock failed.")
             })?;
-            if !pending.insert(capsule_id.into()) {
+            if pending.contains(capsule_id) {
                 return Err(HarnessError::conflict(
                     "This capsule is already being requalified.",
                 ));
             }
+            if pending_compiles + pending.len() as i64 >= WAITING as i64 {
+                return Err(HarnessError::conflict(
+                    "The SkillCache queue is full; try again when a compilation has finished.",
+                ));
+            }
+            pending.insert(capsule_id.into());
         }
         if let Err(error) = self.queue(Work::Requalify {
             capsule_id: capsule_id.into(),
@@ -523,85 +572,15 @@ impl SkillCacheDomain {
                 })?;
             Some(arm.to_string())
         };
-        let chosen = settings::validate(&json!({
-            "mode": "observe",
-            "compiler": if body["compiler"].is_null() { session["skillcache"]["compiler"].clone() } else { body["compiler"].clone() },
-        }))?;
-        let project_id = session["project_id"].as_str().unwrap_or("").to_string();
-        let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
-        let (compile_id, capsule_id) = (crate::store::id(), crate::store::id());
-        {
-            let db = store.connection()?;
-            let stored = db::trace(&db, &generation)?
-                .filter(|trace| trace["session_id"] == session_id)
-                .ok_or_else(|| HarnessError::missing("This session kept no trace of that turn."))?;
-            let skill = stored["skill_refs"]
-                .as_array()
-                .and_then(|skills| skills.first())
-                .cloned()
-                .ok_or_else(|| HarnessError::invalid("The trace names no skill."))?;
-            if db::compile_pending(&db, &generation)? {
-                return Err(HarnessError::conflict(
-                    "This turn is already being compiled.",
-                ));
-            }
-            if db::pending_compiles(&db)? >= WAITING as i64 {
-                return Err(HarnessError::conflict(
-                    "The SkillCache queue is full; try again when a compilation has finished.",
-                ));
-            }
-            db::begin_capsule(
-                &db,
-                &capsule_id,
-                &compile_id,
-                &project_id,
-                session_id,
-                &generation,
-                &skill,
-                eval_arm.as_deref(),
-            )?;
-            db::begin_compile(
-                &db,
-                &compile_id,
-                &capsule_id,
-                &project_id,
-                session_id,
-                &generation,
-                "claude",
-                chosen["compiler"]["model"].as_str(),
-                eval_arm.as_deref(),
-            )?;
-        }
-        let job = Job {
-            compile_id: compile_id.clone(),
-            capsule_id: capsule_id.clone(),
-            session_id: session_id.into(),
-            generation,
-            project_id: project_id.clone(),
-            workspace,
-            model: chosen["compiler"]["model"].as_str().map(String::from),
-            eval_arm: eval_arm.clone(),
-        };
-        let mut detail = json!({"capsule_id": capsule_id, "compile_id": compile_id, "session_id": session_id, "generation": job.generation});
-        if let Some(arm) = &eval_arm {
-            detail["eval_arm"] = arm.clone().into();
-        }
-        if let Err(error) = self.queue(Work::Compile(job)) {
-            let db = store.connection()?;
-            let _ = db::finish_compile(
-                &db,
-                &compile_id,
-                "failed",
-                0,
-                &error.to_string(),
-                &Value::Null,
-                &Value::Null,
-            );
-            let _ = db::set_capsule_status(&db, &capsule_id, "failed", Some(&error.to_string()));
-            return Err(error);
-        }
-        self.runtime.publish(&project_id, "queued", detail);
-        Ok(json!({"compile_id": compile_id, "capsule_id": capsule_id, "status": "queued"}))
+        let compiler_override = (!body["compiler"].is_null()).then_some(&body["compiler"]);
+        enqueue_compile_for_trace(
+            &self.runtime,
+            &session,
+            &generation,
+            compiler_override,
+            eval_arm,
+            &|job| self.queue(Work::Compile(job)),
+        )
     }
     /// What a session's SkillCache state is: its mode, the traces it kept and
     /// what was compiled from them. A trace is listed without its steps; they
@@ -721,6 +700,173 @@ impl Domain for SkillCacheDomain {
     }
 }
 
+/// Marks every `active` or `needs_recompile` capsule for `(project_id, skill_path)`
+/// as `stale` with `reason` and publishes SSE `"stale"` events. Returns the count updated.
+#[allow(dead_code)] // Exposed for SkillsDomain invalidation hookup across branches.
+pub(crate) fn invalidate_for_skill_path(
+    store: &SessionStore,
+    project_id: &str,
+    skill_path: &str,
+    reason: &str,
+) -> Result<usize> {
+    let db = store.connection()?;
+    let ids = {
+        let mut query = db.prepare(
+            "SELECT capsule_id FROM skillcache_capsules
+             WHERE project_id=?1 AND skill_path=?2 AND status IN ('active','needs_recompile')",
+        )?;
+        query
+            .query_map(rusqlite::params![project_id, skill_path], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for id in &ids {
+        db::set_capsule_status(&db, id, "stale", Some(reason))?;
+    }
+    drop(db);
+    for id in &ids {
+        store.publish_event(
+            "skillcache_capsule",
+            None,
+            Some(project_id.to_owned()),
+            json!({
+                "state": "stale",
+                "project_id": project_id,
+                "capsule_id": id,
+                "reason": reason,
+            }),
+        );
+    }
+    Ok(ids.len())
+}
+
+/// Enqueues compilation of an observed turn when `compile_after_observe` is set
+/// on the session; returns a session `"skillcache"` queued event when queued.
+pub(crate) fn maybe_enqueue_after_observe(
+    runtime: &Arc<Runtime>,
+    session: &Value,
+    generation: &str,
+) -> Option<Value> {
+    if session["skillcache"]["compile_after_observe"] != true {
+        return None;
+    }
+    let enqueuer = runtime.enqueuer.as_ref()?;
+    let eval_arm = if settings::eval_enabled(&runtime.store) {
+        session["skillcache"]["eval_arm"].as_str().map(String::from)
+    } else {
+        None
+    };
+    let queued = enqueue_compile_for_trace(runtime, session, generation, None, eval_arm, &|job| {
+        enqueuer(runtime, job)
+    })
+    .ok()?;
+    Some(json!({
+        "kind": "skillcache",
+        "phase": "queued",
+        "compile_id": queued["compile_id"],
+        "capsule_id": queued["capsule_id"],
+        "generation": generation,
+        "text": "SkillCache queued compilation for this observed turn.",
+    }))
+}
+
+fn enqueue_compile_for_trace(
+    runtime: &Arc<Runtime>,
+    session: &Value,
+    generation: &str,
+    compiler_override: Option<&Value>,
+    eval_arm: Option<String>,
+    enqueue: &dyn Fn(Job) -> Result<()>,
+) -> Result<Value> {
+    let store = &runtime.store;
+    let session_id = session["id"].as_str().unwrap_or("");
+    let chosen = settings::validate(&json!({
+        "mode": "observe",
+        "compiler": compiler_override.cloned().unwrap_or_else(|| session["skillcache"]["compiler"].clone()),
+    }))?;
+    let project_id = session["project_id"].as_str().unwrap_or("").to_string();
+    let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+    let (compile_id, capsule_id) = (crate::store::id(), crate::store::id());
+    {
+        let db = store.connection()?;
+        let stored = db::trace(&db, generation)?
+            .filter(|trace| trace["session_id"] == session_id)
+            .ok_or_else(|| HarnessError::missing("This session kept no trace of that turn."))?;
+        let skill = stored["skill_refs"]
+            .as_array()
+            .and_then(|skills| skills.first())
+            .cloned()
+            .ok_or_else(|| HarnessError::invalid("The trace names no skill."))?;
+        if db::compile_pending(&db, generation)? {
+            return Err(HarnessError::conflict(
+                "This turn is already being compiled.",
+            ));
+        }
+        let pending_requalifies = runtime
+            .requalifying
+            .as_ref()
+            .and_then(|set| set.lock().ok())
+            .map_or(0i64, |set| set.len() as i64);
+        if db::pending_compiles(&db)? + pending_requalifies >= WAITING as i64 {
+            return Err(HarnessError::conflict(
+                "The SkillCache queue is full; try again when a compilation has finished.",
+            ));
+        }
+        db::begin_capsule(
+            &db,
+            &capsule_id,
+            &compile_id,
+            &project_id,
+            session_id,
+            generation,
+            &skill,
+            eval_arm.as_deref(),
+        )?;
+        db::begin_compile(
+            &db,
+            &compile_id,
+            &capsule_id,
+            &project_id,
+            session_id,
+            generation,
+            "claude",
+            chosen["compiler"]["model"].as_str(),
+            eval_arm.as_deref(),
+        )?;
+    }
+    let job = Job {
+        compile_id: compile_id.clone(),
+        capsule_id: capsule_id.clone(),
+        session_id: session_id.into(),
+        generation: generation.into(),
+        project_id: project_id.clone(),
+        workspace,
+        model: chosen["compiler"]["model"].as_str().map(String::from),
+        eval_arm: eval_arm.clone(),
+    };
+    let mut detail = json!({"capsule_id": capsule_id, "compile_id": compile_id, "session_id": session_id, "generation": job.generation});
+    if let Some(arm) = &eval_arm {
+        detail["eval_arm"] = arm.clone().into();
+    }
+    if let Err(error) = enqueue(job) {
+        let db = store.connection()?;
+        let _ = db::finish_compile(
+            &db,
+            &compile_id,
+            "failed",
+            0,
+            &error.to_string(),
+            &Value::Null,
+            &Value::Null,
+        );
+        let _ = db::set_capsule_status(&db, &capsule_id, "failed", Some(&error.to_string()));
+        return Err(error);
+    }
+    runtime.publish(&project_id, "queued", detail);
+    Ok(json!({"compile_id": compile_id, "capsule_id": capsule_id, "status": "queued"}))
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     /// A temporary folder that is removed although it held sealed packages,
@@ -738,5 +884,56 @@ pub(crate) mod test_support {
     }
     pub(crate) fn scratch() -> Scratch {
         Scratch(tempfile::tempdir().unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidate_for_skill_path_marks_active_capsules_stale() {
+        let scratch = test_support::scratch();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = scratch.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project_id = store.register(&project).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let db = store.connection().unwrap();
+        let skill =
+            json!({"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": "0"});
+        db::begin_capsule(&db, "c-act", "k-1", &project_id, "s1", "g1", &skill, None).unwrap();
+        db::activate_capsule(
+            &db,
+            &db::Qualified {
+                capsule_id: "c-act",
+                mu_name: "pdf",
+                mu_description: "d",
+                form: "textual",
+                capsule_sha256: "a",
+                package_sha256: "b",
+                skill_files: &json!({}),
+                env_fingerprint: "e",
+                engine_digest: "",
+                artifact_dir: "/tmp/no",
+                capabilities: &json!({}),
+            },
+        )
+        .unwrap();
+        drop(db);
+        let changed = invalidate_for_skill_path(
+            &store,
+            &project_id,
+            ".agents/skills/pdf/SKILL.md",
+            "Skill edited on disk.",
+        )
+        .unwrap();
+        assert_eq!(changed, 1);
+        let db = store.connection().unwrap();
+        let cap = db::capsule(&db, "c-act").unwrap().unwrap();
+        assert_eq!(cap["status"], "stale");
+        assert_eq!(cap["reason"], "Skill edited on disk.");
     }
 }

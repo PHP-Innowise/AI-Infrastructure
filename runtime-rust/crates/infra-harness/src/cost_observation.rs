@@ -1102,7 +1102,8 @@ pub fn claude_message_components(usage: &Value) -> ComponentTotals {
 
 /// Extracts normalized component counts from one Codex `turn.completed.usage` object.
 pub fn codex_turn_components(usage: &Value) -> ComponentTotals {
-    let cached = counter(&usage["cached_input_tokens"]);
+    let cached = counter(&usage["cached_input_tokens"])
+        .or_else(|| counter(&usage["cache_read_input_tokens"]));
     let input =
         counter(&usage["input_tokens"]).map(|total| total.saturating_sub(cached.unwrap_or(0)));
     ComponentTotals {
@@ -1121,6 +1122,7 @@ struct PhaseComponents {
     /// The output tokens each closing `result` event of the phase reported.
     claude_reports: Vec<Option<u64>>,
     codex_totals: ComponentTotals,
+    cursor_calls: std::collections::BTreeSet<String>,
 }
 
 /// Accumulates normalized token components across launch phases (`main` and `recovery`).
@@ -1188,6 +1190,15 @@ impl UsageComponents {
                     .codex_totals
                     .add(&codex_turn_components(usage));
             }
+            "cursor" if kind == "assistant" => {
+                if let Some(call_id) = event["model_call_id"].as_str().filter(|id| !id.is_empty()) {
+                    self.phases
+                        .entry(phase.into())
+                        .or_default()
+                        .cursor_calls
+                        .insert(call_id.into());
+                }
+            }
             _ => {}
         }
     }
@@ -1216,6 +1227,16 @@ impl UsageComponents {
             "codex" => {
                 for phase in self.phases.values() {
                     total.add(&phase.codex_totals);
+                }
+            }
+            "cursor" => {
+                let calls: u64 = self
+                    .phases
+                    .values()
+                    .map(|phase| phase.cursor_calls.len() as u64)
+                    .sum();
+                if calls > 0 {
+                    total.model_calls = Some(calls);
                 }
             }
             _ => {}
@@ -1514,6 +1535,60 @@ mod usage_components_tests {
                 "cache_write_1h_input_tokens": null,
                 "model_calls": null,
                 "source": null
+            })
+        );
+    }
+
+    #[test]
+    fn codex_cache_read_fallback_and_cursor_explicit_model_call_ids() {
+        let mut codex = UsageComponents::new("codex");
+        codex.observe(
+            "main",
+            &object!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 200,
+                    "cache_read_input_tokens": 80,
+                    "output_tokens": 30
+                }
+            }),
+        );
+        assert_eq!(
+            codex.snapshot(),
+            object!({
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "cache_read_input_tokens": 80,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": null,
+                "source": "codex"
+            })
+        );
+
+        let mut cursor = UsageComponents::new("cursor");
+        cursor.observe(
+            "main",
+            &object!({"type": "assistant", "model_call_id": "mc1"}),
+        );
+        cursor.observe(
+            "main",
+            &object!({"type": "assistant", "model_call_id": "mc1"}),
+        );
+        cursor.observe(
+            "main",
+            &object!({"type": "assistant", "model_call_id": "mc2"}),
+        );
+        assert_eq!(
+            cursor.snapshot(),
+            object!({
+                "input_tokens": null,
+                "output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_5m_input_tokens": null,
+                "cache_write_1h_input_tokens": null,
+                "model_calls": 2,
+                "source": "cursor"
             })
         );
     }

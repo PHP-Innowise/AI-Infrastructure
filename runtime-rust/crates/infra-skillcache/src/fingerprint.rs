@@ -186,13 +186,44 @@ pub fn verify_tree(root: &Path, known: &Tree) -> Result<(bool, Option<Tree>)> {
     Ok((tree.sha256 == known.sha256, Some(tree)))
 }
 
+fn sandbox_visible_executable(name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    const VISIBLE_PREFIXES: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64"];
+    #[cfg(target_os = "macos")]
+    const VISIBLE_PREFIXES: &[&str] = &["/usr", "/bin", "/sbin", "/System", "/Library/Apple"];
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let path_env = std::env::var_os("PATH")?;
+        let is_visible = |p: &Path| VISIBLE_PREFIXES.iter().any(|prefix| p.starts_with(prefix));
+        for dir in std::env::split_paths(&path_env) {
+            if !is_visible(&dir) {
+                continue;
+            }
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            if let Ok(canonical) = std::fs::canonicalize(&candidate)
+                && is_visible(&canonical)
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        infra_host::provider::find_executable(name)
+    }
+}
+
 /// The first line an interpreter prints for `--version`, or `None` when it is
-/// not installed or does not answer within a few seconds.
+/// not installed in a gate-visible location or does not answer within a few seconds.
 pub fn runtime_version(name: &str) -> Option<String> {
     if !crate::capsule::is_runtime(name) {
         return None;
     }
-    let executable = infra_host::provider::find_executable(name)?;
+    let executable = sandbox_visible_executable(name)?;
     let mut child = std::process::Command::new(executable)
         .arg("--version")
         .stdin(std::process::Stdio::null())

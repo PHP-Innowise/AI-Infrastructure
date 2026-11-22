@@ -235,6 +235,29 @@ fn the_engine_has_a_skillcache_command_group() {
         .output()
         .unwrap();
     assert_eq!(json_line(&output)["result"]["echo"]["input"]["name"], "Lin");
+    let reset = stand
+        .command(engine)
+        .args(["skillcache", "reset"])
+        .output()
+        .unwrap();
+    assert_eq!(reset.status.code(), Some(0));
+    assert_eq!(
+        json_line(&reset),
+        json!({"status": "reset", "cleared": true})
+    );
+    let status_after_reset = stand
+        .command(engine)
+        .args(["skillcache", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(status_after_reset.status.code(), Some(2));
+    assert_eq!(json_line(&status_after_reset)["code"], "not_started");
+    let rerun = stand
+        .command(engine)
+        .args(["skillcache", "run", r#"{"name":"Ada"}"#])
+        .output()
+        .unwrap();
+    assert_eq!(json_line(&rerun)["result"]["echo"]["input"]["name"], "Ada");
     let output = stand
         .command(engine)
         .args(["skillcache", "tool", "echo", "--input", r#"{"name":"Lin"}"#])
