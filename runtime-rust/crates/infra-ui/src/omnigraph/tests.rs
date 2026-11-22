@@ -1569,3 +1569,49 @@ fn pr106_p0_p1_fixes_drift_poll_status_search_cross_graph_and_hotkeys() {
         false
     ));
 }
+
+#[test]
+fn system_jump_and_code_map_jump_preserve_full_context() {
+    let mut sys_state = json!({"query": "old"});
+    let q = apply_system_jump_context_to_state(
+        &mut sys_state,
+        "billing-api",
+        Some("POST /v1/invoices"),
+        Some("src/Billing/Controller.php"),
+        Some("sysrun-88"),
+    );
+    assert_eq!(q, "src/Billing/Controller.php");
+    assert_eq!(sys_state["query"], json!(""));
+    assert_eq!(sys_state["run_id"], json!("sysrun-88"));
+    assert_eq!(sys_state["filter_run_id"], json!("sysrun-88"));
+    assert_eq!(sys_state["system_context"]["service"], json!("billing-api"));
+    assert_eq!(
+        sys_state["system_context"]["contract"],
+        json!("POST /v1/invoices")
+    );
+    assert_eq!(
+        sys_state["system_context"]["file"],
+        json!("src/Billing/Controller.php")
+    );
+
+    let ctx = resolve_code_map_jump_context(
+        &json!({
+            "path": "src/Billing/Service.php",
+            "filter": "refund",
+            "target_commit": "abcdef12",
+            "semantic_kind": "publishes_event"
+        }),
+        &json!({"query": "fallback", "selected_commit_id": "1111111", "kind": "calls"}),
+    );
+    assert_eq!(ctx.filter.as_deref(), Some("refund"));
+    assert_eq!(ctx.target_commit.as_deref(), Some("abcdef12"));
+    assert_eq!(ctx.semantic_kind.as_deref(), Some("publishes_event"));
+
+    let fallback = resolve_code_map_jump_context(
+        &json!({"path": "src/Billing/Service.php"}),
+        &json!({"query": "from-ui", "selected_commit_id": "9999aaa", "kind": "di_binds"}),
+    );
+    assert_eq!(fallback.filter.as_deref(), Some("from-ui"));
+    assert_eq!(fallback.target_commit.as_deref(), Some("9999aaa"));
+    assert_eq!(fallback.semantic_kind.as_deref(), Some("di_binds"));
+}

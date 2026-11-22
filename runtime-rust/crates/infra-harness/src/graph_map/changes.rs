@@ -25,6 +25,8 @@ pub(crate) struct PersistentMemberStore {
     pub(super) links: Vec<CachedMemberLink>,
 }
 
+const STAT_RACY_NS: u128 = 2_000_000_000;
+
 pub(super) fn disk_file_stamp(root: &Path, rel_path: &str) -> Option<(u64, u128)> {
     if rel_path.split('/').any(|part| part == "..") {
         return None;
@@ -38,6 +40,14 @@ pub(super) fn disk_file_stamp(root: &Path, rel_path: &str) -> Option<(u64, u128)
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0u128, |d| d.as_nanos());
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(0u128, |d| d.as_nanos());
+    // Skip caching file metadata inside the filesystem timestamp race window.
+    if mtime_ns == 0 || now_ns == 0 || now_ns.saturating_sub(mtime_ns) < STAT_RACY_NS {
+        return None;
+    }
     Some((meta.len(), mtime_ns))
 }
 
@@ -107,9 +117,8 @@ impl<'a> FileMemberCache<'a> {
             .as_deref()
             .and_then(|s| parse_file_ir(path, s).map(Arc::new));
         let decls = Arc::new(
-            loaded
-                .as_deref()
-                .map(|src| extract_declared_members(path, src))
+            ir.as_ref()
+                .map(|parsed| parsed.declared_members.clone())
                 .unwrap_or_default(),
         );
         if let (Some(stamp), Some(src)) = (stamp_opt, &loaded)
@@ -704,10 +713,12 @@ impl Index {
             .collect::<Vec<_>>();
         let out = self.test_symbols(&gone, source);
         let mut files = Vec::new();
+        let mut kept_to_old = Vec::new();
         let mut file_at = vec![NONE; self.files.len()];
         for (file, path) in self.files.iter().enumerate() {
             if !gone[file] {
                 file_at[file] = files.len() as u32;
+                kept_to_old.push(file as u32);
                 files.push(path.clone());
             }
         }
@@ -753,7 +764,9 @@ impl Index {
         let ties = left(&self.ties);
         let unlinked = (self.uses.len() - uses.len()) + (self.ruled.len() - ruled.len());
         let dropped = self.symbols.len() - symbols.len();
+        let crates = self.crates.remap(&kept_to_old, self.files.len());
         Index {
+            index_id: super::next_index_id(),
             root: self.root.clone(),
             revision_tests: None,
             test_symbols: OnceLock::new(),
@@ -765,11 +778,14 @@ impl Index {
             ties,
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
             ruled,
+            crates,
             files,
             pairs: pairs_of(&symbols, &uses),
             symbols,
             first,
             names: self.names.clone(),
+            ir_node_ids: String::new(),
+            ir_node_id_spans: Vec::new(),
             community_names: self.community_names.clone(),
             nodes: self.nodes.saturating_sub(dropped as u64),
             links: self.links.saturating_sub(unlinked as u64),
@@ -779,6 +795,7 @@ impl Index {
             backend: self.backend.clone(),
             ir_db_path: self.ir_db_path.clone(),
             known_files_set: OnceLock::new(),
+            manifest_dirs: OnceLock::new(),
             member_store: Mutex::new(PersistentMemberStore::default()),
         }
     }

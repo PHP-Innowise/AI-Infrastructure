@@ -24,6 +24,59 @@ pub trait Services: Send + Sync {
     }
 }
 
+enum OmnigraphEnrichment {
+    Unavailable,
+    Ok { atoms: Value, warnings: Value },
+    Skipped(Value),
+    Error(String),
+}
+
+async fn fetch_omnigraph_enrichment(
+    omnigraph: Option<Arc<dyn Domain>>,
+    project_id: Value,
+    path: Value,
+) -> OmnigraphEnrichment {
+    let Some(omnigraph) = omnigraph else {
+        return OmnigraphEnrichment::Unavailable;
+    };
+    let file = json!({
+        "params": {},
+        "body": {},
+        "query": {"project_id": project_id, "path": path},
+    });
+    match omnigraph.execute("omnigraph.file_context", file).await {
+        Ok(Payload::Json(found)) if found["ok"] == true => OmnigraphEnrichment::Ok {
+            warnings: json!(crate::knowledge::KnowledgeDomain::contradiction_warnings(
+                &found["contradictions"],
+                &found["atoms"],
+            )),
+            atoms: found["atoms"].clone(),
+        },
+        Ok(Payload::Json(found)) => OmnigraphEnrichment::Skipped(found["skipped"].clone()),
+        Ok(_) => OmnigraphEnrichment::Unavailable,
+        Err(error) => OmnigraphEnrichment::Error(error.message),
+    }
+}
+
+fn apply_omnigraph_enrichment(links: &mut Value, enrichment: OmnigraphEnrichment) {
+    // The shared graph's atoms are a companion: an unreachable Omnigraph
+    // leaves the Brain and Bank links standing.
+    links["omnigraph_atoms"] = json!([]);
+    match enrichment {
+        OmnigraphEnrichment::Unavailable => {}
+        OmnigraphEnrichment::Ok { atoms, warnings } => {
+            links["omnigraph_atoms"] = atoms;
+            links["contradiction_warnings"] = warnings;
+        }
+        OmnigraphEnrichment::Skipped(skipped) => {
+            links["omnigraph_skipped"] = skipped;
+        }
+        OmnigraphEnrichment::Error(err) => {
+            links["omnigraph_error"] = json!(err);
+        }
+    }
+}
+
 fn ensure_graph_event_bridge(store: &SessionStore) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -620,6 +673,7 @@ impl NativeServices {
         }
     }
     async fn handle_memory_links(&self, operation: &str, request: &Value) -> Result<Payload> {
+        const MAX_CONCURRENT_FILE_CONTEXT: usize = 8;
         let knowledge = self
             .domains
             .get("knowledge")
@@ -636,8 +690,44 @@ impl NativeServices {
             .unwrap_or_else(|| request["params"]["project_id"].clone());
         if operation == "knowledge.memory_links_batch" {
             if let Some(items) = links["items"].as_array_mut() {
-                for item in items {
-                    self.enrich_memory_links_item(&project_id, item).await;
+                let omnigraph = self.domains.get("omnigraph").cloned();
+                if items.len() <= 1 || tokio::runtime::Handle::try_current().is_err() {
+                    for item in items {
+                        let path = item["path"].clone();
+                        let res =
+                            fetch_omnigraph_enrichment(omnigraph.clone(), project_id.clone(), path)
+                                .await;
+                        apply_omnigraph_enrichment(item, res);
+                    }
+                } else {
+                    let mut set: tokio::task::JoinSet<(usize, OmnigraphEnrichment)> =
+                        tokio::task::JoinSet::new();
+                    let mut next_idx = 0usize;
+                    while next_idx < items.len() && set.len() < MAX_CONCURRENT_FILE_CONTEXT {
+                        let idx = next_idx;
+                        next_idx += 1;
+                        let og = omnigraph.clone();
+                        let pid = project_id.clone();
+                        let path = items[idx]["path"].clone();
+                        set.spawn(
+                            async move { (idx, fetch_omnigraph_enrichment(og, pid, path).await) },
+                        );
+                    }
+                    while let Some(joined) = set.join_next().await {
+                        if let Ok((idx, enrichment)) = joined {
+                            apply_omnigraph_enrichment(&mut items[idx], enrichment);
+                        }
+                        if next_idx < items.len() {
+                            let idx = next_idx;
+                            next_idx += 1;
+                            let og = omnigraph.clone();
+                            let pid = project_id.clone();
+                            let path = items[idx]["path"].clone();
+                            set.spawn(async move {
+                                (idx, fetch_omnigraph_enrichment(og, pid, path).await)
+                            });
+                        }
+                    }
                 }
             }
         } else {
@@ -798,34 +888,13 @@ impl NativeServices {
         }
     }
     async fn enrich_memory_links_item(&self, project_id: &Value, links: &mut Value) {
-        // The shared graph's atoms are a companion: an unreachable Omnigraph
-        // leaves the Brain and Bank links standing.
-        links["omnigraph_atoms"] = json!([]);
-        let Some(omnigraph) = self.domains.get("omnigraph") else {
-            return;
-        };
-        let file = json!({
-            "params": {},
-            "body": {},
-            "query": {"project_id": project_id, "path": links["path"]},
-        });
-        match omnigraph.execute("omnigraph.file_context", file).await {
-            Ok(Payload::Json(found)) if found["ok"] == true => {
-                links["omnigraph_atoms"] = found["atoms"].clone();
-                links["contradiction_warnings"] =
-                    json!(crate::knowledge::KnowledgeDomain::contradiction_warnings(
-                        &found["contradictions"],
-                        &found["atoms"],
-                    ));
-            }
-            Ok(Payload::Json(found)) => {
-                links["omnigraph_skipped"] = found["skipped"].clone();
-            }
-            Ok(_) => {}
-            Err(error) => {
-                links["omnigraph_error"] = json!(error.message);
-            }
-        }
+        let res = fetch_omnigraph_enrichment(
+            self.domains.get("omnigraph").cloned(),
+            project_id.clone(),
+            links["path"].clone(),
+        )
+        .await;
+        apply_omnigraph_enrichment(links, res);
     }
     pub fn new(
         store: SessionStore,
@@ -2856,6 +2925,126 @@ mod tests {
         );
         bridged_services.close().await.unwrap();
 
+        services.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_links_batch_fans_out_omnigraph_file_context_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+
+        struct BatchKnowledgeStub;
+        impl Domain for BatchKnowledgeStub {
+            fn execute<'a>(&'a self, op: &'a str, _req: Value) -> Reply<'a> {
+                Box::pin(async move {
+                    assert_eq!(op, "knowledge.memory_links_batch");
+                    Ok(Payload::Json(json!({
+                        "project_id": "p1",
+                        "items": [
+                            {"path": "src/a.rs"},
+                            {"path": "src/b.rs"},
+                            {"path": "src/c.rs"},
+                            {"path": "src/d.rs"}
+                        ]
+                    })))
+                })
+            }
+        }
+        struct BarrierOmnigraphStub {
+            in_flight: Arc<AtomicUsize>,
+            max_in_flight: Arc<AtomicUsize>,
+        }
+        impl Domain for BarrierOmnigraphStub {
+            fn execute<'a>(&'a self, _op: &'a str, req: Value) -> Reply<'a> {
+                let in_flight = Arc::clone(&self.in_flight);
+                let max_in_flight = Arc::clone(&self.max_in_flight);
+                Box::pin(async move {
+                    let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(cur, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    let path = req["query"]["path"].as_str().unwrap_or("");
+                    Ok(Payload::Json(json!({
+                        "ok": true,
+                        "atoms": [{"id": format!("atom:{path}")}],
+                        "contradictions": []
+                    })))
+                })
+            }
+        }
+        struct OkStub;
+        impl Domain for OkStub {
+            fn execute<'a>(&'a self, _op: &'a str, _req: Value) -> Reply<'a> {
+                Box::pin(async { Ok(Payload::Json(json!({}))) })
+            }
+        }
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let ok_stub: Arc<dyn Domain> = Arc::new(OkStub);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "results",
+            "delivery",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "harness",
+            "graph",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "system_graph",
+        ]
+        .into_iter()
+        .map(|k| (k.to_owned(), Arc::clone(&ok_stub)))
+        .collect();
+        domains.insert("knowledge".into(), Arc::new(BatchKnowledgeStub));
+        domains.insert(
+            "omnigraph".into(),
+            Arc::new(BarrierOmnigraphStub {
+                in_flight,
+                max_in_flight: Arc::clone(&max_in_flight),
+            }),
+        );
+
+        let services = NativeServices::new(
+            store,
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(|| Box::pin(async { Ok(()) })),
+        )
+        .unwrap();
+
+        let Payload::Json(res) = services
+            .request(
+                "knowledge.memory_links_batch",
+                json!({"params": {"project_id": "p1"}, "query": {}, "body": {}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "expected concurrent omnigraph.file_context fanout, max_in_flight={}",
+            max_in_flight.load(Ordering::SeqCst)
+        );
+        let items = res["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0]["omnigraph_atoms"][0]["id"], "atom:src/a.rs");
+        assert_eq!(items[3]["omnigraph_atoms"][0]["id"], "atom:src/d.rs");
         services.close().await.unwrap();
     }
 }

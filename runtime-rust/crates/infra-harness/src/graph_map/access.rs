@@ -169,12 +169,13 @@ impl Index {
         }
         loaded
     }
-    /// The lines of a symbol of a file as far as the graph tells them: from
-    /// where it starts to where the next symbol of the file starts. A type
-    /// therefore holds the lines before its first method, and each method
-    /// its own.
-    fn lines_of(&self, at: u32) -> std::ops::Range<u32> {
+    /// The lines of a symbol of a file: exact `[start, end_line + 1)` from IR
+    /// when recorded, else falling back to `[start, next_symbol)`.
+    pub(super) fn lines_of(&self, at: u32) -> std::ops::Range<u32> {
         let symbol = &self.symbols[at as usize];
+        if symbol.line > 0 && symbol.end_line >= symbol.line {
+            return symbol.line..symbol.end_line.saturating_add(1);
+        }
         let next = self
             .range(symbol.file)
             .filter(|other| *other != at)

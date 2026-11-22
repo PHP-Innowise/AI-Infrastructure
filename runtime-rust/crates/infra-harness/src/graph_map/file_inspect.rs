@@ -86,6 +86,18 @@ impl Index {
                 if heading {
                     continue;
                 }
+                // Prefer exact AST end_line spans from Graph IR when present, avoiding indentation heuristics.
+                if let Some(explicit_end) = placed[groups[index].from..groups[index].to]
+                    .iter()
+                    .filter_map(|at| {
+                        let sym = &self.symbols[*at as usize];
+                        (sym.end_line > 0 && sym.end_line >= sym.line).then_some(sym.end_line)
+                    })
+                    .max()
+                {
+                    groups[index].end = explicit_end.saturating_add(1).min(last + 1);
+                    continue;
+                }
                 // Until something deeper was met, a line at the same depth
                 // still belongs to the signature.
                 let mut body = row(start).whole;

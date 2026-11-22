@@ -2146,7 +2146,7 @@ pub(crate) mod canvas2d {
     }
 
     #[allow(dead_code)]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum EdgeDashKind {
         Solid,
         Dashed,
@@ -2155,7 +2155,7 @@ pub(crate) mod canvas2d {
     }
 
     #[allow(dead_code)]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum EdgeColorSlot {
         Base,
         Calls,
@@ -2202,7 +2202,7 @@ pub(crate) mod canvas2d {
     }
 
     #[allow(dead_code)]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum DenseEdgeTone {
         Base(EdgeColorSlot),
         Against,
@@ -2317,6 +2317,83 @@ pub(crate) mod canvas2d {
             }
         }
         best
+    }
+
+    pub(crate) type DenseEdgeBatchKey = (bool, DenseEdgeTone, EdgeDashKind, u16, u8);
+
+    pub fn dense_edge_batch_key(
+        active: bool,
+        appearance: &DenseEdgeAppearance,
+        width: f64,
+        alpha: f64,
+    ) -> DenseEdgeBatchKey {
+        (
+            active,
+            appearance.tone,
+            appearance.dash,
+            (width.clamp(0.1, 20.0) * 20.0).round() as u16,
+            (alpha.clamp(0.0, 1.0) * 100.0).round() as u8,
+        )
+    }
+
+    thread_local! {
+        static LABEL_FIT_CACHE: RefCell<HashMap<(String, i32, &'static str), String>> =
+            RefCell::new(HashMap::new());
+        static BADGE_WIDTH_CACHE: RefCell<HashMap<String, f64>> =
+            RefCell::new(HashMap::new());
+    }
+
+    #[allow(dead_code)]
+    pub fn fit_label_cached_with<M>(
+        label: &str,
+        max_w: f64,
+        font: &'static str,
+        measure: M,
+    ) -> String
+    where
+        M: FnMut(&str) -> f64,
+    {
+        if label.is_empty() || max_w <= 6.0 {
+            return if label.is_empty() {
+                String::new()
+            } else {
+                label.to_owned()
+            };
+        }
+        let w_key = (max_w * 2.0).round() as i32;
+        if let Some(hit) =
+            LABEL_FIT_CACHE.with(|c| c.borrow().get(&(label.to_owned(), w_key, font)).cloned())
+        {
+            return hit;
+        }
+        let fitted = fit_text_with_ellipsis(label, max_w, measure);
+        LABEL_FIT_CACHE.with(|c| {
+            let mut map = c.borrow_mut();
+            if map.len() >= 1024 {
+                map.clear();
+            }
+            map.insert((label.to_owned(), w_key, font), fitted.clone());
+        });
+        fitted
+    }
+
+    #[allow(dead_code)]
+    pub fn badge_width_cached_with<M>(badge: &str, mut measure: M) -> f64
+    where
+        M: FnMut(&str) -> f64,
+    {
+        if let Some(w) = BADGE_WIDTH_CACHE.with(|c| c.borrow().get(badge).copied()) {
+            return w;
+        }
+        let w = measure(badge).ceil();
+        BADGE_WIDTH_CACHE.with(|c| {
+            let mut map = c.borrow_mut();
+            if map.len() >= 256 {
+                map.clear();
+            }
+            map.insert(badge.to_owned(), w);
+        });
+        w
     }
 
     #[allow(dead_code)]
@@ -3221,7 +3298,9 @@ pub(crate) mod canvas2d {
 
     #[cfg(target_arch = "wasm32")]
     thread_local! {
-        static PALETTE_CACHE: RefCell<HashMap<(String, String, bool), CanvasPalette>> =
+        static PALETTE_THEME_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static RESOLVED_THEME_META: RefCell<Option<(u64, String, bool)>> = const { RefCell::new(None) };
+        static PALETTE_CACHE: RefCell<HashMap<(String, u64), CanvasPalette>> =
             RefCell::new(HashMap::new());
         static DASH_CACHE: RefCell<Option<DashArrays>> = const { RefCell::new(None) };
         static THEME_WATCHERS: RefCell<Option<ThemeWatcherHandles>> = const { RefCell::new(None) };
@@ -3231,7 +3310,11 @@ pub(crate) mod canvas2d {
     pub fn invalidate_palettes_and_repaint() {
         #[cfg(target_arch = "wasm32")]
         {
+            PALETTE_THEME_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
+            RESOLVED_THEME_META.with(|m| *m.borrow_mut() = None);
             PALETTE_CACHE.with(|c| c.borrow_mut().clear());
+            LABEL_FIT_CACHE.with(|c| c.borrow_mut().clear());
+            BADGE_WIDTH_CACHE.with(|c| c.borrow_mut().clear());
             let paints: Vec<(String, LastPaintEntry)> = LAST_PAINT_STATE.with(|p| {
                 p.borrow()
                     .iter()
@@ -3321,19 +3404,30 @@ pub(crate) mod canvas2d {
 
     #[cfg(target_arch = "wasm32")]
     fn resolve_palette(canvas_id: &str, host: &Element) -> CanvasPalette {
-        let theme_key = dom::document()
-            .document_element()
-            .and_then(|root| root.get_attribute("data-theme"))
-            .unwrap_or_default();
-        let forced_colors = dom::window()
-            .match_media("(forced-colors: active)")
-            .ok()
-            .flatten()
-            .is_some_and(|mq| mq.matches());
-        let key = (canvas_id.to_owned(), theme_key, forced_colors);
+        let epoch = PALETTE_THEME_EPOCH.with(|e| e.get());
+        let key = (canvas_id.to_owned(), epoch);
         if let Some(cached) = PALETTE_CACHE.with(|c| c.borrow().get(&key).cloned()) {
             return cached;
         }
+        let (_theme_key, forced_colors) = RESOLVED_THEME_META.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some((e, tk, fc)) = slot.as_ref() {
+                if *e == epoch {
+                    return (tk.clone(), *fc);
+                }
+            }
+            let tk = dom::document()
+                .document_element()
+                .and_then(|root| root.get_attribute("data-theme"))
+                .unwrap_or_default();
+            let fc = dom::window()
+                .match_media("(forced-colors: active)")
+                .ok()
+                .flatten()
+                .is_some_and(|mq| mq.matches());
+            *slot = Some((epoch, tk.clone(), fc));
+            (tk, fc)
+        });
         let palette = if forced_colors {
             CanvasPalette {
                 paper: "Canvas".to_owned(),
@@ -3612,6 +3706,17 @@ pub(crate) mod canvas2d {
                 }
 
                 with_dash_arrays(|dashes| {
+                    struct PreparedEdge<'a> {
+                        edge: &'a DenseEdgeSpec,
+                        batch: DenseEdgeBatchKey,
+                        hollow_arrow: bool,
+                        active: bool,
+                        alpha: f64,
+                        width: f64,
+                    }
+
+                    let mut prepared: Vec<PreparedEdge<'_>> =
+                        Vec::with_capacity(scene.edges.len().min(256));
                     for edge in &scene.edges {
                         if !meta.hidden_kinds.is_empty()
                             && meta
@@ -3639,7 +3744,6 @@ pub(crate) mod canvas2d {
                         let kind_dimmed = active_kind_hover.is_some() && !kind_matched;
                         let appearance = resolve_dense_edge_stroke(edge, hovered);
                         let active = hovered || kind_matched || edge.on || edge.lit;
-                        let stroke_col = palette_for_tone(&pal, appearance.tone);
 
                         let alpha = if (edge.dim || kind_dimmed || hover_dimmed) && !active {
                             0.15
@@ -3656,23 +3760,64 @@ pub(crate) mod canvas2d {
                         } else {
                             0.76
                         };
-                        ctx.set_global_alpha(alpha);
-                        ctx.set_stroke_style(stroke_col);
-                        ctx.set_line_width(if active {
+                        let width = if active {
                             2.4
                         } else if appearance.highlighted || edge.against {
                             2.0
                         } else {
                             (1.0 + (edge.weight.saturating_sub(1) as f64) * 0.25).min(2.6)
+                        };
+                        let batch = dense_edge_batch_key(active, &appearance, width, alpha);
+                        prepared.push(PreparedEdge {
+                            edge,
+                            batch,
+                            hollow_arrow: appearance.hollow_arrow,
+                            active,
+                            alpha,
+                            width,
                         });
-                        ctx.set_line_dash(match appearance.dash {
-                            EdgeDashKind::Solid => &dashes.solid,
-                            EdgeDashKind::Dashed => &dashes.dashed,
-                            EdgeDashKind::Dotted => &dashes.dotted,
-                            EdgeDashKind::DashDot => &dashes.dash_dot,
-                        });
+                    }
 
-                        ctx.begin_path();
+                    prepared.sort_by_key(|p| p.batch);
+
+                    let mut open_batch: Option<DenseEdgeBatchKey> = None;
+                    let mut last_alpha: Option<u8> = None;
+                    let mut last_tone: Option<DenseEdgeTone> = None;
+                    let mut last_width: Option<u16> = None;
+                    let mut last_dash: Option<EdgeDashKind> = None;
+
+                    for item in &prepared {
+                        if open_batch != Some(item.batch) {
+                            if open_batch.is_some() {
+                                ctx.stroke();
+                            }
+                            let (_, tone, dash, width_q, alpha_q) = item.batch;
+                            if last_alpha != Some(alpha_q) {
+                                ctx.set_global_alpha(item.alpha);
+                                last_alpha = Some(alpha_q);
+                            }
+                            if last_tone != Some(tone) {
+                                ctx.set_stroke_style(palette_for_tone(&pal, tone));
+                                last_tone = Some(tone);
+                            }
+                            if last_width != Some(width_q) {
+                                ctx.set_line_width(item.width);
+                                last_width = Some(width_q);
+                            }
+                            if last_dash != Some(dash) {
+                                ctx.set_line_dash(match dash {
+                                    EdgeDashKind::Solid => &dashes.solid,
+                                    EdgeDashKind::Dashed => &dashes.dashed,
+                                    EdgeDashKind::Dotted => &dashes.dotted,
+                                    EdgeDashKind::DashDot => &dashes.dash_dot,
+                                });
+                                last_dash = Some(dash);
+                            }
+                            ctx.begin_path();
+                            open_batch = Some(item.batch);
+                        }
+
+                        let edge = item.edge;
                         if !edge.cmds.is_empty() {
                             for cmd in &edge.cmds {
                                 match *cmd {
@@ -3700,55 +3845,105 @@ pub(crate) mod canvas2d {
                                 }
                             }
                         }
+                    }
+                    if open_batch.is_some() {
                         ctx.stroke();
+                    }
 
-                        if draw_arrows {
-                            if let Some((tip, dir)) = edge_end_tangent(edge) {
-                                let len = if active { 7.5 } else { 6.5 };
-                                let half_w = if active { 3.4 } else { 2.9 };
-                                let base_x = tip.0 - dir.0 * len;
-                                let base_y = tip.1 - dir.1 * len;
-                                let nx = -dir.1 * half_w;
-                                let ny = dir.0 * half_w;
-                                ctx.set_line_dash(&dashes.solid);
+                    if last_dash != Some(EdgeDashKind::Solid) {
+                        ctx.set_line_dash(&dashes.solid);
+                    }
+
+                    if draw_arrows {
+                        // Batch solid arrowheads by `(tone, alpha_q)` into single fill calls.
+                        let mut arrow_batch: Option<(bool, DenseEdgeTone, u8)> = None;
+                        let mut arrow_items: Vec<(
+                            (bool, DenseEdgeTone, u8),
+                            (f64, f64),
+                            (f64, f64),
+                            bool,
+                        )> = Vec::new();
+                        for item in &prepared {
+                            if let Some((tip, dir)) = edge_end_tangent(item.edge) {
+                                arrow_items.push((
+                                    (item.hollow_arrow, item.batch.1, item.batch.4),
+                                    tip,
+                                    dir,
+                                    item.active,
+                                ));
+                            }
+                        }
+                        arrow_items.sort_by_key(|row| row.0);
+                        for (key, tip, dir, active) in arrow_items {
+                            let (hollow, tone, alpha_q) = key;
+                            let len = if active { 7.5 } else { 6.5 };
+                            let half_w = if active { 3.4 } else { 2.9 };
+                            let base_x = tip.0 - dir.0 * len;
+                            let base_y = tip.1 - dir.1 * len;
+                            let nx = -dir.1 * half_w;
+                            let ny = dir.0 * half_w;
+                            if hollow {
+                                if arrow_batch.take().is_some() {
+                                    ctx.fill();
+                                }
+                                ctx.set_global_alpha(f64::from(alpha_q) / 100.0);
+                                ctx.set_stroke_style(palette_for_tone(&pal, tone));
+                                ctx.set_fill_style(&pal.paper);
+                                ctx.set_line_width(1.2);
                                 ctx.begin_path();
                                 ctx.move_to(tip.0, tip.1);
                                 ctx.line_to(base_x + nx, base_y + ny);
                                 ctx.line_to(base_x - nx, base_y - ny);
                                 ctx.close_path();
-                                if appearance.hollow_arrow {
-                                    ctx.set_fill_style(&pal.paper);
-                                    ctx.fill();
-                                    ctx.set_line_width(1.2);
-                                    ctx.stroke();
-                                } else {
-                                    ctx.set_fill_style(stroke_col);
-                                    ctx.fill();
+                                ctx.fill();
+                                ctx.stroke();
+                            } else {
+                                if arrow_batch != Some(key) {
+                                    if arrow_batch.is_some() {
+                                        ctx.fill();
+                                    }
+                                    ctx.set_global_alpha(f64::from(alpha_q) / 100.0);
+                                    ctx.set_fill_style(palette_for_tone(&pal, tone));
+                                    ctx.begin_path();
+                                    arrow_batch = Some(key);
                                 }
+                                ctx.move_to(tip.0, tip.1);
+                                ctx.line_to(base_x + nx, base_y + ny);
+                                ctx.line_to(base_x - nx, base_y - ny);
+                                ctx.close_path();
                             }
                         }
+                        if arrow_batch.is_some() {
+                            ctx.fill();
+                        }
+                    }
 
-                        if edge.weight > 1 && (active || cam.scale >= badge_min_scale) {
+                    let mut set_badge_font = false;
+                    for item in &prepared {
+                        let edge = item.edge;
+                        if edge.weight > 1 && (item.active || cam.scale >= badge_min_scale) {
                             if let Some((mx, my)) = edge_midpoint(edge) {
+                                let stroke_col = palette_for_tone(&pal, item.batch.1);
                                 let label = edge.weight.to_string();
                                 let bw = ((label.len() as f64) * 6.2 + 8.0).max(16.0);
                                 let bh = 14.0;
                                 let bx = mx - bw * 0.5;
                                 let by = my - bh * 0.5;
-                                ctx.set_line_dash(&dashes.solid);
+                                ctx.set_global_alpha(item.alpha);
                                 ctx.set_fill_style(&pal.paper);
                                 ctx.fill_rect(bx, by, bw, bh);
                                 ctx.set_line_width(1.0);
                                 ctx.set_stroke_style(stroke_col);
                                 ctx.stroke_rect(bx, by, bw, bh);
-                                ctx.set_font("600 9.5px sans-serif");
+                                if !set_badge_font {
+                                    ctx.set_font("600 9.5px sans-serif");
+                                    set_badge_font = true;
+                                }
                                 ctx.set_fill_style(stroke_col);
                                 ctx.fill_text(&label, bx + 4.0, by + 10.5, bw - 8.0);
                             }
                         }
                     }
-
-                    ctx.set_line_dash(&dashes.solid);
                 });
 
                 if draw_nodes {
@@ -3824,7 +4019,9 @@ pub(crate) mod canvas2d {
                         if show_labels && cam.scale >= badge_min_scale {
                             if let Some(badge) = nm.and_then(dense_node_badge_label) {
                                 ctx.set_font("600 9px sans-serif");
-                                let text_w = ctx.measure_text(&badge).width().ceil();
+                                let text_w = badge_width_cached_with(&badge, |b| {
+                                    ctx.measure_text(b).width()
+                                });
                                 let pill_w = (text_w + 8.0).clamp(18.0, 44.0);
                                 if node.w - label_left_pad - pill_w - 10.0 >= 28.0 {
                                     let pill_h = 13.0;
@@ -3850,9 +4047,12 @@ pub(crate) mod canvas2d {
                                 &pal.ink
                             });
                             let avail_w = (node.w - label_left_pad - right_reserve).max(12.0);
-                            let fitted = fit_text_with_ellipsis(&node.label, avail_w, |s| {
-                                ctx.measure_text(s).width()
-                            });
+                            let fitted = fit_label_cached_with(
+                                &node.label,
+                                avail_w,
+                                "500 11px sans-serif",
+                                |s| ctx.measure_text(s).width(),
+                            );
                             ctx.fill_text_unscaled(
                                 &fitted,
                                 node.x + label_left_pad,
@@ -4656,6 +4856,70 @@ mod tests {
                 pos: (110.0, 140.0),
             })
         );
+    }
+
+    #[test]
+    fn canvas2d_batch_keys_group_identical_styles_and_cache_ellipsized_labels() {
+        let e1 = canvas2d::DenseEdgeSpec {
+            kind: "calls".into(),
+            ..canvas2d::DenseEdgeSpec::default()
+        };
+        let e2 = canvas2d::DenseEdgeSpec {
+            kind: "calls".into(),
+            ..canvas2d::DenseEdgeSpec::default()
+        };
+        let e3 = canvas2d::DenseEdgeSpec {
+            kind: "calls".into(),
+            against: true,
+            ..canvas2d::DenseEdgeSpec::default()
+        };
+        let a1 = canvas2d::resolve_dense_edge_stroke(&e1, false);
+        let a2 = canvas2d::resolve_dense_edge_stroke(&e2, false);
+        let a3 = canvas2d::resolve_dense_edge_stroke(&e3, false);
+        assert_eq!(
+            canvas2d::dense_edge_batch_key(false, &a1, 1.0, 0.76),
+            canvas2d::dense_edge_batch_key(false, &a2, 1.0, 0.76)
+        );
+        assert_ne!(
+            canvas2d::dense_edge_batch_key(false, &a1, 1.0, 0.76),
+            canvas2d::dense_edge_batch_key(false, &a3, 2.0, 0.94)
+        );
+
+        let mut measure_calls = 0usize;
+        let first = canvas2d::fit_label_cached_with(
+            "OrderController::checkoutSessionHandler",
+            90.0,
+            "500 11px sans-serif",
+            |s| {
+                measure_calls += 1;
+                (s.chars().count() as f64) * 7.0
+            },
+        );
+        let calls_after_first = measure_calls;
+        assert!(calls_after_first > 0);
+        let second = canvas2d::fit_label_cached_with(
+            "OrderController::checkoutSessionHandler",
+            90.0,
+            "500 11px sans-serif",
+            |s| {
+                measure_calls += 1;
+                (s.chars().count() as f64) * 7.0
+            },
+        );
+        assert_eq!(first, second);
+        assert_eq!(measure_calls, calls_after_first);
+
+        let mut badge_calls = 0usize;
+        let w1 = canvas2d::badge_width_cached_with("cls", |s| {
+            badge_calls += 1;
+            (s.len() as f64) * 6.0
+        });
+        let w2 = canvas2d::badge_width_cached_with("cls", |s| {
+            badge_calls += 1;
+            (s.len() as f64) * 6.0
+        });
+        assert_eq!(w1, w2);
+        assert_eq!(badge_calls, 1);
     }
 
     trait CameraTestExt {

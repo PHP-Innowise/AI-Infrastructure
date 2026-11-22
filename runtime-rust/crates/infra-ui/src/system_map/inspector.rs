@@ -186,7 +186,39 @@ pub(super) fn render_node_details_html(
     let open_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id }));
     let spread_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id }));
     let changes_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id }));
-    let omni_p = payload_attr(&json!({ "surface": surface.id, "service": svc_id, "id": id }));
+    let run_id_ctx = {
+        let explicit = m::text(state, "run_id");
+        if !explicit.is_empty() {
+            explicit
+        } else {
+            let tgt = m::text(state, "target");
+            tgt.strip_prefix("sysrun:")
+                .or_else(|| tgt.strip_prefix("system-run:"))
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        }
+    };
+    let contract_ctx = if kind == "contract" {
+        first_non_empty(node, &["contract", "name", "id"])
+    } else {
+        first_non_empty(node, &["contract"])
+    };
+    let file_ctx = first_non_empty(node, &["path", "file", "source_file"]);
+    let mut omni_obj = serde_json::Map::new();
+    omni_obj.insert("surface".into(), json!(surface.id));
+    omni_obj.insert("service".into(), json!(svc_id));
+    omni_obj.insert("id".into(), json!(id));
+    if !contract_ctx.is_empty() {
+        omni_obj.insert("contract".into(), json!(contract_ctx));
+    }
+    if !file_ctx.is_empty() {
+        omni_obj.insert("file".into(), json!(file_ctx));
+    }
+    if !run_id_ctx.is_empty() {
+        omni_obj.insert("run_id".into(), json!(run_id_ctx));
+    }
+    let omni_p = payload_attr(&V::Object(omni_obj));
     let pins = graph_viewport::load_pins(&sys_pin_key(surface, state));
     html.push_str("<div class=\"system-side-actions\">");
     html.push_str(&format!(

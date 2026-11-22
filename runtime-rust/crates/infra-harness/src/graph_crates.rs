@@ -9,7 +9,7 @@
 //! that the link can be, so nothing true is left out of a map.
 use crate::graph_map::{SOURCE_LIMIT, quiet_end};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     sync::LazyLock,
 };
@@ -21,7 +21,7 @@ pub const MODULES: &str = "modules";
 /// One dependency of a Cargo manifest: the key it stands under, the package
 /// where the key is another name for it, and whether the workspace says the
 /// rest.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Needed {
     key: String,
     package: Option<String>,
@@ -29,7 +29,7 @@ struct Needed {
 }
 /// What a Cargo manifest says of a crate, as far as it tells which crates
 /// the crate can use and which sources it compiles.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Manifest {
     /// The package it declares; none where it only holds a workspace.
     name: Option<String>,
@@ -271,6 +271,7 @@ fn led(folder: &str, written: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 /// The Rust crates of a tree, and which of them each can use.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Crates {
     /// For each file of the graph, its crate: the package of the manifest
     /// that stands nearest above a Rust source; else `NONE`.
@@ -282,6 +283,10 @@ pub(crate) struct Crates {
     /// and build script are built with, and what those are built with.
     /// None where that is not known, and the crate may use any.
     can: Vec<Option<HashSet<u32>>>,
+    /// Manifest folders owning each crate id, plus workspace-only manifest folders.
+    folders: Vec<String>,
+    workspace_dirs: Vec<String>,
+    folder_manifests: Vec<Option<Manifest>>,
 }
 impl Crates {
     /// Finds the crates of the files of a graph, with `text` giving a file
@@ -435,7 +440,131 @@ impl Crates {
         } else {
             HashMap::new()
         };
-        Self { of, more, can }
+        let workspace_dirs = read
+            .iter()
+            .filter_map(|(dir, found)| {
+                found
+                    .as_ref()
+                    .is_some_and(|m| m.name.is_none())
+                    .then(|| (*dir).to_owned())
+            })
+            .collect();
+        let folder_manifests = manifests.into_iter().map(|m| m.cloned()).collect();
+        let folders = folders.into_iter().map(str::to_owned).collect();
+        Self {
+            of,
+            more,
+            can,
+            folders,
+            workspace_dirs,
+            folder_manifests,
+        }
+    }
+
+    /// Remaps `Crates` onto a filtered subset of files whose original file ids are `kept_to_old`.
+    pub(crate) fn remap(&self, kept_to_old: &[u32], old_len: usize) -> Self {
+        let mut old_to_new = vec![NONE; old_len];
+        let mut of = Vec::with_capacity(kept_to_old.len());
+        for (new_id, &old_id) in kept_to_old.iter().enumerate() {
+            old_to_new[old_id as usize] = new_id as u32;
+            of.push(self.of[old_id as usize]);
+        }
+        let mut more = HashMap::new();
+        for (&old_file, crates) in &self.more {
+            let new_file = old_to_new[old_file as usize];
+            if new_file != NONE {
+                more.insert(new_file, crates.clone());
+            }
+        }
+        Self {
+            of,
+            more,
+            can: self.can.clone(),
+            folders: self.folders.clone(),
+            workspace_dirs: self.workspace_dirs.clone(),
+            folder_manifests: self.folder_manifests.clone(),
+        }
+    }
+
+    /// Incrementally updates `Crates` after path edits/deletions without re-reading Cargo manifests
+    /// when `manifest_changed` is false, and without scanning Rust sources when no Rust files changed.
+    pub(crate) fn update_files(
+        &self,
+        prev_files: &[String],
+        new_files: &[String],
+        touched: &BTreeSet<String>,
+        manifest_changed: bool,
+        text: &dyn Fn(&str) -> Option<String>,
+    ) -> Self {
+        let rs_touched = touched
+            .iter()
+            .any(|p| p.ends_with(".rs") || p.ends_with(&format!(".{MODULES}")));
+        if manifest_changed
+            || (rs_touched && self.folders.is_empty() && self.workspace_dirs.is_empty())
+        {
+            return Self::find(new_files, text);
+        }
+        let prev_pos: HashMap<&str, u32> = prev_files
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_str(), i as u32))
+            .collect();
+        let folder_id: HashMap<&str, u32> = self
+            .folders
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.as_str(), i as u32))
+            .collect();
+        let workspace_set: HashSet<&str> = self.workspace_dirs.iter().map(String::as_str).collect();
+        let mut old_to_new = vec![NONE; prev_files.len()];
+        let mut of = vec![NONE; new_files.len()];
+        for (new_idx, path) in new_files.iter().enumerate() {
+            if let Some(&old_idx) = prev_pos.get(path.as_str()) {
+                old_to_new[old_idx as usize] = new_idx as u32;
+                of[new_idx] = self.of[old_idx as usize];
+                continue;
+            }
+            if !path.ends_with(".rs") {
+                continue;
+            }
+            let mut folder = path.rsplit_once('/').map_or("", |(f, _)| f);
+            loop {
+                if let Some(&cid) = folder_id.get(folder) {
+                    of[new_idx] = cid;
+                    break;
+                }
+                if workspace_set.contains(folder) || folder.is_empty() {
+                    break;
+                }
+                folder = folder.rsplit_once('/').map_or("", |(above, _)| above);
+            }
+        }
+        let more = if self.folders.len() <= 1 {
+            HashMap::new()
+        } else if !rs_touched {
+            let mut remapped = HashMap::new();
+            for (&old_file, crates) in &self.more {
+                if let Some(&new_file) = old_to_new.get(old_file as usize)
+                    && new_file != NONE
+                {
+                    remapped.insert(new_file, crates.clone());
+                }
+            }
+            remapped
+        } else {
+            let folders_ref: Vec<&str> = self.folders.iter().map(String::as_str).collect();
+            let manifests_ref: Vec<Option<&Manifest>> =
+                self.folder_manifests.iter().map(Option::as_ref).collect();
+            Self::pulled(new_files, &of, &folders_ref, &manifests_ref, text)
+        };
+        Self {
+            of,
+            more,
+            can: self.can.clone(),
+            folders: self.folders.clone(),
+            workspace_dirs: self.workspace_dirs.clone(),
+            folder_manifests: self.folder_manifests.clone(),
+        }
     }
     /// The files a crate compiles from outside its own folder, each with the
     /// crates that pull it in. A source is pulled in by the `path` of a
@@ -570,6 +699,10 @@ impl Crates {
                     .as_ref()
                     .is_some_and(|can| all(to, used).all(|used| !can.contains(&used)))
             })
+    }
+
+    pub(crate) fn is_multi_crate(&self) -> bool {
+        self.folders.len() > 1
     }
 
     /// Returns `true` if Cargo crate boundaries permit `from_path` to depend on `to_path`.

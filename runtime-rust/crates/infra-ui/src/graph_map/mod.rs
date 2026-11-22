@@ -285,6 +285,8 @@ pub use render::LARGE_GRAPH_NODE_THRESHOLD;
 #[allow(unused_imports)]
 pub use surfaces::append_system_task_draft;
 #[allow(unused_imports)]
+pub(crate) use surfaces::apply_code_map_jump_context;
+#[allow(unused_imports)]
 pub use surfaces::apply_focus;
 #[allow(unused_imports)]
 pub(crate) use surfaces::apply_system_live_focus;
@@ -319,6 +321,8 @@ pub(crate) use surfaces::focus_system_from_prompt;
 #[allow(unused_imports)]
 pub(crate) use surfaces::focus_system_target;
 #[allow(unused_imports)]
+pub(crate) use surfaces::focus_target_in_session_with_context;
+#[allow(unused_imports)]
 pub(crate) use surfaces::focused_dense_hit_for_canvas;
 #[allow(unused_imports)]
 pub use surfaces::handle_session_graph_click;
@@ -336,7 +340,13 @@ pub use surfaces::impact_side_html;
 #[allow(unused_imports)]
 pub use surfaces::impact_side_html_with_filter;
 #[allow(unused_imports)]
+pub(crate) use surfaces::invalidate_surface_analysis_caches;
+#[allow(unused_imports)]
+pub(crate) use surfaces::invalidate_surface_analysis_caches_for_live_project;
+#[allow(unused_imports)]
 pub(crate) use surfaces::load_system_embedded;
+#[allow(unused_imports)]
+pub(crate) use surfaces::maybe_schedule_idle_refresh;
 #[allow(unused_imports)]
 pub(crate) use surfaces::open_system_service_map;
 #[allow(unused_imports)]

@@ -2293,8 +2293,35 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
         }
         "system-map-open-omnigraph" => {
             let svc = first_non_empty(payload, &["service", "id"]);
+            let contract = first_non_empty(payload, &["contract"]);
+            let file = first_non_empty(payload, &["file", "path"]);
+            let run_id = {
+                let direct = first_non_empty(payload, &["run_id"]);
+                if !direct.is_empty() {
+                    direct
+                } else {
+                    let st = surface_state(surface);
+                    let r = m::text(&st, "run_id");
+                    if !r.is_empty() {
+                        r
+                    } else {
+                        let tgt = m::text(&st, "target");
+                        tgt.strip_prefix("sysrun:")
+                            .or_else(|| tgt.strip_prefix("system-run:"))
+                            .unwrap_or("")
+                            .trim()
+                            .to_owned()
+                    }
+                }
+            };
             spawn_local(async move {
-                crate::omnigraph::open_from_system_service(svc).await;
+                crate::omnigraph::open_from_system_context(
+                    svc,
+                    (!contract.is_empty()).then_some(contract),
+                    (!file.is_empty()).then_some(file),
+                    (!run_id.is_empty()).then_some(run_id),
+                )
+                .await;
             });
             true
         }

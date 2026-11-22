@@ -178,15 +178,15 @@ impl Index {
                         );
                     }
                 }
-                // What it fulfils: of a type, or of the type a member is
-                // held by. The users of that are reached a link on.
+                // What it fulfils or delegates to via semantic anchors and direct DI bindings.
                 let symbol = &self.symbols[at as usize];
                 if !symbol.is_semantic {
                     for (_, target, kind, guessed) in self.wired(at, true, certain) {
-                        if !self.symbols[*target as usize].is_semantic {
+                        let rel = &self.kinds[*kind as usize];
+                        let is_direct_di_impl = matches!(rel.as_str(), "di_binds" | "di_binding");
+                        if !self.symbols[*target as usize].is_semantic && !is_direct_di_impl {
                             continue;
                         }
-                        let rel = &self.kinds[*kind as usize];
                         if !enters_semantic_anchor(rel) {
                             continue;
                         }
@@ -682,5 +682,45 @@ mod tests {
         assert_eq!(blast["listed"][0]["path"], "src/InvoiceReport.php");
         assert_eq!(blast["listed"][0]["hop"], 2);
         assert_eq!(blast["listed"][0]["via"], "reads_table");
+    }
+
+    #[test]
+    fn blast_propagates_across_direct_di_binds_in_both_directions() {
+        let graph = json!({
+            "nodes": [
+                {"id": "ctrl", "label": "OrderController", "source_file": "src/OrderController.php", "node_kind": "class"},
+                {"id": "iface", "label": "GatewayInterface", "source_file": "src/GatewayInterface.php", "node_kind": "interface"},
+                {"id": "impl", "label": "StripeGateway", "source_file": "src/StripeGateway.php", "node_kind": "class"}
+            ],
+            "links": [
+                {"source": "ctrl", "target": "iface", "relation": "references", "confidence": "EXTRACTED"},
+                {"source": "iface", "target": "impl", "relation": "di_binds", "confidence": "EXTRACTED"}
+            ]
+        });
+        let idx = Index::read(graph.to_string().as_bytes(), Path::new("/work/shop")).unwrap();
+
+        let from_impl = idx
+            .blast("src/StripeGateway.php", true)
+            .expect("impl blast");
+        assert!(
+            from_impl["listed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["path"] == "src/OrderController.php"),
+            "editing concrete impl should reach interface caller: {from_impl}"
+        );
+
+        let from_iface = idx
+            .blast("src/GatewayInterface.php", true)
+            .expect("iface blast");
+        assert!(
+            from_iface["listed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["path"] == "src/StripeGateway.php"),
+            "editing interface should reach DI-bound impl: {from_iface}"
+        );
     }
 }

@@ -605,6 +605,91 @@ pub(crate) fn show_non_destructive_stale_banner(project_id: &str, message: &str)
     }
 }
 
+fn resolved_surface_project_for_invalidation(surface: MapSurface, live_project: &str) -> String {
+    if surface.name == "session" {
+        return live_project.to_owned();
+    }
+    if let Some(stored) = GraphTargetScope::from_json(&m::data(surface.scope_model_key)) {
+        if stored.is_system() || live_project.is_empty() {
+            return stored.project_id().to_owned();
+        }
+        return live_project.to_owned();
+    }
+    live_project.to_owned()
+}
+
+pub(crate) fn invalidate_surface_analysis_caches_for_live_project(
+    project_id: &str,
+    live_project: &str,
+) {
+    for surface in [
+        MODAL_SURFACE,
+        SESSION_SURFACE,
+        SYSTEM_EMBEDDED_SURFACE,
+        SYSTEM_CHANGE_SURFACE,
+    ] {
+        let surf_proj = resolved_surface_project_for_invalidation(surface, live_project);
+        if project_id.is_empty() || surf_proj.is_empty() || surf_proj == project_id {
+            m::next(surface.changes_epoch);
+            m::next(surface.impact_epoch);
+            m::set(surface.changes_key, V::Null);
+            m::set(surface.impact_key, V::Null);
+        }
+    }
+}
+
+/// Invalidates `changes_key`/`impact_key` caches and advances fetch epochs for surfaces
+/// belonging to `project_id` (or all surfaces when `project_id` is empty).
+pub(crate) fn invalidate_surface_analysis_caches(project_id: &str) {
+    let live = if project_id.is_empty() {
+        String::new()
+    } else {
+        dom::value("project")
+    };
+    invalidate_surface_analysis_caches_for_live_project(project_id, &live);
+}
+
+/// Schedules a non-disruptive debounced reload of open/mounted surfaces when no pointer
+/// pan or pin drag is in progress, keeping camera and selection intact.
+pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
+    if active_drag_surface().is_some() || m::yes(&m::data("surface-node-drag")["active"]) {
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let proj = project_id.to_owned();
+        dom::later("graph-sse-idle-refresh", 250, move || {
+            if active_drag_surface().is_some() || m::yes(&m::data("surface-node-drag")["active"]) {
+                return;
+            }
+            if open() {
+                let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
+                if proj.is_empty() || modal_proj.is_empty() || modal_proj == proj {
+                    spawn_local(async {
+                        crate::graph::load(false).await;
+                    });
+                }
+            }
+            for surface in [
+                SESSION_SURFACE,
+                SYSTEM_EMBEDDED_SURFACE,
+                SYSTEM_CHANGE_SURFACE,
+            ] {
+                if dom::get(surface.canvas).is_some() {
+                    let surf_proj = surface_scope(surface).project_id().to_owned();
+                    if proj.is_empty() || surf_proj.is_empty() || surf_proj == proj {
+                        spawn_local(async move {
+                            load_embedded_surface(surface, true).await;
+                        });
+                    }
+                }
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = project_id;
+}
+
 pub(in crate::graph_map) fn active_modal_lens(state: &V, view: &V) -> &'static str {
     if m::yes(&state["lens_runs"])
         || m::yes(&state["history"])
@@ -719,6 +804,45 @@ pub(in crate::graph_map) fn sync_surface_toolbar(
     sync_history_and_pin_controls(surface, state);
 }
 
+pub fn progressive_lod_for_state(
+    state: &V,
+    camera_scale: Option<f64>,
+) -> (Option<String>, Option<u64>) {
+    let explicit_lod = state["lod"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| matches!(*s, "crate" | "folder" | "file" | "symbol"))
+        .map(str::to_owned);
+    let explicit_weight = state["min_weight"]
+        .as_u64()
+        .filter(|&w| w >= 1)
+        .map(|w| w.min(1_000_000));
+    if explicit_lod.is_some() || explicit_weight.is_some() {
+        return (explicit_lod, explicit_weight);
+    }
+    if !m::yes(&state["auto_lod"]) {
+        return (None, None);
+    }
+    let scale = camera_scale
+        .or_else(|| state["scale"].as_f64())
+        .unwrap_or(1.0);
+    let no_submode = state["cycle"].is_null()
+        && state["pattern"].is_null()
+        && state["scenario"].is_null()
+        && m::text(state, "follow").is_empty()
+        && !m::yes(&state["modules"])
+        && !m::yes(&state["history"]);
+    if no_submode && m::text(state, "scope").is_empty() && m::text(state, "focus").is_empty() {
+        if scale < 0.35 {
+            return (Some("crate".to_owned()), Some(2));
+        }
+        if scale < 0.65 {
+            return (Some("folder".to_owned()), None);
+        }
+    }
+    (None, None)
+}
+
 pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool) -> String {
     let mut query = vec![("scope", m::text(state, "scope"))];
     if embedded {
@@ -798,6 +922,13 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
     if m::yes(&state["isolate_active"]) {
         let depth = state["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 6);
         query.push(("depth", depth.to_string()));
+    }
+    let (lod_val, min_weight_val) = progressive_lod_for_state(state, None);
+    if let Some(level) = lod_val {
+        query.push(("lod", level));
+    }
+    if let Some(weight) = min_weight_val {
+        query.push(("min_weight", weight.to_string()));
     }
     if state["scenario"].is_string() {
         // already pushed above

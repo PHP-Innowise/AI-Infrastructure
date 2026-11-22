@@ -1009,6 +1009,23 @@ pub(in crate::graph_map) fn sync_viewport_culling(canvas_id: &str, bounds: Optio
             );
             let view_opt = pan_surface_for_canvas(canvas_id).map(|s| m::data(s.view_key));
             let mut extra_html = String::new();
+            let mut pre_extras: HashMap<usize, Vec<web_sys::Element>> = HashMap::new();
+            if let Ok(extras) = plane.query_selector_all("[data-of]") {
+                for i in 0..extras.length() {
+                    if let Some(el) = extras
+                        .item(i)
+                        .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                    {
+                        if let Some(idx) = el
+                            .get_attribute("data-of")
+                            .and_then(|s| s.parse::<usize>().ok())
+                        {
+                            pre_extras.entry(idx).or_default().push(el);
+                        }
+                    }
+                }
+            }
+            let extras_by_idx = std::cell::RefCell::new(pre_extras);
             let outcome = graph_viewport::dense_dom::reconcile_dense_nodes(
                 &plane,
                 synth_cam,
@@ -1051,7 +1068,7 @@ pub(in crate::graph_map) fn sync_viewport_culling(canvas_id: &str, bounds: Optio
                     if let (Some(view), Some(Some(spec))) =
                         (view_opt.as_ref(), cached.dense_extra_specs.get(idx))
                     {
-                        if let Ok(None) = plane.query_selector(&format!("[data-of='{idx}']")) {
+                        if !extras_by_idx.borrow().contains_key(&idx) {
                             let dim_over = cached
                                 .latest_patch
                                 .as_ref()
@@ -1064,8 +1081,10 @@ pub(in crate::graph_map) fn sync_viewport_culling(canvas_id: &str, bounds: Optio
                     }
                 },
                 |idx| {
-                    for extra_el in dom::all(&format!("#{canvas_id} [data-of='{idx}']")) {
-                        extra_el.remove();
+                    if let Some(removed) = extras_by_idx.borrow_mut().remove(&idx) {
+                        for extra_el in removed {
+                            extra_el.remove();
+                        }
                     }
                 },
             );

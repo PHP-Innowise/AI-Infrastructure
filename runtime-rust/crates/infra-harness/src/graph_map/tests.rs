@@ -7366,3 +7366,224 @@ fn lens_pagination_follow_all_seen_lod_min_weight_diff_overlay_and_sem_hubs() {
     let m2_len = mc2.declared("crates/alpha/src/a.rs").len();
     assert_eq!(m2_len, 3);
 }
+
+#[test]
+fn lod_folder_root_manifest_rollup_marks_end_line_and_racy_stat() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("packages/api/src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"root\"\n").unwrap();
+    std::fs::write(
+        root.join("packages/api/composer.json"),
+        "{\"name\":\"acme/api\"}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "pub fn entry() {}\npub fn stay() {}\n",
+    )
+    .unwrap();
+    // Dedented interior line at L6 inside helper (L2..=L8) tests `end_line` vs indent fallback.
+    std::fs::write(
+        root.join("packages/api/src/Handler.php"),
+        "<?php\nfunction helper() {\n    $s = <<<TXT\nline4\nline5\ndedented_interior\nTXT;\n}\n\n\n\nfunction trailing() {}\n",
+    )
+    .unwrap();
+
+    let ir_nodes = vec![
+        crate::graph_ir::IrNodeSpec {
+            id: "file:src/main.rs".into(),
+            label: "main.rs".into(),
+            source_file: "src/main.rs".into(),
+            source_location: None,
+            end_line: 0,
+            file_type: Some("code".into()),
+            node_kind: Some("page".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "fn:entry".into(),
+            label: "entry()".into(),
+            source_file: "src/main.rs".into(),
+            source_location: Some("L1".into()),
+            end_line: 1,
+            file_type: None,
+            node_kind: Some("function".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "file:packages/api/src/Handler.php".into(),
+            label: "Handler.php".into(),
+            source_file: "packages/api/src/Handler.php".into(),
+            source_location: None,
+            end_line: 0,
+            file_type: Some("code".into()),
+            node_kind: Some("page".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "fn:helper".into(),
+            label: "helper()".into(),
+            source_file: "packages/api/src/Handler.php".into(),
+            source_location: Some("L2".into()),
+            end_line: 8,
+            file_type: None,
+            node_kind: Some("function".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "fn:trailing".into(),
+            label: "trailing()".into(),
+            source_file: "packages/api/src/Handler.php".into(),
+            source_location: Some("L12".into()),
+            end_line: 12,
+            file_type: None,
+            node_kind: Some("function".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+    ];
+    let ir_links = vec![crate::graph_ir::IrLinkSpec {
+        source: "fn:entry".into(),
+        target: "fn:helper".into(),
+        relation: Some("calls".into()),
+        confidence: Some("EXTRACTED".into()),
+        source_file: Some("src/main.rs".into()),
+        context: None,
+        evidence: None,
+    }];
+    let idx = Index::from_ir_parts(root, None, None, ir_nodes, ir_links).unwrap();
+
+    // 1. Root manifest `""` discovery + Folder LOD + mark preservation across rollup_view_to_lod.
+    let manifests = idx.manifest_dirs();
+    assert!(manifests.iter().any(|m| m.is_empty()), "{manifests:?}");
+    assert!(
+        manifests.iter().any(|m| m == "packages/api"),
+        "{manifests:?}"
+    );
+
+    let mut folder_view = idx.view("demo", "", None, false, "");
+    assert!(lod::apply_lod_and_min_weight(
+        &idx,
+        &mut folder_view,
+        Some(Lod::Folder),
+        None,
+        "",
+        None,
+        "",
+        false,
+        false,
+    ));
+    assert_eq!(folder_view["lod"], "folder");
+    let folder_paths: Vec<&str> = folder_view["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["path"].as_str())
+        .collect();
+    assert!(folder_paths.contains(&"src"), "{folder_paths:?}");
+    assert!(
+        folder_paths.contains(&"packages/api/src"),
+        "{folder_paths:?}"
+    );
+
+    // Rollup preserves blast/circle/patterns/changed marks on nodes and violation/detour on edges.
+    let mut marked_view = json!({
+        "mode": "map",
+        "scope": "",
+        "nodes": [
+            {"path": "src/main.rs", "name": "main.rs", "folder": false, "blast": {"hop": 2, "left": 1.0}, "circle": 1, "changed": 1, "patterns": 1},
+            {"path": "packages/api/src/Handler.php", "name": "Handler.php", "folder": false, "suspect": 1}
+        ],
+        "edges": [
+            {"from": "src/main.rs", "to": "packages/api/src/Handler.php", "links": 2, "architecture_violation": 2, "detour": true}
+        ]
+    });
+    assert!(lod::rollup_view_to_lod(&idx, &mut marked_view, Lod::Crate));
+    let rolled_nodes = marked_view["nodes"].as_array().unwrap();
+    let root_bucket = rolled_nodes.iter().find(|n| n["path"] == ".").unwrap();
+    assert_eq!(root_bucket["blast"]["hop"], 2);
+    assert_eq!(root_bucket["circle"], 1);
+    assert_eq!(root_bucket["changed"], 1);
+    assert_eq!(root_bucket["patterns"], 1);
+    let rolled_edge = &marked_view["edges"].as_array().unwrap()[0];
+    assert_eq!(rolled_edge["architecture_violation"], 2);
+    assert_eq!(rolled_edge["detour"], true);
+
+    // 2. `end_line` accurate span in `access::lines_of` and `file_inspect::marks`.
+    let handler_file = idx.opened("packages/api/src/Handler.php").unwrap();
+    let helper_sym = idx
+        .range(handler_file)
+        .find(|&s| idx.label(s) == "helper()")
+        .unwrap();
+    assert_eq!(idx.lines_of(helper_sym), 2..9);
+
+    let text = std::fs::read_to_string(root.join("packages/api/src/Handler.php")).unwrap();
+    let edited = Edited {
+        new: false,
+        hunks: vec![Hunk {
+            at: 7,
+            added: 1,
+            removed: 1,
+            blank: false,
+        }],
+        text,
+    };
+    let marks = idx.marks(handler_file, &edited);
+    let helper_slot = (helper_sym - idx.first[handler_file as usize]) as usize;
+    let file_sym = idx
+        .range(handler_file)
+        .find(|&s| idx.symbols[s as usize].kind == Kind::File)
+        .unwrap();
+    let file_slot = (file_sym - idx.first[handler_file as usize]) as usize;
+    assert_eq!(
+        marks.status[helper_slot],
+        Some('M'),
+        "expected L7 edit inside L2..=L8 helper"
+    );
+    assert_eq!(
+        marks.status[file_slot], None,
+        "L7 edit should not leak to top/file node"
+    );
+
+    // 3. `STAT_RACY_NS` guard refuses caching same-second/same-length rewrite of `src/main.rs`.
+    let mut mc1 = FileMemberCache::new(&idx);
+    let names1: Vec<String> = mc1
+        .declared("src/main.rs")
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    assert_eq!(names1, vec!["entry", "stay"]);
+    std::fs::write(
+        root.join("src/main.rs"),
+        "pub fn entry() {}\npub fn swap() {}\n",
+    )
+    .unwrap();
+    let mut mc2 = FileMemberCache::new(&idx);
+    let names2: Vec<String> = mc2
+        .declared("src/main.rs")
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    assert_eq!(names2, vec!["entry", "swap"]);
+}
