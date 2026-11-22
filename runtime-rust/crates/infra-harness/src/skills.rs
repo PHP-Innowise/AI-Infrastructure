@@ -617,20 +617,9 @@ impl SkillsDomain {
             definitions.insert(prefix.clone(),json!({"name":name,"agent":agent,"source_id":"local","source":"local","revision":format!("sha256:{}",core::query::sha256(content.as_bytes())),"files":{"SKILL.md":{"hash":core::query::sha256(content.as_bytes()),"mode":0o644}}}));
             payloads.insert(format!("{prefix}/SKILL.md"), asset);
         }
-        let mut screen_assets = BTreeMap::new();
-        for (path, asset) in &payloads {
-            screen_assets.insert(path.clone(), asset.body.clone());
-        }
-        let screening = screen_skill_payloads(&screen_assets);
-        if screening["has_secret"] == true {
-            return Err(HarnessError::invalid(
-                "Skill instructions contain a detected secret or credential.",
-            ));
-        }
         let mut response = self.install_preview(project, "local", payloads, definitions)?;
         response["name"] = json!(name);
         response["content"] = json!(content);
-        response["skillcache_screening"] = screening;
         Ok(response)
     }
     fn install_preview(
@@ -645,6 +634,7 @@ impl SkillsDomain {
         {
             return Err(HarnessError::invalid("Select fewer skills or tools."));
         }
+        let screening = enforce_no_skill_secrets(&payloads)?;
         let (project, root) = self.project(project_id)?;
         let mut files = PublicationFiles::new(&root)?;
         let identity = files.root_identity();
@@ -710,7 +700,7 @@ impl SkillsDomain {
         };
         self.cache(id.clone(), preview)?;
         Ok(
-            json!({"preview_id":id,"project_id":project_id,"source_id":source_id,"files":rows,"can_install":can,"expires_at":expires(),"summary":format!("{} files. {}",rows.len(),if can{"Ready to install after review."}else{"Existing files differ or a path is unsafe; resolve conflicts first."})}),
+            json!({"preview_id":id,"project_id":project_id,"source_id":source_id,"files":rows,"can_install":can,"skillcache_screening":screening,"expires_at":expires(),"summary":format!("{} files. {}",rows.len(),if can{"Ready to install after review."}else{"Existing files differ or a path is unsafe; resolve conflicts first."})}),
         )
     }
     fn cache(&self, id: String, preview: Preview) -> Result<()> {
@@ -774,6 +764,9 @@ impl SkillsDomain {
     }
     fn apply(&self, id: &str, install: bool) -> Result<V> {
         let preview = self.consume(id, if install { "install" } else { "change" })?;
+        let screening = (!preview.payloads.is_empty())
+            .then(|| enforce_no_skill_secrets(&preview.payloads))
+            .transpose()?;
         let _operation = self
             .operation
             .try_lock()
@@ -928,12 +921,7 @@ impl SkillsDomain {
         let invalidated_capsules =
             invalidate_skillcache_for_skills(&self.store, &preview.project_id, &affected_prefixes);
         if install {
-            let screen_map = preview
-                .payloads
-                .iter()
-                .map(|(k, v)| (k.clone(), v.body.clone()))
-                .collect::<BTreeMap<_, _>>();
-            let screening = screen_skill_payloads(&screen_map);
+            let screening = screening.unwrap_or_else(|| screen_skill_assets(&preview.payloads));
             Ok(
                 json!({"ok":true,"installed":changed,"unchanged":unchanged,"invalidated_capsules":invalidated_capsules,"skillcache_screening":screening,"summary":"Reviewed files installed. Extra or mismatched files were kept. Start a new agent session to load skills."}),
             )
@@ -1015,6 +1003,9 @@ impl SkillsDomain {
                 "The skill exceeds preview size bounds.",
             ));
         }
+        let screening = (!payloads.is_empty())
+            .then(|| enforce_no_skill_secrets(&payloads))
+            .transpose()?;
         let mut rows = vec![];
         let mut diff_budget = 256 * 1024usize;
         for full in before
@@ -1072,9 +1063,11 @@ impl SkillsDomain {
             can_apply: clean,
         };
         self.cache(id.clone(), preview)?;
-        Ok(
-            json!({"preview_id":id,"project_id":project_id,"path":path,"operation":operation,"source":record["source"],"revision":record["revision"],"next_revision":next_revision,"files":rows,"can_apply":clean,"expires_at":expires(),"summary":if clean{"Review the exact file changes before applying."}else{"Local changes or extra files detected. No files will be overwritten."}}),
-        )
+        let mut resp = json!({"preview_id":id,"project_id":project_id,"path":path,"operation":operation,"source":record["source"],"revision":record["revision"],"next_revision":next_revision,"files":rows,"can_apply":clean,"expires_at":expires(),"summary":if clean{"Review the exact file changes before applying."}else{"Local changes or extra files detected. No files will be overwritten."}});
+        if let Some(screening) = screening {
+            resp["skillcache_screening"] = screening;
+        }
+        Ok(resp)
     }
     fn dispatch(&self, operation: &str, request: V) -> Result<Payload> {
         let body = &request["body"];
@@ -1305,44 +1298,136 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
     value
 }
 
-fn skill_prefix_for_asset(asset_path: &str) -> Option<String> {
+/// Normalizes an asset or repository path under `.claude/skills/`, `.cursor/skills/`, or
+/// `.agents/skills/` to its `<base>/<skill-name>` prefix (including nested package roots).
+pub(crate) fn skill_prefix_for_asset(asset_path: &str) -> Option<String> {
+    let normalized = asset_path.trim().replace('\\', "/");
+    let clean = normalized.trim_start_matches("./").trim_end_matches('/');
+    if clean.is_empty() {
+        return None;
+    }
     for (_, base, _) in AGENTS {
         let prefix = format!("{base}/");
-        if let Some(rest) = asset_path.strip_prefix(&prefix)
+        if let Some(rest) = clean.strip_prefix(&prefix)
             && let Some(name) = rest.split('/').next()
             && !name.is_empty()
         {
             return Some(format!("{base}/{name}"));
         }
+        let nested_needle = format!("/{prefix}");
+        if let Some(idx) = clean.find(&nested_needle) {
+            let head = &clean[..idx];
+            let rest = &clean[idx + nested_needle.len()..];
+            if let Some(name) = rest.split('/').next()
+                && !name.is_empty()
+            {
+                return Some(format!("{head}/{prefix}{name}"));
+            }
+        }
     }
     None
 }
 
+fn check_skill_gate1_group(
+    group_assets: &[(&str, &[u8])],
+    has_programs: bool,
+    has_secret: &mut bool,
+    violations: &mut Vec<V>,
+) {
+    let capsule_bytes = group_assets
+        .iter()
+        .find(|(rel, _)| *rel == "capsule.json")
+        .map(|(_, b)| *b);
+    let md_bytes = group_assets
+        .iter()
+        .find(|(rel, _)| *rel == "SKILL.md")
+        .map(|(_, b)| *b);
+    let (Some(capsule_bytes), Some(md_bytes)) = (capsule_bytes, md_bytes) else {
+        return;
+    };
+    let mut files = infra_skillcache::package::Files::new();
+    for &(rel, bytes) in group_assets {
+        if rel != "capsule.json" && rel != "SKILL.md" {
+            files.insert(rel, bytes.to_vec());
+        }
+    }
+    let report = if files.is_empty() && !has_programs {
+        infra_skillcache::gate1::check_textual(capsule_bytes, md_bytes, None)
+    } else {
+        infra_skillcache::gate1::check(
+            capsule_bytes,
+            &files,
+            None,
+            &infra_skillcache::gate1::Context::default(),
+        )
+    };
+    for v in report.violations {
+        if matches!(v.code, "secret_detected" | "secret_policy_unavailable") {
+            *has_secret = true;
+        }
+        violations.push(json!({"code": v.code, "at": v.at, "message": v.message}));
+    }
+}
+
+fn screen_skill_assets(payloads: &BTreeMap<String, Asset>) -> V {
+    let raw: BTreeMap<String, Vec<u8>> = payloads
+        .iter()
+        .map(|(path, asset)| (path.clone(), asset.body.clone()))
+        .collect();
+    screen_skill_payloads(&raw)
+}
+
+fn enforce_no_skill_secrets(payloads: &BTreeMap<String, Asset>) -> Result<V> {
+    let screening = screen_skill_assets(payloads);
+    if screening["has_secret"] == true {
+        return Err(HarnessError::invalid(
+            "Skill instructions or files contain a detected secret or credential.",
+        ));
+    }
+    Ok(screening)
+}
+
+type Gate1Group<'a> = (Vec<(String, &'a [u8])>, bool);
+
 /// Gate-1-inspired static compilability & safety screen for skill assets
-/// (markdown byte cap, secret scanning, and safe `programs/` hygiene).
+/// (markdown byte cap, fail-closed secret scanning, and safe `programs/` hygiene).
 pub fn screen_skill_payloads(assets: &BTreeMap<String, Vec<u8>>) -> V {
     let mut has_secret = false;
     let mut warnings = Vec::new();
     let mut violations = Vec::new();
     let mut has_programs = false;
+    let mut gate1_groups: BTreeMap<String, Gate1Group<'_>> = BTreeMap::new();
 
     for (path, bytes) in assets {
         let text = String::from_utf8_lossy(bytes);
-        if infra_core::domain::secret_label(&text)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            has_secret = true;
-            violations.push(json!({
-                "code": "secret_detected",
-                "path": path,
-                "message": "Skill payload contains a possible secret or token.",
-            }));
+        match infra_core::domain::secret_label(&text) {
+            Ok(Some(_)) => {
+                has_secret = true;
+                violations.push(json!({
+                    "code": "secret_detected",
+                    "path": path,
+                    "message": "Skill payload contains a possible secret or token.",
+                }));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                has_secret = true;
+                violations.push(json!({
+                    "code": "secret_policy_unavailable",
+                    "path": path,
+                    "message": "Skill secret policy check could not run; payload refused.",
+                }));
+            }
         }
-        let rel = skill_prefix_for_asset(path)
-            .and_then(|p| path.strip_prefix(&format!("{p}/")).map(str::to_owned))
-            .unwrap_or_else(|| path.clone());
+        let group_key = skill_prefix_for_asset(path).unwrap_or_default();
+        let rel = if !group_key.is_empty() {
+            path.strip_prefix(&format!("{group_key}/"))
+                .unwrap_or(path.as_str())
+                .to_owned()
+        } else {
+            path.clone()
+        };
+        let mut group_has_programs = false;
         if rel == "SKILL.md" {
             if bytes.len() > infra_skillcache::gate1::MARKDOWN_BYTES {
                 warnings.push(json!({
@@ -1360,6 +1445,7 @@ pub fn screen_skill_payloads(assets: &BTreeMap<String, Vec<u8>>) -> V {
             }
         } else if rel.starts_with("programs/") {
             has_programs = true;
+            group_has_programs = true;
             let lower = rel.to_ascii_lowercase();
             if lower.ends_with(".cmd") || lower.ends_with(".bat") {
                 violations.push(json!({
@@ -1376,40 +1462,17 @@ pub fn screen_skill_payloads(assets: &BTreeMap<String, Vec<u8>>) -> V {
                 }));
             }
         }
+        let entry = gate1_groups.entry(group_key).or_default();
+        entry.0.push((rel, bytes.as_slice()));
+        entry.1 |= group_has_programs;
     }
 
-    if let (Some(capsule_bytes), Some(md_bytes)) = (
-        assets
+    for (group_assets, group_has_programs) in gate1_groups.values() {
+        let refs: Vec<(&str, &[u8])> = group_assets
             .iter()
-            .find(|(p, _)| p.ends_with("/capsule.json") || *p == "capsule.json")
-            .map(|(_, b)| b.as_slice()),
-        assets
-            .iter()
-            .find(|(p, _)| p.ends_with("/SKILL.md") || *p == "SKILL.md")
-            .map(|(_, b)| b.as_slice()),
-    ) {
-        let mut files = infra_skillcache::package::Files::new();
-        for (p, b) in assets {
-            let rel = skill_prefix_for_asset(p)
-                .and_then(|pref| p.strip_prefix(&format!("{pref}/")).map(str::to_owned))
-                .unwrap_or_else(|| p.clone());
-            if rel != "capsule.json" && rel != "SKILL.md" {
-                files.insert(&rel, b.clone());
-            }
-        }
-        let report = if files.is_empty() && !has_programs {
-            infra_skillcache::gate1::check_textual(capsule_bytes, md_bytes, None)
-        } else {
-            infra_skillcache::gate1::check(
-                capsule_bytes,
-                &files,
-                None,
-                &infra_skillcache::gate1::Context::default(),
-            )
-        };
-        for v in report.violations {
-            violations.push(json!({"code": v.code, "at": v.at, "message": v.message}));
-        }
+            .map(|(rel, bytes)| (rel.as_str(), *bytes))
+            .collect();
+        check_skill_gate1_group(&refs, *group_has_programs, &mut has_secret, &mut violations);
     }
 
     let compilable = !has_secret && violations.is_empty();
@@ -1926,5 +1989,106 @@ mod apply_tests {
         assert_eq!(frame.data["state"], "stale");
         assert_eq!(frame.data["capsule_id"], capsule_id);
         assert_eq!(frame.project_id.as_deref(), fixture.project["id"].as_str());
+    }
+
+    #[test]
+    fn install_preview_and_apply_block_secret_payloads_consistently() {
+        let fixture = Fixture::new();
+        let pid = fixture.project["id"].as_str().unwrap();
+
+        let bad_payloads = BTreeMap::from([(
+            ".agents/skills/secret-install/SKILL.md".to_owned(),
+            Asset {
+                body: b"---\nname: \"secret-install\"\ndescription: \"Bad\"\n---\n\nOPENAI_API_KEY=sk-live-secret-token-1234567890abcdef\n".to_vec(),
+                mode: 0o644,
+            },
+        )]);
+        let bad_defs = BTreeMap::from([(
+            ".agents/skills/secret-install".to_owned(),
+            json!({"name":"secret-install","agent":"codex","source_id":"acme/skills","source":"acme/skills","revision":"rev1","files":{}}),
+        )]);
+        let preview_err = fixture
+            .domain
+            .install_preview(pid, "acme/skills", bad_payloads.clone(), bad_defs.clone())
+            .unwrap_err();
+        assert_eq!(preview_err.status, 400);
+        assert!(preview_err.message.contains("secret"));
+        assert!(!fixture.root.join(".agents/skills/secret-install").exists());
+
+        // Bypass preview checks directly in cache to prove apply() also blocks before writing files.
+        let files = PublicationFiles::new(&fixture.root).unwrap();
+        let forged_install_id = Uuid::new_v4().simple().to_string();
+        fixture
+            .domain
+            .cache(
+                forged_install_id.clone(),
+                Preview {
+                    created: Instant::now(),
+                    project_id: pid.to_owned(),
+                    root: fixture.root.clone(),
+                    identity: files.root_identity(),
+                    directories: files.directory_identities().unwrap(),
+                    _source_id: "acme/skills".to_owned(),
+                    operation: "install".to_owned(),
+                    path: None,
+                    before: BTreeMap::new(),
+                    payloads: bad_payloads,
+                    records_before: None,
+                    records_after: json!({"skills":{}}),
+                    can_apply: true,
+                },
+            )
+            .unwrap();
+        let apply_install_err = fixture
+            .call("skills.install", json!({"preview_id": forged_install_id}))
+            .unwrap_err();
+        assert_eq!(apply_install_err.status, 400);
+        assert!(apply_install_err.message.contains("secret"));
+        assert!(
+            !fixture
+                .root
+                .join(".agents/skills/secret-install/SKILL.md")
+                .exists(),
+            "apply() must reject secrets before writing any skill files"
+        );
+
+        // Apply(update) also rejects forged update payloads carrying secrets without touching existing files.
+        let (_, original_content) = fixture.create_and_install();
+        let remove = fixture
+            .call(
+                "skills.change_preview",
+                json!({"project_id":pid,"agent":"codex","name":"fixture","operation":"remove"}),
+            )
+            .unwrap();
+        let mut update_preview = fixture
+            .domain
+            .consume(remove["preview_id"].as_str().unwrap(), "change")
+            .unwrap();
+        update_preview.operation = "update".into();
+        update_preview.payloads = BTreeMap::from([(
+            format!("{PREFIX}/programs/run.sh"),
+            Asset {
+                body: b"export OPENAI_API_KEY=sk-live-secret-token-1234567890abcdef\n".to_vec(),
+                mode: 0o755,
+            },
+        )]);
+        let forged_update_id = Uuid::new_v4().simple().to_string();
+        fixture
+            .domain
+            .cache(forged_update_id.clone(), update_preview)
+            .unwrap();
+        let apply_update_err = fixture
+            .call(
+                "skills.apply_change",
+                json!({"preview_id": forged_update_id}),
+            )
+            .unwrap_err();
+        assert_eq!(apply_update_err.status, 400);
+        assert!(apply_update_err.message.contains("secret"));
+        assert!(!fixture.root.join(PREFIX).join("programs/run.sh").exists());
+        assert_eq!(
+            std::fs::read(fixture.root.join(PREFIX).join("SKILL.md")).unwrap(),
+            original_content
+        );
     }
 }
