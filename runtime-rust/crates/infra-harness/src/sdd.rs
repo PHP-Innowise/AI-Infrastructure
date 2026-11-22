@@ -1,6 +1,11 @@
 use crate::{HarnessError, Result, store};
+use serde::Serialize;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 pub const PHASES: &[(&str, &str)] = &[
     ("initialize", "Initialize"),
     ("specify", "Specify"),
@@ -110,29 +115,113 @@ pub fn require_documents(root: &Path, settings: &Value) -> Result<()> {
             )));
         }
     }
-    let errors = validate_dataflow(&all_artifacts, phase, needed);
-    if !errors.is_empty() {
+    let violations = validate_dataflow_diagnostics(&all_artifacts, phase, needed);
+    if !violations.is_empty() {
         return Err(HarnessError::invalid(format!(
             "SDD static cross-reference check failed: {}",
-            errors.join("; ")
+            format_bounded_violations(&violations)
         )));
     }
     Ok(())
 }
 
+/// Structured bounded-repair diagnostic emitted by [`validate_dataflow_diagnostics`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Violation {
+    pub code: String,
+    pub path: String,
+    pub line: Option<usize>,
+    pub message: String,
+    pub hint: String,
+}
+
+fn format_bounded_violations(violations: &[Violation]) -> String {
+    violations
+        .iter()
+        .take(16)
+        .map(|v| match v.line {
+            Some(line) => format!(
+                "[{}:{}] {}: {} ({})",
+                v.path, line, v.code, v.message, v.hint
+            ),
+            None => format!("[{}] {}: {} ({})", v.path, v.code, v.message, v.hint),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn dataflow_cache_digest(files: &[Value], phase: &str, needed: usize) -> String {
+    let entries: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let text = f["text"].as_str().unwrap_or("");
+            json!({
+                "path": f["path"].as_str().unwrap_or(""),
+                "available": f["available"].as_bool() == Some(true),
+                "digest": store::sha(text.as_bytes()),
+            })
+        })
+        .collect();
+    store::sha(
+        json!({"phase": phase, "needed": needed, "files": entries})
+            .to_string()
+            .as_bytes(),
+    )
+}
+
+#[cfg(test)]
+static SDD_CACHE_EVALUATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Gate-1-style static dataflow validator across `spec.md -> plan.md -> tasks.md -> progress.md`.
 /// Detects dangling requirement/task IDs, duplicate task definitions, and unverified task claims.
 pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<String> {
-    use std::collections::{BTreeMap, BTreeSet};
+    validate_dataflow_diagnostics(files, phase, needed)
+        .into_iter()
+        .map(|v| v.message)
+        .collect()
+}
 
+/// Returns cached structured [`Violation`] diagnostics across SDD artifacts for bounded repair.
+pub fn validate_dataflow_diagnostics(
+    files: &[Value],
+    phase: &str,
+    needed: usize,
+) -> Vec<Violation> {
     if needed == 0 {
         return vec![];
     }
-    let find_doc = |suffix: &str| -> Option<&str> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, Vec<Violation>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let digest = dataflow_cache_digest(files, phase, needed);
+    if let Ok(guard) = cache.lock()
+        && let Some(hit) = guard.get(&digest)
+    {
+        return hit.clone();
+    }
+
+    #[cfg(test)]
+    SDD_CACHE_EVALUATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let result = compute_dataflow_diagnostics(files, phase);
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 128 {
+            guard.clear();
+        }
+        guard.insert(digest, result.clone());
+    }
+    result
+}
+
+fn compute_dataflow_diagnostics(files: &[Value], phase: &str) -> Vec<Violation> {
+    static REQ_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static TASK_ID_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let find_doc = |suffix: &str| -> Option<(&str, &str)> {
         files.iter().find_map(|f| {
             let p = f["path"].as_str()?;
             (p.ends_with(suffix) && f["available"] == true)
-                .then(|| f["text"].as_str())
+                .then(|| f["text"].as_str().map(|t| (p, t)))
                 .flatten()
         })
     };
@@ -141,29 +230,44 @@ pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<Str
     let tasks = find_doc("tasks.md");
     let progress = find_doc("progress.md");
 
-    let mut errors = Vec::new();
-    let req_re = regex::Regex::new(r"\b(?:FR|NFR|SC|AC)-\d+\b").expect("valid req regex");
-    let task_id_re = regex::Regex::new(r"\bT-?\d{2,}\b").expect("valid task regex");
+    let mut violations = Vec::new();
+    let req_re = REQ_RE
+        .get_or_init(|| regex::Regex::new(r"\b(?:FR|NFR|SC|AC)-\d+\b").expect("valid req regex"));
+    let task_id_re =
+        TASK_ID_RE.get_or_init(|| regex::Regex::new(r"\bT-?\d{2,}\b").expect("valid task regex"));
 
     // 1. Check requirement cross-references against `spec.md`.
-    if let Some(spec_text) = spec {
+    if let Some((_, spec_text)) = spec {
         let declared_reqs: BTreeSet<String> = req_re
             .find_iter(spec_text)
             .map(|m| m.as_str().to_owned())
             .collect();
         if !declared_reqs.is_empty() {
-            for (name, doc_opt) in [
+            for (fallback_name, doc_opt) in [
                 ("plan.md", plan),
                 ("tasks.md", tasks),
                 ("progress.md", progress),
             ] {
-                let Some(text) = doc_opt else { continue };
-                for m in req_re.find_iter(text) {
-                    let id = m.as_str();
-                    if !declared_reqs.contains(id) {
-                        errors.push(format!(
-                            "dangling requirement reference `{id}` in {name} (not in spec.md)"
-                        ));
+                let Some((doc_path, text)) = doc_opt else {
+                    continue;
+                };
+                for (idx, line) in text.lines().enumerate() {
+                    let line_no = idx + 1;
+                    for m in req_re.find_iter(line) {
+                        let id = m.as_str();
+                        if !declared_reqs.contains(id) {
+                            violations.push(Violation {
+                                code: "SDD_DANGLING_REQUIREMENT".into(),
+                                path: doc_path.to_owned(),
+                                line: Some(line_no),
+                                message: format!(
+                                    "dangling requirement reference `{id}` in {fallback_name} (not in spec.md)"
+                                ),
+                                hint: format!(
+                                    "Define `{id}` in spec.md or update the reference in {fallback_name}."
+                                ),
+                            });
+                        }
                     }
                 }
             }
@@ -171,10 +275,11 @@ pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<Str
     }
 
     // 2. Check task definitions, duplicates, dangling task references, and progress sync.
-    if let Some(tasks_text) = tasks {
+    if let Some((tasks_path, tasks_text)) = tasks {
         let mut defined_tasks: BTreeMap<String, char> = BTreeMap::new();
         let mut pending_tasks = Vec::new();
-        for line in tasks_text.lines() {
+        for (idx, line) in tasks_text.lines().enumerate() {
+            let line_no = idx + 1;
             let trimmed = line.trim_start();
             let checkbox = if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") {
                 Some(' ')
@@ -194,9 +299,15 @@ pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<Str
                 let mut ids = task_id_re.find_iter(trimmed).map(|m| m.as_str().to_owned());
                 if let Some(first_id) = ids.next() {
                     if defined_tasks.contains_key(&first_id) {
-                        errors.push(format!(
-                            "duplicate task definition `{first_id}` in tasks.md"
-                        ));
+                        violations.push(Violation {
+                            code: "SDD_DUPLICATE_TASK".into(),
+                            path: tasks_path.to_owned(),
+                            line: Some(line_no),
+                            message: format!("duplicate task definition `{first_id}` in tasks.md"),
+                            hint: format!(
+                                "Rename or remove the duplicate `{first_id}` definition in tasks.md."
+                            ),
+                        });
                     } else {
                         defined_tasks.insert(first_id.clone(), state);
                         if state != 'x' {
@@ -210,16 +321,28 @@ pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<Str
         }
 
         if !defined_tasks.is_empty() {
-            for m in task_id_re.find_iter(tasks_text) {
-                let id = m.as_str();
-                if !defined_tasks.contains_key(id) {
-                    errors.push(format!(
-                        "dangling task dependency `{id}` in tasks.md (no matching task definition)"
-                    ));
+            for (idx, line) in tasks_text.lines().enumerate() {
+                let line_no = idx + 1;
+                for m in task_id_re.find_iter(line) {
+                    let id = m.as_str();
+                    if !defined_tasks.contains_key(id) {
+                        violations.push(Violation {
+                            code: "SDD_DANGLING_TASK_DEP".into(),
+                            path: tasks_path.to_owned(),
+                            line: Some(line_no),
+                            message: format!(
+                                "dangling task dependency `{id}` in tasks.md (no matching task definition)"
+                            ),
+                            hint: format!(
+                                "Add a task checkbox defining `{id}` in tasks.md or fix the dependency ID."
+                            ),
+                        });
+                    }
                 }
             }
-            if let Some(progress_text) = progress {
-                for line in progress_text.lines() {
+            if let Some((progress_path, progress_text)) = progress {
+                for (idx, line) in progress_text.lines().enumerate() {
+                    let line_no = idx + 1;
                     let trimmed = line.trim_start();
                     let marked_done = trimmed.starts_with("- [x]")
                         || trimmed.starts_with("- [X]")
@@ -228,13 +351,29 @@ pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<Str
                     for m in task_id_re.find_iter(trimmed) {
                         let id = m.as_str();
                         match defined_tasks.get(id) {
-                            None => errors.push(format!(
-                                "dangling task reference `{id}` in progress.md (not in tasks.md)"
-                            )),
+                            None => violations.push(Violation {
+                                code: "SDD_DANGLING_PROGRESS_TASK".into(),
+                                path: progress_path.to_owned(),
+                                line: Some(line_no),
+                                message: format!(
+                                    "dangling task reference `{id}` in progress.md (not in tasks.md)"
+                                ),
+                                hint: format!(
+                                    "Define `{id}` in tasks.md or remove the stale reference in progress.md."
+                                ),
+                            }),
                             Some(&task_state) if marked_done && task_state != 'x' => {
-                                errors.push(format!(
-                                    "task `{id}` marked complete in progress.md while unchecked in tasks.md"
-                                ));
+                                violations.push(Violation {
+                                    code: "SDD_PROGRESS_STATUS_MISMATCH".into(),
+                                    path: progress_path.to_owned(),
+                                    line: Some(line_no),
+                                    message: format!(
+                                        "task `{id}` marked complete in progress.md while unchecked in tasks.md"
+                                    ),
+                                    hint: format!(
+                                        "Mark `{id}` as `[x]` in tasks.md after verifying completion, or uncheck it in progress.md."
+                                    ),
+                                });
                             }
                             _ => {}
                         }
@@ -245,14 +384,21 @@ pub fn validate_dataflow(files: &[Value], phase: &str, needed: usize) -> Vec<Str
 
         if phase == "review" && !pending_tasks.is_empty() {
             let preview: Vec<String> = pending_tasks.into_iter().take(5).collect();
-            errors.push(format!(
-                "review stage requires all tasks verified complete in tasks.md (unchecked: {})",
-                preview.join(", ")
-            ));
+            violations.push(Violation {
+                code: "SDD_REVIEW_UNCHECKED_TASKS".into(),
+                path: tasks_path.to_owned(),
+                line: None,
+                message: format!(
+                    "review stage requires all tasks verified complete in tasks.md (unchecked: {})",
+                    preview.join(", ")
+                ),
+                hint: "Complete and mark `[x]` for all unchecked tasks in tasks.md before review."
+                    .into(),
+            });
         }
     }
 
-    errors.into_iter().take(16).collect()
+    violations.into_iter().take(16).collect()
 }
 pub fn instructions(root: &Path, settings: &Value) -> Result<String> {
     let phase = settings["phase"]
@@ -363,5 +509,45 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn validate_dataflow_diagnostics_caches_by_digest_and_reports_structured_violations() {
+        let files = vec![
+            json!({"path": "specs/001-cache/spec.md", "available": true, "text": "# Spec\n- FR-001: Auth\n"}),
+            json!({"path": "specs/001-cache/plan.md", "available": true, "text": "# Plan\nCovers FR-001\nRef FR-404\n"}),
+            json!({"path": "specs/001-cache/tasks.md", "available": true, "text": "- [ ] T001 Build\n- [ ] T001 Dup\n"}),
+            json!({"path": "specs/001-cache/progress.md", "available": true, "text": "- [x] T001 Done early\n"}),
+        ];
+
+        let before = SDD_CACHE_EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        let first = validate_dataflow_diagnostics(&files, "implement", 3);
+        let after_first = SDD_CACHE_EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after_first > before);
+        let second = validate_dataflow_diagnostics(&files, "implement", 3);
+        let after_second = SDD_CACHE_EVALUATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            after_second, after_first,
+            "identical SDD artifacts must hit digest cache"
+        );
+        assert_eq!(first, second);
+
+        assert!(first.iter().any(|v| {
+            v.code == "SDD_DANGLING_REQUIREMENT"
+                && v.path == "specs/001-cache/plan.md"
+                && v.line == Some(3)
+                && v.message.contains("FR-404")
+                && !v.hint.is_empty()
+        }));
+        assert!(first.iter().any(|v| {
+            v.code == "SDD_DUPLICATE_TASK"
+                && v.path == "specs/001-cache/tasks.md"
+                && v.line == Some(2)
+        }));
+        assert!(first.iter().any(|v| {
+            v.code == "SDD_PROGRESS_STATUS_MISMATCH"
+                && v.path == "specs/001-cache/progress.md"
+                && v.line == Some(1)
+        }));
     }
 }

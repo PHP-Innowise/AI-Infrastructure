@@ -191,6 +191,7 @@ impl Accelerators {
                 "Read-only rule workspace is not registered with Harness.",
             ));
         }
+        crate::permissions::warm_read_only_cache(&canon);
         desk.enable_read_only_auto_rules(session_id, canon);
         Ok(())
     }

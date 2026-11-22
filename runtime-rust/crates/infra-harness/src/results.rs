@@ -178,11 +178,81 @@ fn capture_error(error: HarnessError, cancelled: bool) -> Result<&'static str> {
     }
 }
 
+const MAX_CHECK_CACHE_ENTRIES: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CheckCacheKey {
+    canon_argv: Vec<String>,
+    env_fingerprint: String,
+    snapshot_id: String,
+}
+
+#[derive(Default)]
+struct CheckReceiptCache {
+    entries: BTreeMap<CheckCacheKey, Capture>,
+}
+
+fn check_cache_disabled_by_env() -> bool {
+    std::env::var("HARNESS_DISABLE_CHECK_CACHE").as_deref() == Ok("1")
+}
+
+fn check_bypass_requested(check: &Value) -> bool {
+    check["no_cache"].as_bool() == Some(true) || check["cache"].as_bool() == Some(false)
+}
+
+fn scrub_process_env(env_extra: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut env = infra_host::sandbox::scrub_env(std::env::vars(), env_extra);
+    for blocked in [
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "BASH_ENV",
+        "ENV",
+        "ACCELERATOR_HOME",
+        "ACCELERATOR_STATE_DIR",
+        "ACCELERATOR_PROJECT_DIR",
+        "ACCELERATOR_EDITION",
+    ] {
+        env.remove(blocked);
+    }
+    env
+}
+
+fn sanitize_git_env(env: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+    const ALLOWED_CALLER_GIT_KEYS: &[&str] = &[
+        "GIT_INDEX_FILE",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_OPTIONAL_LOCKS",
+    ];
+    let mut clean = BTreeMap::new();
+    for (key, value) in env {
+        if !ALLOWED_CALLER_GIT_KEYS.contains(&key.as_str()) {
+            return Err(HarnessError::forbidden(format!(
+                "Unsafe environment variable `{key}` is not permitted for Git execution."
+            )));
+        }
+        clean.insert(key.clone(), value.clone());
+    }
+    Ok(clean)
+}
+
 pub struct Results {
     pub store: SessionStore,
     pub(crate) backend: Arc<dyn ResultsBackend>,
     target: RwLock<Option<Weak<dyn TargetCheckWorkflow>>>,
     omnigraph: RwLock<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
+    check_cache: Mutex<CheckReceiptCache>,
+    check_cache_enabled: AtomicBool,
 }
 #[derive(Clone, Copy, Default)]
 pub struct SandboxOptions<'a> {
@@ -217,6 +287,8 @@ impl Results {
             backend,
             target: RwLock::new(None),
             omnigraph: RwLock::new(None),
+            check_cache: Mutex::new(CheckReceiptCache::default()),
+            check_cache_enabled: AtomicBool::new(true),
         };
         for raw in checks {
             let mut c = db_json(raw)?;
@@ -262,6 +334,88 @@ impl Results {
     pub fn omnigraph(&self) -> Option<Arc<crate::omnigraph::OmnigraphManager>> {
         self.omnigraph.read().ok().and_then(|slot| slot.clone())
     }
+    pub fn set_check_cache_enabled(&self, enabled: bool) {
+        self.check_cache_enabled.store(enabled, Ordering::Release);
+    }
+
+    fn check_cache_key(
+        argv: &[String],
+        env_extra: &BTreeMap<String, String>,
+        snapshot_id: &str,
+    ) -> Result<CheckCacheKey> {
+        let env = scrub_process_env(env_extra);
+        let env_fingerprint = sha(&serde_json::to_vec(&json!({
+            "env": env,
+            "sandbox": infra_host::sandbox::available(),
+        }))?);
+        Ok(CheckCacheKey {
+            canon_argv: argv.to_vec(),
+            env_fingerprint,
+            snapshot_id: snapshot_id.to_owned(),
+        })
+    }
+
+    pub(crate) fn cached_check(
+        &self,
+        argv: &[String],
+        env_extra: &BTreeMap<String, String>,
+        snapshot_id: &str,
+        check_root: &Path,
+        command: &str,
+        bypass: bool,
+    ) -> Result<Option<Capture>> {
+        if bypass
+            || snapshot_id.is_empty()
+            || !self.check_cache_enabled.load(Ordering::Acquire)
+            || check_cache_disabled_by_env()
+        {
+            return Ok(None);
+        }
+        if !infra_generator::commands::is_verification_safe(check_root, command).unwrap_or(false) {
+            return Ok(None);
+        }
+        let key = Self::check_cache_key(argv, env_extra, snapshot_id)?;
+        let guard = self
+            .check_cache
+            .lock()
+            .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
+        Ok(guard.entries.get(&key).cloned())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_cached_check(
+        &self,
+        argv: &[String],
+        env_extra: &BTreeMap<String, String>,
+        snapshot_id: &str,
+        check_root: &Path,
+        command: &str,
+        bypass: bool,
+        capture: &Capture,
+    ) -> Result<()> {
+        if bypass
+            || snapshot_id.is_empty()
+            || capture.reason.is_some()
+            || !self.check_cache_enabled.load(Ordering::Acquire)
+            || check_cache_disabled_by_env()
+        {
+            return Ok(());
+        }
+        if !infra_generator::commands::is_verification_safe(check_root, command).unwrap_or(false) {
+            return Ok(());
+        }
+        let key = Self::check_cache_key(argv, env_extra, snapshot_id)?;
+        let mut guard = self
+            .check_cache
+            .lock()
+            .map_err(|_| HarnessError::unavailable("Check receipt cache lock failed"))?;
+        if guard.entries.len() >= MAX_CHECK_CACHE_ENTRIES && !guard.entries.contains_key(&key) {
+            guard.entries.clear();
+        }
+        guard.entries.insert(key, capture.clone());
+        Ok(())
+    }
+
     pub async fn capture(
         &self,
         argv: &[String],
@@ -269,6 +423,20 @@ impl Results {
         timeout: u64,
         cancel: Arc<AtomicBool>,
         env_extra: &BTreeMap<String, String>,
+        update: impl FnMut(&str) -> Result<()> + Send,
+    ) -> Result<Capture> {
+        let env = scrub_process_env(env_extra);
+        self.capture_with_scrubbed_env(argv, root, timeout, cancel, &env, update)
+            .await
+    }
+
+    async fn capture_with_scrubbed_env(
+        &self,
+        argv: &[String],
+        root: &Path,
+        timeout: u64,
+        cancel: Arc<AtomicBool>,
+        env: &BTreeMap<String, String>,
         mut update: impl FnMut(&str) -> Result<()> + Send,
     ) -> Result<Capture> {
         let stopping = self.backend.shutdown_cancel();
@@ -280,14 +448,13 @@ impl Results {
                 seconds: 0.0,
             });
         }
-        let env = infra_host::sandbox::scrub_env(std::env::vars(), env_extra);
         let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = bytes.clone();
         let started = Instant::now();
         let result = Box::pin(process::run_raw_with_lock(
             argv,
             root,
-            &env,
+            env,
             &[],
             Limits {
                 seconds: Some(timeout),
@@ -448,13 +615,31 @@ impl Results {
             "commit.gpgSign=false".into(),
             "-c".into(),
             "merge.autoStash=false".into(),
+            "-c".into(),
+            "diff.external=".into(),
+            "-c".into(),
+            "protocol.ext.allow=never".into(),
+            "-c".into(),
+            "credential.helper=".into(),
             "-C".into(),
             root.to_string_lossy().into_owned(),
         ];
         argv.extend_from_slice(args);
-        let mut env = env.clone();
-        env.insert("GIT_NO_REPLACE_OBJECTS".into(), "1".into());
-        Box::pin(self.capture(&argv, root, timeout, cancel, &env, |_| Ok(()))).await
+        let mut safe_git_env = sanitize_git_env(env)?;
+        safe_git_env.insert("GIT_NO_REPLACE_OBJECTS".into(), "1".into());
+        safe_git_env.insert("GIT_OPTIONAL_LOCKS".into(), "0".into());
+        safe_git_env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+        safe_git_env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+        let scrubbed = scrub_process_env(&safe_git_env);
+        Box::pin(self.capture_with_scrubbed_env(
+            &argv,
+            root,
+            timeout,
+            cancel,
+            &scrubbed,
+            |_| Ok(()),
+        ))
+        .await
     }
     pub async fn baseline(&self, session: &Value) -> Result<()> {
         if !session["result_base"].is_null() {
@@ -852,10 +1037,29 @@ impl Results {
         }
     }
     pub fn check_command(data: &Value) -> Result<Vec<String>> {
-        if !exact(data, &["command", "timeout"]) {
+        let Some(obj) = data.as_object() else {
             return Err(HarnessError::invalid(
                 "Provide a check command and timeout.",
             ));
+        };
+        if !obj.contains_key("command")
+            || !obj.contains_key("timeout")
+            || !obj
+                .keys()
+                .all(|k| matches!(k.as_str(), "command" | "timeout" | "cache" | "no_cache"))
+        {
+            return Err(HarnessError::invalid(
+                "Provide a check command and timeout.",
+            ));
+        }
+        for flag in ["cache", "no_cache"] {
+            if let Some(v) = obj.get(flag)
+                && !v.is_boolean()
+            {
+                return Err(HarnessError::invalid(format!(
+                    "Check option `{flag}` must be a boolean."
+                )));
+            }
         }
         let command = data["command"]
             .as_str()
@@ -919,12 +1123,32 @@ impl Results {
         }
     }
     pub async fn start_check(&self, sid: &str, data: &Value) -> Result<Value> {
-        if !exact(data, &["command", "timeout", "snapshot_id"]) {
+        let Some(obj) = data.as_object() else {
+            return Err(HarnessError::invalid(
+                "Provide a command, timeout and the reviewed snapshot.",
+            ));
+        };
+        if !obj.contains_key("command")
+            || !obj.contains_key("timeout")
+            || !obj.contains_key("snapshot_id")
+            || !obj.keys().all(|k| {
+                matches!(
+                    k.as_str(),
+                    "command" | "timeout" | "snapshot_id" | "cache" | "no_cache"
+                )
+            })
+        {
             return Err(HarnessError::invalid(
                 "Provide a command, timeout and the reviewed snapshot.",
             ));
         }
-        let cmd = json!({"command":data["command"],"timeout":data["timeout"]});
+        let mut cmd = json!({"command":data["command"],"timeout":data["timeout"]});
+        if let Some(v) = obj.get("cache") {
+            cmd["cache"] = v.clone();
+        }
+        if let Some(v) = obj.get("no_cache") {
+            cmd["no_cache"] = v.clone();
+        }
         Self::check_command(&cmd)?;
         let lock = self.backend.operation_lock();
         let guard = lock.lock().await;
@@ -940,11 +1164,14 @@ impl Results {
                 "Workspace changed. Refresh the diff before running a check.",
             ));
         }
-        let c = self.prepare_check(
-            sid,
-            &cmd,
-            &json!({"snapshot_id":snapshot["id"],"snapshot_complete":snapshot["complete"]}),
-        )?;
+        let mut metadata = json!({
+            "snapshot_id": snapshot["id"],
+            "snapshot_complete": snapshot["complete"]
+        });
+        if check_bypass_requested(&cmd) {
+            metadata["no_cache"] = json!(true);
+        }
+        let c = self.prepare_check(sid, &cmd, &metadata)?;
         drop(guard);
         self.submit_check(&c)?;
         self.store.get(sid)
@@ -1742,6 +1969,7 @@ impl CheckWorkflow for Results {
             c["status"] = "running".into();
             c["started_at"] = now().into();
             self.save_check(&c)?;
+            let mut used_cache = false;
             let outcome = if c["kind"] == "target" {
                 let target = self
                     .target
@@ -1765,6 +1993,20 @@ impl CheckWorkflow for Results {
                     }
                     let root = self.backend.workspace(&self.store.get(&sid)?)?;
                     let argv = serde_json::from_value::<Vec<String>>(c["argv"].clone())?;
+                    let cmd_str = c["command"].as_str().unwrap_or("").to_owned();
+                    let snap_id = c["snapshot_id"].as_str().unwrap_or("").to_owned();
+                    let snap_complete = c["snapshot_complete"].as_bool() == Some(true)
+                        && before["available"] == true;
+                    let bypass = check_bypass_requested(&c);
+                    let empty_env = BTreeMap::new();
+                    if snap_complete
+                        && let Some(hit) =
+                            self.cached_check(&argv, &empty_env, &snap_id, &root, &cmd_str, bypass)?
+                    {
+                        used_cache = true;
+                        c["workspace_changed"] = false.into();
+                        return Ok(hit);
+                    }
                     let result = self
                         .capture_sandboxed(
                             &argv,
@@ -1779,7 +2021,13 @@ impl CheckWorkflow for Results {
                         )
                         .await?;
                     let after = self.snapshot(&sid).await?;
-                    c["workspace_changed"] = (after["id"] != c["snapshot_id"]).into();
+                    let changed = after["id"].as_str() != Some(snap_id.as_str());
+                    c["workspace_changed"] = changed.into();
+                    if !changed && snap_complete {
+                        self.store_cached_check(
+                            &argv, &empty_env, &snap_id, &root, &cmd_str, bypass, &result,
+                        )?;
+                    }
                     Ok(result)
                 }
                 .await
@@ -1795,6 +2043,10 @@ impl CheckWorkflow for Results {
                     });
                     for (k, v) in result.value().as_object().unwrap() {
                         c[k] = v.clone();
+                    }
+                    c["envelope"] = result.tool_envelope();
+                    if c["kind"] != "target" || c.get("cached").is_none() {
+                        c["cached"] = used_cache.into();
                     }
                     c["status"] = status.into();
                 }
@@ -2039,6 +2291,89 @@ mod cleanup_error_tests {
         assert_eq!(err_env["ok"], false);
         assert_eq!(err_env["exit_code"], 1);
         assert!(err_env["diagnostic"].as_str().unwrap().len() <= diag_cap + 32);
+    }
+
+    #[test]
+    fn sanitize_git_env_and_check_receipt_cache_work_safely() {
+        use crate::sessions::generation_completion_tests::Fixture;
+        use std::collections::BTreeMap;
+
+        assert!(
+            super::sanitize_git_env(&BTreeMap::from([(
+                "GIT_INDEX_FILE".to_owned(),
+                "/tmp/idx".to_owned()
+            )]))
+            .is_ok()
+        );
+        for unsafe_key in [
+            "GIT_EXTERNAL_DIFF",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_EXEC_PATH",
+            "LD_PRELOAD",
+            "SSH_ASKPASS",
+            "OPENAI_API_KEY",
+        ] {
+            assert!(
+                super::sanitize_git_env(&BTreeMap::from([(
+                    unsafe_key.to_owned(),
+                    "evil".to_owned()
+                )]))
+                .is_err(),
+                "{unsafe_key} must be rejected"
+            );
+        }
+
+        let fixture = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("proj");
+        std::fs::create_dir_all(&ws).unwrap();
+        let results = fixture.delivery().results;
+
+        let argv = vec!["php".into(), "-l".into(), "index.php".into()];
+        let cap = super::Capture {
+            output: "No syntax errors detected".into(),
+            exit_code: Some(0),
+            reason: None,
+            seconds: 0.01,
+        };
+        let env = BTreeMap::new();
+        // `php -l index.php` is verification-safe -> caches on snapshot and respects bypass/snapshot changes.
+        results
+            .store_cached_check(&argv, &env, "snap-1", &ws, "php -l index.php", false, &cap)
+            .unwrap();
+        let hit = results
+            .cached_check(&argv, &env, "snap-1", &ws, "php -l index.php", false)
+            .unwrap()
+            .expect("verification-safe check should hit snapshot cache");
+        assert_eq!(hit.tool_envelope()["ok"], true);
+        assert!(
+            results
+                .cached_check(&argv, &env, "snap-1", &ws, "php -l index.php", true)
+                .unwrap()
+                .is_none(),
+            "per-check bypass must skip cache"
+        );
+        assert!(
+            results
+                .cached_check(&argv, &env, "snap-2", &ws, "php -l index.php", false)
+                .unwrap()
+                .is_none(),
+            "different snapshot_id must miss cache"
+        );
+
+        // Non-verification-safe command is never cached.
+        let unsafe_argv = vec!["rm".into(), "-rf".into(), "tmp".into()];
+        results
+            .store_cached_check(&unsafe_argv, &env, "snap-1", &ws, "rm -rf tmp", false, &cap)
+            .unwrap();
+        assert!(
+            results
+                .cached_check(&unsafe_argv, &env, "snap-1", &ws, "rm -rf tmp", false)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 

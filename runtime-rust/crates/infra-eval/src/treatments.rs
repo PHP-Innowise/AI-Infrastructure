@@ -356,7 +356,14 @@ fn consolidation_inner(
             "input changed during consolidation replay",
         ));
     }
-    let mut out = json!({"schema":"memory-consolidation-pilot-v1","variant":variant,"input_digest":digest,"boundaries":boundaries,"mappings":mappings,"planned_tickets":planned["tickets"].as_array().map(Vec::len).unwrap_or(0),"idempotent":last==artifact::image_digest(&snapshot(&copy)?,false)?,"validation_errors":errors,"evidence":"lifecycle-replay","task_outcome":"not-measured","human_reviewed":false,"recipe":{"boundaries":3,"owner":owner,"variant":variant},"runtime_digest":artifact::digest(&json!([artifact::sha(include_bytes!("treatments.rs")),schema_rows.iter().map(|f|json!([f.path,artifact::sha(&f.bytes)])).collect::<Vec<_>>(),artifact::sha(include_bytes!("../../infra-core/src/bank/maintenance.rs"))]))?});
+    let arms = vec![
+        "baseline".to_string(),
+        "consolidate".to_string(),
+        "consolidate-verify".to_string(),
+    ];
+    let arm_order = randomized_treatment_arms(&arms, seed_from_digest(&digest));
+    let usage = normalize_treatment_usage(&Value::Null).map_err(artifact::invalid)?;
+    let mut out = json!({"schema":"memory-consolidation-pilot-v1","variant":variant,"input_digest":digest,"arms":arms,"arm_order":arm_order,"usage":usage,"boundaries":boundaries,"mappings":mappings,"planned_tickets":planned["tickets"].as_array().map(Vec::len).unwrap_or(0),"idempotent":last==artifact::image_digest(&snapshot(&copy)?,false)?,"validation_errors":errors,"evidence":"lifecycle-replay","task_outcome":"not-measured","human_reviewed":false,"recipe":{"boundaries":3,"owner":owner,"variant":variant},"runtime_digest":artifact::digest(&json!([artifact::sha(include_bytes!("treatments.rs")),schema_rows.iter().map(|f|json!([f.path,artifact::sha(&f.bytes)])).collect::<Vec<_>>(),artifact::sha(include_bytes!("../../infra-core/src/bank/maintenance.rs"))]))?});
     if let Some(export) = export {
         if export.exists()
             || artifact::overlaps(export, root)?
@@ -370,7 +377,9 @@ fn consolidation_inner(
         artifact::copy_image(&image, export)?;
         out["export_digest"] = artifact::image_digest(&image, false)?.into();
     }
-    Ok(out)
+    let sealed = seal_treatment_report("memory-consolidation-pilot-v1", out, &digest)?;
+    verify_treatment_report(&sealed)?;
+    Ok(sealed)
 }
 fn tokens(s: &str) -> BTreeSet<String> {
     let stop = [
@@ -500,6 +509,16 @@ pub fn rerank_with_at(
             return Err(artifact::invalid("query judgments must be object"));
         }
     }
+    let input_digest = artifact::digest(&json!({
+        "queries": &queries,
+        "judgments": judgments,
+        "limit": limit,
+        "anchor": anchor,
+        "database": database.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    }))?;
+    let arms = vec!["baseline".to_string(), "reranked".to_string()];
+    let arm_order = randomized_treatment_arms(&arms, seed_from_digest(&input_digest));
+    let usage = normalize_treatment_usage(&Value::Null).map_err(artifact::invalid)?;
     let mut rows = vec![];
     let (mut baseline_useful, mut reranked_useful) = (0u64, 0u64);
     for q in queries {
@@ -536,8 +555,6 @@ pub fn rerank_with_at(
         } else {
             candidate_values(&store, query)?
         };
-        let baseline = candidates.iter().take(limit).cloned().collect::<Vec<_>>();
-        let ranked = rerank(&candidates, query, limit);
         let metrics = |items: &[Value]| {
             let chosen = items
                 .iter()
@@ -553,15 +570,29 @@ pub fn rerank_with_at(
             let n = chosen.intersection(&useful).count();
             json!({"useful":n,"noise":chosen.difference(&useful).count(),"recall":if useful.is_empty(){None}else{Some((n as f64/useful.len()as f64*10000.0).round()/10000.0)},"paths":chosen})
         };
-        let b = metrics(&baseline);
-        let r = metrics(&ranked);
+        let mut b = Value::Null;
+        let mut r = Value::Null;
+        for arm in &arm_order {
+            match arm.as_str() {
+                "baseline" => {
+                    let baseline = candidates.iter().take(limit).cloned().collect::<Vec<_>>();
+                    b = metrics(&baseline);
+                }
+                "reranked" => {
+                    let ranked = rerank(&candidates, query, limit);
+                    r = metrics(&ranked);
+                }
+                _ => {}
+            }
+        }
         baseline_useful += b["useful"].as_u64().unwrap_or(0);
         reranked_useful += r["useful"].as_u64().unwrap_or(0);
         rows.push(json!({"id":id,"query":query,"changed":b["paths"]!=r["paths"],"baseline":b,"reranked":r}));
     }
-    Ok(
-        json!({"queries":rows.len(),"limit":limit,"weights":{"path":0.15,"title":0.10},"baseline_useful":baseline_useful,"reranked_useful":reranked_useful,"rows":rows}),
-    )
+    let out = json!({"queries":rows.len(),"limit":limit,"weights":{"path":0.15,"title":0.10},"baseline_useful":baseline_useful,"reranked_useful":reranked_useful,"arms":arms,"arm_order":arm_order,"usage":usage,"rows":rows});
+    let sealed = seal_treatment_report("memory-rerank-pilot-v1", out, &input_digest)?;
+    verify_treatment_report(&sealed)?;
+    Ok(sealed)
 }
 fn candidate_values(store: &infra_core::Store, query: &str) -> Result<Vec<Value>> {
     let (candidates, _) = infra_core::query::rank_candidates(&store.conn, query, 100, None)?;
@@ -684,6 +715,11 @@ pub fn selective_stream(
     Ok(code)
 }
 
+fn seed_from_digest(digest: &str) -> u64 {
+    let prefix = &digest[..digest.len().min(16)];
+    u64::from_str_radix(prefix, 16).unwrap_or(1).max(1)
+}
+
 /// Wraps a treatment evaluation output (`rerank_evaluate` or `memory_consolidation_pilot`)
 /// in a tamper-evident sealed A/B envelope backed by [`crate::sealed_ab`].
 pub fn seal_treatment_report(schema: &str, report: Value, input_digest: &str) -> Result<Value> {
@@ -738,5 +774,60 @@ mod sealed_ab_tests {
         .unwrap();
         assert_eq!(usage["cache_creation_input_tokens"], 60);
         assert!(normalize_treatment_usage(&json!({"cached_input_tokens": 10})).is_err());
+    }
+
+    #[test]
+    fn rerank_and_consolidation_runners_wire_sealed_ab_and_arm_order() {
+        let temp = artifact::Scratch::new(&std::env::temp_dir(), "treatments-sealed-ab").unwrap();
+        let db_path = temp.0.join("context.db");
+        let mut store = infra_core::Store::open(&db_path, Default::default()).unwrap();
+        let root = temp.0.join("project");
+        std::fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/config")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/tasks")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/handoffs")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/findings")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/decisions")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/schemas")).unwrap();
+        std::fs::write(
+            root.join("project-brain/config/runtime.json"),
+            r#"{"canonical_edition":".agents","mode":"governed","automatic_consolidation":false,"automatic_consolidation_verification":false}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("AGENTS.md"), "# Policy\n").unwrap();
+        let _ = store.put_state(&BTreeMap::new());
+        drop(store);
+
+        let queries = json!([{"id": "q1", "query": "invoice sequence"}]);
+        let judgments = json!({"q1": {"docs/invoice.md": 1}});
+        let mut rerank_report =
+            rerank_with_at(&db_path, &queries, &judgments, 3, None, None).unwrap();
+        assert_eq!(rerank_report["schema"], "memory-rerank-pilot-v1");
+        assert_eq!(rerank_report["queries"], 1);
+        assert!(rerank_report["arm_order"].as_array().unwrap().len() == 2);
+        assert_eq!(
+            rerank_report["usage"],
+            normalize_treatment_usage(&Value::Null).unwrap()
+        );
+        verify_treatment_report(&rerank_report).unwrap();
+        rerank_report["queries"] = json!(99);
+        assert!(verify_treatment_report(&rerank_report).is_err());
+
+        // Also test consolidation_inner wiring with a repo PHP Core schema source.
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        if repo_root.join("PHP Core/project-brain/schemas").is_dir() {
+            let mut con_report =
+                consolidation(&repo_root, &root, "baseline", "local", None).unwrap();
+            assert_eq!(con_report["schema"], "memory-consolidation-pilot-v1");
+            assert_eq!(con_report["arms"].as_array().unwrap().len(), 3);
+            assert_eq!(con_report["arm_order"].as_array().unwrap().len(), 3);
+            assert_eq!(
+                con_report["usage"],
+                normalize_treatment_usage(&Value::Null).unwrap()
+            );
+            verify_treatment_report(&con_report).unwrap();
+            con_report["variant"] = json!("tampered");
+            assert!(verify_treatment_report(&con_report).is_err());
+        }
     }
 }

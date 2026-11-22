@@ -82,6 +82,8 @@ impl RunEvents for CreatorRunEvents {
 struct ValidationGates<'a> {
     inner: &'a (dyn NativeGateServices + Send + Sync),
     base: PathBuf,
+    #[cfg(test)]
+    force_sandbox_unavailable: bool,
 }
 impl NativeGateServices for ValidationGates<'_> {
     fn validate_host(
@@ -109,99 +111,170 @@ impl NativeGateServices for ValidationGates<'_> {
                 "Creator validation runtime accepts only `status --json` or `validate`.",
             ));
         }
-        // Check if an installed engine binary exists in the validation copy AND
-        // matches our trusted current_exe(). When present on a sandbox-capable
-        // non-Windows host, execute inside `Profile::Gate` (network off, minimal root).
         let bin_rel = if cfg!(windows) {
             "memory-bank/bin/infra-engine.exe"
         } else {
             "memory-bank/bin/infra-engine"
         };
         let installed = copy_canon.join(bin_rel);
-        if infra_host::sandbox::available()
-            && !cfg!(windows)
-            && installed.is_file()
-            && current_exe_matches(&installed).unwrap_or(false)
-        {
-            let mut argv = vec![
-                installed.to_string_lossy().into_owned(),
-                "memory".into(),
-                "--root".into(),
-                copy_canon.to_string_lossy().into_owned(),
-            ];
-            argv.extend(args.iter().cloned());
-            let mut runtime = Vec::new();
-            if let Some(parent) = installed.parent() {
-                runtime.push(parent.to_path_buf());
-            }
-            let spec = Spec {
-                workspace: copy_canon.clone(),
-                target: copy_canon.clone(),
-                protected: vec![],
-                readable: vec![],
-                accounts: vec![],
-                runtime,
-                codex: None,
-                evidence: None,
-                network: false,
-            };
-            let wrapped = sandbox::gate(&spec, &argv)
-                .map_err(|e| infra_core::RuntimeError::policy(e.message))?;
-            let mut env = infra_host::sandbox::scrub_env(std::env::vars(), &BTreeMap::new());
-            for key in [
-                "ACCELERATOR_HOME",
-                "ACCELERATOR_STATE_DIR",
-                "ACCELERATOR_PROJECT_DIR",
-                "ACCELERATOR_EDITION",
-            ] {
-                env.remove(key);
-            }
-            let mut command = std::process::Command::new(&wrapped[0]);
-            command
-                .args(&wrapped[1..])
-                .current_dir(&copy_canon)
-                .env_clear()
-                .envs(&env)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let mut child = command.spawn()?;
-            let deadline = std::time::Instant::now() + timeout;
-            let status = loop {
-                match child.try_wait()? {
-                    Some(status) => break status,
-                    None if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
-                    None => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(infra_core::RuntimeError::unavailable(
-                            "Sandboxed Creator validation runtime timed out.",
+        match std::fs::symlink_metadata(&installed) {
+            Ok(meta) => {
+                if infra_core::fs::linked(&meta)
+                    || !meta.is_file()
+                    || !current_exe_matches(&installed)?
+                {
+                    return Err(infra_core::RuntimeError::policy(
+                        "Creator validation runtime binary is linked or differs from the pinned executable.",
+                    ));
+                }
+                #[cfg(not(windows))]
+                {
+                    #[cfg(test)]
+                    let sandbox_ok =
+                        !self.force_sandbox_unavailable && infra_host::sandbox::available();
+                    #[cfg(not(test))]
+                    let sandbox_ok = infra_host::sandbox::available();
+                    if !sandbox_ok {
+                        return Err(infra_core::RuntimeError::coded(
+                            infra_core::ErrorKind::Unavailable,
+                            "SandboxUnavailable",
+                            "SandboxUnavailable: Creator runtime validation requires Profile::Gate sandbox isolation on this host.",
                         ));
                     }
+                    let (_pinned_dir, pinned_bin) = stage_pinned_helper(&self.base)?;
+                    let mut argv = vec![
+                        pinned_bin.to_string_lossy().into_owned(),
+                        "memory".into(),
+                        "--root".into(),
+                        copy_canon.to_string_lossy().into_owned(),
+                    ];
+                    argv.extend(args.iter().cloned());
+                    let runtime = pinned_bin
+                        .parent()
+                        .map(|parent| vec![parent.to_path_buf()])
+                        .unwrap_or_default();
+                    let spec = Spec {
+                        workspace: copy_canon.clone(),
+                        target: copy_canon.clone(),
+                        protected: vec![],
+                        readable: vec![],
+                        accounts: vec![],
+                        runtime,
+                        codex: None,
+                        evidence: None,
+                        network: false,
+                    };
+                    let wrapped = sandbox::gate(&spec, &argv)
+                        .map_err(|e| infra_core::RuntimeError::policy(e.message))?;
+                    let mut env =
+                        infra_host::sandbox::scrub_env(std::env::vars(), &BTreeMap::new());
+                    for key in [
+                        "ACCELERATOR_HOME",
+                        "ACCELERATOR_STATE_DIR",
+                        "ACCELERATOR_PROJECT_DIR",
+                        "ACCELERATOR_EDITION",
+                    ] {
+                        env.remove(key);
+                    }
+                    let mut command = std::process::Command::new(&wrapped[0]);
+                    command
+                        .args(&wrapped[1..])
+                        .current_dir(&copy_canon)
+                        .env_clear()
+                        .envs(&env)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped());
+                    let mut child = command.spawn()?;
+                    let deadline = std::time::Instant::now() + timeout;
+                    let status = loop {
+                        match child.try_wait()? {
+                            Some(status) => break status,
+                            None if std::time::Instant::now() < deadline => {
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                            }
+                            None => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(infra_core::RuntimeError::unavailable(
+                                    "Sandboxed Creator validation runtime timed out.",
+                                ));
+                            }
+                        }
+                    };
+                    use std::io::Read;
+                    let cap = infra_skillcache::tool::STDOUT_BYTES;
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    if let Some(out) = child.stdout.take() {
+                        out.take(cap as u64 + 1).read_to_end(&mut stdout)?;
+                    }
+                    if let Some(err) = child.stderr.take() {
+                        err.take(cap as u64 + 1).read_to_end(&mut stderr)?;
+                    }
+                    stdout.truncate(cap);
+                    stderr.truncate(infra_skillcache::tool::DIAGNOSTIC_BYTES);
+                    Ok(infra_generator::NativeOutput {
+                        code: status.code().unwrap_or(1),
+                        stdout,
+                        stderr,
+                    })
                 }
-            };
-            use std::io::Read;
-            let cap = infra_skillcache::tool::STDOUT_BYTES;
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            if let Some(out) = child.stdout.take() {
-                out.take(cap as u64 + 1).read_to_end(&mut stdout)?;
+                #[cfg(windows)]
+                {
+                    self.inner.runtime_command(copy.path(), args, timeout)
+                }
             }
-            if let Some(err) = child.stderr.take() {
-                err.take(cap as u64 + 1).read_to_end(&mut stderr)?;
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                self.inner.runtime_command(copy.path(), args, timeout)
             }
-            stdout.truncate(cap);
-            stderr.truncate(infra_skillcache::tool::DIAGNOSTIC_BYTES);
-            return Ok(infra_generator::NativeOutput {
-                code: status.code().unwrap_or(1),
-                stdout,
-                stderr,
-            });
+            Err(err) => Err(err.into()),
         }
-        self.inner.runtime_command(copy.path(), args, timeout)
     }
+}
+
+fn stage_pinned_helper(base: &Path) -> infra_core::Result<(tempfile::TempDir, PathBuf)> {
+    use std::io::{Read, Write};
+    std::fs::create_dir_all(base)?;
+    let dir = tempfile::Builder::new()
+        .prefix("creator-pinned-")
+        .tempdir_in(base)?;
+    let current = infra_core::fs::canonicalize(&std::env::current_exe()?)?;
+    let mut reader = std::fs::File::open(&current)?;
+    let meta = reader.metadata()?;
+    if infra_core::fs::linked(&meta) || !meta.is_file() {
+        return Err(infra_core::RuntimeError::policy(
+            "Current executable is not a regular file for pinned helper staging.",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    reader.read_to_end(&mut bytes)?;
+    let expected = infra_core::query::sha256(&bytes);
+
+    let bin = dir.path().join(if cfg!(windows) {
+        "infra-engine.exe"
+    } else {
+        "infra-engine"
+    });
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o700)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut out = options.open(&bin)?;
+    out.write_all(&bytes)?;
+    out.sync_all()?;
+    drop(out);
+    if infra_core::query::sha256(&std::fs::read(&bin)?) != expected {
+        return Err(infra_core::RuntimeError::policy(
+            "Pinned helper staging failed integrity check.",
+        ));
+    }
+    Ok((dir, bin))
 }
 
 fn current_exe_matches(path: &Path) -> infra_core::Result<bool> {
@@ -423,11 +496,15 @@ fn parse_gate_diagnostics(op: &str, stdout: &[u8], stderr: &[u8]) -> (usize, Str
                 for item in items.iter().take(25) {
                     let sev = item["severity"].as_str().unwrap_or("error");
                     let code = item["code"].as_str().unwrap_or(op);
+                    let path = item["path"].as_str().filter(|p| !p.is_empty());
                     let msg = item["message"].as_str().unwrap_or("");
                     if sev == "error" {
                         errors.push(item.clone());
                     }
-                    lines.push(format!("- [{sev}/{code}] {msg}"));
+                    match path {
+                        Some(p) => lines.push(format!("- [{sev}/{code}] ({p}) {msg}")),
+                        None => lines.push(format!("- [{sev}/{code}] {msg}")),
+                    }
                 }
                 let error_count = parsed["error_count"]
                     .as_u64()
@@ -490,6 +567,111 @@ fn format_repair_prompt(base_prompt: String, repair: Option<&RepairContext>) -> 
     )
 }
 
+#[derive(Default)]
+struct VerifiedGateCache {
+    passed: BTreeMap<String, String>,
+    reused_count: usize,
+}
+
+fn hash_path_entry(path: &Path) -> Value {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return json!({"exists": false});
+    };
+    if infra_core::fs::linked(&meta) {
+        return json!({"linked": true});
+    }
+    if meta.is_file() {
+        let sha = std::fs::read(path)
+            .map(|b| infra_core::query::sha256(&b))
+            .unwrap_or_default();
+        return json!({"file": true, "len": meta.len(), "sha256": sha});
+    }
+    if meta.is_dir() {
+        let mut children = BTreeMap::new();
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten().take(1024) {
+                let p = entry.path();
+                let Ok(m) = std::fs::symlink_metadata(&p) else {
+                    continue;
+                };
+                if infra_core::fs::linked(&m) {
+                    continue;
+                }
+                if m.is_dir() {
+                    if children.len() < 1024 {
+                        stack.push(p);
+                    }
+                } else if m.is_file() && children.len() < 1024 {
+                    let rel = p
+                        .strip_prefix(path)
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_default();
+                    let sha = std::fs::read(&p)
+                        .map(|b| infra_core::query::sha256(&b))
+                        .unwrap_or_default();
+                    children.insert(rel, json!([m.len(), sha]));
+                }
+            }
+        }
+        return json!({"dir": children});
+    }
+    json!({"other": true})
+}
+
+fn gate_input_digest(op: &str, data: &Value, task: &Path, request: &Value) -> String {
+    let mut parts = BTreeMap::<String, Value>::new();
+    for key in [
+        "plan",
+        "review",
+        "registry",
+        "publication_plan",
+        "task_dir",
+        "target",
+        "editions",
+        "skill_plan",
+        "approved_profile",
+        "approved_profile_sha256",
+        "profile_path",
+    ] {
+        let val = &data[key];
+        if val.is_null() {
+            continue;
+        }
+        if let Some(p) = val.as_str() {
+            let path = Path::new(p);
+            if matches!(
+                key,
+                "plan"
+                    | "review"
+                    | "registry"
+                    | "publication_plan"
+                    | "task_dir"
+                    | "skill_plan"
+                    | "approved_profile"
+            ) || (key == "target" && op == "validate-generated")
+            {
+                parts.insert(key.into(), hash_path_entry(path));
+            } else {
+                parts.insert(key.into(), json!(p));
+            }
+        } else {
+            parts.insert(key.into(), val.clone());
+        }
+    }
+    if op == "validate-plan-mutations" {
+        parts.insert(
+            "approved_profile".into(),
+            hash_path_entry(&task.join(files::REPORTS[0])),
+        );
+    }
+    parts.insert("approved_hashes".into(), request["approved"].clone());
+    infra_core::query::sha256(json!({"op": op, "parts": parts}).to_string().as_bytes())
+}
+
 impl CreatorRunner {
     fn verify_structured(
         &self,
@@ -497,6 +679,17 @@ impl CreatorRunner {
         generated: bool,
         installed: bool,
         emit: &Event,
+    ) -> Result<std::result::Result<(), VerifyFailure>> {
+        self.verify_structured_with_cache(request, generated, installed, emit, None)
+    }
+
+    fn verify_structured_with_cache(
+        &self,
+        request: &Value,
+        generated: bool,
+        installed: bool,
+        emit: &Event,
+        mut cache: Option<&mut VerifiedGateCache>,
     ) -> Result<std::result::Result<(), VerifyFailure>> {
         files::check_identity(request)?;
         let directory = PathBuf::from(request["directory"].as_str().unwrap_or(""));
@@ -509,8 +702,22 @@ impl CreatorRunner {
         let safe_gates = ValidationGates {
             inner: self.gates.as_ref(),
             base: directory.clone(),
+            #[cfg(test)]
+            force_sandbox_unavailable: false,
         };
-        let run = |op: &str, mut data: Value| -> Result<std::result::Result<(), VerifyFailure>> {
+        let mut run = |op: &str,
+                       mut data: Value|
+         -> Result<std::result::Result<(), VerifyFailure>> {
+            let input_digest = gate_input_digest(op, &data, &task, request);
+            if let Some(c) = cache.as_deref_mut()
+                && c.passed.get(op) == Some(&input_digest)
+            {
+                c.reused_count += 1;
+                emit(
+                    json!({"kind":"status","text":format!("Reusing verified {op} (artifacts unchanged)")}),
+                )?;
+                return Ok(Ok(()));
+            }
             emit(json!({"kind":"status","text":format!("Checking {op}")}))?;
             if let Some(obj) = data.as_object_mut() {
                 obj.insert("json".into(), Value::Bool(true));
@@ -524,6 +731,9 @@ impl CreatorRunner {
                 }
             }
             if result.code != 0 {
+                if let Some(c) = cache.as_deref_mut() {
+                    c.passed.remove(op);
+                }
                 let (error_count, summary, diagnostics) =
                     parse_gate_diagnostics(op, &result.stdout, &result.stderr);
                 return Ok(Err(VerifyFailure {
@@ -533,6 +743,9 @@ impl CreatorRunner {
                     summary,
                     diagnostics,
                 }));
+            }
+            if let Some(c) = cache.as_deref_mut() {
+                c.passed.insert(op.to_owned(), input_digest);
             }
             Ok(Ok(()))
         };
@@ -933,6 +1146,7 @@ impl CreatorRunner {
         let max_seconds = request["budgets"]["seconds"].as_u64();
         let mut repair: Option<RepairContext> = None;
         let mut repair_rounds = 0usize;
+        let mut gate_cache = VerifiedGateCache::default();
         loop {
             let output_limited = match self
                 .agent(
@@ -965,7 +1179,13 @@ impl CreatorRunner {
                 Ok(_) => {}
                 Err(err) => return Err(Box::new((err, repair_rounds, Value::Null))),
             }
-            match self.verify_structured(request, phase == "generate", false, &emit) {
+            match self.verify_structured_with_cache(
+                request,
+                phase == "generate",
+                false,
+                &emit,
+                Some(&mut gate_cache),
+            ) {
                 Ok(Ok(())) => break,
                 Ok(Err(failure)) => {
                     let budget_exhausted = max_tokens
@@ -1351,7 +1571,11 @@ mod tests {
         let base = dir.path().join("base");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::create_dir_all(&base).unwrap();
-        let gates = ValidationGates { inner: &Stub, base };
+        let gates = ValidationGates {
+            inner: &Stub,
+            base: base.clone(),
+            force_sandbox_unavailable: false,
+        };
         let err = gates
             .runtime_command(
                 &target,
@@ -1368,6 +1592,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ok.code, 0);
+
+        // Untrusted staged binary MUST be refused rather than silently falling back to `Stub`.
+        let bin_rel = if cfg!(windows) {
+            "memory-bank/bin/infra-engine.exe"
+        } else {
+            "memory-bank/bin/infra-engine"
+        };
+        let staged_bin = target.join(bin_rel);
+        std::fs::create_dir_all(staged_bin.parent().unwrap()).unwrap();
+        std::fs::write(&staged_bin, b"untrusted-binary").unwrap();
+        let untrusted = gates
+            .runtime_command(
+                &target,
+                &["validate".into()],
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap_err();
+        assert!(
+            untrusted.to_string().contains("pinned executable"),
+            "{untrusted}"
+        );
+
+        // When staged binary matches `current_exe()` and sandbox is unavailable on Unix,
+        // `ValidationGates` returns `SandboxUnavailable` instead of silently running unsandboxed.
+        #[cfg(not(windows))]
+        {
+            std::fs::copy(std::env::current_exe().unwrap(), &staged_bin).unwrap();
+            let no_sandbox_gates = ValidationGates {
+                inner: &Stub,
+                base,
+                force_sandbox_unavailable: true,
+            };
+            let unavailable = no_sandbox_gates
+                .runtime_command(
+                    &target,
+                    &["validate".into()],
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap_err();
+            assert_eq!(unavailable.code.as_deref(), Some("SandboxUnavailable"));
+            assert!(unavailable.message.contains("SandboxUnavailable"));
+        }
+    }
+
+    #[test]
+    fn verified_gate_cache_fingerprints_artifacts_and_reuses_when_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = dir.path().join("task");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let plan = task.join("skill-generation-plan.json");
+        let review = task.join("skill-plan-quality-report.json");
+        let registry = task.join("registry.json");
+        std::fs::write(&plan, b"{\"skills\":[]}").unwrap();
+        std::fs::write(&review, b"{\"ok\":true}").unwrap();
+        std::fs::write(&registry, b"{}").unwrap();
+        let data = json!({"plan": &plan, "review": &review, "registry": &registry});
+        let req = json!({"approved": {}});
+        let d1 = gate_input_digest("validate-plan-review", &data, &task, &req);
+        let d2 = gate_input_digest("validate-plan-review", &data, &task, &req);
+        assert_eq!(d1, d2);
+        std::fs::write(&review, b"{\"ok\":false}").unwrap();
+        let d3 = gate_input_digest("validate-plan-review", &data, &task, &req);
+        assert_ne!(d1, d3);
     }
 
     #[test]
