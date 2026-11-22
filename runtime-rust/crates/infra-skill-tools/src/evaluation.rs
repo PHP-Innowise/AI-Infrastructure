@@ -17,9 +17,11 @@ const MAX_QUERY_MEMO_ENTRIES: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct QueryMemoKey {
     platform: String,
+    project_sha256: String,
     description_sha256: String,
     query_sha256: String,
     model: String,
+    sample_index: usize,
 }
 
 #[derive(Default)]
@@ -62,15 +64,19 @@ fn query_memo() -> &'static Mutex<QueryMemoCache> {
 
 fn query_memo_key(
     platform: &str,
+    project: &Path,
     description: &str,
     query: &str,
     model: Option<&str>,
+    sample_index: usize,
 ) -> QueryMemoKey {
     QueryMemoKey {
         platform: platform.to_string(),
+        project_sha256: infra_core::query::sha256(project.as_os_str().as_encoded_bytes()),
         description_sha256: infra_core::query::sha256(description.as_bytes()),
         query_sha256: infra_core::query::sha256(query.as_bytes()),
         model: model.unwrap_or("").to_string(),
+        sample_index,
     }
 }
 
@@ -201,15 +207,12 @@ impl TriggerDetector {
     }
 }
 fn run_single_query_with_memo(
-    platform: &str,
+    key: QueryMemoKey,
     name: &str,
     description: &str,
-    query: &str,
-    model: Option<&str>,
     exec: impl FnOnce() -> Result<bool>,
 ) -> Result<bool> {
     static_prefilter_description(name, description)?;
-    let key = query_memo_key(platform, description, query, model);
     if let Ok(mut guard) = query_memo().lock()
         && let Some(hit) = guard.get(&key)
     {
@@ -236,18 +239,17 @@ pub fn run_single_query(
     model: Option<&str>,
     environment: &BTreeMap<String, String>,
 ) -> Result<bool> {
-    run_single_query_with_memo(config.key, name, description, query, model, || {
-        execute_single_query(
-            config,
-            query,
-            name,
-            description,
-            timeout,
-            project,
-            model,
-            environment,
-        )
-    })
+    static_prefilter_description(name, description)?;
+    execute_single_query(
+        config,
+        query,
+        name,
+        description,
+        timeout,
+        project,
+        model,
+        environment,
+    )
 }
 
 #[expect(
@@ -469,9 +471,15 @@ pub fn run_eval(
 ) -> Result<Value> {
     static_prefilter(name, description, eval_set)?;
     let jobs = prepare_jobs(eval_set, options)?;
+    let mut sample_counts: HashMap<&str, usize> = HashMap::new();
     let mut queue = VecDeque::with_capacity(jobs.job_count);
-    for index in 0..eval_set.len() {
-        queue.extend(std::iter::repeat_n(index, options.runs));
+    for (index, item) in eval_set.iter().enumerate() {
+        let query = item["query"].as_str().expect("validated evaluation query");
+        let sample = sample_counts.entry(query).or_default();
+        for _ in 0..options.runs {
+            queue.push_back((index, *sample));
+            *sample += 1;
+        }
     }
     let queue = Arc::new(Mutex::new(queue));
     let (tx, rx) = mpsc::channel();
@@ -488,22 +496,32 @@ pub fn run_eval(
                         break;
                     }
                     let job = queue.lock().unwrap().pop_front();
-                    let Some(index) = job else {
+                    let Some((index, sample_index)) = job else {
                         break;
                     };
                     let query = eval_set[index]["query"]
                         .as_str()
                         .expect("validated evaluation query");
-                    let result = run_single_query(
-                        &options.config,
-                        query,
-                        name,
-                        description,
-                        options.timeout,
+                    let key = query_memo_key(
+                        options.config.key,
                         project,
+                        description,
+                        query,
                         options.model.as_deref(),
-                        &environment,
+                        sample_index,
                     );
+                    let result = run_single_query_with_memo(key, name, description, || {
+                        execute_single_query(
+                            &options.config,
+                            query,
+                            name,
+                            description,
+                            options.timeout,
+                            project,
+                            options.model.as_deref(),
+                            &environment,
+                        )
+                    });
                     if tx.send((index, result)).is_err() {
                         break;
                     }
@@ -812,32 +830,53 @@ mod job_tests {
     fn query_memoization_reuses_result_by_description_query_and_model() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = AtomicUsize::new(0);
+        let project = Path::new("/tmp/memo-project-a");
         let desc = "memo-test-desc-v1";
         let q = "memo-test-query-alpha";
-        let first =
-            run_single_query_with_memo("claude", "memo-skill", desc, q, Some("sonnet"), || {
+        let first = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("sonnet"), 0),
+            "memo-skill",
+            desc,
+            || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(true)
-            })
-            .unwrap();
-        let second =
-            run_single_query_with_memo("claude", "memo-skill", desc, q, Some("sonnet"), || {
+            },
+        )
+        .unwrap();
+        let second = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("sonnet"), 0),
+            "memo-skill",
+            desc,
+            || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(false)
-            })
-            .unwrap();
-        let diff_model =
-            run_single_query_with_memo("claude", "memo-skill", desc, q, Some("opus"), || {
+            },
+        )
+        .unwrap();
+        let next_sample = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("sonnet"), 1),
+            "memo-skill",
+            desc,
+            || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(false)
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
+        let diff_model = run_single_query_with_memo(
+            query_memo_key("claude", project, desc, q, Some("opus"), 0),
+            "memo-skill",
+            desc,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            },
+        )
+        .unwrap();
         let diff_desc = run_single_query_with_memo(
-            "claude",
+            query_memo_key("claude", project, "memo-test-desc-v2", q, Some("sonnet"), 0),
             "memo-skill",
             "memo-test-desc-v2",
-            q,
-            Some("sonnet"),
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(false)
@@ -846,9 +885,10 @@ mod job_tests {
         .unwrap();
         assert!(first);
         assert!(second);
+        assert!(!next_sample);
         assert!(!diff_model);
         assert!(!diff_desc);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
