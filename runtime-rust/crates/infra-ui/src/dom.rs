@@ -278,35 +278,134 @@ fn apply_workspace_sibling_inert(ws: &Element) {
     }
 }
 
+pub(crate) fn push_overlay_id(stack: &mut Vec<String>, id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    stack.retain(|item| item != id);
+    stack.push(id.to_owned());
+}
+
+pub(crate) fn remove_overlay_id(stack: &mut Vec<String>, id: &str) {
+    if !id.is_empty() {
+        stack.retain(|item| item != id);
+    }
+}
+
+pub(crate) fn top_overlay_from_stack<'a>(
+    stack: &'a [String],
+    open_ids: &[String],
+) -> Option<&'a str> {
+    stack
+        .iter()
+        .rev()
+        .find(|id| open_ids.iter().any(|open| open == *id))
+        .map(String::as_str)
+}
+
+fn push_overlay_stack(id: &str) {
+    OVERLAY_STACK.with(|stack| push_overlay_id(&mut stack.borrow_mut(), id));
+}
+
+fn remove_overlay_stack(id: &str) {
+    OVERLAY_STACK.with(|stack| remove_overlay_id(&mut stack.borrow_mut(), id));
+}
+
+fn all_dialog_elements() -> Vec<Element> {
+    all("dialog")
+}
+
+fn is_dialog_open_el(el: &Element) -> bool {
+    let id = el.id();
+    el.has_attribute("open")
+        || (MODAL_OVERLAY_IDS.contains(&id.as_str()) && !el.has_attribute("hidden"))
+}
+
+fn top_open_modal_id() -> Option<String> {
+    let dialogs = all_dialog_elements();
+    let open_ids: Vec<String> = dialogs
+        .iter()
+        .filter(|el| is_dialog_open_el(el))
+        .map(Element::id)
+        .filter(|id| !id.is_empty())
+        .collect();
+    if open_ids.is_empty() {
+        return None;
+    }
+    let from_stack = OVERLAY_STACK
+        .with(|stack| top_overlay_from_stack(&stack.borrow(), &open_ids).map(str::to_owned));
+    if from_stack.is_some() {
+        return from_stack;
+    }
+    let has_open = |id: &str| open_ids.iter().any(|open| open == id);
+    let fallback_dialog = dialogs
+        .iter()
+        .rev()
+        .find(|el| {
+            is_dialog_open_el(el)
+                && !matches!(
+                    el.id().as_str(),
+                    "command-palette" | "approvals-drawer" | "run-file-card"
+                )
+        })
+        .map(Element::id);
+    match overlay_stack_priority(
+        has_open("command-palette"),
+        has_open("approvals-drawer"),
+        fallback_dialog.is_some(),
+        has_open("run-file-card"),
+        false,
+        false,
+    ) {
+        Some("command-palette") => Some("command-palette".into()),
+        Some("approvals-drawer") => Some("approvals-drawer".into()),
+        Some("dialog") => fallback_dialog,
+        Some("run-file-card") => Some("run-file-card".into()),
+        _ => None,
+    }
+}
+
+/// Returns the ID of the top-most open `<dialog>` overlay according to open order.
+pub(crate) fn top_open_dialog_id() -> Option<String> {
+    top_open_modal_id()
+}
+
 /// Synchronizes `inert` attributes across the shell, sidebar, expanded workspaces, and stacked modal overlays.
 pub fn sync_overlay_inert() {
     clear_workspace_inert();
-    let is_open =
-        |id: &str| get(id).is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
-    let other_dialog_open = document()
-        .query_selector("dialog[open]:not(#command-palette):not(#approvals-drawer)")
-        .ok()
-        .flatten()
-        .is_some();
-    let palette_open = is_open("command-palette");
-    let drawer_open = is_open("approvals-drawer");
-    let file_or_dialog_open = is_open("run-file-card") || other_dialog_open;
+    let dialogs = all_dialog_elements();
+    let top_modal = top_open_modal_id();
     let sidebar_open = get("sidebar").is_some_and(|e| e.class_list().contains("open"));
     let mobile = is_mobile_viewport();
-    let expanded_ws =
-        if !palette_open && !drawer_open && !file_or_dialog_open && !(mobile && sidebar_open) {
-            active_expanded_workspace()
-        } else {
-            None
-        };
 
-    for (id, mut inert) in overlay_inert_targets(
-        palette_open,
-        drawer_open,
-        file_or_dialog_open,
-        sidebar_open,
-        mobile,
-    ) {
+    if let Some(ref top_id) = top_modal {
+        set_inert_attr("sidebar", true);
+        set_inert_attr("main", true);
+        for d in dialogs {
+            let should_inert = is_dialog_open_el(&d) && d.id() != *top_id;
+            let has_inert = d.has_attribute("inert");
+            if should_inert && !has_inert {
+                let _ = d.set_attribute("inert", "");
+            } else if !should_inert && has_inert {
+                let _ = d.remove_attribute("inert");
+            }
+        }
+        return;
+    }
+
+    for d in dialogs {
+        if d.has_attribute("inert") {
+            let _ = d.remove_attribute("inert");
+        }
+    }
+
+    let expanded_ws = if !(mobile && sidebar_open) {
+        active_expanded_workspace()
+    } else {
+        None
+    };
+
+    for (id, mut inert) in overlay_inert_targets(false, false, false, sidebar_open, mobile) {
         if expanded_ws.is_some() && id == "sidebar" {
             inert = true;
         }
@@ -318,46 +417,74 @@ pub fn sync_overlay_inert() {
 }
 
 pub fn hidden(id: &str, v: bool) {
+    hidden_with_restore(id, v, true);
+}
+
+/// Shows or hides element `id`, restoring saved opener focus on hide only when `restore_focus` is true.
+pub fn hidden_with_restore(id: &str, v: bool, restore_focus: bool) {
     if let Some(e) = get(id) {
-        hide(&e, v);
+        hide_with_restore(&e, v, restore_focus);
     }
 }
+
 pub fn hide(e: &Element, v: bool) {
+    hide_with_restore(e, v, true);
+}
+
+/// Shows or hides element `e`, restoring saved opener focus on hide only when `restore_focus` is true.
+pub fn hide_with_restore(e: &Element, v: bool, restore_focus: bool) {
     let id = e.id();
+    let is_tracked_modal = MODAL_OVERLAY_IDS.contains(&id.as_str()) || e.tag_name() == "DIALOG";
     let was_open = !e.has_attribute("hidden") || e.has_attribute("open");
     let mut restored_already = false;
     if let Ok(dialog) = e.clone().dyn_into::<web_sys::HtmlDialogElement>() {
         if v {
+            remove_overlay_stack(&id);
             let _ = e.set_attribute("hidden", "");
+            if !restore_focus {
+                clear_saved_focus_for_overlay(&id);
+            }
             if dialog.open() {
                 mark_suppress_close_restore(&id);
                 dialog.close();
-                if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
+                if is_tracked_modal {
                     sync_overlay_inert();
-                    restore_focus_for_overlay(&id);
+                    if restore_focus {
+                        restore_focus_for_overlay(&id);
+                    }
                     restored_already = true;
                 }
             }
         } else {
-            if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !dialog.open() {
+            if is_tracked_modal && !dialog.open() {
                 save_focus_for_overlay(&id);
             }
             let _ = e.remove_attribute("hidden");
             if !dialog.open() {
                 let _ = dialog.show_modal();
             }
+            if is_tracked_modal && !id.is_empty() {
+                push_overlay_stack(&id);
+            }
         }
     } else if v {
+        remove_overlay_stack(&id);
         let _ = e.set_attribute("hidden", "");
+        if !restore_focus {
+            clear_saved_focus_for_overlay(&id);
+        }
     } else {
         if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !was_open {
             save_focus_for_overlay(&id);
         }
         let _ = e.remove_attribute("hidden");
+        if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !id.is_empty() {
+            push_overlay_stack(&id);
+        }
     }
-    if MODAL_OVERLAY_IDS.contains(&id.as_str()) && !restored_already {
+    if is_tracked_modal && !restored_already {
         sync_overlay_inert();
-        if v && was_open {
+        if v && restore_focus && was_open {
             restore_focus_for_overlay(&id);
         }
     }
@@ -526,10 +653,21 @@ pub fn focus(id: &str) {
 }
 
 thread_local! {
+    static OVERLAY_STACK: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static FOCUS_RETURN_STACK: std::cell::RefCell<Vec<(String, Element)>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static SUPPRESS_CLOSE_FOCUS_RESTORE: std::cell::RefCell<std::collections::BTreeSet<String>> =
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+fn clear_saved_focus_for_overlay(overlay_id: &str) {
+    if overlay_id.is_empty() {
+        return;
+    }
+    FOCUS_RETURN_STACK.with(|stack| {
+        stack.borrow_mut().retain(|(id, _)| id != overlay_id);
+    });
 }
 
 fn mark_suppress_close_restore(overlay_id: &str) {
@@ -602,28 +740,53 @@ pub fn click_outside_element(el: &Element, mouse: &web_sys::MouseEvent) -> bool 
 }
 
 pub fn dialog(id: &str, open: bool) {
+    dialog_with_restore(id, open, true);
+}
+
+/// Opens or closes a `<dialog>` element, restoring opener focus on close only when `restore_focus` is true.
+pub(crate) fn dialog_with_restore(id: &str, open: bool, restore_focus: bool) {
     if let Some(d) = get(id).and_then(|e| e.dyn_into::<web_sys::HtmlDialogElement>().ok()) {
         if open {
             if !d.open() {
                 save_focus_for_overlay(id);
                 let _ = d.show_modal();
+                push_overlay_stack(id);
                 if let Some(el) = modal_focusables(d.as_ref()).first() {
                     focus_element(el);
                 }
             }
             sync_overlay_inert();
         } else {
+            remove_overlay_stack(id);
             let was_open = d.open();
             if was_open {
                 mark_suppress_close_restore(id);
                 d.close();
             }
+            if !restore_focus {
+                clear_saved_focus_for_overlay(id);
+            }
             sync_overlay_inert();
-            if was_open {
+            if restore_focus && was_open {
                 restore_focus_for_overlay(id);
             }
         }
     }
+}
+
+/// Closes any open non-shell `<dialog>` elements (without focus theft) when navigating away.
+pub(crate) fn close_other_open_dialogs() {
+    for el in all_dialog_elements() {
+        let id = el.id();
+        if !matches!(
+            id.as_str(),
+            "command-palette" | "approvals-drawer" | "run-file-card"
+        ) && is_dialog_open_el(&el)
+        {
+            dialog_with_restore(&id, false, false);
+        }
+    }
+    sync_overlay_inert();
 }
 pub fn validity(id: &str) -> bool {
     get(id)
@@ -1480,45 +1643,16 @@ fn modal_focusables(card: &Element) -> Vec<Element> {
 }
 
 fn active_overlay_container() -> Option<Element> {
-    let palette_el =
-        get("command-palette").filter(|el| !el.has_attribute("hidden") || el.has_attribute("open"));
-    let drawer_el = get("approvals-drawer")
-        .filter(|el| !el.has_attribute("hidden") || el.has_attribute("open"));
-    let top_dialog = document()
-        .query_selector_all("dialog[open]:not(#command-palette):not(#approvals-drawer)")
-        .ok()
-        .and_then(|dialogs| {
-            let len = dialogs.length();
-            if len > 0 {
-                dialogs
-                    .item(len - 1)
-                    .and_then(|n| n.dyn_into::<Element>().ok())
-            } else {
-                None
-            }
-        });
-    let file_card_el =
-        get("run-file-card").filter(|el| !el.has_attribute("hidden") || el.has_attribute("open"));
+    if let Some(id) = top_open_modal_id() {
+        return get(&id);
+    }
     let mobile_sidebar_el = is_mobile_viewport()
         .then(|| get("sidebar").filter(|el| el.class_list().contains("open")))
         .flatten();
-    let expanded_ws_el = active_expanded_workspace();
-    match overlay_stack_priority(
-        palette_el.is_some(),
-        drawer_el.is_some(),
-        top_dialog.is_some(),
-        file_card_el.is_some(),
-        mobile_sidebar_el.is_some(),
-        expanded_ws_el.is_some(),
-    ) {
-        Some("command-palette") => palette_el,
-        Some("approvals-drawer") => drawer_el,
-        Some("dialog") => top_dialog,
-        Some("run-file-card") => file_card_el,
-        Some("sidebar") => mobile_sidebar_el,
-        Some("expanded-workspace") => expanded_ws_el,
-        _ => None,
+    if mobile_sidebar_el.is_some() {
+        return mobile_sidebar_el;
     }
+    active_expanded_workspace()
 }
 
 pub(crate) fn collapse_active_expanded_workspace() -> bool {
@@ -1802,6 +1936,7 @@ pub(crate) fn handle_a11y_dialog_close(target: &Element) {
         return;
     }
     let id = target.id();
+    remove_overlay_stack(&id);
     if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
         let _ = target.set_attribute("hidden", "");
     }
@@ -2050,6 +2185,23 @@ mod tests {
             "command-palette"
         ));
         assert!(!take_suppress_close_restore(&mut suppressed, ""));
+
+        // Open-order OVERLAY_STACK picks the most recently opened open modal regardless of DOM order.
+        let mut stack = Vec::new();
+        push_overlay_id(&mut stack, "omni-settings-dialog");
+        push_overlay_id(&mut stack, "graph-map");
+        push_overlay_id(&mut stack, "omni-settings-dialog");
+        assert_eq!(stack, vec!["graph-map", "omni-settings-dialog"]);
+        assert_eq!(
+            top_overlay_from_stack(&stack, &["graph-map".into(), "omni-settings-dialog".into()]),
+            Some("omni-settings-dialog")
+        );
+        remove_overlay_id(&mut stack, "omni-settings-dialog");
+        assert_eq!(
+            top_overlay_from_stack(&stack, &["graph-map".into()]),
+            Some("graph-map")
+        );
+        assert_eq!(top_overlay_from_stack(&stack, &[]), None);
     }
 
     #[test]

@@ -17,6 +17,9 @@ struct State {
     visited: BTreeSet<usize>,
     pending: Option<V>,
     saving: bool,
+    done_opener: Option<Element>,
+    editor_row_ids: Vec<String>,
+    next_editor_row_id: u64,
 }
 thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 fn read<T>(f: impl FnOnce(&State) -> T) -> T {
@@ -192,12 +195,33 @@ fn outputs(container: &Element, files: &[V]) {
                 let _ = img.set_attribute("alt", &text(file, "name"));
             }
             "pdf" => {
-                let iframe = add(&content, "iframe", "", "");
-                let uri = text(file, "data_uri");
-                if uri.starts_with("data:application/pdf;") {
-                    let _ = iframe.set_attribute("src", &uri);
+                let preview = add(&content, "div", "pdf-preview", "");
+                add(
+                    &preview,
+                    "p",
+                    "pdf-preview-note",
+                    "Inline PDF frames are disabled under strict Content Security Policy. Download the PDF to inspect it locally.",
+                );
+                let excerpt = text(file, "content");
+                let excerpt = if excerpt.is_empty() {
+                    text(file, "text")
+                } else {
+                    excerpt
+                };
+                if !excerpt.trim().is_empty() {
+                    add(&preview, "pre", "", &excerpt);
                 }
-                let _ = iframe.set_attribute("title", &text(file, "name"));
+                let name = text(file, "name");
+                let link = add(
+                    &preview,
+                    "a",
+                    "download-link",
+                    &format!("Download {}", if name.is_empty() { "PDF" } else { &name }),
+                );
+                let _ = link.set_attribute("href", &link_uri(file));
+                if !name.is_empty() {
+                    let _ = link.set_attribute("download", &name);
+                }
             }
             "xlsx" => {
                 if let Some(error) = file["render_error"].as_str() {
@@ -245,6 +269,7 @@ fn grades(run: &V) {
     dom::clear("grades-content");
     class("grades-content", "open", false);
     class("grades-arrow", "open", false);
+    dom::attr("grades-toggle", "aria-expanded", "false");
     if grading.is_null() {
         return;
     }
@@ -340,6 +365,7 @@ fn show_run(index: usize) {
     show("prev-outputs-section", !previous.is_empty());
     class("prev-outputs-content", "open", false);
     class("prev-outputs-arrow", "open", false);
+    dom::attr("prev-outputs-toggle", "aria-expanded", "false");
     if let Some(e) = dom::get("prev-outputs-content") {
         outputs(&e, previous);
     }
@@ -352,6 +378,7 @@ fn show_run(index: usize) {
         feedback.get(&id).map(String::as_str).unwrap_or(""),
     );
     dom::text("feedback-status", "");
+    class("feedback-status", "error", false);
     dom::disabled("prev-btn", index == 0);
     dom::disabled("next-btn", index + 1 >= total);
     class("done-btn", "ready", visited >= total);
@@ -436,6 +463,112 @@ fn download_feedback(data: &V) {
     }
     a.remove();
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SaveOutcomePlan {
+    status_text: &'static str,
+    status_error: bool,
+    show_done_overlay: bool,
+    done_message: &'static str,
+    trigger_download: bool,
+    toast_message: Option<&'static str>,
+}
+
+fn save_outcome_plan(standalone: bool, complete: bool, server_ok: bool) -> SaveOutcomePlan {
+    if standalone {
+        if complete {
+            SaveOutcomePlan {
+                status_text: "Downloaded feedback.json",
+                status_error: false,
+                show_done_overlay: true,
+                done_message: "Your feedback has been downloaded as feedback.json. Return to your session to share it.",
+                trigger_download: true,
+                toast_message: None,
+            }
+        } else {
+            SaveOutcomePlan {
+                status_text: "Will download on submit",
+                status_error: false,
+                show_done_overlay: false,
+                done_message: "",
+                trigger_download: false,
+                toast_message: None,
+            }
+        }
+    } else if server_ok {
+        SaveOutcomePlan {
+            status_text: "Saved",
+            status_error: false,
+            show_done_overlay: complete,
+            done_message:
+                "Your feedback has been saved. You can close this page or return to your session.",
+            trigger_download: false,
+            toast_message: None,
+        }
+    } else if complete {
+        SaveOutcomePlan {
+            status_text: "Server save failed — downloaded feedback.json instead",
+            status_error: true,
+            show_done_overlay: false,
+            done_message: "",
+            trigger_download: true,
+            toast_message: Some("Could not save to server; downloaded feedback.json instead."),
+        }
+    } else {
+        SaveOutcomePlan {
+            status_text: "Autosave failed (server unreachable); will retry or download on submit",
+            status_error: true,
+            show_done_overlay: false,
+            done_message: "",
+            trigger_download: false,
+            toast_message: None,
+        }
+    }
+}
+
+fn show_toast(message: &str) {
+    dom::text("toast", message);
+    class("toast", "visible", true);
+    dom::cancel_timer("eval-toast-hide");
+    dom::later("eval-toast-hide", 4500, || {
+        class("toast", "visible", false);
+    });
+}
+
+fn open_done_overlay(message: &str) {
+    let opener = dom::document().active_element();
+    write(|s| s.done_opener = opener);
+    if !message.is_empty() {
+        dom::text("done-overlay-message", message);
+    }
+    show("done-overlay", true);
+    class("done-overlay", "visible", true);
+    if let Some(ok_btn) =
+        dom::get("done-overlay-ok").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = ok_btn.focus();
+    } else if let Some(overlay) =
+        dom::get("done-overlay").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = overlay.focus();
+    }
+}
+
+fn close_done_overlay() {
+    class("done-overlay", "visible", false);
+    show("done-overlay", false);
+    let opener = write(|s| s.done_opener.take());
+    if let Some(el) = opener
+        .filter(|e| e.is_connected())
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = el.focus();
+    } else if let Some(btn) =
+        dom::get("done-btn").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = btn.focus();
+    }
+}
+
 fn save(complete: bool) {
     if complete {
         dom::cancel_timer("eval-feedback-save");
@@ -463,25 +596,22 @@ fn save(complete: bool) {
             };
             let complete = data["status"] == "complete";
             let standalone = read(|s| s.data["standalone"] == true);
-            let result = if standalone {
-                Err(JsValue::from_str("Standalone viewer"))
+            let server_ok = if standalone {
+                false
             } else {
-                request("POST", Some(&data)).await
+                request("POST", Some(&data)).await.is_ok()
             };
-            match result {
-                Ok(_) => {
-                    dom::text("feedback-status", "Saved");
-                    if complete {
-                        class("done-overlay", "visible", true);
-                    }
-                }
-                Err(_) => {
-                    dom::text("feedback-status", "Will download on submit");
-                    if complete {
-                        download_feedback(&data);
-                        class("done-overlay", "visible", true);
-                    }
-                }
+            let outcome = save_outcome_plan(standalone, complete, server_ok);
+            dom::text("feedback-status", outcome.status_text);
+            class("feedback-status", "error", outcome.status_error);
+            if outcome.trigger_download {
+                download_feedback(&data);
+            }
+            if outcome.show_done_overlay {
+                open_done_overlay(outcome.done_message);
+            }
+            if let Some(toast) = outcome.toast_message {
+                show_toast(toast);
             }
         }
     });
@@ -505,11 +635,17 @@ fn switch_view(view: &str) {
         let active =
             e.get_attribute("data-eval-action").as_deref() == Some(&format!("view-{view}"));
         let _ = e.class_list().toggle_with_force("active", active);
+        let _ = e.set_attribute("aria-selected", if active { "true" } else { "false" });
+        let _ = e.set_attribute("tabindex", if active { "0" } else { "-1" });
     }
     for e in dom::all(".view-panel") {
-        let _ = e
-            .class_list()
-            .toggle_with_force("active", e.id() == format!("panel-{view}"));
+        let active = e.id() == format!("panel-{view}");
+        let _ = e.class_list().toggle_with_force("active", active);
+        if active {
+            let _ = e.remove_attribute("hidden");
+        } else {
+            let _ = e.set_attribute("hidden", "");
+        }
     }
 }
 fn delta_number(value: &V) -> Option<f64> {
@@ -904,16 +1040,30 @@ pub fn start() -> Result<(), JsValue> {
                 "next" => navigate(1),
                 "submit" => save(true),
                 "close-done" => {
-                    class("done-overlay", "visible", false);
+                    close_done_overlay();
                     save(false);
                 }
                 "toggle-grades" => {
                     toggle("grades-content");
                     toggle("grades-arrow");
+                    let open =
+                        dom::get("grades-content").is_some_and(|e| e.class_list().contains("open"));
+                    dom::attr(
+                        "grades-toggle",
+                        "aria-expanded",
+                        if open { "true" } else { "false" },
+                    );
                 }
                 "toggle-previous" => {
                     toggle("prev-outputs-content");
                     toggle("prev-outputs-arrow");
+                    let open = dom::get("prev-outputs-content")
+                        .is_some_and(|e| e.class_list().contains("open"));
+                    dom::attr(
+                        "prev-outputs-toggle",
+                        "aria-expanded",
+                        if open { "true" } else { "false" },
+                    );
                 }
                 "view-outputs" => switch_view("outputs"),
                 "view-benchmark" => switch_view("benchmark"),
@@ -939,16 +1089,58 @@ pub fn start() -> Result<(), JsValue> {
         input.forget();
         let key =
             Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|event: web_sys::KeyboardEvent| {
-                if event
-                    .target()
-                    .and_then(|e| e.dyn_into::<Element>().ok())
-                    .is_some_and(|e| {
-                        e.tag_name() == "TEXTAREA"
-                            || e.tag_name() == "INPUT"
-                            || e.has_attribute("contenteditable")
-                    })
-                {
+                if dom::get("done-overlay").is_some_and(|el| el.class_list().contains("visible")) {
+                    match event.key().as_str() {
+                        "Escape" => {
+                            event.prevent_default();
+                            close_done_overlay();
+                            save(false);
+                        }
+                        "Tab" => {
+                            event.prevent_default();
+                            if let Some(ok_btn) = dom::get("done-overlay-ok")
+                                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                            {
+                                let _ = ok_btn.focus();
+                            }
+                        }
+                        _ => {}
+                    }
                     return;
+                }
+                if let Some(target_el) = event.target().and_then(|e| e.dyn_into::<Element>().ok()) {
+                    if target_el.get_attribute("role").as_deref() == Some("tab")
+                        && target_el.closest("#view-tabs").ok().flatten().is_some()
+                    {
+                        let next_view = match event.key().as_str() {
+                            "ArrowLeft" | "ArrowRight" => {
+                                if target_el.id() == "tab-outputs" {
+                                    Some(("benchmark", "tab-benchmark"))
+                                } else {
+                                    Some(("outputs", "tab-outputs"))
+                                }
+                            }
+                            "Home" => Some(("outputs", "tab-outputs")),
+                            "End" => Some(("benchmark", "tab-benchmark")),
+                            _ => None,
+                        };
+                        if let Some((view, tab_id)) = next_view {
+                            event.prevent_default();
+                            switch_view(view);
+                            if let Some(tab_el) = dom::get(tab_id)
+                                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                            {
+                                let _ = tab_el.focus();
+                            }
+                            return;
+                        }
+                    }
+                    if target_el.tag_name() == "TEXTAREA"
+                        || target_el.tag_name() == "INPUT"
+                        || target_el.has_attribute("contenteditable")
+                    {
+                        return;
+                    }
                 }
                 let delta = match event.key().as_str() {
                     "ArrowLeft" | "ArrowUp" => -1,
@@ -1122,60 +1314,165 @@ fn editor_summary() {
         ),
     );
 }
+fn editor_display_order(items: &[V], row_ids: &[String]) -> Vec<(usize, String, bool)> {
+    let mut sorted = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let row_id = row_ids
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| format!("row-{idx}"));
+            (idx, row_id, item["should_trigger"] == true)
+        })
+        .collect::<Vec<_>>();
+    sorted.sort_by_key(|(_, _, expected)| !*expected);
+    sorted
+}
+
+fn ensure_editor_section_row(
+    existing: &mut BTreeMap<String, Element>,
+    section_key: &str,
+    label: &str,
+) -> Element {
+    if let Some(tr) = existing.remove(section_key) {
+        return tr;
+    }
+    let tr = dom::el("tr", "section-header", "");
+    let _ = tr.set_attribute("data-editor-section", section_key);
+    let cell = add(&tr, "td", "", label);
+    let _ = cell.set_attribute("colspan", "3");
+    tr
+}
+
+fn create_editor_item_row(row_id: &str) -> Element {
+    let tr = dom::el("tr", "", "");
+    let _ = tr.set_attribute("data-editor-row", row_id);
+
+    let td_query = add(&tr, "td", "", "");
+    let input = add(&td_query, "textarea", "query-input", "");
+    let _ = input.set_attribute("data-editor-field", "query");
+
+    let td_toggle = add(&tr, "td", "", "");
+    let label = add(&td_toggle, "label", "toggle", "");
+    let checkbox = add(&label, "input", "", "");
+    let _ = checkbox.set_attribute("type", "checkbox");
+    let _ = checkbox.set_attribute("id", &format!("eval-trigger-{row_id}"));
+    let _ = checkbox.set_attribute("data-editor-field", "should_trigger");
+    add(&label, "span", "slider", "");
+    let trig_label = add(&td_toggle, "label", "trigger-label", "");
+    let _ = trig_label.set_attribute("for", &format!("eval-trigger-{row_id}"));
+
+    let td_actions = add(&tr, "td", "", "");
+    let button = add(&td_actions, "button", "btn-delete", "Delete");
+    let _ = button.set_attribute("type", "button");
+    let _ = button.set_attribute("data-editor-action", "delete");
+    tr
+}
+
+fn sync_editor_item_row(tr: &Element, index: usize, row_id: &str, item: &V, expected: bool) {
+    let display_num = index + 1;
+    let index_str = index.to_string();
+    if let Ok(Some(textarea)) = tr.query_selector("textarea.query-input") {
+        let _ = textarea.set_attribute("data-editor-index", &index_str);
+        let _ = textarea.set_attribute("aria-label", &format!("Evaluation query {display_num}"));
+        let next_val = text(item, "query");
+        if dom::value_of(&textarea) != next_val {
+            dom::set_element_value(&textarea, &next_val);
+        }
+    }
+    if let Ok(Some(checkbox)) = tr.query_selector("input[data-editor-field='should_trigger']") {
+        let _ = checkbox.set_attribute("id", &format!("eval-trigger-{row_id}"));
+        let _ = checkbox.set_attribute("data-editor-index", &index_str);
+        let _ =
+            checkbox.set_attribute("aria-label", &format!("Should trigger query {display_num}"));
+        if let Some(input) = checkbox.dyn_ref::<web_sys::HtmlInputElement>() {
+            if input.checked() != expected {
+                input.set_checked(expected);
+            }
+        }
+    }
+    if let Ok(Some(trig_label)) = tr.query_selector("label.trigger-label") {
+        let _ = trig_label.set_attribute("for", &format!("eval-trigger-{row_id}"));
+        let txt = if expected { "Yes" } else { "No" };
+        if trig_label.text_content().as_deref() != Some(txt) {
+            trig_label.set_text_content(Some(txt));
+        }
+    }
+    if let Ok(Some(btn)) = tr.query_selector("button.btn-delete") {
+        let _ = btn.set_attribute("data-editor-index", &index_str);
+        let _ = btn.set_attribute("aria-label", &format!("Delete query {display_num}"));
+    }
+}
+
 fn render_editor() {
-    let items = read(|s| list(&s.data["items"]).to_vec());
-    let mut sorted = items.iter().enumerate().collect::<Vec<_>>();
-    sorted.sort_by_key(|(_, item)| item["should_trigger"] != true);
+    let (items, row_ids) = read(|s| (list(&s.data["items"]).to_vec(), s.editor_row_ids.clone()));
+    let sorted = editor_display_order(&items, &row_ids);
     let Some(body) = dom::get("eval-body") else {
         return;
     };
-    body.set_text_content(None);
+
+    let active_before = dom::document()
+        .active_element()
+        .filter(|el| body.contains(Some(el)));
+
+    let mut existing_sections = BTreeMap::<String, Element>::new();
+    let mut existing_rows = BTreeMap::<String, Element>::new();
+    for child in dom::children(&body) {
+        if let Some(sec) = child.get_attribute("data-editor-section") {
+            existing_sections.insert(sec, child);
+        } else if let Some(row_id) = child.get_attribute("data-editor-row") {
+            existing_rows.insert(row_id, child);
+        } else {
+            child.remove();
+        }
+    }
+
+    let mut desired: Vec<Element> = Vec::with_capacity(sorted.len() + 2);
     let mut group = None;
-    for (index, item) in sorted {
-        let expected = item["should_trigger"] == true;
+    for (index, row_id, expected) in sorted {
         if group != Some(expected) {
-            let tr = add(&body, "tr", "section-header", "");
-            let cell = add(
-                &tr,
-                "td",
-                "",
-                if expected {
-                    "Should Trigger"
-                } else {
-                    "Should NOT Trigger"
-                },
-            );
-            let _ = cell.set_attribute("colspan", "3");
+            let (sec_key, sec_label) = if expected {
+                ("trigger", "Should Trigger")
+            } else {
+                ("no-trigger", "Should NOT Trigger")
+            };
+            desired.push(ensure_editor_section_row(
+                &mut existing_sections,
+                sec_key,
+                sec_label,
+            ));
             group = Some(expected);
         }
-        let tr = add(&body, "tr", "", "");
-        let td = add(&tr, "td", "", "");
-        let input = add(&td, "textarea", "query-input", "");
-        let _ = input.set_attribute("data-editor-field", "query");
-        let _ = input.set_attribute("data-editor-index", &index.to_string());
-        dom::set_element_value(&input, &text(item, "query"));
-        let td = add(&tr, "td", "", "");
-        let label = add(&td, "label", "toggle", "");
-        let checkbox = add(&label, "input", "", "");
-        let _ = checkbox.set_attribute("type", "checkbox");
-        let _ = checkbox.set_attribute("data-editor-field", "should_trigger");
-        let _ = checkbox.set_attribute("data-editor-index", &index.to_string());
-        if let Some(input) = checkbox.dyn_ref::<web_sys::HtmlInputElement>() {
-            input.set_checked(expected);
-        }
-        add(&label, "span", "slider", "");
-        add(
-            &td,
-            "span",
-            "trigger-label",
-            if expected { "Yes" } else { "No" },
-        );
-        let td = add(&tr, "td", "", "");
-        let button = add(&td, "button", "btn-delete", "Delete");
-        let _ = button.set_attribute("type", "button");
-        let _ = button.set_attribute("data-editor-action", "delete");
-        let _ = button.set_attribute("data-editor-index", &index.to_string());
+        let tr = existing_rows
+            .remove(&row_id)
+            .unwrap_or_else(|| create_editor_item_row(&row_id));
+        sync_editor_item_row(&tr, index, &row_id, &items[index], expected);
+        desired.push(tr);
     }
+
+    for unused in existing_sections
+        .into_values()
+        .chain(existing_rows.into_values())
+    {
+        unused.remove();
+    }
+
+    for (pos, el) in desired.iter().enumerate() {
+        let cur = body.children().item(pos as u32);
+        if cur.as_ref() != Some(el) {
+            let _ = body.insert_before(el, cur.as_ref().map(|n| n.as_ref()));
+        }
+    }
+
+    if let Some(active) = active_before {
+        if active.is_connected() && dom::document().active_element().as_ref() != Some(&active) {
+            if let Some(html) = active.dyn_ref::<web_sys::HtmlElement>() {
+                let _ = html.focus();
+            }
+        }
+    }
+
     editor_summary();
 }
 fn export_editor() {
@@ -1215,7 +1512,12 @@ fn start_editor(data: V) -> Result<(), JsValue> {
     if !data["items"].is_array() {
         return Err(JsValue::from_str("Invalid evaluation set"));
     }
-    write(|s| s.data = data);
+    let count = list(&data["items"]).len();
+    write(|s| {
+        s.data = data;
+        s.editor_row_ids = (0..count).map(|i| format!("row-{i}")).collect();
+        s.next_editor_row_id = count as u64;
+    });
     dom::text("skill-name", &read(|s| text(&s.data, "skill_name")));
     dom::text("skill-desc", &read(|s| text(&s.data, "description")));
     render_editor();
@@ -1234,7 +1536,13 @@ fn start_editor(data: V) -> Result<(), JsValue> {
             .unwrap_or("")
         {
             "add" => {
-                let index = write(|s| add_eval_set_item(&mut s.data));
+                let index = write(|s| {
+                    let index = add_eval_set_item(&mut s.data);
+                    let row_id = format!("row-{}", s.next_editor_row_id);
+                    s.next_editor_row_id = s.next_editor_row_id.saturating_add(1);
+                    s.editor_row_ids.push(row_id);
+                    index
+                });
                 render_editor();
                 if let Ok(Some(input)) = dom::document()
                     .query_selector(&format!("textarea[data-editor-index='{index}']"))
@@ -1254,6 +1562,9 @@ fn start_editor(data: V) -> Result<(), JsValue> {
                             if index < items.len() {
                                 items.remove(index);
                             }
+                        }
+                        if index < s.editor_row_ids.len() {
+                            s.editor_row_ids.remove(index);
                         }
                     });
                     render_editor();
@@ -1393,5 +1704,49 @@ mod tests {
         let mut bad = json!("corrupt");
         assert_eq!(add_eval_set_item(&mut bad), 0);
         assert_eq!(bad["items"][0]["should_trigger"], json!(true));
+    }
+
+    #[test]
+    fn save_outcome_plan_distinguishes_server_failure_from_standalone() {
+        let srv_ok = save_outcome_plan(false, true, true);
+        assert!(srv_ok.show_done_overlay);
+        assert!(!srv_ok.status_error);
+        assert!(!srv_ok.trigger_download);
+        assert!(!srv_ok.done_message.contains("Claude"));
+
+        let srv_err_submit = save_outcome_plan(false, true, false);
+        assert!(!srv_err_submit.show_done_overlay);
+        assert!(srv_err_submit.status_error);
+        assert!(srv_err_submit.trigger_download);
+        assert!(srv_err_submit.toast_message.is_some());
+
+        let srv_err_auto = save_outcome_plan(false, false, false);
+        assert!(!srv_err_auto.show_done_overlay);
+        assert!(srv_err_auto.status_error);
+        assert!(!srv_err_auto.trigger_download);
+
+        let standalone_submit = save_outcome_plan(true, true, false);
+        assert!(standalone_submit.show_done_overlay);
+        assert!(!standalone_submit.status_error);
+        assert!(standalone_submit.trigger_download);
+        assert!(!standalone_submit.done_message.contains("Claude"));
+    }
+
+    #[test]
+    fn editor_display_order_groups_triggers_first_with_stable_row_keys() {
+        let items = vec![
+            json!({"query": "no", "should_trigger": false}),
+            json!({"query": "yes", "should_trigger": true}),
+            json!({"query": "no2", "should_trigger": false}),
+        ];
+        let row_ids = vec!["row-0".into(), "row-1".into(), "row-2".into()];
+        assert_eq!(
+            editor_display_order(&items, &row_ids),
+            vec![
+                (1, "row-1".into(), true),
+                (0, "row-0".into(), false),
+                (2, "row-2".into(), false),
+            ]
+        );
     }
 }

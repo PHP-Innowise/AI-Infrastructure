@@ -969,7 +969,7 @@ fn push_skill_palette_entries(candidates: &mut Vec<PaletteEntry>) {
             } else if !path.is_empty() {
                 path
             } else if !agent.is_empty() {
-                agent
+                agent.clone()
             } else {
                 format!("Skill ({origin})")
             };
@@ -980,7 +980,7 @@ fn push_skill_palette_entries(candidates: &mut Vec<PaletteEntry>) {
                 subtitle,
                 shortcut: String::new(),
                 action: "palette-skill".into(),
-                payload: json!({ "name": name, "origin": origin }),
+                payload: json!({ "name": name, "origin": origin, "agent": agent }),
             });
         }
     }
@@ -1179,6 +1179,10 @@ pub fn open_palette() {
 }
 
 pub fn close_palette() {
+    close_palette_with_restore(true);
+}
+
+pub(crate) fn close_palette_with_restore(restore_focus: bool) {
     let was_open = palette_open()
         || dom::get("command-palette")
             .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
@@ -1195,7 +1199,7 @@ pub fn close_palette() {
     if !was_open {
         return;
     }
-    dom::hidden("command-palette", true);
+    dom::hidden_with_restore("command-palette", true, restore_focus);
 }
 
 pub fn render_palette() {
@@ -1274,8 +1278,118 @@ pub fn render_palette() {
     }
 }
 
+pub(crate) fn parse_palette_skill_payload(payload: &V) -> (String, String, String) {
+    if let Some(name) = payload.as_str() {
+        return (name.trim().to_owned(), String::new(), String::new());
+    }
+    (
+        m::text(payload, "name").trim().to_owned(),
+        m::text(payload, "origin").trim().to_owned(),
+        m::text(payload, "agent").trim().to_owned(),
+    )
+}
+
+fn scroll_matching_skill_into_view(name: &str, origin: &str) {
+    let target_lower = name.trim().to_ascii_lowercase();
+    if target_lower.is_empty() {
+        return;
+    }
+    let find_discovery = || {
+        dom::all("#skills-list .skill-choice")
+            .into_iter()
+            .find(|row| {
+                !row.has_attribute("hidden")
+                    && [".skill-choice-name", ".skill-choice-id"]
+                        .into_iter()
+                        .any(|sel| {
+                            row.query_selector(sel)
+                                .ok()
+                                .flatten()
+                                .and_then(|el| el.text_content())
+                                .is_some_and(|txt| txt.trim().to_ascii_lowercase() == target_lower)
+                        })
+            })
+    };
+    let find_installed = || {
+        dom::all("#skills-installed-list .installed-skill")
+            .into_iter()
+            .find(|row| {
+                row.query_selector(".skills-installed-name > span")
+                    .ok()
+                    .flatten()
+                    .and_then(|el| el.text_content())
+                    .is_some_and(|txt| txt.trim().to_ascii_lowercase() == target_lower)
+            })
+    };
+    let matched = if origin == "installed" {
+        find_installed().or_else(find_discovery)
+    } else {
+        find_discovery().or_else(find_installed)
+    };
+    if let Some(el) = matched {
+        el.scroll_into_view();
+    }
+}
+
+async fn apply_palette_skill_target(name: &str, origin: &str, agent: &str) {
+    if !name.is_empty() {
+        dom::set_value("skills-filter", name);
+        if dom::get("skills-filter").is_some_and(|el| !dom::is_disabled(&el)) {
+            let _ = crate::management::event(
+                "input",
+                "skills-filter",
+                "skills-filter",
+                &V::Null,
+                name,
+                false,
+            )
+            .await;
+        }
+    }
+    if origin == "installed" && !agent.is_empty() {
+        if let Some(select_el) = dom::get("skills-installed-agent") {
+            let has_opt = dom::children(&select_el)
+                .into_iter()
+                .any(|opt| opt.get_attribute("value").as_deref() == Some(agent));
+            if has_opt {
+                dom::set_value("skills-installed-agent", agent);
+                let _ = crate::management::event(
+                    "change",
+                    "skills-installed-agent",
+                    "skills-installed-agent",
+                    &V::Null,
+                    agent,
+                    false,
+                )
+                .await;
+            }
+        }
+    }
+    scroll_matching_skill_into_view(name, origin);
+    if !name.is_empty() {
+        let name_owned = name.to_owned();
+        let origin_owned = origin.to_owned();
+        dom::later("palette-skill-scroll", 100, move || {
+            scroll_matching_skill_into_view(&name_owned, &origin_owned);
+        });
+    }
+}
+
+fn dismiss_underlying_overlays_for_palette() {
+    crate::run::dismiss_file_card(false);
+    crate::activity::dismiss_file_card(false);
+    crate::run::close_approvals_drawer_with_restore(false);
+    dom::close_other_open_dialogs();
+}
+
 pub async fn execute_palette_entry(entry: PaletteEntry) {
-    close_palette();
+    let keeps_underlying = matches!(entry.action.as_str(), "palette-theme" | "palette-refresh");
+    if keeps_underlying {
+        close_palette();
+    } else {
+        close_palette_with_restore(false);
+        dismiss_underlying_overlays_for_palette();
+    }
     match entry.action.as_str() {
         "palette-new-session" => {
             session::new_session(None);
@@ -1332,7 +1446,9 @@ pub async fn execute_palette_entry(entry: PaletteEntry) {
             session::open_view("skill-capsules", true).await;
         }
         "palette-skill" => {
+            let (name, origin, agent) = parse_palette_skill_payload(&entry.payload);
             session::open_view("skills", true).await;
+            apply_palette_skill_target(&name, &origin, &agent).await;
         }
         "palette-composer-sigil" => {
             let sigil = entry.payload.as_str().unwrap_or("/");
@@ -1696,5 +1812,21 @@ mod tests {
 
         let discovered = collect_palette_entries("octane");
         assert!(discovered.iter().any(|e| e.action == "palette-skill"));
+        let skill_entry = skill_matches
+            .iter()
+            .find(|e| e.action == "palette-skill")
+            .expect("palette-skill entry");
+        assert_eq!(
+            parse_palette_skill_payload(&skill_entry.payload),
+            (
+                "verify-contracts".into(),
+                "installed".into(),
+                "codex".into()
+            )
+        );
+        assert_eq!(
+            parse_palette_skill_payload(&json!("pdf")),
+            ("pdf".into(), String::new(), String::new())
+        );
     }
 }

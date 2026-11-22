@@ -4,9 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Eval Review</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600&family=Lora:wght@400;500&display=swap" rel="stylesheet">
 
   <style>
     :root {
@@ -14,7 +11,7 @@
       --surface: #ffffff;
       --border: #e8e6dc;
       --text: #141413;
-      --text-muted: #b0aea5;
+      --text-muted: #6f6d65;
       --accent: #d97757;
       --accent-hover: #c4613f;
       --green: #788c5d;
@@ -24,12 +21,14 @@
       --header-bg: #141413;
       --header-text: #faf9f5;
       --radius: 6px;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    [hidden] { display: none !important; }
 
     body {
-      font-family: 'Lora', Georgia, serif;
+      font-family: Georgia, 'Times New Roman', serif;
       background: var(--bg);
       color: var(--text);
       height: 100vh;
@@ -48,7 +47,7 @@
       flex-shrink: 0;
     }
     .header h1 {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       font-size: 1.25rem;
       font-weight: 600;
     }
@@ -81,7 +80,7 @@
       flex-shrink: 0;
     }
     .section-header {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       padding: 0.75rem 1rem;
       font-size: 0.75rem;
       font-weight: 500;
@@ -100,7 +99,7 @@
       display: inline-block;
       padding: 0.2rem 0.625rem;
       border-radius: 9999px;
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       font-size: 0.6875rem;
       font-weight: 600;
       text-transform: uppercase;
@@ -194,6 +193,17 @@
       background: var(--bg);
       font-weight: 600;
     }
+    .output-file-content .pdf-preview {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      align-items: flex-start;
+    }
+    .output-file-content .pdf-preview-note {
+      font-family: var(--font-sans);
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+    }
     .output-file-content .download-link {
       display: inline-flex;
       align-items: center;
@@ -259,13 +269,31 @@
       margin-top: 0.5rem;
       min-height: 1.1em;
     }
+    .feedback-status.error {
+      color: var(--red);
+      font-weight: 600;
+    }
 
     /* ---- Grades (collapsible) ---- */
     .grades-toggle {
       display: flex;
       align-items: center;
+      width: 100%;
+      border: none;
+      background: none;
+      padding: 0;
+      font: inherit;
+      letter-spacing: inherit;
+      text-transform: inherit;
+      color: inherit;
+      text-align: left;
       cursor: pointer;
       user-select: none;
+    }
+    .grades-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 3px;
     }
     .grades-toggle:hover {
       color: var(--accent);
@@ -333,7 +361,7 @@
       flex-shrink: 0;
     }
     .view-tab {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       padding: 0.625rem 1.25rem;
       font-size: 0.8125rem;
       font-weight: 500;
@@ -373,7 +401,7 @@
       border: 1px solid var(--border);
     }
     .benchmark-table th {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       background: var(--header-bg);
       color: var(--header-text);
       font-weight: 500;
@@ -398,7 +426,7 @@
       padding: 1rem;
     }
     .benchmark-notes h3 {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       font-size: 0.875rem;
       margin-bottom: 0.75rem;
     }
@@ -429,7 +457,7 @@
       flex-shrink: 0;
     }
     .nav-btn {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       padding: 0.5rem 1.25rem;
       border: 1px solid var(--border);
       border-radius: var(--radius);
@@ -449,7 +477,7 @@
       cursor: not-allowed;
     }
     .done-btn {
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
       padding: 0.5rem 1.5rem;
       border: 1px solid var(--border);
       border-radius: var(--radius);
@@ -545,19 +573,19 @@
     <div class="header">
       <div>
         <h1>Eval Review: <span id="skill-name"></span></h1>
-        <div class="instructions">Review each output and leave feedback below. Navigate with arrow keys or buttons. When done, copy feedback and paste into Claude Code.</div>
+        <div class="instructions">Review each output and leave feedback below. Navigate with arrow keys or buttons. Submit when finished.</div>
       </div>
       <div class="progress" id="progress"></div>
     </div>
 
     <!-- View tabs (only shown when benchmark data exists) -->
-    <div class="view-tabs" id="view-tabs" style="display:none;">
-      <button class="view-tab active" data-eval-action="view-outputs">Outputs</button>
-      <button class="view-tab" data-eval-action="view-benchmark">Benchmark</button>
+    <div class="view-tabs" id="view-tabs" role="tablist" aria-label="Evaluation views" style="display:none;">
+      <button type="button" class="view-tab active" id="tab-outputs" role="tab" aria-selected="true" aria-controls="panel-outputs" tabindex="0" data-eval-action="view-outputs">Outputs</button>
+      <button type="button" class="view-tab" id="tab-benchmark" role="tab" aria-selected="false" aria-controls="panel-benchmark" tabindex="-1" data-eval-action="view-benchmark">Benchmark</button>
     </div>
 
     <!-- Outputs panel (qualitative review) -->
-    <div class="view-panel active" id="panel-outputs">
+    <div class="view-panel active" id="panel-outputs" role="tabpanel" aria-labelledby="tab-outputs">
     <div class="main">
       <!-- Prompt -->
       <div class="section">
@@ -578,10 +606,10 @@
       <!-- Previous Output (collapsible) -->
       <div class="section" id="prev-outputs-section" style="display:none;">
         <div class="section-header">
-          <div class="grades-toggle" data-eval-action="toggle-previous">
-            <span class="arrow" id="prev-outputs-arrow">&#9654;</span>
+          <button type="button" class="grades-toggle" id="prev-outputs-toggle" aria-expanded="false" aria-controls="prev-outputs-content" data-eval-action="toggle-previous">
+            <span class="arrow" id="prev-outputs-arrow" aria-hidden="true">&#9654;</span>
             Previous Output
-          </div>
+          </button>
         </div>
         <div class="grades-content" id="prev-outputs-content"></div>
       </div>
@@ -589,24 +617,25 @@
       <!-- Grades (collapsible) -->
       <div class="section" id="grades-section" style="display:none;">
         <div class="section-header">
-          <div class="grades-toggle" data-eval-action="toggle-grades">
-            <span class="arrow" id="grades-arrow">&#9654;</span>
+          <button type="button" class="grades-toggle" id="grades-toggle" aria-expanded="false" aria-controls="grades-content" data-eval-action="toggle-grades">
+            <span class="arrow" id="grades-arrow" aria-hidden="true">&#9654;</span>
             Formal Grades
-          </div>
+          </button>
         </div>
         <div class="grades-content" id="grades-content"></div>
       </div>
 
       <!-- Feedback -->
       <div class="section">
-        <div class="section-header">Your Feedback</div>
+        <label class="section-header" for="feedback" style="display:block;">Your Feedback</label>
         <div class="section-body">
           <textarea
             class="feedback-textarea"
             id="feedback"
+            aria-label="Your Feedback"
             placeholder="What do you think of this output? Any issues, suggestions, or things that look great?"
           ></textarea>
-          <div class="feedback-status" id="feedback-status"></div>
+          <div class="feedback-status" id="feedback-status" role="status" aria-live="polite"></div>
           <div class="prev-feedback" id="prev-feedback" style="display:none;">
             <div class="prev-feedback-label">Previous feedback</div>
             <div id="prev-feedback-text"></div>
@@ -616,14 +645,14 @@
     </div>
 
     <div class="nav" id="outputs-nav">
-      <button class="nav-btn" id="prev-btn" data-eval-action="previous">&#8592; Previous</button>
-      <button class="done-btn" id="done-btn" data-eval-action="submit">Submit All Reviews</button>
-      <button class="nav-btn" id="next-btn" data-eval-action="next">Next &#8594;</button>
+      <button type="button" class="nav-btn" id="prev-btn" data-eval-action="previous">&#8592; Previous</button>
+      <button type="button" class="done-btn" id="done-btn" data-eval-action="submit">Submit All Reviews</button>
+      <button type="button" class="nav-btn" id="next-btn" data-eval-action="next">Next &#8594;</button>
     </div>
     </div><!-- end panel-outputs -->
 
     <!-- Benchmark panel (quantitative stats) -->
-    <div class="view-panel" id="panel-benchmark">
+    <div class="view-panel" id="panel-benchmark" role="tabpanel" aria-labelledby="tab-benchmark" hidden>
       <div class="benchmark-view" id="benchmark-content">
         <div class="benchmark-empty">No benchmark data available. Run a benchmark to see quantitative results here.</div>
       </div>
@@ -631,18 +660,18 @@
   </div>
 
   <!-- Done overlay -->
-  <div class="done-overlay" id="done-overlay">
+  <div class="done-overlay" id="done-overlay" role="dialog" aria-modal="true" aria-labelledby="done-overlay-title" tabindex="-1" hidden>
     <div class="done-card">
-      <h2>Review Complete</h2>
-      <p>Your feedback has been saved. Go back to your Claude Code session and tell Claude you're done reviewing.</p>
+      <h2 id="done-overlay-title">Review Complete</h2>
+      <p id="done-overlay-message">Your feedback has been saved. You can close this page or return to your session.</p>
       <div class="btn-row">
-        <button data-eval-action="close-done">OK</button>
+        <button type="button" id="done-overlay-ok" data-eval-action="close-done">OK</button>
       </div>
     </div>
   </div>
 
   <!-- Toast -->
-  <div class="toast" id="toast"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <script id="eval-viewer-data" type="application/json">__EVAL_DATA__</script>
 <script type="module" src="__BOOT_URL__"></script>

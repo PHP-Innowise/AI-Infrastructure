@@ -1,6 +1,6 @@
 use super::*;
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct StreamMdEntry {
@@ -19,31 +19,74 @@ thread_local! {
     static STREAM_RAW_TEXT: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
     static CALL_BLOCK_CACHE: RefCell<BTreeMap<String, web_sys::Element>> = const { RefCell::new(BTreeMap::new()) };
     static TOOL_FULL_OUTPUTS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+    static TOOL_OUTPUT_ORDER: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
+    static RENDERED_EVENT_IDS: RefCell<BTreeSet<u64>> = const { RefCell::new(BTreeSet::new()) };
+    static LAST_MAX_RENDERED_ID: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 const TOOL_OUTPUT_MAX_CACHED_KEYS: usize = 256;
+const TOOL_OUTPUT_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Clears DOM-bound stream caches while retaining `TOOL_FULL_OUTPUTS` across in-session replays.
 fn clear_stream_dom_caches() {
     STREAM_MD_CACHE.with(|cache| cache.borrow_mut().clear());
     STREAM_RAW_TEXT.with(|raw| raw.borrow_mut().clear());
     CALL_BLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
-    TOOL_FULL_OUTPUTS
-        .with(|cache| prune_tool_outputs_map(&mut cache.borrow_mut(), TOOL_OUTPUT_MAX_CACHED_KEYS));
+    RENDERED_EVENT_IDS.with(|ids| ids.borrow_mut().clear());
+    LAST_MAX_RENDERED_ID.with(|max| max.set(None));
+    TOOL_FULL_OUTPUTS.with(|cache| {
+        TOOL_OUTPUT_ORDER.with(|order| {
+            prune_tool_outputs_with_budget(
+                &mut cache.borrow_mut(),
+                &mut order.borrow_mut(),
+                TOOL_OUTPUT_MAX_CACHED_KEYS,
+                TOOL_OUTPUT_MAX_TOTAL_BYTES,
+            );
+        });
+    });
 }
 
-pub(crate) fn prune_tool_outputs_map(map: &mut BTreeMap<String, String>, max_entries: usize) {
-    while map.len() > max_entries {
-        let Some(first_key) = map.keys().next().cloned() else {
+fn touch_tool_output_key(order: &mut VecDeque<String>, key: &str) {
+    if let Some(pos) = order.iter().position(|existing| existing == key) {
+        order.remove(pos);
+    }
+    order.push_back(key.to_owned());
+}
+
+pub(crate) fn prune_tool_outputs_with_budget(
+    map: &mut BTreeMap<String, String>,
+    order: &mut VecDeque<String>,
+    max_entries: usize,
+    max_total_bytes: usize,
+) {
+    let mut total_bytes: usize = map.values().map(String::len).sum();
+    while map.len() > max_entries || (total_bytes > max_total_bytes && map.len() > 1) {
+        let evict_key = loop {
+            match order.pop_front() {
+                Some(candidate) if map.contains_key(&candidate) => break Some(candidate),
+                Some(_) => continue,
+                None => break map.keys().next().cloned(),
+            }
+        };
+        let Some(key) = evict_key else {
             break;
         };
-        map.remove(&first_key);
+        if let Some(removed) = map.remove(&key) {
+            total_bytes = total_bytes.saturating_sub(removed.len());
+        }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn prune_tool_outputs_map(map: &mut BTreeMap<String, String>, max_entries: usize) {
+    let mut order = VecDeque::new();
+    prune_tool_outputs_with_budget(map, &mut order, max_entries, usize::MAX);
 }
 
 pub(crate) fn clear_stream_md_cache() {
     clear_stream_dom_caches();
     TOOL_FULL_OUTPUTS.with(|cache| cache.borrow_mut().clear());
+    TOOL_OUTPUT_ORDER.with(|order| order.borrow_mut().clear());
 }
 
 fn ensure_block_stream_key(block: &web_sys::Element) -> String {
@@ -461,6 +504,16 @@ fn store_tool_output(key: &str, incoming: &str, reset: bool) -> String {
             combined
         };
         map.insert(key.to_owned(), bounded.clone());
+        TOOL_OUTPUT_ORDER.with(|order| {
+            let mut order = order.borrow_mut();
+            touch_tool_output_key(&mut order, key);
+            prune_tool_outputs_with_budget(
+                &mut map,
+                &mut order,
+                TOOL_OUTPUT_MAX_CACHED_KEYS,
+                TOOL_OUTPUT_MAX_TOTAL_BYTES,
+            );
+        });
         bounded
     })
 }
@@ -804,7 +857,26 @@ pub(crate) fn conversation(v: &V) {
     conversation_with_call(v, None);
 }
 
+fn stream_event_id(v: &V) -> Option<u64> {
+    v["id"]
+        .as_u64()
+        .or_else(|| v["id"].as_str()?.trim().parse().ok())
+}
+
+fn record_rendered_event_id(v: &V) {
+    if let Some(id) = stream_event_id(v) {
+        RENDERED_EVENT_IDS.with(|ids| {
+            ids.borrow_mut().insert(id);
+        });
+        LAST_MAX_RENDERED_ID.with(|max| {
+            let next = max.get().map_or(id, |prev| prev.max(id));
+            max.set(Some(next));
+        });
+    }
+}
+
 pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
+    record_rendered_event_id(v);
     let Some(events_el) = dom::get("events") else {
         return;
     };
@@ -965,6 +1037,7 @@ fn render_event_into(
             &format!("conversation-{kind}"),
             "",
         );
+        let _ = block.set_attribute("data-first-event-id", &id);
         let _ = block.set_attribute("data-event-id", &id);
         match kind.as_str() {
             "tool" => {
@@ -1267,24 +1340,203 @@ fn restore_stream_replay_ui_state(container: &web_sys::Element, state: &StreamRe
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderedBlockMeta {
+    pub(crate) first_id: u64,
+    pub(crate) last_id: u64,
+    pub(crate) call_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum IncrementalOp {
+    InsertBefore {
+        event_idx: usize,
+        before_block_idx: usize,
+    },
+    UpdateTool {
+        event_idx: usize,
+        block_idx: usize,
+    },
+    AppendBottom {
+        event_idx: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayPlan {
+    Incremental {
+        ops: Vec<IncrementalOp>,
+        bottom_appended: usize,
+        inserted_above: bool,
+    },
+    FullRebuild {
+        bottom_appended: usize,
+    },
+}
+
+pub(crate) fn plan_stream_replay(
+    blocks: &[RenderedBlockMeta],
+    rendered_ids: &BTreeSet<u64>,
+    max_rendered_id: Option<u64>,
+    visible_events: &[V],
+) -> ReplayPlan {
+    let count_bottom_new = || -> usize {
+        if let Some(max_id) = max_rendered_id {
+            visible_events
+                .iter()
+                .filter_map(stream_event_id)
+                .filter(|id| !rendered_ids.contains(id) && *id > max_id)
+                .count()
+        } else {
+            visible_events.len()
+        }
+    };
+
+    if blocks.is_empty() || visible_events.is_empty() || rendered_ids.is_empty() {
+        return ReplayPlan::FullRebuild {
+            bottom_appended: count_bottom_new(),
+        };
+    }
+
+    let mut ops = Vec::new();
+    let mut bottom_appended = 0usize;
+    let mut inserted_above = false;
+    for (idx, ev) in visible_events.iter().enumerate() {
+        let Some(ev_id) = stream_event_id(ev) else {
+            return ReplayPlan::FullRebuild {
+                bottom_appended: count_bottom_new(),
+            };
+        };
+        if rendered_ids.contains(&ev_id) {
+            continue;
+        }
+        let kind = m::text(ev, "kind");
+        if kind == "tool" {
+            let call_id = conversation_event_call_id(ev, None);
+            if !call_id.is_empty() {
+                if let Some(block_idx) = blocks.iter().position(|b| b.call_id == call_id) {
+                    ops.push(IncrementalOp::UpdateTool {
+                        event_idx: idx,
+                        block_idx,
+                    });
+                    continue;
+                }
+            }
+        }
+        if max_rendered_id.is_some_and(|m| ev_id > m) {
+            bottom_appended += 1;
+            ops.push(IncrementalOp::AppendBottom { event_idx: idx });
+            continue;
+        }
+        let before_pos = blocks.iter().position(|b| b.first_id > ev_id);
+        let splits_coalesced = match before_pos {
+            Some(0) => false,
+            Some(pos) => {
+                let prev = &blocks[pos - 1];
+                prev.first_id < ev_id && ev_id < prev.last_id
+            }
+            None => blocks
+                .last()
+                .is_some_and(|last| last.first_id < ev_id && ev_id < last.last_id),
+        };
+        if splits_coalesced {
+            return ReplayPlan::FullRebuild {
+                bottom_appended: count_bottom_new(),
+            };
+        }
+        if let Some(before_block_idx) = before_pos {
+            inserted_above = true;
+            ops.push(IncrementalOp::InsertBefore {
+                event_idx: idx,
+                before_block_idx,
+            });
+        } else {
+            // Event follows all rendered blocks even if <= max_rendered_id (e.g., trailing non-rendered item).
+            ops.push(IncrementalOp::AppendBottom { event_idx: idx });
+        }
+    }
+
+    ReplayPlan::Incremental {
+        ops,
+        bottom_appended,
+        inserted_above,
+    }
+}
+
+fn read_rendered_blocks(
+    container: &web_sys::Element,
+) -> Option<(Vec<web_sys::Element>, Vec<RenderedBlockMeta>)> {
+    let dom_nodes = dom::children(container);
+    let mut metas = Vec::with_capacity(dom_nodes.len());
+    for el in &dom_nodes {
+        let last_id = el
+            .get_attribute("data-event-id")
+            .and_then(|s| s.trim().parse::<u64>().ok())?;
+        let first_id = el
+            .get_attribute("data-first-event-id")
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(last_id);
+        let call_id = el.get_attribute("data-call-id").unwrap_or_default();
+        metas.push(RenderedBlockMeta {
+            first_id,
+            last_id,
+            call_id,
+        });
+    }
+    Some((dom_nodes, metas))
+}
+
+fn update_existing_tool_block(block: &web_sys::Element, v: &V, resolved_call: Option<&str>) {
+    let id = m::string(&v["id"]);
+    let call_id = conversation_event_call_id(v, resolved_call);
+    let is_start = starts(v);
+    let failed = !is_start && v["ok"] == false;
+    let state_str = if is_start {
+        "running"
+    } else if failed {
+        "failed"
+    } else {
+        "completed"
+    };
+    let existing_id = block
+        .get_attribute("data-event-id")
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let incoming_id = stream_event_id(v);
+    let newer_or_equal = match (existing_id, incoming_id) {
+        (Some(cur), Some(inc)) => inc >= cur,
+        _ => true,
+    };
+    if newer_or_equal {
+        let _ = block.set_attribute("data-event-id", &id);
+        let _ = block.set_attribute("data-tool-state", state_str);
+        if let Ok(Some(summary)) = block.query_selector("summary") {
+            summary.set_text_content(Some(&format_tool_summary(v)));
+        }
+    }
+    let output_key = if !call_id.is_empty() {
+        call_id
+    } else {
+        format!("ev:{id}")
+    };
+    let _ = block.set_attribute("data-output-key", &output_key);
+    let text = clean(&m::text(v, "text"));
+    let full_text = store_tool_output(&output_key, &text, is_start);
+    apply_tool_output_dom(block, &output_key, &full_text);
+    sync_tool_failure_button(block, v, &full_text, failed);
+}
+
 /// Re-renders `#events` from `model::events` honoring the current `visible_limit` window
 /// while folding `run` locally and preserving expanded tool/thinking state and cached full outputs.
 pub(crate) fn replay_visible_stream() {
     let events_el = dom::get("events");
-    let preserved = events_el
-        .as_ref()
-        .map(capture_stream_replay_ui_state)
-        .unwrap_or_default();
     let conv_before = dom::get("conversation").map(|c| {
         let sticky = m::read(|s| s.stream.sticky_bottom)
             || is_near_bottom(c.scroll_height(), c.scroll_top(), c.client_height());
-        (sticky, c.scroll_top())
+        (sticky, c.scroll_top(), c.scroll_height())
     });
-    let was_sticky = conv_before.map(|(s, _)| s).unwrap_or(true);
-    let prev_scroll_top = conv_before.map(|(_, top)| top).unwrap_or(0);
-
-    clear_stream_dom_caches();
-    dom::clear("events");
+    let was_sticky = conv_before.map(|(s, _, _)| s).unwrap_or(true);
+    let prev_scroll_top = conv_before.map(|(_, top, _)| top).unwrap_or(0);
+    let prev_scroll_height = conv_before.map(|(_, _, h)| h).unwrap_or(0);
 
     let (events, limit) = m::read(|s| (s.events.clone(), s.stream.visible_limit));
     let start = events.len().saturating_sub(limit);
@@ -1300,11 +1552,131 @@ pub(crate) fn replay_visible_stream() {
             m::take("run-before");
         }
     }
+
+    let visible_events = &events[start..];
+    let dom_snapshot = events_el.as_ref().and_then(read_rendered_blocks);
+    let plan = match &dom_snapshot {
+        Some((_, metas)) => RENDERED_EVENT_IDS.with(|ids| {
+            let max_id = LAST_MAX_RENDERED_ID.with(Cell::get);
+            plan_stream_replay(metas, &ids.borrow(), max_id, visible_events)
+        }),
+        None => RENDERED_EVENT_IDS.with(|ids| {
+            let max_id = LAST_MAX_RENDERED_ID.with(Cell::get);
+            plan_stream_replay(&[], &ids.borrow(), max_id, visible_events)
+        }),
+    };
+
+    if let (
+        Some(container),
+        Some((dom_nodes, _)),
+        ReplayPlan::Incremental {
+            ops,
+            bottom_appended,
+            inserted_above,
+        },
+    ) = (&events_el, &dom_snapshot, &plan)
+    {
+        let mut rendered_any = false;
+        for op in ops {
+            match *op {
+                IncrementalOp::InsertBefore {
+                    event_idx,
+                    before_block_idx,
+                } => {
+                    let ev = &visible_events[event_idx];
+                    let resolved_call = resolved_calls[start + event_idx].as_deref();
+                    activity(ev);
+                    record_rendered_event_id(ev);
+                    let staging = dom::el("div", "", "");
+                    if render_event_into(&staging, ev, resolved_call, true) {
+                        let anchor = dom_nodes.get(before_block_idx);
+                        while let Some(node) = staging.first_element_child() {
+                            if let Some(call_id) = node.get_attribute("data-call-id") {
+                                if !call_id.is_empty() {
+                                    CALL_BLOCK_CACHE.with(|c| {
+                                        c.borrow_mut().insert(call_id, node.clone());
+                                    });
+                                }
+                            }
+                            let _ = container.insert_before(&node, anchor.map(|a| a.as_ref()));
+                            rendered_any = true;
+                        }
+                    }
+                }
+                IncrementalOp::UpdateTool {
+                    event_idx,
+                    block_idx,
+                } => {
+                    let ev = &visible_events[event_idx];
+                    let resolved_call = resolved_calls[start + event_idx].as_deref();
+                    activity(ev);
+                    record_rendered_event_id(ev);
+                    if let Some(block) = dom_nodes.get(block_idx) {
+                        update_existing_tool_block(block, ev, resolved_call);
+                    }
+                }
+                IncrementalOp::AppendBottom { event_idx } => {
+                    let ev = &visible_events[event_idx];
+                    let resolved_call = resolved_calls[start + event_idx].as_deref();
+                    activity(ev);
+                    record_rendered_event_id(ev);
+                    if render_event_into(container, ev, resolved_call, true) {
+                        rendered_any = true;
+                    }
+                }
+            }
+        }
+        if rendered_any {
+            if let Some(conv) = dom::get("conversation") {
+                if was_sticky {
+                    conv.set_scroll_top(conv.scroll_height());
+                    m::write(|s| {
+                        s.stream.sticky_bottom = true;
+                        s.stream.unseen_count = 0;
+                    });
+                } else {
+                    let target_top = if *inserted_above && *bottom_appended == 0 {
+                        let new_h = conv.scroll_height();
+                        prev_scroll_top + (new_h - prev_scroll_height)
+                    } else {
+                        prev_scroll_top
+                    };
+                    conv.set_scroll_top(target_top);
+                    m::write(|s| {
+                        s.stream.sticky_bottom = false;
+                        if *bottom_appended > 0 {
+                            s.stream.unseen_count =
+                                s.stream.unseen_count.saturating_add(*bottom_appended);
+                        }
+                    });
+                }
+                update_scroll_ui();
+            }
+        }
+        sync_load_earlier_control();
+        return;
+    }
+
+    let bottom_appended = match plan {
+        ReplayPlan::FullRebuild { bottom_appended } => bottom_appended,
+        ReplayPlan::Incremental {
+            bottom_appended, ..
+        } => bottom_appended,
+    };
+
+    let preserved = events_el
+        .as_ref()
+        .map(capture_stream_replay_ui_state)
+        .unwrap_or_default();
+
+    clear_stream_dom_caches();
+    dom::clear("events");
     m::take("agents");
     let mut rendered_any = false;
     for (idx, (ev, resolved_call)) in events.iter().zip(resolved_calls.iter()).enumerate() {
         activity(ev);
         if idx >= start {
+            record_rendered_event_id(ev);
             if let Some(ref container) = events_el {
                 if render_event_into(container, ev, resolved_call.as_deref(), true) {
                     rendered_any = true;
@@ -1327,7 +1699,10 @@ pub(crate) fn replay_visible_stream() {
                 conv.set_scroll_top(prev_scroll_top);
                 m::write(|s| {
                     s.stream.sticky_bottom = false;
-                    s.stream.unseen_count = s.stream.unseen_count.saturating_add(1);
+                    if bottom_appended > 0 {
+                        s.stream.unseen_count =
+                            s.stream.unseen_count.saturating_add(bottom_appended);
+                    }
                 });
             }
         }
@@ -1458,4 +1833,109 @@ pub(crate) async fn copy_code_block(target: &web_sys::Element) {
     dom::later(&timer_key, 1500, move || {
         btn.set_text_content(Some("Copy"));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_output_budget_evicts_oldest_entries_by_byte_and_key_cap() {
+        let mut map = BTreeMap::new();
+        let mut order = VecDeque::new();
+        for (k, size) in [("c1", 6), ("c2", 6), ("c3", 6)] {
+            map.insert(k.to_owned(), "x".repeat(size));
+            touch_tool_output_key(&mut order, k);
+            prune_tool_outputs_with_budget(&mut map, &mut order, 256, 12);
+        }
+        // 18 bytes > 12 byte cap -> oldest entry c1 evicted, c2 + c3 (12 bytes) retained.
+        assert!(!map.contains_key("c1"));
+        assert!(map.contains_key("c2"));
+        assert!(map.contains_key("c3"));
+
+        // Touching c2 makes it MRU so inserting c4 evicts c3 instead of c2.
+        touch_tool_output_key(&mut order, "c2");
+        map.insert("c4".to_owned(), "x".repeat(6));
+        touch_tool_output_key(&mut order, "c4");
+        prune_tool_outputs_with_budget(&mut map, &mut order, 256, 12);
+        assert!(map.contains_key("c2"));
+        assert!(!map.contains_key("c3"));
+        assert!(map.contains_key("c4"));
+    }
+
+    #[test]
+    fn incremental_replay_plans_insert_before_without_bumping_unseen_and_falls_back_on_split() {
+        let blocks = vec![
+            RenderedBlockMeta {
+                first_id: 10,
+                last_id: 11,
+                call_id: String::new(),
+            },
+            RenderedBlockMeta {
+                first_id: 20,
+                last_id: 20,
+                call_id: "call-20".into(),
+            },
+        ];
+        let rendered_ids = BTreeSet::from([10, 11, 20]);
+
+        // Out-of-order earlier event (15) goes before block 1 (id 20), bottom_appended == 0.
+        let visible_insert = vec![
+            json!({"id": 10, "kind": "text", "text": "a"}),
+            json!({"id": 11, "kind": "text", "text": "b"}),
+            json!({"id": 15, "kind": "status", "text": "older"}),
+            json!({"id": 20, "kind": "tool", "call": "call-20", "state": "started"}),
+        ];
+        assert_eq!(
+            plan_stream_replay(&blocks, &rendered_ids, Some(20), &visible_insert),
+            ReplayPlan::Incremental {
+                ops: vec![IncrementalOp::InsertBefore {
+                    event_idx: 2,
+                    before_block_idx: 1,
+                }],
+                bottom_appended: 0,
+                inserted_above: true,
+            }
+        );
+
+        // New bottom-appended event (25) alongside out-of-order (15) bumps bottom_appended == 1.
+        let visible_mixed = vec![
+            json!({"id": 10, "kind": "text", "text": "a"}),
+            json!({"id": 11, "kind": "text", "text": "b"}),
+            json!({"id": 15, "kind": "status", "text": "older"}),
+            json!({"id": 20, "kind": "tool", "call": "call-20", "state": "started"}),
+            json!({"id": 25, "kind": "text", "text": "latest"}),
+        ];
+        assert_eq!(
+            plan_stream_replay(&blocks, &rendered_ids, Some(20), &visible_mixed),
+            ReplayPlan::Incremental {
+                ops: vec![
+                    IncrementalOp::InsertBefore {
+                        event_idx: 2,
+                        before_block_idx: 1,
+                    },
+                    IncrementalOp::AppendBottom { event_idx: 4 },
+                ],
+                bottom_appended: 1,
+                inserted_above: true,
+            }
+        );
+
+        // Coalesced block split (10..12 already coalesced, 11 arrives late) falls back cleanly to FullRebuild.
+        let coalesced_blocks = vec![RenderedBlockMeta {
+            first_id: 10,
+            last_id: 12,
+            call_id: String::new(),
+        }];
+        let coalesced_ids = BTreeSet::from([10, 12]);
+        let visible_split = vec![
+            json!({"id": 10, "kind": "text", "text": "a"}),
+            json!({"id": 11, "kind": "status", "text": "split"}),
+            json!({"id": 12, "kind": "text", "text": "b"}),
+        ];
+        assert_eq!(
+            plan_stream_replay(&coalesced_blocks, &coalesced_ids, Some(12), &visible_split),
+            ReplayPlan::FullRebuild { bottom_appended: 0 }
+        );
+    }
 }

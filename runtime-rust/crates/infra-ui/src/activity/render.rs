@@ -101,11 +101,15 @@ pub(super) fn hide_card_for_root(root: &str, restore_focus: bool) {
         .as_deref()
         == Some(owner.as_str());
     if prev.is_some() || owned_by_root {
-        dom::hidden(CARD_ID, true);
-    }
-    if restore_focus {
+        if !restore_focus {
+            dom::hidden_with_restore(CARD_ID, true, false);
+            return;
+        }
         if let Some(chip) = prev.as_deref().and_then(|k| chip_for_root_key(root, k)) {
+            dom::hidden_with_restore(CARD_ID, true, false);
             focus_element_no_scroll(&chip);
+        } else {
+            dom::hidden_with_restore(CARD_ID, true, true);
         }
     }
 }
@@ -119,7 +123,7 @@ fn hide_any_activity_card(restore_focus: bool) -> bool {
             .and_then(|c| c.get_attribute("data-owner"))
             .is_some_and(|o| o.starts_with("activity:"))
     {
-        dom::hidden(CARD_ID, true);
+        dom::hidden_with_restore(CARD_ID, true, restore_focus);
         true
     } else {
         false
