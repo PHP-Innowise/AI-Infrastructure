@@ -250,19 +250,21 @@ impl Graphs {
         rev
     }
 
-    fn invalidate_skill_paths(&self, project: &str, changed_paths: &[String]) {
-        let mut prefixes = BTreeSet::new();
-        for path in changed_paths {
-            if let Some(prefix) = crate::skills::skill_prefix_for_asset(path) {
-                prefixes.insert(prefix);
-            }
-        }
-        for prefix in prefixes {
-            let _ = crate::skillcache::invalidate_for_skill_path(
-                &self.store,
+    fn notify_skillcache_ir_paths(
+        &self,
+        project: &str,
+        changed_paths: &[String],
+        caller_files: &[String],
+        ir_revision: u64,
+    ) {
+        if let Ok(db) = self.store.connection() {
+            let _ = crate::skillcache::on_ir_paths_updated(
+                &db,
+                self.store.stream(),
                 project,
-                &prefix,
-                "Skill files changed in workspace.",
+                changed_paths,
+                caller_files,
+                ir_revision,
             );
         }
     }
@@ -279,7 +281,12 @@ impl Graphs {
             root,
             delta,
         );
-        self.invalidate_skill_paths(project, &delta.changed_paths);
+        self.notify_skillcache_ir_paths(
+            project,
+            &delta.changed_paths,
+            &delta.incoming_caller_files,
+            delta.ir_revision,
+        );
     }
 
     fn finalize_ir_update_delta(
@@ -323,7 +330,8 @@ impl Graphs {
             drop(setting);
             drop(_guard);
             drop(_publish_guard);
-            self.invalidate_skill_paths(project, rel_paths);
+            let rev = self.ir_revision_of(project);
+            self.notify_skillcache_ir_paths(project, rel_paths, &[], rev);
             return Ok(None);
         }
         let any_arch = rel_paths
@@ -1045,12 +1053,14 @@ mod ir_bus_tests {
         }
         assert_eq!(graphs.status(&pid, false).unwrap()["state"], "ready");
 
-        // Register active SkillCache capsules tied to .claude, .cursor, and .agents skill directories.
+        // Register active SkillCache capsules tied to .claude, .cursor, and .agents skill directories,
+        // plus one capsule watching 1-hop caller_files via ArtifactDependencyManifest.
         let db = store.connection().unwrap();
         for (cid, name, path) in [
             ("cap-claude", "deploy-check", ".claude/skills/deploy-check"),
             ("cap-cursor", "lint-check", ".cursor/skills/lint-check"),
             ("cap-agents", "audit-check", ".agents/skills/audit-check"),
+            ("cap-dep", "dep-watch", ".claude/skills/dep-watch"),
         ] {
             crate::skillcache::db::begin_capsule(
                 &db,
@@ -1079,6 +1089,18 @@ mod ir_bus_tests {
             };
             crate::skillcache::db::activate_capsule(&db, &q).unwrap();
         }
+        crate::skillcache::db::set_dependency_manifest(
+            &db,
+            "cap-dep",
+            &crate::skillcache::db::ArtifactDependencyManifest {
+                skill_paths: vec![".claude/skills/dep-watch".to_owned()],
+                caller_files: vec!["src/caller.rs".to_owned()],
+                ir_revision: 0,
+                verified_ns: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         drop(db);
 
         let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
@@ -1102,10 +1124,12 @@ mod ir_bus_tests {
             delta.incoming_caller_files
         );
 
-        // Non-UI edits under .claude/skills/, .cursor/skills/, and .agents/skills/ emit stale SSE.
+        // Non-UI edits under .claude/.cursor/.agents skills and caller dependencies emit stale SSE via on_ir_paths_updated.
+        std::fs::write(root.join("src/dep.rs"), "pub fn dep_fn() -> i32 { 3 }\n").unwrap();
         graphs.record_live_paths(
             &pid,
             &[
+                "src/dep.rs".to_owned(),
                 ".claude/skills/deploy-check/SKILL.md".to_owned(),
                 ".cursor/skills/lint-check/SKILL.md".to_owned(),
                 ".agents/skills/audit-check/programs/run.sh".to_owned(),
@@ -1113,7 +1137,7 @@ mod ir_bus_tests {
         );
 
         let db = store.connection().unwrap();
-        for cid in ["cap-claude", "cap-cursor", "cap-agents"] {
+        for cid in ["cap-claude", "cap-cursor", "cap-agents", "cap-dep"] {
             let cap = crate::skillcache::db::capsule(&db, cid).unwrap().unwrap();
             assert_eq!(cap["status"], "stale", "expected {cid} to be stale");
         }
@@ -1132,6 +1156,7 @@ mod ir_bus_tests {
                 "cap-claude".to_owned(),
                 "cap-cursor".to_owned(),
                 "cap-agents".to_owned(),
+                "cap-dep".to_owned(),
             ])
         );
 
