@@ -1,5 +1,6 @@
-use crate::{api, dom, model as m, session};
+use crate::{api, dom, management, model as m, session};
 use serde_json::{json, Value as V};
+use std::collections::HashSet;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 #[derive(Clone, Debug)]
@@ -266,6 +267,8 @@ pub(crate) fn handle_focus_out(target: &web_sys::Element, event: &web_sys::Focus
 
 pub(crate) fn close() {
     dom::cancel_timer("composer-blur-check");
+    dom::cancel_timer("composer-files");
+    dom::cancel_timer("composer-hints");
     m::next("composer");
     m::set("composer-open", json!(false));
     m::take("composer-rendered-signature");
@@ -273,6 +276,12 @@ pub(crate) fn close() {
     dom::attr("prompt", "aria-expanded", "false");
     clear_active_descendant();
 }
+pub(crate) fn composer_cache_valid(cached: &V, url: &str, now_ms: f64) -> bool {
+    cached["url"] == url && now_ms - cached["at"].as_f64().unwrap_or(0.) < 30_000.
+}
+
+const COMPOSER_DEBOUNCE_MS: i32 = 120;
+
 pub async fn update() {
     dom::cancel_timer("composer-blur-check");
     if m::read(|s| m::active(&s.selected)) || crate::inbox::needs_confirmation() {
@@ -303,9 +312,7 @@ pub async fn update() {
     if m::yes(&m::data("composer-open"))
         && m::data("composer-rendered-signature") == signature
         && (t.trigger == '@'
-            || (m::data("composer-cache")["url"] == url
-                && js_sys::Date::now() - m::data("composer-cache")["at"].as_f64().unwrap_or(0.)
-                    < 30000.))
+            || composer_cache_valid(&m::data("composer-cache"), &url, js_sys::Date::now()))
     {
         return;
     }
@@ -317,20 +324,27 @@ pub async fn update() {
     dom::hidden("skill-hints-panel", false);
     dom::attr("prompt", "aria-expanded", "true");
     if t.trigger == '@' {
+        dom::cancel_timer("composer-hints");
         let sep = if url.contains('?') { '&' } else { '?' };
         let path = format!("{url}{sep}q={}", dom::enc(&t.query));
-        dom::later("composer-files", 120, move || {
+        dom::later("composer-files", COMPOSER_DEBOUNCE_MS, move || {
             spawn_local(async move {
                 load(&path, true).await;
             })
         });
     } else {
+        dom::cancel_timer("composer-files");
         let now = js_sys::Date::now();
         let cached = m::data("composer-cache");
-        if cached["url"] == url && now - cached["at"].as_f64().unwrap_or(0.) < 30000. {
+        if composer_cache_valid(&cached, &url, now) {
+            dom::cancel_timer("composer-hints");
             present(&cached["data"], false);
         } else {
-            load(&url, false).await;
+            dom::later("composer-hints", COMPOSER_DEBOUNCE_MS, move || {
+                spawn_local(async move {
+                    load(&url, false).await;
+                });
+            });
         }
     }
 }
@@ -710,6 +724,7 @@ pub struct PaletteEntry {
     pub category: String,
     pub title: String,
     pub subtitle: String,
+    pub shortcut: String,
     pub action: String,
     pub payload: V,
 }
@@ -761,6 +776,11 @@ const PALETTE_VIEWS: &[(&str, &str, &str)] = &[
         "Install or update target accelerators",
     ),
     (
+        "kit3",
+        "Open Source Kit",
+        "Browse community and partner accelerator catalogs",
+    ),
+    (
         "skills",
         "Skills catalog",
         "Browse and install agent skills",
@@ -802,15 +822,179 @@ pub fn palette_open() -> bool {
     m::read(|s| s.workspace.command_palette_open)
 }
 
-/// Builds and ranks filtered entries across quick actions, views, workspace projects, and recent sessions.
-pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut chars = needle.chars();
+    let Some(mut target) = chars.next() else {
+        return true;
+    };
+    for ch in haystack.chars() {
+        if ch == target {
+            if let Some(next) = chars.next() {
+                target = next;
+            } else {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Scores how well a palette entry matches `query` (lower score ranks higher; `None` excludes).
+pub(crate) fn palette_match_score(entry: &PaletteEntry, query: &str) -> Option<u8> {
     let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let t_low = entry.title.to_ascii_lowercase();
+    let s_low = entry.subtitle.to_ascii_lowercase();
+    let c_low = entry.category.to_ascii_lowercase();
+    let k_low = entry.shortcut.to_ascii_lowercase();
+    if t_low == q {
+        return Some(0);
+    }
+    if t_low.starts_with(&q) {
+        return Some(1);
+    }
+    if t_low.contains(&q) || c_low.contains(&q) {
+        return Some(2);
+    }
+    if s_low.contains(&q) || (!k_low.is_empty() && k_low.contains(&q)) {
+        return Some(3);
+    }
+    let tokens: Vec<&str> = q.split_whitespace().collect();
+    let haystack = format!("{t_low} {c_low} {s_low} {k_low}");
+    if tokens.len() > 1 && tokens.iter().all(|tok| haystack.contains(tok)) {
+        return Some(4);
+    }
+    if tokens.len() == 1 && q.len() >= 2 && is_subsequence(&q, &t_low) {
+        return Some(5);
+    }
+    if tokens.len() > 1
+        && tokens
+            .iter()
+            .all(|tok| tok.len() >= 2 && (haystack.contains(tok) || is_subsequence(tok, &t_low)))
+    {
+        return Some(6);
+    }
+    None
+}
+
+fn push_capsule_palette_entries(candidates: &mut Vec<PaletteEntry>) {
+    let capsules = m::data("skill-capsules");
+    for cap in m::array(&capsules["capsules"]).into_iter().take(40) {
+        let cid = m::text(&cap, "capsule_id");
+        if cid.is_empty() {
+            continue;
+        }
+        let title = management::capsule_title(&cap);
+        let status = cap["status"].as_str().unwrap_or("");
+        let path = m::text(&cap, "skill_path");
+        let subtitle = match (status.is_empty(), path.is_empty()) {
+            (false, false) => format!("{status} · {path}"),
+            (false, true) => status.to_owned(),
+            (true, false) => path,
+            (true, true) => "Compiled SkillCache capsule".into(),
+        };
+        candidates.push(PaletteEntry {
+            id: format!("capsule-{cid}"),
+            category: "Capsule".into(),
+            title,
+            subtitle,
+            shortcut: String::new(),
+            action: "palette-capsule".into(),
+            payload: json!(cid),
+        });
+    }
+}
+
+fn push_skill_palette_entries(candidates: &mut Vec<PaletteEntry>) {
+    let installed = m::data("skills-installed");
+    let discovery = m::data("skills-discovery");
+    let catalog = m::data("skills-catalog");
+    let sources: Vec<(&str, &V)> = vec![
+        (
+            "installed",
+            if installed["skills"].is_array() {
+                &installed["skills"]
+            } else {
+                &installed["installed"]
+            },
+        ),
+        (
+            "discovery",
+            if discovery["skills"].is_array() {
+                &discovery["skills"]
+            } else {
+                &discovery["items"]
+            },
+        ),
+        (
+            "catalog",
+            if catalog["skills"].is_array() {
+                &catalog["skills"]
+            } else {
+                &catalog["items"]
+            },
+        ),
+    ];
+    let mut seen = HashSet::<String>::new();
+    for (origin, list) in sources {
+        for skill in m::array(list).into_iter().take(40) {
+            let name = {
+                let n = m::text(&skill, "name");
+                if n.is_empty() {
+                    m::text(&skill, "id")
+                } else {
+                    n
+                }
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let dedupe_key = format!(
+                "{}:{}",
+                name.to_ascii_lowercase(),
+                m::text(&skill, "agent").to_ascii_lowercase()
+            );
+            if !seen.insert(dedupe_key) {
+                continue;
+            }
+            let agent = m::text(&skill, "agent");
+            let path = m::text(&skill, "path");
+            let desc = m::text(&skill, "description");
+            let subtitle = if !agent.is_empty() && !path.is_empty() {
+                format!("{agent} · {path}")
+            } else if !desc.is_empty() {
+                desc
+            } else if !path.is_empty() {
+                path
+            } else if !agent.is_empty() {
+                agent
+            } else {
+                format!("Skill ({origin})")
+            };
+            candidates.push(PaletteEntry {
+                id: format!("skill-{origin}-{name}"),
+                category: "Skill".into(),
+                title: name.clone(),
+                subtitle,
+                shortcut: String::new(),
+                action: "palette-skill".into(),
+                payload: json!({ "name": name, "origin": origin }),
+            });
+        }
+    }
+}
+
+/// Builds and ranks filtered entries across quick actions, views, projects, sessions, capsules, and skills.
+pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
     let mut candidates = vec![
         PaletteEntry {
             id: "act-new-session".into(),
             category: "Action".into(),
             title: "New session".into(),
             subtitle: "Start a fresh chat in the current workspace project".into(),
+            shortcut: String::new(),
             action: "palette-new-session".into(),
             payload: V::Null,
         },
@@ -819,6 +1003,7 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "Action".into(),
             title: "Approvals queue".into(),
             subtitle: "Review pending permissions and remembered session rules".into(),
+            shortcut: "Alt+A".into(),
             action: "palette-approvals".into(),
             payload: V::Null,
         },
@@ -827,6 +1012,7 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "Action".into(),
             title: "Refresh sessions".into(),
             subtitle: "Sync active session list and waiting counts".into(),
+            shortcut: String::new(),
             action: "palette-refresh".into(),
             payload: V::Null,
         },
@@ -835,6 +1021,7 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "Action".into(),
             title: "Workspace pane: Code graph".into(),
             subtitle: "Switch right pane to Code graph".into(),
+            shortcut: String::new(),
             action: "palette-right-tab".into(),
             payload: json!("graph"),
         },
@@ -843,6 +1030,7 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "Action".into(),
             title: "Workspace pane: Changes & Diff".into(),
             subtitle: "Switch right pane to grouped diff viewer".into(),
+            shortcut: String::new(),
             action: "palette-right-tab".into(),
             payload: json!("diff"),
         },
@@ -851,14 +1039,43 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "Action".into(),
             title: "Workspace pane: Checks".into(),
             subtitle: "Switch right pane to verification checks".into(),
+            shortcut: String::new(),
             action: "palette-right-tab".into(),
             payload: json!("checks"),
+        },
+        PaletteEntry {
+            id: "act-composer-slash".into(),
+            category: "Action".into(),
+            title: "Composer: Insert slash command".into(),
+            subtitle: "Open slash command autocomplete in session composer".into(),
+            shortcut: "/".into(),
+            action: "palette-composer-sigil".into(),
+            payload: json!("/"),
+        },
+        PaletteEntry {
+            id: "act-composer-file".into(),
+            category: "Action".into(),
+            title: "Composer: Attach workspace file".into(),
+            subtitle: "Open @ file reference picker in session composer".into(),
+            shortcut: "@".into(),
+            action: "palette-composer-sigil".into(),
+            payload: json!("@"),
+        },
+        PaletteEntry {
+            id: "act-composer-skill".into(),
+            category: "Action".into(),
+            title: "Composer: Reference skill".into(),
+            subtitle: "Open $ skill picker in session composer".into(),
+            shortcut: "$".into(),
+            action: "palette-composer-sigil".into(),
+            payload: json!("$"),
         },
         PaletteEntry {
             id: "act-theme".into(),
             category: "Action".into(),
             title: "Toggle theme (System / Dark / Light)".into(),
             subtitle: "Cycle workspace color scheme".into(),
+            shortcut: String::new(),
             action: "palette-theme".into(),
             payload: V::Null,
         },
@@ -870,6 +1087,7 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "View".into(),
             title: title.to_owned(),
             subtitle: subtitle.to_owned(),
+            shortcut: String::new(),
             action: "palette-view".into(),
             payload: json!(view_id),
         });
@@ -887,13 +1105,14 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             category: "Project".into(),
             title: format!("Switch project: {name}"),
             subtitle: m::text(&proj, "path"),
+            shortcut: String::new(),
             action: "palette-project".into(),
             payload: json!(pid),
         });
     }
 
     let sessions = m::read(|s| s.sessions.clone());
-    for sess in sessions.into_iter().take(30) {
+    for sess in sessions.into_iter().take(60) {
         let sid = m::text(&sess, "id");
         if sid.is_empty() {
             continue;
@@ -910,33 +1129,31 @@ pub fn collect_palette_entries(query: &str) -> Vec<PaletteEntry> {
             } else {
                 format!("{status} · {proj}")
             },
+            shortcut: String::new(),
             action: "palette-session".into(),
             payload: json!(sid),
         });
     }
 
+    push_capsule_palette_entries(&mut candidates);
+    push_skill_palette_entries(&mut candidates);
+
+    let q = query.trim();
     if q.is_empty() {
-        candidates.truncate(40);
+        candidates.truncate(50);
         return candidates;
     }
 
     let mut ranked = Vec::<(u8, PaletteEntry)>::new();
     for item in candidates {
-        let t_low = item.title.to_ascii_lowercase();
-        let s_low = item.subtitle.to_ascii_lowercase();
-        let c_low = item.category.to_ascii_lowercase();
-        if t_low.starts_with(&q) {
-            ranked.push((0, item));
-        } else if t_low.contains(&q) || c_low.contains(&q) {
-            ranked.push((1, item));
-        } else if s_low.contains(&q) {
-            ranked.push((2, item));
+        if let Some(score) = palette_match_score(&item, q) {
+            ranked.push((score, item));
         }
     }
     ranked.sort_by_key(|(score, _)| *score);
     ranked
         .into_iter()
-        .take(40)
+        .take(50)
         .map(|(_, entry)| entry)
         .collect()
 }
@@ -1031,6 +1248,12 @@ pub fn render_palette() {
             &head,
             &dom::el("strong", "command-palette-title", &item.title),
         );
+        if !item.shortcut.is_empty() {
+            dom::add(
+                &head,
+                &dom::el("kbd", "command-palette-kbd", &item.shortcut),
+            );
+        }
         dom::add(&btn, &head);
         if !item.subtitle.is_empty() {
             dom::add(
@@ -1103,6 +1326,28 @@ pub async fn execute_palette_entry(entry: PaletteEntry) {
             if let Some(sid) = entry.payload.as_str() {
                 session::select(sid).await;
             }
+        }
+        "palette-capsule" => {
+            m::set("skill-capsule-open", entry.payload.clone());
+            session::open_view("skill-capsules", true).await;
+        }
+        "palette-skill" => {
+            session::open_view("skills", true).await;
+        }
+        "palette-composer-sigil" => {
+            let sigil = entry.payload.as_str().unwrap_or("/");
+            if m::read(|s| s.view != "sessions") {
+                session::open_view("sessions", true).await;
+            }
+            let current = dom::value("prompt");
+            let next = if current.is_empty() || current.ends_with(char::is_whitespace) {
+                format!("{current}{sigil}")
+            } else {
+                format!("{current} {sigil}")
+            };
+            dom::set_value("prompt", &next);
+            dom::focus("prompt");
+            update().await;
         }
         _ => {}
     }
@@ -1352,5 +1597,104 @@ mod tests {
         assert_eq!(palette_selection_step(4, 2, "Home"), Some(0));
         assert_eq!(palette_selection_step(4, 1, "End"), Some(3));
         assert_eq!(palette_selection_step(4, 1, "Escape"), None);
+    }
+
+    #[test]
+    fn composer_cache_valid_respects_url_and_ttl() {
+        let cached = json!({"url": "/api/commands?project=p1", "at": 10_000.0});
+        assert!(composer_cache_valid(
+            &cached,
+            "/api/commands?project=p1",
+            15_000.0
+        ));
+        assert!(composer_cache_valid(
+            &cached,
+            "/api/commands?project=p1",
+            39_999.0
+        ));
+        assert!(!composer_cache_valid(
+            &cached,
+            "/api/commands?project=p1",
+            40_000.0
+        ));
+        assert!(!composer_cache_valid(
+            &cached,
+            "/api/commands?project=p2",
+            15_000.0
+        ));
+        assert!(!composer_cache_valid(
+            &V::Null,
+            "/api/commands?project=p1",
+            15_000.0
+        ));
+    }
+
+    #[test]
+    fn palette_includes_kit3_capsules_skills_shortcuts_and_fuzzy_matches() {
+        m::write(|s| {
+            s.boot = json!({
+                "projects": [{"id": "app-1", "name": "Demo", "path": "/repo"}]
+            });
+            s.sessions = vec![
+                json!({"id": "s1", "title": "Session One", "project_id": "app-1", "status": "idle"}),
+            ];
+        });
+        m::set(
+            "skill-capsules",
+            json!({
+                "capsules": [
+                    {
+                        "capsule_id": "cap-laravel-auth",
+                        "mu": { "name": "Laravel Sanctum Plan" },
+                        "status": "active",
+                        "skill_path": ".agents/skills/auth/SKILL.md"
+                    }
+                ]
+            }),
+        );
+        m::set(
+            "skills-installed",
+            json!({
+                "skills": [
+                    {"name": "verify-contracts", "agent": "codex", "path": ".agents/skills/verify"}
+                ]
+            }),
+        );
+        m::set(
+            "skills-discovery",
+            json!({
+                "skills": [
+                    {"name": "verify-contracts", "agent": "codex", "path": ".agents/skills/verify"},
+                    {"name": "octane-profiler", "description": "Profile Laravel Octane"}
+                ]
+            }),
+        );
+
+        let all = collect_palette_entries("");
+        assert!(all.iter().any(|e| e.payload == json!("kit3")));
+        assert!(all
+            .iter()
+            .find(|e| e.id == "act-approvals")
+            .is_some_and(|e| e.shortcut == "Alt+A"));
+
+        let fuzzy_kit = collect_palette_entries("osk");
+        assert!(fuzzy_kit.iter().any(|e| e.payload == json!("kit3")));
+
+        let multi_cap = collect_palette_entries("sanctum cap");
+        assert!(multi_cap
+            .iter()
+            .any(|e| e.action == "palette-capsule" && e.payload == json!("cap-laravel-auth")));
+
+        let skill_matches = collect_palette_entries("verify-contracts");
+        assert_eq!(
+            skill_matches
+                .iter()
+                .filter(|e| e.action == "palette-skill")
+                .count(),
+            1
+        );
+
+        let discovered = collect_palette_entries("octane");
+        assert!(discovered.iter().any(|e| e.action == "palette-skill"));
     }
 }

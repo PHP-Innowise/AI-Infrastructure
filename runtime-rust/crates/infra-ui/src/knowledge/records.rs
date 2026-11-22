@@ -135,7 +135,7 @@ pub(super) fn fields(scope: &str) {
     );
 }
 pub async fn load_context() {
-    let p = dom::value("context-project");
+    let p = m::current_project();
     if p.is_empty() {
         return;
     }
@@ -145,7 +145,7 @@ pub async fn load_context() {
     )
     .await
     {
-        Ok((e, v)) if m::current("context", e) && dom::value("context-project") == p => {
+        Ok((e, v)) if m::current("context", e) && m::current_project() == p => {
             let files = m::array(&v["files"]);
             dom::text(
                 "context-summary",
@@ -1308,7 +1308,7 @@ pub fn render_linked(session: &V) {
     let (show_omni, omni_html) = render_linked_omnigraph_html(session);
     dom::hidden("linked-omnigraph-summary", !show_omni);
     if let Some(el) = dom::get("linked-omnigraph-summary") {
-        el.set_inner_html(&omni_html);
+        dom::set_markup(&el, &omni_html);
     }
     dom::hidden("linked-context-form", brain["review"] == false);
     dom::hidden("linked-context-run", !waiting);
@@ -1338,8 +1338,9 @@ pub fn render_linked(session: &V) {
         return;
     }
     if let Some(bar) = dom::get("capsule-bar") {
-        bar.set_inner_html(&render_capsule_bar_html(&meter));
-        let _ = bar.set_attribute("aria-label", &capsule_bar_label(&meter));
+        if dom::set_markup(&bar, &render_capsule_bar_html(&meter)) {
+            let _ = bar.set_attribute("aria-label", &capsule_bar_label(&meter));
+        }
     }
     dom::text(
         "capsule-facts",
@@ -1350,7 +1351,7 @@ pub fn render_linked(session: &V) {
         ),
     );
     if let Some(legend) = dom::get("capsule-legend") {
-        legend.set_inner_html(&render_capsule_legend_html(&meter));
+        dom::set_markup(&legend, &render_capsule_legend_html(&meter));
     }
     dom::text(
         "capsule-repeats",

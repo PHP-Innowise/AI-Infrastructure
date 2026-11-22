@@ -21,10 +21,28 @@ thread_local! {
     static TOOL_FULL_OUTPUTS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
 }
 
-pub(crate) fn clear_stream_md_cache() {
+const TOOL_OUTPUT_MAX_CACHED_KEYS: usize = 256;
+
+/// Clears DOM-bound stream caches while retaining `TOOL_FULL_OUTPUTS` across in-session replays.
+fn clear_stream_dom_caches() {
     STREAM_MD_CACHE.with(|cache| cache.borrow_mut().clear());
     STREAM_RAW_TEXT.with(|raw| raw.borrow_mut().clear());
     CALL_BLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
+    TOOL_FULL_OUTPUTS
+        .with(|cache| prune_tool_outputs_map(&mut cache.borrow_mut(), TOOL_OUTPUT_MAX_CACHED_KEYS));
+}
+
+pub(crate) fn prune_tool_outputs_map(map: &mut BTreeMap<String, String>, max_entries: usize) {
+    while map.len() > max_entries {
+        let Some(first_key) = map.keys().next().cloned() else {
+            break;
+        };
+        map.remove(&first_key);
+    }
+}
+
+pub(crate) fn clear_stream_md_cache() {
+    clear_stream_dom_caches();
     TOOL_FULL_OUTPUTS.with(|cache| cache.borrow_mut().clear());
 }
 
@@ -1117,30 +1135,174 @@ fn prepend_events_range(start: usize, end: usize) {
     }
 }
 
+/// Folds `events` locally into `(run, run_before, resolved_calls)` without per-event global store writes.
+pub(crate) fn fold_run_events(events: &[V]) -> (V, Option<V>, Vec<Option<String>>) {
+    let mut run = V::Null;
+    let mut before = None;
+    let mut resolved_calls = Vec::with_capacity(events.len());
+    for ev in events {
+        let (next_run, replaced, resolved_call) = advance_with_call(run, ev);
+        if let Some(replaced) = replaced {
+            before = Some(replaced);
+        }
+        run = next_run;
+        resolved_calls.push(resolved_call);
+    }
+    (run, before, resolved_calls)
+}
+
+#[derive(Default)]
+struct StreamReplayUiState {
+    open_tools: std::collections::BTreeSet<String>,
+    expanded_outputs: std::collections::BTreeSet<String>,
+    open_thinking: std::collections::BTreeSet<String>,
+}
+
+fn capture_stream_replay_ui_state(container: &web_sys::Element) -> StreamReplayUiState {
+    let mut state = StreamReplayUiState::default();
+    if let Ok(nodes) = container.query_selector_all("details.conversation-tool") {
+        for i in 0..nodes.length() {
+            let Some(el) = nodes
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let Some(key) = el
+                .get_attribute("data-output-key")
+                .filter(|k| !k.is_empty())
+            else {
+                continue;
+            };
+            if el.has_attribute("open") {
+                state.open_tools.insert(key.clone());
+            }
+            if el.get_attribute("data-output-expanded").as_deref() == Some("true") {
+                state.expanded_outputs.insert(key);
+            }
+        }
+    }
+    if let Ok(nodes) =
+        container.query_selector_all(".conversation-thinking details.thinking-details[open]")
+    {
+        for i in 0..nodes.length() {
+            let Some(el) = nodes
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            if let Some(id) = el
+                .closest(".conversation-thinking")
+                .ok()
+                .flatten()
+                .and_then(|p| p.get_attribute("data-event-id"))
+                .filter(|id| !id.is_empty())
+            {
+                state.open_thinking.insert(id);
+            }
+        }
+    }
+    state
+}
+
+fn restore_stream_replay_ui_state(container: &web_sys::Element, state: &StreamReplayUiState) {
+    if state.open_tools.is_empty()
+        && state.expanded_outputs.is_empty()
+        && state.open_thinking.is_empty()
+    {
+        return;
+    }
+    if !state.open_tools.is_empty() || !state.expanded_outputs.is_empty() {
+        if let Ok(nodes) = container.query_selector_all("details.conversation-tool") {
+            for i in 0..nodes.length() {
+                let Some(el) = nodes
+                    .item(i)
+                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                else {
+                    continue;
+                };
+                let Some(key) = el
+                    .get_attribute("data-output-key")
+                    .filter(|k| !k.is_empty())
+                else {
+                    continue;
+                };
+                if state.open_tools.contains(&key) {
+                    let _ = el.set_attribute("open", "");
+                }
+                if state.expanded_outputs.contains(&key) {
+                    let _ = el.set_attribute("data-output-expanded", "true");
+                    if let Some(full) =
+                        TOOL_FULL_OUTPUTS.with(|map| map.borrow().get(&key).cloned())
+                    {
+                        apply_tool_output_dom(&el, &key, &full);
+                    }
+                }
+            }
+        }
+    }
+    if !state.open_thinking.is_empty() {
+        if let Ok(nodes) = container
+            .query_selector_all(".conversation-thinking[data-event-id] details.thinking-details")
+        {
+            for i in 0..nodes.length() {
+                let Some(el) = nodes
+                    .item(i)
+                    .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                else {
+                    continue;
+                };
+                let matched = el
+                    .closest(".conversation-thinking")
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.get_attribute("data-event-id"))
+                    .is_some_and(|id| state.open_thinking.contains(&id));
+                if matched {
+                    let _ = el.set_attribute("open", "");
+                }
+            }
+        }
+    }
+}
+
 /// Re-renders `#events` from `model::events` honoring the current `visible_limit` window
-/// with a single scroll-sticky measurement before and after the loop.
+/// while folding `run` locally and preserving expanded tool/thinking state and cached full outputs.
 pub(crate) fn replay_visible_stream() {
-    clear_stream_md_cache();
-    dom::clear("events");
-    let was_sticky = dom::get("conversation")
-        .map(|c| {
-            m::read(|s| s.stream.sticky_bottom)
-                || is_near_bottom(c.scroll_height(), c.scroll_top(), c.client_height())
-        })
-        .unwrap_or(true);
     let events_el = dom::get("events");
+    let preserved = events_el
+        .as_ref()
+        .map(capture_stream_replay_ui_state)
+        .unwrap_or_default();
+    let conv_before = dom::get("conversation").map(|c| {
+        let sticky = m::read(|s| s.stream.sticky_bottom)
+            || is_near_bottom(c.scroll_height(), c.scroll_top(), c.client_height());
+        (sticky, c.scroll_top())
+    });
+    let was_sticky = conv_before.map(|(s, _)| s).unwrap_or(true);
+    let prev_scroll_top = conv_before.map(|(_, top)| top).unwrap_or(0);
+
+    clear_stream_dom_caches();
+    dom::clear("events");
+
     let (events, limit) = m::read(|s| (s.events.clone(), s.stream.visible_limit));
     let start = events.len().saturating_sub(limit);
-    m::take("run");
-    m::take("run-before");
+    let (next_run, next_before, resolved_calls) = fold_run_events(&events);
+    if events.is_empty() {
+        m::take("run");
+        m::take("run-before");
+    } else {
+        m::set("run", next_run);
+        if let Some(before) = next_before {
+            m::set("run-before", before);
+        } else {
+            m::take("run-before");
+        }
+    }
     m::take("agents");
     let mut rendered_any = false;
-    for (idx, ev) in events.iter().enumerate() {
-        let (run, replaced, resolved_call) = advance_with_call(m::data("run"), ev);
-        if let Some(replaced) = replaced {
-            m::set("run-before", replaced);
-        }
-        m::set("run", run);
+    for (idx, (ev, resolved_call)) in events.iter().zip(resolved_calls.iter()).enumerate() {
         activity(ev);
         if idx >= start {
             if let Some(ref container) = events_el {
@@ -1149,6 +1311,9 @@ pub(crate) fn replay_visible_stream() {
                 }
             }
         }
+    }
+    if let Some(ref container) = events_el {
+        restore_stream_replay_ui_state(container, &preserved);
     }
     if rendered_any {
         if let Some(conv) = dom::get("conversation") {
@@ -1159,6 +1324,7 @@ pub(crate) fn replay_visible_stream() {
                     s.stream.unseen_count = 0;
                 });
             } else {
+                conv.set_scroll_top(prev_scroll_top);
                 m::write(|s| {
                     s.stream.sticky_bottom = false;
                     s.stream.unseen_count = s.stream.unseen_count.saturating_add(1);

@@ -311,7 +311,9 @@ pub(crate) fn render_answers_summary_html(questions: &[V], answers: &V) -> Strin
     if rows.is_empty() {
         return String::new();
     }
-    let mut out = String::from("<p class=\"permission-answers-heading\">Submitted answers</p><dl class=\"permission-answers-list\">");
+    let mut out = String::from(
+        "<p class=\"permission-answers-heading\">Submitted answers</p><dl class=\"permission-answers-list\">",
+    );
     for (label, val) in rows {
         out.push_str(&format!(
             "<div class=\"permission-answer-row\"><dt>{}</dt><dd>{}</dd></div>",
@@ -797,6 +799,7 @@ pub(crate) fn render_permission_card_html(
     }
     if spec.state == "pending" {
         if let Some(exp_ms) = spec.expires_at_ms {
+            HAS_TIMED_EXPIRIES.with(|flag| flag.set(true));
             attrs.push_str(&format!(" data-expires-ms=\"{exp_ms:.0}\""));
         }
     }
@@ -943,6 +946,7 @@ fn sync_card_expiry_slot(
         }
         return;
     };
+    HAS_TIMED_EXPIRIES.with(|flag| flag.set(true));
     let _ = block.set_attribute("data-expires-ms", &format!("{exp_ms:.0}"));
     let (tone, text) = format_countdown_badge(exp_ms - current_now_ms());
     let badge = match existing {
@@ -1709,6 +1713,7 @@ pub(super) async fn decide_permission(payload: &V) {
     let origin_kind = m::text(payload, "origin_kind");
     let origin_run_id = m::text(payload, "origin_run_id");
     if decide_permission_for(container_id, &sid, payload).await {
+        invalidate_approvals_cache_for(&sid);
         let current_sid = m::read(|s| s.sid.clone());
         let epoch = m::read(|s| s.epoch);
         if sid == current_sid {
@@ -1777,21 +1782,59 @@ pub(crate) fn permission_event_container(payload: &V) -> &'static str {
     permission_target_container(payload, &view, active_permission_container())
 }
 
+thread_local! {
+    static HAS_TIMED_EXPIRIES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static APPROVALS_SESSION_CACHE: std::cell::RefCell<BTreeMap<String, (usize, Vec<V>)>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+pub(crate) fn invalidate_approvals_cache_for(sid: &str) {
+    if sid.is_empty() {
+        return;
+    }
+    APPROVALS_SESSION_CACHE.with(|cache| {
+        cache.borrow_mut().remove(sid);
+    });
+}
+
+pub(crate) fn approvals_sessions_to_fetch(
+    waiting_sids: &[(String, String, usize)],
+    cache: &BTreeMap<String, (usize, Vec<V>)>,
+    force_all: bool,
+) -> Vec<(String, String)> {
+    waiting_sids
+        .iter()
+        .filter(|(sid, _, count)| {
+            force_all
+                || cache
+                    .get(sid)
+                    .is_none_or(|(cached_count, _)| *cached_count != *count)
+        })
+        .map(|(sid, label, _)| (sid.clone(), label.clone()))
+        .collect()
+}
+
+/// Schedules permission expiry countdowns only when at least one card carries `data-expires-ms`.
 pub(crate) fn schedule_permission_countdowns() {
-    let timed = dom::all(".conversation-permission[data-state=\"pending\"][data-expires-ms]");
-    if timed.is_empty() {
+    if !HAS_TIMED_EXPIRIES.with(|flag| flag.get()) {
         dom::cancel_timer("permission-countdown");
         return;
     }
-    sync_permission_countdown_badges();
+    let timed = dom::all(".conversation-permission[data-state=\"pending\"][data-expires-ms]");
+    if timed.is_empty() {
+        HAS_TIMED_EXPIRIES.with(|flag| flag.set(false));
+        dom::cancel_timer("permission-countdown");
+        return;
+    }
+    sync_permission_countdown_badges_for(&timed);
     dom::later("permission-countdown", 1000, || {
         schedule_permission_countdowns();
     });
 }
 
-fn sync_permission_countdown_badges() {
+fn sync_permission_countdown_badges_for(cards: &[web_sys::Element]) {
     let now = current_now_ms();
-    for card in dom::all(".conversation-permission[data-state=\"pending\"][data-expires-ms]") {
+    for card in cards {
         let Some(exp_ms) = card
             .get_attribute("data-expires-ms")
             .and_then(|v| v.parse::<f64>().ok())
@@ -1809,6 +1852,17 @@ fn sync_permission_countdown_badges() {
             }
         }
     }
+}
+
+/// Debounces live SSE-driven queue refreshes across rapid `waiting_counts` updates.
+pub(crate) fn schedule_approvals_queue_refresh() {
+    dom::later("approvals-queue-refresh", 150, || {
+        wasm_bindgen_futures::spawn_local(async {
+            if m::read(|s| s.approvals.drawer_open) {
+                refresh_approvals_queue_inner(false).await;
+            }
+        });
+    });
 }
 
 /// Computes total pending approval count across sessions, system runs, and creator runs.
@@ -2233,12 +2287,17 @@ fn collect_background_run_approvals(entries: &mut Vec<ApprovalQueueEntry>) {
 }
 
 pub(crate) async fn refresh_approvals_queue() {
+    dom::cancel_timer("approvals-queue-refresh");
+    refresh_approvals_queue_inner(true).await;
+}
+
+async fn refresh_approvals_queue_inner(force_all: bool) {
     let Some(container) = dom::get("approvals-drawer-list") else {
         return;
     };
     let sessions = m::read(|s| s.sessions.clone());
     let waiting_counts = m::read(|s| s.approvals.waiting_counts.clone());
-    let waiting_sids: Vec<(String, String)> = sessions
+    let waiting_sids: Vec<(String, String, usize)> = sessions
         .iter()
         .filter_map(|s| {
             let sid = m::text(s, "id");
@@ -2246,17 +2305,29 @@ pub(crate) async fn refresh_approvals_queue() {
                 .get(&sid)
                 .copied()
                 .unwrap_or_else(|| s["waiting_permissions"].as_u64().unwrap_or(0) as usize);
-            (count > 0).then(|| (sid, m::summary(s)))
+            (count > 0).then(|| (sid, m::summary(s), count))
         })
+        .take(12)
         .collect();
 
-    let mut entries = Vec::<ApprovalQueueEntry>::new();
+    APPROVALS_SESSION_CACHE.with(|cache| {
+        let mut map = cache.borrow_mut();
+        let active_set: std::collections::BTreeSet<&str> = waiting_sids
+            .iter()
+            .map(|(sid, _, _)| sid.as_str())
+            .collect();
+        map.retain(|k, _| active_set.contains(k.as_str()));
+    });
+
+    let to_fetch = APPROVALS_SESSION_CACHE
+        .with(|cache| approvals_sessions_to_fetch(&waiting_sids, &cache.borrow(), force_all));
+
     let fetches = js_sys::Array::new();
-    for (sid, label) in waiting_sids.into_iter().take(12) {
+    for (sid, _label) in to_fetch {
         let url = format!("/api/sessions/{}?limit=1&tail=1", dom::enc(&sid));
         let promise = wasm_bindgen_futures::future_to_promise(async move {
             let session = api::get(&url).await.unwrap_or(V::Null);
-            let item = json!({ "sid": sid, "label": label, "session": session });
+            let item = json!({ "sid": sid, "session": session });
             Ok(wasm_bindgen::JsValue::from_str(&item.to_string()))
         });
         fetches.push(&promise);
@@ -2273,7 +2344,6 @@ pub(crate) async fn refresh_approvals_queue() {
                     continue;
                 };
                 let sid = m::text(&parsed, "sid");
-                let label = m::text(&parsed, "label");
                 let waiting_for_sid = m::array(&parsed["session"]["waiting_permissions"]);
                 if parsed["session"].is_object() {
                     let count = waiting_for_sid.len();
@@ -2285,28 +2355,41 @@ pub(crate) async fn refresh_approvals_queue() {
                             count,
                         );
                     });
-                }
-                for (idx, mut ask) in waiting_for_sid.into_iter().enumerate() {
-                    ask["state"] = json!("pending");
-                    let req_id = m::text(&ask, "request_id");
-                    let key = if req_id.is_empty() {
-                        format!("session:{sid}:idx:{idx}")
-                    } else {
-                        format!("session:{sid}:{req_id}")
-                    };
-                    entries.push(ApprovalQueueEntry::Card {
-                        key,
-                        label: label.clone(),
-                        sid: sid.clone(),
-                        ask,
-                        jump_action: "approvals-jump-session",
-                        jump_label: "Open session",
-                        jump_payload: json!(sid),
-                        origin_kind: "",
-                        origin_run_id: String::new(),
+                    APPROVALS_SESSION_CACHE.with(|cache| {
+                        cache
+                            .borrow_mut()
+                            .insert(sid.clone(), (count, waiting_for_sid));
                     });
                 }
             }
+        }
+    }
+
+    let mut entries = Vec::<ApprovalQueueEntry>::new();
+    let cached_map = APPROVALS_SESSION_CACHE.with(|cache| cache.borrow().clone());
+    for (sid, label, _) in &waiting_sids {
+        let Some((_, waiting_for_sid)) = cached_map.get(sid) else {
+            continue;
+        };
+        for (idx, mut ask) in waiting_for_sid.iter().cloned().enumerate() {
+            ask["state"] = json!("pending");
+            let req_id = m::text(&ask, "request_id");
+            let key = if req_id.is_empty() {
+                format!("session:{sid}:idx:{idx}")
+            } else {
+                format!("session:{sid}:{req_id}")
+            };
+            entries.push(ApprovalQueueEntry::Card {
+                key,
+                label: label.clone(),
+                sid: sid.clone(),
+                ask,
+                jump_action: "approvals-jump-session",
+                jump_label: "Open session",
+                jump_payload: json!(sid),
+                origin_kind: "",
+                origin_run_id: String::new(),
+            });
         }
     }
     collect_background_run_approvals(&mut entries);
@@ -2467,6 +2550,22 @@ pub(crate) async fn open_approvals_drawer() {
     }
     let sid = m::read(|s| s.sid.clone());
     refresh_approvals_queue().await;
+    if m::read(|s| s.approvals.drawer_open) {
+        let active_is_close_or_outside = dom::document().active_element().is_none_or(|active| {
+            active.id() == "approvals-drawer-close" || active.tag_name() == "BODY"
+        });
+        if active_is_close_or_outside {
+            if let Some(first_action) = dom::get("approvals-drawer-list").and_then(|list| {
+                list.query_selector(
+                    ".conversation-permission[data-state=\"pending\"] button[data-action=\"permission-decide\"]",
+                )
+                .ok()
+                .flatten()
+            }) {
+                focus_node(&first_action);
+            }
+        }
+    }
     load_permission_rules(&sid).await;
 }
 
@@ -2513,13 +2612,14 @@ pub(crate) fn handle_permission_shortcut(event: &web_sys::KeyboardEvent) -> bool
         .closest(".conversation-permission[data-state=\"pending\"]")
         .ok()
         .flatten();
-    let in_drawer_list = active
-        .closest("#approvals-drawer-list")
-        .ok()
-        .flatten()
-        .is_some();
+    let drawer_open = m::read(|s| s.approvals.drawer_open)
+        || dom::get("approvals-drawer")
+            .is_some_and(|e| !e.has_attribute("hidden") || e.has_attribute("open"));
+    let in_open_drawer = drawer_open
+        && (active.closest("#approvals-drawer").ok().flatten().is_some()
+            || active.tag_name() == "BODY");
     let queue_item = active.closest(".approvals-queue-item").ok().flatten();
-    if !can_target_drawer_shortcut(pending_card.is_some(), in_drawer_list, queue_item.is_some()) {
+    if !can_target_drawer_shortcut(pending_card.is_some(), in_open_drawer, queue_item.is_some()) {
         return false;
     }
     let card = pending_card

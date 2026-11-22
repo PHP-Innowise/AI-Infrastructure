@@ -7,10 +7,77 @@ use crate::{
 use serde_json::{json, Value as V};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
 };
 
 pub(super) const CARD_ID: &str = "run-file-card";
+
+#[derive(Clone, Debug)]
+pub(super) struct AgentCallState {
+    pub(super) open: bool,
+    pub(super) ok: bool,
+    pub(super) settled: bool,
+    pub(super) touched: BTreeMap<String, &'static str>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AgentFileState {
+    pub(super) key: String,
+    pub(super) path: String,
+    pub(super) service: Option<String>,
+    pub(super) reads: u64,
+    pub(super) edits: u64,
+    pub(super) created: bool,
+    pub(super) deleted: bool,
+    pub(super) failed: bool,
+    pub(super) outside: bool,
+    pub(super) helper: bool,
+    pub(super) main: bool,
+    pub(super) order: usize,
+    pub(super) first_step: u64,
+    pub(super) last_step: u64,
+    pub(super) event_id: V,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AgentRecord {
+    pub(super) meta: V,
+    pub(super) events: Vec<V>,
+    pub(super) calls: BTreeMap<String, usize>,
+    pub(super) call_states: BTreeMap<String, AgentCallState>,
+    pub(super) uncalled: BTreeMap<String, VecDeque<String>>,
+    pub(super) files: BTreeMap<String, AgentFileState>,
+    pub(super) searches: Vec<V>,
+    pub(super) plan_items: Vec<V>,
+    pub(super) commands: Vec<V>,
+    pub(super) from_evidence: bool,
+}
+
+impl AgentRecord {
+    fn new(key: String, name: &str, attempt: u64, default_svc: String) -> Self {
+        Self {
+            meta: json!({
+                "id": key,
+                "agent": name,
+                "attempt": attempt,
+                "service": if default_svc.is_empty() { V::Null } else { json!(default_svc) },
+                "status": "running",
+                "tools": 0,
+                "messages": 0,
+                "tokens": 0,
+            }),
+            events: Vec::new(),
+            calls: BTreeMap::new(),
+            call_states: BTreeMap::new(),
+            uncalled: BTreeMap::new(),
+            files: BTreeMap::new(),
+            searches: Vec::new(),
+            plan_items: Vec::new(),
+            commands: Vec::new(),
+            from_evidence: false,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Panel {
@@ -21,7 +88,7 @@ pub(super) struct Panel {
     pub(super) epoch: u64,
     pub(super) pending: bool,
     pub(super) plan: Vec<V>,
-    pub(super) agents: BTreeMap<String, V>,
+    pub(super) agents: BTreeMap<String, AgentRecord>,
     pub(super) order: Vec<String>,
     pub(super) selected: String,
     pub(super) follow: bool,
@@ -155,12 +222,15 @@ pub(super) fn shorten_folder(raw_folder: &str, system_root: &str) -> String {
     }
 }
 
-pub(super) fn service_folders_map(p: &Panel, evidence: Option<&V>) -> BTreeMap<String, String> {
-    let catalog_wrap = m::data("system-catalog");
+pub(super) fn service_folders_map_with_catalog(
+    p: &Panel,
+    evidence: Option<&V>,
+    catalog_wrap: &V,
+) -> BTreeMap<String, String> {
     let catalog = if catalog_wrap["catalog"].is_object() {
         &catalog_wrap["catalog"]
     } else {
-        &catalog_wrap
+        catalog_wrap
     };
     let mut system_root = m::text(catalog, "root");
     if system_root.is_empty() {
@@ -193,7 +263,8 @@ pub(super) fn service_folders_map(p: &Panel, evidence: Option<&V>) -> BTreeMap<S
                 .or_insert_with(|| shorten_folder(&path, &system_root));
         }
     }
-    for a in p.agents.values() {
+    for record in p.agents.values() {
+        let a = &record.meta;
         let sid = m::text(a, "service");
         let root = m::text(a, "root");
         if sid == "__system__" && system_root.is_empty() && !root.is_empty() {
@@ -226,12 +297,11 @@ pub(super) fn service_folders_map(p: &Panel, evidence: Option<&V>) -> BTreeMap<S
     out
 }
 
-pub(super) fn active_evidence_for(root: &str, p: &Panel) -> Option<V> {
+pub(super) fn active_evidence_for_with_run(root: &str, p: &Panel, sys_run: &V) -> Option<V> {
     if root != "system-agents" {
         return None;
     }
-    let sys_run = m::data("system-run");
-    let sys_run_id = m::text(&sys_run, "id");
+    let sys_run_id = m::text(sys_run, "id");
     let from_store = EVIDENCE.with(|cell| {
         let (latest_id, map) = &*cell.borrow();
         if !p.run_id.is_empty() {
@@ -253,12 +323,17 @@ pub(super) fn active_evidence_for(root: &str, p: &Panel) -> Option<V> {
         return from_store;
     }
     if sys_run.is_object() && (!sys_run["evidence"].is_null() || sys_run["receipts"].is_array()) {
-        return Some(sys_run);
+        return Some(sys_run.clone());
     }
     None
 }
 
+pub(super) fn render_frame_key(root: &str) -> String {
+    format!("activity-render:{root}")
+}
+
 pub fn reset(root: &str) {
+    dom::cancel_frame(&render_frame_key(root));
     super::render::hide_card_for_root(root, false);
     if root == "system-agents" {
         EVIDENCE.with(|cell| {
@@ -279,6 +354,7 @@ pub fn reset(root: &str) {
 }
 
 pub fn set_plan(root: &str, steps: Vec<V>, active: bool) {
+    dom::cancel_frame(&render_frame_key(root));
     edit(root, |p| {
         p.plan = steps;
         p.active = active;
@@ -288,6 +364,7 @@ pub fn set_plan(root: &str, steps: Vec<V>, active: bool) {
 
 #[allow(dead_code)]
 pub(crate) fn set_run_evidence(run_id: &str, evidence: &V) {
+    dom::cancel_frame(&render_frame_key("system-agents"));
     let rid = run_id.trim().to_owned();
     EVIDENCE.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -340,19 +417,17 @@ fn tool_starts(v: &V) -> bool {
         .any(|p| tail.starts_with(p))
 }
 
-fn paired_call_id(agent: &mut V, key: &str, start: bool, event_id: &str) -> String {
-    let mut waiting = agent["uncalled"].as_object().cloned().unwrap_or_default();
-    let mut queue = m::array(&waiting.get(key).cloned().unwrap_or(V::Null));
-    let call = if start || queue.is_empty() {
-        format!("anonymous-{event_id}")
+fn paired_call_id(agent: &mut AgentRecord, key: &str, start: bool, event_id: &str) -> String {
+    let queue = agent.uncalled.entry(key.to_owned()).or_default();
+    let call = if start {
+        let generated = format!("anonymous-{event_id}");
+        queue.push_back(generated.clone());
+        generated
     } else {
-        m::string(&queue.remove(0))
+        queue
+            .pop_front()
+            .unwrap_or_else(|| format!("anonymous-{event_id}"))
     };
-    if start {
-        queue.push(json!(call));
-    }
-    waiting.insert(key.into(), json!(queue));
-    agent["uncalled"] = V::Object(waiting);
     call
 }
 
@@ -531,8 +606,8 @@ fn file_map_key(service_id: Option<&str>, path: &str, outside: bool) -> String {
 }
 
 pub(super) fn touch_agent_files(
-    agent: &mut V,
-    call: &mut V,
+    agent: &mut AgentRecord,
+    call: &mut AgentCallState,
     targets: &[NamedTarget],
     step: u64,
     event_id: &V,
@@ -541,85 +616,76 @@ pub(super) fn touch_agent_files(
     if targets.is_empty() {
         return;
     }
-    let mut touched = call["touched"].as_object().cloned().unwrap_or_default();
-    let mut files = agent["files"].as_object().cloned().unwrap_or_default();
-    let role_key = if helper { "helper" } else { "main" };
 
     for target in targets {
         let fkey = file_map_key(target.service_id.as_deref(), &target.path, target.outside);
-        if touched.contains_key(&fkey) {
+        if call.touched.contains_key(&fkey) {
             continue;
         }
-        touched.insert(fkey.clone(), json!(target.how));
-        if !files.contains_key(&fkey) {
-            files.insert(
-                fkey.clone(),
-                json!({
-                    "key": fkey,
-                    "path": target.path,
-                    "service": target.service_id,
-                    "reads": 0,
-                    "edits": 0,
-                    "created": false,
-                    "deleted": false,
-                    "failed": false,
-                    "outside": target.outside,
-                    "helper": false,
-                    "main": false,
-                    "order": files.len(),
-                    "first_step": step,
-                    "last_step": step,
-                    "event_id": event_id,
-                }),
-            );
+        call.touched.insert(fkey.clone(), target.how);
+        let next_order = agent.files.len();
+        let file = agent
+            .files
+            .entry(fkey.clone())
+            .or_insert_with(|| AgentFileState {
+                key: fkey,
+                path: target.path.clone(),
+                service: target.service_id.clone(),
+                reads: 0,
+                edits: 0,
+                created: false,
+                deleted: false,
+                failed: false,
+                outside: target.outside,
+                helper: false,
+                main: false,
+                order: next_order,
+                first_step: step,
+                last_step: step,
+                event_id: event_id.clone(),
+            });
+        if target.how == "read" {
+            file.reads += 1;
         }
-        if let Some(file) = files.get_mut(&fkey) {
-            if target.how == "read" {
-                file["reads"] = json!(file["reads"].as_u64().unwrap_or(0) + 1);
-            }
-            file[role_key] = json!(true);
-            file["last_step"] = json!(step);
-            if !event_id.is_null() {
-                file["event_id"] = event_id.clone();
-            }
+        if helper {
+            file.helper = true;
+        } else {
+            file.main = true;
+        }
+        file.last_step = step;
+        if !event_id.is_null() {
+            file.event_id = event_id.clone();
         }
     }
-    call["touched"] = V::Object(touched);
-    agent["files"] = V::Object(files);
 }
 
-pub(super) fn settle_agent_files(agent: &mut V, call: &mut V, event: &V) {
-    if m::yes(&call["settled"]) {
+pub(super) fn settle_agent_files(agent: &mut AgentRecord, call: &mut AgentCallState, event: &V) {
+    if call.settled {
         return;
     }
-    call["settled"] = json!(true);
-    let Some(touched) = call["touched"].as_object() else {
-        return;
-    };
-    let mut files = agent["files"].as_object().cloned().unwrap_or_default();
-    let ok = m::yes(&call["ok"]);
-    for (fkey, how) in touched {
-        let Some(file) = files.get_mut(fkey) else {
+    call.settled = true;
+    let ok = call.ok;
+    for (fkey, how) in &call.touched {
+        let Some(file) = agent.files.get_mut(fkey) else {
             continue;
         };
         if !ok {
             if event["outcome"] != "not_run" {
-                file["failed"] = json!(true);
+                file.failed = true;
             }
             continue;
         }
-        match how.as_str() {
-            Some("read") => continue,
-            Some("add") => file["created"] = json!(true),
-            Some("delete") => file["deleted"] = json!(true),
+        match *how {
+            "read" => continue,
+            "add" => file.created = true,
+            "delete" => file.deleted = true,
             _ => {}
         }
-        file["edits"] = json!(file["edits"].as_u64().unwrap_or(0) + 1);
+        file.edits += 1;
         if !event["id"].is_null() {
-            file["event_id"] = event["id"].clone();
+            file.event_id = event["id"].clone();
         }
     }
-    agent["files"] = V::Object(files);
 }
 
 pub(super) fn observe_panel(p: &mut Panel, event: &V) {
@@ -635,23 +701,7 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
         let default_svc = default_service_for_agent(name);
         p.agents.insert(
             key.clone(),
-            json!({
-                "id": key,
-                "agent": name,
-                "attempt": attempt,
-                "service": if default_svc.is_empty() { V::Null } else { json!(default_svc) },
-                "status": "running",
-                "events": [],
-                "calls": {},
-                "call_states": {},
-                "files": {},
-                "searches": [],
-                "plan_items": [],
-                "commands": [],
-                "tools": 0,
-                "messages": 0,
-                "tokens": 0,
-            }),
+            AgentRecord::new(key.clone(), name, attempt, default_svc),
         );
     }
 
@@ -693,28 +743,25 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
             };
             for field in fields {
                 if !event[*field].is_null() {
-                    agent[*field] = event[*field].clone();
+                    agent.meta[*field] = event[*field].clone();
                 }
             }
             if event["status"] == "running" {
-                agent["started"] = event["at"].clone();
+                agent.meta["started"] = event["at"].clone();
             } else {
-                agent["finished"] = event["at"].clone();
+                agent.meta["finished"] = event["at"].clone();
                 if event
                     .as_object()
                     .map(|o| o.contains_key("tokens"))
                     .unwrap_or(false)
                 {
-                    agent["tokens"] = event["tokens"].clone();
+                    agent.meta["tokens"] = event["tokens"].clone();
                 }
-                if let Some(states) = agent["call_states"].as_object_mut() {
-                    for val in states.values_mut() {
-                        val["open"] = json!(false);
-                    }
+                for val in agent.call_states.values_mut() {
+                    val.open = false;
                 }
-                let default_svc = clean_service_id(agent["service"].as_str(), name);
-                let mut files = agent["files"].as_object().cloned().unwrap_or_default();
-                for changed in m::array(&agent["changed_files"]) {
+                let default_svc = clean_service_id(agent.meta["service"].as_str(), name);
+                for changed in m::array(&agent.meta["changed_files"]) {
                     let raw = changed
                         .as_str()
                         .map(str::to_owned)
@@ -724,34 +771,34 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
                         continue;
                     }
                     let fkey = file_map_key(svc.as_deref(), &path, outside);
-                    let entry = files.entry(fkey.clone()).or_insert_with(|| {
-                        json!({
-                            "key": fkey,
-                            "path": path,
-                            "service": svc,
-                            "reads": 0,
-                            "edits": 1,
-                            "created": false,
-                            "deleted": false,
-                            "failed": false,
-                            "outside": outside,
-                            "helper": false,
-                            "main": true,
-                            "order": 10_000,
-                            "first_step": p.step_seq,
-                            "last_step": p.step_seq,
-                            "event_id": event_id,
-                        })
-                    });
-                    if entry["edits"].as_u64().unwrap_or(0) == 0 {
-                        entry["edits"] = json!(1);
+                    let entry = agent
+                        .files
+                        .entry(fkey.clone())
+                        .or_insert_with(|| AgentFileState {
+                            key: fkey,
+                            path,
+                            service: svc,
+                            reads: 0,
+                            edits: 1,
+                            created: false,
+                            deleted: false,
+                            failed: false,
+                            outside,
+                            helper: false,
+                            main: true,
+                            order: 10_000,
+                            first_step: p.step_seq,
+                            last_step: p.step_seq,
+                            event_id: event_id.clone(),
+                        });
+                    if entry.edits == 0 {
+                        entry.edits = 1;
                     }
                 }
-                agent["files"] = V::Object(files);
             }
         }
         Some("usage") => {
-            if agent["finished"].is_null() {
+            if agent.meta["finished"].is_null() {
                 let count = [
                     "input_tokens",
                     "output_tokens",
@@ -761,7 +808,7 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
                 .iter()
                 .filter_map(|k| event[*k].as_f64())
                 .sum::<f64>();
-                agent["tokens"] = json!(agent["tokens"].as_f64().unwrap_or(0.) + count);
+                agent.meta["tokens"] = json!(agent.meta["tokens"].as_f64().unwrap_or(0.) + count);
             }
         }
         Some("agent_activity") => {
@@ -784,59 +831,52 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
                     p.step_seq = 1;
                 }
                 let step = p.step_seq;
-                let agent_svc = clean_service_id(agent["service"].as_str(), name);
+                let agent_svc = clean_service_id(agent.meta["service"].as_str(), name);
                 let targets =
                     extract_named_targets(raw_tool, &norm_key, event, agent_svc.as_deref());
                 let helper = event["parent"].as_str().is_some_and(|s| !s.is_empty());
 
-                let mut call_states = agent["call_states"]
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default();
-                let mut call_obj = call_states.get(&call_id).cloned().unwrap_or_else(|| {
-                    json!({
-                        "tool": display_tool,
-                        "key": norm_key,
-                        "path": event["path"],
-                        "detail": event["detail"],
-                        "event_id": event_id,
-                        "started": event["at"],
-                    })
-                });
-                call_obj["open"] = json!(start);
-                call_obj["ok"] = json!(event["ok"]
+                let mut call_obj =
+                    agent
+                        .call_states
+                        .remove(&call_id)
+                        .unwrap_or_else(|| AgentCallState {
+                            open: start,
+                            ok: true,
+                            settled: false,
+                            touched: BTreeMap::new(),
+                        });
+                call_obj.open = start;
+                call_obj.ok = event["ok"]
                     .as_bool()
-                    .unwrap_or(!m::text(event, "text").contains("failed")));
-                call_obj["event_id"] = event_id.clone();
+                    .unwrap_or(!m::text(event, "text").contains("failed"));
 
                 touch_agent_files(agent, &mut call_obj, &targets, step, &event_id, helper);
                 if !start {
                     settle_agent_files(agent, &mut call_obj, event);
                 }
-                call_states.insert(call_id.clone(), call_obj.clone());
-                agent["call_states"] = V::Object(call_states);
+                let call_ok = call_obj.ok;
+                agent.call_states.insert(call_id.clone(), call_obj);
 
                 if ["grep", "glob", "ls"].contains(&norm_key.as_str()) && start {
-                    let mut searches = m::array(&agent["searches"]);
                     let scope_svc = event["service"]
                         .as_str()
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                         .or_else(|| agent_svc.clone());
-                    searches.push(json!({
+                    agent.searches.push(json!({
                         "service": scope_svc,
                         "pattern": event["detail"],
                         "scope": event["path"],
                         "event_id": event_id,
                     }));
-                    agent["searches"] = json!(searches);
                 }
 
                 if ["bash", "shell"].contains(&norm_key.as_str()) {
-                    let mut commands = m::array(&agent["commands"]);
-                    if let Some(existing) = commands.iter_mut().find(|c| c["call"] == call_id) {
+                    if let Some(existing) = agent.commands.iter_mut().find(|c| c["call"] == call_id)
+                    {
                         existing["running"] = json!(start);
-                        existing["ok"] = call_obj["ok"].clone();
+                        existing["ok"] = json!(call_ok);
                         existing["event_id"] = event_id.clone();
                     } else {
                         let cmd_text = event["detail"].as_str().unwrap_or_else(|| {
@@ -847,7 +887,7 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
                                 .map(|(_, s)| s)
                                 .unwrap_or("")
                         });
-                        commands.push(json!({
+                        agent.commands.push(json!({
                             "call": call_id,
                             "agent": name,
                             "agent_key": key,
@@ -855,16 +895,15 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
                             "command": cmd_text,
                             "class": classify::classify(cmd_text),
                             "running": start,
-                            "ok": call_obj["ok"],
+                            "ok": call_ok,
                             "event_id": event_id,
                             "at": event["at"],
                         }));
                     }
-                    agent["commands"] = json!(commands);
                 }
             } else if kind == "plan" {
                 p.step_seq += 1;
-                let items = event["items"]
+                agent.plan_items = event["items"]
                     .as_array()
                     .or_else(|| event["plan"].as_array())
                     .cloned()
@@ -880,37 +919,33 @@ pub(super) fn observe_panel(p: &mut Panel, event: &V) {
                                 .collect()
                         }
                     });
-                agent["plan_items"] = json!(items);
             }
 
-            let mut events = m::array(&agent["events"]);
             if kind == "tool" && !raw_call.is_empty() && event["state"] == "completed" {
-                if let Some(index) = agent["calls"][&raw_call].as_u64() {
-                    if let Some(item) = events.get_mut(index as usize) {
+                if let Some(&index) = agent.calls.get(&raw_call) {
+                    if let Some(item) = agent.events.get_mut(index) {
                         item["state"] = json!("completed");
                         item["ok"] = event["ok"].clone();
                         item["done"] = event["at"].clone();
-                        agent["events"] = json!(events);
                         return;
                     }
                 }
             }
             if kind == "tool" {
-                agent["tools"] = json!(agent["tools"].as_u64().unwrap_or(0) + 1);
+                agent.meta["tools"] = json!(agent.meta["tools"].as_u64().unwrap_or(0) + 1);
                 if !raw_call.is_empty() {
-                    agent["calls"][&raw_call] = json!(events.len());
+                    agent.calls.insert(raw_call, agent.events.len());
                 }
             }
             if kind == "text" {
-                agent["messages"] = json!(agent["messages"].as_u64().unwrap_or(0) + 1);
+                agent.meta["messages"] = json!(agent.meta["messages"].as_u64().unwrap_or(0) + 1);
             }
             let mut stored = event.clone();
             stored["event_id"] = event_id;
             stored["event_seq"] = json!(p.cursor.max(p.step_seq));
             stored["agent_key"] = json!(key);
-            events.push(stored);
-            agent["events"] = json!(events);
-            agent["last"] = event.clone();
+            agent.events.push(stored);
+            agent.meta["last"] = event.clone();
         }
         _ => {}
     }
@@ -940,15 +975,23 @@ pub fn observe_session(sid: &str, event: &V) {
         });
         if accept {
             observe(&root, event);
-            super::render::render(&root);
+            let root_for_frame = root.clone();
+            dom::schedule_frame(&render_frame_key(&root), move || {
+                super::render::render(&root_for_frame);
+            });
         }
     }
 }
 
 pub async fn load(root: &str, sid: &str) {
     if sid.is_empty() {
+        let sys_run = if root == "system-agents" {
+            m::data("system-run")
+        } else {
+            V::Null
+        };
         let has_plan_or_evidence = edit(root, |p| {
-            let has_ev = active_evidence_for(root, p).is_some();
+            let has_ev = active_evidence_for_with_run(root, p, &sys_run).is_some();
             if has_ev || !p.plan.is_empty() {
                 p.sid.clear();
                 p.cursor = 0;
@@ -1010,6 +1053,7 @@ pub async fn load(root: &str, sid: &str) {
                     break;
                 }
                 let events = m::array(&data["events"]);
+                let mut page_updated = false;
                 for event in &events {
                     let id = event["id"].as_u64().unwrap_or(0);
                     let accept = edit(root, |p| {
@@ -1022,10 +1066,17 @@ pub async fn load(root: &str, sid: &str) {
                     });
                     if accept {
                         observe(root, event);
+                        page_updated = true;
                     }
                 }
                 if events.len() < 250 {
                     break;
+                }
+                if page_updated {
+                    let root_for_frame = root.to_owned();
+                    dom::schedule_frame(&render_frame_key(root), move || {
+                        super::render::render(&root_for_frame);
+                    });
                 }
             }
             Err(error) => {
@@ -1046,6 +1097,7 @@ pub async fn load(root: &str, sid: &str) {
         }
     }
     if panel(root).epoch == epoch {
+        dom::cancel_frame(&render_frame_key(root));
         edit(root, |p| p.pending = false);
         super::render::render(root);
     }
@@ -1224,7 +1276,73 @@ pub(super) fn parse_evidence_path_item(
     None
 }
 
-pub(super) fn synthetic_agent_from_evidence(d: &V, receipts: &[V]) -> Option<(String, V)> {
+pub(super) enum AgentView<'a> {
+    Live { record: &'a AgentRecord, meta: V },
+    Synth(AgentRecord),
+}
+
+impl<'a> AgentView<'a> {
+    pub(super) fn meta(&self) -> &V {
+        match self {
+            Self::Live { meta, .. } => meta,
+            Self::Synth(record) => &record.meta,
+        }
+    }
+
+    pub(super) fn events(&self) -> &[V] {
+        match self {
+            Self::Live { record, .. } => &record.events,
+            Self::Synth(record) => &record.events,
+        }
+    }
+
+    pub(super) fn files(&self) -> &BTreeMap<String, AgentFileState> {
+        match self {
+            Self::Live { record, .. } => &record.files,
+            Self::Synth(record) => &record.files,
+        }
+    }
+
+    pub(super) fn call_states(&self) -> &BTreeMap<String, AgentCallState> {
+        match self {
+            Self::Live { record, .. } => &record.call_states,
+            Self::Synth(record) => &record.call_states,
+        }
+    }
+
+    pub(super) fn searches(&self) -> &[V] {
+        match self {
+            Self::Live { record, .. } => &record.searches,
+            Self::Synth(record) => &record.searches,
+        }
+    }
+
+    pub(super) fn commands(&self) -> &[V] {
+        match self {
+            Self::Live { record, .. } => &record.commands,
+            Self::Synth(record) => &record.commands,
+        }
+    }
+
+    pub(super) fn plan_items(&self) -> &[V] {
+        match self {
+            Self::Live { record, .. } => &record.plan_items,
+            Self::Synth(record) => &record.plan_items,
+        }
+    }
+
+    pub(super) fn from_evidence(&self) -> bool {
+        match self {
+            Self::Live { record, .. } => record.from_evidence,
+            Self::Synth(record) => record.from_evidence,
+        }
+    }
+}
+
+pub(super) fn synthetic_agent_from_evidence(
+    d: &V,
+    receipts: &[V],
+) -> Option<(String, AgentRecord)> {
     let key = dispatch_key(d)?;
     let phase = dispatch_phase(d);
     let attempt = d["attempt"].as_u64().unwrap_or(1);
@@ -1271,41 +1389,41 @@ pub(super) fn synthetic_agent_from_evidence(d: &V, receipts: &[V]) -> Option<(St
         .as_u64()
         .unwrap_or_else(|| m::array(&d["commands"]).len() as u64);
 
-    Some((
-        key.clone(),
-        json!({
-            "id": key,
-            "agent": phase,
-            "attempt": attempt,
-            "service": sid,
-            "root": d["root"],
-            "mode": d["mode"],
-            "provider": d["provider"],
-            "status": status,
-            "ok": ok,
-            "summary": summary,
-            "changed_files": changed_files,
-            "checks": checks,
-            "tools": tools,
-            "messages": 0,
-            "tokens": d["tokens"].as_f64().unwrap_or(0.),
-            "cost_usd": d["cost_usd"],
-            "duration_seconds": d["duration_seconds"],
-            "events": [],
-            "files": {},
-            "searches": [],
-            "plan_items": [],
-            "commands": [],
-            "from_evidence": true,
-        }),
-    ))
+    let mut rec = AgentRecord::new(key.clone(), &phase, attempt, sid.unwrap_or_default());
+    rec.meta["root"] = d["root"].clone();
+    rec.meta["mode"] = d["mode"].clone();
+    rec.meta["provider"] = d["provider"].clone();
+    rec.meta["status"] = json!(status);
+    rec.meta["ok"] = json!(ok);
+    rec.meta["summary"] = json!(summary);
+    rec.meta["changed_files"] = changed_files;
+    rec.meta["checks"] = checks;
+    rec.meta["tools"] = json!(tools);
+    rec.meta["tokens"] = json!(d["tokens"].as_f64().unwrap_or(0.));
+    rec.meta["cost_usd"] = d["cost_usd"].clone();
+    rec.meta["duration_seconds"] = d["duration_seconds"].clone();
+    rec.meta["from_evidence"] = json!(true);
+    rec.from_evidence = true;
+    Some((key, rec))
 }
 
-pub(super) fn effective_agents(
-    p: &Panel,
+pub(super) fn effective_agents<'a>(
+    p: &'a Panel,
     evidence: Option<&V>,
-) -> (BTreeMap<String, V>, Vec<String>, Vec<V>, Vec<V>) {
-    let mut agents = p.agents.clone();
+) -> (BTreeMap<String, AgentView<'a>>, Vec<String>, Vec<V>, Vec<V>) {
+    let mut agents: BTreeMap<String, AgentView<'a>> = p
+        .agents
+        .iter()
+        .map(|(k, record)| {
+            (
+                k.clone(),
+                AgentView::Live {
+                    record,
+                    meta: record.meta.clone(),
+                },
+            )
+        })
+        .collect();
     let mut order = p.order.clone();
     let (raw_dispatches, receipts) = evidence.map(extract_dispatch_evidences).unwrap_or_default();
     let dispatches = filter_dispatches_for_launch(raw_dispatches, &p.sid);
@@ -1313,21 +1431,27 @@ pub(super) fn effective_agents(
     for d in &dispatches {
         if let Some((key, synth)) = synthetic_agent_from_evidence(d, &receipts) {
             if let Some(existing) = agents.get_mut(&key) {
-                for field in ["service", "root", "summary", "checks"] {
-                    if existing[field].is_null() && !synth[field].is_null() {
-                        existing[field] = synth[field].clone();
+                if let AgentView::Live { meta, .. } = existing {
+                    for field in ["service", "root", "summary", "checks"] {
+                        if meta[field].is_null() && !synth.meta[field].is_null() {
+                            meta[field] = synth.meta[field].clone();
+                        }
                     }
                 }
             } else {
                 order.push(key.clone());
-                agents.insert(key, synth);
+                agents.insert(key, AgentView::Synth(synth));
             }
         }
     }
     (agents, order, dispatches, receipts)
 }
 
-pub(super) fn ordered_items(p: &Panel, agents: &BTreeMap<String, V>, order: &[String]) -> Vec<V> {
+pub(super) fn ordered_items(
+    p: &Panel,
+    agents: &BTreeMap<String, AgentView<'_>>,
+    order: &[String],
+) -> Vec<V> {
     let mut result = Vec::new();
     let mut seen = BTreeSet::new();
     for step in &p.plan {
@@ -1336,17 +1460,18 @@ pub(super) fn ordered_items(p: &Panel, agents: &BTreeMap<String, V>, order: &[St
             .iter()
             .rev()
             .filter_map(|id| agents.get(id))
-            .find(|a| a["agent"] == name);
+            .find(|a| a.meta()["agent"] == name);
         let mut item = step.clone();
         if !item.is_object() {
             continue;
         }
         if let Some(a) = latest {
-            for (k, v) in a.as_object().into_iter().flatten() {
+            let meta = a.meta();
+            for (k, v) in meta.as_object().into_iter().flatten() {
                 item[k] = v.clone();
             }
-            item["key"] = a["id"].clone();
-            seen.insert(m::text(a, "id"));
+            item["key"] = meta["id"].clone();
+            seen.insert(m::text(meta, "id"));
         } else {
             item["key"] = V::Null;
             item["status"] = step["journal"]
@@ -1362,12 +1487,15 @@ pub(super) fn ordered_items(p: &Panel, agents: &BTreeMap<String, V>, order: &[St
         result.push(item);
     }
     for key in order {
-        let a = &agents[key];
-        if !seen.contains(key) && !p.plan.iter().any(|s| s["id"] == a["agent"]) {
-            let mut item = a.clone();
+        let Some(a) = agents.get(key) else {
+            continue;
+        };
+        let meta = a.meta();
+        if !seen.contains(key) && !p.plan.iter().any(|s| s["id"] == meta["agent"]) {
+            let mut item = meta.clone();
             item["key"] = json!(key);
-            item["step"] = a["agent"].clone();
-            item["label"] = a["agent"].clone();
+            item["step"] = meta["agent"].clone();
+            item["label"] = meta["agent"].clone();
             result.push(item);
         }
     }
@@ -1470,29 +1598,26 @@ pub(super) fn searched_patterns_for(
 
 pub(super) fn build_agent_files(
     agent_key: &str,
-    agent: &V,
+    agent: &AgentView<'_>,
     dispatch: Option<&V>,
     receipt: Option<&V>,
     folders: &BTreeMap<String, String>,
 ) -> Vec<FileTouchEntry> {
-    let agent_name = m::text(agent, "agent");
-    let default_svc = clean_service_id(agent["service"].as_str(), &agent_name);
-    let agent_running = agent["status"] == "running";
+    let meta = agent.meta();
+    let agent_name = m::text(meta, "agent");
+    let default_svc = clean_service_id(meta["service"].as_str(), &agent_name);
+    let agent_running = meta["status"] == "running";
 
     let mut open_keys = BTreeSet::new();
     if agent_running {
-        if let Some(states) = agent["call_states"].as_object() {
-            for state in states.values() {
-                if m::yes(&state["open"]) {
-                    if let Some(touched) = state["touched"].as_object() {
-                        open_keys.extend(touched.keys().cloned());
-                    }
-                }
+        for state in agent.call_states().values() {
+            if state.open {
+                open_keys.extend(state.touched.keys().cloned());
             }
         }
     }
 
-    let mut searches = m::array(&agent["searches"]);
+    let mut searches = agent.searches().to_vec();
     if let Some(d) = dispatch {
         for item in m::array(&d["searched"]) {
             if let Some(pat) = item.as_str() {
@@ -1526,49 +1651,44 @@ pub(super) fn build_agent_files(
     }
 
     let mut by_key: BTreeMap<String, FileTouchEntry> = BTreeMap::new();
-    let mut live_files: Vec<V> = agent["files"]
-        .as_object()
-        .map(|map| map.values().cloned().collect())
-        .unwrap_or_default();
-    live_files.sort_by_key(|f| f["order"].as_u64().unwrap_or(0));
+    let mut live_files: Vec<&AgentFileState> = agent.files().values().collect();
+    live_files.sort_by_key(|f| f.order);
 
     for (idx, f) in live_files.iter().enumerate() {
-        let path = tidy_path(&m::text(f, "path"));
+        let path = tidy_path(&f.path);
         if path.is_empty() || path == "." {
             continue;
         }
-        let outside = m::yes(&f["outside"]);
+        let outside = f.outside;
         let svc = if outside {
             None
         } else {
-            f["service"]
-                .as_str()
+            f.service
+                .clone()
                 .filter(|s| !s.is_empty())
-                .map(str::to_owned)
                 .or_else(|| default_svc.clone())
         };
         let folder = svc.as_deref().and_then(|s| folders.get(s)).cloned();
-        let raw_fkey = m::text(f, "key");
         let searched_patterns = searched_patterns_for(&searches, svc.as_deref(), &path, outside);
         let entry = FileTouchEntry {
             path,
             service_id: svc,
             service_folder: folder,
             agents: vec![agent_name.clone()],
-            reads: f["reads"].as_u64().unwrap_or(0),
-            edits: f["edits"].as_u64().unwrap_or(0),
-            created: m::yes(&f["created"]),
-            deleted: m::yes(&f["deleted"]),
-            failed: m::yes(&f["failed"]),
+            reads: f.reads,
+            edits: f.edits,
+            created: f.created,
+            deleted: f.deleted,
+            failed: f.failed,
             outside,
-            helper: m::yes(&f["helper"]),
-            main: m::yes(&f["main"]),
-            now: agent_running && open_keys.contains(&raw_fkey),
+            helper: f.helper,
+            main: f.main,
+            now: agent_running && open_keys.contains(&f.key),
             order: idx,
-            first_step: f["first_step"].as_u64().unwrap_or(0),
-            last_step: f["last_step"].as_u64().unwrap_or(0),
+            first_step: f.first_step,
+            last_step: f.last_step,
             searched_patterns,
-            event_id: f["event_id"].clone(),
+            event_id: f.event_id.clone(),
             timeline_agent: Some(agent_key.to_owned()),
         };
         by_key.insert(entry.key(), entry);
@@ -1879,13 +1999,14 @@ pub(super) fn merge_multi_agent_files(per_agent: Vec<Vec<FileTouchEntry>>) -> Ve
 
 pub(super) fn build_agent_commands(
     agent_key: &str,
-    agent: &V,
+    agent: &AgentView<'_>,
     dispatch: Option<&V>,
     receipt: Option<&V>,
 ) -> Vec<V> {
-    let agent_name = m::text(agent, "agent");
-    let default_svc = clean_service_id(agent["service"].as_str(), &agent_name);
-    let mut list = m::array(&agent["commands"]);
+    let meta = agent.meta();
+    let agent_name = m::text(meta, "agent");
+    let default_svc = clean_service_id(meta["service"].as_str(), &agent_name);
+    let mut list = agent.commands().to_vec();
     let mut seen_cmds: BTreeSet<String> = list
         .iter()
         .map(|c| m::text(c, "command"))
@@ -1938,7 +2059,7 @@ pub(super) fn build_agent_commands(
         }
     }
 
-    let mut checks = m::array(&agent["checks"]);
+    let mut checks = m::array(&meta["checks"]);
     if checks.is_empty() {
         if let Some(r) = receipt {
             checks = m::array(&r["report"]["checks"]);
@@ -1982,16 +2103,17 @@ pub(super) fn build_agent_commands(
 
 pub(super) fn build_agent_plan_items(
     agent_key: &str,
-    agent: &V,
+    agent: &AgentView<'_>,
     dispatch: Option<&V>,
     step_item: Option<&V>,
     include_step_fallback: bool,
 ) -> Vec<V> {
-    let agent_name = m::text(agent, "agent");
+    let meta = agent.meta();
+    let agent_name = m::text(meta, "agent");
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for raw in m::array(&agent["plan_items"]) {
+    for raw in agent.plan_items() {
         let text = raw["text"]
             .as_str()
             .or_else(|| raw["content"].as_str())
@@ -2033,7 +2155,7 @@ pub(super) fn build_agent_plan_items(
             }
             let st = raw["status"]
                 .as_str()
-                .unwrap_or_else(|| agent["status"].as_str().unwrap_or("completed"));
+                .unwrap_or_else(|| meta["status"].as_str().unwrap_or("completed"));
             out.push(json!({
                 "id": format!("ev:{agent_key}:{text}"),
                 "agent": agent_name,
@@ -2068,11 +2190,11 @@ pub(super) fn build_agent_plan_items(
 
 pub(super) fn build_synthetic_timeline(
     agent_key: &str,
-    agent: &V,
+    agent: &AgentView<'_>,
     files: &[FileTouchEntry],
     commands: &[V],
 ) -> Vec<V> {
-    let agent_name = m::text(agent, "agent");
+    let agent_name = m::text(agent.meta(), "agent");
     let mut out = Vec::new();
     for file in files {
         let tool = if file.created {
@@ -2115,130 +2237,143 @@ pub(super) fn build_synthetic_timeline(
 }
 
 pub(crate) fn snapshot_for_root(root: &str) -> InspectorSnapshot {
-    let mut p = panel(root);
-    let evidence = active_evidence_for(root, &p);
-    let folders = service_folders_map(&p, evidence.as_ref());
-    let (agents, order, dispatches, receipts) = effective_agents(&p, evidence.as_ref());
-    let items = ordered_items(&p, &agents, &order);
-    let (show_all_card, selected) = resolve_selection(root, &p, &items);
-    if p.selected != selected {
-        p.selected = selected.clone();
-        edit(root, |state| state.selected = selected.clone());
-    }
-
-    let dispatch_for = |key: &str| -> Option<&V> {
-        dispatches
-            .iter()
-            .find(|d| dispatch_key(d).as_deref() == Some(key))
+    let sys_run = if root == "system-agents" {
+        m::data("system-run")
+    } else {
+        V::Null
     };
-    let receipt_for = |agent: &V| -> Option<&V> {
-        let phase = m::text(agent, "agent");
-        let attempt = agent["attempt"].as_u64().unwrap_or(1);
-        receipts
-            .iter()
-            .find(|r| r["phase"] == phase && r["attempt"].as_u64().unwrap_or(1) == attempt)
-    };
+    let catalog = m::data("system-catalog");
+    let (snapshot, updated_selected) = PANELS.with(|all| {
+        let mut map = all.borrow_mut();
+        let p = map.entry(root.into()).or_default();
+        let evidence = active_evidence_for_with_run(root, p, &sys_run);
+        let folders = service_folders_map_with_catalog(p, evidence.as_ref(), &catalog);
+        let (agents, order, dispatches, receipts) = effective_agents(p, evidence.as_ref());
+        let items = ordered_items(p, &agents, &order);
+        let (show_all_card, selected) = resolve_selection(root, p, &items);
+        let updated_selected = (p.selected != selected).then(|| selected.clone());
 
-    let mut running = false;
-    let mut timeline_events = Vec::new();
-    let mut files = Vec::new();
-    let mut plan_items = Vec::new();
-    let mut commands = Vec::new();
+        let dispatch_for = |key: &str| -> Option<&V> {
+            dispatches
+                .iter()
+                .find(|d| dispatch_key(d).as_deref() == Some(key))
+        };
+        let receipt_for = |agent: &AgentView<'_>| -> Option<&V> {
+            let meta = agent.meta();
+            let phase = m::text(meta, "agent");
+            let attempt = meta["attempt"].as_u64().unwrap_or(1);
+            receipts
+                .iter()
+                .find(|r| r["phase"] == phase && r["attempt"].as_u64().unwrap_or(1) == attempt)
+        };
 
-    if selected == "all" {
-        let mut per_agent_files = Vec::new();
-        for step in &items {
-            let step_id = m::text(step, "step");
-            let label = m::text(step, "label");
-            let goal = m::text(step, "goal");
-            let summary = if !goal.is_empty() {
-                format!("{label} — {goal}")
+        let mut running = false;
+        let mut timeline_events = Vec::new();
+        let mut files = Vec::new();
+        let mut plan_items = Vec::new();
+        let mut commands = Vec::new();
+
+        if selected == "all" {
+            let mut per_agent_files = Vec::new();
+            for step in &items {
+                let step_id = m::text(step, "step");
+                let label = m::text(step, "label");
+                let goal = m::text(step, "goal");
+                let summary = if !goal.is_empty() {
+                    format!("{label} — {goal}")
+                } else {
+                    label
+                };
+                if !summary.is_empty() {
+                    plan_items.push(json!({
+                        "id": format!("wave:{step_id}"),
+                        "agent": step_id,
+                        "status": step["status"].as_str().unwrap_or("pending"),
+                        "text": summary,
+                        "wave_step": true,
+                    }));
+                }
+            }
+
+            for key in &order {
+                let Some(agent) = agents.get(key) else {
+                    continue;
+                };
+                if agent.meta()["status"] == "running" {
+                    running = true;
+                }
+                let d = dispatch_for(key);
+                let r = receipt_for(agent);
+                let ag_files = build_agent_files(key, agent, d, r, &folders);
+                let ag_cmds = build_agent_commands(key, agent, d, r);
+                let ag_plan = build_agent_plan_items(key, agent, d, None, false);
+                plan_items.extend(ag_plan);
+
+                let live_evs = agent.events();
+                if live_evs.is_empty() && agent.from_evidence() {
+                    timeline_events
+                        .extend(build_synthetic_timeline(key, agent, &ag_files, &ag_cmds));
+                } else {
+                    timeline_events.extend(live_evs.iter().cloned());
+                }
+                per_agent_files.push(ag_files);
+                commands.extend(ag_cmds);
+            }
+            timeline_events.sort_by_key(|ev| ev["event_seq"].as_u64().unwrap_or(0));
+            files = merge_multi_agent_files(per_agent_files);
+        } else if let Some(agent) = agents.get(&selected) {
+            running = agent.meta()["status"] == "running";
+            let d = dispatch_for(&selected);
+            let r = receipt_for(agent);
+            let step_item = items.iter().find(|i| selection(i) == selected);
+            files = build_agent_files(&selected, agent, d, r, &folders);
+            commands = build_agent_commands(&selected, agent, d, r);
+            plan_items = build_agent_plan_items(&selected, agent, d, step_item, true);
+            let live_evs = agent.events();
+            timeline_events = if live_evs.is_empty() && agent.from_evidence() {
+                build_synthetic_timeline(&selected, agent, &files, &commands)
             } else {
-                label
+                live_evs.to_vec()
             };
-            if !summary.is_empty() {
+        } else if let Some(step_item) = items.iter().find(|i| selection(i) == selected) {
+            let goal = m::text(step_item, "goal");
+            let label = m::text(step_item, "label");
+            if !label.is_empty() {
                 plan_items.push(json!({
-                    "id": format!("wave:{step_id}"),
-                    "agent": step_id,
-                    "status": step["status"].as_str().unwrap_or("pending"),
-                    "text": summary,
-                    "wave_step": true,
+                    "id": format!("step:{selected}"),
+                    "agent": m::text(step_item, "step"),
+                    "status": step_item["status"].as_str().unwrap_or("pending"),
+                    "text": if goal.is_empty() { label } else { format!("{label}: {goal}") },
                 }));
             }
         }
 
-        for key in &order {
-            let Some(agent) = agents.get(key) else {
-                continue;
-            };
-            if agent["status"] == "running" {
-                running = true;
-            }
-            let d = dispatch_for(key);
-            let r = receipt_for(agent);
-            let ag_files = build_agent_files(key, agent, d, r, &folders);
-            let ag_cmds = build_agent_commands(key, agent, d, r);
-            let ag_plan = build_agent_plan_items(key, agent, d, None, false);
-            plan_items.extend(ag_plan);
-
-            let live_evs = m::array(&agent["events"]);
-            if live_evs.is_empty() && m::yes(&agent["from_evidence"]) {
-                timeline_events.extend(build_synthetic_timeline(key, agent, &ag_files, &ag_cmds));
-            } else {
-                timeline_events.extend(live_evs);
-            }
-            per_agent_files.push(ag_files);
-            commands.extend(ag_cmds);
-        }
-        timeline_events.sort_by_key(|ev| ev["event_seq"].as_u64().unwrap_or(0));
-        files = merge_multi_agent_files(per_agent_files);
-    } else if let Some(agent) = agents.get(&selected) {
-        running = agent["status"] == "running";
-        let d = dispatch_for(&selected);
-        let r = receipt_for(agent);
-        let step_item = items.iter().find(|i| selection(i) == selected);
-        files = build_agent_files(&selected, agent, d, r, &folders);
-        commands = build_agent_commands(&selected, agent, d, r);
-        plan_items = build_agent_plan_items(&selected, agent, d, step_item, true);
-        let live_evs = m::array(&agent["events"]);
-        timeline_events = if live_evs.is_empty() && m::yes(&agent["from_evidence"]) {
-            build_synthetic_timeline(&selected, agent, &files, &commands)
-        } else {
-            live_evs
+        let tab = match p.tab.as_str() {
+            "files" | "plan" | "commands" => p.tab.clone(),
+            _ => "timeline".into(),
         };
-    } else if let Some(step_item) = items.iter().find(|i| selection(i) == selected) {
-        let goal = m::text(step_item, "goal");
-        let label = m::text(step_item, "label");
-        if !label.is_empty() {
-            plan_items.push(json!({
-                "id": format!("step:{selected}"),
-                "agent": m::text(step_item, "step"),
-                "status": step_item["status"].as_str().unwrap_or("pending"),
-                "text": if goal.is_empty() { label } else { format!("{label}: {goal}") },
-            }));
-        }
-    }
+        let (resolved_filter, _) = offered_filters(&files, &p.file_filter);
 
-    let tab = match p.tab.as_str() {
-        "files" | "plan" | "commands" => p.tab.clone(),
-        _ => "timeline".into(),
-    };
-    let (resolved_filter, _) = offered_filters(&files, &p.file_filter);
-
-    InspectorSnapshot {
-        items,
-        show_all_card,
-        selected,
-        tab,
-        files_view: normalize_view(&p.files_view).to_owned(),
-        file_filter: resolved_filter,
-        cmd_filter: p.cmd_filter,
-        running,
-        timeline_events,
-        files,
-        plan_items,
-        commands,
+        let snap = InspectorSnapshot {
+            items,
+            show_all_card,
+            selected,
+            tab,
+            files_view: normalize_view(&p.files_view).to_owned(),
+            file_filter: resolved_filter,
+            cmd_filter: p.cmd_filter.clone(),
+            running,
+            timeline_events,
+            files,
+            plan_items,
+            commands,
+        };
+        (snap, updated_selected)
+    });
+    if let Some(selected) = updated_selected {
+        edit(root, |state| state.selected = selected);
     }
+    snapshot
 }
 
 pub(crate) fn system_card_actions(root: &str, entry: &FileTouchEntry) -> Vec<FileCardAction> {

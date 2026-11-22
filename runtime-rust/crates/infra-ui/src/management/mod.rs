@@ -5,6 +5,7 @@ mod skills;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use capsules::capsule_title;
 pub use capsules::{capsule_changed, load_capsules};
 pub use creator::{creator_list, creator_models, creator_read, reset_creator_project};
 #[allow(unused_imports)]
@@ -42,16 +43,6 @@ pub(crate) fn on_global_project_change(project: &str) {
         return;
     }
     let active_view = m::read(|s| s.view.clone());
-    for scope_id in [
-        "setup-project",
-        "skills-project",
-        "create-skill-project",
-        "accelerator-project",
-    ] {
-        if cfg!(target_arch = "wasm32") && dom::value(scope_id) != project {
-            dom::set_value(scope_id, project);
-        }
-    }
     for k in ["setup", "skills", "create-skill"] {
         invalidate(k);
     }
@@ -119,10 +110,6 @@ pub async fn event(
             invalidate("setup");
             return true;
         }
-        if id == "setup-project" {
-            load_setup().await;
-            return true;
-        }
         if id == "setup-preview-actions" || id == "setup-preview-path" {
             setup_files();
             return true;
@@ -148,13 +135,6 @@ pub async fn event(
             m::take("skills-discovery");
             render_skills();
             skills_controls();
-            return true;
-        }
-        if id == "skills-project" {
-            invalidate("skills");
-            m::take("skills-change-preview");
-            skills_controls();
-            installed_skills().await;
             return true;
         }
         if id == "skills-filter" {
@@ -274,7 +254,7 @@ pub async fn event(
         "setup-detach-button" => attach("detach").await,
         "setup-attach-codex-trust" => hooks(true).await,
         "setup-start-session" => {
-            let p = dom::value("setup-project");
+            let p = m::current_project();
             session::new_session(Some(&p));
             session::open_view("sessions", true).await;
         }
@@ -292,10 +272,10 @@ pub async fn event(
         "skills-change-apply" => apply_change().await,
         "create-skill-save" => install("create-skill").await,
         "create-skill-view-installed" => {
-            dom::set_value(
-                "skills-project",
-                &m::string(&m::data("create-skill-result-project")),
-            );
+            let target = m::string(&m::data("create-skill-result-project"));
+            if !target.is_empty() {
+                session::set_workspace_project(&target);
+            }
             session::open_view("skills", true).await;
         }
         "creator-refresh" => creator_list().await,
@@ -336,12 +316,8 @@ pub async fn event(
             session::select_with_view(payload.as_str().unwrap_or(""), Some("changes")).await;
         }
         "accelerator-catalog" => session::open_view("kit3", true).await,
-        "accelerator-creator" => {
-            dom::set_value("creator-project", &dom::value("accelerator-project"));
-            session::open_view("creator", true).await;
-        }
+        "accelerator-creator" => session::open_view("creator", true).await,
         "accelerator-setup" => {
-            dom::set_value("setup-project", &dom::value("accelerator-project"));
             dom::set_value("setup-edition", payload.as_str().unwrap_or(""));
             session::open_view("setup", true).await;
         }

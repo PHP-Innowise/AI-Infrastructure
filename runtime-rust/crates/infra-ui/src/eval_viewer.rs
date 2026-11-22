@@ -29,9 +29,43 @@ fn text(v: &V, key: &str) -> String {
     v[key].as_str().map(str::to_owned).unwrap_or_default()
 }
 fn show(id: &str, visible: bool) {
-    if let Some(e) = dom::get(id) {
-        let _ = e.set_attribute("style", if visible { "" } else { "display:none" });
+    dom::hidden(id, !visible);
+}
+
+fn ensure_eval_viewer_styles() {
+    if dom::get("eval-viewer-a11y").is_some() {
+        return;
     }
+    let doc = dom::document();
+    if let Ok(style) = doc.create_element("style") {
+        style.set_id("eval-viewer-a11y");
+        style.set_text_content(Some(
+            "[hidden]{display:none!important;}.eval-output-error{color:var(--error,var(--red));}",
+        ));
+        if let Some(parent) = doc
+            .query_selector("head")
+            .ok()
+            .flatten()
+            .or_else(|| doc.document_element())
+        {
+            let _ = parent.append_child(&style);
+        }
+    }
+}
+
+fn add_eval_set_item(data: &mut V) -> usize {
+    if !data.is_object() {
+        *data = json!({});
+    }
+    if !data["items"].is_array() {
+        data["items"] = json!([]);
+    }
+    let Some(items) = data.get_mut("items").and_then(V::as_array_mut) else {
+        return 0;
+    };
+    let index = items.len();
+    items.push(json!({"query": "", "should_trigger": true}));
+    index
 }
 fn class(id: &str, key: &str, on: bool) {
     dom::class(id, key, on);
@@ -146,7 +180,7 @@ fn outputs(container: &Element, files: &[V]) {
             "text" | "error" => {
                 let pre = add(&content, "pre", "", &text(file, "content"));
                 if file["type"] == "error" {
-                    let _ = pre.set_attribute("style", "color:var(--error, var(--red))");
+                    let _ = pre.class_list().add_1("eval-output-error");
                 }
             }
             "image" => {
@@ -824,6 +858,7 @@ fn render_benchmark() {
     }
 }
 pub fn start() -> Result<(), JsValue> {
+    ensure_eval_viewer_styles();
     let data = dom::get("eval-viewer-data")
         .and_then(|e| e.text_content())
         .ok_or_else(|| JsValue::from_str("Missing evaluation viewer data"))?;
@@ -1199,12 +1234,7 @@ fn start_editor(data: V) -> Result<(), JsValue> {
             .unwrap_or("")
         {
             "add" => {
-                let index = write(|s| {
-                    let items = s.data["items"].as_array_mut().unwrap();
-                    let index = items.len();
-                    items.push(json!({"query":"","should_trigger":true}));
-                    index
-                });
+                let index = write(|s| add_eval_set_item(&mut s.data));
                 render_editor();
                 if let Ok(Some(input)) = dom::document()
                     .query_selector(&format!("textarea[data-editor-index='{index}']"))
@@ -1351,5 +1381,17 @@ mod tests {
         ] {
             assert!(METRICS.iter().any(|(name, ..)| *name == key), "{key}");
         }
+    }
+
+    #[test]
+    fn add_eval_set_item_initializes_missing_or_non_array_items() {
+        let mut data = json!({"mode": "eval-set"});
+        assert_eq!(add_eval_set_item(&mut data), 0);
+        assert_eq!(add_eval_set_item(&mut data), 1);
+        assert_eq!(data["items"].as_array().map(Vec::len), Some(2));
+
+        let mut bad = json!("corrupt");
+        assert_eq!(add_eval_set_item(&mut bad), 0);
+        assert_eq!(bad["items"][0]["should_trigger"], json!(true));
     }
 }
