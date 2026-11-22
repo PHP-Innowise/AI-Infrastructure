@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 pub const STATE_SCHEMA: u64 = 1;
 const STATE_BYTES: usize = 8 * 1024 * 1024;
 pub const LOG_FILE: &str = "run-log.jsonl";
+pub const CHANGES_FILE: &str = "run-log.changes.jsonl";
 
 /// What the run waits for.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -259,9 +260,32 @@ impl RunLog {
         self.needs_newline = false;
         Ok(())
     }
+    /// The journal path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    /// The generation string recorded in each line.
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
 }
 pub fn log_path(state_file: &Path) -> PathBuf {
     state_file.with_file_name(LOG_FILE)
+}
+
+/// Path of the sibling workspace-change sidecar journal beside `log_file`.
+pub fn changes_path(log_file: &Path) -> PathBuf {
+    log_file.with_file_name(CHANGES_FILE)
+}
+
+/// Appends workspace mutation metadata (`changed_files`) to the sibling sidecar
+/// journal so `run-log.jsonl` remains purely phase-only.
+pub fn append_changes(log_file: &Path, generation: &str, changed_files: &[Value]) -> Result<()> {
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+    let mut log = RunLog::open_log(changes_path(log_file), generation)?;
+    log.append("file_change", json!({"changes": changed_files}))
 }
 
 /// The journal's events after `after_seq`, in order. A torn or malformed line,

@@ -36,6 +36,7 @@ const HELP: &str = "Usage: infra-engine skillcache <operation>\n\
   run ['<JSON>'] [--replay <examples.json>]   start a capsule's plan with the values known so far\n\
   continue ['<JSON>']                         supply what the last answer asked for and go on\n\
   status                                      where the run stands\n\
+  reset                                       clear a run's saved state so it can restart\n\
   tool <program> --input '<JSON>' | --check   run one program of the capsule\n\
   gate1 <package directory> [--examples <file>]   check a package's structure and dataflow\n\
 A JSON argument may be `-` to read it from standard input.\n\
@@ -101,7 +102,7 @@ fn supplied(argument: &str) -> Result<Value, Refusal> {
 /// failures, 2 for a refused command.
 pub fn execute_run(arguments: &[String]) -> i32 {
     let Some((operation, rest)) = arguments.split_first() else {
-        return usage("Usage: skillcache-run run|continue|status ['<JSON>']");
+        return usage("Usage: skillcache-run run|continue|status|reset ['<JSON>']");
     };
     let mut values = None;
     let mut replay = None;
@@ -118,7 +119,7 @@ pub fn execute_run(arguments: &[String]) -> i32 {
                 Err(refusal) => return refuse(&refusal),
             }
         } else {
-            return usage("Usage: skillcache-run run|continue|status ['<JSON>']");
+            return usage("Usage: skillcache-run run|continue|status|reset ['<JSON>']");
         }
     }
     let prepared = (|| {
@@ -174,7 +175,8 @@ pub fn execute_run(arguments: &[String]) -> i32 {
         "run" => Command::Run(values),
         "continue" => Command::Continue(values),
         "status" if values.is_none() => Command::Status,
-        _ => return usage("Usage: skillcache-run run|continue|status ['<JSON>']"),
+        "reset" if values.is_none() => Command::Reset,
+        _ => return usage("Usage: skillcache-run run|continue|status|reset ['<JSON>']"),
     };
     match executor::execute(&session, command) {
         Ok(answer) => {
@@ -267,7 +269,17 @@ pub fn execute_tool(arguments: &[String]) -> i32 {
         .plan()
         .position(|step| step.program() == Some(id));
     let verification = step_index.is_some_and(|index| package.capsule.is_verification(index));
+    let before = log_file
+        .as_ref()
+        .and_then(|_| executor::workspace_snapshot_for_changes(&workspace));
     let outcome = tool::run(&package, program, mode, &workspace);
+    let changed_files = before
+        .as_ref()
+        .and_then(|prev| {
+            executor::workspace_snapshot_for_changes(&workspace)
+                .map(|next| executor::diff_workspace_changes(prev, &next, &workspace))
+        })
+        .unwrap_or_default();
     if let Some(log_file) = log_file
         && outcome.is_ok()
     {
@@ -281,6 +293,7 @@ pub fn execute_tool(arguments: &[String]) -> i32 {
                 let _ = file.lock();
             });
         let generation = std::env::var(env_filter::GENERATION).unwrap_or_default();
+        let _ = crate::state::append_changes(&log_file, &generation, &changed_files);
         if let Ok(mut log) = RunLog::open_log(log_file, &generation) {
             match &outcome {
                 Ok(tool::Outcome::Completed(completed)) => {
@@ -355,20 +368,20 @@ pub fn execute_gate1(arguments: &[String]) -> i32 {
 }
 
 /// The engine's `skillcache` command group and its two staged names.
-/// `name` is `run`, `continue`, `status`, `tool` or `gate1`.
+/// `name` is `run`, `continue`, `status`, `reset`, `tool` or `gate1`.
 pub fn execute(name: &str, arguments: &[String]) -> i32 {
     if name.is_empty() || matches!(name, "--help" | "-h" | "help") {
         println!("{HELP}");
         return 0;
     }
     match name {
-        "run" | "continue" | "status" => {
+        "run" | "continue" | "status" | "reset" => {
             let mut all = vec![name.to_string()];
             all.extend_from_slice(arguments);
             execute_run(&all)
         }
         "tool" => execute_tool(arguments),
         "gate1" => execute_gate1(arguments),
-        _ => usage("Usage: skillcache run|continue|status|tool|gate1"),
+        _ => usage("Usage: skillcache run|continue|status|reset|tool|gate1"),
     }
 }

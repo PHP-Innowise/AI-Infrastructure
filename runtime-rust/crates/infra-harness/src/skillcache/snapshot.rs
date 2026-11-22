@@ -152,8 +152,10 @@ fn tree_bytes(root: &Path) -> u64 {
 }
 
 pub(super) fn should_skip_name(name: &OsStr, depth: usize) -> bool {
-    name.to_str()
-        .is_some_and(|name| name == ".git" || (depth == 0 && ROOT_SKIPPED_NAMES.contains(&name)))
+    name.to_str().is_some_and(|name| {
+        infra_skillcache::executor::is_ignored_workspace_name(name)
+            || (depth == 0 && ROOT_SKIPPED_NAMES.contains(&name))
+    })
 }
 
 /// The target of the symbolic link at `link` when the link may be kept in a
@@ -449,8 +451,21 @@ struct Copied {
 }
 /// Copies one ignored entry of the checkout at `root`. A link is kept only
 /// when it stays inside the checkout; see [`kept_link`].
-fn copy_entry(root: &Path, from: &Path, to: &Path, copied: &mut Copied) -> std::io::Result<()> {
+fn copy_entry(
+    root: &Path,
+    ws_root: &Path,
+    from: &Path,
+    to: &Path,
+    skip_hashes: &std::collections::BTreeSet<String>,
+    copied: &mut Copied,
+) -> std::io::Result<()> {
     if copied.truncated {
+        return Ok(());
+    }
+    if let Some(name) = from.file_name().and_then(|n| n.to_str())
+        && (infra_skillcache::executor::is_ignored_workspace_name(name)
+            || (from.parent() == Some(ws_root) && ROOT_SKIPPED_NAMES.contains(&name)))
+    {
         return Ok(());
     }
     let metadata = std::fs::symlink_metadata(from)?;
@@ -467,13 +482,37 @@ fn copy_entry(root: &Path, from: &Path, to: &Path, copied: &mut Copied) -> std::
         return Ok(());
     }
     if metadata.is_dir() {
-        std::fs::create_dir_all(to)?;
         let mut entries = std::fs::read_dir(from)?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|entry| entry.file_name());
+        if entries.is_empty() && skip_hashes.is_empty() {
+            std::fs::create_dir_all(to)?;
+        }
         for entry in entries {
-            copy_entry(root, &entry.path(), &to.join(entry.file_name()), copied)?;
+            copy_entry(
+                root,
+                ws_root,
+                &entry.path(),
+                &to.join(entry.file_name()),
+                skip_hashes,
+                copied,
+            )?;
         }
     } else if metadata.is_file() {
+        if !skip_hashes.is_empty()
+            && let Ok(rel) = from.strip_prefix(ws_root)
+            && let Some(rel) = rel.to_str()
+        {
+            let normalized = if cfg!(windows) {
+                rel.replace('\\', "/")
+            } else {
+                rel.to_owned()
+            };
+            if skip_hashes.contains(&infra_skillcache::fingerprint::sha256(
+                normalized.as_bytes(),
+            )) {
+                return Ok(());
+            }
+        }
         if copied.files >= IGNORED_FILES
             || copied.bytes.saturating_add(metadata.len()) > IGNORED_BYTES
         {
@@ -569,6 +608,12 @@ fn materialize_git(root: &Path, snapshot: &Value, destination: &Path) -> Result<
         "-z",
     ];
     arguments.extend(scope);
+    let ws_source_root = if prefix.is_empty() {
+        top.clone()
+    } else {
+        top.join(&prefix)
+    };
+    let created = crate::skillcache::replay_result::created_hashes(root);
     if let Ok(listed) = git(&top, &arguments, &[]) {
         for name in listed
             .split(|byte| *byte == 0)
@@ -577,16 +622,18 @@ fn materialize_git(root: &Path, snapshot: &Value, destination: &Path) -> Result<
             let name = String::from_utf8_lossy(name);
             let relative = name.trim_end_matches('/');
             if relative.is_empty()
-                || relative
-                    .split('/')
-                    .any(|part| part == ".git" || part == "..")
+                || relative.split('/').any(|part| {
+                    part == ".." || infra_skillcache::executor::is_ignored_workspace_name(part)
+                })
             {
                 continue;
             }
             let _ = copy_entry(
                 &top,
+                &ws_source_root,
                 &top.join(relative),
                 &destination.join(relative),
+                &created,
                 &mut copied,
             );
         }
@@ -1167,5 +1214,55 @@ mod tests {
         )
         .unwrap();
         assert!(materialize(&state, "gen-1", &base.join("replay")).is_err());
+    }
+
+    #[test]
+    fn git_materialize_skips_cold_created_ignored_outputs_and_python_caches() {
+        let root = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(root.path()).unwrap();
+        let project = base.join("repo");
+        let state = base.join("state");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q"], &[]).unwrap();
+        std::fs::write(
+            project.join(".gitignore"),
+            "out/\n__pycache__/\n.DS_Store\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("input.txt"), "hello\n").unwrap();
+        std::fs::create_dir_all(project.join("out")).unwrap();
+        std::fs::write(project.join("out/existing-input.txt"), "keep\n").unwrap();
+        git(&project, &["add", ".gitignore", "input.txt"], &[]).unwrap();
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+            &[],
+        )
+        .unwrap();
+
+        let before = crate::skillcache::replay_result::capture(&project, None).unwrap();
+        take(&state, &project, "gen-git").unwrap().unwrap();
+        // Cold turn creates an ignored output file + python cache + .DS_Store.
+        std::fs::write(project.join("out/cold-created.json"), "{\"ok\":true}\n").unwrap();
+        std::fs::create_dir_all(project.join("src/__pycache__")).unwrap();
+        std::fs::write(project.join("src/__pycache__/a.pyc"), "pyc").unwrap();
+        std::fs::write(project.join(".DS_Store"), "finder").unwrap();
+        crate::skillcache::replay_result::record(&state, &project, "gen-git", before).unwrap();
+
+        let replay = base.join("replay");
+        materialize(&state, "gen-git", &replay).unwrap();
+        assert!(replay.join("out/existing-input.txt").exists());
+        assert!(!replay.join("out/cold-created.json").exists());
+        assert!(!replay.join("src/__pycache__").exists());
+        assert!(!replay.join(".DS_Store").exists());
     }
 }

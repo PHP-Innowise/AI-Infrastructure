@@ -557,3 +557,34 @@ fn a_capsule_is_stored_in_one_spelling() {
         observed
     );
 }
+
+#[test]
+fn gate1_rejects_extended_inline_flags_and_package_file_example_leaks() {
+    for args in [
+        json!(["powershell", "-EncodedCommand", "ZABpAHIA"]),
+        json!(["powershell", "-enc", "ZABpAHIA"]),
+        json!(["node", "--input-type=module", "-e", "console.log(1)"]),
+        json!(["perl", "-pe", "s/a/b/", "programs/extract/main.py"]),
+        json!(["perl", "-n", "programs/extract/main.py"]),
+    ] {
+        refused("argv_inline_code", |value| {
+            value["programs"][0]["entry"] = args.clone();
+        });
+    }
+
+    let mut pkg = Files::new();
+    for (path, content) in files().iter() {
+        let replacement = if path == "programs/extract/main.py" {
+            b"import sys\nprint('invoices/2026-q3/')\n".to_vec()
+        } else {
+            content.to_vec()
+        };
+        pkg.insert(path, replacement);
+    }
+    let report = gate(&capsule(), &pkg, Some(&examples()));
+    assert!(
+        report.has("example_value_in_capsule"),
+        "{:?}",
+        report.violations
+    );
+}

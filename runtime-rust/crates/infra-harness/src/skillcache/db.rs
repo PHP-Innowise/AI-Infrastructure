@@ -148,6 +148,7 @@ pub(crate) struct TraceRow<'a> {
     pub request: &'a str,
     pub skill_refs: &'a Value,
     pub steps: &'a Value,
+    pub usage: &'a Value,
     pub redaction: &'a Value,
 }
 
@@ -156,11 +157,12 @@ pub(crate) struct TraceRow<'a> {
 pub(crate) fn save_trace(db: &Connection, row: &TraceRow<'_>) -> Result<String> {
     let steps = row.steps.to_string();
     let digest = store::sha(steps.as_bytes());
+    let usage = (!row.usage.is_null()).then(|| row.usage.to_string());
     db.execute(
         "INSERT INTO skillcache_traces(generation,session_id,provider,model,request,skill_refs,steps,usage,redaction,trace_sha256,created_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,?8,?9,?10)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
          ON CONFLICT(generation) DO UPDATE SET request=excluded.request,skill_refs=excluded.skill_refs,
-           steps=excluded.steps,redaction=excluded.redaction,trace_sha256=excluded.trace_sha256,created_at=excluded.created_at",
+           steps=excluded.steps,usage=excluded.usage,redaction=excluded.redaction,trace_sha256=excluded.trace_sha256,created_at=excluded.created_at",
         params![
             row.generation,
             row.session_id,
@@ -169,6 +171,7 @@ pub(crate) fn save_trace(db: &Connection, row: &TraceRow<'_>) -> Result<String> 
             row.request,
             row.skill_refs.to_string(),
             steps,
+            usage,
             row.redaction.to_string(),
             digest,
             store::now()
@@ -609,6 +612,10 @@ pub(crate) fn delete_capsule(db: &Connection, capsule_id: &str) -> Result<bool> 
         "DELETE FROM skillcache_runs WHERE capsule_id=?1",
         [capsule_id],
     )?;
+    db.execute(
+        "DELETE FROM skillcache_compiles WHERE capsule_id=?1",
+        [capsule_id],
+    )?;
     Ok(db.execute(
         "DELETE FROM skillcache_capsules WHERE capsule_id=?1",
         [capsule_id],
@@ -813,6 +820,7 @@ mod tests {
                 request: "Summarise",
                 skill_refs: &json!([{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md"}]),
                 steps: &json!([{"index": 0, "kind": "tool", "tool": "Bash"}]),
+                usage: &Value::Null,
                 redaction: &json!({"redacted": 0}),
             },
         )
@@ -943,6 +951,7 @@ mod tests {
         assert_eq!(next_round(&db, "k-done").unwrap(), 2);
         assert!(delete_capsule(&db, "k-done").unwrap());
         assert!(gates(&db, "k-done").unwrap().is_empty());
+        assert!(compile(&db, "done").unwrap().is_none());
         assert!(delete_trace(&db, "gen").unwrap());
     }
 
