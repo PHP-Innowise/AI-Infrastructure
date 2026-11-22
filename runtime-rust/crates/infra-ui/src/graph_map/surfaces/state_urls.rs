@@ -649,24 +649,202 @@ pub(crate) fn invalidate_surface_analysis_caches(project_id: &str) {
     invalidate_surface_analysis_caches_for_live_project(project_id, &live);
 }
 
+fn any_graph_drag_active() -> bool {
+    active_drag_surface().is_some()
+        || [
+            "surface-node-drag",
+            "system-map-drag",
+            "system-change-topology-drag",
+            "system-map-node-drag",
+            "system-change-topology-node-drag",
+            "system-map-radar-drag",
+            "omnigraph-drag",
+            "omnigraph-node-drag",
+            "omnigraph-radar-drag",
+        ]
+        .iter()
+        .any(|key| m::yes(&m::data(key)["active"]))
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(super) fn project_scope_matches(event_project: &str, surface_project: &str) -> bool {
+    event_project.is_empty() || surface_project.is_empty() || surface_project == event_project
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn normalize_fs_path(raw: &str) -> String {
+    let norm = raw.trim().replace('\\', "/");
+    let trimmed = norm.trim_end_matches('/');
+    if trimmed.is_empty() && norm.starts_with('/') {
+        "/".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(super) fn system_project_matches(
+    event_project: &str,
+    system_project: &str,
+    graph_status: &V,
+    catalog: &V,
+    system_project_path: Option<&str>,
+    event_project_path: Option<&str>,
+) -> bool {
+    if system_project.is_empty() {
+        return false;
+    }
+    if event_project.is_empty() || system_project == event_project {
+        return true;
+    }
+    if m::text(graph_status, "project_id") == event_project
+        || m::text(&graph_status["system"], "graph_id") == event_project
+    {
+        return true;
+    }
+    if graph_status["services"]
+        .as_object()
+        .is_some_and(|services| {
+            services
+                .values()
+                .any(|svc| m::text(svc, "graph_id") == event_project)
+        })
+    {
+        return true;
+    }
+    let ev_path = event_project_path
+        .map(normalize_fs_path)
+        .filter(|p| !p.is_empty());
+    let sys_path = system_project_path
+        .map(normalize_fs_path)
+        .filter(|p| !p.is_empty());
+    if let Some(ev_path) = ev_path {
+        for svc in m::array(&catalog["services"]) {
+            let root = normalize_fs_path(&m::text(&svc, "root"));
+            if root.is_empty() {
+                continue;
+            }
+            if root == ev_path {
+                return true;
+            }
+            let is_abs = root.starts_with('/') || (root.len() >= 2 && root.as_bytes()[1] == b':');
+            if let Some(base) = sys_path.as_deref().filter(|_| !is_abs) {
+                let joined = format!(
+                    "{}/{}",
+                    base.trim_end_matches('/'),
+                    root.trim_start_matches("./")
+                );
+                if normalize_fs_path(&joined) == ev_path {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dom_visible(id: &str) -> bool {
+    dom::get(id).is_some_and(|el| el.closest("[hidden]").ok().flatten().is_none())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn refresh_active_external_views(proj: &str) {
+    let active_view = m::read(|s| s.view.clone());
+    if matches!(active_view.as_str(), "systems" | "system-changes") {
+        let sys_project = dom::value("system-project");
+        let sys_config = dom::value("system-config");
+        let cat = m::data("system-catalog")["catalog"].clone();
+        let graph_status = m::data("system-graph-status");
+        let sys_proj_meta = m::project(&sys_project);
+        let ev_proj_meta = m::project(proj);
+        if system_project_matches(
+            proj,
+            &sys_project,
+            &graph_status,
+            &cat,
+            sys_proj_meta["path"].as_str(),
+            ev_proj_meta["path"].as_str(),
+        ) {
+            if active_view == "systems"
+                && dom_visible("system-map-canvas")
+                && (cat.is_object() || m::data("system-map-doc")["nodes"].is_array())
+            {
+                crate::system_map::refresh_services_map(
+                    &sys_project,
+                    &sys_config,
+                    &cat,
+                    &graph_status,
+                );
+            }
+            if active_view == "system-changes" && dom_visible("system-change-topology-canvas") {
+                let run_doc = m::data("system-run");
+                if cat.is_object()
+                    || run_doc.is_object()
+                    || m::data("system-change-topology-doc")["nodes"].is_array()
+                {
+                    let checked_seeds: Vec<String> = dom::selected_checks("system-plan-services")
+                        .into_iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    let depth = dom::value("system-depth").parse::<u64>().unwrap_or(32);
+                    let contracts_raw = dom::value("system-contracts");
+                    let plan_form_open =
+                        dom::get("system-plan-form").is_some_and(|f| !f.has_attribute("hidden"));
+                    let overlay = crate::systems::build_changes_overlay(
+                        &run_doc,
+                        plan_form_open,
+                        &checked_seeds,
+                        depth,
+                        &contracts_raw,
+                    );
+                    crate::system_map::refresh_changes_map(
+                        &sys_project,
+                        &sys_config,
+                        &cat,
+                        &graph_status,
+                        &overlay,
+                    );
+                }
+            }
+        }
+    }
+    if active_view == "omnigraph"
+        && m::yes(&m::data("omnigraph-status")["connected"])
+        && dom_visible("omnigraph-studio")
+    {
+        let omni_proj = crate::omnigraph::current_project_id();
+        if project_scope_matches(proj, &omni_proj) {
+            m::take("omnigraph-workspace-changes");
+            m::take("omnigraph-workspace-impact");
+            spawn_local(async {
+                crate::omnigraph::load().await;
+            });
+        }
+    }
+}
+
 /// Schedules a non-disruptive debounced reload of open/mounted surfaces when no pointer
 /// pan or pin drag is in progress, keeping camera and selection intact.
 pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
-    if active_drag_surface().is_some() || m::yes(&m::data("surface-node-drag")["active"]) {
+    if any_graph_drag_active() {
         return;
     }
     #[cfg(target_arch = "wasm32")]
     {
         let proj = project_id.to_owned();
         dom::later("graph-sse-idle-refresh", 250, move || {
-            if active_drag_surface().is_some() || m::yes(&m::data("surface-node-drag")["active"]) {
+            if any_graph_drag_active() {
                 return;
             }
             if open() {
                 let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
-                if proj.is_empty() || modal_proj.is_empty() || modal_proj == proj {
+                if project_scope_matches(&proj, &modal_proj) {
                     spawn_local(async {
                         crate::graph::load(false).await;
+                        if open() {
+                            modal_lifecycle::load(true).await;
+                        }
                     });
                 }
             }
@@ -677,13 +855,14 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
             ] {
                 if dom::get(surface.canvas).is_some() {
                     let surf_proj = surface_scope(surface).project_id().to_owned();
-                    if proj.is_empty() || surf_proj.is_empty() || surf_proj == proj {
+                    if project_scope_matches(&proj, &surf_proj) {
                         spawn_local(async move {
                             load_embedded_surface(surface, true).await;
                         });
                     }
                 }
             }
+            refresh_active_external_views(&proj);
         });
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -970,4 +1149,128 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
 #[cfg(test)]
 pub(in crate::graph_map) fn build_map_path(project: &str, state: &V, embedded: bool) -> String {
     build_scoped_map_path(&GraphTargetScope::single(project), state, embedded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_and_system_scope_matching_respects_empty_and_member_projects() {
+        assert!(project_scope_matches("", "proj-a"));
+        assert!(project_scope_matches("proj-a", ""));
+        assert!(project_scope_matches("proj-a", "proj-a"));
+        assert!(!project_scope_matches("proj-a", "proj-b"));
+
+        let catalog = json!({
+            "schema_version": 1,
+            "system": "sys-demo",
+            "services": [
+                { "id": "api", "root": "services/api", "access": "available", "head": "abc", "declared": {} },
+                { "id": "worker", "root": "/repos/worker", "access": "available", "head": "def", "declared": {} }
+            ],
+            "relationships": [],
+            "warnings": []
+        });
+        let graph_status = json!({
+            "project_id": "proj-sys",
+            "system": { "service": "__system__", "graph_id": "proj-sys" },
+            "services": {
+                "api": { "service": "api", "graph_id": "proj-api", "state": "ready" },
+                "worker": { "service": "worker", "graph_id": "proj-worker", "state": "ready" }
+            }
+        });
+        assert!(!system_project_matches(
+            "proj-sys",
+            "",
+            &graph_status,
+            &catalog,
+            None,
+            None,
+        ));
+        assert!(system_project_matches(
+            "",
+            "proj-sys",
+            &graph_status,
+            &catalog,
+            None,
+            None,
+        ));
+        assert!(system_project_matches(
+            "proj-sys",
+            "proj-sys",
+            &graph_status,
+            &catalog,
+            None,
+            None,
+        ));
+        assert!(system_project_matches(
+            "proj-api",
+            "proj-sys",
+            &graph_status,
+            &catalog,
+            None,
+            None,
+        ));
+        assert!(!system_project_matches(
+            "proj-other",
+            "proj-sys",
+            &graph_status,
+            &catalog,
+            None,
+            None,
+        ));
+        // Fallback before system-graph-status arrives: match catalog[*].root (relative or absolute) against boot project path.
+        assert!(system_project_matches(
+            "proj-api",
+            "proj-sys",
+            &V::Null,
+            &catalog,
+            Some("/repos/sys"),
+            Some("/repos/sys/services/api/"),
+        ));
+        assert!(system_project_matches(
+            "proj-worker",
+            "proj-sys",
+            &V::Null,
+            &catalog,
+            Some("/repos/sys"),
+            Some("/repos/worker"),
+        ));
+        assert!(!system_project_matches(
+            "proj-other",
+            "proj-sys",
+            &V::Null,
+            &catalog,
+            Some("/repos/sys"),
+            Some("/repos/unrelated"),
+        ));
+    }
+
+    #[test]
+    fn any_graph_drag_active_covers_system_and_omnigraph_drags() {
+        for key in [
+            "surface-node-drag",
+            "system-map-drag",
+            "system-change-topology-drag",
+            "system-map-node-drag",
+            "system-change-topology-node-drag",
+            "system-map-radar-drag",
+            "omnigraph-drag",
+            "omnigraph-node-drag",
+            "omnigraph-radar-drag",
+        ] {
+            m::take(key);
+        }
+        assert!(!any_graph_drag_active());
+
+        m::set("system-map-drag", json!({ "active": true }));
+        assert!(any_graph_drag_active());
+        m::take("system-map-drag");
+
+        m::set("omnigraph-node-drag", json!({ "active": true }));
+        assert!(any_graph_drag_active());
+        m::take("omnigraph-node-drag");
+        assert!(!any_graph_drag_active());
+    }
 }

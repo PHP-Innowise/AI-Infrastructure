@@ -2319,8 +2319,10 @@ pub(crate) mod canvas2d {
         best
     }
 
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
     pub(crate) type DenseEdgeBatchKey = (bool, DenseEdgeTone, EdgeDashKind, u16, u8);
 
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
     pub fn dense_edge_batch_key(
         active: bool,
         appearance: &DenseEdgeAppearance,
@@ -3856,13 +3858,11 @@ pub(crate) mod canvas2d {
 
                     if draw_arrows {
                         // Batch solid arrowheads by `(tone, alpha_q)` into single fill calls.
-                        let mut arrow_batch: Option<(bool, DenseEdgeTone, u8)> = None;
-                        let mut arrow_items: Vec<(
-                            (bool, DenseEdgeTone, u8),
-                            (f64, f64),
-                            (f64, f64),
-                            bool,
-                        )> = Vec::new();
+                        type DenseArrowBatchKey = (bool, DenseEdgeTone, u8);
+                        type DenseArrowBatchItem =
+                            (DenseArrowBatchKey, (f64, f64), (f64, f64), bool);
+                        let mut arrow_batch: Option<DenseArrowBatchKey> = None;
+                        let mut arrow_items: Vec<DenseArrowBatchItem> = Vec::new();
                         for item in &prepared {
                             if let Some((tip, dir)) = edge_end_tangent(item.edge) {
                                 arrow_items.push((
