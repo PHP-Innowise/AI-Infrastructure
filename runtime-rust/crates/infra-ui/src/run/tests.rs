@@ -1878,4 +1878,54 @@ new file mode 100644
         );
         assert!(parsed.is_some());
     }
+
+    #[test]
+    fn fold_run_events_and_prune_tool_outputs_match_incremental_state() {
+        let events = vec![
+            json!({"id": 1, "kind": "status", "launch_id": "l1", "text": "Starting"}),
+            json!({"id": 2, "kind": "tool", "launch_id": "l1", "tool": "Edit", "call": "c1", "state": "started", "path": "src/a.rs"}),
+            json!({"id": 3, "kind": "tool", "launch_id": "l1", "tool": "Edit", "call": "c1", "state": "completed", "ok": true, "path": "src/a.rs"}),
+            json!({"id": 4, "kind": "status", "launch_id": "l2", "text": "Follow-up"}),
+        ];
+        let (folded, before, calls) = super::super::stream::fold_run_events(&events);
+        assert_eq!(folded["launch"], "l2");
+        assert_eq!(before.as_ref().unwrap()["launch"], "l1");
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[1].as_deref(), Some("c1"));
+        assert_eq!(calls[2].as_deref(), Some("c1"));
+
+        let mut outputs = std::collections::BTreeMap::new();
+        for i in 0..300 {
+            outputs.insert(format!("k-{i:03}"), format!("out-{i}"));
+        }
+        super::super::stream::prune_tool_outputs_map(&mut outputs, 256);
+        assert_eq!(outputs.len(), 256);
+        assert!(!outputs.contains_key("k-000"));
+        assert!(outputs.contains_key("k-299"));
+    }
+
+    #[test]
+    fn approvals_sessions_to_fetch_uses_count_cache_and_invalidation() {
+        let mut cache = std::collections::BTreeMap::new();
+        cache.insert("s1".to_owned(), (2usize, vec![json!({"request_id": "r1"})]));
+        cache.insert("s2".to_owned(), (1usize, vec![json!({"request_id": "r2"})]));
+
+        let waiting = vec![
+            ("s1".to_owned(), "One".to_owned(), 2usize),
+            ("s2".to_owned(), "Two".to_owned(), 3usize),
+            ("s3".to_owned(), "Three".to_owned(), 1usize),
+        ];
+
+        assert_eq!(
+            super::super::permissions::approvals_sessions_to_fetch(&waiting, &cache, false),
+            vec![
+                ("s2".to_owned(), "Two".to_owned()),
+                ("s3".to_owned(), "Three".to_owned()),
+            ]
+        );
+        assert_eq!(
+            super::super::permissions::approvals_sessions_to_fetch(&waiting, &cache, true).len(),
+            3
+        );
+    }
 }

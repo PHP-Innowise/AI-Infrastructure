@@ -379,7 +379,10 @@ mod update_tests {
             "The update could not be applied: Git exited with status 128."
         );
         let held = update_view(
-            &status("restart-required", "The clone is now at 43a21a0, but its browser interface was built from other sources. In the clone, run `./infra-engine repo build-ui`, then press Update again."),
+            &status(
+                "restart-required",
+                "The clone is now at 43a21a0, but its browser interface was built from other sources. In the clone, run `./infra-engine repo build-ui`, then press Update again.",
+            ),
             &V::Null,
         );
         assert!(held.button && !held.busy && held.error);
@@ -1375,5 +1378,104 @@ mod update_tests {
         for field in ["skillcache-mode", "skillcache-compiler-model"] {
             assert!(super::prefs::PREF_FIELDS.contains(&field), "{field}");
         }
+    }
+
+    #[test]
+    fn dirty_preference_flush_gate_requires_dirty_booted_non_restoring_state() {
+        assert!(!super::prefs::should_flush_preferences(false, false, true));
+        assert!(!super::prefs::should_flush_preferences(true, true, true));
+        assert!(!super::prefs::should_flush_preferences(true, false, false));
+        assert!(super::prefs::should_flush_preferences(true, false, true));
+    }
+
+    #[test]
+    fn is_mutation_tool_event_handles_tools_skillcache_phases_and_skillcache_run() {
+        assert!(is_mutation_tool_event(
+            &json!({"kind": "tool", "tool": "Edit", "state": "completed"})
+        ));
+        assert!(!is_mutation_tool_event(
+            &json!({"kind": "tool", "tool": "Edit", "state": "started"})
+        ));
+        assert!(!is_mutation_tool_event(
+            &json!({"kind": "tool", "tool": "Edit", "state": "completed", "ok": false})
+        ));
+        assert!(is_mutation_tool_event(&json!({
+            "kind": "tool",
+            "tool": "Bash",
+            "state": "completed",
+            "detail": "/tmp/bin/skillcache-run run '{\"x\":1}'"
+        })));
+        assert!(is_mutation_tool_event(&json!({
+            "kind": "tool",
+            "tool": "command_execution",
+            "state": "completed",
+            "detail": "skillcache-run continue '{\"ok\":true}'"
+        })));
+        assert!(!is_mutation_tool_event(&json!({
+            "kind": "tool",
+            "tool": "Bash",
+            "state": "completed",
+            "detail": "skillcache-run status"
+        })));
+        assert!(is_mutation_tool_event(&json!({
+            "kind": "skillcache",
+            "phase": "program_completed"
+        })));
+        assert!(is_mutation_tool_event(&json!({
+            "kind": "skillcache",
+            "phase": "complete"
+        })));
+        assert!(is_mutation_tool_event(&json!({
+            "kind": "skillcache",
+            "phase": "started",
+            "changes": [{"path": "src/a.php"}]
+        })));
+        assert!(!is_mutation_tool_event(&json!({
+            "kind": "skillcache",
+            "phase": "hit"
+        })));
+    }
+
+    #[test]
+    fn sse_ui_batch_coalesces_events_and_drops_stale_epochs() {
+        let mut slot = None;
+        super::poll::queue_sse_ui_batch(
+            &mut slot,
+            7,
+            false,
+            false,
+            Some(json!({"phase": "predicting"})),
+        );
+        super::poll::queue_sse_ui_batch(&mut slot, 7, true, true, Some(json!({"phase": "idle"})));
+        // Stale epoch drops pending batch without running it.
+        let peek = slot.clone();
+        assert!(super::poll::take_sse_ui_batch(&mut slot, 6).is_none());
+        assert!(slot.is_none());
+
+        let taken = super::poll::take_sse_ui_batch(&mut peek.clone(), 7).expect("matching epoch");
+        assert!(taken.needs_replay);
+        assert!(taken.needs_controls);
+        assert!(taken.needs_badge);
+        assert!(taken.needs_embedded_sync);
+        assert_eq!(taken.pending_focus, Some(json!({"phase": "idle"})));
+    }
+
+    #[test]
+    fn should_reset_results_on_view_change_preserves_selected_session_views() {
+        assert!(!super::navigation::should_reset_results_on_view_change(
+            "sessions", "changes", "s1"
+        ));
+        assert!(!super::navigation::should_reset_results_on_view_change(
+            "changes", "sessions", "s1"
+        ));
+        assert!(!super::navigation::should_reset_results_on_view_change(
+            "changes", "usage", "s1"
+        ));
+        assert!(super::navigation::should_reset_results_on_view_change(
+            "changes", "systems", "s1"
+        ));
+        assert!(super::navigation::should_reset_results_on_view_change(
+            "checks", "sessions", ""
+        ));
     }
 }

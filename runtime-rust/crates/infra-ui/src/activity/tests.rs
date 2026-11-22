@@ -802,3 +802,63 @@ fn failed_command_builds_localize_payload_and_token_button() {
     crate::test_support::assert_no_inline_hex_colors(&html);
     m::take("system-run");
 }
+
+#[test]
+fn typed_agent_record_handles_hundreds_of_events_in_place_without_meta_bloat() {
+    reset("system-agents");
+    edit("system-agents", |p| p.sid = "sess-scale-1".into());
+    observe_session(
+        "sess-scale-1",
+        &json!({
+            "id": 1,
+            "kind": "agent",
+            "agent": "orders",
+            "attempt": 1,
+            "status": "running",
+            "service": "orders",
+            "root": "/workspace/orders",
+        }),
+    );
+    let mut seq = 2u64;
+    for i in 0..120 {
+        let call = format!("c-{i}");
+        observe_session(
+            "sess-scale-1",
+            &json!({
+                "id": seq,
+                "kind": "agent_activity",
+                "agent": "orders",
+                "attempt": 1,
+                "type": "tool",
+                "tool": "Bash",
+                "call": call,
+                "state": "started",
+                "detail": format!("phpunit tests/T{i}.php"),
+            }),
+        );
+        seq += 1;
+        observe_session(
+            "sess-scale-1",
+            &json!({
+                "id": seq,
+                "kind": "agent_activity",
+                "agent": "orders",
+                "attempt": 1,
+                "type": "tool",
+                "tool": "Bash",
+                "call": call,
+                "state": "completed",
+                "ok": true,
+            }),
+        );
+        seq += 1;
+    }
+    let snap = snapshot_for_root("system-agents");
+    assert_eq!(snap.commands.len(), 120);
+    assert_eq!(snap.timeline_events.len(), 120);
+    assert_eq!(snap.timeline_events[119]["state"], "completed");
+    // Card summary metadata stays lightweight and never duplicates nested event arrays.
+    assert!(snap.items[0].get("events").is_none());
+    assert!(snap.items[0].get("files").is_none());
+    reset("system-agents");
+}

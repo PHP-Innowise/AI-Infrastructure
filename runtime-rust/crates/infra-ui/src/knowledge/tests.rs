@@ -649,3 +649,25 @@ fn knowledge_keyed_list_items_and_css_hidden_filter_avoid_selection_rebuilds() {
     assert!(m::data(&key("brain")).is_null());
     m::take("knowledge-global-project");
 }
+
+#[test]
+fn retrieval_strip_column_max_computes_single_pass_minimum_one_maximums() {
+    use super::test_exports::retrieval_strip_column_max;
+
+    assert_eq!(retrieval_strip_column_max(&[]), [1, 1, 1]);
+    let rows = vec![
+        json!({
+            "brain": 3,
+            "bank": 2,
+            "cuts": ["c1", "c2", "c3"],
+            "rules": 4
+        }),
+        json!({
+            "brain": 6,
+            "bank": 1,
+            "cuts": ["x"],
+            "rules": 0
+        }),
+    ];
+    assert_eq!(retrieval_strip_column_max(&rows), [6, 5, 4]);
+}

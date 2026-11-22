@@ -959,6 +959,16 @@ pub fn update_hash_route(route: &HashRoute, push: bool) {
         }
     }
 }
+enum FramePending {
+    Raf(i32),
+    Timer,
+}
+
+thread_local! {
+    static PENDING_FRAMES: std::cell::RefCell<std::collections::BTreeMap<String, FramePending>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 pub fn later(key: &str, ms: i32, callback: impl FnOnce() + 'static) {
     cancel_timer(key);
     let name = key.to_owned();
@@ -979,6 +989,63 @@ pub fn later(key: &str, ms: i32, callback: impl FnOnce() + 'static) {
 pub fn cancel_timer(key: &str) {
     if let Some(id) = crate::model::write(|s| s.timers.remove(key)) {
         window().clear_timeout_with_handle(id);
+    }
+}
+
+/// Coalesces repeated work under `key` onto the next animation frame (falling back to a short timer while hidden).
+pub fn schedule_frame(key: &str, callback: impl FnOnce() + 'static) {
+    if !cfg!(target_arch = "wasm32") {
+        return;
+    }
+    let already_pending = PENDING_FRAMES.with(|frames| frames.borrow().contains_key(key));
+    if already_pending {
+        return;
+    }
+    let name = key.to_owned();
+    if document().hidden() {
+        PENDING_FRAMES.with(|frames| {
+            frames
+                .borrow_mut()
+                .insert(name.clone(), FramePending::Timer);
+        });
+        let timer_key = format!("frame:{key}");
+        later(&timer_key, 16, move || {
+            let active = PENDING_FRAMES.with(|frames| frames.borrow_mut().remove(&name).is_some());
+            if active {
+                callback();
+            }
+        });
+        return;
+    }
+    let name_for_cb = name.clone();
+    let c = Closure::once_into_js(move || {
+        let active =
+            PENDING_FRAMES.with(|frames| frames.borrow_mut().remove(&name_for_cb).is_some());
+        if active {
+            callback();
+        }
+    });
+    if let Ok(id) = window().request_animation_frame(c.unchecked_ref()) {
+        PENDING_FRAMES.with(|frames| {
+            frames.borrow_mut().insert(name, FramePending::Raf(id));
+        });
+    }
+}
+
+/// Cancels any queued frame callback under `key`.
+pub fn cancel_frame(key: &str) {
+    if !cfg!(target_arch = "wasm32") {
+        return;
+    }
+    let pending = PENDING_FRAMES.with(|frames| frames.borrow_mut().remove(key));
+    match pending {
+        Some(FramePending::Raf(id)) => {
+            let _ = window().cancel_animation_frame(id);
+        }
+        Some(FramePending::Timer) => {
+            cancel_timer(&format!("frame:{key}"));
+        }
+        None => {}
     }
 }
 pub fn num(id: &str) -> V {
@@ -1053,6 +1120,43 @@ pub fn json_signature(v: &V) -> String {
     format!("{h1:016x}{h2:016x}")
 }
 
+/// Computes a 128-bit digest of rendered HTML markup for cheap unchanged-DOM skipping.
+pub fn markup_signature(html: &str) -> String {
+    let mut h1: u64 = 0xCBF2_9CE4_8422_2325;
+    let mut h2: u64 = 0x517C_C1B7_2722_0A95;
+    fnv1a_feed(&mut h1, &mut h2, &html.len().to_le_bytes());
+    fnv1a_feed(&mut h1, &mut h2, html.as_bytes());
+    format!("{h1:016x}{h2:016x}")
+}
+
+pub(crate) fn should_apply_markup(current_sig: Option<&str>, next_sig: &str) -> bool {
+    current_sig != Some(next_sig)
+}
+
+/// Replaces `el`'s inner HTML only when its markup digest changed, preserving DOM nodes and `<details>` state otherwise.
+pub fn set_markup(el: &Element, html: &str) -> bool {
+    let sig = markup_signature(html);
+    let current = el.get_attribute("data-markup-sig");
+    if !should_apply_markup(current.as_deref(), &sig) {
+        return false;
+    }
+    el.set_inner_html(html);
+    let _ = el.set_attribute("data-markup-sig", &sig);
+    true
+}
+
+/// Replaces `#id`'s inner HTML only when its markup digest changed.
+pub fn set_markup_id(id: &str, html: &str) -> bool {
+    let Some(el) = get(id) else {
+        return false;
+    };
+    set_markup(&el, html)
+}
+
+pub(crate) fn should_remove_keyless_child(tag_name: &str, has_data_key: bool) -> bool {
+    !has_data_key && !tag_name.eq_ignore_ascii_case("TEMPLATE")
+}
+
 pub fn keyed_render(
     id: &str,
     items: &[V],
@@ -1064,6 +1168,8 @@ pub fn keyed_render(
     for e in children(&container) {
         if let Some(key) = e.get_attribute("data-key") {
             previous.insert(key, e);
+        } else if should_remove_keyless_child(&e.tag_name(), false) {
+            e.remove();
         }
     }
     for (index, item) in items.iter().enumerate() {
@@ -1139,6 +1245,34 @@ pub fn keyed_render(
     }
     for node in previous.into_values() {
         node.remove();
+    }
+}
+
+/// Renders keyed items into `#id`, or a keyed `__empty__` placeholder when `items` is empty.
+pub fn keyed_render_or_empty(
+    id: &str,
+    items: &[V],
+    key_of: impl Fn(&V) -> String,
+    build: impl FnMut(&V) -> Element,
+    empty_tag: &str,
+    empty_class: &str,
+    empty_text: &str,
+) {
+    if items.is_empty() {
+        let placeholder = [json!({
+            "__empty__": true,
+            "tag": empty_tag,
+            "class": empty_class,
+            "text": empty_text,
+        })];
+        keyed_render(
+            id,
+            &placeholder,
+            |_| "__empty__".into(),
+            |_| el(empty_tag, empty_class, empty_text),
+        );
+    } else {
+        keyed_render(id, items, key_of, build);
     }
 }
 
@@ -1624,7 +1758,7 @@ fn handle_widget_keydown(event: &web_sys::KeyboardEvent) -> bool {
     true
 }
 
-fn sync_widget_from_target(target: &Element) {
+pub(crate) fn sync_widget_from_target(target: &Element) {
     let Some(container) = target
         .closest("[role=\"tablist\"],[role=\"toolbar\"],[role=\"radiogroup\"],[role=\"tree\"]")
         .ok()
@@ -1650,82 +1784,42 @@ fn sync_widget_from_target(target: &Element) {
     }
 }
 
-pub fn wire_a11y_widgets() {
+/// Handles modal `Tab` focus trapping and roving keyboard navigation for ARIA widgets.
+pub(crate) fn handle_a11y_keydown(event: &web_sys::KeyboardEvent) -> bool {
+    handle_modal_trap(event) || handle_widget_keydown(event)
+}
+
+/// Re-syncs roving tabindex when a `<details>` tree node is toggled open or closed.
+pub(crate) fn handle_a11y_toggle(target: &Element) {
+    if let Ok(Some(tree)) = target.closest("[role=\"tree\"]") {
+        sync_roving_widget(&tree);
+    }
+}
+
+/// Keeps `hidden`, `inert`, and focus restoration synchronized when a `<dialog>` closes.
+pub(crate) fn handle_a11y_dialog_close(target: &Element) {
+    if target.tag_name() != "DIALOG" {
+        return;
+    }
+    let id = target.id();
+    if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
+        let _ = target.set_attribute("hidden", "");
+    }
+    let suppressed = SUPPRESS_CLOSE_FOCUS_RESTORE
+        .with(|set| take_suppress_close_restore(&mut set.borrow_mut(), &id));
+    sync_overlay_inert();
+    if !id.is_empty() && !suppressed {
+        restore_focus_for_overlay(&id);
+    }
+}
+
+/// Synchronizes overlay `inert` attributes and roving widget `tabindex` states in the DOM.
+pub fn sync_a11y_widgets() {
     sync_overlay_inert();
     for widget in all("[role=\"tablist\"],[role=\"toolbar\"],[role=\"radiogroup\"],[role=\"tree\"]")
     {
         sync_roving_widget(&widget);
     }
-    if crate::model::yes(&crate::model::data("a11y-widgets-wired")) {
-        return;
-    }
-    crate::model::set("a11y-widgets-wired", json!(true));
-
-    let keydown_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
-        let Some(key_event) = event.dyn_ref::<web_sys::KeyboardEvent>() else {
-            return;
-        };
-        if handle_modal_trap(key_event) || handle_widget_keydown(key_event) {
-            key_event.prevent_default();
-        }
-    });
-    let _ =
-        document().add_event_listener_with_callback("keydown", keydown_cb.as_ref().unchecked_ref());
-    keydown_cb.forget();
-
-    let focus_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
-        if let Some(target) = event.target().and_then(|v| v.dyn_into::<Element>().ok()) {
-            sync_widget_from_target(&target);
-        }
-    });
-    let _ =
-        document().add_event_listener_with_callback("focusin", focus_cb.as_ref().unchecked_ref());
-    focus_cb.forget();
-
-    let click_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
-        if let Some(target) = event.target().and_then(|v| v.dyn_into::<Element>().ok()) {
-            sync_widget_from_target(&target);
-        }
-    });
-    let _ = document().add_event_listener_with_callback("click", click_cb.as_ref().unchecked_ref());
-    click_cb.forget();
-
-    let toggle_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
-        if let Some(target) = event.target().and_then(|v| v.dyn_into::<Element>().ok()) {
-            if let Ok(Some(tree)) = target.closest("[role=\"tree\"]") {
-                sync_roving_widget(&tree);
-            }
-        }
-    });
-    let _ = document().add_event_listener_with_callback_and_bool(
-        "toggle",
-        toggle_cb.as_ref().unchecked_ref(),
-        true,
-    );
-    toggle_cb.forget();
-
-    let close_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
-        if let Some(target) = event.target().and_then(|v| v.dyn_into::<Element>().ok()) {
-            if target.tag_name() == "DIALOG" {
-                let id = target.id();
-                if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
-                    let _ = target.set_attribute("hidden", "");
-                }
-                let suppressed = SUPPRESS_CLOSE_FOCUS_RESTORE
-                    .with(|set| take_suppress_close_restore(&mut set.borrow_mut(), &id));
-                sync_overlay_inert();
-                if !id.is_empty() && !suppressed {
-                    restore_focus_for_overlay(&id);
-                }
-            }
-        }
-    });
-    let _ = document().add_event_listener_with_callback_and_bool(
-        "close",
-        close_cb.as_ref().unchecked_ref(),
-        true,
-    );
-    close_cb.forget();
 }
 
 /// Strips Unicode bidirectional override control characters from text.
@@ -1983,5 +2077,23 @@ mod tests {
             "knowledge-responsive-viewport"
         ));
         assert!(!should_register_viewport_listener(&existing, ""));
+    }
+
+    #[test]
+    fn markup_signature_and_keyless_child_filter_prevent_redundant_writes_and_leaks() {
+        let sig_a = markup_signature("<p>Hello</p>");
+        let sig_b = markup_signature("<p>World</p>");
+        assert_eq!(sig_a.len(), 32);
+        assert_eq!(sig_a, markup_signature("<p>Hello</p>"));
+        assert_ne!(sig_a, sig_b);
+        assert!(should_apply_markup(None, &sig_a));
+        assert!(!should_apply_markup(Some(&sig_a), &sig_a));
+        assert!(should_apply_markup(Some(&sig_a), &sig_b));
+
+        assert!(should_remove_keyless_child("P", false));
+        assert!(should_remove_keyless_child("li", false));
+        assert!(!should_remove_keyless_child("TEMPLATE", false));
+        assert!(!should_remove_keyless_child("template", false));
+        assert!(!should_remove_keyless_child("P", true));
     }
 }

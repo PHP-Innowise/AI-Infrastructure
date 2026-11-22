@@ -1607,6 +1607,11 @@ pub(crate) fn handle_click(target: &web_sys::Element) -> bool {
 }
 
 #[allow(dead_code)]
+pub(crate) fn dismiss_file_card(restore: bool) -> bool {
+    hide_any_activity_card(restore)
+}
+
+#[allow(dead_code)]
 pub(crate) fn escape() -> bool {
     hide_any_activity_card(true)
 }

@@ -107,7 +107,7 @@ pub(super) fn skills_controls() {
         "skills-preview-button",
         !available
             || pending
-            || dom::value("skills-project").is_empty()
+            || m::current_project().is_empty()
             || selected_skills.is_empty()
             || selected_agents.is_empty(),
     );
@@ -151,7 +151,7 @@ pub(super) fn create_skill_controls() {
     let desc = dom::value("create-skill-description");
     let inst = dom::value("create-skill-instructions");
     let agents = dom::selected_checks("create-skill-agents");
-    let project = dom::value("create-skill-project");
+    let project = m::current_project();
     let check = validate_create_skill_inputs(&project, trimmed_name, &desc, &inst, agents.len());
 
     dom::error("create-skill-name-error", check.name_error);
@@ -216,7 +216,14 @@ pub fn accelerators() {
                 ),
             );
             dom::add(&content, &actions);
-            dom::add(&content,&dom::el("p","small-note","Sessions already use this edition without installing it. Install to put its files in the project's Git: choose target tools and review file changes under Install into project."));
+            dom::add(
+                &content,
+                &dom::el(
+                    "p",
+                    "small-note",
+                    "Sessions already use this edition without installing it. Install to put its files in the project's Git: choose target tools and review file changes under Install into project.",
+                ),
+            );
             let details = dom::el("details", "fleet-report startup-context", "");
             dom::add(
                 &details,
@@ -350,7 +357,17 @@ pub(super) fn startup_table(data: &V, index: u64) {
     }
     dom::add(&table, &body);
     dom::append(&id, &table);
-    dom::append(&id,&dom::el("p","knowledge-note",&format!("Exact startup bytes per edition. Token counts use the measured calibration {}; CI gates the configured ceilings.",m::text(data,"calibration"))));
+    dom::append(
+        &id,
+        &dom::el(
+            "p",
+            "knowledge-note",
+            &format!(
+                "Exact startup bytes per edition. Token counts use the measured calibration {}; CI gates the configured ceilings.",
+                m::text(data, "calibration")
+            ),
+        ),
+    );
 }
 
 pub async fn load_skills() {
@@ -542,7 +559,7 @@ pub(super) fn render_skills() {
     filter_skills_in_place();
 }
 pub(super) async fn installed_skills() {
-    let p = dom::value("skills-project");
+    let p = m::current_project();
     if p.is_empty() {
         return;
     }
@@ -552,7 +569,7 @@ pub(super) async fn installed_skills() {
     )
     .await
     {
-        Ok((e, v)) if m::current("skills-installed", e) && dom::value("skills-project") == p => {
+        Ok((e, v)) if m::current("skills-installed", e) && m::current_project() == p => {
             m::set("skills-installed", v);
             render_installed();
         }
@@ -641,7 +658,7 @@ pub(super) fn render_installed() {
 pub(super) async fn change_preview(skill: &V) {
     m::take("skills-change-preview");
     dom::disabled("skills-change-apply", true);
-    let p = dom::value("skills-project");
+    let p = m::current_project();
     let body = json!({"project_id":p,"agent":skill["agent"],"name":skill["name"],"operation":skill["operation"]});
     match api::post("/api/skills/change-preview", body).await {
         Ok(v) => {

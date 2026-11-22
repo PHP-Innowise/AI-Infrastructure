@@ -119,6 +119,7 @@ pub fn start() -> Result<(), JsValue> {
                 return;
             }
             if k == "click" {
+                dom::sync_widget_from_target(&target);
                 if let Ok(Some(copy_btn)) = target.closest("[data-action=\"copy-code\"]") {
                     event.prevent_default();
                     spawn_local(async move {
@@ -174,10 +175,16 @@ pub fn start() -> Result<(), JsValue> {
                 return;
             }
             if k == "focusin" {
+                dom::sync_widget_from_target(&target);
                 commands::handle_focus_in(&target);
                 return;
             }
             if k == "focusout" {
+                if target.id() == "prompt"
+                    || target.closest("#session-form").ok().flatten().is_some()
+                {
+                    session::flush_preferences();
+                }
                 if let Some(focus_event) = event.dyn_ref::<web_sys::FocusEvent>() {
                     commands::handle_focus_out(&target, focus_event);
                 }
@@ -226,6 +233,9 @@ pub fn start() -> Result<(), JsValue> {
                 }
                 session::resize_key(key);
                 session::workspace_split_key(key);
+                if dom::handle_a11y_keydown(key) {
+                    event.prevent_default();
+                }
                 return;
             }
             if k == "pointerover" {
@@ -278,6 +288,15 @@ pub fn start() -> Result<(), JsValue> {
                 if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
                     if dom::click_outside_element(&element, mouse) {
                         run::close_approvals_drawer();
+                    }
+                }
+                return;
+            }
+            if k == "click" && element.id() == "run-file-card" {
+                if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
+                    if dom::click_outside_element(&element, mouse) {
+                        run::dismiss_file_card(false);
+                        activity::dismiss_file_card(false);
                     }
                 }
                 return;
@@ -390,6 +409,11 @@ pub fn start() -> Result<(), JsValue> {
                 event.prevent_default();
                 run::close_approvals_drawer();
             }
+            "run-file-card" => {
+                event.prevent_default();
+                run::dismiss_file_card(true);
+                activity::dismiss_file_card(true);
+            }
             _ => {}
         }
     });
@@ -399,6 +423,34 @@ pub fn start() -> Result<(), JsValue> {
         true,
     )?;
     cancel_cb.forget();
+    let toggle_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+        if let Some(target) = event
+            .target()
+            .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+        {
+            dom::handle_a11y_toggle(&target);
+        }
+    });
+    dom::document().add_event_listener_with_callback_and_bool(
+        "toggle",
+        toggle_cb.as_ref().unchecked_ref(),
+        true,
+    )?;
+    toggle_cb.forget();
+    let close_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+        if let Some(target) = event
+            .target()
+            .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+        {
+            dom::handle_a11y_dialog_close(&target);
+        }
+    });
+    dom::document().add_event_listener_with_callback_and_bool(
+        "close",
+        close_cb.as_ref().unchecked_ref(),
+        true,
+    )?;
+    close_cb.forget();
     if let Some(conv) = dom::get("conversation") {
         let scroll_cb = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
             run::on_conversation_scroll();
@@ -406,7 +458,7 @@ pub fn start() -> Result<(), JsValue> {
         let _ = conv.add_event_listener_with_callback("scroll", scroll_cb.as_ref().unchecked_ref());
         scroll_cb.forget();
     }
-    let save = Closure::<dyn FnMut(web_sys::Event)>::new(|_| session::save_preferences());
+    let save = Closure::<dyn FnMut(web_sys::Event)>::new(|_| session::flush_preferences());
     dom::window().add_event_listener_with_callback("pagehide", save.as_ref().unchecked_ref())?;
     save.forget();
     let focus = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
@@ -421,6 +473,9 @@ pub fn start() -> Result<(), JsValue> {
     dom::window().add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref())?;
     focus.forget();
     let visibility = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+        if dom::document().hidden() {
+            session::flush_preferences();
+        }
         run::visibility();
         knowledge::visibility();
         omnigraph::visibility();

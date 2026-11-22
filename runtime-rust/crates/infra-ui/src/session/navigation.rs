@@ -122,7 +122,23 @@ pub async fn open_view(view: &str, record: bool) {
     open_view_inner(view, record, record).await;
 }
 
+pub(super) fn should_reset_results_on_view_change(
+    prev_view: &str,
+    next_view: &str,
+    sid: &str,
+) -> bool {
+    let was_results = ["changes", "checks", "usage"].contains(&prev_view);
+    if !was_results {
+        return false;
+    }
+    if sid.is_empty() {
+        return true;
+    }
+    !["sessions", "changes", "checks", "usage"].contains(&next_view)
+}
+
 pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: bool) {
+    flush_preferences();
     let previous_view = m::read(|state| state.view.clone());
     if ["systems", "system-changes"].contains(&previous_view.as_str())
         && !["systems", "system-changes"].contains(&view)
@@ -160,9 +176,8 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
     } else {
         "sessions"
     };
-    if m::read(|s| ["changes", "checks", "usage"].contains(&s.view.as_str()))
-        && !["changes", "checks", "usage"].contains(&view)
-    {
+    let (prev_view, sid) = m::read(|s| (s.view.clone(), s.sid.clone()));
+    if should_reset_results_on_view_change(&prev_view, view, &sid) {
         reset_results();
     }
     m::write(|s| s.view = view.into());
@@ -222,9 +237,18 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
             "Context Graph",
             "Live cross-session knowledge, branches, and 3-way merges",
         ),
-        "knowledge" => ("Knowledge", "Your local workspace for agent sessions"),
-        "skills" => ("Skills", "Your local workspace for agent sessions"),
-        "accelerators" => ("Accelerators", "Your local workspace for agent sessions"),
+        "knowledge" => (
+            "Knowledge",
+            "Project Brain, Memory Bank, retrieval analytics, and indexed context",
+        ),
+        "skills" => (
+            "Skills",
+            "Skill library, SkillCache capsules, and custom skills",
+        ),
+        "accelerators" => (
+            "Accelerators",
+            "Starter packs, Infrastructure Creator, and project setup",
+        ),
         _ => ("Sessions", "Your local workspace for agent sessions"),
     };
     dom::text("page-title", title);
@@ -251,7 +275,14 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
         }
         "omnigraph" => omnigraph::load().await,
         "accelerators" => management::accelerators(),
-        "kit3" => dom::attr("kit3-frame", "src", "/kit3/"),
+        "kit3" => {
+            if dom::get("kit3-frame")
+                .and_then(|e| e.get_attribute("src"))
+                .is_none_or(|src| src.is_empty())
+            {
+                dom::attr("kit3-frame", "src", "/kit3/");
+            }
+        }
         _ => load_git().await,
     }
 }
@@ -360,54 +391,58 @@ pub fn history() {
     if m::data("history-projection") == projection {
         return;
     }
-    dom::clear("history");
-    if filtered.is_empty() {
-        let msg = if waiting_only {
-            "No sessions waiting for approval."
-        } else if !query.trim().is_empty() {
-            "No sessions match your search."
-        } else {
-            "No sessions yet."
-        };
-        dom::append("history", &dom::el("p", "muted history-empty", msg));
-        m::set("history-projection", projection);
-        return;
-    }
-    for v in projection.as_array().into_iter().flatten() {
-        let id = m::text(v, "id");
-        let title = m::text(v, "title");
-        let status = m::text(v, "status");
-        let status_text = m::text(v, "status_text");
-        let waiting = v["waiting_permissions"].as_u64().unwrap_or(0);
-        let b = dom::button("", "session-open", json!(id));
-        b.set_class_name("history-item");
-        if waiting > 0 {
-            let _ = b.set_attribute("data-waiting-approval", "true");
-        }
-        if m::yes(&v["selected"]) {
-            let _ = b.set_attribute("aria-current", "true");
-        }
-        dom::add(&b, &dom::el("span", "history-title", &title));
-        let meta = dom::el("span", "history-meta", "");
-        let dot_class = if waiting > 0 {
-            "status-dot awaiting_approval"
-        } else {
-            match status.as_str() {
-                "running" => "status-dot running",
-                "queued" => "status-dot queued",
-                "failed" => "status-dot failed",
-                "awaiting_approval" => "status-dot awaiting_approval",
-                "rejected" => "status-dot rejected",
-                _ => "status-dot",
+    let items = projection.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let empty_msg = if waiting_only {
+        "No sessions waiting for approval."
+    } else if !query.trim().is_empty() {
+        "No sessions match your search."
+    } else {
+        "No sessions yet."
+    };
+    dom::keyed_render_or_empty(
+        "history",
+        items,
+        |v| m::text(v, "id"),
+        |v| {
+            let id = m::text(v, "id");
+            let title = m::text(v, "title");
+            let status = m::text(v, "status");
+            let status_text = m::text(v, "status_text");
+            let waiting = v["waiting_permissions"].as_u64().unwrap_or(0);
+            let b = dom::button("", "session-open", json!(id));
+            b.set_class_name("history-item");
+            let _ = b.set_attribute("data-focus-key", &id);
+            if waiting > 0 {
+                let _ = b.set_attribute("data-waiting-approval", "true");
             }
-        };
-        let dot = dom::el("span", dot_class, "");
-        let _ = dot.set_attribute("aria-hidden", "true");
-        dom::add(&meta, &dot);
-        dom::add(&meta, &dom::el("span", "", &status_text));
-        dom::add(&b, &meta);
-        dom::append("history", &b);
-    }
+            if m::yes(&v["selected"]) {
+                let _ = b.set_attribute("aria-current", "true");
+            }
+            dom::add(&b, &dom::el("span", "history-title", &title));
+            let meta = dom::el("span", "history-meta", "");
+            let dot_class = if waiting > 0 {
+                "status-dot awaiting_approval"
+            } else {
+                match status.as_str() {
+                    "running" => "status-dot running",
+                    "queued" => "status-dot queued",
+                    "failed" => "status-dot failed",
+                    "awaiting_approval" => "status-dot awaiting_approval",
+                    "rejected" => "status-dot rejected",
+                    _ => "status-dot",
+                }
+            };
+            let dot = dom::el("span", dot_class, "");
+            let _ = dot.set_attribute("aria-hidden", "true");
+            dom::add(&meta, &dot);
+            dom::add(&meta, &dom::el("span", "", &status_text));
+            dom::add(&b, &meta);
+            b
+        },
+        "p",
+        "muted history-empty",
+        empty_msg,
+    );
     m::set("history-projection", projection);
     crate::run::sync_approvals_badge();
 }
@@ -661,7 +696,10 @@ pub(super) fn merge_controls() {
     if merging {
         dom::hidden("merge-context", false);
         dom::text("merge-context-title", "Merge chats into a new task");
-        dom::text("merge-context-note","The first launch reads an immutable archive of these chats as untrusted history. Write the new task's instruction below.");
+        dom::text(
+            "merge-context-note",
+            "The first launch reads an immutable archive of these chats as untrusted history. Write the new task's instruction below.",
+        );
         dom::clear("merge-context-sources");
         for id in m::array(&draft["sources"]) {
             let source = m::read(|s| {

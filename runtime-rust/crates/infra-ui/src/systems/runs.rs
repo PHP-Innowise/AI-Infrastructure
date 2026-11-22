@@ -1427,23 +1427,30 @@ pub(super) fn render_run() {
         "system-selection-note",
         v["plan"]["status"] != "needs_selection",
     );
-    dom::pretty("system-plan-json", &v["plan"]);
-    dom::clear("system-plan-summary");
+    let plan_sig = dom::json_signature(&v["plan"]);
+    if let Some(plan_el) = dom::get("system-plan-json") {
+        if plan_el.get_attribute("data-signature").as_deref() != Some(plan_sig.as_str()) {
+            let _ = plan_el.set_attribute("data-signature", &plan_sig);
+            dom::pretty("system-plan-json", &v["plan"]);
+        }
+    }
     let participants = joined(&v["plan"]["context"]["services"]);
     let shared_mem = shared_memory_summary(&v["plan"]);
+    let mut summary_html = String::new();
     for (term, value, is_zero) in [
         ("Participants", participants.clone(), participants == "none"),
         ("Context", context_summary(&v["plan"]), false),
         ("Shared memory", shared_mem.clone(), shared_mem == "none"),
         ("System file", m::text(&v, "config_path"), false),
     ] {
-        dom::append("system-plan-summary", &dom::el("dt", "", term));
-        let dd = dom::el("dd", "", &value);
-        if is_zero {
-            let _ = dd.set_attribute("data-zero", "true");
-        }
-        dom::append("system-plan-summary", &dd);
+        let zero_attr = if is_zero { " data-zero=\"true\"" } else { "" };
+        summary_html.push_str(&format!(
+            "<dt>{}</dt><dd{zero_attr}>{}</dd>",
+            dom::escape_html(term),
+            dom::escape_html(&value),
+        ));
     }
+    dom::set_markup_id("system-plan-summary", &summary_html);
     let steps = if v["execution"]["steps"].is_array() {
         m::array(&v["execution"]["steps"])
     } else {
@@ -1461,7 +1468,7 @@ pub(super) fn render_run() {
             json!({"idx": idx, "step": step, "localize": localize})
         })
         .collect::<Vec<_>>();
-    dom::keyed_render(
+    dom::keyed_render_or_empty(
         "system-flow",
         &step_entries,
         |entry| {
@@ -1510,13 +1517,10 @@ pub(super) fn render_run() {
             dom::add(&item, &body);
             item
         },
+        "li",
+        "system-stage",
+        "No planned steps yet.",
     );
-    if steps.is_empty() {
-        dom::append(
-            "system-flow",
-            &dom::el("li", "system-stage", "No planned steps yet."),
-        );
-    }
     dom::options(
         "system-provider",
         &m::array(&v["providers"]),

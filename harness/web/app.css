@@ -1138,7 +1138,8 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .run-tree-folder > summary[role="treeitem"] { display:flex; align-items:center; gap:8px; padding:4px 8px; border-radius:var(--radius-sm); cursor:pointer; font-size:var(--text-ui); font-weight:var(--weight-strong); }
 .run-tree-path { min-width:0; color:var(--ink-2); font-family:var(--font-mono); overflow-wrap:anywhere; }
 .run-tree-facts { color:var(--muted); font-size:var(--text-meta); }
-.run-file-card { position:fixed; z-index:30; width:min(360px,calc(100vw - 32px)); padding:12px 16px; border:1px solid var(--field-line); border-radius:var(--radius-md); background:var(--paper); box-shadow:0 8px 24px var(--shadow-strong); color:var(--ink); font-size:var(--text-ui); line-height:var(--leading-ui); }
+.run-file-card { position:fixed; z-index:30; margin:0; right:auto; bottom:auto; width:min(360px,calc(100vw - 32px)); max-width:calc(100vw - 16px); max-height:calc(100vh - 16px); overflow:auto; padding:12px 16px; border:1px solid var(--field-line); border-radius:var(--radius-md); background:var(--paper); box-shadow:0 8px 24px var(--shadow-strong); color:var(--ink); font-size:var(--text-ui); line-height:var(--leading-ui); }
+.run-file-card::backdrop { background:transparent; backdrop-filter:none; -webkit-backdrop-filter:none; }
 .run-file-card[data-inline="true"] { position:static; width:auto; margin:8px 0 4px; box-shadow:none; background:var(--soft); }
 .run-card-path { margin:0; font-family:var(--font-mono); font-weight:var(--weight-strong); overflow-wrap:anywhere; }
 .run-card-facts { margin:4px 0 0; color:var(--ink-2); }
@@ -2843,6 +2844,8 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
   .diff-file-filter { width:100%; }
   .diff-line { grid-template-columns:32px 32px minmax(0,1fr); }
   .sse-status { font-size:var(--text-meta); gap:4px; padding:2px 8px; max-width:140px; overflow:hidden; text-overflow:ellipsis; }
+  .command-palette-backdrop { padding:8vh 10px 16px; }
+  .command-palette-card { width:100%; max-height:78vh; }
 }
 @media (forced-colors:active) {
   .omni-tab[aria-selected="true"] { color:Highlight; }
@@ -2942,6 +2945,7 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 .command-palette-item-head { display:flex; align-items:center; gap:8px; }
 .command-palette-cat { padding:1px 6px; border-radius:var(--radius-pill); background:var(--soft); border:1px solid var(--field-line); color:var(--muted); font-size:var(--text-meta); }
 .command-palette-title { font-size:var(--text-ui); }
+.command-palette-kbd { margin-left:auto; padding:1px 6px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--soft); color:var(--muted); font-family:var(--font-mono); font-size:var(--text-meta); white-space:nowrap; }
 .command-palette-sub { font-size:var(--text-meta); color:var(--muted); padding-left:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .command-palette-empty { margin:12px; text-align:center; }
 
@@ -3050,7 +3054,7 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 .skill-capsule-facts-grid { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin:0; font-size:var(--text-ui); }
 .skill-capsule-facts-grid dt { color:var(--muted); }
 .skill-capsule-facts-grid dd { margin:0; color:var(--ink); overflow-wrap:anywhere; }
-@media (max-width:900px) { .skill-capsules-layout { grid-template-columns:1fr; } }
+@media (max-width:920px) { .skill-capsules-layout { grid-template-columns:1fr; } }
 @media (forced-colors:active) {
   .skillcache-pill,.skill-capsule-row,.skill-capsule-detail { border-color:CanvasText; }
   .conversation-skillcache,.skillcache-phase { border-left-color:CanvasText; }

@@ -138,6 +138,7 @@ pub(crate) fn append_draft_block(textarea_id: &str, block: &str, max_chars: usiz
 }
 
 pub async fn send() {
+    flush_preferences();
     if inbox::needs_confirmation() || m::read(|s| m::active(&s.selected)) {
         if FILES.with(|files| !files.borrow().is_empty()) {
             dom::error(
@@ -191,7 +192,10 @@ pub async fn send() {
             || dom::checked("clash-enabled")
             || FILES.with(|f| !f.borrow().is_empty()))
     {
-        dom::error("composer-error","A merged task uses an ordinary native chat in the project folder, without attachments or Clash.");
+        dom::error(
+            "composer-error",
+            "A merged task uses an ordinary native chat in the project folder, without attachments or Clash.",
+        );
         return;
     }
     if !follow {

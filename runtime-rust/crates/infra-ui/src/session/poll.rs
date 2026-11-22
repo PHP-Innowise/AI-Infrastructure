@@ -1,24 +1,101 @@
 use super::*;
 use std::collections::BTreeSet;
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SseUiBatch {
+    pub(crate) epoch: u64,
+    pub(crate) needs_replay: bool,
+    pub(crate) needs_controls: bool,
+    pub(crate) needs_badge: bool,
+    pub(crate) needs_embedded_sync: bool,
+    pub(crate) pending_focus: Option<V>,
+}
+
 #[derive(Default)]
 struct StreamSyncBuffer {
     initial_poll_epoch: Option<u64>,
     buffered_sse_events: Vec<V>,
     pending_sse_resync: bool,
+    sse_ui_batch: Option<SseUiBatch>,
 }
+
+const SSE_UI_FRAME_KEY: &str = "session-sse-ui";
 
 thread_local! {
     static STREAM_SYNC: RefCell<StreamSyncBuffer> = RefCell::new(StreamSyncBuffer::default());
 }
 
+pub(crate) fn queue_sse_ui_batch(
+    slot: &mut Option<SseUiBatch>,
+    epoch: u64,
+    out_of_order: bool,
+    mutation: bool,
+    focus: Option<V>,
+) {
+    let batch = slot.get_or_insert_with(|| SseUiBatch {
+        epoch,
+        ..SseUiBatch::default()
+    });
+    if batch.epoch != epoch {
+        *batch = SseUiBatch {
+            epoch,
+            ..SseUiBatch::default()
+        };
+    }
+    if out_of_order {
+        batch.needs_replay = true;
+    }
+    batch.needs_controls = true;
+    batch.needs_badge = true;
+    if mutation {
+        batch.needs_embedded_sync = true;
+    }
+    if let Some(focus) = focus {
+        batch.pending_focus = Some(focus);
+    }
+}
+
+pub(crate) fn take_sse_ui_batch(
+    slot: &mut Option<SseUiBatch>,
+    current_epoch: u64,
+) -> Option<SseUiBatch> {
+    let batch = slot.take()?;
+    (batch.epoch == current_epoch).then_some(batch)
+}
+
 fn clear_stream_sync() {
+    dom::cancel_frame(SSE_UI_FRAME_KEY);
     STREAM_SYNC.with(|sync| {
         let mut s = sync.borrow_mut();
         s.initial_poll_epoch = None;
         s.buffered_sse_events.clear();
         s.pending_sse_resync = false;
+        s.sse_ui_batch = None;
     });
+}
+
+fn flush_sse_ui_batch() {
+    let current_epoch = m::read(|s| s.epoch);
+    let Some(batch) = STREAM_SYNC
+        .with(|sync| take_sse_ui_batch(&mut sync.borrow_mut().sse_ui_batch, current_epoch))
+    else {
+        return;
+    };
+    if batch.needs_replay {
+        run::replay_visible_stream();
+    }
+    if batch.needs_controls {
+        controls();
+    }
+    if batch.needs_embedded_sync {
+        crate::graph_map::sync_embedded_changes();
+    }
+    if let Some(focus) = batch.pending_focus {
+        crate::graph_map::apply_focus(&focus);
+    }
+    if batch.needs_badge {
+        run::sync_approvals_badge();
+    }
 }
 
 pub(crate) fn parsed_event_id(event: &V) -> Option<u64> {
@@ -631,7 +708,6 @@ pub async fn poll(epoch: u64) {
             }
             history();
             controls();
-            run::render();
             run::sync_approvals_badge();
             let is_active = m::read(|s| m::active(&s.selected));
             crate::graph::run_state(is_active);
@@ -693,7 +769,6 @@ pub async fn poll(epoch: u64) {
                         run::observe(event.clone());
                     }
                 }
-                run::render();
                 controls();
             }
             dom::error("events-error", &e.message);
@@ -809,23 +884,33 @@ pub(crate) fn initialize_sse_listeners() {
                 merge_ordered_events(&mut s.events, &mut s.seen, &mut s.cursor, vec![event])
             });
             if out_of_order {
-                run::replay_visible_stream();
-                run::render();
-                controls();
-                run::sync_approvals_badge();
+                STREAM_SYNC.with(|sync| {
+                    queue_sse_ui_batch(
+                        &mut sync.borrow_mut().sse_ui_batch,
+                        current_epoch,
+                        true,
+                        false,
+                        None,
+                    );
+                });
+                dom::schedule_frame(SSE_UI_FRAME_KEY, flush_sse_ui_batch);
             } else if let Some(event) = fresh_events.into_iter().next() {
                 run::observe(event.clone());
-                run::render();
-                controls();
-                if is_mutation_tool_event(&event) {
-                    crate::graph_map::sync_embedded_changes();
-                }
-                if let Some(focus) = event_focus_payload(&event) {
-                    crate::graph_map::apply_focus(&focus);
-                }
-                run::sync_approvals_badge();
+                let mutation = is_mutation_tool_event(&event);
+                let focus = event_focus_payload(&event);
+                STREAM_SYNC.with(|sync| {
+                    queue_sse_ui_batch(
+                        &mut sync.borrow_mut().sse_ui_batch,
+                        current_epoch,
+                        false,
+                        mutation,
+                        focus,
+                    );
+                });
+                dom::schedule_frame(SSE_UI_FRAME_KEY, flush_sse_ui_batch);
             }
         } else if event["kind"] == "permission" {
+            run::invalidate_approvals_cache_for(&target_sid);
             spawn_local(async {
                 refresh().await;
             });
@@ -860,7 +945,6 @@ pub(crate) fn initialize_sse_listeners() {
         if m::read(|s| s.sid == sid) {
             apply_settings(&session);
             controls();
-            run::render();
             let is_active = m::active(&session);
             crate::graph::run_state(is_active);
             if was_active && !is_active {
@@ -895,9 +979,7 @@ pub(crate) fn initialize_sse_listeners() {
             history();
             run::sync_approvals_badge();
             if m::read(|s| s.approvals.drawer_open) {
-                spawn_local(async {
-                    run::refresh_approvals_queue().await;
-                });
+                run::schedule_approvals_queue_refresh();
             }
         }
     });

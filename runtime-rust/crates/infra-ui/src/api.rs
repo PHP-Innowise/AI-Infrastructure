@@ -115,7 +115,10 @@ pub async fn call(
         if status == 401 || status == 403 {
             model::write(|s| s.auth_failed = true);
             stop_sse();
-            dom::error("connection-message","The local connection token is no longer accepted. Reconnect before sending another request.");
+            dom::error(
+                "connection-message",
+                "The local connection token is no longer accepted. Reconnect before sending another request.",
+            );
             dom::hidden("connection-banner", false);
             crate::session::controls();
         }
@@ -307,12 +310,50 @@ fn attach_named_listener(source: &web_sys::EventSource, event_name: &str) {
     SSE.with(|sse| sse.borrow_mut().message_cbs.push(cb));
 }
 
-fn stream_url() -> String {
-    let last_id = SSE.with(|sse| sse.borrow().last_event_id.clone());
-    if last_id.is_empty() {
+fn encode_query_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Builds the `/api/events/stream` URL with optional `last_event_id` and active `project_id` filters.
+pub(crate) fn build_stream_url(last_event_id: &str, project_id: &str) -> String {
+    let mut params = Vec::new();
+    if !last_event_id.is_empty() {
+        params.push(format!(
+            "last_event_id={}",
+            encode_query_component(last_event_id)
+        ));
+    }
+    if !project_id.is_empty() {
+        params.push(format!("project_id={}", encode_query_component(project_id)));
+    }
+    if params.is_empty() {
         "/api/events/stream".into()
     } else {
-        format!("/api/events/stream?last_event_id={}", dom::enc(&last_id))
+        format!("/api/events/stream?{}", params.join("&"))
+    }
+}
+
+fn stream_url() -> String {
+    let last_id = SSE.with(|sse| sse.borrow().last_event_id.clone());
+    let project_id = model::current_project();
+    build_stream_url(&last_id, &project_id)
+}
+
+/// Reopens the live SSE stream when the active workspace project changes.
+pub fn reconnect_sse_for_project_scope() {
+    if !cfg!(target_arch = "wasm32") || model::read(|s| s.auth_failed) {
+        return;
+    }
+    if SSE.with(|sse| sse.borrow().enabled) {
+        start_sse();
     }
 }
 
@@ -555,5 +596,18 @@ mod sse_contract_tests {
         assert!(reconnect.1.contains("2"));
         assert_eq!(sse_status_badge(false, true, 0).0, "offline");
         assert_eq!(sse_status_badge(false, false, 0).0, "connecting");
+    }
+
+    #[test]
+    fn build_stream_url_includes_project_scope_and_last_event_id() {
+        assert_eq!(build_stream_url("", ""), "/api/events/stream");
+        assert_eq!(
+            build_stream_url("", "laravel app/1"),
+            "/api/events/stream?project_id=laravel%20app%2F1"
+        );
+        assert_eq!(
+            build_stream_url("ev:42", "proj-a"),
+            "/api/events/stream?last_event_id=ev%3A42&project_id=proj-a"
+        );
     }
 }
