@@ -2778,8 +2778,11 @@ fn commit_dock_data_sig(dock: &V, selected_target: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let rows = m::array(&dock["rows"]);
     rows.len().hash(&mut h);
-    rows.first().and_then(|r| r["commit"].as_str()).hash(&mut h);
-    rows.last().and_then(|r| r["commit"].as_str()).hash(&mut h);
+    for row in &rows {
+        row["commit"].as_str().hash(&mut h);
+        row["subject"].as_str().hash(&mut h);
+    }
+    dock["active"].as_u64().hash(&mut h);
     selected_target.hash(&mut h);
     m::text(dock, "range_base").hash(&mut h);
     m::text(dock, "range_head").hash(&mut h);
@@ -2906,7 +2909,7 @@ pub(super) fn show_commit_dock() {
             }
         }
     }
-    sync_commit_dock_virtual_window(true);
+    sync_commit_dock_virtual_window(false);
     if let Some(idx) = active {
         dom::attr(
             "graph-commit-graph-list",
@@ -2962,7 +2965,7 @@ pub(super) fn mark_commit_dock(next: usize) {
             }
         }
         if dom::get(&active_id).is_none() {
-            sync_commit_dock_virtual_window(true);
+            sync_commit_dock_virtual_window(false);
         }
     }
     if let Some(before) = prev.filter(|&before| before != next) {

@@ -1540,12 +1540,25 @@ pub(super) fn try_patch_system_canvas_in_place(
     true
 }
 
+#[cfg(test)]
 pub(super) fn build_dense_scene_for_surface(
     surface: SysMapSurface,
     doc: &V,
     state: &V,
     layout: &SysLayout,
 ) -> Option<graph_viewport::canvas2d::DenseScene> {
+    build_dense_scene_and_meta_for_surface(surface, doc, state, layout).map(|(scene, _)| scene)
+}
+
+pub(super) fn build_dense_scene_and_meta_for_surface(
+    surface: SysMapSurface,
+    doc: &V,
+    state: &V,
+    layout: &SysLayout,
+) -> Option<(
+    graph_viewport::canvas2d::DenseScene,
+    graph_viewport::canvas2d::DenseSceneMeta,
+)> {
     if layout.nodes.len() < 180 && layout.wires.len() < 400 {
         return None;
     }
@@ -1565,30 +1578,56 @@ pub(super) fn build_dense_scene_for_surface(
         }
     }
     let node_ids: Vec<String> = layout.nodes.iter().map(|n| n.id.clone()).collect();
+    let mut node_index_by_id: HashMap<&str, usize> = HashMap::with_capacity(node_ids.len());
+    let mut meta = graph_viewport::canvas2d::DenseSceneMeta::default();
     let nodes = layout
         .nodes
         .iter()
         .enumerate()
-        .map(|(i, n)| graph_viewport::canvas2d::DenseNodeSpec {
-            index: i,
-            x: n.x,
-            y: n.y,
-            w: n.w,
-            h: n.h,
-            label: name_by_id
+        .map(|(i, n)| {
+            node_index_by_id.insert(n.id.as_str(), i);
+            let label = name_by_id
                 .get(&n.id)
                 .cloned()
-                .unwrap_or_else(|| n.id.clone()),
-            role: n.child_of.as_deref().unwrap_or("service").to_owned(),
-            selected: n.id == vis.focus_id,
-            lit: false,
-            dim: false,
-            changed: vis.is_changed(&n.id),
-            pinned: pins.contains_key(&n.id),
-            failed: vis.failed_services.contains(&n.id)
-                || n.child_of
-                    .as_deref()
-                    .is_some_and(|p| vis.failed_services.contains(p)),
+                .unwrap_or_else(|| n.id.clone());
+            let svc_id = n.child_of.as_deref().unwrap_or(&n.id);
+            meta.nodes.insert(
+                i,
+                graph_viewport::canvas2d::DenseNodeMeta {
+                    explain_kind: "node".to_owned(),
+                    explain_payload: json!({
+                        "id": n.id,
+                        "service": svc_id,
+                        "name": label,
+                        "label": label,
+                    }),
+                    symbol_kind: n
+                        .child_of
+                        .as_deref()
+                        .map_or("service", |_| "contract")
+                        .to_owned(),
+                    tooltip: format!("{label} — double-click to open service code map"),
+                    ..Default::default()
+                },
+            );
+            graph_viewport::canvas2d::DenseNodeSpec {
+                index: i,
+                x: n.x,
+                y: n.y,
+                w: n.w,
+                h: n.h,
+                label,
+                role: n.child_of.as_deref().unwrap_or("service").to_owned(),
+                selected: n.id == vis.focus_id,
+                lit: false,
+                dim: false,
+                changed: vis.is_changed(&n.id),
+                pinned: pins.contains_key(&n.id),
+                failed: vis.failed_services.contains(&n.id)
+                    || n.child_of
+                        .as_deref()
+                        .is_some_and(|p| vis.failed_services.contains(p)),
+            }
         })
         .collect();
     let mut edge_endpoints = vec![(String::new(), String::new()); layout.wires.len()];
@@ -1605,9 +1644,27 @@ pub(super) fn build_dense_scene_for_surface(
             let prov = edge.map(|e| m::text(e, "provenance")).unwrap_or_default();
             let broken = edge.is_some_and(|e| m::yes(&e["broken_risk"]));
             let against = edge.is_some_and(|e| m::yes(&e["against"]))
-                || (layers_mode && violation_set.contains(&(from, to)));
+                || (layers_mode && violation_set.contains(&(from.clone(), to.clone())));
             let kind_hidden = hidden_kinds[contract_spec_index(&kind)] && !against && !broken;
             let path_for_scene = if kind_hidden { "" } else { w.path_d.as_str() };
+            if !kind_hidden {
+                let from_idx = node_index_by_id.get(from.as_str()).copied();
+                let to_idx = node_index_by_id.get(to.as_str()).copied();
+                meta.edges.insert(
+                    i,
+                    graph_viewport::canvas2d::DenseEdgeMeta {
+                        explain_kind: "link".to_owned(),
+                        explain_payload: json!({
+                            "from": from,
+                            "to": to,
+                            "kind": kind,
+                        }),
+                        from_index: from_idx,
+                        to_index: to_idx,
+                        summary: format!("{from} -> {to} ({kind})"),
+                    },
+                );
+            }
             graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
                 i,
                 path_for_scene,
@@ -1629,7 +1686,7 @@ pub(super) fn build_dense_scene_for_surface(
         edges: dense_edges,
     };
     refresh_dense_scene_for_system(&mut scene, &vis, &node_ids, &edge_endpoints);
-    Some(scene)
+    Some((scene, meta))
 }
 
 pub(crate) fn mark_failed_services(failed_ids: &[String]) {
@@ -1768,8 +1825,10 @@ pub(super) fn render_surface(surface: SysMapSurface, refit: bool) {
         SYS_DENSE_CACHE.with(|c| {
             c.borrow_mut().insert(surface.canvas_id, cache_entry);
         });
-        if let Some(scene) = build_dense_scene_for_surface(surface, &view_doc, &state, &layout) {
-            graph_viewport::canvas2d::store_scene(surface.canvas_id, scene);
+        if let Some((scene, meta)) =
+            build_dense_scene_and_meta_for_surface(surface, &view_doc, &state, &layout)
+        {
+            graph_viewport::canvas2d::store_scene_with_meta(surface.canvas_id, scene, meta);
         } else {
             graph_viewport::canvas2d::clear_scene(surface.canvas_id);
         }

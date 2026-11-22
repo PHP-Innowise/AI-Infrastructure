@@ -966,6 +966,16 @@
           <label class="checkbox"><input id="graph-map-no-incoming" type="checkbox">No incoming links</label>
           <label class="checkbox"><input id="graph-map-fit" type="checkbox">Fit to window</label>
           <label class="checkbox"><input id="graph-map-whole" type="checkbox">Unfold all</label>
+          <label class="checkbox">Detail level
+            <select id="graph-map-lod">
+              <option value="">Auto</option>
+              <option value="crate">Crate</option>
+              <option value="folder">Folder</option>
+              <option value="file">File</option>
+              <option value="symbol">Symbol</option>
+            </select>
+          </label>
+          <label class="checkbox">Min link weight <input id="graph-map-min-weight" type="number" min="1" step="1" placeholder="1"></label>
         </div>
       </div>
       <button type="button" class="button compact" id="graph-map-reset-pins" hidden>Reset pins</button>

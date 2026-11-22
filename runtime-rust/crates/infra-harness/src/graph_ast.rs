@@ -268,9 +268,9 @@ pub(crate) fn parse_file_ir(rel_path: &str, source: &str) -> Option<AstFileExtra
         AstGrammar::Swift => extract_swift(&mut ctx, root),
         AstGrammar::Scala => extract_scala(&mut ctx, root),
     }
-    // Extract SQL queries from any string literal node across all languages.
-    scan_sql_string_literals(&mut ctx, root);
-    let identifiers = collect_code_identifiers_from_root(root, source);
+    // Extract SQL queries and code identifiers in one combined traversal, anchoring SQL edges
+    // to their tightest enclosing declaration from the language extraction above.
+    let identifiers = scan_sql_and_identifiers(&mut ctx, root);
     let mut out = ctx.into_extraction();
     out.identifiers = identifiers;
     Some(out)
@@ -916,19 +916,71 @@ fn extract_class_ref_name(raw: &str) -> Option<String> {
 // Semantic Extraction Helpers (SQL, Routes, DI, Events)
 // =========================================================================
 
-fn scan_sql_string_literals(ctx: &mut ExtractCtx<'_>, root: Node<'_>) {
+impl ExtractCtx<'_> {
+    fn enclosing_symbol_at_line(&self, line: u32) -> Option<String> {
+        if line == 0 {
+            return None;
+        }
+        let mut best: Option<&ExtractedDecl> = None;
+        let mut best_span = u32::MAX;
+        for decl in &self.declarations {
+            if line >= decl.start_line && line <= decl.end_line {
+                let span = decl.end_line.saturating_sub(decl.start_line);
+                let better = match best {
+                    None => true,
+                    Some(prev) => {
+                        span < best_span || (span == best_span && decl.start_line > prev.start_line)
+                    }
+                };
+                if better {
+                    best = Some(decl);
+                    best_span = span;
+                }
+            }
+        }
+        let decl = best?;
+        match decl.entity.parent.as_deref() {
+            Some(owner) if owner != self.rel_path => Some(format!("{owner}::{}", decl.entity.name)),
+            _ => Some(decl.entity.name.clone()),
+        }
+    }
+}
+
+fn scan_sql_and_identifiers(ctx: &mut ExtractCtx<'_>, root: Node<'_>) -> BTreeSet<String> {
+    let mut identifiers = BTreeSet::new();
     let mut stack = vec![(root, 0usize)];
     while let Some((node, depth)) = stack.pop() {
         if depth >= MAX_AST_DEPTH {
             continue;
         }
-        if is_string_kind(node.kind()) {
+        let kind = node.kind();
+        if is_comment_kind(kind) {
+            continue;
+        }
+        if is_string_kind(kind) {
             let raw = node_text(node, ctx.source);
             if raw.len() <= MAX_SQL_LITERAL_BYTES
                 && let Some(val) = unquote_literal(raw)
             {
                 let line = start_line(node);
-                emit_sql_table_edges(ctx, &val, None, line);
+                let owner = ctx.enclosing_symbol_at_line(line);
+                emit_sql_table_edges(ctx, &val, owner, line);
+            }
+            continue;
+        }
+        if node.child_count() == 0 {
+            let text = node_text(node, ctx.source);
+            let clean = text.strip_prefix('$').unwrap_or(text);
+            if !clean.is_empty()
+                && clean
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                identifiers.insert(clean.to_owned());
+                if text.starts_with('$') {
+                    identifiers.insert(text.to_owned());
+                }
             }
             continue;
         }
@@ -938,4 +990,5 @@ fn scan_sql_string_literals(ctx: &mut ExtractCtx<'_>, root: Node<'_>) {
             }
         }
     }
+    identifiers
 }

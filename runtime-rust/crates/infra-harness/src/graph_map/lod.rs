@@ -260,7 +260,8 @@ pub(crate) struct LodFilter<'a> {
     pub(crate) focus: Option<&'a str>,
     pub(crate) filter: &'a str,
     pub(crate) certain: bool,
-    pub(crate) paginated: bool,
+    pub(crate) offset: usize,
+    pub(crate) limit: Option<usize>,
 }
 
 pub(crate) fn rebuild_default_map_at_lod(
@@ -274,8 +275,10 @@ pub(crate) fn rebuild_default_map_at_lod(
         focus,
         filter,
         certain,
-        paginated,
+        offset,
+        limit,
     } = *opts;
+    let paginated = offset > 0 || limit.is_some();
     let scope = scope.trim_matches('/');
     let scope = if scope.is_empty() || index.folder(scope) || index.opens(scope).is_some() {
         scope
@@ -296,37 +299,79 @@ pub(crate) fn rebuild_default_map_at_lod(
             sym_in[to as usize] += 1;
         }
         let mut file_keys_cache: HashMap<u32, Vec<String>> = HashMap::new();
+        let focus_trim = focus.map(str::trim).filter(|s| !s.is_empty());
+        let mut seed_syms: BTreeSet<u32> = BTreeSet::new();
+        let mut focus_is_path_scope = false;
+        if let Some(f) = focus_trim {
+            for (idx, sym) in index.symbols.iter().enumerate() {
+                if matches!(sym.kind, Kind::File | Kind::Note) {
+                    continue;
+                }
+                let file_path = index.files[sym.file as usize].as_str();
+                if path_matches_scope(f, file_path) {
+                    seed_syms.insert(idx as u32);
+                    focus_is_path_scope = true;
+                } else {
+                    let keys = file_keys_cache
+                        .entry(sym.file)
+                        .or_insert_with(|| index.keys(sym.file));
+                    let k = &keys[idx - index.first[sym.file as usize] as usize];
+                    if k == f {
+                        seed_syms.insert(idx as u32);
+                    }
+                }
+            }
+        }
+        let allowed_focus: Option<HashSet<u32>> = focus_trim.map(|_| {
+            let mut allowed: HashSet<u32> = seed_syms.iter().copied().collect();
+            if !focus_is_path_scope {
+                for &(from, to, _, guessed) in &index.uses {
+                    if (certain && guessed) || from == to {
+                        continue;
+                    }
+                    if seed_syms.contains(&from) {
+                        allowed.insert(to);
+                    }
+                    if seed_syms.contains(&to) {
+                        allowed.insert(from);
+                    }
+                }
+            }
+            allowed
+        });
+
         let mut candidates: Vec<(u32, String, u64, u64)> = Vec::new();
         for (idx, sym) in index.symbols.iter().enumerate() {
             if matches!(sym.kind, Kind::File | Kind::Note) {
                 continue;
             }
+            let sym_id = idx as u32;
             let file_path = index.files[sym.file as usize].as_str();
-            if !path_matches_scope(scope, file_path) {
+            let is_seed = seed_syms.contains(&sym_id);
+            let allowed = match &allowed_focus {
+                Some(set) => set.contains(&sym_id),
+                None => path_matches_scope(scope, file_path),
+            };
+            if !allowed {
                 continue;
-            }
-            if let Some(f) = focus.filter(|s| !s.is_empty())
-                && !path_matches_scope(f, file_path)
-            {
-                let keys = file_keys_cache
-                    .entry(sym.file)
-                    .or_insert_with(|| index.keys(sym.file));
-                let k = &keys[idx - index.first[sym.file as usize] as usize];
-                if k != f {
-                    continue;
-                }
             }
             let keys = file_keys_cache
                 .entry(sym.file)
                 .or_insert_with(|| index.keys(sym.file));
             let key = keys[idx - index.first[sym.file as usize] as usize].clone();
-            if !needle.is_empty() && !key.to_ascii_lowercase().contains(&needle) {
+            if !is_seed && !needle.is_empty() && !key.to_ascii_lowercase().contains(&needle) {
                 continue;
             }
-            candidates.push((idx as u32, key, sym_out[idx], sym_in[idx]));
+            candidates.push((sym_id, key, sym_out[idx], sym_in[idx]));
         }
         let total_matching = candidates.len();
-        candidates.sort_by(|a, b| (b.2 + b.3).cmp(&(a.2 + a.3)).then(a.1.cmp(&b.1)));
+        candidates.sort_by(|a, b| {
+            seed_syms
+                .contains(&b.0)
+                .cmp(&seed_syms.contains(&a.0))
+                .then_with(|| (b.2 + b.3).cmp(&(a.2 + a.3)))
+                .then_with(|| a.1.cmp(&b.1))
+        });
         if !paginated {
             candidates.truncate(max_default);
         }
@@ -918,7 +963,8 @@ pub(crate) fn view_at_lod(
         opts.focus,
         opts.filter,
         opts.certain,
-        opts.paginated,
+        opts.offset,
+        opts.limit,
     );
     out
 }
@@ -936,7 +982,8 @@ pub(crate) fn apply_lod_and_min_weight(
     focus: Option<&str>,
     filter: &str,
     certain: bool,
-    paginated: bool,
+    offset: usize,
+    limit: Option<usize>,
 ) -> bool {
     let mut reshaped = false;
     if let Some(level) = lod {
@@ -951,7 +998,8 @@ pub(crate) fn apply_lod_and_min_weight(
                     focus,
                     filter,
                     certain,
-                    paginated,
+                    offset,
+                    limit,
                 },
             )
         } else if mode.as_deref() != Some("file") {
@@ -995,6 +1043,16 @@ pub(crate) fn apply_lod_and_min_weight(
         if let Some(obj) = view.as_object_mut() {
             obj.insert("min_weight".into(), json!(threshold));
         }
+    }
+    if (reshaped || offset > 0 || limit.is_some())
+        && let Value::Object(obj) = view
+        && (reshaped || !obj.get("paging").is_some_and(Value::is_object))
+    {
+        let mut anchors = Vec::new();
+        if let Some(f) = focus.filter(|s| !s.is_empty()) {
+            anchors.push(f);
+        }
+        paginate_lens_view(obj, offset, limit, &anchors);
     }
     reshaped
 }

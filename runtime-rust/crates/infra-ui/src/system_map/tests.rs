@@ -1344,3 +1344,48 @@ fn bridge_confidence_null_and_from_symbols_payload_and_unfold_more_and_guards() 
         "dblclick", true, false, true, false, true
     ));
 }
+
+#[test]
+fn system_map_dense_scene_populates_meta_adjacency_and_explain_targets() {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for i in 0..185 {
+        nodes.push(json!({
+            "id": format!("svc-{i}"),
+            "name": format!("Service {i}"),
+            "kind": "service",
+        }));
+    }
+    edges.push(json!({
+        "from": "svc-0",
+        "to": "svc-1",
+        "kinds": ["http"],
+    }));
+    let doc = json!({ "nodes": nodes, "edges": edges });
+    let state = json!({});
+    let layout = layout_system_nodes(&doc, false);
+    let (scene, mut meta) = super::render::build_dense_scene_and_meta_for_surface(
+        SERVICES_SURFACE,
+        &doc,
+        &state,
+        &layout,
+    )
+    .expect("dense scene + meta");
+    meta.rebuild_caches(&scene);
+    let idx_0 = layout.nodes.iter().position(|n| n.id == "svc-0").unwrap();
+    let idx_1 = layout.nodes.iter().position(|n| n.id == "svc-1").unwrap();
+    assert_eq!(
+        meta.nodes[&idx_0].explain_payload["service"],
+        json!("svc-0")
+    );
+    assert_eq!(
+        meta.nodes[&idx_1].explain_payload["service"],
+        json!("svc-1")
+    );
+    assert!(meta.edges.contains_key(&0));
+    assert_eq!(meta.edges[&0].explain_kind, "link");
+    assert_eq!(meta.edges[&0].explain_payload["from"], json!("svc-0"));
+    assert_eq!(meta.edges[&0].explain_payload["to"], json!("svc-1"));
+    let adj0 = meta.node_adjacency.get(&idx_0).expect("svc-0 adjacency");
+    assert_eq!(adj0, &vec![(0, idx_1)]);
+}

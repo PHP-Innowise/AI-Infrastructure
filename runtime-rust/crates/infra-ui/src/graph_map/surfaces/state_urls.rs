@@ -818,7 +818,7 @@ fn refresh_active_external_views(proj: &str) {
             m::take("omnigraph-workspace-changes");
             m::take("omnigraph-workspace-impact");
             spawn_local(async {
-                crate::omnigraph::load().await;
+                crate::omnigraph::refresh_graph_preserving_pages().await;
             });
         }
     }
@@ -921,6 +921,22 @@ pub(in crate::graph_map) fn sync_modal_lens_and_display(state: &V, view: &V) {
     let has_path = !m::text(&state["traced_path"], "from").is_empty()
         && !m::text(&state["traced_path"], "to").is_empty();
     dom::hidden("graph-map-path-clear", !has_path);
+    let wanted_lod = state["lod"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| matches!(*s, "crate" | "folder" | "file" | "symbol"))
+        .unwrap_or("");
+    if dom::value("graph-map-lod") != wanted_lod {
+        dom::set_value("graph-map-lod", wanted_lod);
+    }
+    let wanted_weight = state["min_weight"]
+        .as_u64()
+        .filter(|&w| w >= 1)
+        .map(|w| w.to_string())
+        .unwrap_or_default();
+    if dom::value("graph-map-min-weight") != wanted_weight {
+        dom::set_value("graph-map-min-weight", &wanted_weight);
+    }
 }
 
 pub(in crate::graph_map) fn sync_surface_toolbar(

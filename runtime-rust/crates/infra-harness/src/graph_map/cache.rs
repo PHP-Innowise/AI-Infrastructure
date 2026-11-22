@@ -361,6 +361,23 @@ impl Maps {
         }
     }
 
+    /// Re-stamps the most recently cached live IR `Index` for `project` to `ir_revision`
+    /// without rebuilding it (used for architecture/non-code updates that leave code IR intact).
+    pub(crate) fn rebind_live_ir_revision(&self, project: &str, ir_revision: u64) {
+        if let Ok(mut cache) = self.cache.lock() {
+            if let Some((_, rev, _, _)) = cache
+                .kept_live_ir
+                .iter_mut()
+                .rfind(|(name, ..)| name == project)
+            {
+                *rev = ir_revision.max(*rev);
+            }
+            cache
+                .kept_ir_summaries
+                .retain(|(_, name), _| name != project);
+        }
+    }
+
     /// Returns a live in-memory `Index` built from SQLite IR when present, updating LRU order.
     #[cfg(test)]
     pub(crate) fn live_ir(&self, project: &str) -> Option<(u64, Arc<Index>)> {

@@ -481,6 +481,10 @@ pub(super) struct Builder<'a> {
     pub(super) nodes: u64,
     pub(super) links: u64,
     pub(super) unplaced: u64,
+    pub(super) struct_links_in: Vec<(u32, u32)>,
+    pub(super) edge_extra_links: Vec<(u32, u32)>,
+    pub(super) unplaced_links: Vec<(u32, u32)>,
+    pub(super) orphan_extra_links: u64,
     /// Links met before the node list; the node-link format puts nodes first.
     pub(super) early: Vec<Link>,
     pub(super) listed: bool,
@@ -541,6 +545,10 @@ impl<'a> Builder<'a> {
             nodes: 0,
             links: 0,
             unplaced: 0,
+            struct_links_in: Vec::new(),
+            edge_extra_links: Vec::new(),
+            unplaced_links: Vec::new(),
+            orphan_extra_links: 0,
             early: Vec::new(),
             listed: false,
             backend,
@@ -641,13 +649,34 @@ impl Builder<'_> {
     pub(super) fn link(&mut self, link: Link) {
         self.links += 1;
         let relation = link.relation.map(|text| text.0).unwrap_or_default();
+        let source_file_id = link
+            .source_file
+            .as_ref()
+            .and_then(|text| self.path(&text.0))
+            .and_then(|p| self.file_ids.get(&p).copied());
         if relation.starts_with('_') {
+            if let Some(f) = source_file_id {
+                self.edge_extra_links.push((f, f));
+            } else {
+                self.orphan_extra_links += 1;
+            }
             return;
         }
         let (Some(&source), Some(&target)) = (
             self.node_symbol.get(&link.source.0),
             self.node_symbol.get(&link.target.0),
         ) else {
+            if let Some(f) = source_file_id {
+                self.edge_extra_links.push((f, f));
+            } else if let Some(&s) = self.node_symbol.get(&link.source.0) {
+                let f = self.symbols[s as usize].file;
+                self.edge_extra_links.push((f, f));
+            } else if let Some(&t) = self.node_symbol.get(&link.target.0) {
+                let f = self.symbols[t as usize].file;
+                self.edge_extra_links.push((f, f));
+            } else {
+                self.orphan_extra_links += 1;
+            }
             return;
         };
         let (from, to) = (
@@ -659,9 +688,11 @@ impl Builder<'_> {
             if relation != "rationale_for" && from == to && source != target {
                 self.nest(source, target, &relation);
             }
+            self.struct_links_in.push((from, to));
             return;
         }
         if source == target {
+            self.edge_extra_links.push((from, to));
             return;
         }
         // The link names the file it was found in, which is the side that
@@ -673,9 +704,13 @@ impl Builder<'_> {
             Some(found) if found == self.files[from as usize] => (source, target),
             Some(found) if found == self.files[to as usize] => (target, source),
             // Two symbols of one file cannot be linked from another.
-            Some(_) if from == to => return,
+            Some(_) if from == to => {
+                self.edge_extra_links.push((from, to));
+                return;
+            }
             Some(_) => {
                 self.unplaced += 1;
+                self.unplaced_links.push((from, to));
                 return;
             }
         };
@@ -846,6 +881,11 @@ pub struct Index {
     nodes: u64,
     links: u64,
     unplaced: u64,
+    per_file_struct_links: Vec<u32>,
+    per_file_edge_extra_links: Vec<u32>,
+    cross_extra_links: Vec<(u32, u32)>,
+    cross_unplaced_links: Vec<(u32, u32)>,
+    orphan_extra_links: u64,
     backend: Option<String>,
     ir_db_path: Option<PathBuf>,
     known_files_set: OnceLock<BTreeSet<String>>,
@@ -1147,6 +1187,24 @@ impl Index {
                 !crates.rules_out(symbols[*from as usize].file, symbols[*to as usize].file)
             })
             .collect();
+        let mut per_file_struct_links = vec![0u32; builder.files.len()];
+        let mut per_file_edge_extra_links = vec![0u32; builder.files.len()];
+        let mut cross_extra_links = Vec::new();
+        for (from, to) in builder.struct_links_in {
+            if from == to {
+                per_file_struct_links[from as usize] += 1;
+            } else {
+                cross_extra_links.push((from, to));
+            }
+        }
+        for (from, to) in builder.edge_extra_links {
+            if from == to {
+                per_file_edge_extra_links[from as usize] += 1;
+            } else {
+                cross_extra_links.push((from, to));
+            }
+        }
+        let cross_unplaced_links = builder.unplaced_links;
         Ok(Self {
             index_id: next_index_id(),
             root: base,
@@ -1174,6 +1232,11 @@ impl Index {
             nodes: builder.nodes,
             links: builder.links,
             unplaced: builder.unplaced,
+            per_file_struct_links,
+            per_file_edge_extra_links,
+            cross_extra_links,
+            cross_unplaced_links,
+            orphan_extra_links: builder.orphan_extra_links,
             backend: builder.backend,
             ir_db_path,
             known_files_set: OnceLock::new(),
@@ -1275,6 +1338,20 @@ impl Index {
             .collect();
 
         let mut community_names = self.community_names.clone();
+        let mut community_ids_by_name: HashMap<String, u32> = community_names
+            .iter()
+            .map(|(&id, name)| (name.clone(), id))
+            .collect();
+        let mut next_community_id = community_names
+            .keys()
+            .copied()
+            .max()
+            .map_or(0, |k| k.saturating_add(1));
+        let old_file_community = |path: &str| -> Option<u32> {
+            let &old_f = old_by_path.get(path)?;
+            self.range(old_f)
+                .find_map(|sym| self.symbols[sym as usize].community)
+        };
         let mut delta_symbols: Vec<Symbol> = Vec::with_capacity(delta.node_specs.len());
         let mut delta_labels: Vec<String> = Vec::with_capacity(delta.node_specs.len());
         let mut delta_ir_ids: Vec<String> = Vec::with_capacity(delta.node_specs.len());
@@ -1299,20 +1376,33 @@ impl Index {
             } else {
                 clip(spec.label.trim(), NAME_LIMIT)
             };
-            if let Some((id, name)) = spec.community.zip(spec.community_name) {
-                let clipped = clip(name.trim(), NAME_LIMIT);
-                if !clipped.is_empty() {
-                    community_names
-                        .entry(id)
-                        .or_insert_with(|| clipped.to_owned());
+            let resolved_community = match (spec.community, spec.community_name) {
+                (raw_id, Some(name)) => {
+                    let clipped = clip(name.trim(), NAME_LIMIT);
+                    if clipped.is_empty() {
+                        raw_id.or_else(|| old_file_community(clean_file.as_str()))
+                    } else if let Some(&existing_id) = community_ids_by_name.get(clipped) {
+                        Some(existing_id)
+                    } else {
+                        let chosen = match raw_id {
+                            Some(id) if !community_names.contains_key(&id) => id,
+                            _ => next_community_id,
+                        };
+                        next_community_id = next_community_id.max(chosen.saturating_add(1));
+                        community_names.insert(chosen, clipped.to_owned());
+                        community_ids_by_name.insert(clipped.to_owned(), chosen);
+                        Some(chosen)
+                    }
                 }
-            }
+                (Some(id), None) => Some(id),
+                (None, None) => old_file_community(clean_file.as_str()),
+            };
             let is_semantic =
                 spec.node_kind.as_deref() == Some("semantic") || spec.id.starts_with("sem:");
             let file_is_test = is_test(&delta.files[new_file as usize]);
             let sym = Symbol {
                 file: new_file,
-                community: spec.community,
+                community: resolved_community,
                 parent: NONE,
                 line: line(spec.source_location.as_deref()),
                 end_line: spec.end_line,
@@ -1330,13 +1420,15 @@ impl Index {
             delta_ir_ids.push(spec.id);
         }
 
-        let delta_total_links = delta.link_specs.len() as u64;
+        let mut new_per_file_struct = vec![0u32; delta.files.len()];
+        let mut new_per_file_edge_extra = vec![0u32; delta.files.len()];
+        let mut new_cross_extra: Vec<(u32, u32)> = Vec::new();
+        let mut new_cross_unplaced: Vec<(u32, u32)> = Vec::new();
+        let mut new_orphan_extra = self.orphan_extra_links;
+
         let mut non_struct_links = Vec::with_capacity(delta.link_specs.len());
         for link in delta.link_specs {
             let rel = link.relation.as_deref().unwrap_or("");
-            if rel.starts_with('_') {
-                continue;
-            }
             let is_structure = STRUCTURE.contains(&rel) || rel == "case_of";
             if is_structure
                 && let (Some(&src), Some(&dst)) = (
@@ -1346,21 +1438,19 @@ impl Index {
             {
                 let from_f = delta_symbols[src as usize].file;
                 let to_f = delta_symbols[dst as usize].file;
-                if (STRUCTURE.contains(&rel) || (rel == "case_of" && from_f == to_f))
-                    && rel != "rationale_for"
-                    && from_f == to_f
-                    && src != dst
-                {
-                    apply_nest(&mut delta_symbols, src, dst, rel);
-                    continue;
-                }
-                if STRUCTURE.contains(&rel) {
+                if STRUCTURE.contains(&rel) || from_f == to_f {
+                    if rel != "rationale_for" && from_f == to_f && src != dst {
+                        apply_nest(&mut delta_symbols, src, dst, rel);
+                    }
+                    if from_f == to_f {
+                        new_per_file_struct[from_f as usize] += 1;
+                    } else {
+                        new_cross_extra.push((from_f, to_f));
+                    }
                     continue;
                 }
             }
-            if !STRUCTURE.contains(&rel) {
-                non_struct_links.push(link);
-            }
+            non_struct_links.push(link);
         }
 
         for idx in 0..delta_symbols.len() {
@@ -1461,28 +1551,51 @@ impl Index {
             .iter()
             .map(|p| delta.dirty_files.contains(p))
             .collect();
+        let old_to_new_file: Vec<u32> = self
+            .files
+            .iter()
+            .map(|p| new_by_path.get(p.as_str()).copied().unwrap_or(NONE))
+            .collect();
         let mut removed_node_count = 0u64;
-        let mut dropped_struct_links = 0u64;
         for (old_f, path) in self.files.iter().enumerate() {
-            if delta.edited_files.contains(path) || delta.removed_files.contains(path) {
-                let r = self.range(old_f as u32);
-                removed_node_count += r.len() as u64;
-                for old_sym in r {
-                    if self.symbols[old_sym as usize].parent != NONE {
-                        dropped_struct_links += 1;
-                    }
+            let new_f = old_to_new_file[old_f];
+            if new_f != NONE {
+                if !delta.edited_files.contains(path) {
+                    new_per_file_struct[new_f as usize] = self.per_file_struct_links[old_f];
                 }
+                if !old_file_dirty[old_f] {
+                    new_per_file_edge_extra[new_f as usize] = self.per_file_edge_extra_links[old_f];
+                }
+            }
+            if delta.edited_files.contains(path) || delta.removed_files.contains(path) {
+                removed_node_count += self.range(old_f as u32).len() as u64;
+            }
+        }
+        for &(f1, f2) in &self.cross_extra_links {
+            if !old_file_dirty[f1 as usize] && !old_file_dirty[f2 as usize] {
+                let (nf1, nf2) = (old_to_new_file[f1 as usize], old_to_new_file[f2 as usize]);
+                if nf1 == NONE || nf2 == NONE {
+                    return None;
+                }
+                new_cross_extra.push((nf1, nf2));
+            }
+        }
+        for &(f1, f2) in &self.cross_unplaced_links {
+            if !old_file_dirty[f1 as usize] && !old_file_dirty[f2 as usize] {
+                let (nf1, nf2) = (old_to_new_file[f1 as usize], old_to_new_file[f2 as usize]);
+                if nf1 == NONE || nf2 == NONE {
+                    return None;
+                }
+                new_cross_unplaced.push((nf1, nf2));
             }
         }
 
         let is_dirty_old = |sym: u32| old_file_dirty[self.symbols[sym as usize].file as usize];
         let check_multi_rs = delta.rs_touched && new_crates.is_multi_crate();
-        let mut dropped_non_struct = 0u64;
         let mut new_uses = Vec::with_capacity(self.uses.len());
         let mut new_ruled = Vec::with_capacity(self.ruled.len());
         for &(from, to, kind, guessed) in &self.uses {
             if is_dirty_old(from) || is_dirty_old(to) {
-                dropped_non_struct += 1;
                 continue;
             }
             let nf = old_to_new_sym[from as usize];
@@ -1501,7 +1614,6 @@ impl Index {
         }
         for &(from, to, kind, guessed) in &self.ruled {
             if is_dirty_old(from) || is_dirty_old(to) {
-                dropped_non_struct += 1;
                 continue;
             }
             let nf = old_to_new_sym[from as usize];
@@ -1560,34 +1672,51 @@ impl Index {
             .enumerate()
             .map(|(i, k)| (k.clone(), i as u16))
             .collect();
-        let mut delta_unplaced = 0u64;
         for link in non_struct_links {
             let relation = link.relation.unwrap_or_default();
+            let source_file_opt = link
+                .source_file
+                .as_deref()
+                .and_then(|raw| clean_graph_path(root_trim, raw));
             if relation.starts_with('_') {
+                if let Some(f) = source_file_opt
+                    .as_deref()
+                    .and_then(|p| new_by_path.get(p).copied())
+                {
+                    new_per_file_edge_extra[f as usize] += 1;
+                } else {
+                    new_orphan_extra += 1;
+                }
                 continue;
             }
             let &source_sym = endpoint_id_to_sym.get(link.source.as_str())?;
             let &target_sym = endpoint_id_to_sym.get(link.target.as_str())?;
-            if source_sym == target_sym {
-                continue;
-            }
             let (from_f, to_f) = (
                 new_symbols[source_sym as usize].file,
                 new_symbols[target_sym as usize].file,
             );
-            let (src, dst) = match link
-                .source_file
-                .as_deref()
-                .and_then(|raw| clean_graph_path(root_trim, raw))
-            {
-                None => (source_sym, target_sym),
-                Some(ref found) if found == &delta.files[from_f as usize] => {
-                    (source_sym, target_sym)
+            if STRUCTURE.contains(&relation.as_str()) || (relation == "case_of" && from_f == to_f) {
+                if from_f == to_f {
+                    new_per_file_edge_extra[from_f as usize] += 1;
+                } else {
+                    new_cross_extra.push((from_f, to_f));
                 }
-                Some(ref found) if found == &delta.files[to_f as usize] => (target_sym, source_sym),
-                Some(_) if from_f == to_f => continue,
+                continue;
+            }
+            if source_sym == target_sym {
+                new_per_file_edge_extra[from_f as usize] += 1;
+                continue;
+            }
+            let (src, dst) = match source_file_opt.as_deref() {
+                None => (source_sym, target_sym),
+                Some(found) if found == delta.files[from_f as usize] => (source_sym, target_sym),
+                Some(found) if found == delta.files[to_f as usize] => (target_sym, source_sym),
+                Some(_) if from_f == to_f => {
+                    new_per_file_edge_extra[from_f as usize] += 1;
+                    continue;
+                }
                 Some(_) => {
-                    delta_unplaced += 1;
+                    new_cross_unplaced.push((from_f, to_f));
                     continue;
                 }
             };
@@ -1626,10 +1755,15 @@ impl Index {
             .nodes
             .saturating_sub(removed_node_count)
             .saturating_add(delta_symbols.len() as u64);
-        let new_links = self
-            .links
-            .saturating_sub(dropped_non_struct.saturating_add(dropped_struct_links))
-            .saturating_add(delta_total_links);
+        let new_unplaced = new_cross_unplaced.len() as u64;
+        let extra_links: u64 = new_per_file_struct
+            .iter()
+            .chain(new_per_file_edge_extra.iter())
+            .map(|&n| u64::from(n))
+            .sum::<u64>()
+            + new_cross_extra.len() as u64
+            + new_orphan_extra;
+        let new_links = (new_uses.len() + new_ruled.len()) as u64 + extra_links + new_unplaced;
 
         Some(Self {
             index_id: next_index_id(),
@@ -1657,7 +1791,12 @@ impl Index {
             kinds: new_kinds,
             nodes: new_nodes,
             links: new_links,
-            unplaced: self.unplaced.saturating_add(delta_unplaced),
+            unplaced: new_unplaced,
+            per_file_struct_links: new_per_file_struct,
+            per_file_edge_extra_links: new_per_file_edge_extra,
+            cross_extra_links: new_cross_extra,
+            cross_unplaced_links: new_cross_unplaced,
+            orphan_extra_links: new_orphan_extra,
             backend: self.backend.clone(),
             ir_db_path: self.ir_db_path.clone(),
             known_files_set: OnceLock::new(),

@@ -40,6 +40,51 @@ use std::{
 };
 
 impl OmnigraphManager {
+    async fn enrich_canonical_symbol_ids_async(
+        &self,
+        project_id: &str,
+        symbols: &mut [Value],
+        symbol_edges: &mut [Value],
+    ) {
+        if symbols.is_empty() {
+            return;
+        }
+        let file_paths: BTreeSet<String> = symbols
+            .iter()
+            .filter_map(|s| str_field(s, "file_path"))
+            .collect();
+        if file_paths.is_empty() {
+            return;
+        }
+        let state_dir = self.state_dir.clone();
+        let pid = project_id.to_owned();
+        let Some(id_map) = tokio::task::spawn_blocking(move || {
+            let ir = crate::graph_ir::GraphIrStore::open_readonly_cached(&state_dir, &pid)
+                .ok()
+                .flatten()?;
+            ir.canonical_symbol_ids_for_files(&file_paths).ok()
+        })
+        .await
+        .ok()
+        .flatten() else {
+            return;
+        };
+        for sym in symbols {
+            if let Some(fqn) = str_field(sym, "fqn")
+                && let Some(cid) = id_map.get(&fqn)
+            {
+                sym["symbol_id"] = json!(cid);
+            }
+        }
+        for edge in symbol_edges {
+            if let Some(fqn) = str_field(edge, "fqn")
+                && let Some(cid) = id_map.get(&fqn)
+            {
+                edge["symbol_id"] = json!(cid);
+            }
+        }
+    }
+
     /// Build full constellation graph + branch/commit DAG payload for `/api/omnigraph/graph`
     /// using default pagination (`limit = 250`, `offset = 0`).
     pub async fn graph_view_json(
@@ -594,31 +639,8 @@ impl OmnigraphManager {
             need_unlinked_view,
             allow_symbol_q_match,
         );
-        if !symbols.is_empty()
-            && let Ok(Some(ir)) =
-                crate::graph_ir::GraphIrStore::open_readonly(&self.state_dir, project_id)
-        {
-            let file_paths: BTreeSet<String> = symbols
-                .iter()
-                .filter_map(|s| str_field(s, "file_path"))
-                .collect();
-            if let Ok(id_map) = ir.canonical_symbol_ids_for_files(&file_paths) {
-                for sym in &mut symbols {
-                    if let Some(fqn) = str_field(sym, "fqn")
-                        && let Some(cid) = id_map.get(&fqn)
-                    {
-                        sym["symbol_id"] = json!(cid);
-                    }
-                }
-                for edge in &mut symbol_edges {
-                    if let Some(fqn) = str_field(edge, "fqn")
-                        && let Some(cid) = id_map.get(&fqn)
-                    {
-                        edge["symbol_id"] = json!(cid);
-                    }
-                }
-            }
-        }
+        self.enrich_canonical_symbol_ids_async(project_id, &mut symbols, &mut symbol_edges)
+            .await;
 
         let kept_file_paths: BTreeSet<String> = if need_unlinked_view {
             BTreeSet::new()
@@ -1110,31 +1132,12 @@ impl OmnigraphManager {
             false,
             false,
         );
-        if !subgraph_symbols.is_empty()
-            && let Ok(Some(ir)) =
-                crate::graph_ir::GraphIrStore::open_readonly(&self.state_dir, project_id)
-        {
-            let file_paths: BTreeSet<String> = subgraph_symbols
-                .iter()
-                .filter_map(|s| str_field(s, "file_path"))
-                .collect();
-            if let Ok(id_map) = ir.canonical_symbol_ids_for_files(&file_paths) {
-                for sym in &mut subgraph_symbols {
-                    if let Some(fqn) = str_field(sym, "fqn")
-                        && let Some(cid) = id_map.get(&fqn)
-                    {
-                        sym["symbol_id"] = json!(cid);
-                    }
-                }
-                for edge in &mut subgraph_symbol_edges {
-                    if let Some(fqn) = str_field(edge, "fqn")
-                        && let Some(cid) = id_map.get(&fqn)
-                    {
-                        edge["symbol_id"] = json!(cid);
-                    }
-                }
-            }
-        }
+        self.enrich_canonical_symbol_ids_async(
+            project_id,
+            &mut subgraph_symbols,
+            &mut subgraph_symbol_edges,
+        )
+        .await;
 
         let mut kept_session_ids = BTreeSet::new();
         for atom in &subgraph_atoms {
@@ -1677,13 +1680,24 @@ impl OmnigraphManager {
             last_commit = Some(commit);
         }
 
-        let symbols = atom_symbols_for_project(
-            Some(&self.state_dir),
-            &project_id,
-            root,
-            &files,
-            &format!("{title}\n{summary}\n{atom_body}"),
-        );
+        let symbols = {
+            let state_dir = self.state_dir.clone();
+            let pid = project_id.clone();
+            let root_owned = root.map(Path::to_path_buf);
+            let files_owned = files.clone();
+            let sym_text = format!("{title}\n{summary}\n{atom_body}");
+            tokio::task::spawn_blocking(move || {
+                atom_symbols_for_project(
+                    Some(&state_dir),
+                    &pid,
+                    root_owned.as_deref(),
+                    &files_owned,
+                    &sym_text,
+                )
+            })
+            .await
+            .unwrap_or_default()
+        };
         let previous_symbols = if existing.is_some() {
             list_atom_symbols(&client, &project_id, &branch)
                 .await

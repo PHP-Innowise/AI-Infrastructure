@@ -347,7 +347,7 @@ pub(super) fn emit_semantic_from_call(
         }
     }
 
-    // 3. Domain events (`event(...)`, `dispatch(...)`, `emit(...)`, `publish(...)`, `Event::listen(...)`)
+    // 3. Domain events / queues (`event(...)`, `dispatch(...)`, `emit(...)`, `publish(...)`, `enqueue(...)`, `produce(...)`, `broadcast(...)`, `sendEvent(...)`, `Event::listen(...)`)
     if matches!(
         callee_lower.as_str(),
         "event"
@@ -357,6 +357,10 @@ pub(super) fn emit_semantic_from_call(
             | "emit"
             | "publish"
             | "publishevent"
+            | "produce"
+            | "sendevent"
+            | "enqueue"
+            | "broadcast"
     ) {
         let event_name =
             extract_event_name_from_args(receiver, &callee_lower, args_inner, string_args);
@@ -369,13 +373,18 @@ pub(super) fn emit_semantic_from_call(
                 evidence,
             );
         }
-    } else if matches!(callee_lower.as_str(), "listen" | "subscribe" | "on")
-        && (recv_lower.contains("event")
-            || recv_lower.contains("bus")
-            || recv_lower.contains("emitter")
-            || recv_lower.contains("broker")
-            || recv_lower.contains("pubsub")
-            || callee_lower == "listen")
+    } else if matches!(
+        callee_lower.as_str(),
+        "listen" | "subscribe" | "on" | "consume"
+    ) && (recv_lower.contains("event")
+        || recv_lower.contains("bus")
+        || recv_lower.contains("emitter")
+        || recv_lower.contains("broker")
+        || recv_lower.contains("pubsub")
+        || recv_lower.contains("queue")
+        || recv_lower.contains("kafka")
+        || recv_lower.contains("rabbit")
+        || matches!(callee_lower.as_str(), "listen" | "consume"))
         && let Some(ev) =
             extract_event_name_from_args(receiver, &callee_lower, args_inner, string_args)
     {
@@ -524,7 +533,7 @@ pub(super) fn emit_semantic_from_attribute(
         }
     }
 
-    // Event handlers: `AsMessageHandler`, `AsEventListener`, `EventListener`, `EventHandler`, `KafkaListener`, `RabbitListener`
+    // Event handlers: `AsMessageHandler`, `AsEventListener`, `EventListener`, `EventHandler`, `KafkaListener`, `RabbitListener`, `OnEvent`, `EventPattern`, `MessagePattern`, `receiver`
     if matches!(
         lower.as_str(),
         "asmessagehandler"
@@ -533,6 +542,10 @@ pub(super) fn emit_semantic_from_attribute(
             | "eventhandler"
             | "kafkalistener"
             | "rabbitlistener"
+            | "onevent"
+            | "eventpattern"
+            | "messagepattern"
+            | "receiver"
     ) {
         let ev = extract_class_ref_name(attr_text)
             .or_else(|| string_args.first().cloned())

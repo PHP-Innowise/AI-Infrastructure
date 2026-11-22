@@ -873,13 +873,6 @@ pub(super) fn render_constellation() {
         "omnigraph-structure-digest",
         json!(rendered.structure_digest),
     );
-    let is_dense = rendered.dense_scene.is_some();
-    if let Some(scene) = rendered.dense_scene {
-        graph_viewport::canvas2d::store_scene("omnigraph-canvas", scene);
-    } else {
-        graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
-    }
-
     let node_index_by_id: HashMap<String, usize> = rendered
         .node_rects
         .iter()
@@ -891,6 +884,44 @@ pub(super) fn render_constellation() {
         .iter()
         .map(|(id, ..)| title_for_omni_node(&graph, id))
         .collect();
+    let is_dense = rendered.dense_scene.is_some();
+    if let Some(scene) = rendered.dense_scene {
+        let mut meta = graph_viewport::canvas2d::DenseSceneMeta::default();
+        for (i, (id, ..)) in rendered.node_rects.iter().enumerate() {
+            let title = node_titles.get(i).cloned().unwrap_or_else(|| id.clone());
+            meta.nodes.insert(
+                i,
+                graph_viewport::canvas2d::DenseNodeMeta {
+                    explain_kind: "node".to_owned(),
+                    explain_payload: json!({
+                        "node_id": id,
+                        "label": title,
+                        "name": title,
+                    }),
+                    tooltip: title,
+                    ..Default::default()
+                },
+            );
+        }
+        for (i, (from, to)) in rendered.edge_endpoints.iter().enumerate() {
+            meta.edges.insert(
+                i,
+                graph_viewport::canvas2d::DenseEdgeMeta {
+                    explain_kind: "link".to_owned(),
+                    explain_payload: json!({
+                        "from": from,
+                        "to": to,
+                    }),
+                    from_index: node_index_by_id.get(from.as_str()).copied(),
+                    to_index: node_index_by_id.get(to.as_str()).copied(),
+                    summary: format!("{from} -> {to}"),
+                },
+            );
+        }
+        graph_viewport::canvas2d::store_scene_with_meta("omnigraph-canvas", scene, meta);
+    } else {
+        graph_viewport::canvas2d::clear_scene("omnigraph-canvas");
+    }
     let mut cache_neighbors = BTreeSet::new();
     if let Some(sel) = filter.selected_id.as_deref() {
         if let Some(&sel_idx) = node_index_by_id.get(sel) {
