@@ -1181,6 +1181,16 @@ pub(crate) fn refresh_skillcache_cards() {
     }
 }
 
+fn cache_call_block_if_present(node: &web_sys::Element) {
+    if let Some(call_id) = node.get_attribute("data-call-id") {
+        if !call_id.is_empty() {
+            CALL_BLOCK_CACHE.with(|c| {
+                c.borrow_mut().insert(call_id, node.clone());
+            });
+        }
+    }
+}
+
 fn prepend_events_range(start: usize, end: usize) {
     let Some(events_el) = dom::get("events") else {
         return;
@@ -1199,11 +1209,13 @@ fn prepend_events_range(start: usize, end: usize) {
         let (next_run, _, resolved_call) = advance_with_call(scan_run, ev);
         scan_run = next_run;
         if idx >= start {
+            record_rendered_event_id(ev);
             render_event_into(&staging, ev, resolved_call.as_deref(), false);
         }
     }
     let anchor = events_el.first_child();
     while let Some(node) = staging.first_element_child() {
+        cache_call_block_if_present(&node);
         let _ = events_el.insert_before(&node, anchor.as_ref());
     }
 }
@@ -1591,13 +1603,7 @@ pub(crate) fn replay_visible_stream() {
                     if render_event_into(&staging, ev, resolved_call, true) {
                         let anchor = dom_nodes.get(before_block_idx);
                         while let Some(node) = staging.first_element_child() {
-                            if let Some(call_id) = node.get_attribute("data-call-id") {
-                                if !call_id.is_empty() {
-                                    CALL_BLOCK_CACHE.with(|c| {
-                                        c.borrow_mut().insert(call_id, node.clone());
-                                    });
-                                }
-                            }
+                            cache_call_block_if_present(&node);
                             let _ = container.insert_before(&node, anchor.map(|a| a.as_ref()));
                             rendered_any = true;
                         }
@@ -1613,6 +1619,7 @@ pub(crate) fn replay_visible_stream() {
                     record_rendered_event_id(ev);
                     if let Some(block) = dom_nodes.get(block_idx) {
                         update_existing_tool_block(block, ev, resolved_call);
+                        rendered_any = true;
                     }
                 }
                 IncrementalOp::AppendBottom { event_idx } => {
