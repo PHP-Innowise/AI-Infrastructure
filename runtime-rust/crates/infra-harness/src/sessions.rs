@@ -212,11 +212,16 @@ fn fleet_options(
     effort: Option<&str>,
 ) -> Result<Value> {
     if !value.is_object()
-        || value
-            .as_object()
-            .unwrap()
-            .keys()
-            .any(|k| !["lenses", "dry_run", "budget_usd", "worker_timeout"].contains(&k.as_str()))
+        || value.as_object().unwrap().keys().any(|k| {
+            ![
+                "lenses",
+                "dry_run",
+                "budget_usd",
+                "worker_timeout",
+                "precheck",
+            ]
+            .contains(&k.as_str())
+        })
     {
         return Err(HarnessError::invalid("Invalid Fleet review settings."));
     }
@@ -267,7 +272,13 @@ fn fleet_options(
             "Native Fleet USD limits require Claude.",
         ));
     }
-    Ok(json!({"lenses":lenses,"dry_run":dry,"budget_usd":budget,"worker_timeout":seconds}))
+    let precheck = crate::clash::validate_precheck(value.get("precheck"))?;
+    let mut out =
+        json!({"lenses":lenses,"dry_run":dry,"budget_usd":budget,"worker_timeout":seconds});
+    if !precheck.is_null() {
+        out["precheck"] = precheck;
+    }
+    Ok(out)
 }
 fn followup_settings(session: &Value, options: &Value, catalog: &Value) -> Result<Value> {
     let workflow = session["workflow"].as_str().unwrap_or("native");
@@ -1641,6 +1652,16 @@ impl Sessions {
         (crate::permissions::mode(session) == Some(infra_host::permission::PermissionMode::Manual))
             .then(|| self.permissions.approvals(sid, emit.clone()))
     }
+    /// Enables Gate-1 read-only program auto-approval for `sid` inside registered `workspace`
+    /// when `Accelerators` are installed (used for ordinary and Clash launches, keeping
+    /// Creator and System manual permission workflows strictly explicit).
+    fn register_read_only_auto_rules_for_session(&self, sid: &str, workspace: &Path) {
+        if let Ok(slot) = lock(&self.accelerators)
+            && let Some(accelerators) = slot.as_ref()
+        {
+            let _ = accelerators.register_read_only_auto_rules(&self.permissions, sid, workspace);
+        }
+    }
     /// Where a Creator launch puts permission requests when running in Manual mode.
     pub(crate) fn creator_approvals(
         &self,
@@ -2180,7 +2201,7 @@ impl Sessions {
                 [&job.sid],
                 |r| r.get(0),
             )?;
-            fleet.initialize(
+            fleet.initialize_with_precheck(
                 &job.sid,
                 &job.prompt,
                 &format!("harness/{}", job.sid),
@@ -2194,6 +2215,7 @@ impl Sessions {
                         .join("checkpoints.sqlite"),
                 ),
                 action.as_deref(),
+                settings.get("precheck").filter(|v| !v.is_null()),
             )?;
             if let Some(action) = action
                 .as_deref()
@@ -2244,6 +2266,9 @@ impl Sessions {
             }
             let mut launch = self.configure_launch(&session, &job.prompt)?;
             launch.approvals = self.approvals(&job.sid, &session, &emit);
+            if launch.approvals.is_some() {
+                self.register_read_only_auto_rules_for_session(&job.sid, &workspace);
+            }
             let stage = if session["mode"] == "edit" {
                 "implement"
             } else {
@@ -2408,6 +2433,9 @@ impl Sessions {
             }
         };
         launch.approvals = self.approvals(&job.sid, &session, &emit);
+        if launch.approvals.is_some() {
+            self.register_read_only_auto_rules_for_session(&job.sid, &workspace);
+        }
         let adapter = self.launch_adapter(&session)?;
         // The turn's own launch gets the executor when it runs a capsule; a
         // recovery turn after it does not.
@@ -6309,5 +6337,126 @@ mod phase3c_approvals_tests {
         let logged = events.lock().unwrap();
         assert_eq!(logged[0]["state"], "pending");
         assert_eq!(logged[1]["state"], "expired");
+    }
+
+    #[test]
+    fn fleet_options_accepts_and_validates_precheck() {
+        let valid = fleet_options(
+            &json!({
+                "lenses": ["code-reviewer"],
+                "dry_run": true,
+                "precheck": {"argv": ["composer", "validate"], "timeout_seconds": 25}
+            }),
+            "codex",
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(valid["precheck"]["argv"], json!(["composer", "validate"]));
+        assert_eq!(valid["precheck"]["timeout_seconds"], 25);
+
+        assert!(
+            fleet_options(
+                &json!({
+                    "lenses": ["code-reviewer"],
+                    "dry_run": true,
+                    "precheck": {"argv": []}
+                }),
+                "codex",
+                false,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_read_only_auto_rules_approve_safe_commands_and_keep_creator_manual() {
+        let fixture = generation_completion_tests::Fixture::new();
+        let proj = infra_core::fs::canonicalize(fixture.temporary.path())
+            .unwrap()
+            .join("project");
+        std::fs::create_dir_all(proj.join("programs")).unwrap();
+        std::fs::write(proj.join("programs/ro.py"), "print('ok')\n").unwrap();
+        fixture.sessions.store.register(&proj).unwrap();
+
+        let accelerators = Arc::new(
+            crate::accelerators::Accelerators::new(
+                fixture.sessions.store.clone(),
+                fixture.temporary.path().join("source"),
+                fixture.sessions.providers.clone(),
+                std::sync::Weak::new(),
+            )
+            .unwrap(),
+        );
+        fixture.sessions.install_accelerators(accelerators).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let recorded = events.clone();
+        let emit: Event = Arc::new(move |ev| {
+            recorded.lock().unwrap().push(ev);
+            Ok(())
+        });
+
+        // Ordinary session enables Gate-1 read-only auto-rules on its registered workspace.
+        let ordinary_approvals = fixture
+            .sessions
+            .approvals("s-ordinary", &json!({"permissions": "manual"}), &emit)
+            .unwrap();
+        fixture
+            .sessions
+            .register_read_only_auto_rules_for_session("s-ordinary", &proj);
+
+        let rx_ro = ordinary_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "cmd-ro".into(),
+                provider: "codex".into(),
+                tool: "Shell".into(),
+                summary: "python3 programs/ro.py".into(),
+                kind: "command".into(),
+                session_rule_key: Some("readonly:program:python3 programs/ro.py".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            rx_ro.await.unwrap().decision,
+            infra_host::permission::Decision::Allow
+        );
+        assert!(
+            fixture
+                .sessions
+                .waiting_permissions("s-ordinary")
+                .is_empty()
+        );
+
+        // Mutating command still waits for manual approval.
+        let _rx_mut = ordinary_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "cmd-mut".into(),
+                provider: "codex".into(),
+                tool: "Shell".into(),
+                summary: "touch probe.txt".into(),
+                kind: "command".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(fixture.sessions.waiting_permissions("s-ordinary").len(), 1);
+
+        // Creator manual approvals remain strictly manual (even for `php -v`).
+        let creator_approvals = fixture
+            .sessions
+            .creator_approvals("s-creator", &json!({"permissions": "manual"}), &emit)
+            .unwrap();
+        let _rx_creator = creator_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "creator-ro".into(),
+                provider: "claude".into(),
+                tool: "Bash".into(),
+                summary: "php -v".into(),
+                kind: "command".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(fixture.sessions.waiting_permissions("s-creator").len(), 1);
     }
 }

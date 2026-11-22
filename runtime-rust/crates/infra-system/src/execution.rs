@@ -865,6 +865,7 @@ pub struct StepUsageTracker {
     claude_messages: std::collections::BTreeMap<String, ComponentCounts>,
     claude_result_outputs: Vec<Option<u64>>,
     codex_totals: ComponentCounts,
+    cursor_calls: std::collections::BTreeSet<String>,
 }
 
 impl StepUsageTracker {
@@ -874,6 +875,7 @@ impl StepUsageTracker {
             claude_messages: std::collections::BTreeMap::new(),
             claude_result_outputs: Vec::new(),
             codex_totals: ComponentCounts::default(),
+            cursor_calls: std::collections::BTreeSet::new(),
         }
     }
 
@@ -902,6 +904,11 @@ impl StepUsageTracker {
             "codex" if kind == "turn.completed" && event["usage"].is_object() => {
                 self.codex_totals.add(&codex_turn_counts(&event["usage"]));
             }
+            "cursor" if kind == "assistant" => {
+                if let Some(call_id) = event["model_call_id"].as_str().filter(|id| !id.is_empty()) {
+                    self.cursor_calls.insert(call_id.to_owned());
+                }
+            }
             _ => {}
         }
     }
@@ -919,6 +926,12 @@ impl StepUsageTracker {
                 };
             }
             "codex" => total.add(&self.codex_totals),
+            "cursor" => {
+                let calls = self.cursor_calls.len() as u64;
+                if calls > 0 {
+                    total.model_calls = Some(calls);
+                }
+            }
             _ => {}
         }
         let source = ["claude", "codex", "cursor"]
@@ -1153,5 +1166,24 @@ mod usage_components_tests {
         assert_eq!(det["model_calls"], 0);
         assert_eq!(det["input_tokens"], 0);
         assert_eq!(det["source"], "deterministic");
+
+        let cursor_raw = concat!(
+            "{\"type\":\"assistant\",\"model_call_id\":\"mc1\"}\n",
+            "{\"type\":\"assistant\",\"model_call_id\":\"mc1\"}\n",
+            "{\"type\":\"assistant\",\"model_call_id\":\"mc2\"}\n",
+            "{\"type\":\"assistant\",\"model_call_id\":\"\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\"}\n"
+        );
+        let cursor_parsed = usage_components_from_raw(cursor_raw.as_bytes(), "cursor");
+        assert_eq!(cursor_parsed["model_calls"], 2);
+        assert_eq!(cursor_parsed["input_tokens"], Value::Null);
+        assert_eq!(cursor_parsed["output_tokens"], Value::Null);
+        assert_eq!(cursor_parsed["cache_read_input_tokens"], Value::Null);
+        assert_eq!(cursor_parsed["source"], "cursor");
+
+        let cursor_empty =
+            usage_components_from_raw(b"{\"type\":\"result\",\"subtype\":\"success\"}\n", "cursor");
+        assert_eq!(cursor_empty["model_calls"], Value::Null);
+        assert_eq!(cursor_empty["source"], "cursor");
     }
 }
