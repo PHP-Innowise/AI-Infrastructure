@@ -253,7 +253,20 @@ impl System {
             steps.push(object!({"id":step,"service":sid,"depends_on":[previous],"task_reference":{"external_id":format!("{change_id}/{sid}"),"created":false},"goal":"Inspect local policy and sources, prepare scoped changes and local validation","acceptance":["Follow the service's policy and source contracts","Report local checks run and checks not run","Do not infer deployment order from this investigation order"]}));
             previous = step;
         }
-        steps.extend([object!({"id":"verify","depends_on":[previous],"goal":"Check local results, producer/consumer compatibility and the end-to-end scenario"}),object!({"id":"knowledge","depends_on":["verify"],"goal":"Update source catalogs and reusable local/system knowledge through their owning runtime"})]);
+        let program_checks = if selected_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.detect_verify_program_checks(&selected_ids)
+        };
+        let mut verify_step = object!({"id":"verify","depends_on":[previous],"goal":"Check local results, producer/consumer compatibility and the end-to-end scenario"});
+        if !program_checks.is_empty() {
+            verify_step["program_checks"] = Value::Array(program_checks);
+            verify_step["require_llm_review"] = object!(true);
+        }
+        steps.extend([
+            verify_step,
+            object!({"id":"knowledge","depends_on":["verify"],"goal":"Update source catalogs and reusable local/system knowledge through their owning runtime"}),
+        ]);
         let mut routing = routing;
         routing["selection_provenance"] = if inferred { "inferred" } else { "explicit" }.into();
         let heads = selected_ids
@@ -610,6 +623,222 @@ impl System {
         }
         Ok(updated)
     }
+
+    fn detect_verify_program_checks(&self, selected_ids: &[String]) -> Vec<Value> {
+        const MAX_AUTO_CHECKS: usize = 16;
+        let mut checks = Vec::new();
+        let mut seen_roots = BTreeSet::new();
+
+        let candidates = selected_ids
+            .iter()
+            .filter_map(|sid| {
+                let svc = self.services.get(sid)?;
+                (svc.access == "available" && svc.manifest.is_some())
+                    .then_some((sid.as_str(), svc.root.as_path()))
+            })
+            .chain(std::iter::once(("__system__", self.root.as_path())));
+
+        for (sid, root) in candidates {
+            if checks.len() >= MAX_AUTO_CHECKS {
+                break;
+            }
+            let canon = infra_core::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            if !seen_roots.insert(canon) {
+                continue;
+            }
+            collect_root_program_checks(sid, root, MAX_AUTO_CHECKS - checks.len(), &mut checks);
+        }
+        checks
+    }
+}
+
+fn is_regular_file(root: &std::path::Path, rel: &str) -> bool {
+    std::fs::symlink_metadata(root.join(rel))
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
+}
+
+fn is_real_dir(root: &std::path::Path, rel: &str) -> bool {
+    std::fs::symlink_metadata(root.join(rel))
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+}
+
+fn is_safe_package_script(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() || trimmed.len() > 512 {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("no test specified") {
+        return false;
+    }
+    if [
+        "--fix", "--write", " -w", "rm ", "curl ", "wget ", "chmod ", "chown ",
+    ]
+    .iter()
+    .any(|bad| lower.contains(bad))
+    {
+        return false;
+    }
+    true
+}
+
+fn push_check(
+    out: &mut Vec<Value>,
+    limit: usize,
+    name: String,
+    argv: &[&str],
+    cwd_service: &str,
+    timeout_seconds: Option<u64>,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    let mut entry = object!({
+        "name": name,
+        "argv": argv,
+        "cwd_service": cwd_service,
+    });
+    if let Some(secs) = timeout_seconds {
+        entry["timeout_seconds"] = object!(secs);
+    }
+    out.push(entry);
+}
+
+fn collect_root_program_checks(
+    sid: &str,
+    root: &std::path::Path,
+    remaining: usize,
+    out: &mut Vec<Value>,
+) {
+    if remaining == 0 {
+        return;
+    }
+    let start_len = out.len();
+    let max_len = start_len + remaining;
+
+    if is_regular_file(root, "composer.json") {
+        if is_regular_file(root, "vendor/bin/phpunit")
+            && (is_regular_file(root, "phpunit.xml") || is_regular_file(root, "phpunit.xml.dist"))
+        {
+            push_check(
+                out,
+                max_len,
+                format!("{sid}:phpunit"),
+                &["vendor/bin/phpunit"],
+                sid,
+                Some(120),
+            );
+        } else if is_regular_file(root, "vendor/bin/pest") {
+            push_check(
+                out,
+                max_len,
+                format!("{sid}:pest"),
+                &["vendor/bin/pest"],
+                sid,
+                Some(120),
+            );
+        }
+        if is_regular_file(root, "vendor/bin/phpstan")
+            && (is_regular_file(root, "phpstan.neon") || is_regular_file(root, "phpstan.neon.dist"))
+        {
+            push_check(
+                out,
+                max_len,
+                format!("{sid}:phpstan"),
+                &["vendor/bin/phpstan", "analyse", "--no-progress"],
+                sid,
+                Some(120),
+            );
+        }
+        if read_file(root, "composer.json", MAX_SOURCE_BYTES)
+            .ok()
+            .and_then(|raw| parse_json(&raw, MAX_SOURCE_BYTES).ok())
+            .is_some_and(|doc| doc.is_object())
+        {
+            push_check(
+                out,
+                max_len,
+                format!("{sid}:composer-validate"),
+                &[
+                    "composer",
+                    "validate",
+                    "--no-check-all",
+                    "--no-check-publish",
+                    "--no-interaction",
+                ],
+                sid,
+                Some(60),
+            );
+        }
+    }
+
+    if is_regular_file(root, "Cargo.toml") {
+        push_check(
+            out,
+            max_len,
+            format!("{sid}:cargo-test"),
+            &["cargo", "test", "--offline"],
+            sid,
+            Some(120),
+        );
+    }
+
+    if is_regular_file(root, "package.json")
+        && let Ok(raw) = read_file(root, "package.json", MAX_SOURCE_BYTES)
+        && let Ok(doc) = parse_json(&raw, MAX_SOURCE_BYTES)
+        && let Some(scripts) = doc.get("scripts").and_then(Value::as_object)
+    {
+        let pkg_mgr = if is_regular_file(root, "pnpm-lock.yaml") {
+            "pnpm"
+        } else if is_regular_file(root, "yarn.lock") {
+            "yarn"
+        } else {
+            "npm"
+        };
+        for script in ["typecheck", "lint", "test", "check"] {
+            if let Some(cmd) = scripts.get(script).and_then(Value::as_str)
+                && is_safe_package_script(cmd)
+            {
+                let argv: [&str; 4] = if pkg_mgr == "yarn" {
+                    ["yarn", "run", "--silent", script]
+                } else {
+                    [pkg_mgr, "run", script, "--silent"]
+                };
+                push_check(
+                    out,
+                    max_len,
+                    format!("{sid}:{pkg_mgr}-{script}"),
+                    &argv,
+                    sid,
+                    Some(120),
+                );
+            }
+        }
+    }
+
+    if (is_regular_file(root, "pyproject.toml") || is_regular_file(root, "pytest.ini"))
+        && is_real_dir(root, "tests")
+    {
+        push_check(
+            out,
+            max_len,
+            format!("{sid}:pytest"),
+            &["pytest", "-q"],
+            sid,
+            Some(120),
+        );
+    }
+
+    if is_regular_file(root, "go.mod") {
+        push_check(
+            out,
+            max_len,
+            format!("{sid}:go-test"),
+            &["go", "test", "./..."],
+            sid,
+            Some(120),
+        );
+    }
 }
 /// Keeps the longest start of a source excerpt whose entry fits `limit`
 /// characters in canonical form, marking it truncated. Escaped characters
@@ -725,5 +954,106 @@ mod racy_verify_tests {
             parsed.get(&("__system__".into(), path.into())),
             Some(&(size, mtime_ns, settled_taken))
         );
+    }
+
+    #[test]
+    fn system_plan_emits_deterministic_program_checks_for_known_stacks_with_llm_review() {
+        let dir = std::env::temp_dir().join(format!("infra-sys-checks-{}", uuid::Uuid::new_v4()));
+        let sys_dir = dir.join("sys");
+        let php_dir = dir.join("php-svc");
+        let node_dir = dir.join("node-svc");
+        let plain_dir = dir.join("plain-svc");
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        std::fs::create_dir_all(php_dir.join("vendor/bin")).unwrap();
+        std::fs::create_dir_all(&node_dir).unwrap();
+        std::fs::create_dir_all(&plain_dir).unwrap();
+
+        std::fs::write(sys_dir.join("AGENTS.md"), "# Policy\n").unwrap();
+        std::fs::write(
+            sys_dir.join("system.json"),
+            serde_json::to_string_pretty(&object!({
+                "schema_version": 1,
+                "name": "checks-sys",
+                "services": [
+                    {"id": "orders", "root": "../php-svc", "manifest": "ai-service.json"},
+                    {"id": "web", "root": "../node-svc", "manifest": "ai-service.json"},
+                    {"id": "plain", "root": "../plain-svc", "manifest": "ai-service.json"}
+                ],
+                "shared_sources": [{"kind": "policy", "path": "AGENTS.md"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let manifest = |id: &str| {
+            serde_json::to_string_pretty(&object!({
+                "schema_version": 1,
+                "id": id,
+                "description": id,
+                "owner": "@team",
+                "capabilities": [{"id": id, "description": id, "status": "implemented", "sources": []}],
+                "provides": [],
+                "consumes": [],
+                "sources": []
+            }))
+            .unwrap()
+        };
+        std::fs::write(php_dir.join("ai-service.json"), manifest("orders")).unwrap();
+        std::fs::write(php_dir.join("composer.json"), r#"{"name":"acme/orders"}"#).unwrap();
+        std::fs::write(php_dir.join("phpunit.xml.dist"), "<phpunit/>").unwrap();
+        std::fs::write(php_dir.join("vendor/bin/phpunit"), "#!/bin/sh\n").unwrap();
+
+        std::fs::write(node_dir.join("ai-service.json"), manifest("web")).unwrap();
+        std::fs::write(
+            node_dir.join("package.json"),
+            r#"{"name":"web","scripts":{"test":"vitest run","lint":"eslint --fix .","typecheck":"tsc --noEmit"}}"#,
+        )
+        .unwrap();
+
+        std::fs::write(plain_dir.join("ai-service.json"), manifest("plain")).unwrap();
+
+        let mut system =
+            System::new(&sys_dir.join("system.json"), std::slice::from_ref(&dir)).unwrap();
+
+        // Plain fixture without project manifests keeps legacy verify step shape.
+        let plain_plan = system
+            .plan("Plain task", "chg-plain", &["plain".into()], &[], 8000, 4)
+            .unwrap();
+        let plain_verify = plain_plan["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "verify")
+            .unwrap();
+        assert!(plain_verify.get("program_checks").is_none());
+
+        // PHP + Node services emit safe deterministic checks and keep require_llm_review: true.
+        let stack_plan = system
+            .plan(
+                "Cross-service change",
+                "chg-stacks",
+                &["orders".into(), "web".into()],
+                &[],
+                8000,
+                4,
+            )
+            .unwrap();
+        let verify = stack_plan["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "verify")
+            .unwrap();
+        assert_eq!(verify["require_llm_review"], true);
+        let checks = verify["program_checks"].as_array().unwrap();
+        let names: Vec<&str> = checks.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(names.contains(&"orders:phpunit"), "{names:?}");
+        assert!(names.contains(&"orders:composer-validate"), "{names:?}");
+        assert!(names.contains(&"web:npm-typecheck"), "{names:?}");
+        assert!(names.contains(&"web:npm-test"), "{names:?}");
+        // Mutating `--fix` script is filtered out.
+        assert!(!names.contains(&"web:npm-lint"), "{names:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

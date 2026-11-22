@@ -47,6 +47,46 @@ fn history(item: &mut Value, record: Value) {
         a.push(record);
     }
 }
+/// Validates an optional deterministic `precheck` specification (`{argv, timeout_seconds?}`).
+pub(crate) fn validate_precheck(value: Option<&Value>) -> Result<Value> {
+    let Some(value) = value else {
+        return Ok(Value::Null);
+    };
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    if !crate::store::exact(value, &["argv"], &["timeout_seconds"]) {
+        return Err(HarnessError::invalid("Invalid precheck settings."));
+    }
+    let argv_raw = value["argv"]
+        .as_array()
+        .ok_or_else(|| HarnessError::invalid("Precheck argv must be a non-empty array."))?;
+    if argv_raw.is_empty() || argv_raw.len() > 64 {
+        return Err(HarnessError::invalid(
+            "Precheck argv must contain 1–64 arguments.",
+        ));
+    }
+    let mut argv = Vec::with_capacity(argv_raw.len());
+    for arg in argv_raw {
+        let s = arg
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.contains('\0'))
+            .ok_or_else(|| {
+                HarnessError::invalid("Precheck argv entries must be non-empty strings.")
+            })?;
+        argv.push(s.to_owned());
+    }
+    let timeout = match value.get("timeout_seconds") {
+        None | Some(Value::Null) => 30,
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (1..=120).contains(n))
+            .ok_or_else(|| {
+                HarnessError::invalid("Precheck timeout_seconds must be an integer from 1 to 120.")
+            })?,
+    };
+    Ok(json!({"argv": argv, "timeout_seconds": timeout}))
+}
 pub fn validate(value: &Value, workflow: &str, provider: &str) -> Result<Option<Value>> {
     if value.is_null() {
         return Ok(None);
@@ -55,7 +95,12 @@ pub fn validate(value: &Value, workflow: &str, provider: &str) -> Result<Option<
         || !crate::store::exact(
             value,
             &["challenger"],
-            &["rounds", "challenger_model", "challenger_thinking_effort"],
+            &[
+                "rounds",
+                "challenger_model",
+                "challenger_thinking_effort",
+                "precheck",
+            ],
         )
     {
         return Err(HarnessError::invalid("Invalid Clash settings."));
@@ -71,9 +116,17 @@ pub fn validate(value: &Value, workflow: &str, provider: &str) -> Result<Option<
             "Choose a different challenger and one to three rounds.",
         ));
     }
-    Ok(Some(
-        json!({"challenger":challenger,"rounds":rounds,"challenger_model":value["challenger_model"],"challenger_thinking_effort":value["challenger_thinking_effort"]}),
-    ))
+    let precheck = validate_precheck(value.get("precheck"))?;
+    let mut out = json!({
+        "challenger": challenger,
+        "rounds": rounds,
+        "challenger_model": value["challenger_model"],
+        "challenger_thinking_effort": value["challenger_thinking_effort"],
+    });
+    if !precheck.is_null() {
+        out["precheck"] = precheck;
+    }
+    Ok(Some(out))
 }
 pub fn new_state(session: &Value, stage: &str, previous: Option<&Value>) -> Value {
     let settings = &session["clash"];
@@ -932,9 +985,6 @@ impl Cycle {
                     emit.clone(),
                 )
                 .await?;
-            if let Some(message) = budget.post_turn_violation(&res) {
-                return self.incomplete(state, message);
-            }
             (res, Ok(json!({})))
         };
         if let Some(message) = budget.post_turn_violation(&result) {
@@ -979,13 +1029,18 @@ impl Cycle {
             } else {
                 "{\"verdict\":\"accept|reject\",\"assessments\":[],\"responses\":[],\"additional\":[]}"
             };
+            let chal_required: &[&str] = if stage == "implement" {
+                &["verdict", "objections"]
+            } else {
+                &["verdict", "assessments"]
+            };
             let (result, chal_payload) = self
                 .complete_structured_turn(
                     &mut state,
                     "challenger",
                     round,
                     challenge,
-                    &["verdict", "objections", "assessments"],
+                    chal_required,
                     chal_schema,
                     &mut budget,
                     cancel.clone(),
@@ -1035,13 +1090,18 @@ impl Cycle {
             } else {
                 "{\"assessments\":[{\"id\":1,\"stance\":\"agree|dispute|unverified\",\"evidence\":\"...\"}],\"responses\":[{\"id\":1,\"action\":\"defend|withdraw\",\"note\":\"...\"}]}"
             };
+            let resp_required: &[&str] = if stage == "implement" {
+                &["responses"]
+            } else {
+                &["responses", "assessments"]
+            };
             let (result, payload) = self
                 .complete_structured_turn(
                     &mut state,
                     role,
                     round,
                     response,
-                    &["responses", "assessments"],
+                    resp_required,
                     schema_spec,
                     &mut budget,
                     cancel.clone(),
@@ -1207,19 +1267,147 @@ pub(crate) fn extract_json_fence(text: &str) -> Option<&str> {
     Some(rest[..end].trim())
 }
 
-fn validate_clash_schema(value: &Value) -> std::result::Result<(), String> {
-    if let Some(verdict) = value.get("verdict")
-        && let Some(v) = verdict.as_str()
-        && !["accept", "reject", "continue"].contains(&v)
+fn check_optional_string(
+    obj: &serde_json::Map<String, Value>,
+    ctx: &str,
+    key: &str,
+) -> std::result::Result<(), String> {
+    if let Some(v) = obj.get(key)
+        && !v.is_null()
+        && !v.is_string()
     {
-        return Err(format!("invalid verdict `{v}`"));
+        return Err(format!("`{ctx}.{key}` must be a string"));
     }
-    for array_key in ["objections", "findings", "responses", "assessments"] {
-        if let Some(val) = value.get(array_key)
-            && !val.is_null()
-            && !val.is_array()
-        {
+    Ok(())
+}
+
+fn check_optional_u64(
+    obj: &serde_json::Map<String, Value>,
+    ctx: &str,
+    key: &str,
+) -> std::result::Result<(), String> {
+    if let Some(v) = obj.get(key)
+        && !v.is_null()
+        && !v.is_u64()
+    {
+        return Err(format!("`{ctx}.{key}` must be a non-negative integer"));
+    }
+    Ok(())
+}
+
+fn check_optional_severity(
+    obj: &serde_json::Map<String, Value>,
+    ctx: &str,
+) -> std::result::Result<(), String> {
+    if let Some(v) = obj.get("severity")
+        && !v.is_null()
+    {
+        let sev = v
+            .as_str()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !["critical", "high", "medium", "low", "info", "unrated"].contains(&sev.as_str()) {
+            return Err(format!("`{ctx}.severity` has invalid value `{sev}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_clash_schema(value: &Value) -> std::result::Result<(), String> {
+    if let Some(verdict) = value.get("verdict") {
+        let Some(v) = verdict.as_str() else {
+            return Err("`verdict` must be a string".into());
+        };
+        if !["accept", "reject", "continue"].contains(&v) {
+            return Err(format!("invalid verdict `{v}`"));
+        }
+    }
+    if let Some(resolved) = value.get("resolved")
+        && !resolved.is_null()
+    {
+        let Some(arr) = resolved.as_array() else {
+            return Err("`resolved` must be an array".into());
+        };
+        for (idx, item) in arr.iter().enumerate() {
+            if !item.is_u64() {
+                return Err(format!("`resolved[{idx}]` must be a non-negative integer"));
+            }
+        }
+    }
+    for array_key in [
+        "objections",
+        "findings",
+        "additional",
+        "responses",
+        "assessments",
+    ] {
+        let Some(val) = value.get(array_key) else {
+            continue;
+        };
+        if val.is_null() {
+            continue;
+        }
+        let Some(arr) = val.as_array() else {
             return Err(format!("`{array_key}` must be an array"));
+        };
+        for (idx, item) in arr.iter().enumerate() {
+            let ctx = format!("{array_key}[{idx}]");
+            let Some(obj) = item.as_object() else {
+                return Err(format!("`{ctx}` must be an object"));
+            };
+            match array_key {
+                "objections" => {
+                    check_optional_u64(obj, &ctx, "id")?;
+                    let has_id = obj.get("id").is_some_and(Value::is_u64);
+                    if !has_id || obj.get("claim").is_some_and(|v| !v.is_null()) {
+                        let valid_claim = obj
+                            .get("claim")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.trim().is_empty());
+                        if !valid_claim {
+                            return Err(format!("`{ctx}.claim` must be a non-empty string"));
+                        }
+                    }
+                    check_optional_severity(obj, &ctx)?;
+                    check_optional_u64(obj, &ctx, "line")?;
+                    check_optional_string(obj, &ctx, "file")?;
+                    check_optional_string(obj, &ctx, "evidence")?;
+                }
+                "findings" | "additional" => {
+                    let valid_claim = obj
+                        .get("claim")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty());
+                    if !valid_claim {
+                        return Err(format!("`{ctx}.claim` must be a non-empty string"));
+                    }
+                    check_optional_severity(obj, &ctx)?;
+                    check_optional_u64(obj, &ctx, "line")?;
+                    check_optional_string(obj, &ctx, "file")?;
+                    check_optional_string(obj, &ctx, "evidence")?;
+                }
+                "responses" => {
+                    if !obj.get("id").is_some_and(Value::is_u64) {
+                        return Err(format!("`{ctx}.id` must be a non-negative integer"));
+                    }
+                    let action = obj.get("action").and_then(Value::as_str).unwrap_or("");
+                    if !["fixed", "rebutted", "deferred", "defend", "withdraw"].contains(&action) {
+                        return Err(format!("`{ctx}.action` has invalid value `{action}`"));
+                    }
+                    check_optional_string(obj, &ctx, "note")?;
+                }
+                "assessments" => {
+                    if !obj.get("id").is_some_and(Value::is_u64) {
+                        return Err(format!("`{ctx}.id` must be a non-negative integer"));
+                    }
+                    let stance = obj.get("stance").and_then(Value::as_str).unwrap_or("");
+                    if !["agree", "dispute", "unverified"].contains(&stance) {
+                        return Err(format!("`{ctx}.stance` has invalid value `{stance}`"));
+                    }
+                    check_optional_string(obj, &ctx, "evidence")?;
+                }
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -1290,9 +1478,25 @@ pub(crate) fn merge_usage_components(acc: &mut Value, turn: &Value) {
     }
 }
 
+fn precheck_workspace(session: &Value) -> &std::path::Path {
+    let workspace = session["project_path"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            session["_workspace_path"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("");
+    std::path::Path::new(workspace)
+}
+
 async fn run_clash_precheck(session: &Value) -> Option<(String, Value)> {
-    let precheck = session.get("clash").and_then(|c| c.get("precheck"))?;
-    let cwd = std::path::Path::new(session["_workspace_path"].as_str().unwrap_or(""));
+    let precheck = session
+        .get("clash")
+        .and_then(|c| c.get("precheck"))
+        .filter(|p| !p.is_null())?;
+    let cwd = precheck_workspace(session);
     let record = run_precheck_sandboxed(cwd, precheck).await?;
     let summary = record["summary"].as_str().unwrap_or("").to_owned();
     Some((summary, record))
@@ -1371,7 +1575,15 @@ pub(crate) async fn run_precheck_sandboxed(
         .lock()
         .map(|g| String::from_utf8_lossy(&g).into_owned())
         .unwrap_or_default();
-    let masked = infra_core::domain::mask_secrets(raw.trim())
+    let diagnostic_input = if raw.trim().is_empty() {
+        match &res {
+            Err(err) => err.message.as_str(),
+            Ok(_) => "",
+        }
+    } else {
+        raw.trim()
+    };
+    let masked = infra_core::domain::mask_secrets(diagnostic_input)
         .map(|(t, _)| t)
         .unwrap_or_else(|_| "[redacted]".into());
     let mut end = masked.len().min(cap);
@@ -1472,5 +1684,131 @@ mod tests {
         assert_eq!(acc["cache_read_input_tokens"], 40);
         assert_eq!(acc["cache_write_5m_input_tokens"], 30);
         assert_eq!(acc["model_calls"], 2);
+    }
+
+    #[test]
+    fn clash_validate_accepts_precheck_and_rejects_invalid_precheck() {
+        let valid = validate(
+            &json!({
+                "challenger": "codex",
+                "rounds": 2,
+                "precheck": {"argv": ["php", "-l", "src/App.php"], "timeout_seconds": 15}
+            }),
+            "native",
+            "claude",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            valid["precheck"]["argv"],
+            json!(["php", "-l", "src/App.php"])
+        );
+        assert_eq!(valid["precheck"]["timeout_seconds"], 15);
+
+        let defaulted = validate(
+            &json!({
+                "challenger": "codex",
+                "precheck": {"argv": ["cargo", "check"]}
+            }),
+            "review",
+            "claude",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(defaulted["precheck"]["timeout_seconds"], 30);
+
+        for bad in [
+            json!({"challenger": "codex", "precheck": {"argv": []}}),
+            json!({"challenger": "codex", "precheck": {"argv": [""]}}),
+            json!({"challenger": "codex", "precheck": {"argv": ["ok"], "timeout_seconds": 0}}),
+            json!({"challenger": "codex", "precheck": {"argv": ["ok"], "timeout_seconds": 121}}),
+            json!({"challenger": "codex", "precheck": {"argv": ["ok"], "extra": true}}),
+        ] {
+            assert!(validate(&bad, "native", "claude").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn validate_clash_schema_enforces_item_level_contracts_without_breaking_valid_payloads() {
+        // Valid implement-stage challenge (including id-only maintenance + resolved IDs).
+        assert!(
+            parse_strict_payload(
+                r#"{"verdict":"reject","objections":[{"id":1},{"severity":"high","file":"a.php","line":10,"claim":"Null deref","evidence":"line 10"}],"resolved":[2]}"#,
+                &["verdict"],
+            )
+            .is_ok()
+        );
+        // Valid review-stage payload.
+        assert!(
+            parse_strict_payload(
+                r#"{"verdict":"accept","assessments":[{"id":1,"stance":"agree","evidence":"verified"}],"responses":[{"id":2,"action":"defend","note":"valid"}],"additional":[{"severity":"low","file":"b.php","line":3,"claim":"Check","evidence":"e"}]}"#,
+                &["verdict"],
+            )
+            .is_ok()
+        );
+        // Invalid item-level shapes rejected cleanly.
+        for bad in [
+            r#"{"verdict":null,"objections":[]}"#,
+            r#"{"verdict":"accept","resolved":["bad"]}"#,
+            r#"{"verdict":"reject","objections":[{"severity":"bogus","claim":"x"}]}"#,
+            r#"{"verdict":"reject","objections":[{"file":"a.php"}]}"#,
+            r#"{"findings":[{"severity":"high","file":"a.php"}]}"#,
+            r#"{"responses":[{"id":1,"action":"ignored"}]}"#,
+            r#"{"assessments":[{"id":1,"stance":"unsure"}]}"#,
+        ] {
+            assert!(
+                validate_clash_schema(&serde_json::from_str(bad).unwrap()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_clash_precheck_reads_project_path_and_falls_back_to_workspace_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let missing = ws.join("does-not-exist");
+
+        // Persisted `SessionStore` rows carry `project_path` (no `_workspace_path`).
+        let persisted_session = json!({
+            "project_path": ws,
+            "_workspace_path": missing,
+            "clash": {
+                "challenger": "codex",
+                "precheck": {"argv": ["/bin/sh", "-c", "echo clash-precheck-project-path"], "timeout_seconds": 10}
+            }
+        });
+        assert_eq!(precheck_workspace(&persisted_session), ws.as_path());
+        let (_summary, record) = run_clash_precheck(&persisted_session).await.expect(
+            "precheck should resolve persisted project_path even when _workspace_path is missing",
+        );
+        assert_eq!(record["deterministic"], true);
+        assert_eq!(record["usage_components"]["model_calls"], 0);
+        assert_eq!(record["usage_components"]["source"], "deterministic");
+
+        // Fallback to transient `_workspace_path` when `project_path` is absent/empty.
+        let transient_session = json!({
+            "project_path": "",
+            "_workspace_path": ws,
+            "clash": {
+                "challenger": "codex",
+                "precheck": {"argv": ["/bin/sh", "-c", "echo clash-precheck-fallback"], "timeout_seconds": 10}
+            }
+        });
+        assert_eq!(precheck_workspace(&transient_session), ws.as_path());
+        let (_fallback_summary, fallback_record) = run_clash_precheck(&transient_session)
+            .await
+            .expect("precheck should fall back to _workspace_path");
+        assert_eq!(fallback_record["deterministic"], true);
+
+        // Missing or empty paths return None cleanly.
+        let missing_session = json!({
+            "project_path": missing,
+            "clash": {
+                "challenger": "codex",
+                "precheck": {"argv": ["/bin/sh", "-c", "echo unreachable"], "timeout_seconds": 10}
+            }
+        });
+        assert!(run_clash_precheck(&missing_session).await.is_none());
     }
 }
