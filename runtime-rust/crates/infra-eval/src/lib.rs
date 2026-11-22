@@ -17,6 +17,7 @@ pub mod reconstruction;
 pub mod response;
 pub mod rng;
 pub mod scoring;
+pub mod skillcache;
 pub mod transcript;
 pub mod treatments;
 pub use infra_core::{Result, RuntimeError};

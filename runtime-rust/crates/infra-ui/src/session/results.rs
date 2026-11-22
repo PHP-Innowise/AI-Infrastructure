@@ -433,6 +433,7 @@ pub async fn results() {
             if view == "usage" {
                 dom::rows("results-launches", &m::array(&v["launches"]));
                 knowledge::usage(&v);
+                crate::skillcache::render_usage(&m::array(&v["launches"]));
             }
             if view == "changes" {
                 delivery_load(&sid).await;

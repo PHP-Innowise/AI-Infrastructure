@@ -269,7 +269,7 @@ impl CommandCatalog {
             .catalogue(provider, cwd, settings, project, None)
             .await?;
         let(mut commands,skills)=match provider{
-   "claude"=>(native.into_iter().map(|mut item|{let action=claude_page(item["name"].as_str().unwrap_or(""));item["kind"]=json!(if action.is_some(){"page"}else{"native"});item["action"]=action.map(|s|json!(s)).unwrap_or(V::Null);item}).collect::<Vec<_>>(),vec![]),
+   "claude"=>(native.into_iter().map(|mut item|{let action=claude_page(item["name"].as_str().unwrap_or(""));item["kind"]=json!(if action.is_some(){"page"}else{"native"});item["action"]=action.map(|s|json!(s)).unwrap_or(V::Null);item}).collect::<Vec<_>>(),claude_skills(cwd)?),
    "codex"=>{let mut commands=vec![];for(name,description,hint,action)in [("new","Start a new session in this project","","new"),("model","Choose the model for the next turn","[model]","model"),("diff","Show this session's changes","","diff"),("status","Show this session's usage","","status"),("init","Create an AGENTS.md contributor guide for this repository","","")]{commands.push(json!({"name":name,"description":description,"hint":hint,"aliases":[],"kind":if action.is_empty(){"prompt"}else{"page"},"action":if action.is_empty(){V::Null}else{json!(action)}}));}for prompt in codex_prompts()?{commands.push(json!({"name":prompt["name"],"description":prompt["description"],"hint":prompt["hint"],"aliases":[],"kind":"prompt","action":null}));}(commands,native)},
    "cursor"=>(native.into_iter().map(|item|json!({"name":item["name"],"description":item["description"],"hint":item["hint"],"aliases":[],"kind":"skill","action":null})).collect(),vec![]),_=>return Err(HarnessError::invalid("Choose a provider."))
   };
@@ -391,6 +391,30 @@ impl CommandCatalog {
                     format!("/{name} is not a Claude Code command here, so it went as text.")
                 });
             }
+            // A `$skill` mention is routed only for a session that opted into
+            // SkillCache: an ordinary Claude session's message goes as typed
+            // and its prompt stays what it was.
+            let mentioned = if crate::skillcache::settings::mode(session) == "off" {
+                Vec::new()
+            } else {
+                mentions(message)
+            };
+            if !mentioned.is_empty() {
+                let skills = claude_skills(&cwd)?;
+                resolve_mentions(&mentioned, &skills, &mut route);
+                let names = route
+                    .requests
+                    .iter()
+                    .filter_map(|r| r["name"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !names.is_empty() {
+                    route.notice = join_notice(
+                        route.notice,
+                        Some(format!("Claude skills requested: {names}.")),
+                    );
+                }
+            }
         } else if provider == "codex" {
             if let Some((name, args)) = lead {
                 if name.starts_with("prompts:") {
@@ -415,21 +439,7 @@ impl CommandCatalog {
             let mentioned = mentions(message);
             if !mentioned.is_empty() {
                 let (skills, error) = self.catalogue(provider, &cwd, None, project, None).await?;
-                for name in mentioned {
-                    let name = if skills.iter().any(|s| s["name"] == name) {
-                        name
-                    } else {
-                        strip_punctuation(&name)
-                    };
-                    if let Some(skill) = skills.iter().find(|s| s["name"] == name)
-                        && !route.requests.contains(skill)
-                    {
-                        route.requests.push(skill.clone());
-                    }
-                    if route.requests.len() == 5 {
-                        break;
-                    }
-                }
+                resolve_mentions(&mentioned, &skills, &mut route);
                 let names = route
                     .requests
                     .iter()
@@ -455,6 +465,107 @@ impl CommandCatalog {
             return Err(HarnessError::invalid("Choose a provider."));
         }
         Ok(route)
+    }
+    /// Lists the skills routable for `provider` in `cwd` without executing a
+    /// live slash-command probe for Claude.
+    pub async fn provider_skills(
+        &self,
+        provider: &str,
+        cwd: &Path,
+        project: Option<&str>,
+    ) -> Result<(Vec<V>, Option<String>)> {
+        if provider == "claude" {
+            return Ok((claude_skills(cwd)?, None));
+        }
+        self.catalogue(provider, cwd, None, project, None).await
+    }
+    /// Resolves an explicit `skillcache.skill` hint when no skill was already
+    /// routed from the prompt text and the prompt is not a native slash command.
+    pub async fn apply_skill_hint(&self, session: &V, route: &mut ResolvedCommand) -> Result<()> {
+        if route.mode == "native" || !route.requests.is_empty() {
+            return Ok(());
+        }
+        let Some(hint) = crate::skillcache::settings::skill_hint(session) else {
+            return Ok(());
+        };
+        let provider = session["provider"].as_str().unwrap_or("");
+        if !["claude", "codex"].contains(&provider) {
+            return Ok(());
+        }
+        let cwd = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+        if !cwd.is_dir() {
+            return Ok(());
+        }
+        let (skills, _) = self
+            .provider_skills(provider, &cwd, session["project_id"].as_str())
+            .await?;
+        if let Some(skill) = match_skill(&skills, hint) {
+            route.requests.push(skill);
+        }
+        Ok(())
+    }
+}
+
+pub fn match_skill(skills: &[V], hint: &str) -> Option<V> {
+    let hint = hint.trim();
+    if hint.is_empty() {
+        return None;
+    }
+    skills
+        .iter()
+        .find(|skill| skill["name"].as_str() == Some(hint) || skill["path"].as_str() == Some(hint))
+        .cloned()
+}
+
+fn claude_skills(cwd: &Path) -> Result<Vec<V>> {
+    let mut listed: Vec<V> = workspace_skills(cwd, "claude")?
+        .0
+        .into_iter()
+        .filter(|s| s["user"] == true)
+        .collect();
+    let mut names = listed
+        .iter()
+        .filter_map(|v| v["name"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    if let Some(home) = crate::run_activity::user_home() {
+        let home = PathBuf::from(home);
+        if home.is_dir()
+            && let Ok((home_skills, _)) = workspace_skills(&home, "claude")
+        {
+            for mut skill in home_skills {
+                if skill["user"] != true {
+                    continue;
+                }
+                if let Some(path) = skill["path"].as_str() {
+                    skill["path"] = json!(home.join(path));
+                }
+                if skill["name"]
+                    .as_str()
+                    .is_some_and(|name| names.insert(name.to_owned()))
+                {
+                    listed.push(skill);
+                }
+            }
+        }
+    }
+    Ok(listed)
+}
+
+fn resolve_mentions(mentioned: &[String], skills: &[V], route: &mut ResolvedCommand) {
+    for name in mentioned {
+        let name = if skills.iter().any(|s| s["name"] == *name) {
+            name.clone()
+        } else {
+            strip_punctuation(name)
+        };
+        if let Some(skill) = skills.iter().find(|s| s["name"] == name)
+            && !route.requests.contains(skill)
+        {
+            route.requests.push(skill.clone());
+        }
+        if route.requests.len() == 5 {
+            break;
+        }
     }
 }
 fn host(error: infra_host::HostError) -> HarnessError {
@@ -1019,5 +1130,114 @@ impl Domain for CommandCatalog {
             };
             Ok(Payload::Json(value))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog_in(root: &Path) -> CommandCatalog {
+        let store = SessionStore::open(&root.join("state")).unwrap();
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        CommandCatalog::new(store, source, Arc::new(RwLock::new(BTreeMap::new())))
+    }
+
+    #[test]
+    fn claude_skills_reads_frontmatter_names_and_hides_non_user_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let dir_named = root.path().join(".claude/skills/sc-test-alpha-dir");
+        let custom_named = root.path().join(".claude/skills/sc-test-custom-folder");
+        let hidden = root.path().join(".claude/skills/sc-test-hidden");
+        std::fs::create_dir_all(&dir_named).unwrap();
+        std::fs::create_dir_all(&custom_named).unwrap();
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(
+            dir_named.join("SKILL.md"),
+            "---\ndescription: Alpha skill\n---\n# Alpha\n",
+        )
+        .unwrap();
+        std::fs::write(
+            custom_named.join("SKILL.md"),
+            "---\nname: sc-test-beta\ndescription: Beta skill\n---\n# Beta\n",
+        )
+        .unwrap();
+        std::fs::write(
+            hidden.join("SKILL.md"),
+            "---\nname: sc-test-hidden\nuser-invocable: false\n---\n# Hidden\n",
+        )
+        .unwrap();
+
+        let listed = claude_skills(root.path()).unwrap();
+        assert!(listed.iter().any(|s| {
+            s["name"] == "sc-test-alpha-dir"
+                && s["path"] == ".claude/skills/sc-test-alpha-dir/SKILL.md"
+        }));
+        assert!(listed.iter().any(|s| {
+            s["name"] == "sc-test-beta"
+                && s["path"] == ".claude/skills/sc-test-custom-folder/SKILL.md"
+        }));
+        assert!(!listed.iter().any(|s| s["name"] == "sc-test-hidden"));
+    }
+
+    #[tokio::test]
+    async fn claude_routes_dollar_skill_mentions_and_skill_hints() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let skill_dir = workspace.join(".claude/skills/sc-test-pdf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: sc-test-pdf\ndescription: PDF totals\n---\n# PDF\n",
+        )
+        .unwrap();
+        let catalog = catalog_in(root.path());
+        // A session that did not opt into SkillCache sends its message as it
+        // was typed: the mention is not routed and the prompt gains nothing.
+        let ordinary = json!({
+            "provider": "claude",
+            "project_path": workspace.display().to_string(),
+            "agents_enabled": false,
+            "agent_count": 1,
+        });
+        let untouched = catalog
+            .route(&ordinary, "Please run $sc-test-pdf on invoice.pdf")
+            .await
+            .unwrap();
+        assert!(untouched.requests.is_empty());
+        assert!(untouched.notice.is_none());
+        assert_eq!(untouched.skill_request(), "");
+        let mut session = ordinary.clone();
+        session["skillcache"] = json!({"mode": "auto"});
+
+        let routed = catalog
+            .route(&session, "Please run $sc-test-pdf on invoice.pdf")
+            .await
+            .unwrap();
+        assert_eq!(routed.mode, "text");
+        assert_eq!(routed.requests.len(), 1);
+        assert_eq!(routed.requests[0]["name"], "sc-test-pdf");
+        assert_eq!(
+            routed.requests[0]["path"],
+            ".claude/skills/sc-test-pdf/SKILL.md"
+        );
+
+        let mut hinted = catalog
+            .route(&session, "Please summarize invoice.pdf")
+            .await
+            .unwrap();
+        assert!(hinted.requests.is_empty());
+        let with_hint = json!({
+            "provider": "claude",
+            "project_path": workspace.display().to_string(),
+            "skillcache": {"mode": "warm_only", "skill": "sc-test-pdf"},
+        });
+        catalog
+            .apply_skill_hint(&with_hint, &mut hinted)
+            .await
+            .unwrap();
+        assert_eq!(hinted.requests.len(), 1);
+        assert_eq!(hinted.requests[0]["name"], "sc-test-pdf");
     }
 }

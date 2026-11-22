@@ -640,6 +640,12 @@ impl PromptLedger {
                 let current = self.value["omnigraph"].as_u64().unwrap_or(0);
                 self.value["omnigraph"] = current.saturating_add(size).into();
             }
+            // Present only on a turn that ran a SkillCache capsule: every
+            // other turn's ledger is what it was before the category existed.
+            "skillcache" => {
+                let current = self.value["skillcache"].as_u64().unwrap_or(0);
+                self.value["skillcache"] = current.saturating_add(size).into();
+            }
             _ => {}
         }
     }
@@ -692,6 +698,7 @@ impl PromptLedger {
             .saturating_add(count(&value["capsule"]["inserted"]).unwrap_or(0))
             .saturating_add(count(&value["attachments"]["characters"]).unwrap_or(0))
             .saturating_add(count(&value["omnigraph"]).unwrap_or(0))
+            .saturating_add(count(&value["skillcache"]).unwrap_or(0))
             .saturating_add(excerpts);
         value["total"] = self.total.into();
         value["instructions"] = self.total.saturating_sub(accounted).into();

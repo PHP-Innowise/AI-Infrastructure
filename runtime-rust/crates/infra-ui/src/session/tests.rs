@@ -1351,5 +1351,29 @@ mod update_tests {
             super::navigation::view_tabs_for_group("systems", false),
             vec!["systems", "system-changes"]
         );
+        // Skill capsules sit between the library and the editor.
+        assert_eq!(
+            super::navigation::view_tabs_for_group("skills", false),
+            vec!["skills", "skill-capsules", "create-skill"]
+        );
+        assert_eq!(
+            super::navigation::view_label("skill-capsules"),
+            "Skill capsules"
+        );
+    }
+
+    #[test]
+    fn a_session_s_skillcache_option_is_part_of_its_settings_snapshot() {
+        let off = super::prefs::session_settings_snapshot_fields(&json!({"id": "s1"}));
+        assert_eq!(off["skillcache"], json!({"mode": "off", "model": ""}));
+        let on = super::prefs::session_settings_snapshot_fields(&json!({
+            "id": "s1",
+            "skillcache": {"mode": "auto", "compiler": {"provider": "claude", "model": "opus"}}
+        }));
+        assert_eq!(on["skillcache"], json!({"mode": "auto", "model": "opus"}));
+        // The option is remembered with a draft like the others.
+        for field in ["skillcache-mode", "skillcache-compiler-model"] {
+            assert!(super::prefs::PREF_FIELDS.contains(&field), "{field}");
+        }
     }
 }

@@ -1,0 +1,26 @@
+[package]
+name = "infra-skillcache"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+description = "SkillCache capsules: schema, gates, the plan executor and the program tool"
+
+# Fixture programs for the executor contracts. It also serves the guardian
+# command, so a test binary can start programs through native capture.
+[[bin]]
+name = "infra-skillcache-program-fixture"
+path = "tests/support/program_fixture.rs"
+test = false
+bench = false
+
+[dependencies]
+infra-core = { path = "../infra-core" }
+infra-host = { path = "../infra-host" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order"] }
+sha2 = "=0.11.0"
+regex = "1"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

@@ -1096,6 +1096,29 @@ pub fn execute(operation: &str, v: &Value) -> Result<Value> {
                 Ok(envelope(report, 0, text))
             }
         }
+        ("skillcache-ab", "seal") => json_output(
+            crate::skillcache::seal(&path(v, "plan")?, &path(v, "out")?)?,
+            0,
+        ),
+        ("skillcache-ab", "run") => json_output(
+            crate::skillcache::run(&path(v, "protocol")?, &path(v, "out")?)?,
+            0,
+        ),
+        ("skillcache-ab", "report") => json_output(
+            crate::skillcache::report(&path(v, "protocol")?, &path(v, "result")?)?,
+            0,
+        ),
+        ("skillcache-ab", "viewer") => json_output(
+            crate::skillcache::viewer(
+                &path(v, "protocol")?,
+                &path(v, "result")?,
+                &path(v, "out")?,
+                s(v, "arm"),
+                s(v, "compile_model"),
+                s(v, "executor_model"),
+            )?,
+            0,
+        ),
         ("memory-outcome-ab", "sample" | "recall-sources") => {
             let projects_root = s(v, "projects_root")
                 .map(expand)

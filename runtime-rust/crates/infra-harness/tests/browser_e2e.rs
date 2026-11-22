@@ -625,6 +625,12 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
     if !system_run_id.is_empty() {
         command.arg("--system-run-id").arg(system_run_id);
     }
+    if let Some(capsule) = receipt["skillcache_capsule_id"].as_str() {
+        command.arg("--skillcache-capsule-id").arg(capsule);
+    }
+    if receipt["skillcache_requalify"] == true {
+        command.arg("--skillcache-requalify").arg("1");
+    }
     let output = command
         .arg("--chrome")
         .arg(&chrome)

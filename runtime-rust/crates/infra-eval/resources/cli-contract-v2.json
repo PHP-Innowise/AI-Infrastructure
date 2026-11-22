@@ -6089,5 +6089,425 @@
       "default": false,
       "native_extension": true
     }
+  },
+  "skillcache-ab/seal": {
+    "--plan": {
+      "flags": [
+        "--plan"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "native": true,
+      "operation": "skillcache-ab/seal"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "skillcache-ab/run": {
+    "--protocol": {
+      "flags": [
+        "--protocol"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "native": true,
+      "operation": "skillcache-ab/run"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "skillcache-ab/report": {
+    "--protocol": {
+      "flags": [
+        "--protocol"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--result": {
+      "flags": [
+        "--result"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "native": true,
+      "operation": "skillcache-ab/report"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "skillcache-ab/viewer": {
+    "--protocol": {
+      "flags": [
+        "--protocol"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--result": {
+      "flags": [
+        "--result"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--arm": {
+      "flags": [
+        "--arm"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--compile-model": {
+      "flags": [
+        "--compile-model"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--executor-model": {
+      "flags": [
+        "--executor-model"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "native": true,
+      "operation": "skillcache-ab/viewer"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
   }
 }

@@ -70,6 +70,10 @@ pub fn reset() {
     dom::clear("run-pane-commands");
     dom::clear("run-pane-memory");
     dom::clear("run-pane-omnigraph");
+    if let Some(pane) = dom::get("run-pane-skillcache") {
+        crate::skillcache::set_markup(&pane, "");
+    }
+    m::take("skillcache-error");
     update_scroll_ui();
     sync_load_earlier_control();
     sync_approvals_badge();
@@ -80,7 +84,7 @@ pub fn reset() {
 }
 
 pub(super) fn initial() -> V {
-    json!({"launch":"","calls":{},"open":[],"files":{},"commands":[],"plan":[],"searches":[],"steps":0,"messages":0,"finished":false,"outcome":null,"memory":null,"omnigraph":null,"kinds":[],"started":null})
+    json!({"launch":"","calls":{},"open":[],"files":{},"commands":[],"plan":[],"searches":[],"steps":0,"messages":0,"finished":false,"outcome":null,"memory":null,"omnigraph":null,"skillcache":[],"kinds":[],"started":null})
 }
 
 pub(super) fn tool_name(v: &V) -> String {
@@ -230,6 +234,11 @@ pub(super) fn advance_with_call(mut run: V, event: &V) -> (V, Option<V>, Option<
         "usage" => run["usage"] = event.clone(),
         "memory" => run["memory"] = event.clone(),
         "omnigraph" => run["omnigraph"] = event.clone(),
+        "skillcache" => {
+            let mut list = m::array(&run["skillcache"]);
+            list.push(event.clone());
+            run["skillcache"] = json!(list);
+        }
         "delegation" => run["delegation"] = event.clone(),
         "status" => {
             if check_status(&m::text(event, "text")) {
@@ -546,6 +555,11 @@ pub fn render() {
             element.set_inner_html(&pane);
         }
     }
+    // This pane has buttons, so it is replaced only when what it shows changes.
+    crate::skillcache::render_run_pane(&run);
+    // What can be done about an observed turn depends on the session's
+    // traces and compilations; they are read once per new SkillCache event.
+    crate::skillcache::sync_session(&run);
     let commands = m::array(&run["commands"]);
     dom::text("run-badge-commands", &commands.len().to_string());
     dom::keyed_render(
@@ -644,7 +658,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
         "run-close" => close(),
         "run-open" => open(payload.as_str().unwrap_or("files")),
         "run-tab-files" | "run-tab-plan" | "run-tab-commands" | "run-tab-memory"
-        | "run-tab-omnigraph" => {
+        | "run-tab-omnigraph" | "run-tab-skillcache" => {
             m::set("run-tab", json!(action.trim_start_matches("run-tab-")));
             // The file card belongs to the Files tab.
             hide_card(false);

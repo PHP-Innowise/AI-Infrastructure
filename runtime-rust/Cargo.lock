@@ -1184,11 +1184,13 @@ dependencies = [
  "infra-pilots",
  "infra-qa",
  "infra-skill-tools",
+ "infra-skillcache",
  "infra-system",
  "infra-tooling",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -1258,6 +1260,7 @@ dependencies = [
  "infra-core",
  "infra-generator",
  "infra-host",
+ "infra-skillcache",
  "infra-system",
  "infra-tooling",
  "libc",
@@ -1306,6 +1309,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
@@ -1380,6 +1384,19 @@ dependencies = [
  "uuid",
  "xmltree",
  "zip 4.6.1",
+]
+
+[[package]]
+name = "infra-skillcache"
+version = "0.1.0"
+dependencies = [
+ "infra-core",
+ "infra-host",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

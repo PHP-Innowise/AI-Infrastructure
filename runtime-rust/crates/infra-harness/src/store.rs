@@ -318,6 +318,7 @@ impl SessionStore {
             ("cost_totals", "TEXT"),
             ("omnigraph", "TEXT"),
             ("permissions", "TEXT"),
+            ("skillcache", "TEXT"),
         ] {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
@@ -326,6 +327,7 @@ impl SessionStore {
             }
         }
         crate::inbox::initialize(&db)?;
+        crate::skillcache::db::initialize(&db)?;
         let restart = db.unchecked_transaction()?;
         let interrupted = {
             let mut q =
@@ -339,7 +341,15 @@ impl SessionStore {
         restart.execute("UPDATE sessions SET status='interrupted',updated_at=?1 WHERE status IN ('queued','running')",[now()])?;
         expire_pending_permissions(&restart)?;
         crate::inbox::recover(&restart)?;
+        crate::skillcache::db::recover(&restart)?;
         restart.commit()?;
+        // Files of SkillCache that no row owns any more: snapshots of traces
+        // that are gone, and the folders of compilations a restart interrupted.
+        if let Ok(kept) = crate::skillcache::db::trace_generations(&db) {
+            crate::skillcache::snapshot::collect(&state, &kept);
+        }
+        crate::skillcache::compile::clear_workspaces(&state);
+        crate::skillcache::warm::clear_sessions(&state);
         Ok(Self {
             state,
             db: Arc::new(Mutex::new(db)),
@@ -870,6 +880,7 @@ impl SessionStore {
             "system_discovery",
             "system_explain",
             "omnigraph",
+            "skillcache",
         ] {
             if !options[key].is_null() {
                 tx.execute(
@@ -1143,6 +1154,7 @@ impl SessionStore {
             "cost_totals",
             "omnigraph",
             "permissions",
+            "skillcache",
         ];
         if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -1219,6 +1231,7 @@ impl SessionStore {
             "cost_totals",
             "omnigraph",
             "permissions",
+            "skillcache",
         ];
         if map.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -1276,6 +1289,7 @@ impl SessionStore {
             "fleet_action",
             "omnigraph",
             "permissions",
+            "skillcache",
         ];
         if fields.keys().any(|k| !allowed.contains(&k.as_str())) {
             return Err(HarnessError::invalid("Unknown follow-up option."));
@@ -1558,6 +1572,7 @@ fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
         "clash_result",
         "cost_totals",
         "omnigraph",
+        "skillcache",
     ] {
         if let Some(raw) = result.get(key).and_then(Value::as_str) {
             let parsed = crate::strict_json::parse(raw.as_bytes(), 16 * 1024 * 1024)?;

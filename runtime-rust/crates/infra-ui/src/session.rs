@@ -1456,6 +1456,7 @@ pub fn controls() {
     );
     knowledge::linked_controls();
     omnigraph::session_controls();
+    crate::skillcache::controls();
     context_meter(&session);
     result_controls();
     merge_controls();
@@ -1481,7 +1482,10 @@ pub async fn event(
         save_preferences();
         update_send_control();
         let ready = m::read(|s| !s.boot.is_null() && !s.auth_failed && !m::active(&s.selected));
-        if ready && !dom::value("project").is_empty() && has_at_file_mention(value) {
+        if ready
+            && !dom::value("project").is_empty()
+            && (has_at_file_mention(value) || crate::skillcache::wants_preview(value))
+        {
             dom::later("preflight-debounce", 600, || {
                 spawn_local(async {
                     run_preflight(false).await;
@@ -1624,6 +1628,7 @@ pub async fn event(
             "omnigraph-shared-space",
             "omnigraph-auto-publish",
             "omnigraph-auto-merge",
+            "skillcache-mode",
         ]
         .contains(&id)
         {
@@ -1644,9 +1649,10 @@ pub async fn event(
             || id == "routing-edit-model"
             || id == "omnigraph-pull-branches"
             || id == "omnigraph-session-query"
-            || id == "omnigraph-shared-space")
+            || id == "omnigraph-shared-space"
+            || id == "skillcache-compiler-model")
     {
-        if id.starts_with("omnigraph-") {
+        if id.starts_with("omnigraph-") || id.starts_with("skillcache-") {
             save_preferences();
         }
         mark_dirty_for_id(id);
@@ -2160,6 +2166,7 @@ pub async fn event(
                 "workspace",
                 "brain",
                 "omnigraph",
+                "skillcache",
                 "graph",
                 "budgets",
                 "models",

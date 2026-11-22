@@ -37,7 +37,21 @@ const GROUPS: &[&str] = &[
     "skill-tools",
     "routing-eval",
     "release",
+    "skillcache",
 ];
+/// The command an executable name stands for when a warm SkillCache session
+/// staged the engine under it: `skillcache-run` or `skillcache-tool`, with or
+/// without the platform's executable suffix.
+pub use infra_skillcache::cli::staged_tool;
+/// Runs one SkillCache command and returns its exit code. `name` is an
+/// operation of the `skillcache` group, or `run-command` for the executor's
+/// own command line (`run`, `continue` or `status` first).
+pub fn skillcache(name: &str, arguments: &[String]) -> i32 {
+    match name {
+        "run-command" => infra_skillcache::cli::execute_run(arguments),
+        other => infra_skillcache::cli::execute(other, arguments),
+    }
+}
 fn input(limit: usize, needed: bool) -> Result<Vec<u8>> {
     if !needed {
         return Ok(vec![]);
@@ -213,7 +227,7 @@ pub fn capabilities() -> Value {
     let source = env!("INFRA_ENGINE_SOURCE_SHA256");
     let source = (!source.is_empty())
         .then(|| json!({"scheme":infra_tooling::source_identity::SCHEME,"sha256":source}));
-    let mut descriptor = json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source});
+    let mut descriptor = json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","skillcache","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source});
     // Report dependency truth: workspace feature unification can enable ONNX
     // in pilots even when this package's forwarding feature was not selected.
     if infra_pilots::onnx::compiled() {
@@ -364,6 +378,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
         "app",
         "internal-sandbox-child",
         "internal-discovery-probe",
+        "skillcache",
     ]
     .contains(&group)
         && rest
@@ -397,8 +412,13 @@ pub fn run(raw: &[String]) -> Result<Output> {
                         _ => family,
                     };
                     let command = if group == "eval"
-                        && ["memory-eval", "memory-outcome-ab", "memory-native-ab"]
-                            .contains(&family)
+                        && [
+                            "memory-eval",
+                            "memory-outcome-ab",
+                            "memory-native-ab",
+                            "skillcache-ab",
+                        ]
+                        .contains(&family)
                     {
                         rest.get(1).filter(|command| !command.starts_with('-'))
                     } else {
@@ -877,7 +897,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
             let (sub, args) = if group == "eval"
                 && matches!(
                     family,
-                    "memory-eval" | "memory-outcome-ab" | "memory-native-ab"
+                    "memory-eval" | "memory-outcome-ab" | "memory-native-ab" | "skillcache-ab"
                 ) {
                 let (op, args) = operation(args, None)?;
                 (Some(op), args)
@@ -900,7 +920,9 @@ pub fn run(raw: &[String]) -> Result<Output> {
                     .unwrap_or_default()
                     .into();
             }
-            if operation.ends_with("/report") && request["result"].is_null() {
+            if (operation.ends_with("/report") || operation == "skillcache-ab/viewer")
+                && request["result"].is_null()
+            {
                 request["result"] = request["_positionals"]
                     .as_array()
                     .and_then(|args| args.first())
@@ -924,6 +946,13 @@ pub fn run(raw: &[String]) -> Result<Output> {
             let (command, args) = operation(rest, None)?;
             let code = infra_pilots::run_cli(command, args)?;
             Ok(inherited(code))
+        }
+        "skillcache" => {
+            // The operation owns its arguments: a JSON object is one of them.
+            let (name, args) = rest
+                .split_first()
+                .map_or(("", rest), |(name, args)| (name.as_str(), args));
+            Ok(inherited(skillcache(name, args)))
         }
         "onnx-worker" => {
             let code = infra_pilots::run_cli("onnx-worker", rest)?;

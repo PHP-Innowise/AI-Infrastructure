@@ -857,17 +857,28 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
     if path.is_absolute() {
         return path.is_file().then(|| path.to_path_buf());
     }
+    #[cfg(windows)]
+    let has_windows_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["exe", "com", "cmd", "bat"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        });
     for folder in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        #[cfg(windows)]
+        if !has_windows_extension {
+            for ext in [".exe", ".com", ".cmd", ".bat"] {
+                let candidate = folder.join(format!("{name}{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
         let candidate = folder.join(name);
         if candidate.is_file() {
             return Some(candidate);
-        }
-        #[cfg(windows)]
-        for ext in [".exe", ".cmd", ".bat"] {
-            let candidate = folder.join(format!("{name}{ext}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
         }
     }
     None

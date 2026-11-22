@@ -150,6 +150,7 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
         "brain",
         "memory",
         "skills",
+        "skill-capsules",
         "create-skill",
         "accelerators",
         "kit3",
@@ -187,7 +188,7 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
         "systems"
     } else if ["brain", "memory", "memory-use", "context"].contains(&view) {
         "knowledge"
-    } else if view == "create-skill" {
+    } else if ["create-skill", "skill-capsules"].contains(&view) {
         "skills"
     } else if ["creator", "setup", "kit3"].contains(&view) {
         "accelerators"
@@ -239,6 +240,7 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
         "memory-use" => knowledge::load_memory_use().await,
         "setup" => management::load_setup().await,
         "skills" | "create-skill" => management::load_skills().await,
+        "skill-capsules" => management::load_capsules().await,
         "creator" => management::creator_list().await,
         "systems" | "system-changes" => {
             systems::adopt_sidebar_project(&previous_view);
@@ -561,6 +563,7 @@ pub(super) fn view_label(view: &str) -> &str {
         "memory" => "Memory bank",
         "context" => "Context files",
         "skills" => "Library",
+        "skill-capsules" => "Skill capsules",
         "create-skill" => "Create skill",
         "accelerators" => "Overview",
         "creator" => "Infrastructure Creator",
@@ -575,7 +578,7 @@ pub(crate) fn view_tabs_for_group(group: &str, has_session: bool) -> Vec<&'stati
         "systems" => &["systems", "system-changes"],
         "omnigraph" => &["omnigraph"],
         "knowledge" => &["memory-use", "brain", "memory", "context"],
-        "skills" => &["skills", "create-skill"],
+        "skills" => &["skills", "skill-capsules", "create-skill"],
         _ => &["accelerators", "creator", "kit3", "setup"],
     };
     views

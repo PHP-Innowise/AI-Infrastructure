@@ -213,6 +213,7 @@ pub fn sandbox_spec(request: &Value) -> Result<Spec> {
         runtime,
         codex: request["sandbox_executable"].as_str().map(PathBuf::from),
         evidence: None,
+        network: true,
     })
 }
 fn prompt(request: &Value) -> String {
@@ -700,8 +701,11 @@ mod tests {
             readable: vec![],
             accounts: vec![],
             runtime: vec![],
-            codex: None,
+            // Windows has no sandbox of its own: a launch there is wrapped in
+            // native Codex's. No other host reads the field.
+            codex: Some(PathBuf::from("/bin/echo")),
             evidence: None,
+            network: true,
         }
     }
 
@@ -727,6 +731,21 @@ mod tests {
             permissions,
             approvals: None,
         };
+
+        // Without Codex a launch on Windows is refused rather than run outside
+        // a sandbox.
+        if cfg!(windows) {
+            let bare = CreatorLaunchAdapter {
+                spec: Spec {
+                    codex: None,
+                    ..spec.clone()
+                },
+            };
+            let Err(error) = command_with_adapter(&base_launch("codex", None), &bare) else {
+                panic!("a Windows launch without Codex was wrapped");
+            };
+            assert_eq!(error.status, 503, "{}", error.message);
+        }
 
         // Codex Text variants include --skip-git-repo-check after exec and wrap in sandbox.
         for perm in [

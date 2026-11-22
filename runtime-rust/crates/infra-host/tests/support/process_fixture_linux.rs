@@ -958,6 +958,7 @@ async fn discovery_boundary(root: &Path) -> Result<()> {
         runtime: vec![],
         codex: None,
         evidence: Some(evidence),
+        network: true,
     };
     let boundary = infra_host::sandbox::boundary_request(&spec)?;
     let output = process::run_monitored(

@@ -29,6 +29,14 @@ path = "tests/support/browser_e2e_fixture.rs"
 test = false
 bench = false
 
+# An engine stand-in for SkillCache gates and compilations: the fixture of the
+# infra-skillcache crate, built here so that this crate's tests can name it.
+[[bin]]
+name = "infra-harness-skillcache-fixture"
+path = "../infra-skillcache/tests/support/program_fixture.rs"
+test = false
+bench = false
+
 [[bin]]
 name = "infra-harness-ab"
 path = "tools/session_ab/main.rs"
@@ -41,6 +49,12 @@ path = "tools/session_ab/oracle_child.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "infra-harness-skillcache-driver"
+path = "tools/skillcache_driver/main.rs"
+test = false
+bench = false
+
 [dependencies]
 infra-host = { path = "../infra-host" }
 infra-core = { path = "../infra-core" }
@@ -48,6 +62,7 @@ infra-tooling = { path = "../infra-tooling" }
 infra-generator = { path = "../infra-generator" }
 infra-system = { path = "../infra-system" }
 infra-adapters = { path = "../infra-adapters" }
+infra-skillcache = { path = "../infra-skillcache" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order", "arbitrary_precision"] }
 rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite"] }

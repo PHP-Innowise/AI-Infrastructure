@@ -1478,9 +1478,11 @@ mod session_concurrency_tests {
             extract_marked_path(b"__AI_ACCEL_PATH_BEGIN__/a\0/b__AI_ACCEL_PATH_END__"),
             None
         );
+        // A search path is joined with the host's own separator, `:` or `;`.
+        let joined = |parts: &[&str]| std::env::join_paths(parts).unwrap();
         let merged = merge_search_paths(
-            Some("/home/u/.local/bin:/usr/bin"),
-            Some(std::ffi::OsString::from("/usr/bin:/bin")),
+            joined(&["/home/u/.local/bin", "/usr/bin"]).to_str(),
+            Some(joined(&["/usr/bin", "/bin"])),
         )
         .unwrap();
         let parts = std::env::split_paths(&merged)
