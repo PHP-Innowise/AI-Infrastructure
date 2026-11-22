@@ -377,25 +377,150 @@ fn normalized(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_string()
 }
 
-fn contains_literal(capsule_text: &str, literal: &str) -> bool {
-    if capsule_text.contains(literal) {
+fn is_compound_or_path_literal(text: &str) -> bool {
+    text.contains(['/', '\\', ':', '\n'])
+        || text.contains(char::is_whitespace)
+        || (text.contains('.') && text.chars().any(char::is_alphanumeric))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn contains_literal(haystack: &str, literal: &str) -> bool {
+    if literal.is_empty() {
+        return false;
+    }
+    if is_compound_or_path_literal(literal) {
+        return haystack.contains(literal);
+    }
+    let mut start = 0;
+    while let Some(found) = haystack[start..].find(literal) {
+        let idx = start + found;
+        let end = idx + literal.len();
+        let left_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let right_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word_char(c));
+        if left_ok && right_ok {
+            return true;
+        }
+        start = idx + haystack[idx..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// Collects text strings from `capsule` that carry author-written descriptions
+/// or commands, excluding JSON structure keys.
+fn capsule_authored_strings(capsule: &SkillCapsule) -> Vec<&str> {
+    let mut strings = vec![capsule.mu.name.as_str(), capsule.mu.description.as_str()];
+    for binding in &capsule.bindings {
+        if let Some(desc) = &binding.description {
+            strings.push(desc.as_str());
+        }
+    }
+    for program in &capsule.programs {
+        if let Some(desc) = &program.description {
+            strings.push(desc.as_str());
+        }
+        strings.extend(program.entry.iter().map(String::as_str));
+        strings.extend(program.check.iter().map(String::as_str));
+    }
+    for step in capsule.steps.iter().chain(capsule.verification.iter()) {
+        match step {
+            Step::Instruction { text, .. } | Step::Inspection { text, .. } => {
+                strings.push(text.as_str())
+            }
+            Step::Program { .. } => {}
+        }
+    }
+    strings
+}
+
+/// Extracts quoted string literals (`'...'`, `"..."`, `` `...` ``, triple quotes)
+/// from a package source file, ignoring comment-only prose.
+fn extract_source_literals(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'#' || (b == b'/' && bytes.get(i + 1) == Some(&b'/')) {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if matches!(b, b'\'' | b'"' | b'`') {
+            let triple = b != b'`' && bytes.get(i + 1) == Some(&b) && bytes.get(i + 2) == Some(&b);
+            let quote_len = if triple { 3 } else { 1 };
+            i += quote_len;
+            let mut literal = String::new();
+            while i < bytes.len() {
+                if triple {
+                    if bytes.get(i..i + 3) == Some(&[b, b, b]) {
+                        i += 3;
+                        break;
+                    }
+                } else if bytes[i] == b {
+                    i += 1;
+                    break;
+                }
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    let esc = bytes[i + 1];
+                    match esc {
+                        b'n' => literal.push('\n'),
+                        b'r' => literal.push('\r'),
+                        b't' => literal.push('\t'),
+                        _ => literal.push(esc as char),
+                    }
+                    i += 2;
+                    continue;
+                }
+                let ch = source[i..].chars().next().unwrap_or('\0');
+                literal.push(ch);
+                i += ch.len_utf8();
+            }
+            out.push(literal);
+            continue;
+        }
+        i += source[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out
+}
+
+/// Non-comment lines of `source` for checking unquoted path-like literals.
+fn source_non_comment_code(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.starts_with("--") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn source_contains_example_literal(source: &str, text: &str) -> bool {
+    if extract_source_literals(source)
+        .iter()
+        .any(|lit| contains_literal(lit, text))
+    {
         return true;
     }
-    serde_json::to_string(literal)
-        .ok()
-        .and_then(|quoted| {
-            quoted
-                .len()
-                .checked_sub(2)
-                .map(|_| quoted[1..quoted.len() - 1].to_string())
-        })
-        .is_some_and(|escaped| capsule_text.contains(&escaped))
+    is_compound_or_path_literal(text) && contains_literal(&source_non_comment_code(source), text)
 }
 
 fn check_examples(
     capsule: &SkillCapsule,
     package_files: &Files,
-    capsule_text: &str,
+    _capsule_text: &str,
     examples: &Examples,
     context: &Context<'_>,
     violations: &mut Vec<Violation>,
@@ -492,7 +617,10 @@ fn check_examples(
                 break;
             }
             if text.chars().count() >= EXAMPLE_LITERAL_CHARS {
-                if contains_literal(capsule_text, &text) {
+                if capsule_authored_strings(capsule)
+                    .iter()
+                    .any(|field| contains_literal(field, &text))
+                {
                     violations.push(Violation::new(
                         "example_value_in_capsule",
                         &at,
@@ -501,7 +629,8 @@ fn check_examples(
                     break;
                 }
                 if let Some((path, _)) = package_files.iter().find(|(_, content)| {
-                    std::str::from_utf8(content).is_ok_and(|source| contains_literal(source, &text))
+                    std::str::from_utf8(content)
+                        .is_ok_and(|source| source_contains_example_literal(source, &text))
                 }) {
                     violations.push(Violation::new(
                         "example_value_in_capsule",
@@ -764,7 +893,9 @@ pub fn check_textual(capsule: &[u8], markdown: &[u8], examples: Option<&Examples
                     continue;
                 }
                 let literal = normalized(raw);
-                if literal.chars().count() >= EXAMPLE_LITERAL_CHARS && text.contains(&literal) {
+                if literal.chars().count() >= EXAMPLE_LITERAL_CHARS
+                    && contains_literal(text, &literal)
+                {
                     violations.push(Violation::new(
                         "example_value_in_capsule",
                         format!("examples.bindings.{name}"),
@@ -776,4 +907,29 @@ pub fn check_textual(capsule: &[u8], markdown: &[u8], examples: Option<&Examples
         }
     }
     Report::of("gate1t", violations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_literal_ignores_comments_and_partial_identifier_substrings() {
+        assert!(!contains_literal("documentation helper", "document"));
+        assert!(!contains_literal(
+            "build_invoice_data_cache",
+            "invoice_data"
+        ));
+        assert!(contains_literal("read \"document\" here", "document"));
+        assert!(contains_literal("invoices/2026-q3/", "invoices/2026-q3/"));
+
+        let py = b"# example comment: invoices/2026-q3/ and document\ndef build_document_id():\n    return 1\n";
+        let src = std::str::from_utf8(py).unwrap();
+        assert!(!source_contains_example_literal(src, "invoices/2026-q3/"));
+        assert!(!source_contains_example_literal(src, "document"));
+        assert!(source_contains_example_literal(
+            "print('invoices/2026-q3/')\n",
+            "invoices/2026-q3/"
+        ));
+    }
 }

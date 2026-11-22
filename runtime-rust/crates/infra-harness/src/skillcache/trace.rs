@@ -23,6 +23,44 @@ use std::{
 /// The shortest environment value worth replacing wherever it appears.
 const SECRET_CHARS: usize = 8;
 const SKILLS: usize = 8;
+pub const SKILL_FOLDERS: [&str; 3] = [".claude/skills", ".agents/skills", ".cursor/skills"];
+
+/// Whether `workspace` or the user's home directory contains at least one
+/// discoverable `SKILL.md` folder for Claude, Codex, or Cursor.
+pub fn workspace_has_skills(workspace: &Path) -> bool {
+    let home = run_activity::user_home().map(PathBuf::from);
+    for root in [Some(workspace), home.as_deref()].into_iter().flatten() {
+        for folder in SKILL_FOLDERS {
+            let Ok(entries) = std::fs::read_dir(root.join(folder)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path().join("SKILL.md");
+                if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether this cold turn should pay the pre-turn workspace snapshot + hash
+/// cost before the provider runs.
+///
+/// Unrouted chat turns in `auto` mode carry no requested skill and skip
+/// pre-turn hashing; explicit `observe` turns snapshot whenever a skill is
+/// routed or at least one skill folder is present in the workspace/home.
+pub fn should_snapshot_for_observation(
+    session: &Value,
+    route: &ResolvedCommand,
+    workspace: &Path,
+) -> bool {
+    if !route.requests.is_empty() || route.mode == "native" {
+        return true;
+    }
+    crate::skillcache::settings::mode(session) == "observe" && workspace_has_skills(workspace)
+}
 
 /// Store setting JSON controlling short-turn observation admission
 /// (`{"min_tool_calls": 2, "min_output_tokens": ...}`).
@@ -86,6 +124,7 @@ impl RunEvents for Tee {
 /// What a session's trace must not keep: the values of the launch's
 /// credential-like environment variables, command-line credentials, anything
 /// the shared secret policy names, and the host's own paths.
+#[derive(Clone)]
 pub struct SessionRedactor {
     secrets: Vec<String>,
     roots: Vec<String>,
@@ -267,7 +306,7 @@ pub fn resolve_skills(
         if name.is_empty() || name.contains([':', '/', '\\']) || name.starts_with('.') {
             return None;
         }
-        for folder in [".claude/skills", ".agents/skills"] {
+        for folder in SKILL_FOLDERS {
             if let Some(found) = [Some(workspace.as_path()), home]
                 .into_iter()
                 .flatten()
@@ -283,7 +322,7 @@ pub fn resolve_skills(
                 return Some(found);
             }
         }
-        for folder in [".claude/skills", ".agents/skills"] {
+        for folder in SKILL_FOLDERS {
             for root in [Some(workspace.as_path()), home].into_iter().flatten() {
                 let Ok(entries) = std::fs::read_dir(root.join(folder)) else {
                     continue;
@@ -364,6 +403,54 @@ fn observe_min_roi(store: &SessionStore) -> (usize, Option<u64>) {
     (min_tools, min_output)
 }
 
+/// Checks whether an observed trace meets recording eligibility without
+/// writing to disk or computing workspace diffs.
+pub fn check_admissible(
+    store: &SessionStore,
+    workspace: &Path,
+    route: &ResolvedCommand,
+    message: &str,
+    trace: &Trace,
+    usage: &Value,
+) -> std::result::Result<(Vec<Value>, usize), Value> {
+    let tools = trace
+        .steps
+        .iter()
+        .filter(|step| step["kind"] == "tool")
+        .count();
+    let skills = resolve_skills(workspace, route, message, trace);
+    let skipped = |reason: &str, text: &str| json!({"kind": "skillcache", "phase": "not_observed", "reason": reason, "text": text});
+    if tools == 0 {
+        return Err(skipped(
+            "no_tool_calls",
+            "SkillCache kept no trace: this turn ran no tool.",
+        ));
+    }
+    if skills.is_empty() {
+        return Err(skipped(
+            "no_skill",
+            "SkillCache kept no trace: no skill of this project or of your home folder was used.",
+        ));
+    }
+    let (min_tools, min_output) = observe_min_roi(store);
+    if tools < min_tools {
+        return Err(skipped(
+            "low_roi",
+            "SkillCache kept no trace: this short turn is unlikely to pay back compilation.",
+        ));
+    }
+    if let Some(min_output) = min_output
+        && let Some(output_tokens) = usage["output_tokens"].as_u64()
+        && output_tokens < min_output
+    {
+        return Err(skipped(
+            "low_roi",
+            "SkillCache kept no trace: this short turn produced too few tokens to pay back compilation.",
+        ));
+    }
+    Ok((skills, tools))
+}
+
 /// Stores the trace of a completed turn. Returns the session event that says
 /// what was kept, or why nothing was.
 pub fn save(
@@ -372,41 +459,17 @@ pub fn save(
     trace: Trace,
     redactor: &dyn Redactor,
 ) -> Result<Value> {
-    let tools = trace
-        .steps
-        .iter()
-        .filter(|step| step["kind"] == "tool")
-        .count();
-    let skills = resolve_skills(turn.workspace, turn.route, turn.message, &trace);
-    let skipped = |reason: &str, text: &str| json!({"kind": "skillcache", "phase": "not_observed", "reason": reason, "text": text});
-    if tools == 0 {
-        return Ok(skipped(
-            "no_tool_calls",
-            "SkillCache kept no trace: this turn ran no tool.",
-        ));
-    }
-    if skills.is_empty() {
-        return Ok(skipped(
-            "no_skill",
-            "SkillCache kept no trace: no skill of this project or of your home folder was used.",
-        ));
-    }
-    let (min_tools, min_output) = observe_min_roi(store);
-    if tools < min_tools {
-        return Ok(skipped(
-            "low_roi",
-            "SkillCache kept no trace: this short turn is unlikely to pay back compilation.",
-        ));
-    }
-    if let Some(min_output) = min_output
-        && let Some(output_tokens) = turn.usage["output_tokens"].as_u64()
-        && output_tokens < min_output
-    {
-        return Ok(skipped(
-            "low_roi",
-            "SkillCache kept no trace: this short turn produced too few tokens to pay back compilation.",
-        ));
-    }
+    let (skills, tools) = match check_admissible(
+        store,
+        turn.workspace,
+        turn.route,
+        turn.message,
+        &trace,
+        turn.usage,
+    ) {
+        Ok(ok) => ok,
+        Err(skipped) => return Ok(skipped),
+    };
     let (request, _) = redactor.redact(turn.message);
     let mut redaction = trace.redaction();
     redaction["complete"] = trace.complete.into();
@@ -612,5 +675,39 @@ mod tests {
         let db = store.connection().unwrap();
         let stored = db::trace(&db, "g-good").unwrap().unwrap();
         assert_eq!(stored["usage"], usage);
+    }
+
+    #[test]
+    fn resolve_skills_and_workspace_scan_include_cursor_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = infra_core::fs::canonicalize(root.path()).unwrap();
+        let cursor_dir = workspace.join(".cursor/skills/sc-cursor-only");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::write(cursor_dir.join("SKILL.md"), "# Cursor Skill\n").unwrap();
+        assert!(workspace_has_skills(&workspace));
+
+        let trace = Trace {
+            provider: "cursor".into(),
+            steps: vec![],
+            skills: vec![SkillRef {
+                name: Some("sc-cursor-only".into()),
+                path: None,
+            }],
+            counters: Default::default(),
+            complete: true,
+        };
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "$sc-cursor-only run".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let resolved = resolve_skills(&workspace, &route, "$sc-cursor-only run", &trace);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["name"], "sc-cursor-only");
+        assert_eq!(
+            resolved[0]["path"],
+            ".cursor/skills/sc-cursor-only/SKILL.md"
+        );
     }
 }

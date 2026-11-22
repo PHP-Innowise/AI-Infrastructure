@@ -151,9 +151,13 @@ fn tree_bytes(root: &Path) -> u64 {
     total
 }
 
+pub(super) fn is_root_skipped_name(name: &str) -> bool {
+    ROOT_SKIPPED_NAMES.contains(&name)
+}
+
 pub(super) fn should_skip_name(name: &OsStr, depth: usize) -> bool {
     name.to_str().is_some_and(|name| {
-        infra_skillcache::executor::is_ignored_workspace_name(name)
+        infra_skillcache::executor::ALWAYS_IGNORED_WORKSPACE_NAMES.contains(&name)
             || (depth == 0 && ROOT_SKIPPED_NAMES.contains(&name))
     })
 }
@@ -329,14 +333,81 @@ fn take_tree(
 /// `None` when the workspace is missing or the snapshot would exceed its
 /// limits; an observed turn then has no replay copy.
 pub fn take(state: &Path, workspace: &Path, generation: &str) -> Result<Option<Value>> {
-    take_with(state, workspace, generation, Limits::default())
+    take_with_allowlist(state, workspace, generation, &[])
 }
 
+/// Like [`take`], additionally freezing any allowlisted dependency directories
+/// inside `<snapshot>/ignored/` for Git checkouts.
+pub fn take_with_allowlist(
+    state: &Path,
+    workspace: &Path,
+    generation: &str,
+    allowlist: &[String],
+) -> Result<Option<Value>> {
+    take_with_options(state, workspace, generation, Limits::default(), allowlist)
+}
+
+#[cfg(test)]
 fn take_with(
     state: &Path,
     workspace: &Path,
     generation: &str,
     limits: Limits,
+) -> Result<Option<Value>> {
+    take_with_options(state, workspace, generation, limits, &[])
+}
+
+fn git_ignored_paths(top: &Path, prefix: &str) -> Vec<String> {
+    let scope = if prefix.is_empty() {
+        vec![]
+    } else {
+        vec!["--", prefix]
+    };
+    let mut arguments = vec![
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+    ];
+    arguments.extend(scope);
+    let Ok(listed) = git(top, &arguments, &[]) else {
+        return Vec::new();
+    };
+    listed
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            String::from_utf8_lossy(name)
+                .trim_end_matches('/')
+                .to_string()
+        })
+        .filter(|relative| !relative.is_empty())
+        .collect()
+}
+
+fn path_has_always_ignored_or_root(relative: &str, depth_offset: usize) -> bool {
+    relative.split('/').enumerate().any(|(i, part)| {
+        part == ".."
+            || infra_skillcache::executor::ALWAYS_IGNORED_WORKSPACE_NAMES.contains(&part)
+            || (i == depth_offset && ROOT_SKIPPED_NAMES.contains(&part))
+    })
+}
+
+fn path_hits_default_ignored(relative: &str, allowlist: &[String]) -> bool {
+    relative.split('/').any(|part| {
+        infra_skillcache::executor::DEFAULT_IGNORED_WORKSPACE_NAMES.contains(&part)
+            && !allowlist.iter().any(|allowed| allowed == part)
+    })
+}
+
+fn take_with_options(
+    state: &Path,
+    workspace: &Path,
+    generation: &str,
+    limits: Limits,
+    allowlist: &[String],
 ) -> Result<Option<Value>> {
     let root = folder(state, generation)?;
     let Ok(located) = git(
@@ -401,6 +472,40 @@ fn take_with(
         return Ok(None);
     }
     let _ = std::fs::remove_file(&index);
+    let ws_source_root = if prefix.is_empty() {
+        top.clone()
+    } else {
+        top.join(&prefix)
+    };
+    let depth_offset = if prefix.is_empty() {
+        0
+    } else {
+        prefix.split('/').count()
+    };
+    let ignored_dir = root.join("ignored");
+    let mut ignored_copied = Copied {
+        files: 0,
+        bytes: 0,
+        truncated: false,
+    };
+    let empty_skip = std::collections::BTreeSet::new();
+    for relative in git_ignored_paths(&top, &prefix) {
+        if path_has_always_ignored_or_root(&relative, depth_offset)
+            || path_hits_default_ignored(&relative, allowlist)
+        {
+            continue;
+        }
+        let _ = copy_entry(
+            &top,
+            &ws_source_root,
+            &top.join(&relative),
+            &ignored_dir.join(&relative),
+            &empty_skip,
+            &mut ignored_copied,
+            CopySkipMode::AlwaysOnly,
+        );
+    }
+    let ignored_complete = !ignored_copied.truncated;
     let snapshot = json!({
         "kind": "git",
         "tree": tree,
@@ -408,6 +513,8 @@ fn take_with(
         "prefix": prefix,
         "common_dir": common,
         "workspace": workspace,
+        "ignored_complete": ignored_complete,
+        "ignored_snapshotted_files": ignored_copied.files,
     });
     infra_core::fs::atomic_json(&root.join("snapshot.json"), &snapshot)?;
     Ok(Some(snapshot))
@@ -449,6 +556,12 @@ struct Copied {
     bytes: u64,
     truncated: bool,
 }
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CopySkipMode {
+    AlwaysOnly,
+    DependencyFallback,
+}
+
 /// Copies one ignored entry of the checkout at `root`. A link is kept only
 /// when it stays inside the checkout; see [`kept_link`].
 fn copy_entry(
@@ -458,12 +571,13 @@ fn copy_entry(
     to: &Path,
     skip_hashes: &std::collections::BTreeSet<String>,
     copied: &mut Copied,
+    mode: CopySkipMode,
 ) -> std::io::Result<()> {
     if copied.truncated {
         return Ok(());
     }
     if let Some(name) = from.file_name().and_then(|n| n.to_str())
-        && (infra_skillcache::executor::is_ignored_workspace_name(name)
+        && (infra_skillcache::executor::ALWAYS_IGNORED_WORKSPACE_NAMES.contains(&name)
             || (from.parent() == Some(ws_root) && ROOT_SKIPPED_NAMES.contains(&name)))
     {
         return Ok(());
@@ -472,6 +586,7 @@ fn copy_entry(
     if infra_core::fs::linked_at(from, &metadata).unwrap_or(true) {
         #[cfg(unix)]
         if metadata.file_type().is_symlink()
+            && std::fs::symlink_metadata(to).is_err()
             && let Some(target) = kept_link(root, from)
         {
             if let Some(parent) = to.parent() {
@@ -484,7 +599,7 @@ fn copy_entry(
     if metadata.is_dir() {
         let mut entries = std::fs::read_dir(from)?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|entry| entry.file_name());
-        if entries.is_empty() && skip_hashes.is_empty() {
+        if entries.is_empty() && skip_hashes.is_empty() && mode == CopySkipMode::AlwaysOnly {
             std::fs::create_dir_all(to)?;
         }
         for entry in entries {
@@ -495,9 +610,13 @@ fn copy_entry(
                 &to.join(entry.file_name()),
                 skip_hashes,
                 copied,
+                mode,
             )?;
         }
     } else if metadata.is_file() {
+        if mode == CopySkipMode::DependencyFallback && std::fs::symlink_metadata(to).is_ok() {
+            return Ok(());
+        }
         if !skip_hashes.is_empty()
             && let Ok(rel) = from.strip_prefix(ws_root)
             && let Some(rel) = rel.to_str()
@@ -594,49 +713,51 @@ fn materialize_git(root: &Path, snapshot: &Value, destination: &Path) -> Result<
         bytes: 0,
         truncated: false,
     };
-    let scope = if prefix.is_empty() {
-        vec![]
-    } else {
-        vec!["--", prefix.as_str()]
-    };
-    let mut arguments = vec![
-        "ls-files",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "--directory",
-        "-z",
-    ];
-    arguments.extend(scope);
     let ws_source_root = if prefix.is_empty() {
         top.clone()
     } else {
         top.join(&prefix)
     };
-    let created = crate::skillcache::replay_result::created_hashes(root);
-    if let Ok(listed) = git(&top, &arguments, &[]) {
-        for name in listed
-            .split(|byte| *byte == 0)
-            .filter(|name| !name.is_empty())
-        {
-            let name = String::from_utf8_lossy(name);
-            let relative = name.trim_end_matches('/');
-            if relative.is_empty()
-                || relative.split('/').any(|part| {
-                    part == ".." || infra_skillcache::executor::is_ignored_workspace_name(part)
-                })
-            {
-                continue;
-            }
+    let depth_offset = if prefix.is_empty() {
+        0
+    } else {
+        prefix.split('/').count()
+    };
+    let ignored_root = root.join("ignored");
+    let empty_skip = std::collections::BTreeSet::new();
+    if ignored_root.is_dir() {
+        let mut entries = std::fs::read_dir(&ignored_root)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let _ = copy_entry(
-                &top,
-                &ws_source_root,
-                &top.join(relative),
-                &destination.join(relative),
-                &created,
+                &ignored_root,
+                &ignored_root,
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                &empty_skip,
                 &mut copied,
+                CopySkipMode::AlwaysOnly,
             );
         }
+    }
+    let ignored_complete = snapshot["ignored_complete"].as_bool() == Some(true);
+    let contaminated = crate::skillcache::replay_result::contaminated_hashes(root);
+    for relative in git_ignored_paths(&top, &prefix) {
+        if path_has_always_ignored_or_root(&relative, depth_offset) {
+            continue;
+        }
+        if ignored_complete && !path_hits_default_ignored(&relative, &[]) {
+            continue;
+        }
+        let _ = copy_entry(
+            &top,
+            &ws_source_root,
+            &top.join(&relative),
+            &destination.join(&relative),
+            &contaminated,
+            &mut copied,
+            CopySkipMode::DependencyFallback,
+        );
     }
     let workspace = if prefix.is_empty() {
         destination.to_path_buf()
@@ -1264,5 +1385,31 @@ mod tests {
         assert!(!replay.join("out/cold-created.json").exists());
         assert!(!replay.join("src/__pycache__").exists());
         assert!(!replay.join(".DS_Store").exists());
+
+        // Post-observation mutations, deletions, and new ignored files on live
+        // disk must not leak into a later Gate 3 materialization.
+        std::fs::write(project.join("out/existing-input.txt"), "corrupted-later\n").unwrap();
+        std::fs::write(
+            project.join("out/post-obs-created.json"),
+            "{\"leak\":true}\n",
+        )
+        .unwrap();
+        let replay_after = base.join("replay-after-mutation");
+        materialize(&state, "gen-git", &replay_after).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replay_after.join("out/existing-input.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(!replay_after.join("out/post-obs-created.json").exists());
+
+        // Even deleting the pre-existing gitignored file afterward leaves the
+        // Gate 3 snapshot intact.
+        std::fs::remove_file(project.join("out/existing-input.txt")).unwrap();
+        let replay_deleted = base.join("replay-after-delete");
+        materialize(&state, "gen-git", &replay_deleted).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(replay_deleted.join("out/existing-input.txt")).unwrap(),
+            "keep\n"
+        );
     }
 }

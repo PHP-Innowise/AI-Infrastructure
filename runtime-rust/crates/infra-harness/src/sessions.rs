@@ -39,6 +39,13 @@ pub trait BlackboardFactory: Send + Sync {
     fn for_session(&self, session: &Value) -> Result<Arc<dyn fleet::Blackboard>>;
 }
 #[derive(Clone)]
+struct PreparedTrace {
+    trace: infra_skillcache::trace::Trace,
+    usage: Value,
+    redactor: crate::skillcache::trace::SessionRedactor,
+    admissible: std::result::Result<(Vec<Value>, usize), Value>,
+}
+#[derive(Clone)]
 enum JobKind {
     Run,
     Check {
@@ -2524,17 +2531,28 @@ impl Sessions {
             }),
             None => Arc::new(binding.clone()),
         };
-        let observed_before = if recorder.is_some() {
+        let allowlist = crate::skillcache::settings::workspace_allowlist(&self.store);
+        let observed_before = if recorder.is_some()
+            && crate::skillcache::trace::should_snapshot_for_observation(
+                &session, &route, &workspace,
+            ) {
             // A capsule compiled from this turn is replayed on the workspace
             // as it is now, before the turn changes it.
-            let (state, root, generation) = (
+            let (state, root, generation, allowlist) = (
                 self.store.state.clone(),
                 workspace.clone(),
                 job.generation.clone(),
+                allowlist.clone(),
             );
             tokio::task::spawn_blocking(move || {
-                crate::skillcache::snapshot::take(&state, &root, &generation).ok()??;
-                crate::skillcache::replay_result::capture(&root, Some(&state)).ok()
+                crate::skillcache::snapshot::take_with_allowlist(
+                    &state,
+                    &root,
+                    &generation,
+                    &allowlist,
+                )
+                .ok()??;
+                crate::skillcache::replay_result::capture_with(&root, Some(&state), &allowlist).ok()
             })
             .await
             .ok()
@@ -2697,21 +2715,57 @@ impl Sessions {
                 &|event| emit(event),
             );
             warm.finish(&self.store, &session, &job.generation, &|event| emit(event));
+            crate::skillcache::maybe_enqueue_recompile_on_finish(
+                &self.skillcache_runtime(),
+                &warm.capsule_id,
+                &|event| {
+                    let _ = emit(event);
+                },
+            );
         }
+        let prepared_trace = if result.ok {
+            recorder.as_ref().and_then(|recorder| {
+                self.finish_recorded_trace(
+                    recorder,
+                    &session,
+                    &job.prompt,
+                    &route,
+                    &workspace,
+                    &binding.environment,
+                )
+            })
+        } else {
+            None
+        };
+        let trace_eligible = prepared_trace
+            .as_ref()
+            .is_none_or(|prepared| prepared.admissible.is_ok());
         if result.ok
+            && trace_eligible
             && let Some(before) = observed_before
         {
             // Capture the primary turn's effects before lifecycle recovery
             // or publication can change the project.
-            let (state, root, generation) = (
+            let (state, root, generation, allowlist) = (
                 self.store.state.clone(),
                 workspace.clone(),
                 job.generation.clone(),
+                allowlist,
             );
+            let result_text = result.text.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                crate::skillcache::replay_result::record(&state, &root, &generation, before)
+                crate::skillcache::replay_result::record_with_output(
+                    &state,
+                    &root,
+                    &generation,
+                    before,
+                    Some(&result_text),
+                    &allowlist,
+                )
             })
             .await;
+        } else if observed_before.is_some() {
+            let _ = crate::skillcache::snapshot::remove(&self.store.state, &job.generation);
         }
         let mut recovery = NativeRecovery {
             adapter: recovery_adapter,
@@ -2737,9 +2791,9 @@ impl Sessions {
                     .unwrap_or_else(|| "Native session did not complete.".into()),
             ));
         }
-        if let Some(recorder) = &recorder {
-            self.keep_trace(
-                recorder,
+        if let Some(prepared) = prepared_trace {
+            self.keep_prepared_trace(
+                prepared,
                 &crate::skillcache::trace::ObservedTurn {
                     session: &session,
                     generation: &job.generation,
@@ -2748,7 +2802,6 @@ impl Sessions {
                     workspace: &workspace,
                     usage: &Value::Null,
                 },
-                &binding.environment,
                 &emit,
             );
         }
@@ -2848,42 +2901,73 @@ impl Sessions {
             &workspace,
         ))
     }
-    /// Stores the observed trace of a turn that completed. A trace that
-    /// cannot be kept never fails the turn it observed.
-    fn keep_trace(
+    /// Finalizes the trace recorder before post-turn workspace capture so
+    /// ineligible turns skip hashing the workspace.
+    fn finish_recorded_trace(
         &self,
         recorder: &crate::skillcache::trace::TraceRecorder,
-        turn: &crate::skillcache::trace::ObservedTurn<'_>,
+        _session: &Value,
+        message: &str,
+        route: &crate::commands::ResolvedCommand,
+        workspace: &Path,
         environment: &BTreeMap<String, Option<String>>,
-        emit: &Event,
-    ) {
+    ) -> Option<PreparedTrace> {
         let launched = std::env::vars().chain(
             environment
                 .iter()
                 .filter_map(|(name, value)| Some((name.clone(), value.clone()?))),
         );
-        let redactor = crate::skillcache::trace::SessionRedactor::new(turn.workspace, launched);
-        let Some((trace, usage)) = recorder.finish_with_usage(&redactor) else {
-            let _ = crate::skillcache::snapshot::remove(&self.store.state, turn.generation);
-            return;
-        };
-        let usage_turn = crate::skillcache::trace::ObservedTurn {
-            session: turn.session,
-            generation: turn.generation,
-            message: turn.message,
-            route: turn.route,
-            workspace: turn.workspace,
-            usage: &usage,
-        };
-        let event = crate::skillcache::trace::save(&self.store, &usage_turn, trace, &redactor)
-            .unwrap_or_else(|error| {
-                json!({
-                    "kind": "skillcache",
-                    "phase": "not_observed",
-                    "reason": "storage",
-                    "text": format!("SkillCache could not keep this turn's trace: {error}"),
+        let redactor = crate::skillcache::trace::SessionRedactor::new(workspace, launched);
+        let (trace, usage) = recorder.finish_with_usage(&redactor)?;
+        let admissible = crate::skillcache::trace::check_admissible(
+            &self.store,
+            workspace,
+            route,
+            message,
+            &trace,
+            &usage,
+        );
+        Some(PreparedTrace {
+            trace,
+            usage,
+            redactor,
+            admissible,
+        })
+    }
+    /// Stores the pre-finalized observed trace of a completed turn.
+    fn keep_prepared_trace(
+        &self,
+        prepared: PreparedTrace,
+        turn: &crate::skillcache::trace::ObservedTurn<'_>,
+        emit: &Event,
+    ) {
+        let event = match prepared.admissible {
+            Err(skipped) => skipped,
+            Ok(_) => {
+                let usage_turn = crate::skillcache::trace::ObservedTurn {
+                    session: turn.session,
+                    generation: turn.generation,
+                    message: turn.message,
+                    route: turn.route,
+                    workspace: turn.workspace,
+                    usage: &prepared.usage,
+                };
+                crate::skillcache::trace::save(
+                    &self.store,
+                    &usage_turn,
+                    prepared.trace,
+                    &prepared.redactor,
+                )
+                .unwrap_or_else(|error| {
+                    json!({
+                        "kind": "skillcache",
+                        "phase": "not_observed",
+                        "reason": "storage",
+                        "text": format!("SkillCache could not keep this turn's trace: {error}"),
+                    })
                 })
-            });
+            }
+        };
         // A snapshot lives exactly as long as the trace it belongs to.
         let mut auto_queued = None;
         if event["phase"] == "observed" {

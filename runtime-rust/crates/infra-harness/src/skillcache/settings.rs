@@ -17,6 +17,22 @@ pub const EVAL_ARMS: [&str; 6] = [
     "skillcache_no_replay",
 ];
 pub const EVAL_SETTING: &str = "skillcache.eval_arms";
+pub const WORKSPACE_ALLOWLIST: &str = "skillcache.workspace_allowlist";
+
+/// Optional project/store-wide safe directory allowlist overriding default
+/// dependency ignores (`node_modules`, `vendor`, `.venv`, `dist`, `build`, `.next`).
+pub fn workspace_allowlist(store: &crate::store::SessionStore) -> Vec<String> {
+    store
+        .setting(WORKSPACE_ALLOWLIST)
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(str::to_owned))
+        .filter(|name| infra_skillcache::executor::is_safe_allowlist_name(name))
+        .collect()
+}
 
 fn optional_id(value: Option<&Value>, label: &str) -> Result<Option<String>> {
     let Some(value) = value.filter(|value| !value.is_null()) else {

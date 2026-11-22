@@ -231,14 +231,7 @@ impl CommandCatalog {
                 let (skills, error) = self.codex(cwd).await?;
                 (skills.into_iter().map(|v|json!({"name":v["name"],"description":v["description"],"path":v["path"]})).collect::<Vec<_>>(),error)
             }
-            "cursor" => (
-                workspace_skills(cwd, provider)?
-                    .0
-                    .into_iter()
-                    .filter(|s| s["user"] == true)
-                    .collect(),
-                None,
-            ),
+            "cursor" => (user_skills(cwd, provider)?, None),
             _ => return Err(HarnessError::invalid("Choose a provider.")),
         };
         if let Some(home) = home {
@@ -454,11 +447,32 @@ impl CommandCatalog {
                 route.notice = join_notice(route.notice, notice);
             }
         } else if provider == "cursor" {
-            if let Some((name, _)) = lead {
+            let mentioned = if crate::skillcache::settings::mode(session) == "off" {
+                Vec::new()
+            } else {
+                mentions(message)
+            };
+            if lead.is_some() || !mentioned.is_empty() {
                 let (skills, _) = self.catalogue(provider, &cwd, None, project, None).await?;
-                if let Some(skill) = skills.iter().find(|s| s["name"] == name) {
+                if let Some((name, _)) = lead
+                    && let Some(skill) = skills.iter().find(|s| s["name"] == name)
+                {
                     route.requests.push(skill.clone());
-                    route.notice = Some(format!("Cursor skill requested: {name}."));
+                }
+                if !mentioned.is_empty() {
+                    resolve_mentions(&mentioned, &skills, &mut route);
+                }
+                let names = route
+                    .requests
+                    .iter()
+                    .filter_map(|r| r["name"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !names.is_empty() {
+                    route.notice = join_notice(
+                        route.notice,
+                        Some(format!("Cursor skills requested: {names}.")),
+                    );
                 }
             }
         } else {
@@ -489,7 +503,7 @@ impl CommandCatalog {
             return Ok(());
         };
         let provider = session["provider"].as_str().unwrap_or("");
-        if !["claude", "codex"].contains(&provider) {
+        if !["claude", "codex", "cursor"].contains(&provider) {
             return Ok(());
         }
         let cwd = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
@@ -518,7 +532,18 @@ pub fn match_skill(skills: &[V], hint: &str) -> Option<V> {
 }
 
 fn claude_skills(cwd: &Path) -> Result<Vec<V>> {
-    let mut listed: Vec<V> = workspace_skills(cwd, "claude")?
+    user_skills(cwd, "claude")
+}
+
+/// Lists user-invocable skills for `provider` from the workspace and user home.
+fn user_skills(cwd: &Path, provider: &str) -> Result<Vec<V>> {
+    let home = crate::run_activity::user_home().map(PathBuf::from);
+    user_skills_in(cwd, home.as_deref(), provider)
+}
+
+/// Lists user-invocable skills for `provider` across `cwd` and an optional `home` directory.
+fn user_skills_in(cwd: &Path, home: Option<&Path>, provider: &str) -> Result<Vec<V>> {
+    let mut listed: Vec<V> = workspace_skills(cwd, provider)?
         .0
         .into_iter()
         .filter(|s| s["user"] == true)
@@ -527,24 +552,22 @@ fn claude_skills(cwd: &Path) -> Result<Vec<V>> {
         .iter()
         .filter_map(|v| v["name"].as_str().map(str::to_owned))
         .collect::<BTreeSet<_>>();
-    if let Some(home) = crate::run_activity::user_home() {
-        let home = PathBuf::from(home);
-        if home.is_dir()
-            && let Ok((home_skills, _)) = workspace_skills(&home, "claude")
-        {
-            for mut skill in home_skills {
-                if skill["user"] != true {
-                    continue;
-                }
-                if let Some(path) = skill["path"].as_str() {
-                    skill["path"] = json!(home.join(path));
-                }
-                if skill["name"]
-                    .as_str()
-                    .is_some_and(|name| names.insert(name.to_owned()))
-                {
-                    listed.push(skill);
-                }
+    if let Some(home) = home
+        && home.is_dir()
+        && let Ok((home_skills, _)) = workspace_skills(home, provider)
+    {
+        for mut skill in home_skills {
+            if skill["user"] != true {
+                continue;
+            }
+            if let Some(path) = skill["path"].as_str() {
+                skill["path"] = json!(home.join(path));
+            }
+            if skill["name"]
+                .as_str()
+                .is_some_and(|name| names.insert(name.to_owned()))
+            {
+                listed.push(skill);
             }
         }
     }
@@ -1239,5 +1262,79 @@ mod tests {
             .unwrap();
         assert_eq!(hinted.requests.len(), 1);
         assert_eq!(hinted.requests[0]["name"], "sc-test-pdf");
+    }
+
+    #[tokio::test]
+    async fn cursor_routes_dollar_mentions_skill_hints_and_home_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let home = root.path().join("home");
+        let ws_skill = workspace.join(".cursor/skills/sc-ws-pdf");
+        let home_skill = home.join(".cursor/skills/sc-home-csv");
+        std::fs::create_dir_all(&ws_skill).unwrap();
+        std::fs::create_dir_all(&home_skill).unwrap();
+        std::fs::write(
+            ws_skill.join("SKILL.md"),
+            "---\nname: sc-ws-pdf\ndescription: Workspace Cursor skill\n---\n# PDF\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home_skill.join("SKILL.md"),
+            "---\nname: sc-home-csv\ndescription: Home Cursor skill\n---\n# CSV\n",
+        )
+        .unwrap();
+
+        let home_listed = user_skills_in(&workspace, Some(&home), "cursor").unwrap();
+        assert!(home_listed.iter().any(|s| s["name"] == "sc-ws-pdf"));
+        assert!(home_listed.iter().any(|s| {
+            s["name"] == "sc-home-csv"
+                && s["path"]
+                    == home
+                        .join(".cursor/skills/sc-home-csv/SKILL.md")
+                        .to_string_lossy()
+                        .as_ref()
+        }));
+
+        let catalog = catalog_in(root.path());
+        let ordinary = json!({
+            "provider": "cursor",
+            "project_path": workspace.display().to_string(),
+        });
+        let untouched = catalog
+            .route(&ordinary, "Run $sc-ws-pdf here")
+            .await
+            .unwrap();
+        assert!(untouched.requests.is_empty());
+
+        let mut session = ordinary.clone();
+        session["skillcache"] = json!({"mode": "auto"});
+        let routed = catalog
+            .route(&session, "Run $sc-ws-pdf here")
+            .await
+            .unwrap();
+        assert_eq!(routed.mode, "text");
+        assert_eq!(routed.requests.len(), 1);
+        assert_eq!(routed.requests[0]["name"], "sc-ws-pdf");
+        assert_eq!(
+            routed.requests[0]["path"],
+            ".cursor/skills/sc-ws-pdf/SKILL.md"
+        );
+
+        let mut hinted = catalog
+            .route(&session, "Process these files")
+            .await
+            .unwrap();
+        assert!(hinted.requests.is_empty());
+        let with_hint = json!({
+            "provider": "cursor",
+            "project_path": workspace.display().to_string(),
+            "skillcache": {"mode": "warm_only", "skill": "sc-ws-pdf"},
+        });
+        catalog
+            .apply_skill_hint(&with_hint, &mut hinted)
+            .await
+            .unwrap();
+        assert_eq!(hinted.requests.len(), 1);
+        assert_eq!(hinted.requests[0]["name"], "sc-ws-pdf");
     }
 }
