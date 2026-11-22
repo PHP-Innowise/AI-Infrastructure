@@ -19,6 +19,7 @@ use std::{
 const INDEX_DOCUMENT_FORMAT: &str = "source-digests-v1";
 const RACY_NS: i128 = 2_000_000_000;
 const CITED_SOURCES_STATE_KEY: &str = "memory-cited-sources-v1";
+const CHUNK_SHA256_STATE_KEY: &str = "memory-chunk-sha256-v1";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CitedSourceStamp {
@@ -41,6 +42,8 @@ pub struct SourceStamp {
     pub cited_sources_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cited_sources: Vec<CitedSourceStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_sha256: Option<String>,
 }
 pub type SourceState = BTreeMap<String, SourceStamp>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,6 +123,7 @@ fn stamp(path: &Path) -> Result<SourceStamp> {
         eligible_until: None,
         cited_sources_digest: None,
         cited_sources: Vec::new(),
+        chunk_sha256: None,
     })
 }
 
@@ -757,6 +761,23 @@ fn discover_sources_with_clock(
                 current.cited_sources_digest = Some(digest);
                 current.cited_sources = cited_sources;
             }
+            current.chunk_sha256 = Some(sha256(raw.as_bytes()));
+        }
+        // Inside the racy window we must still read, parse, and verify cited
+        // sources above; once verified unchanged against the prior state, retain
+        // the chunk so incremental indexing does not falsely bump index-generation.
+        if kind == "memory"
+            && reusable.get(&key).is_some_and(|cached| {
+                cached.mtime_ns == current.mtime_ns
+                    && cached.size == current.size
+                    && cached.eligible_until == current.eligible_until
+                    && cached.cited_sources_digest == current.cited_sources_digest
+                    && cached.chunk_sha256 == current.chunk_sha256
+            })
+        {
+            result.retained.insert(key.clone(), current.clone());
+            result.state.insert(key, current);
+            continue;
         }
         if let Ok((meta, _)) = parse_markdown_record(&raw)
             && meta["type"] == "context-handoff"
@@ -1116,6 +1137,7 @@ pub fn load_source_state(conn: &Connection) -> Result<SourceState> {
                     eligible_until: row.get(3)?,
                     cited_sources_digest: None,
                     cited_sources: Vec::new(),
+                    chunk_sha256: None,
                 },
             ))
         })?
@@ -1214,6 +1236,15 @@ pub fn refresh_index(
                 if let Some(stamp) = loaded.get_mut(&path) {
                     stamp.cited_sources_digest = digest;
                     stamp.cited_sources = sources;
+                }
+            }
+        }
+        if let Some(raw_hashes) = stored.get(CHUNK_SHA256_STATE_KEY)
+            && let Ok(hash_map) = serde_json::from_str::<BTreeMap<String, String>>(raw_hashes)
+        {
+            for (path, digest) in hash_map {
+                if let Some(stamp) = loaded.get_mut(&path) {
+                    stamp.chunk_sha256 = Some(digest);
                 }
             }
         }
@@ -1407,6 +1438,20 @@ pub fn refresh_index(
             state.insert(
                 CITED_SOURCES_STATE_KEY.into(),
                 serde_json::to_string(&cited_state)?,
+            );
+            let chunk_sha256_state = discovery
+                .state
+                .iter()
+                .filter_map(|(path, stamp)| {
+                    stamp
+                        .chunk_sha256
+                        .as_ref()
+                        .map(|digest| (path.clone(), digest.clone()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            state.insert(
+                CHUNK_SHA256_STATE_KEY.into(),
+                serde_json::to_string(&chunk_sha256_state)?,
             );
             state.insert("brain-rows-digest".into(), brain_digest.clone());
             state.insert("index-generation".into(), uuid4());
@@ -1953,7 +1998,8 @@ pub(crate) mod provenance_withholding_tests {
             "memory chunk stamp should record cited_sources_digest"
         );
 
-        // Inside the 2s RACY_NS window, reuse MUST NOT skip parse or SHA-256 verification.
+        // Inside the 2s RACY_NS window, reuse MUST NOT skip read, parse, or SHA-256
+        // verification, while still retaining the chunk once verified unchanged.
         let mut racy_counters = DiscoveryCounters::default();
         let racy = discover_sources_with_clock(
             &fixture.context,
@@ -1962,9 +2008,10 @@ pub(crate) mod provenance_withholding_tests {
             Some(&mut racy_counters),
         )
         .unwrap();
+        assert_eq!(racy_counters.chunk_reads, 1);
         assert_eq!(racy_counters.memory_parses, 1);
         assert_eq!(racy_counters.source_hash_checks, 1);
-        assert!(!racy.retained.contains_key(&key));
+        assert!(racy.retained.contains_key(&key));
 
         // Outside the 2s RACY_NS window, unchanged chunk and cited sources skip read, parse, and SHA-256!
         let mut settled_counters = DiscoveryCounters::default();
@@ -1998,5 +2045,42 @@ pub(crate) mod provenance_withholding_tests {
                 .iter()
                 .any(|e| e.path == key && matches!(e.reason.as_str(), "source-missing" | "invalid"))
         );
+    }
+
+    #[test]
+    fn same_mtime_and_size_chunk_edit_inside_racy_window_is_not_retained() {
+        let fixture = Fixture::new();
+        let (key, _) = fixture.chunk(1, REVIEWED, "Retries wait before next attempt.\n");
+        let chunk_path = fixture.root.join(&key);
+        let original_modified = fs::metadata(&chunk_path).unwrap().modified().unwrap();
+        let max_mtime = i128::from(stamp(&chunk_path).unwrap().mtime_ns);
+        let first = discover_sources_with_clock(
+            &fixture.context,
+            &SourceState::new(),
+            max_mtime + RACY_NS + 1,
+            None,
+        )
+        .unwrap();
+
+        let (rekey, _) = fixture.chunk(1, REVIEWED, "Retries wait before each attempt.\n");
+        assert_eq!(rekey, key);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&chunk_path)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+
+        let after = discover_sources_with_clock(
+            &fixture.context,
+            &first.state,
+            max_mtime + RACY_NS - 1,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first.state[&key].mtime_ns, after.state[&key].mtime_ns);
+        assert_eq!(first.state[&key].size, after.state[&key].size);
+        assert!(!after.retained.contains_key(&key));
+        assert!(after.documents.iter().any(|doc| doc.path == key));
     }
 }
