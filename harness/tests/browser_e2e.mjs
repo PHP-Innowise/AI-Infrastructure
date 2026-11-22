@@ -637,7 +637,7 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
   };
 }
 
-async function suite1BootThemeTransport(driver, opts) {
+async function suite1BootThemeTransport(driver, cdp, opts) {
   console.log('[Suite 1] WASM boot, pre-WASM theme & transport');
   const initialTheme = await driver.waitFor(() => {
     const connecting = document.getElementById('connecting');
@@ -4360,7 +4360,7 @@ async function main() {
       await pageCdp.send('Page.navigate', { url: opts.url });
       await pageCdp.send('Page.bringToFront');
 
-      await suite1BootThemeTransport(driver, opts);
+      await suite1BootThemeTransport(driver, pageCdp, opts);
       await suite2Canvas2dAndMapLayout(driver, pageCdp, opts);
       await suite3MapLenses(driver);
       await suite4LiveSseAndStyling(driver, pageCdp, opts);
