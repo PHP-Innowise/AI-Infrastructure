@@ -20,6 +20,7 @@ use crate::{
 use infra_skillcache::{
     Form,
     candidate::{self, Candidate, KnownSkill},
+    capsule::CapsuleKind,
     compile_rules, fingerprint, gate1, package,
     trace::Trace,
 };
@@ -425,7 +426,7 @@ fn compiler_prompt(
         ));
     }
     if !resumed {
-        if let Some(req) = req_text {
+        if let Some(ref req) = req_text {
             parts.push(format!(
                 "<observed_request>\n{}\n</observed_request>",
                 req.trim()
@@ -462,6 +463,14 @@ fn compiler_prompt(
     }
     if zero_file_changes && form == Form::Hybrid {
         parts.push("The observed turn made zero workspace file changes; populate `examples.steps` with deterministic JSON step outputs matching the observed output so Gate 3 can verify equivalence.".to_string());
+    }
+    if req_text
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .is_some_and(|v| v["kind"] == "tool_chain")
+        && form == Form::Hybrid
+    {
+        parts.push("This is a read-only `tool_chain` compilation with no source skill: set `source.skills` to `[]` and mark every program `\"read_only\": true`.".to_string());
     }
     if round > 1 || form == Form::Textual {
         let diag_path = evidence.join("diagnostics.json");
@@ -877,6 +886,161 @@ async fn qualify(
     })
 }
 
+fn push_unique(target: &mut Vec<String>, item: String) {
+    if !item.is_empty() && !target.contains(&item) {
+        target.push(item);
+    }
+}
+
+fn rel_in_workspace(workspace: &Path, raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 512 {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    let rel = if path.is_absolute() {
+        path.strip_prefix(workspace)
+            .ok()?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        db::normalize_rel_path(trimmed)
+    };
+    let normalized = db::normalize_rel_path(&rel);
+    if normalized.is_empty() || normalized.starts_with("..") || normalized.contains("/../") {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+/// Builds the persisted dependency manifest recorded alongside a qualified capsule.
+pub(crate) fn build_dependency_manifest(
+    workspace: &Path,
+    stored_trace: &Value,
+    candidate: &Candidate,
+    ir_revision: u64,
+) -> db::ArtifactDependencyManifest {
+    let mut manifest = db::ArtifactDependencyManifest {
+        skill_paths: candidate
+            .capsule
+            .skills
+            .iter()
+            .map(|skill| db::normalize_rel_path(&skill.path))
+            .collect(),
+        ir_revision,
+        verified_ns: db::current_unix_ns(),
+        ..Default::default()
+    };
+    for name in [
+        "composer.json",
+        "composer.lock",
+        "package.json",
+        "package-lock.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "symfony.lock",
+        "artisan",
+    ] {
+        if workspace.join(name).is_file() {
+            push_unique(&mut manifest.manifest_files, name.to_string());
+        }
+    }
+    if let Some(steps) = stored_trace["steps"].as_array() {
+        for step in steps {
+            if step["kind"] != "tool" {
+                continue;
+            }
+            let Some(input) = step["input"].as_object() else {
+                continue;
+            };
+            for field in [
+                "file_path",
+                "path",
+                "dir",
+                "directory",
+                "TargetFile",
+                "SearchPath",
+                "SearchDirectory",
+            ] {
+                let Some(raw) = input.get(field).and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(rel) = rel_in_workspace(workspace, raw) else {
+                    continue;
+                };
+                if manifest
+                    .skill_paths
+                    .iter()
+                    .any(|skill| db::path_matches(skill, &rel))
+                {
+                    continue;
+                }
+                let lower = rel.to_ascii_lowercase();
+                if lower.contains("route") {
+                    push_unique(&mut manifest.route_selectors, rel.clone());
+                } else if lower.contains("migration") || lower.contains("schema") {
+                    push_unique(&mut manifest.table_selectors, rel.clone());
+                } else if lower.ends_with(".php")
+                    || lower.ends_with(".rs")
+                    || lower.ends_with(".ts")
+                {
+                    push_unique(&mut manifest.ast_selectors, rel.clone());
+                }
+                let full = workspace.join(&rel);
+                if full.is_dir() {
+                    push_unique(&mut manifest.watched_globs, format!("{rel}/**"));
+                } else {
+                    push_unique(&mut manifest.caller_files, rel);
+                }
+            }
+        }
+    }
+    if let Some(examples) = &candidate.examples {
+        for binding in &candidate.capsule.bindings {
+            if binding.kind == infra_skillcache::capsule::BindingType::Path
+                && let Some(raw) = examples.bindings.get(&binding.name).and_then(Value::as_str)
+                && let Some(rel) = rel_in_workspace(workspace, raw)
+            {
+                let glob = if workspace.join(&rel).is_dir() {
+                    format!("{rel}/**")
+                } else {
+                    rel
+                };
+                push_unique(&mut manifest.watched_globs, glob);
+            }
+        }
+    }
+    manifest
+}
+
+/// Resolves an edition name for `workspace` or `session` when compiling or admitting templates.
+pub(crate) fn workspace_edition(workspace: &Path, session: Option<&Value>) -> Option<String> {
+    if let Some(edition) = session
+        .and_then(|s| s["skillcache"]["edition"].as_str())
+        .or_else(|| session.and_then(|s| s["edition"].as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(edition.to_string());
+    }
+    let manifest = workspace.join(".infra-manifest.json");
+    if let Ok(bytes) = infra_core::fs::read_regular(&manifest)
+        && let Ok(json) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(edition) = json["edition"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        return Some(edition.to_string());
+    }
+    let name = workspace.file_name().and_then(|n| n.to_str())?;
+    if workspace.join("VERSION").is_file() && matches!(name, "Laravel" | "Symfony" | "PHP Core") {
+        return Some(name.to_string());
+    }
+    None
+}
+
 /// Writes a qualified candidate where sessions mount it and makes it active.
 fn publish_capsule(
     runtime: &Runtime,
@@ -913,8 +1077,11 @@ fn publish_capsule(
     let environment = fingerprint::env_fingerprint(&fingerprint::runtime_versions(
         &candidate.capsule.capabilities.runtimes,
     ));
+    let session = runtime.store.get(&job.session_id).ok();
+    let db = runtime.store.connection()?;
+    let stored_trace = db::trace(&db, &job.generation)?.unwrap_or_else(|| json!({}));
     db::activate_capsule(
-        &*runtime.store.connection()?,
+        &db,
         &db::Qualified {
             capsule_id: &job.capsule_id,
             mu_name: &candidate.capsule.mu.name,
@@ -931,7 +1098,36 @@ fn publish_capsule(
                 "runtimes": candidate.capsule.capabilities.runtimes,
             }),
         },
-    )
+    )?;
+    db::set_capsule_kind_meta(
+        &db,
+        &job.capsule_id,
+        candidate.capsule.kind.as_str(),
+        candidate.capsule.tool_chain_sha256.as_deref().unwrap_or(""),
+    )?;
+    let manifest = build_dependency_manifest(&job.workspace, &stored_trace, candidate, 0);
+    db::set_dependency_manifest(&db, &job.capsule_id, &manifest)?;
+    if candidate.capsule.kind == CapsuleKind::Skill
+        && let Some(edition) = workspace_edition(&job.workspace, session.as_ref())
+        && let Some(primary) = candidate.capsule.skills.first()
+    {
+        let template = candidate::as_portable_template(candidate, &edition);
+        let report = gate1::check_portable_template(
+            &template.capsule_bytes,
+            &template.files,
+            template.markdown.as_deref().map(str::as_bytes),
+        );
+        if report.passed {
+            let _ = db::upsert_template(
+                &db,
+                &edition,
+                &primary.name,
+                &primary.tree_sha256,
+                &template,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// What a compilation ended as.
@@ -955,8 +1151,21 @@ async fn compile(
         .filter(|trace| trace["session_id"] == job.session_id.as_str())
         .ok_or_else(|| HarnessError::missing("This turn has no kept trace."))?;
     let skills = known_skills(&stored);
-    if skills.is_empty() {
+    let tool_chain_sha = (stored["redaction"]["trace_kind"] == "tool_chain")
+        .then(|| stored["redaction"]["tool_chain_tree_sha"].as_str())
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if skills.is_empty() && tool_chain_sha.is_none() {
         return Err(HarnessError::invalid("The trace names no skill."));
+    }
+    if let Some(expected_tree) = &tool_chain_sha {
+        let now_tree = trace::workspace_tree_sha(&job.workspace)?;
+        if now_tree != *expected_tree {
+            return Err(HarnessError::conflict(
+                "The workspace tree changed since this tool-chain turn was observed. Observe a new turn and compile that one.",
+            ));
+        }
     }
     // The skill that was observed must still be the skill on disk.
     for skill in &skills {
@@ -994,15 +1203,17 @@ async fn compile(
         .ok()
         .map(|res| res.changes.len());
     let steps = stored["steps"].as_array().cloned().unwrap_or_default();
-    save_json(
-        &evidence.join("request.json"),
-        &json!({
-            "request": stored["request"],
-            "provider": stored["provider"],
-            "skills": skills.iter().map(|skill| json!({"name": skill.name, "path": skill.path})).collect::<Vec<_>>(),
-            "observed_file_changes": expected_changes,
-        }),
-    )?;
+    let mut request_meta = json!({
+        "request": stored["request"],
+        "provider": stored["provider"],
+        "skills": skills.iter().map(|skill| json!({"name": skill.name, "path": skill.path})).collect::<Vec<_>>(),
+        "observed_file_changes": expected_changes,
+    });
+    if let Some(tree_sha) = &tool_chain_sha {
+        request_meta["kind"] = "tool_chain".into();
+        request_meta["tool_chain_tree_sha"] = tree_sha.clone().into();
+    }
+    save_json(&evidence.join("request.json"), &request_meta)?;
     save_json(
         &evidence.join("tau_obs.json"),
         &json!({
@@ -1045,6 +1256,20 @@ async fn compile(
         }
         .observed_files(),
     );
+    if job.eval_arm.is_none()
+        && skills.len() == 1
+        && let Some(edition) = workspace_edition(
+            &job.workspace,
+            runtime.store.get(&job.session_id).ok().as_ref(),
+        )
+        && try_qualify_template_for_job(runtime, job, &edition, &skills[0], observed_files.clone())
+            .await?
+    {
+        return Ok(Outcome {
+            status: "completed",
+            text: "Qualified from portable edition template.".into(),
+        });
+    }
     let written_procedure = job.eval_arm.as_deref() == Some("written_procedure");
     let total_rounds = if written_procedure {
         HYBRID_ROUNDS
@@ -1087,7 +1312,10 @@ async fn compile(
         }
         attempt.rounds = round;
         attempt.usage.push(answer.usage);
-        let candidate = candidate::from_answer(&answer.value, &skills, form);
+        let candidate = match &tool_chain_sha {
+            Some(tree_sha) => candidate::from_tool_chain_answer(&answer.value, tree_sha, form),
+            None => candidate::from_answer(&answer.value, &skills, form),
+        };
         if let Ok(candidate) = &candidate
             && candidate.examples.is_some()
         {
@@ -1230,6 +1458,14 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
     let detail = json!({"capsule_id": capsule_id, "generation": generation});
     let artifacts = PathBuf::from(capsule["artifact_dir"].as_str().unwrap_or(""));
     let stored = package::load(&artifacts.join("warm"))?;
+    if stored.capsule.kind == CapsuleKind::ToolChain {
+        let now_tree = trace::workspace_tree_sha(workspace)?;
+        if stored.capsule.tool_chain_sha256.as_deref() != Some(now_tree.as_str()) {
+            return Err(HarnessError::conflict(
+                "The workspace tree changed since this tool-chain capsule was compiled. Observe a new turn and compile it.",
+            ));
+        }
+    }
     let skills = stored
         .capsule
         .skills
@@ -1345,6 +1581,10 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
             &environment,
             &runtime.engine_digest(),
         )?;
+        let mut manifest =
+            db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+        manifest.verified_ns = db::current_unix_ns();
+        let _ = db::set_dependency_manifest(&db, &capsule_id, &manifest);
     } else {
         let target = if capsule["status"] == "retired" {
             "retired"
@@ -1365,6 +1605,185 @@ pub async fn requalify(runtime: &Arc<Runtime>, capsule: &Value, workspace: &Path
         detail,
     );
     Ok(json!({"passed": passed, "round": round_number, "gates": reports}))
+}
+
+fn candidate_from_template_row(
+    template: &Value,
+    edition: &str,
+    skill: &KnownSkill,
+) -> std::result::Result<(Candidate, Form), Vec<infra_skillcache::Violation>> {
+    let mut cap_val: Value =
+        serde_json::from_str(template["capsule_json"].as_str().unwrap_or("{}")).map_err(|err| {
+            vec![infra_skillcache::Violation::new(
+                "invalid_json",
+                "capsule_json",
+                err.to_string(),
+            )]
+        })?;
+    let form = match template["form"].as_str() {
+        Some("textual") => Form::Textual,
+        _ => Form::Hybrid,
+    };
+    cap_val["schema_version"] = infra_skillcache::SCHEMA_VERSION.into();
+    cap_val["form"] = form.as_str().into();
+    cap_val["kind"] = CapsuleKind::Template.as_str().into();
+    cap_val["source"] = json!({
+        "edition": edition,
+        "skills": [{
+            "name": skill.name,
+            "path": skill.path,
+            "tree_sha256": skill.tree_sha256,
+        }]
+    });
+    let parsed = infra_skillcache::SkillCapsule::from_value(&cap_val)?;
+    let capsule_bytes = parsed.to_bytes();
+    let files = infra_skillcache::package::Files::from_response(&template["files_json"]);
+    let markdown = template["markdown"].as_str().map(str::to_owned);
+    let examples = template["examples_json"]
+        .as_str()
+        .and_then(|raw| infra_skillcache::Examples::parse(raw.as_bytes()).ok());
+    Ok((
+        Candidate {
+            capsule: parsed,
+            capsule_bytes,
+            files,
+            examples,
+            markdown,
+        },
+        form,
+    ))
+}
+
+async fn try_qualify_template_for_job(
+    runtime: &Arc<Runtime>,
+    job: &Job,
+    edition: &str,
+    skill: &KnownSkill,
+    observed_files: Arc<Vec<String>>,
+) -> Result<bool> {
+    let templates = {
+        let db = runtime.store.connection()?;
+        db::find_templates(&db, edition, &skill.name, &skill.tree_sha256)?
+    };
+    for template in templates {
+        let Ok((candidate, form)) = candidate_from_template_row(&template, edition, skill) else {
+            continue;
+        };
+        let port = gate1::check_portable_template(
+            &candidate.capsule_bytes,
+            &candidate.files,
+            candidate.markdown.as_deref().map(str::as_bytes),
+        );
+        if !port.passed {
+            continue;
+        }
+        if form == Form::Hybrid
+            && (snapshot::load(&runtime.store.state, &job.generation)?.is_none()
+                || !replay_result::available(&runtime.store.state, &job.generation))
+        {
+            continue;
+        }
+        let dir = compile_dir(&runtime.store, &format!("tpl-{}", crate::store::hexid()));
+        let qualified = qualify(
+            runtime,
+            job,
+            Round::new(&dir, 1),
+            Ok(candidate),
+            form,
+            observed_files.clone(),
+            None,
+        )
+        .await;
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = make_removable(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .await;
+        let qualified = qualified?;
+        {
+            let db = runtime.store.connection()?;
+            for report in &qualified.reports {
+                db::record_gate(
+                    &db,
+                    &job.capsule_id,
+                    1,
+                    report["gate"].as_str().unwrap_or("gate"),
+                    report["passed"] == true,
+                    report,
+                )?;
+            }
+        }
+        if qualified.passed
+            && let Some(candidate) = &qualified.candidate
+        {
+            publish_capsule(runtime, job, candidate, std::slice::from_ref(skill))?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Strictly admits an indexed edition template on a target project ONLY if
+/// Gate 1 proves portability (no hardcoded project paths/secrets) AND
+/// target-repo Gate 2 + Gate 3 replay pass.
+pub async fn admit_template_for_project(
+    runtime: &Arc<Runtime>,
+    session: &Value,
+    generation: &str,
+    edition: &str,
+    skill: &KnownSkill,
+) -> Result<Option<Value>> {
+    let project_id = session["project_id"].as_str().unwrap_or("").to_string();
+    let session_id = session["id"].as_str().unwrap_or("").to_string();
+    let workspace = PathBuf::from(session["project_path"].as_str().unwrap_or(""));
+    let has_templates = {
+        let db = runtime.store.connection()?;
+        !db::find_templates(&db, edition, &skill.name, &skill.tree_sha256)?.is_empty()
+    };
+    if !has_templates {
+        return Ok(None);
+    }
+    let (compile_id, capsule_id) = (crate::store::id(), crate::store::id());
+    let skill_row = json!({
+        "name": skill.name,
+        "path": skill.path,
+        "tree_sha256": skill.tree_sha256,
+    });
+    {
+        let db = runtime.store.connection()?;
+        db::begin_capsule(
+            &db,
+            &capsule_id,
+            &compile_id,
+            &project_id,
+            &session_id,
+            generation,
+            &skill_row,
+            None,
+        )?;
+    }
+    let job = Job {
+        compile_id,
+        capsule_id: capsule_id.clone(),
+        session_id,
+        generation: generation.to_string(),
+        project_id,
+        workspace,
+        model: None,
+        eval_arm: None,
+    };
+    if try_qualify_template_for_job(runtime, &job, edition, skill, Arc::new(Vec::new())).await? {
+        let db = runtime.store.connection()?;
+        return db::capsule(&db, &capsule_id);
+    }
+    let db = runtime.store.connection()?;
+    let _ = db::set_capsule_status(
+        &db,
+        &capsule_id,
+        "failed",
+        Some("Edition template failed target-project gates."),
+    );
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1516,5 +1935,75 @@ mod tests {
         assert!(p_resumed.contains("<previous_diagnostics>"));
         assert!(!p_resumed.contains("=== COMPILE INSTRUCTIONS ==="));
         assert!(!p_resumed.contains("<source_skill"));
+    }
+
+    #[tokio::test]
+    async fn admit_template_for_project_rejects_nonportable_and_admits_portable_textual() {
+        let scratch = crate::skillcache::test_support::scratch();
+        let workspace = scratch.path().join("project");
+        let skill_dir = workspace.join(".claude/skills/check-routes");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Check Routes\n").unwrap();
+        let tree = fingerprint::tree_sha256(&skill_dir).unwrap();
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let project = store.register(&workspace).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "claude", "mode": "edit", "workflow": "native", "permissions": "auto"}),
+                "check routes",
+                &[],
+            )
+            .unwrap();
+        let skill = KnownSkill {
+            name: "check-routes".into(),
+            path: ".claude/skills/check-routes/SKILL.md".into(),
+            tree_sha256: tree.sha256.clone(),
+        };
+        let make_tpl = |md: &str| {
+            let answer = json!({
+                "form": "textual",
+                "capsule": {
+                    "mu": {"name": "check-routes", "description": "Verify application routes"},
+                    "source": {"skills": [{"name": "check-routes", "path": ".claude/skills/check-routes/SKILL.md"}]}
+                },
+                "markdown": md
+            });
+            let cand = candidate::from_answer(&answer, std::slice::from_ref(&skill), Form::Textual)
+                .unwrap();
+            candidate::as_portable_template(&cand, "Laravel")
+        };
+        {
+            let db = store.connection().unwrap();
+            let bad = make_tpl("# Check Routes\n\n1. Open /home/bob/app/routes.php.\n");
+            db::upsert_template(&db, "Laravel", "check-routes", &tree.sha256, &bad).unwrap();
+        }
+        let rt = Arc::new(Runtime {
+            store,
+            providers: Arc::new(ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        });
+        assert!(
+            admit_template_for_project(&rt, &session, "g-tpl-bad", "Laravel", &skill)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let good = make_tpl("# Check Routes\n\n1. Inspect `routes/web.php`.\n");
+            db::upsert_template(&db, "Laravel", "check-routes", &tree.sha256, &good).unwrap();
+        }
+        let admitted = admit_template_for_project(&rt, &session, "g-tpl-ok", "Laravel", &skill)
+            .await
+            .unwrap()
+            .expect("portable template should be admitted");
+        assert_eq!(admitted["status"], "active");
+        assert_eq!(admitted["kind"], "template");
     }
 }

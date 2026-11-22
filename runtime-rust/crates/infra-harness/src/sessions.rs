@@ -2533,8 +2533,11 @@ impl Sessions {
         };
         let allowlist = crate::skillcache::settings::workspace_allowlist(&self.store);
         let observed_before = if recorder.is_some()
-            && crate::skillcache::trace::should_snapshot_for_observation(
-                &session, &route, &workspace,
+            && crate::skillcache::trace::should_snapshot_for_observation_in_store(
+                &self.store,
+                &session,
+                &route,
+                &workspace,
             ) {
             // A capsule compiled from this turn is replayed on the workspace
             // as it is now, before the turn changes it.
@@ -2859,6 +2862,8 @@ impl Sessions {
                 "eval_arm",
                 "trace_generation",
                 "capsule_id",
+                "tool_chain",
+                "edition",
             ] {
                 if let Some(value) = composer.get(key)
                     && !value.is_null()
@@ -2906,7 +2911,7 @@ impl Sessions {
     fn finish_recorded_trace(
         &self,
         recorder: &crate::skillcache::trace::TraceRecorder,
-        _session: &Value,
+        session: &Value,
         message: &str,
         route: &crate::commands::ResolvedCommand,
         workspace: &Path,
@@ -2919,14 +2924,18 @@ impl Sessions {
         );
         let redactor = crate::skillcache::trace::SessionRedactor::new(workspace, launched);
         let (trace, usage) = recorder.finish_with_usage(&redactor)?;
-        let admissible = crate::skillcache::trace::check_admissible(
+        let allow_tool_chain =
+            crate::skillcache::settings::tool_chain_enabled(&self.store, session);
+        let admissible = crate::skillcache::trace::check_admissible_with_toolchain(
             &self.store,
+            allow_tool_chain,
             workspace,
             route,
             message,
             &trace,
             &usage,
-        );
+        )
+        .map(|(skills, tools, _)| (skills, tools));
         Some(PreparedTrace {
             trace,
             usage,

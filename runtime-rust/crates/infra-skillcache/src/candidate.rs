@@ -5,10 +5,10 @@
 //! form that was asked for, and the identity of each source skill as it was
 //! when the run was observed.
 use crate::{
-    capsule::{Examples, Form, SCHEMA_VERSION, SkillCapsule, Violation},
+    capsule::{CapsuleKind, Examples, Form, SCHEMA_VERSION, SkillCapsule, Violation},
     package::Files,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A skill of the observed run: what `source.skills` may name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +33,39 @@ pub struct Candidate {
 pub fn from_answer(
     answer: &Value,
     skills: &[KnownSkill],
+    form: Form,
+) -> Result<Candidate, Vec<Violation>> {
+    from_answer_with_kind(answer, skills, CapsuleKind::Skill, None, form)
+}
+
+/// Reads a compiler's answer for a skillless read-only tool-chain capsule bound to `tree_sha256`.
+pub fn from_tool_chain_answer(
+    answer: &Value,
+    tree_sha256: &str,
+    form: Form,
+) -> Result<Candidate, Vec<Violation>> {
+    from_answer_with_kind(answer, &[], CapsuleKind::ToolChain, Some(tree_sha256), form)
+}
+
+/// Converts a verified candidate into a portable edition template tagged with `edition`.
+pub fn as_portable_template(candidate: &Candidate, edition: &str) -> Candidate {
+    let mut capsule = candidate.capsule.clone();
+    capsule.kind = CapsuleKind::Template;
+    capsule.source_edition = Some(edition.to_string());
+    Candidate {
+        capsule_bytes: capsule.to_bytes(),
+        capsule,
+        files: candidate.files.clone(),
+        examples: candidate.examples.clone(),
+        markdown: candidate.markdown.clone(),
+    }
+}
+
+fn from_answer_with_kind(
+    answer: &Value,
+    skills: &[KnownSkill],
+    kind: CapsuleKind,
+    tool_chain_tree_sha: Option<&str>,
     form: Form,
 ) -> Result<Candidate, Vec<Violation>> {
     let mut violations = Vec::new();
@@ -70,46 +103,63 @@ pub fn from_answer(
     }
     capsule["schema_version"] = SCHEMA_VERSION.into();
     capsule["form"] = form.as_str().into();
-    // The compiler names the skills; their identities are the observed ones.
-    match capsule["source"]["skills"].as_array_mut() {
-        Some(named) if !named.is_empty() => {
-            for (index, skill) in named.iter_mut().enumerate() {
-                let known = skill["path"]
-                    .as_str()
-                    .and_then(|path| skills.iter().find(|known| known.path == path));
-                match known {
-                    Some(known) => {
-                        skill["name"] = known.name.clone().into();
-                        skill["tree_sha256"] = known.tree_sha256.clone().into();
-                    }
-                    None => {
-                        // Reported once, as what it is; the reader below is
-                        // not also told that the identity is missing.
-                        skill["tree_sha256"] = "0".repeat(64).into();
-                        if !skill["name"].is_string() {
-                            skill["name"] = "unknown".into();
+    if kind == CapsuleKind::Skill {
+        if let Some(obj) = capsule.as_object_mut() {
+            obj.remove("kind");
+        }
+    } else {
+        capsule["kind"] = kind.as_str().into();
+    }
+    if kind == CapsuleKind::ToolChain {
+        if !capsule["source"].is_object() {
+            capsule["source"] = json!({"skills": []});
+        }
+        capsule["source"]["skills"] = json!([]);
+        if let Some(tree_sha) = tool_chain_tree_sha {
+            capsule["source"]["tool_chain"] = json!({"tree_sha256": tree_sha});
+        }
+    } else {
+        // The compiler names the skills; their identities are the observed ones.
+        match capsule["source"]["skills"].as_array_mut() {
+            Some(named) if !named.is_empty() => {
+                for (index, skill) in named.iter_mut().enumerate() {
+                    let known = skill["path"]
+                        .as_str()
+                        .and_then(|path| skills.iter().find(|known| known.path == path));
+                    match known {
+                        Some(known) => {
+                            skill["name"] = known.name.clone().into();
+                            skill["tree_sha256"] = known.tree_sha256.clone().into();
                         }
-                        violations.push(Violation::new(
-                            "source_skill_unknown",
-                            format!("capsule.source.skills[{index}].path"),
-                            format!(
-                                "The observed run used: {}. Name one of these paths.",
-                                skills
-                                    .iter()
-                                    .map(|known| known.path.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                        ));
+                        None => {
+                            // Reported once, as what it is; the reader below is
+                            // not also told that the identity is missing.
+                            skill["tree_sha256"] = "0".repeat(64).into();
+                            if !skill["name"].is_string() {
+                                skill["name"] = "unknown".into();
+                            }
+                            violations.push(Violation::new(
+                                "source_skill_unknown",
+                                format!("capsule.source.skills[{index}].path"),
+                                format!(
+                                    "The observed run used: {}. Name one of these paths.",
+                                    skills
+                                        .iter()
+                                        .map(|known| known.path.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            ));
+                        }
                     }
                 }
             }
+            _ => violations.push(Violation::new(
+                "missing_field",
+                "capsule.source.skills",
+                "The capsule names the skill it was compiled from.",
+            )),
         }
-        _ => violations.push(Violation::new(
-            "missing_field",
-            "capsule.source.skills",
-            "The capsule names the skill it was compiled from.",
-        )),
     }
     let files = Files::from_response(&answer["files"]);
     let mut examples = None;
@@ -298,5 +348,25 @@ mod tests {
         let mut empty = textual;
         empty["markdown"] = "  ".into();
         assert_eq!(codes(&empty, Form::Textual), ["missing_field"]);
+    }
+
+    #[test]
+    fn tool_chain_and_template_candidates_round_trip() {
+        let mut chain = answer();
+        chain["capsule"]["source"] = json!({"skills": []});
+        chain["capsule"]["programs"][0]["read_only"] = true.into();
+        let tree_sha = "d".repeat(64);
+        let built = from_tool_chain_answer(&chain, &tree_sha, Form::Hybrid).unwrap();
+        assert_eq!(built.capsule.kind, CapsuleKind::ToolChain);
+        assert!(built.capsule.skills.is_empty());
+        assert_eq!(
+            built.capsule.tool_chain_sha256.as_deref(),
+            Some(tree_sha.as_str())
+        );
+
+        let skill_cand = from_answer(&answer(), &skills(), Form::Hybrid).unwrap();
+        let template = as_portable_template(&skill_cand, "Laravel");
+        assert_eq!(template.capsule.kind, CapsuleKind::Template);
+        assert_eq!(template.capsule.source_edition.as_deref(), Some("Laravel"));
     }
 }

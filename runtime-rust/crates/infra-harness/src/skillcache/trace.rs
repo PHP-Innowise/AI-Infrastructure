@@ -62,6 +62,57 @@ pub fn should_snapshot_for_observation(
     crate::skillcache::settings::mode(session) == "observe" && workspace_has_skills(workspace)
 }
 
+/// As [`should_snapshot_for_observation`], also enabling snapshots when
+/// opt-in `ToolChain` capture is enabled on `store` or `session`.
+pub fn should_snapshot_for_observation_in_store(
+    store: &SessionStore,
+    session: &Value,
+    route: &ResolvedCommand,
+    workspace: &Path,
+) -> bool {
+    should_snapshot_for_observation(session, route, workspace)
+        || (crate::skillcache::settings::records(session)
+            && crate::skillcache::settings::tool_chain_enabled(store, session))
+}
+
+/// Stable 64-hex tree digest shared across subagents and linked worktrees on the same commit.
+pub fn workspace_tree_sha(workspace: &Path) -> Result<String> {
+    if let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+        .output()
+        && output.status.success()
+    {
+        let tree_oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !tree_oid.is_empty() {
+            return Ok(fingerprint::sha256(
+                format!("git-tree:{tree_oid}").as_bytes(),
+            ));
+        }
+    }
+    Ok(fingerprint::tree_sha256(workspace)?.sha256)
+}
+
+/// Conservative allowlist of strictly read-only/search tool names permitted in `ToolChain` traces.
+pub fn is_read_only_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "read"
+            | "grep"
+            | "glob"
+            | "ls"
+            | "read_file"
+            | "view_file"
+            | "view_file_outline"
+            | "view_code_item"
+            | "grep_search"
+            | "find_by_name"
+            | "list_dir"
+            | "search"
+    )
+}
+
 /// Store setting JSON controlling short-turn observation admission
 /// (`{"min_tool_calls": 2, "min_output_tokens": ...}`).
 pub const OBSERVE_MIN_ROI: &str = "skillcache_observe_min_roi";
@@ -413,6 +464,22 @@ pub fn check_admissible(
     trace: &Trace,
     usage: &Value,
 ) -> std::result::Result<(Vec<Value>, usize), Value> {
+    let (skills, tools, _) =
+        check_admissible_with_toolchain(store, false, workspace, route, message, trace, usage)?;
+    Ok((skills, tools))
+}
+
+/// Checks trace admissibility, additionally admitting skillless read-only tool
+/// chains when `allow_tool_chain` is true.
+pub fn check_admissible_with_toolchain(
+    store: &SessionStore,
+    allow_tool_chain: bool,
+    workspace: &Path,
+    route: &ResolvedCommand,
+    message: &str,
+    trace: &Trace,
+    usage: &Value,
+) -> std::result::Result<(Vec<Value>, usize, Option<String>), Value> {
     let tools = trace
         .steps
         .iter()
@@ -426,11 +493,37 @@ pub fn check_admissible(
             "SkillCache kept no trace: this turn ran no tool.",
         ));
     }
+    let mut tool_chain_tree_sha = None;
     if skills.is_empty() {
-        return Err(skipped(
-            "no_skill",
-            "SkillCache kept no trace: no skill of this project or of your home folder was used.",
-        ));
+        if !allow_tool_chain {
+            return Err(skipped(
+                "no_skill",
+                "SkillCache kept no trace: no skill of this project or of your home folder was used.",
+            ));
+        }
+        let has_mutating = trace
+            .steps
+            .iter()
+            .filter(|step| step["kind"] == "tool")
+            .any(|step| {
+                let name = step["tool"]
+                    .as_str()
+                    .or_else(|| step["name"].as_str())
+                    .unwrap_or("");
+                !is_read_only_tool_name(name)
+            });
+        if has_mutating {
+            return Err(skipped(
+                "mutating_tool_chain",
+                "SkillCache kept no trace: tool-chain capture admits read-only tool sequences only.",
+            ));
+        }
+        tool_chain_tree_sha = Some(workspace_tree_sha(workspace).map_err(|err| {
+            skipped(
+                "storage",
+                &format!("SkillCache could not fingerprint workspace tree: {err}"),
+            )
+        })?);
     }
     let (min_tools, min_output) = observe_min_roi(store);
     if tools < min_tools {
@@ -448,7 +541,7 @@ pub fn check_admissible(
             "SkillCache kept no trace: this short turn produced too few tokens to pay back compilation.",
         ));
     }
-    Ok((skills, tools))
+    Ok((skills, tools, tool_chain_tree_sha))
 }
 
 /// Stores the trace of a completed turn. Returns the session event that says
@@ -459,8 +552,10 @@ pub fn save(
     trace: Trace,
     redactor: &dyn Redactor,
 ) -> Result<Value> {
-    let (skills, tools) = match check_admissible(
+    let allow_tool_chain = crate::skillcache::settings::tool_chain_enabled(store, turn.session);
+    let (skills, tools, tool_chain_tree_sha) = match check_admissible_with_toolchain(
         store,
+        allow_tool_chain,
         turn.workspace,
         turn.route,
         turn.message,
@@ -473,6 +568,10 @@ pub fn save(
     let (request, _) = redactor.redact(turn.message);
     let mut redaction = trace.redaction();
     redaction["complete"] = trace.complete.into();
+    if let Some(tree_sha) = &tool_chain_tree_sha {
+        redaction["trace_kind"] = "tool_chain".into();
+        redaction["tool_chain_tree_sha"] = tree_sha.clone().into();
+    }
     let steps = Value::Array(trace.steps);
     let db = store.connection()?;
     db::save_trace(
@@ -493,6 +592,16 @@ pub fn save(
         .iter()
         .filter_map(|skill| skill["name"].as_str())
         .collect::<Vec<_>>();
+    let text = if tool_chain_tree_sha.is_some() {
+        format!(
+            "SkillCache kept this turn's read-only tool-chain trace ({tools} tool calls). It can be compiled into a tool-chain capsule."
+        )
+    } else {
+        format!(
+            "SkillCache kept this turn's trace ({tools} tool calls; skill: {}). It can be compiled into a capsule.",
+            names.join(", ")
+        )
+    };
     Ok(json!({
         "kind": "skillcache",
         "phase": "observed",
@@ -501,10 +610,7 @@ pub fn save(
         "tool_calls": tools,
         "skills": names,
         "redaction": redaction,
-        "text": format!(
-            "SkillCache kept this turn's trace ({tools} tool calls; skill: {}). It can be compiled into a capsule.",
-            names.join(", ")
-        ),
+        "text": text,
     }))
 }
 
@@ -709,5 +815,69 @@ mod tests {
             resolved[0]["path"],
             ".cursor/skills/sc-cursor-only/SKILL.md"
         );
+    }
+
+    #[test]
+    fn check_admissible_with_toolchain_enforces_read_only_and_shares_tree_sha() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = infra_core::fs::canonicalize(root.path()).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}").unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect composer dependencies".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let mut ro_trace = Trace {
+            provider: "claude".into(),
+            steps: vec![
+                json!({"kind": "tool", "tool": "Read", "input": {"file_path": "composer.json"}}),
+                json!({"kind": "tool", "tool": "Grep", "input": {"pattern": "laravel"}}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        let default_denied = check_admissible_with_toolchain(
+            &store,
+            false,
+            &workspace,
+            &route,
+            "inspect composer dependencies",
+            &ro_trace,
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert_eq!(default_denied["reason"], "no_skill");
+
+        let (skills, tools, tree_sha) = check_admissible_with_toolchain(
+            &store,
+            true,
+            &workspace,
+            &route,
+            "inspect composer dependencies",
+            &ro_trace,
+            &Value::Null,
+        )
+        .unwrap();
+        assert!(skills.is_empty());
+        assert_eq!(tools, 2);
+        assert!(tree_sha.is_some());
+
+        ro_trace
+            .steps
+            .push(json!({"kind": "tool", "tool": "Write", "input": {"file_path": "a.txt"}}));
+        let mutating = check_admissible_with_toolchain(
+            &store,
+            true,
+            &workspace,
+            &route,
+            "inspect composer dependencies",
+            &ro_trace,
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert_eq!(mutating["reason"], "mutating_tool_chain");
     }
 }

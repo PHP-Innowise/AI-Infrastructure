@@ -3,8 +3,180 @@
 //! They live in `sessions.sqlite3` with every other Harness domain. Nothing
 //! is written to a project's `memory-bank/` or `project-brain/`.
 use crate::{HarnessError, Result, store};
+use infra_skillcache::candidate::Candidate;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Filesystem/IR verification race window (2 seconds in nanoseconds).
+pub(crate) const RACY_NS: u128 = 2_000_000_000;
+
+/// Current wall-clock time in Unix nanoseconds for RACY_NS manifest guards.
+pub(crate) fn current_unix_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+/// Persisted artifact dependency manifest bound to a compiled SkillCache capsule.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ArtifactDependencyManifest {
+    #[serde(default)]
+    pub skill_paths: Vec<String>,
+    #[serde(default)]
+    pub watched_globs: Vec<String>,
+    #[serde(default)]
+    pub manifest_files: Vec<String>,
+    #[serde(default)]
+    pub ast_selectors: Vec<String>,
+    #[serde(default)]
+    pub route_selectors: Vec<String>,
+    #[serde(default)]
+    pub table_selectors: Vec<String>,
+    #[serde(default)]
+    pub caller_files: Vec<String>,
+    #[serde(default)]
+    pub ir_revision: u64,
+    #[serde(default)]
+    pub verified_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeltaMatch {
+    None,
+    ExactSkill,
+    Dependency,
+}
+
+pub(crate) fn normalize_rel_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    let stripped = normalized.trim_start_matches("./").trim_end_matches('/');
+    stripped.to_string()
+}
+
+pub(crate) fn path_matches(candidate: &str, needle: &str) -> bool {
+    let sp = normalize_rel_path(candidate);
+    let needle = normalize_rel_path(needle);
+    if sp.is_empty() || needle.is_empty() {
+        return false;
+    }
+    sp == needle
+        || sp.starts_with(&format!("{needle}/"))
+        || needle.starts_with(&format!("{sp}/"))
+        || sp.ends_with(&format!("/{needle}"))
+        || sp.contains(&format!("/{needle}/"))
+}
+
+pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
+    let pat = normalize_rel_path(pattern);
+    let target = normalize_rel_path(path);
+    if pat.is_empty() || target.is_empty() {
+        return false;
+    }
+    if !pat.contains(['*', '?']) {
+        return path_matches(&pat, &target);
+    }
+    fn inner(p: &[u8], s: &[u8]) -> bool {
+        if p.is_empty() {
+            return s.is_empty();
+        }
+        if p.starts_with(b"**") {
+            let next_p = if p.get(2) == Some(&b'/') {
+                &p[3..]
+            } else {
+                &p[2..]
+            };
+            if inner(next_p, s) {
+                return true;
+            }
+            return !s.is_empty() && inner(p, &s[1..]);
+        }
+        if p[0] == b'*' {
+            if inner(&p[1..], s) {
+                return true;
+            }
+            return !s.is_empty() && s[0] != b'/' && inner(p, &s[1..]);
+        }
+        if p[0] == b'?' {
+            return !s.is_empty() && s[0] != b'/' && inner(&p[1..], &s[1..]);
+        }
+        !s.is_empty() && p[0] == s[0] && inner(&p[1..], &s[1..])
+    }
+    inner(pat.as_bytes(), target.as_bytes())
+}
+
+impl ArtifactDependencyManifest {
+    pub(crate) fn from_value(value: &Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
+    }
+
+    pub(crate) fn evaluate_delta(
+        &self,
+        changed_paths: &[String],
+        caller_files: &[String],
+        ir_revision: u64,
+        now_ns: u128,
+    ) -> DeltaMatch {
+        if changed_paths.is_empty() && caller_files.is_empty() {
+            return DeltaMatch::None;
+        }
+        for changed in changed_paths {
+            if self
+                .skill_paths
+                .iter()
+                .any(|skill| path_matches(skill, changed))
+            {
+                return DeltaMatch::ExactSkill;
+            }
+        }
+        let dep_changed = changed_paths.iter().any(|changed| {
+            self.watched_globs
+                .iter()
+                .any(|glob| glob_matches(glob, changed))
+                || self
+                    .manifest_files
+                    .iter()
+                    .any(|file| path_matches(file, changed))
+                || self
+                    .ast_selectors
+                    .iter()
+                    .any(|sel| path_matches(sel, changed))
+                || self
+                    .route_selectors
+                    .iter()
+                    .any(|sel| path_matches(sel, changed))
+                || self
+                    .table_selectors
+                    .iter()
+                    .any(|sel| path_matches(sel, changed))
+        });
+        let caller_changed = caller_files.iter().any(|caller| {
+            self.caller_files
+                .iter()
+                .any(|known| path_matches(known, caller))
+                || self
+                    .watched_globs
+                    .iter()
+                    .any(|glob| glob_matches(glob, caller))
+        });
+        if !dep_changed && !caller_changed {
+            return DeltaMatch::None;
+        }
+        if self.ir_revision != 0
+            && ir_revision != 0
+            && ir_revision <= self.ir_revision
+            && now_ns.saturating_sub(self.verified_ns) >= RACY_NS
+        {
+            return DeltaMatch::None;
+        }
+        DeltaMatch::Dependency
+    }
+}
 
 /// A trace nothing was compiled from is dropped after this many days.
 pub const TRACE_DAYS: i64 = 30;
@@ -29,7 +201,9 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             source_generation TEXT NOT NULL, compile_id TEXT NOT NULL, artifact_dir TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT,
             package_sha256 TEXT NOT NULL DEFAULT '', capabilities TEXT NOT NULL DEFAULT '{}',
-            engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0, reason TEXT);
+            engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0,
+            dependency_manifest TEXT NOT NULL DEFAULT '{}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
+            tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT);
         CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);
         CREATE VIRTUAL TABLE IF NOT EXISTS skillcache_capsules_fts USING fts5(
             capsule_id UNINDEXED, project_id UNINDEXED, skill_name, mu_name, mu_description,
@@ -49,7 +223,25 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             generation TEXT PRIMARY KEY, session_id TEXT NOT NULL, capsule_id TEXT NOT NULL,
             provider TEXT NOT NULL, model TEXT, outcome TEXT NOT NULL, steps TEXT NOT NULL,
             deopts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS skillcache_runs_capsule ON skillcache_runs(capsule_id,created_at);",
+        CREATE INDEX IF NOT EXISTS skillcache_runs_capsule ON skillcache_runs(capsule_id,created_at);
+        CREATE TABLE IF NOT EXISTS skillcache_templates(
+            template_id TEXT PRIMARY KEY,
+            edition TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            skill_tree_sha256 TEXT NOT NULL,
+            form TEXT NOT NULL CHECK(form IN ('hybrid','textual')),
+            mu_name TEXT NOT NULL,
+            mu_description TEXT NOT NULL,
+            capsule_json TEXT NOT NULL,
+            files_json TEXT NOT NULL,
+            markdown TEXT,
+            examples_json TEXT,
+            portability_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(edition, skill_name, skill_tree_sha256));
+        CREATE INDEX IF NOT EXISTS skillcache_templates_lookup
+            ON skillcache_templates(edition, skill_name, skill_tree_sha256);",
     )?;
     for (table, column, definition) in [
         (
@@ -62,6 +254,21 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             "skillcache_capsules",
             "runs_reset_rowid",
             "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "skillcache_capsules",
+            "dependency_manifest",
+            "TEXT NOT NULL DEFAULT '{}'",
+        ),
+        (
+            "skillcache_capsules",
+            "capsule_kind",
+            "TEXT NOT NULL DEFAULT 'skill'",
+        ),
+        (
+            "skillcache_capsules",
+            "tool_chain_tree_sha",
+            "TEXT NOT NULL DEFAULT ''",
         ),
         ("skillcache_compiles", "eval_arm", "TEXT"),
     ] {
@@ -102,7 +309,9 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
                  source_generation TEXT NOT NULL, compile_id TEXT NOT NULL, artifact_dir TEXT NOT NULL,
                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT,
                  package_sha256 TEXT NOT NULL DEFAULT '', capabilities TEXT NOT NULL DEFAULT '{{}}',
-                 engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0, reason TEXT);
+                 engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0,
+                 dependency_manifest TEXT NOT NULL DEFAULT '{{}}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
+                 tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT);
              INSERT INTO skillcache_capsules_new({CAPSULE_COLUMNS},runs_reset_rowid)
              SELECT {CAPSULE_COLUMNS},runs_reset_rowid FROM skillcache_capsules;
              DROP TABLE skillcache_capsules;
@@ -253,7 +462,7 @@ pub(crate) fn delete_trace(db: &Connection, generation: &str) -> Result<bool> {
     )? > 0)
 }
 
-const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason";
+const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha";
 
 fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -283,6 +492,9 @@ fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "engine_digest": row.get::<_, String>(24)?,
         "eval_arm": row.get::<_, Option<String>>(25)?,
         "reason": row.get::<_, Option<String>>(26)?,
+        "dependency_manifest": decoded(row.get(27)?),
+        "kind": row.get::<_, String>(28)?,
+        "tool_chain_tree_sha": row.get::<_, String>(29)?,
     }))
 }
 
@@ -473,6 +685,159 @@ pub(crate) fn active_capsules(
     skill_path: &str,
 ) -> Result<Vec<Value>> {
     active_capsules_for_eval(db, project_id, skill_path, None)
+}
+
+/// Records the dependency manifest bound to a compiled capsule.
+pub(crate) fn set_dependency_manifest(
+    db: &Connection,
+    capsule_id: &str,
+    manifest: &ArtifactDependencyManifest,
+) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE skillcache_capsules SET dependency_manifest=?2,updated_at=?3 WHERE capsule_id=?1",
+        params![capsule_id, manifest.to_value().to_string(), store::now()],
+    )?;
+    if changed == 0 {
+        return Err(HarnessError::missing("Capsule not found."));
+    }
+    Ok(())
+}
+
+/// Records kind (`skill` | `tool_chain` | `template`) and workspace tree digest for cross-worktree sharing.
+pub(crate) fn set_capsule_kind_meta(
+    db: &Connection,
+    capsule_id: &str,
+    kind: &str,
+    tool_chain_tree_sha: &str,
+) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE skillcache_capsules SET capsule_kind=?2,tool_chain_tree_sha=?3,updated_at=?4 WHERE capsule_id=?1",
+        params![capsule_id, kind, tool_chain_tree_sha, store::now()],
+    )?;
+    if changed == 0 {
+        return Err(HarnessError::missing("Capsule not found."));
+    }
+    Ok(())
+}
+
+/// Active `ToolChain` capsules shared within a project for a matching tree digest.
+pub(crate) fn active_toolchain_capsules(
+    db: &Connection,
+    project_id: &str,
+    tree_sha: &str,
+    eval_arm: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id=?1 AND capsule_kind='tool_chain' AND tool_chain_tree_sha=?2 AND status='active'
+           AND ((?3 IS NULL AND eval_arm IS NULL) OR eval_arm=?3)
+         ORDER BY created_at DESC,rowid DESC"
+    ))?;
+    let rows = query.query_map(params![project_id, tree_sha, eval_arm], capsule_row)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Stores or updates a portable edition template indexed by `(edition, skill_name, skill_tree_sha256)`.
+pub(crate) fn upsert_template(
+    db: &Connection,
+    edition: &str,
+    skill_name: &str,
+    skill_tree_sha256: &str,
+    candidate: &Candidate,
+) -> Result<String> {
+    let files_json = Value::Array(
+        candidate
+            .files
+            .iter()
+            .filter_map(|(path, bytes)| {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .map(|content| json!({"path": path, "content": content}))
+            })
+            .collect(),
+    );
+    let examples_json = candidate
+        .examples
+        .as_ref()
+        .and_then(|e| serde_json::to_string(&e.to_value()).ok());
+    let capsule_json = String::from_utf8_lossy(&candidate.capsule_bytes).into_owned();
+    let portability_sha256 =
+        infra_core::query::sha256(format!("{capsule_json}\n{files_json}").as_bytes());
+    let template_id = format!("tpl-{}", &portability_sha256[..16]);
+    let now = store::now();
+    db.execute(
+        "INSERT INTO skillcache_templates(
+            template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
+            capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)
+         ON CONFLICT(edition,skill_name,skill_tree_sha256) DO UPDATE SET
+            form=excluded.form,mu_name=excluded.mu_name,mu_description=excluded.mu_description,
+            capsule_json=excluded.capsule_json,files_json=excluded.files_json,markdown=excluded.markdown,
+            examples_json=excluded.examples_json,portability_sha256=excluded.portability_sha256,updated_at=excluded.updated_at",
+        params![
+            template_id,
+            edition,
+            skill_name,
+            skill_tree_sha256,
+            candidate.capsule.form.as_str(),
+            candidate.capsule.mu.name,
+            candidate.capsule.mu.description,
+            capsule_json,
+            files_json.to_string(),
+            candidate.markdown,
+            examples_json,
+            portability_sha256,
+            now
+        ],
+    )?;
+    Ok(template_id)
+}
+
+/// Looks up portable edition templates matching `(edition, skill_name, skill_tree_sha256)`.
+pub(crate) fn find_templates(
+    db: &Connection,
+    edition: &str,
+    skill_name: &str,
+    skill_tree_sha256: &str,
+) -> Result<Vec<Value>> {
+    let mut query = db.prepare(
+        "SELECT template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
+                capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
+         FROM skillcache_templates
+         WHERE edition=?1 AND skill_name=?2 AND skill_tree_sha256=?3
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = query.query_map(params![edition, skill_name, skill_tree_sha256], |row| {
+        Ok(json!({
+            "template_id": row.get::<_, String>(0)?,
+            "edition": row.get::<_, String>(1)?,
+            "skill_name": row.get::<_, String>(2)?,
+            "skill_tree_sha256": row.get::<_, String>(3)?,
+            "form": row.get::<_, String>(4)?,
+            "mu": {"name": row.get::<_, String>(5)?, "description": row.get::<_, String>(6)?},
+            "capsule_json": row.get::<_, String>(7)?,
+            "files_json": decoded(row.get(8)?),
+            "markdown": row.get::<_, Option<String>>(9)?,
+            "examples_json": row.get::<_, Option<String>>(10)?,
+            "portability_sha256": row.get::<_, String>(11)?,
+            "created_at": row.get::<_, String>(12)?,
+            "updated_at": row.get::<_, String>(13)?,
+        }))
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Lists all active/needs_recompile capsules of `project_id` for IR delta matching.
+pub(crate) fn active_or_needs_recompile_capsules(
+    db: &Connection,
+    project_id: &str,
+) -> Result<Vec<Value>> {
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id=?1 AND status IN ('active','needs_recompile')"
+    ))?;
+    let rows = query.query_map([project_id], capsule_row)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 /// The active capsules compiled for `eval_arm` (or normal non-eval capsules
@@ -1160,5 +1525,96 @@ mod tests {
         initialize(&db).unwrap();
         set_capsule_status(&db, "k1", "retired", Some("Retired")).unwrap();
         assert_eq!(capsule(&db, "k1").unwrap().unwrap()["status"], "retired");
+    }
+
+    #[test]
+    fn dependency_manifest_racy_ns_and_template_index_round_trip() {
+        let now = current_unix_ns();
+        let manifest = ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/deploy/SKILL.md".into()],
+            watched_globs: vec!["src/routes/**".into()],
+            manifest_files: vec!["composer.json".into()],
+            ast_selectors: vec!["src/Controllers/AuthController.php".into()],
+            route_selectors: vec!["routes/api.php".into()],
+            table_selectors: vec!["database/migrations/**".into()],
+            caller_files: vec!["app/Http/Kernel.php".into()],
+            ir_revision: 10,
+            verified_ns: now,
+        };
+        assert_eq!(
+            manifest.evaluate_delta(
+                &[".claude/skills/deploy/SKILL.md".into()],
+                &[],
+                10,
+                now + RACY_NS + 100
+            ),
+            DeltaMatch::ExactSkill
+        );
+        // Same/older IR revision outside the 2s RACY_NS window is already verified.
+        assert_eq!(
+            manifest.evaluate_delta(&["routes/api.php".into()], &[], 10, now + RACY_NS + 1),
+            DeltaMatch::None
+        );
+        // Within RACY_NS window, matching changes must be treated as drifted conservatively.
+        assert_eq!(
+            manifest.evaluate_delta(&["routes/api.php".into()], &[], 10, now + 1000),
+            DeltaMatch::Dependency
+        );
+        // Newer IR revision triggers dependency staleness even after RACY_NS.
+        assert_eq!(
+            manifest.evaluate_delta(
+                &[],
+                &["app/Http/Kernel.php".into()],
+                11,
+                now + RACY_NS + 500
+            ),
+            DeltaMatch::Dependency
+        );
+        assert_eq!(
+            manifest.evaluate_delta(&["README.md".into()], &[], 11, now + 500),
+            DeltaMatch::None
+        );
+
+        let db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let answer = json!({
+            "form": "hybrid",
+            "capsule": {
+                "mu": {"name": "php-lint", "description": "Check PHP syntax"},
+                "source": {"skills": [{"name": "php-lint", "path": ".claude/skills/php-lint/SKILL.md"}]},
+                "capabilities": {"network": "none", "runtimes": ["python3"]},
+                "bindings": [],
+                "programs": [{
+                    "id": "lint",
+                    "entry": ["python3", "programs/lint/main.py"],
+                    "inputs": [],
+                    "outputs": [],
+                    "check": ["python3", "programs/lint/main.py", "--check"],
+                    "timeout_seconds": 30,
+                    "read_only": true
+                }],
+                "steps": [{"kind": "program", "program": "lint"}],
+                "verification": []
+            },
+            "files": [{"path": "programs/lint/main.py", "content": "print('ok')\n"}],
+            "examples": {"bindings": {}, "steps": {}}
+        });
+        let known = vec![infra_skillcache::candidate::KnownSkill {
+            name: "php-lint".into(),
+            path: ".claude/skills/php-lint/SKILL.md".into(),
+            tree_sha256: "e".repeat(64),
+        }];
+        let cand = infra_skillcache::candidate::from_answer(
+            &answer,
+            &known,
+            infra_skillcache::Form::Hybrid,
+        )
+        .unwrap();
+        let tpl = infra_skillcache::candidate::as_portable_template(&cand, "Laravel");
+        upsert_template(&db, "Laravel", "php-lint", &"e".repeat(64), &tpl).unwrap();
+        let found = find_templates(&db, "Laravel", "php-lint", &"e".repeat(64)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["edition"], "Laravel");
+        assert_eq!(found[0]["mu"]["name"], "php-lint");
     }
 }
