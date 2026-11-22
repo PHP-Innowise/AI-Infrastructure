@@ -62,6 +62,73 @@ impl Capture {
     pub fn value(&self) -> Value {
         json!({"output":self.output,"exit_code":self.exit_code,"reason":self.reason,"seconds":self.seconds})
     }
+    /// Returns a `skillcache-tool`-compatible bounded status envelope (`ok`,
+    /// `exit_code`, `reason`, truncated `stdout`/`diagnostic`, `seconds`).
+    pub fn tool_envelope(&self) -> Value {
+        let cap = infra_skillcache::tool::STDOUT_BYTES;
+        let diag_cap = infra_skillcache::tool::DIAGNOSTIC_BYTES;
+        let slice = |text: &str, max: usize| -> String {
+            let mut end = text.len().min(max);
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text[..end].to_owned()
+        };
+        let ok = self.reason.is_none() && self.exit_code == Some(0);
+        json!({
+            "ok": ok,
+            "exit_code": self.exit_code,
+            "reason": self.reason,
+            "stdout": slice(&self.output, cap),
+            "diagnostic": if ok { String::new() } else { slice(&self.output, diag_cap) },
+            "seconds": self.seconds,
+        })
+    }
+}
+
+fn discover_git_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let Ok(mut cur) = infra_core::fs::canonicalize(root) else {
+        return dirs;
+    };
+    loop {
+        let dot_git = cur.join(".git");
+        if dot_git.is_dir() {
+            if let Ok(canon) = infra_core::fs::canonicalize(&dot_git) {
+                dirs.push(canon);
+            }
+            return dirs;
+        }
+        if dot_git.is_file() {
+            dirs.push(dot_git.clone());
+            if let Ok(text) = std::fs::read_to_string(&dot_git)
+                && let Some(raw) = text.trim().strip_prefix("gitdir:")
+            {
+                let gitdir = PathBuf::from(raw.trim());
+                let abs = if gitdir.is_absolute() {
+                    gitdir
+                } else {
+                    cur.join(gitdir)
+                };
+                if let Ok(canon_abs) = infra_core::fs::canonicalize(&abs) {
+                    if !dirs.contains(&canon_abs) {
+                        dirs.push(canon_abs);
+                    }
+                    let commondir_file = abs.join("commondir");
+                    if let Ok(rel) = std::fs::read_to_string(&commondir_file)
+                        && let Ok(canon_common) = infra_core::fs::canonicalize(abs.join(rel.trim()))
+                        && !dirs.contains(&canon_common)
+                    {
+                        dirs.push(canon_common);
+                    }
+                }
+            }
+            return dirs;
+        }
+        if !cur.pop() {
+            return dirs;
+        }
+    }
 }
 pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -116,6 +183,11 @@ pub struct Results {
     pub(crate) backend: Arc<dyn ResultsBackend>,
     target: RwLock<Option<Weak<dyn TargetCheckWorkflow>>>,
     omnigraph: RwLock<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
+}
+#[derive(Clone, Copy, Default)]
+pub struct SandboxOptions<'a> {
+    pub env_extra: Option<&'a BTreeMap<String, String>>,
+    pub readable_extra: &'a [PathBuf],
 }
 impl Results {
     pub fn new(store: SessionStore, backend: Arc<dyn ResultsBackend>) -> Result<Self> {
@@ -208,11 +280,7 @@ impl Results {
                 seconds: 0.0,
             });
         }
-        let mut env = std::env::vars()
-            .filter(|(k, _)| !k.starts_with("GIT_"))
-            .collect::<BTreeMap<_, _>>();
-        env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
-        env.extend(env_extra.clone());
+        let env = infra_host::sandbox::scrub_env(std::env::vars(), env_extra);
         let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = bytes.clone();
         let started = Instant::now();
@@ -240,6 +308,66 @@ impl Results {
         ))
         .await;
         self.finish_capture(result, bytes.as_ref(), cancel.as_ref(), started)
+    }
+    /// Executes a command inside `sandbox::gate` (`Profile::Gate`, `network = false`,
+    /// minimal root, scrubbed env) with `root` writable and optional extra read-only
+    /// directories (such as a linked worktree's shared `.git` common dir).
+    pub async fn capture_sandboxed(
+        &self,
+        argv: &[String],
+        root: &Path,
+        timeout: u64,
+        cancel: Arc<AtomicBool>,
+        options: SandboxOptions<'_>,
+        update: impl FnMut(&str) -> Result<()> + Send,
+    ) -> Result<Capture> {
+        let stopping = self.backend.shutdown_cancel();
+        if cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) {
+            return Ok(Capture {
+                output: String::new(),
+                exit_code: None,
+                reason: Some("cancelled".into()),
+                seconds: 0.0,
+            });
+        }
+        let root_canon = infra_core::fs::canonicalize(root)?;
+        let mut readable = Vec::new();
+        for git_dir in discover_git_dirs(&root_canon) {
+            if !git_dir.starts_with(&root_canon) && !readable.contains(&git_dir) {
+                readable.push(git_dir);
+            }
+        }
+        for path in options.readable_extra {
+            if let Ok(canon) = infra_core::fs::canonicalize(path)
+                && !readable.contains(&canon)
+            {
+                readable.push(canon);
+            }
+        }
+        let empty_env = BTreeMap::new();
+        let env_extra = options.env_extra.unwrap_or(&empty_env);
+        let path_env = env_extra
+            .get("PATH")
+            .cloned()
+            .or_else(|| std::env::var("PATH").ok());
+        let wrapped = if cfg!(windows) && !infra_host::sandbox::available() {
+            argv.to_vec()
+        } else {
+            let spec = crate::sandbox::Spec {
+                workspace: root_canon.clone(),
+                target: root_canon.clone(),
+                protected: vec![],
+                readable,
+                accounts: vec![],
+                runtime: infra_host::sandbox::runtime_dirs_for_argv(argv, path_env.as_deref()),
+                codex: None,
+                evidence: None,
+                network: false,
+            };
+            crate::sandbox::gate(&spec, argv)?
+        };
+        self.capture(&wrapped, &root_canon, timeout, cancel, env_extra, update)
+            .await
     }
     fn finish_capture(
         &self,
@@ -1638,12 +1766,12 @@ impl CheckWorkflow for Results {
                     let root = self.backend.workspace(&self.store.get(&sid)?)?;
                     let argv = serde_json::from_value::<Vec<String>>(c["argv"].clone())?;
                     let result = self
-                        .capture(
+                        .capture_sandboxed(
                             &argv,
                             &root,
                             c["timeout"].as_u64().unwrap_or(1),
                             cancel.clone(),
-                            &BTreeMap::new(),
+                            SandboxOptions::default(),
                             |output| {
                                 c["output"] = output.into();
                                 self.save_check(&c)
@@ -1851,6 +1979,66 @@ mod cleanup_error_tests {
         assert_eq!(capture.exit_code, None);
         assert!(capture.output.is_empty());
         assert_eq!(capture.seconds, 0.0);
+    }
+
+    #[tokio::test]
+    async fn capture_sandboxed_cancels_cleanly_and_tool_envelope_bounds_diagnostics() {
+        let fixture = crate::sessions::generation_completion_tests::Fixture::new();
+        let results = fixture.delivery().results;
+        let dir = tempfile::tempdir().unwrap();
+        let ws = infra_core::fs::canonicalize(dir.path()).unwrap().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let cap = results
+            .capture_sandboxed(
+                &["/bin/echo".into(), "never-runs".into()],
+                &ws,
+                5,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                super::SandboxOptions::default(),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cap.reason.as_deref(), Some("cancelled"));
+        assert_eq!(cap.exit_code, None);
+        assert!(!ws.join(".harness-tmp").exists());
+
+        let env_clean = infra_host::sandbox::scrub_env(
+            [
+                ("PATH".to_owned(), "/usr/bin".to_owned()),
+                ("OPENAI_API_KEY".to_owned(), "secret".to_owned()),
+            ],
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(!env_clean.contains_key("OPENAI_API_KEY"));
+        assert_eq!(
+            env_clean.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+
+        let ok_cap = super::Capture {
+            output: "all checks green".into(),
+            exit_code: Some(0),
+            reason: None,
+            seconds: 0.1,
+        };
+        let ok_env = ok_cap.tool_envelope();
+        assert_eq!(ok_env["ok"], true);
+        assert_eq!(ok_env["exit_code"], 0);
+        assert_eq!(ok_env["stdout"], "all checks green");
+        assert_eq!(ok_env["diagnostic"], "");
+
+        let diag_cap = infra_skillcache::tool::DIAGNOSTIC_BYTES;
+        let err_cap = super::Capture {
+            output: "x".repeat(diag_cap + 200),
+            exit_code: Some(1),
+            reason: None,
+            seconds: 0.2,
+        };
+        let err_env = err_cap.tool_envelope();
+        assert_eq!(err_env["ok"], false);
+        assert_eq!(err_env["exit_code"], 1);
+        assert!(err_env["diagnostic"].as_str().unwrap().len() <= diag_cap + 32);
     }
 }
 

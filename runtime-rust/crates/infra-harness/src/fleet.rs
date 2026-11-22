@@ -42,42 +42,77 @@ pub struct Fleet {
 fn cost(v: &Value) -> Option<f64> {
     v.as_f64().filter(|n| n.is_finite() && *n >= 0.)
 }
-pub fn parse_findings(text: &str, lens: &str) -> Vec<Value> {
-    for (start, _) in text.match_indices('{') {
-        let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
-        if let Some(Ok(v)) = stream.next()
-            && let Some(items) = v["findings"].as_array()
-        {
-            return items
-                .iter()
-                .filter(|v| v.is_object() && v["claim"].as_str().is_some_and(|s| !s.is_empty()))
-                .map(|v| {
-                    let mut v = v.clone();
-                    v["lens"] = lens.into();
-                    v
-                })
-                .collect();
-        }
+/// Strictly validates Fleet JSON findings (`{"findings": [...]}`) without creating
+/// heuristic `"severity": "unparsed"` placeholder items.
+pub fn parse_findings_strict(text: &str, lens: &str) -> std::result::Result<Vec<Value>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("empty reviewer response".into());
     }
-    let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if clean.is_empty() {
-        vec![]
+    let root = if let Ok(v) = serde_json::from_str::<Value>(trimmed)
+        && v.is_object()
+    {
+        v
+    } else if let Some(fenced) = crate::clash::extract_json_fence(trimmed)
+        && let Ok(v) = serde_json::from_str::<Value>(fenced)
+        && v.is_object()
+    {
+        v
     } else {
-        vec![
-            json!({"lens":lens,"severity":"unparsed","claim":clean.chars().take(300).collect::<String>(),"file":"","evidence":"worker output did not contain a findings object"}),
-        ]
+        return Err("reviewer output is not a valid JSON object or fenced ```json block".into());
+    };
+    let Some(items) = root.get("findings").and_then(Value::as_array) else {
+        return Err("missing `findings` array in JSON output".into());
+    };
+    let mut validated = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            return Err(format!("`findings[{idx}]` must be an object"));
+        };
+        let Some(claim) = obj
+            .get("claim")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Err(format!(
+                "`findings[{idx}].claim` must be a non-empty string"
+            ));
+        };
+        let sev = obj
+            .get("severity")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !["critical", "high", "medium", "low", "info"].contains(&sev.as_str()) {
+            return Err(format!(
+                "`findings[{idx}].severity` must be critical|high|medium|low|info (got `{sev}`)"
+            ));
+        }
+        let mut entry = Value::Object(obj.clone());
+        entry["lens"] = lens.into();
+        entry["severity"] = sev.into();
+        entry["claim"] = claim.chars().take(2000).collect::<String>().into();
+        validated.push(entry);
     }
+    Ok(validated)
 }
+
+pub fn parse_findings(text: &str, lens: &str) -> Vec<Value> {
+    parse_findings_strict(text, lens).unwrap_or_default()
+}
+
 pub fn dedupe(items: &[Value]) -> Vec<Value> {
     let mut indexed = items.iter().enumerate().collect::<Vec<_>>();
     indexed.sort_by_key(|(i, v)| {
         (
             match v["severity"].as_str() {
-                Some("high") => 0,
-                Some("medium") => 1,
-                Some("low") => 2,
-                Some("unparsed") => 3,
-                _ => 4,
+                Some("critical") => 0,
+                Some("high") => 1,
+                Some("medium") => 2,
+                Some("low") => 3,
+                Some("info") => 4,
+                _ => 5,
             },
             *i,
         )
@@ -190,7 +225,7 @@ impl Fleet {
         {
             return legacy::persist(&self.store, &run);
         }
-        let state = json!({"scope":scope,"task_id":task,"thread_id":thread,"lenses":c.lenses,"findings":[],"cost_usd":0.0,"skipped":[]});
+        let state = json!({"scope":scope,"task_id":task,"thread_id":thread,"lenses":c.lenses,"findings":[],"cost_usd":0.0,"usage_components":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_write_5m_input_tokens":0,"cache_write_1h_input_tokens":0,"model_calls":0},"skipped":[]});
         self.store.connection()?.execute(
             "INSERT INTO native_fleet_runs(thread_id,state,stage)VALUES(?1,?2,'scope')",
             params![thread, state.to_string()],
@@ -254,7 +289,14 @@ impl Fleet {
         }
         Ok(out)
     }
-    fn finish(&self, thread: &str, tid: &str, result: &WorkerResult) -> Result<()> {
+    fn finish(
+        &self,
+        thread: &str,
+        tid: &str,
+        result: &WorkerResult,
+        usage_components: &Value,
+        schema_error: Option<&str>,
+    ) -> Result<()> {
         let mut db = self.store.connection()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (input, status): (String, String) = tx.query_row(
@@ -279,7 +321,11 @@ impl Fleet {
             |r| r.get(0),
         )?;
         let mut state = crate::strict_json::parse(raw.as_bytes(), 16 * 1024 * 1024)?;
-        let findings = parse_findings(&result.text, input["lens"].as_str().unwrap_or(""));
+        let lens = input["lens"].as_str().unwrap_or("");
+        let (findings, schema_err) = match parse_findings_strict(&result.text, lens) {
+            Ok(items) => (items, schema_error.map(str::to_owned)),
+            Err(err) => (vec![], Some(schema_error.map(str::to_owned).unwrap_or(err))),
+        };
         state["findings"]
             .as_array_mut()
             .ok_or_else(|| HarnessError::invalid("Invalid Fleet findings."))?
@@ -289,7 +335,18 @@ impl Fleet {
                 .zip(result.cost_usd)
                 .map(|(a, b)| a + b)
         );
-        tx.execute("UPDATE native_fleet_tasks SET status='completed',output=?1,error=NULL WHERE thread_id=?2 AND task_id=?3",params![json!({"findings":findings,"cost_usd":result.cost_usd}).to_string(),thread,tid])?;
+        crate::clash::merge_usage_components(&mut state["usage_components"], usage_components);
+        if let Some(err) = &schema_err {
+            let mut errs = state["schema_errors"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if errs.len() < 32 {
+                errs.push(json!({"lens": lens, "error": err}));
+            }
+            state["schema_errors"] = json!(errs);
+        }
+        tx.execute("UPDATE native_fleet_tasks SET status='completed',output=?1,error=NULL WHERE thread_id=?2 AND task_id=?3",params![json!({"findings":findings,"cost_usd":result.cost_usd,"usage_components":usage_components,"schema_error":schema_err}).to_string(),thread,tid])?;
         tx.execute(
             "UPDATE native_fleet_runs SET state=?1,revision=revision+1 WHERE thread_id=?2",
             params![state.to_string(), thread],
@@ -348,10 +405,24 @@ impl Fleet {
                         tx.execute("UPDATE native_fleet_runs SET state=?1,stage='review',revision=revision+1 WHERE thread_id=?2 AND revision=?3",params![state.to_string(),thread,rev])?;
                         tx.commit()?;
                     }
+                    if !c.dry_run
+                        && let Some(pre) = state.get("precheck")
+                        && let Some(record) =
+                            crate::clash::run_precheck_sandboxed(&c.project, pre).await
+                    {
+                        let (mut st, _, _, r) = self.snapshot(thread)?;
+                        st["deterministic_precheck"] = record;
+                        self.transition(thread, r, &st, "review")?;
+                    }
                     emit(json!({"kind":"fleet_stage","stage":"scope","status":"completed"}))?;
                 }
                 "review" => {
                     emit(json!({"kind":"fleet_stage","stage":"review","status":"running"}))?;
+                    let pre_note = state["deterministic_precheck"]["summary"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| format!("\n**Deterministic pre-stage check** -\n{s}\n"))
+                        .unwrap_or_default();
                     let semaphore = Arc::new(tokio::sync::Semaphore::new(c.concurrency));
                     let mut running = tokio::task::JoinSet::new();
                     for (tid, input) in self.tasks(thread)? {
@@ -364,12 +435,63 @@ impl Fleet {
                         let cancel = cancel.clone();
                         let emit = emit.clone();
                         let thread = thread.to_string();
-                        running.spawn(async move{let _permit=permit;let lens=input["lens"].as_str().ok_or_else(||HarnessError::invalid("Missing lens."))?;let task=input["task_id"].as_str().unwrap_or("");emit(json!({"kind":"fleet_reviewer","lens":lens,"status":"running","cost_usd":null}))?;
-       let capsule=format!("**Objective** - review through the {lens} lens.\n**Output format** - JSON findings with file,line,severity(high|medium|low),claim,evidence.\n**Tool and source guidance** - project root; scope {}. Task ID: {task}.\n**Task boundaries** - report only; do not modify files, run fixes or spawn agents.\n**Decisions and assumptions so far** - unattended run {thread}; no user amendments.\n",input["scope"].as_str().unwrap_or(""));if !cfg.dry_run{engine.blackboard.dispatch_spawn(task,lens,&capsule)?;}
-       let result=if cfg.dry_run{WorkerResult{text:json!({"findings":[{"file":"DEMO.md","line":1,"severity":"low","claim":format!("Offline demonstration finding ({lens})"),"evidence":"Synthetic finding; no project code was reviewed."}]}).to_string(),ok:true,cost_usd:Some(0.),session_id:None,duration_seconds:0.,error:None,limit_reached:None}}
-       else{let launch=Launch{provider:cfg.provider.clone(),executable:cfg.executable.clone(),project:cfg.project.clone(),prompt:format!("Act as {lens}. Return only JSON findings.\n\n{capsule}"),mode:"plan".into(),model:cfg.model.clone(),session:None,agents:false,count:1,effort:cfg.effort.clone(),usd:cost(&input["budget_usd"]),hook_events:false,permissions:None,approvals:None};let emit=emit.clone();provider::run_monitored_locked(&launch,Limits{seconds:Some(cfg.seconds),..Limits::default()},cancel,None,cfg.runner_lock.clone(),cfg.adapter.as_deref(),&std::collections::BTreeMap::new(),None,move|e|emit(e)).await?};
-       if !cfg.dry_run{engine.blackboard.dispatch_complete(task,lens,if result.ok{&result.text}else{"Reviewer failed."})?;}emit(json!({"kind":"fleet_reviewer","lens":lens,"status":if result.ok{"completed"}else{"failed"},"cost_usd":result.cost_usd,"duration_seconds":result.duration_seconds,"limit_reached":result.limit_reached}))?;engine.finish(&thread,&tid,&result)
-      });
+                        let pre_note = pre_note.clone();
+                        running.spawn(async move {
+                            let _permit = permit;
+                            let lens = input["lens"].as_str().ok_or_else(|| HarnessError::invalid("Missing lens."))?;
+                            let task = input["task_id"].as_str().unwrap_or("");
+                            emit(json!({"kind":"fleet_reviewer","lens":lens,"status":"running","cost_usd":null}))?;
+                            let capsule = format!(
+                                "**Objective** - review through the {lens} lens.\n**Output format** - JSON findings with file,line,severity(critical|high|medium|low|info),claim,evidence.\n**Tool and source guidance** - project root; scope {}. Task ID: {task}.\n**Task boundaries** - report only; do not modify files, run fixes or spawn agents.\n**Decisions and assumptions so far** - unattended run {thread}; no user amendments.\n{pre_note}",
+                                input["scope"].as_str().unwrap_or("")
+                            );
+                            if !cfg.dry_run {
+                                engine.blackboard.dispatch_spawn(task, lens, &capsule)?;
+                            }
+                            let (result, usage_components, schema_error) = if cfg.dry_run {
+                                (
+                                    WorkerResult {
+                                        text: json!({"findings":[{"file":"DEMO.md","line":1,"severity":"low","claim":format!("Offline demonstration finding ({lens})"),"evidence":"Synthetic finding; no project code was reviewed."}]}).to_string(),
+                                        ok: true,
+                                        cost_usd: Some(0.),
+                                        session_id: None,
+                                        duration_seconds: 0.,
+                                        error: None,
+                                        limit_reached: None,
+                                    },
+                                    json!({"input_tokens":0u64,"output_tokens":0u64,"cache_read_input_tokens":0u64,"cache_write_5m_input_tokens":0u64,"cache_write_1h_input_tokens":0u64,"model_calls":0u64,"source":"deterministic"}),
+                                    None,
+                                )
+                            } else {
+                                run_reviewer_with_repair(
+                                    &cfg,
+                                    lens,
+                                    &capsule,
+                                    cost(&input["budget_usd"]),
+                                    cancel,
+                                    emit.clone(),
+                                )
+                                .await?
+                            };
+                            if !cfg.dry_run {
+                                engine.blackboard.dispatch_complete(
+                                    task,
+                                    lens,
+                                    if result.ok { &result.text } else { "Reviewer failed." },
+                                )?;
+                            }
+                            emit(json!({
+                                "kind":"fleet_reviewer",
+                                "lens":lens,
+                                "status":if result.ok{"completed"}else{"failed"},
+                                "cost_usd":result.cost_usd,
+                                "usage_components":usage_components,
+                                "schema_error":schema_error,
+                                "duration_seconds":result.duration_seconds,
+                                "limit_reached":result.limit_reached
+                            }))?;
+                            engine.finish(&thread, &tid, &result, &usage_components, schema_error.as_deref())
+                        });
                     }
                     let mut failure = None;
                     while let Some(v) = running.join_next().await {
@@ -398,7 +520,7 @@ impl Fleet {
                 }
                 "gate" => {
                     return Ok(
-                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":"awaiting_approval","findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":"","preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run&&self.blackboard.available(),"task_id":state["task_id"]}),
                     );
                 }
                 "record" => {
@@ -436,11 +558,154 @@ impl Fleet {
                 }
                 "done" => {
                     return Ok(
-                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
+                        json!({"kind":"fleet_state","status":if state["approved"]==true{"completed"}else{"rejected"},"findings":dedupe(state["findings"].as_array().map(Vec::as_slice).unwrap_or(&[])),"cost_usd":state["cost_usd"],"usage_components":state["usage_components"],"schema_errors":state["schema_errors"],"deterministic_precheck":state["deterministic_precheck"],"skipped":state["skipped"],"report":state["report"],"preview":report(&state),"dry_run":c.dry_run,"brain_available":!c.dry_run,"task_id":state["task_id"]}),
                     );
                 }
                 _ => return Err(HarnessError::invalid("Invalid native Fleet stage.")),
             }
         }
+    }
+}
+
+async fn run_reviewer_with_repair(
+    cfg: &Config,
+    lens: &str,
+    capsule: &str,
+    budget_usd: Option<f64>,
+    cancel: Arc<AtomicBool>,
+    emit: Arc<dyn Fn(Value) -> Result<()> + Send + Sync>,
+) -> Result<(WorkerResult, Value, Option<String>)> {
+    let usage = Arc::new(std::sync::Mutex::new(json!({
+        "input_tokens": 0u64,
+        "output_tokens": 0u64,
+        "cache_read_input_tokens": 0u64,
+        "cache_write_5m_input_tokens": 0u64,
+        "cache_write_1h_input_tokens": 0u64,
+        "model_calls": 0u64,
+        "source": cfg.provider,
+    })));
+    let run_once = |prompt: String, usd: Option<f64>| {
+        let cfg = cfg.clone();
+        let cancel = cancel.clone();
+        let emit = emit.clone();
+        let usage = usage.clone();
+        async move {
+            let launch = Launch {
+                provider: cfg.provider.clone(),
+                executable: cfg.executable.clone(),
+                project: cfg.project.clone(),
+                prompt,
+                mode: "plan".into(),
+                model: cfg.model.clone(),
+                session: None,
+                agents: false,
+                count: 1,
+                effort: cfg.effort.clone(),
+                usd,
+                hook_events: false,
+                permissions: None,
+                approvals: None,
+            };
+            provider::run_monitored_locked(
+                &launch,
+                Limits {
+                    seconds: Some(cfg.seconds),
+                    ..Limits::default()
+                },
+                cancel,
+                None,
+                cfg.runner_lock.clone(),
+                cfg.adapter.as_deref(),
+                &std::collections::BTreeMap::new(),
+                None,
+                move |e| {
+                    if e["kind"] == "usage"
+                        && let Ok(mut slot) = usage.lock()
+                    {
+                        crate::clash::observe_usage_event(&mut slot, &e);
+                    }
+                    emit(e)
+                },
+            )
+            .await
+        }
+    };
+    let first = run_once(
+        format!("Act as {lens}. Return only JSON findings.\n\n{capsule}"),
+        budget_usd,
+    )
+    .await?;
+    let mut combined = first.clone();
+    let mut schema_error = None;
+    if first.ok
+        && let Err(err) = parse_findings_strict(&first.text, lens)
+    {
+        let remaining_usd = match (budget_usd, first.cost_usd) {
+            (Some(b), Some(used)) => Some((b - used).max(0.0)),
+            (b, _) => b,
+        };
+        let can_repair = !cancel.load(std::sync::atomic::Ordering::Acquire)
+            && remaining_usd.is_none_or(|r| r >= 0.01);
+        if can_repair {
+            let snippet: String = first.text.chars().take(1024).collect();
+            let repair_prompt = format!(
+                "Act as {lens}. Your previous response failed strict JSON schema validation ({err}).\nReturn ONLY a single JSON object `{{\"findings\":[{{\"file\":\"...\",\"line\":1,\"severity\":\"high|medium|low\",\"claim\":\"...\",\"evidence\":\"...\"}}]}}`.\nPrevious output:\n{snippet}"
+            );
+            if let Ok(repaired) = run_once(repair_prompt, remaining_usd).await {
+                combined.cost_usd = match (first.cost_usd, repaired.cost_usd) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
+                combined.duration_seconds += repaired.duration_seconds;
+                if repaired.ok {
+                    match parse_findings_strict(&repaired.text, lens) {
+                        Ok(_) => combined.text = repaired.text,
+                        Err(err2) => schema_error = Some(err2),
+                    }
+                } else {
+                    schema_error = Some(err);
+                }
+            } else {
+                schema_error = Some(err);
+            }
+        } else {
+            schema_error = Some(err);
+        }
+    }
+    let usage_val = usage
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| json!({}));
+    Ok((combined, usage_val, schema_error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_findings_parser_refuses_unparsed_prose_and_normalizes_valid_json() {
+        let prose = "No defects found cleanly without JSON.";
+        assert!(parse_findings_strict(prose, "security").is_err());
+        assert!(parse_findings(prose, "security").is_empty());
+
+        let invalid_sev = r#"{"findings":[{"severity":"bogus","claim":"bad","evidence":"x"}]}"#;
+        assert!(parse_findings_strict(invalid_sev, "security").is_err());
+
+        let valid_fenced = "```json\n{\"findings\":[{\"severity\":\"HIGH\",\"claim\":\"SQL injection\",\"file\":\"app.php\",\"line\":10,\"evidence\":\"raw sql\"}]}\n```";
+        let findings = parse_findings_strict(valid_fenced, "security").unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["severity"], "high");
+        assert_eq!(findings[0]["lens"], "security");
+
+        let mut acc = json!({});
+        crate::clash::merge_usage_components(
+            &mut acc,
+            &json!({"input_tokens": 20, "output_tokens": 5, "cache_read_input_tokens": 80, "model_calls": 1}),
+        );
+        assert_eq!(acc["input_tokens"], 20);
+        assert_eq!(acc["output_tokens"], 5);
+        assert_eq!(acc["cache_read_input_tokens"], 80);
+        assert_eq!(acc["model_calls"], 1);
     }
 }

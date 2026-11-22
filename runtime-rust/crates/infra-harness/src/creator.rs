@@ -172,6 +172,16 @@ impl CreatorManager {
                     .get("message")
                     .cloned()
                     .unwrap_or(json!("Inspect the session events and retry this phase."));
+                if let Some(rounds) = result.get("repair_rounds") {
+                    run["repair_rounds"] = rounds.clone();
+                } else {
+                    run.as_object_mut().unwrap().remove("repair_rounds");
+                }
+                if let Some(diagnostics) = result.get("diagnostics") {
+                    run["diagnostics"] = diagnostics.clone();
+                } else {
+                    run.as_object_mut().unwrap().remove("diagnostics");
+                }
                 run["revision"] = json!(run["revision"].as_u64().unwrap_or(0) + 1);
                 self.save(&run)?;
             }
@@ -284,7 +294,11 @@ impl CreatorManager {
                 directory.join(format!("journal-{nonce}")),
             )?;
         }
-        run.as_object_mut().unwrap().remove("message");
+        if let Some(obj) = run.as_object_mut() {
+            obj.remove("message");
+            obj.remove("repair_rounds");
+            obj.remove("diagnostics");
+        }
         run["phase"] = phase.into();
         run["result_file"] = format!("result-{nonce}.json").into();
         run["status"] = match phase {

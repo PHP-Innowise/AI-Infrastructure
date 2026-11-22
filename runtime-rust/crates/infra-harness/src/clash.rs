@@ -105,7 +105,7 @@ pub fn new_state(session: &Value, stage: &str, previous: Option<&Value>) -> Valu
         .filter(|p| p["challenger"]["provider"] == settings["challenger"])
         .map(|p| p["challenger_session_id"].clone())
         .unwrap_or(Value::Null);
-    json!({"kind":"clash_state","stage":stage,"status":"running","outcome":null,"cycle":previous.and_then(|p|p["cycle"].as_u64()).unwrap_or(0)+1,"round":0,"rounds":settings["rounds"],"protagonist":{"provider":session["provider"],"role":if stage=="implement"{"implementer"}else{"reviewer"},"model":session["model"],"thinking_effort":session["thinking_effort"]},"challenger":{"provider":settings["challenger"],"role":"challenger","model":settings["challenger_model"],"thinking_effort":settings["challenger_thinking_effort"]},"challenger_session_id":challenger,"task":if same{previous.map(|p|p["task"].clone()).unwrap_or(json!(""))}else{json!("")},"followup":"","items":old_items,"turns":old_turns,"tokens":0,"cost_usd":0.0,"summary":"","verdict":null,"verdict_note":"","message":"","report":""})
+    json!({"kind":"clash_state","stage":stage,"status":"running","outcome":null,"cycle":previous.and_then(|p|p["cycle"].as_u64()).unwrap_or(0)+1,"round":0,"rounds":settings["rounds"],"protagonist":{"provider":session["provider"],"role":if stage=="implement"{"implementer"}else{"reviewer"},"model":session["model"],"thinking_effort":session["thinking_effort"]},"challenger":{"provider":settings["challenger"],"role":"challenger","model":settings["challenger_model"],"thinking_effort":settings["challenger_thinking_effort"]},"challenger_session_id":challenger,"task":if same{previous.map(|p|p["task"].clone()).unwrap_or(json!(""))}else{json!("")},"followup":"","items":old_items,"turns":old_turns,"tokens":0,"cost_usd":0.0,"usage_components":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_write_5m_input_tokens":0,"cache_write_1h_input_tokens":0,"model_calls":0},"summary":"","verdict":null,"verdict_note":"","message":"","report":""})
 }
 pub fn unresolved(state: &Value) -> Vec<Value> {
     items(state)
@@ -379,22 +379,9 @@ pub fn apply_review(state: &mut Value, actor: &str, payload: &Value, round: u64)
         verdict(state, payload);
     }
 }
+/// Strictly parses structured Clash JSON from a whole object or fenced ```json block.
 pub fn extract(text: &str, required: &[&str]) -> Option<Value> {
-    for (start, _) in text
-        .match_indices('{')
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
-        if let Some(Ok(v)) = stream.next()
-            && v.is_object()
-            && required.iter().any(|k| v.get(*k).is_some())
-        {
-            return Some(v);
-        }
-    }
-    None
+    parse_strict_payload(text, required).ok()
 }
 pub fn render(state: &Value) -> String {
     let mut out = format!(
@@ -676,6 +663,16 @@ impl Cycle {
         let stream_native = active_native.clone();
         let stream_cost = last_turn_cost.clone();
         let stream_sid = session_id.clone();
+        let turn_usage = Arc::new(Mutex::new(json!({
+            "input_tokens": 0u64,
+            "output_tokens": 0u64,
+            "cache_read_input_tokens": 0u64,
+            "cache_write_5m_input_tokens": 0u64,
+            "cache_write_1h_input_tokens": 0u64,
+            "model_calls": 0u64,
+            "source": provider,
+        })));
+        let stream_usage = turn_usage.clone();
         let turn_started = Instant::now();
         let outcome = provider::run_monitored_until(
             &launch,
@@ -704,6 +701,9 @@ impl Cycle {
                     *current = Some(native.to_owned());
                 }
                 if event["kind"] == "usage" {
+                    if let Ok(mut slot) = stream_usage.lock() {
+                        observe_usage_event(&mut slot, &event);
+                    }
                     if let Some(n) = provider::total_tokens(&event) {
                         stream_turn_tokens.fetch_add(n, Ordering::AcqRel);
                         let used = cycle_tokens
@@ -816,9 +816,14 @@ impl Cycle {
             }
         }
         let this_turn_tokens = turn_tokens.load(Ordering::Acquire);
+        let usage_snapshot = turn_usage
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| json!({}));
         budget.record_cost(output.cost_usd);
         state["tokens"] = json!(budget.tokens.load(Ordering::Acquire));
         state["cost_usd"] = json!(budget.usd);
+        merge_usage_components(&mut state["usage_components"], &usage_snapshot);
         let turn = json!({
             "cycle": state["cycle"],
             "round": round,
@@ -828,6 +833,7 @@ impl Cycle {
             "summary": clean(&json!(output.text), 600),
             "cost_usd": output.cost_usd,
             "tokens": this_turn_tokens,
+            "usage_components": usage_snapshot,
             "seconds": output.duration_seconds,
             "error": output.error
         });
@@ -872,12 +878,21 @@ impl Cycle {
         if let Some(message) = budget.pre_turn_violation(&protagonist_provider) {
             return self.incomplete(state, message);
         }
-        let header = format!(
+        let mut header = format!(
             "Two-provider Clash, cycle {}. No additional agents. One human-reviewed cycle only. Task: {}\nFollow-up: {}\n",
             state["cycle"],
             state["task"].as_str().unwrap_or(""),
             state["followup"].as_str().unwrap_or("")
         );
+        if let Some((pre_summary, pre_record)) = run_clash_precheck(&self.session).await {
+            state["deterministic_precheck"] = pre_record;
+            self.persist(&state)?;
+            if !pre_summary.is_empty() {
+                header.push_str(&format!(
+                    "Deterministic pre-stage check output:\n{pre_summary}\n"
+                ));
+            }
+        }
         let opening = format!(
             "{header}Act as {role}. {} Existing ledger is reference data: {}. Return verified file/line evidence. {}",
             if stage == "implement" {
@@ -892,17 +907,36 @@ impl Cycle {
                 "Summarize changed files, verification and limitations."
             }
         );
-        let result = self
-            .turn(
+        let (result, opening_payload) = if stage == "review" {
+            self.complete_structured_turn(
                 &mut state,
                 role,
                 0,
                 opening,
+                &["findings"],
+                "{\"findings\":[{\"severity\":\"high|medium|low\",\"file\":\"...\",\"line\":1,\"claim\":\"...\",\"evidence\":\"...\"}]}",
                 &mut budget,
                 cancel.clone(),
                 emit.clone(),
             )
-            .await?;
+            .await?
+        } else {
+            let res = self
+                .turn(
+                    &mut state,
+                    role,
+                    0,
+                    opening,
+                    &mut budget,
+                    cancel.clone(),
+                    emit.clone(),
+                )
+                .await?;
+            if let Some(message) = budget.post_turn_violation(&res) {
+                return self.incomplete(state, message);
+            }
+            (res, Ok(json!({})))
+        };
         if let Some(message) = budget.post_turn_violation(&result) {
             return self.incomplete(state, message);
         }
@@ -911,8 +945,16 @@ impl Cycle {
         }
         state["summary"] = clean(&json!(result.text), 4000).into();
         if stage == "review" {
-            let Some(payload) = extract(&result.text, &["findings"]) else {
-                return self.incomplete(state, "Reviewer A did not return structured findings.");
+            let payload = match opening_payload {
+                Ok(valid) => valid,
+                Err(reason) => {
+                    record_schema_error(&mut state, role, 0, &reason);
+                    self.persist(&state)?;
+                    return self.incomplete(
+                        state,
+                        &format!("Reviewer A did not return structured findings: {reason}"),
+                    );
+                }
             };
             apply_review(&mut state, "reviewer", &payload, 0);
         }
@@ -932,12 +974,19 @@ impl Cycle {
                     "Return JSON {verdict:accept|reject,assessments:[{id,stance:agree|dispute|unverified,evidence}],responses:[{id,action:defend|withdraw,note}],additional:[...]}. Assess every other-side item; defend or withdraw own disputed items."
                 }
             );
-            let result = self
-                .turn(
+            let chal_schema = if stage == "implement" {
+                "{\"verdict\":\"accept|reject\",\"objections\":[],\"resolved\":[]}"
+            } else {
+                "{\"verdict\":\"accept|reject\",\"assessments\":[],\"responses\":[],\"additional\":[]}"
+            };
+            let (result, chal_payload) = self
+                .complete_structured_turn(
                     &mut state,
                     "challenger",
                     round,
                     challenge,
+                    &["verdict", "objections", "assessments"],
+                    chal_schema,
                     &mut budget,
                     cancel.clone(),
                     emit.clone(),
@@ -949,10 +998,16 @@ impl Cycle {
             if !result.ok {
                 return self.incomplete(state, "The challenger turn did not complete.");
             }
-            let Some(payload) = extract(&result.text, &["verdict", "objections", "assessments"])
-            else {
-                return self
-                    .incomplete(state, "The challenger did not return a structured verdict.");
+            let payload = match chal_payload {
+                Ok(valid) => valid,
+                Err(reason) => {
+                    record_schema_error(&mut state, "challenger", round, &reason);
+                    self.persist(&state)?;
+                    return self.incomplete(
+                        state,
+                        &format!("The challenger did not return a structured verdict: {reason}"),
+                    );
+                }
             };
             if stage == "implement" {
                 apply_challenge(&mut state, &payload, round);
@@ -975,12 +1030,19 @@ impl Cycle {
                     "Do not edit files. Return JSON {assessments:[{id,stance:agree|dispute|unverified,evidence}],responses:[{id,action:defend|withdraw,note}]}."
                 }
             );
-            let result = self
-                .turn(
+            let schema_spec = if stage == "implement" {
+                "{\"responses\":[{\"id\":1,\"action\":\"fixed|rebutted|deferred\",\"note\":\"...\"}]}"
+            } else {
+                "{\"assessments\":[{\"id\":1,\"stance\":\"agree|dispute|unverified\",\"evidence\":\"...\"}],\"responses\":[{\"id\":1,\"action\":\"defend|withdraw\",\"note\":\"...\"}]}"
+            };
+            let (result, payload) = self
+                .complete_structured_turn(
                     &mut state,
                     role,
                     round,
                     response,
+                    &["responses", "assessments"],
+                    schema_spec,
                     &mut budget,
                     cancel.clone(),
                     emit.clone(),
@@ -992,7 +1054,17 @@ impl Cycle {
             if !result.ok {
                 return self.incomplete(state, "The protagonist response turn did not complete.");
             }
-            let payload = extract(&result.text, &["responses", "assessments"]).unwrap_or(json!({}));
+            let payload = match payload {
+                Ok(valid) => valid,
+                Err(reason) => {
+                    record_schema_error(&mut state, role, round, &reason);
+                    self.persist(&state)?;
+                    return self.incomplete(
+                        state,
+                        &format!("Clash {role} output failed JSON schema validation: {reason}"),
+                    );
+                }
+            };
             if stage == "implement" {
                 apply_response(&mut state, &payload, round);
             } else {
@@ -1030,6 +1102,300 @@ impl Cycle {
         self.persist(&state)?;
         Ok(state)
     }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Structured turn runner carries shared cycle budget, schema requirements, and bounded repair state."
+    )]
+    async fn complete_structured_turn(
+        &mut self,
+        state: &mut Value,
+        role: &str,
+        round: u64,
+        prompt: String,
+        required: &[&str],
+        schema_spec: &str,
+        budget: &mut CycleBudget,
+        cancel: Arc<AtomicBool>,
+        emit: Arc<dyn Fn(Value) -> Result<()> + Send + Sync>,
+    ) -> Result<(provider::WorkerResult, std::result::Result<Value, String>)> {
+        let result = self
+            .turn(
+                state,
+                role,
+                round,
+                prompt,
+                budget,
+                cancel.clone(),
+                emit.clone(),
+            )
+            .await?;
+        if budget.post_turn_violation(&result).is_some() {
+            return Ok((result, Err("budget exceeded during turn".into())));
+        }
+        if !result.ok {
+            return Ok((
+                result,
+                Err("turn failed before returning structured output".into()),
+            ));
+        }
+        match parse_strict_payload(&result.text, required) {
+            Ok(valid) => Ok((result, Ok(valid))),
+            Err(err) => {
+                let provider = self.turn_provider(state, role)?;
+                if cancel.load(Ordering::Acquire) || budget.pre_turn_violation(&provider).is_some()
+                {
+                    return Ok((result, Err(err)));
+                }
+                let snippet: String = result.text.chars().take(1024).collect();
+                let repair_prompt = format!(
+                    "Your previous response did not match the required JSON schema ({err}).\nExpected schema: {schema_spec}\nReturn ONLY a single valid JSON object matching the schema with no surrounding commentary.\nPrevious invalid reply:\n{snippet}"
+                );
+                let mut repaired = self
+                    .turn(state, role, round, repair_prompt, budget, cancel, emit)
+                    .await?;
+                repaired.cost_usd = match (result.cost_usd, repaired.cost_usd) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
+                if budget.post_turn_violation(&repaired).is_some() || !repaired.ok {
+                    return Ok((repaired, Err(err)));
+                }
+                let validated = parse_strict_payload(&repaired.text, required);
+                Ok((repaired, validated))
+            }
+        }
+    }
+}
+
+/// Strictly parses a Clash structured turn response: accepts a whole JSON object
+/// or a single fenced ```json``` block without heuristic backward brace scanning.
+pub fn parse_strict_payload(text: &str, required: &[&str]) -> std::result::Result<Value, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("empty response".into());
+    }
+    let parsed = if let Ok(v) = serde_json::from_str::<Value>(trimmed)
+        && v.is_object()
+    {
+        v
+    } else if let Some(fenced) = extract_json_fence(trimmed)
+        && let Ok(v) = serde_json::from_str::<Value>(fenced)
+        && v.is_object()
+    {
+        v
+    } else {
+        return Err("response is not a valid JSON object or fenced ```json block".into());
+    };
+    if !required.is_empty() && !required.iter().any(|k| parsed.get(*k).is_some()) {
+        return Err(format!(
+            "missing one of required keys: {}",
+            required.join(", ")
+        ));
+    }
+    validate_clash_schema(&parsed)?;
+    Ok(parsed)
+}
+
+/// Extracts the payload inside a Markdown fenced ```json or ``` code block.
+pub(crate) fn extract_json_fence(text: &str) -> Option<&str> {
+    let start = text.find("```json").or_else(|| text.find("```"))?;
+    let after = &text[start + 3..];
+    let body_start = after.find('\n')? + 1;
+    let rest = &after[body_start..];
+    let end = rest.rfind("\n```").or_else(|| rest.rfind("```"))?;
+    Some(rest[..end].trim())
+}
+
+fn validate_clash_schema(value: &Value) -> std::result::Result<(), String> {
+    if let Some(verdict) = value.get("verdict")
+        && let Some(v) = verdict.as_str()
+        && !["accept", "reject", "continue"].contains(&v)
+    {
+        return Err(format!("invalid verdict `{v}`"));
+    }
+    for array_key in ["objections", "findings", "responses", "assessments"] {
+        if let Some(val) = value.get(array_key)
+            && !val.is_null()
+            && !val.is_array()
+        {
+            return Err(format!("`{array_key}` must be an array"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn observe_usage_event(slot: &mut Value, event: &Value) {
+    for key in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_write_5m_input_tokens",
+        "cache_write_1h_input_tokens",
+    ] {
+        if let Some(v) = event.get(key).and_then(Value::as_u64) {
+            let cur = slot.get(key).and_then(Value::as_u64).unwrap_or(0);
+            slot[key] = json!(cur.saturating_add(v));
+        }
+    }
+    if event["cache_write_5m_input_tokens"].is_null()
+        && let Some(creation) = event
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+    {
+        let cur = slot
+            .get("cache_write_5m_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        slot["cache_write_5m_input_tokens"] = json!(cur.saturating_add(creation));
+    }
+    let calls = slot.get("model_calls").and_then(Value::as_u64).unwrap_or(0);
+    slot["model_calls"] = json!(calls.saturating_add(1));
+}
+
+fn record_schema_error(state: &mut Value, role: &str, round: u64, reason: &str) {
+    let mut errs = state["schema_errors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if errs.len() < 20 {
+        errs.push(json!({"role": role, "round": round, "error": reason}));
+    }
+    state["schema_errors"] = json!(errs);
+}
+
+pub(crate) fn merge_usage_components(acc: &mut Value, turn: &Value) {
+    if !acc.is_object() {
+        *acc = json!({
+            "input_tokens": 0u64,
+            "output_tokens": 0u64,
+            "cache_read_input_tokens": 0u64,
+            "cache_write_5m_input_tokens": 0u64,
+            "cache_write_1h_input_tokens": 0u64,
+            "model_calls": 0u64,
+        });
+    }
+    for key in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_write_5m_input_tokens",
+        "cache_write_1h_input_tokens",
+        "model_calls",
+    ] {
+        if let Some(add) = turn.get(key).and_then(Value::as_u64) {
+            let cur = acc.get(key).and_then(Value::as_u64).unwrap_or(0);
+            acc[key] = json!(cur.saturating_add(add));
+        }
+    }
+}
+
+async fn run_clash_precheck(session: &Value) -> Option<(String, Value)> {
+    let precheck = session.get("clash").and_then(|c| c.get("precheck"))?;
+    let cwd = std::path::Path::new(session["_workspace_path"].as_str().unwrap_or(""));
+    let record = run_precheck_sandboxed(cwd, precheck).await?;
+    let summary = record["summary"].as_str().unwrap_or("").to_owned();
+    Some((summary, record))
+}
+
+/// Runs a configured deterministic precheck command inside a network-off `Profile::Gate`
+/// sandbox with scrubbed env and zero-token attribution.
+pub(crate) async fn run_precheck_sandboxed(
+    workspace: &std::path::Path,
+    precheck: &Value,
+) -> Option<Value> {
+    let argv: Vec<String> = precheck
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if argv.is_empty() || !workspace.is_dir() {
+        return None;
+    }
+    let cwd_canon = infra_core::fs::canonicalize(workspace).ok()?;
+    let env = infra_host::sandbox::scrub_env(std::env::vars(), &BTreeMap::new());
+    let path_env = std::env::var("PATH").ok();
+    let wrapped = if infra_host::sandbox::available() {
+        let spec = infra_host::sandbox::Spec {
+            workspace: cwd_canon.clone(),
+            target: cwd_canon.clone(),
+            protected: vec![],
+            readable: vec![],
+            accounts: vec![],
+            runtime: infra_host::sandbox::runtime_dirs_for_argv(&argv, path_env.as_deref()),
+            codex: None,
+            evidence: None,
+            network: false,
+        };
+        infra_host::sandbox::gate(&spec, &argv).ok()?
+    } else {
+        argv.clone()
+    };
+    let cap = infra_skillcache::tool::DIAGNOSTIC_BYTES;
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let sink = out.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let timeout = precheck["timeout_seconds"]
+        .as_u64()
+        .unwrap_or(30)
+        .clamp(1, 120);
+    let res = infra_host::process::run_raw_with_lock(
+        &wrapped,
+        &cwd_canon,
+        &env,
+        &[],
+        infra_host::process::Limits {
+            seconds: Some(timeout),
+            output: infra_skillcache::tool::STDOUT_BYTES,
+            line: infra_skillcache::tool::STDOUT_BYTES,
+        },
+        cancel,
+        None,
+        move |chunk| {
+            let mut buf = sink.lock().map_err(|_| {
+                infra_host::HarnessError::unavailable("Precheck buffer lock failed")
+            })?;
+            let left = infra_skillcache::tool::STDOUT_BYTES.saturating_sub(buf.len());
+            buf.extend_from_slice(&chunk[..chunk.len().min(left)]);
+            Ok(())
+        },
+    )
+    .await;
+    let raw = out
+        .lock()
+        .map(|g| String::from_utf8_lossy(&g).into_owned())
+        .unwrap_or_default();
+    let masked = infra_core::domain::mask_secrets(raw.trim())
+        .map(|(t, _)| t)
+        .unwrap_or_else(|_| "[redacted]".into());
+    let mut end = masked.len().min(cap);
+    while end > 0 && !masked.is_char_boundary(end) {
+        end -= 1;
+    }
+    let summary = masked[..end].to_owned();
+    let ok = res.as_ref().is_ok_and(|o| o.code == 0);
+    let code = res.as_ref().ok().map(|o| o.code);
+    Some(json!({
+        "ok": ok,
+        "exit_code": code,
+        "summary": summary,
+        "deterministic": true,
+        "usage_components": {
+            "input_tokens": 0u64,
+            "output_tokens": 0u64,
+            "cache_read_input_tokens": 0u64,
+            "cache_write_5m_input_tokens": 0u64,
+            "cache_write_1h_input_tokens": 0u64,
+            "model_calls": 0u64,
+            "source": "deterministic"
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -1078,5 +1444,33 @@ mod tests {
             zero_time.pre_turn_violation("claude"),
             Some("Clash reached its time budget; cycle incomplete.")
         );
+    }
+
+    #[test]
+    fn strict_payload_rejects_unstructured_prose_with_trailing_brace_and_accepts_fenced_json() {
+        // Heuristic backward brace scanning would have accepted trailing JSON inside prose;
+        // strict parser rejects mixed prose unless enclosed in a dedicated JSON block/fenced object.
+        let mixed_prose =
+            "I inspected things. Here is an informal note {\"verdict\":\"accept\"} in prose.";
+        assert!(parse_strict_payload(mixed_prose, &["verdict"]).is_err());
+        assert_eq!(extract(mixed_prose, &["verdict"]), None);
+
+        let fenced = "```json\n{\"verdict\":\"accept\",\"objections\":[],\"resolved\":[1]}\n```";
+        let ok = parse_strict_payload(fenced, &["verdict"]).unwrap();
+        assert_eq!(ok["verdict"], "accept");
+
+        let bad_verdict = r#"{"verdict":"maybe","objections":[]}"#;
+        assert!(parse_strict_payload(bad_verdict, &["verdict"]).is_err());
+
+        let mut acc = json!({});
+        let t1 = json!({"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 40, "model_calls": 1});
+        let t2 = json!({"input_tokens": 50, "output_tokens": 10, "cache_write_5m_input_tokens": 30, "model_calls": 1});
+        merge_usage_components(&mut acc, &t1);
+        merge_usage_components(&mut acc, &t2);
+        assert_eq!(acc["input_tokens"], 150);
+        assert_eq!(acc["output_tokens"], 30);
+        assert_eq!(acc["cache_read_input_tokens"], 40);
+        assert_eq!(acc["cache_write_5m_input_tokens"], 30);
+        assert_eq!(acc["model_calls"], 2);
     }
 }

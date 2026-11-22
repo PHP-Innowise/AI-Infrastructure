@@ -683,3 +683,60 @@ pub fn selective_stream(
     }
     Ok(code)
 }
+
+/// Wraps a treatment evaluation output (`rerank_evaluate` or `memory_consolidation_pilot`)
+/// in a tamper-evident sealed A/B envelope backed by [`crate::sealed_ab`].
+pub fn seal_treatment_report(schema: &str, report: Value, input_digest: &str) -> Result<Value> {
+    crate::sealed_ab::seal_experiment_envelope(schema, report, input_digest)
+}
+
+/// Verifies a sealed treatment evaluation output against its recorded `seal_sha256`.
+pub fn verify_treatment_report(sealed: &Value) -> Result<()> {
+    crate::sealed_ab::verify_sealed_digest(
+        sealed,
+        "the treatment evaluation report was modified after sealing",
+    )
+}
+
+/// Deterministically randomizes treatment arm order for A/B execution using a sealed seed.
+pub fn randomized_treatment_arms(arms: &[String], seed: u64) -> Vec<String> {
+    let mut order = crate::rng::Random::new(seed);
+    crate::sealed_ab::shuffled_arms(arms, &mut order)
+}
+
+/// Normalizes provider token telemetry into the 6 sealed billing components.
+pub fn normalize_treatment_usage(source: &Value) -> std::result::Result<Value, &'static str> {
+    crate::sealed_ab::normalize_usage(source)
+}
+
+#[cfg(test)]
+mod sealed_ab_tests {
+    use super::*;
+
+    #[test]
+    fn shared_sealed_ab_enforces_tamper_evidence_arm_order_and_usage_normalization() {
+        let report = json!({"queries": 10, "baseline_useful": 4, "reranked_useful": 8});
+        let mut sealed = seal_treatment_report("rerank-ab-v1", report, "abc123").unwrap();
+        verify_treatment_report(&sealed).unwrap();
+
+        sealed["reranked_useful"] = json!(10);
+        assert!(verify_treatment_report(&sealed).is_err());
+
+        let arms = vec!["cold".into(), "baseline".into(), "reranked".into()];
+        assert_eq!(
+            randomized_treatment_arms(&arms, 42),
+            randomized_treatment_arms(&arms, 42)
+        );
+
+        let usage = normalize_treatment_usage(&json!({
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "cache_read_input_tokens": 300,
+            "cache_write_5m_input_tokens": 50,
+            "cache_write_1h_input_tokens": 10
+        }))
+        .unwrap();
+        assert_eq!(usage["cache_creation_input_tokens"], 60);
+        assert!(normalize_treatment_usage(&json!({"cached_input_tokens": 10})).is_err());
+    }
+}

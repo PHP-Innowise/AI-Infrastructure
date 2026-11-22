@@ -340,6 +340,7 @@ struct Phase3cFixture {
     root: PathBuf,
     project_id: String,
     store: SessionStore,
+    results: Arc<infra_harness::results::Results>,
     sessions: Arc<Sessions>,
     _creator: Arc<CreatorManager>,
     claude: PathBuf,
@@ -501,7 +502,9 @@ impl Phase3cFixture {
         }
         domains.insert(
             "results".into(),
-            Arc::new(infra_harness::results::ResultService { results }),
+            Arc::new(infra_harness::results::ResultService {
+                results: results.clone(),
+            }),
         );
         let boot = store.clone();
         let closing = sessions.clone();
@@ -548,6 +551,7 @@ impl Phase3cFixture {
             root,
             project_id,
             store,
+            results,
             sessions,
             _creator: creator,
             claude,
@@ -1762,7 +1766,9 @@ impl SystemPhase3cFixture {
         }
         domains.insert(
             "results".into(),
-            Arc::new(infra_harness::results::ResultService { results }),
+            Arc::new(infra_harness::results::ResultService {
+                results: results.clone(),
+            }),
         );
         let boot = store.clone();
         let closing = sessions.clone();
@@ -2068,5 +2074,265 @@ fn system_workflow_auto_mode_auto_allows_own_service_and_escalates_boundary_ask_
         );
 
         fx.close().await;
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn results_capture_sandboxed_scrubs_secrets_and_isolates_network_and_worktree() {
+    run_on_worker(async {
+        if !infra_host::sandbox::available() {
+            return;
+        }
+        let fx = Phase3cFixture::new().await;
+        let ws = fx.root.join("sandboxed-ws");
+        fs::create_dir_all(&ws).unwrap();
+        let script = r#"echo "if=$(grep -c : /proc/net/dev)"; echo "key=${OPENAI_API_KEY:-unset}"; echo "prompt=$GIT_TERMINAL_PROMPT""#;
+        let cap = fx
+            .results
+            .capture_sandboxed(
+                &["/bin/sh".into(), "-c".into(), script.into()],
+                &ws,
+                5,
+                Arc::new(AtomicBool::new(false)),
+                infra_harness::results::SandboxOptions::default(),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cap.exit_code, Some(0), "output: {}", cap.output);
+        assert!(
+            cap.output.contains("if=1"),
+            "expected loopback only: {}",
+            cap.output
+        );
+        assert!(cap.output.contains("prompt=0"), "output: {}", cap.output);
+        assert!(!ws.join(".harness-tmp").exists());
+        let env = cap.tool_envelope();
+        assert_eq!(env["ok"], true);
+        assert_eq!(env["exit_code"], 0);
+        assert_eq!(env["diagnostic"], "");
+        fx.close().await;
+    });
+}
+
+#[test]
+fn system_verify_program_checks_skip_llm_on_pass_and_wake_on_fail() {
+    run_large_stack(async {
+        let _ = infra_host::process::use_guardian(PathBuf::from(env!(
+            "CARGO_BIN_EXE_infra-harness-inbox-fixture"
+        )));
+        let dir = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let sys_dir = root.join("sys");
+        let orders_dir = root.join("orders");
+        fs::create_dir_all(sys_dir.join("contracts")).unwrap();
+        fs::create_dir_all(orders_dir.join("src")).unwrap();
+        fs::write(sys_dir.join("AGENTS.md"), "# System Policy\n").unwrap();
+        fs::write(sys_dir.join("contracts/shared.md"), "# Contract\n").unwrap();
+        fs::write(
+            sys_dir.join("system.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "det-verify-sys",
+                "services": [
+                    { "id": "orders", "root": "../orders", "manifest": "ai-service.json" }
+                ],
+                "shared_sources": [
+                    { "kind": "policy", "path": "AGENTS.md" },
+                    { "kind": "contract", "path": "contracts/shared.md" }
+                ]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        fs::write(orders_dir.join("src/order.php"), "<?php // order\n").unwrap();
+        fs::write(
+            orders_dir.join("ai-service.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "id": "orders",
+                "owner": "@orders",
+                "description": "Orders",
+                "capabilities": [{
+                    "id": "orders.place",
+                    "description": "Place order",
+                    "status": "implemented",
+                    "sources": ["src/order.php"]
+                }],
+                "provides": [],
+                "consumes": [],
+                "sources": [{ "kind": "code", "path": "src/order.php" }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+
+        let calls_log = root.join("claude-calls.log");
+        let fake_cli = root.join("fake-claude-sys");
+        let script = format!(
+            r#"#!/bin/sh
+prompt=$(cat)
+echo "call" >> "{log}"
+case "$prompt" in
+  *'"phase":"contracts"'*)
+    report='{{"status":"completed","summary":"Agreement ready","checks":[{{"name":"contract","status":"passed","detail":"ok"}}],"changed_files":[],"service_order":["orders"]}}'
+    ;;
+  *'"phase":"verify"'*)
+    report='{{"status":"completed","summary":"Verified after failure","checks":[{{"name":"verify","status":"passed","detail":"ok"}}],"changed_files":[],"service_order":[]}}'
+    ;;
+  *)
+    report='{{"status":"completed","summary":"Checked orders","checks":[{{"name":"orders","status":"passed","detail":"ok"}}],"changed_files":[],"service_order":[]}}'
+    ;;
+esac
+echo '{{"type":"system","subtype":"init","claude_code_version":"2.1.300","session_id":"det-sys-1"}}'
+echo '{{"type":"assistant","message":{{"id":"m1","role":"assistant","usage":{{"input_tokens":15,"cache_read_input_tokens":40,"cache_creation_input_tokens":5}}}},"session_id":"det-sys-1"}}'
+printf '{{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":%s,"session_id":"det-sys-1","total_cost_usd":0.01,"usage":{{"input_tokens":15,"output_tokens":8,"cache_read_input_tokens":40,"cache_creation_input_tokens":5}}}}\n' "$report"
+"#,
+            log = calls_log.display(),
+        );
+        write_executable(&fake_cli, &script);
+        let cli_str = fake_cli.to_string_lossy().into_owned();
+
+        // 1. Passing deterministic program check skips verify LLM call completely (0 model calls).
+        let run_pass = root.join("run-pass");
+        let mut sys = infra_system::catalog::System::new(
+            &sys_dir.join("system.json"),
+            std::slice::from_ref(&orders_dir),
+        )
+        .unwrap();
+        let mut plan = sys
+            .plan(
+                "Verify order contract",
+                "chg-pass",
+                &["orders".into()],
+                &[],
+                16000,
+                16,
+            )
+            .unwrap();
+        for step in plan["steps"].as_array_mut().unwrap() {
+            if step["id"] == "verify" {
+                step["program_checks"] = json!([{
+                    "name": "orders-lint",
+                    "argv": ["/bin/sh", "-c", "echo orders-lint-ok"],
+                    "cwd_service": "orders"
+                }]);
+            }
+        }
+        infra_system::native::create_run(
+            &mut sys,
+            &plan,
+            &run_pass,
+            "claude",
+            Some(&cli_str),
+            "read-only",
+            30,
+            "service",
+        )
+        .await
+        .unwrap();
+        let mut events = Vec::new();
+        let finished = infra_system::runner::drive_run(
+            &mut sys,
+            &run_pass,
+            None,
+            infra_system::runner::Acceptance::default(),
+            Arc::new(AtomicBool::new(false)),
+            &mut |ev| {
+                events.push(ev);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(finished["status"], "completed", "{finished}");
+        let log_pass = fs::read_to_string(&calls_log).unwrap_or_default();
+        assert_eq!(
+            log_pass.lines().count(),
+            2,
+            "verify step should NOT invoke LLM on passing program_checks:\n{log_pass}"
+        );
+        let verify_receipt: Value =
+            serde_json::from_slice(&fs::read(run_pass.join("verify-a1.json")).unwrap()).unwrap();
+        assert_eq!(verify_receipt["deterministic"], true);
+        assert_eq!(verify_receipt["ok"], true);
+        assert_eq!(verify_receipt["usage_components"]["model_calls"], 0);
+        assert_eq!(
+            verify_receipt["usage_components"]["source"],
+            "deterministic"
+        );
+        let svc_receipt: Value =
+            serde_json::from_slice(&fs::read(run_pass.join("service-orders-a1.json")).unwrap())
+                .unwrap();
+        assert_eq!(svc_receipt["deterministic"], false);
+        assert_eq!(svc_receipt["usage_components"]["input_tokens"], 15);
+        assert_eq!(svc_receipt["usage_components"]["output_tokens"], 8);
+        assert_eq!(
+            svc_receipt["usage_components"]["cache_read_input_tokens"],
+            40
+        );
+
+        // 2. Failing deterministic program check wakes verify LLM with bounded diagnostics.
+        fs::remove_file(&calls_log).unwrap();
+        let run_fail = root.join("run-fail");
+        let mut plan_fail = sys
+            .plan(
+                "Verify order contract",
+                "chg-fail",
+                &["orders".into()],
+                &[],
+                16000,
+                16,
+            )
+            .unwrap();
+        for step in plan_fail["steps"].as_array_mut().unwrap() {
+            if step["id"] == "verify" {
+                step["program_checks"] = json!([{
+                    "name": "orders-lint",
+                    "argv": ["/bin/sh", "-c", "echo lint-error-xyz && exit 1"],
+                    "cwd_service": "orders"
+                }]);
+            }
+        }
+        infra_system::native::create_run(
+            &mut sys,
+            &plan_fail,
+            &run_fail,
+            "claude",
+            Some(&cli_str),
+            "read-only",
+            30,
+            "service",
+        )
+        .await
+        .unwrap();
+        let finished_fail = infra_system::runner::drive_run(
+            &mut sys,
+            &run_fail,
+            None,
+            infra_system::runner::Acceptance::default(),
+            Arc::new(AtomicBool::new(false)),
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(finished_fail["status"], "completed");
+        let log_fail = fs::read_to_string(&calls_log).unwrap_or_default();
+        assert_eq!(
+            log_fail.lines().count(),
+            3,
+            "failing program_checks must wake verify LLM:\n{log_fail}"
+        );
+        let verify_input: Value =
+            serde_json::from_slice(&fs::read(run_fail.join("verify-a1.input.json")).unwrap())
+                .unwrap();
+        let prompt_sent = verify_input["prompt"].as_str().unwrap_or("");
+        assert!(
+            prompt_sent.contains("lint-error-xyz"),
+            "verify LLM prompt missing failure diagnostic: {prompt_sent}"
+        );
     });
 }

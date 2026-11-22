@@ -1094,6 +1094,11 @@ impl CommandAnalyzer {
         false
     }
 }
+pub fn is_verification_safe(target: &Path, command: &str) -> Result<bool> {
+    let analyzer = CommandAnalyzer::new(target)?;
+    Ok(analyzer.analyze(command, true, None)?.verification_safe)
+}
+
 pub fn console_read_only(action: &str, args: &[String]) -> bool {
     if ["--help", "--version", "-V", "-h"].contains(&action) {
         return true;

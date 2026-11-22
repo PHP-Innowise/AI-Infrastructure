@@ -102,8 +102,121 @@ impl NativeGateServices for ValidationGates<'_> {
     ) -> infra_core::Result<infra_generator::NativeOutput> {
         let copy = files::validation_copy(target, &self.base)
             .map_err(|e| infra_core::RuntimeError::invalid(e.message))?;
+        let copy_canon = infra_core::fs::canonicalize(copy.path())?;
+        if args != ["status".to_string(), "--json".to_string()] && args != ["validate".to_string()]
+        {
+            return Err(infra_core::RuntimeError::policy(
+                "Creator validation runtime accepts only `status --json` or `validate`.",
+            ));
+        }
+        // Check if an installed engine binary exists in the validation copy AND
+        // matches our trusted current_exe(). When present on a sandbox-capable
+        // non-Windows host, execute inside `Profile::Gate` (network off, minimal root).
+        let bin_rel = if cfg!(windows) {
+            "memory-bank/bin/infra-engine.exe"
+        } else {
+            "memory-bank/bin/infra-engine"
+        };
+        let installed = copy_canon.join(bin_rel);
+        if infra_host::sandbox::available()
+            && !cfg!(windows)
+            && installed.is_file()
+            && current_exe_matches(&installed).unwrap_or(false)
+        {
+            let mut argv = vec![
+                installed.to_string_lossy().into_owned(),
+                "memory".into(),
+                "--root".into(),
+                copy_canon.to_string_lossy().into_owned(),
+            ];
+            argv.extend(args.iter().cloned());
+            let mut runtime = Vec::new();
+            if let Some(parent) = installed.parent() {
+                runtime.push(parent.to_path_buf());
+            }
+            let spec = Spec {
+                workspace: copy_canon.clone(),
+                target: copy_canon.clone(),
+                protected: vec![],
+                readable: vec![],
+                accounts: vec![],
+                runtime,
+                codex: None,
+                evidence: None,
+                network: false,
+            };
+            let wrapped = sandbox::gate(&spec, &argv)
+                .map_err(|e| infra_core::RuntimeError::policy(e.message))?;
+            let mut env = infra_host::sandbox::scrub_env(std::env::vars(), &BTreeMap::new());
+            for key in [
+                "ACCELERATOR_HOME",
+                "ACCELERATOR_STATE_DIR",
+                "ACCELERATOR_PROJECT_DIR",
+                "ACCELERATOR_EDITION",
+            ] {
+                env.remove(key);
+            }
+            let mut command = std::process::Command::new(&wrapped[0]);
+            command
+                .args(&wrapped[1..])
+                .current_dir(&copy_canon)
+                .env_clear()
+                .envs(&env)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = command.spawn()?;
+            let deadline = std::time::Instant::now() + timeout;
+            let status = loop {
+                match child.try_wait()? {
+                    Some(status) => break status,
+                    None if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    None => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(infra_core::RuntimeError::unavailable(
+                            "Sandboxed Creator validation runtime timed out.",
+                        ));
+                    }
+                }
+            };
+            use std::io::Read;
+            let cap = infra_skillcache::tool::STDOUT_BYTES;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(out) = child.stdout.take() {
+                out.take(cap as u64 + 1).read_to_end(&mut stdout)?;
+            }
+            if let Some(err) = child.stderr.take() {
+                err.take(cap as u64 + 1).read_to_end(&mut stderr)?;
+            }
+            stdout.truncate(cap);
+            stderr.truncate(infra_skillcache::tool::DIAGNOSTIC_BYTES);
+            return Ok(infra_generator::NativeOutput {
+                code: status.code().unwrap_or(1),
+                stdout,
+                stderr,
+            });
+        }
         self.inner.runtime_command(copy.path(), args, timeout)
     }
+}
+
+fn current_exe_matches(path: &Path) -> infra_core::Result<bool> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if infra_core::fs::linked(&meta) || !meta.is_file() {
+        return Ok(false);
+    }
+    let current = infra_core::fs::canonicalize(&std::env::current_exe()?)?;
+    let current_meta = std::fs::metadata(&current)?;
+    if meta.len() != current_meta.len() {
+        return Ok(false);
+    }
+    let expected = infra_core::query::sha256(&std::fs::read(&current)?);
+    let actual = infra_core::query::sha256(&std::fs::read(path)?);
+    Ok(actual == expected)
 }
 pub fn sandbox_spec(request: &Value) -> Result<Spec> {
     let directory = PathBuf::from(
@@ -243,14 +356,148 @@ fn prompt(request: &Value) -> String {
         request["budgets"]["tokens"]
     )
 }
+const VERIFY_REPAIR_ROUNDS: usize = 3;
+const DIAGNOSTIC_CAP_BYTES: usize = infra_skillcache::tool::DIAGNOSTIC_BYTES;
+
+struct AgentLoop<'a> {
+    repair: Option<&'a RepairContext>,
+    used_tokens: &'a AtomicU64,
+    started: std::time::Instant,
+}
+
+type ExecuteReportResult =
+    std::result::Result<(&'static str, usize), Box<(HarnessError, usize, Value)>>;
+
+#[derive(Clone, Debug)]
+struct VerifyFailure {
+    op: String,
+    repairable: bool,
+    error_count: usize,
+    summary: String,
+    diagnostics: Vec<Value>,
+}
+impl VerifyFailure {
+    fn into_error(self) -> HarnessError {
+        if self.repairable {
+            HarnessError::conflict(format!(
+                "Canonical verification failed: {}. {}",
+                self.op, self.summary
+            ))
+        } else {
+            HarnessError::conflict(self.summary)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RepairContext {
+    round: usize,
+    max_rounds: usize,
+    op: String,
+    diagnostics_summary: String,
+}
+
+fn mask_bounded(raw: &str, cap: usize) -> String {
+    let masked = match infra_core::domain::mask_secrets(raw) {
+        Ok((text, _)) => text,
+        Err(_) => "[diagnostics withheld: a possible secret could not be masked]".into(),
+    };
+    let mut end = masked.len().min(cap);
+    while end > 0 && !masked.is_char_boundary(end) {
+        end -= 1;
+    }
+    masked[..end].to_owned()
+}
+
+fn parse_gate_diagnostics(op: &str, stdout: &[u8], stderr: &[u8]) -> (usize, String, Vec<Value>) {
+    for raw in [stdout, stderr] {
+        if raw.is_empty() {
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_slice::<Value>(raw)
+            && parsed.is_object()
+        {
+            if let Some(items) = parsed["diagnostics"].as_array() {
+                let mut errors = Vec::new();
+                let mut lines = Vec::new();
+                for item in items.iter().take(25) {
+                    let sev = item["severity"].as_str().unwrap_or("error");
+                    let code = item["code"].as_str().unwrap_or(op);
+                    let msg = item["message"].as_str().unwrap_or("");
+                    if sev == "error" {
+                        errors.push(item.clone());
+                    }
+                    lines.push(format!("- [{sev}/{code}] {msg}"));
+                }
+                let error_count = parsed["error_count"]
+                    .as_u64()
+                    .map(|n| n as usize)
+                    .unwrap_or_else(|| {
+                        items
+                            .iter()
+                            .filter(|i| i["severity"].as_str() == Some("error"))
+                            .count()
+                            .max(usize::from(!items.is_empty()))
+                    });
+                let summary = mask_bounded(&lines.join("\n"), DIAGNOSTIC_CAP_BYTES);
+                return (
+                    error_count.max(1),
+                    summary,
+                    if errors.is_empty() {
+                        items.iter().take(25).cloned().collect()
+                    } else {
+                        errors
+                    },
+                );
+            }
+            if let Some(items) = parsed["errors"].as_array() {
+                let errors: Vec<Value> = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(25)
+                    .map(|msg| json!({"severity": "error", "code": op, "message": msg}))
+                    .collect();
+                let lines: Vec<String> = errors
+                    .iter()
+                    .map(|d| format!("- [error/{}] {}", op, d["message"].as_str().unwrap_or("")))
+                    .collect();
+                let summary = mask_bounded(&lines.join("\n"), DIAGNOSTIC_CAP_BYTES);
+                return (items.len().max(1), summary, errors);
+            }
+        }
+    }
+    let fallback = [&stderr, &stdout]
+        .into_iter()
+        .find(|raw| !raw.is_empty())
+        .map(|raw| String::from_utf8_lossy(raw).into_owned())
+        .unwrap_or_default();
+    let summary = mask_bounded(fallback.trim(), DIAGNOSTIC_CAP_BYTES);
+    let diag = if summary.is_empty() {
+        vec![]
+    } else {
+        vec![json!({"severity": "error", "code": op, "message": summary})]
+    };
+    (1, summary, diag)
+}
+
+fn format_repair_prompt(base_prompt: String, repair: Option<&RepairContext>) -> String {
+    let Some(repair) = repair else {
+        return base_prompt;
+    };
+    format!(
+        "{base_prompt}\n\n## Bounded Diagnostic Repair (round {}/{})\nCanonical gate `{}` failed with the following structured diagnostics:\n{}\n\nFix ONLY the reported canonical gate violations in the workspace and ensure all required output artifacts are valid. Do not alter the approved scan profile or plan during generate, and do not modify the real target.",
+        repair.round, repair.max_rounds, repair.op, repair.diagnostics_summary
+    )
+}
+
 impl CreatorRunner {
-    fn verify(
+    fn verify_structured(
         &self,
         request: &Value,
         generated: bool,
         installed: bool,
         emit: &Event,
-    ) -> Result<()> {
+    ) -> Result<std::result::Result<(), VerifyFailure>> {
         files::check_identity(request)?;
         let directory = PathBuf::from(request["directory"].as_str().unwrap_or(""));
         let task = directory.join("agent").join(files::TASK);
@@ -263,8 +510,11 @@ impl CreatorRunner {
             inner: self.gates.as_ref(),
             base: directory.clone(),
         };
-        let run = |op: &str, data: Value| -> Result<()> {
+        let run = |op: &str, mut data: Value| -> Result<std::result::Result<(), VerifyFailure>> {
             emit(json!({"kind":"status","text":format!("Checking {op}")}))?;
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("json".into(), Value::Bool(true));
+            }
             let result = gate(op, &data, &safe_gates)?;
             for raw in [&result.stdout, &result.stderr] {
                 if !raw.is_empty() {
@@ -274,47 +524,109 @@ impl CreatorRunner {
                 }
             }
             if result.code != 0 {
-                return Err(HarnessError::conflict(format!(
-                    "Canonical verification failed: {op}."
-                )));
+                let (error_count, summary, diagnostics) =
+                    parse_gate_diagnostics(op, &result.stdout, &result.stderr);
+                return Ok(Err(VerifyFailure {
+                    op: op.to_owned(),
+                    repairable: true,
+                    error_count,
+                    summary,
+                    diagnostics,
+                }));
             }
-            Ok(())
+            Ok(Ok(()))
         };
         if !generated || !installed {
-            files::hashes(&directory)?;
-            run(
+            if let Err(err) = files::hashes(&directory) {
+                return Ok(Err(VerifyFailure {
+                    op: "required-reports".into(),
+                    repairable: false,
+                    error_count: 1,
+                    summary: err.message.clone(),
+                    diagnostics: vec![
+                        json!({"severity": "error", "code": "MISSING_REQUIRED_REPORT", "message": err.message}),
+                    ],
+                }));
+            }
+            if let Err(failure) = run(
                 "validate-scan-coverage",
                 json!({"target":target,"task_dir":task,"plan":plan}),
-            )?;
-            run(
+            )? {
+                return Ok(Err(failure));
+            }
+            if let Err(failure) = run(
                 "validate-plan-review",
                 json!({"plan":plan,"review":task.join(files::REPORTS[2]),"registry":registry}),
-            )?;
-            run(
+            )? {
+                return Ok(Err(failure));
+            }
+            if let Err(failure) = run(
                 "validate-skill-quality",
                 json!({"plan":plan,"target":target,"registry":registry,"plan_only":true}),
-            )?;
+            )? {
+                return Ok(Err(failure));
+            }
         }
         if generated {
-            if files::hashes(&directory)? != request["approved"] {
-                return Err(HarnessError::conflict(
-                    "The reviewed profile or plan changed. Start a new scan for review.",
-                ));
+            match files::hashes(&directory) {
+                Ok(current) if current == request["approved"] => {}
+                Ok(_) => {
+                    return Ok(Err(VerifyFailure {
+                        op: "approved-hashes".into(),
+                        repairable: false,
+                        error_count: 1,
+                        summary:
+                            "The reviewed profile or plan changed. Start a new scan for review."
+                                .into(),
+                        diagnostics: vec![
+                            json!({"severity": "error", "code": "APPROVED_PROFILE_CHANGED", "message": "The reviewed profile or plan changed. Start a new scan for review."}),
+                        ],
+                    }));
+                }
+                Err(err) => {
+                    return Ok(Err(VerifyFailure {
+                        op: "approved-hashes".into(),
+                        repairable: false,
+                        error_count: 1,
+                        summary: err.message.clone(),
+                        diagnostics: vec![
+                            json!({"severity": "error", "code": "MISSING_APPROVED_REPORT", "message": err.message}),
+                        ],
+                    }));
+                }
             }
-            run(
+            if let Err(failure) = run(
                 "validate-plan-mutations",
                 json!({"plan":plan,"target":target,"registry":registry}),
-            )?;
-            run(
+            )? {
+                return Ok(Err(failure));
+            }
+            if let Err(failure) = run(
                 "validate-content-review",
                 json!({"publication_plan":task.join(files::PLANS[0]),"review":task.join("infra-validate-review.json")}),
-            )?;
-            run(
+            )? {
+                return Ok(Err(failure));
+            }
+            if let Err(failure) = run(
                 "validate-generated",
                 json!({"target":if installed{target.clone()}else{task.join("infra-generate-staging")},"editions":request["tools"],"skill_plan":plan,"evidence_target":target,"delivery_root":target,"approved_profile":task.join(files::REPORTS[0]),"approved_profile_sha256":request["approved"][files::REPORTS[0]],"profile_path":format!("{}/{}",files::TASK,files::REPORTS[0]),"registry":registry}),
-            )?;
+            )? {
+                return Ok(Err(failure));
+            }
         }
-        Ok(())
+        Ok(Ok(()))
+    }
+    fn verify(
+        &self,
+        request: &Value,
+        generated: bool,
+        installed: bool,
+        emit: &Event,
+    ) -> Result<()> {
+        match self.verify_structured(request, generated, installed, emit)? {
+            Ok(()) => Ok(()),
+            Err(failure) => Err(failure.into_error()),
+        }
     }
     fn rollback(&self, request: &Value, emit: &Event) -> Result<()> {
         files::check_identity(request)?;
@@ -411,7 +723,13 @@ impl CreatorRunner {
         request: &Value,
         cancel: Arc<AtomicBool>,
         emit: Event,
-    ) -> Result<()> {
+        loop_state: AgentLoop<'_>,
+    ) -> Result<bool> {
+        let AgentLoop {
+            repair,
+            used_tokens,
+            started,
+        } = loop_state;
         let spec = sandbox_spec(request)?;
         let task = spec.workspace.join(files::TASK);
         let old = files::read(&task, "harness-questions.md", false, 1024 * 1024)?;
@@ -419,7 +737,7 @@ impl CreatorRunner {
             let mut rooted = infra_core::bank::publication::PublicationFiles::new(&task)?;
             rooted.unlink_expected_limit("harness-questions.md", bytes, 1024 * 1024)?;
         }
-        let mut message = prompt(request);
+        let mut message = format_repair_prompt(prompt(request), repair);
         if let Some(bytes) = old {
             message.push_str("\nPrevious questions to resolve:\n");
             message.push_str(&String::from_utf8_lossy(&bytes));
@@ -436,6 +754,10 @@ impl CreatorRunner {
         } else {
             None
         };
+        let max_tokens = request["budgets"]["tokens"].as_u64();
+        let remaining_seconds = request["budgets"]["seconds"]
+            .as_u64()
+            .map(|limit| limit.saturating_sub(started.elapsed().as_secs()).max(1));
         let input = Launch {
             provider: request["provider"].as_str().unwrap_or("").into(),
             executable: PathBuf::from(
@@ -463,9 +785,11 @@ impl CreatorRunner {
             0
         };
         let output = (3 * 1024 * 1024 + count * 3 * 1024 * 1024).min(96 * 1024 * 1024);
-        let max_tokens = request["budgets"]["tokens"].as_u64();
-        let tokens = Arc::new(AtomicU64::new(0));
-        let token_limit_hit = Arc::new(AtomicBool::new(false));
+        let prior_tokens = used_tokens.load(Ordering::Acquire);
+        let tokens = Arc::new(AtomicU64::new(prior_tokens));
+        let token_limit_hit = Arc::new(AtomicBool::new(
+            max_tokens.is_some_and(|limit| prior_tokens >= limit),
+        ));
         let dispatch_cancel = Arc::new(AtomicBool::new(cancel.load(Ordering::Acquire)));
         let forwarding = tokio::runtime::Handle::try_current().ok().map(|handle| {
             let human = cancel.clone();
@@ -490,7 +814,7 @@ impl CreatorRunner {
         let outcome = provider::run_monitored_locked(
             &input,
             Limits {
-                seconds: request["budgets"]["seconds"].as_u64(),
+                seconds: remaining_seconds,
                 output,
                 line: 2 * 1024 * 1024,
             },
@@ -523,6 +847,7 @@ impl CreatorRunner {
         )
         .await;
         drop(forwarding);
+        used_tokens.store(tokens.load(Ordering::Acquire), Ordering::Release);
         if permissions == Some(PermissionMode::Manual)
             && !sid.is_empty()
             && let Some(links) = &self.links
@@ -538,7 +863,7 @@ impl CreatorRunner {
                     message: "The native token budget was reached.".into(),
                 })
             }
-            Ok(result) if result.ok => Ok(()),
+            Ok(result) if result.ok => Ok(false),
             Ok(result) if result.limit_reached.as_deref() == Some("USD") => {
                 Err(HarnessError::conflict("The native USD budget was reached."))
             }
@@ -561,50 +886,128 @@ impl CreatorRunner {
                     "kind": "status",
                     "text": "Creator stream output limit reached. Existing artifacts are retained and independently verified."
                 }))?;
-                Ok(())
+                Ok(true)
             }
             Err(error) => Err(error),
         }
     }
-    async fn execute(
+    async fn execute_with_report(
         &self,
         session: &Value,
         request: &Value,
         cancel: Arc<AtomicBool>,
         emit: Event,
-    ) -> Result<&'static str> {
-        files::check_identity(request)?;
+    ) -> ExecuteReportResult {
+        if let Err(err) = files::check_identity(request) {
+            return Err(Box::new((err, 0, Value::Null)));
+        }
         let phase = request["phase"].as_str().unwrap_or("");
         if phase == "rollback" {
-            self.rollback(request, &emit)?;
-            return Ok("rolled_back");
+            return match self.rollback(request, &emit) {
+                Ok(()) => Ok(("rolled_back", 0)),
+                Err(err) => Err(Box::new((err, 0, Value::Null))),
+            };
         }
         if phase == "apply" {
-            self.apply(request, &emit)?;
-            return Ok("complete");
+            return match self.apply(request, &emit) {
+                Ok(()) => Ok(("complete", 0)),
+                Err(err) => Err(Box::new((err, 0, Value::Null))),
+            };
         }
         if !["scan", "generate"].contains(&phase) {
-            return Err(HarnessError::invalid("Unknown Creator phase."));
+            return Err(Box::new((
+                HarnessError::invalid("Unknown Creator phase."),
+                0,
+                Value::Null,
+            )));
         }
-        self.agent(session, request, cancel.clone(), emit.clone())
-            .await?;
-        if cancel.load(Ordering::Acquire) {
-            return Err(HarnessError::conflict("Cancellation requested."));
-        }
+        let max_repair_rounds = request["verify_repair_rounds"]
+            .as_u64()
+            .map(|n| (n as usize).min(VERIFY_REPAIR_ROUNDS))
+            .unwrap_or(VERIFY_REPAIR_ROUNDS);
         let directory = PathBuf::from(request["directory"].as_str().unwrap_or(""));
         let task = directory.join("agent").join(files::TASK);
-        if files::read(&task, "harness-questions.md", false, 1024 * 1024)?
-            .is_some_and(|v| v.iter().any(|b| !b.is_ascii_whitespace()))
-        {
-            return Ok("needs_input");
+        let started = std::time::Instant::now();
+        let used_tokens = AtomicU64::new(0);
+        let max_tokens = request["budgets"]["tokens"].as_u64();
+        let max_seconds = request["budgets"]["seconds"].as_u64();
+        let mut repair: Option<RepairContext> = None;
+        let mut repair_rounds = 0usize;
+        loop {
+            let output_limited = match self
+                .agent(
+                    session,
+                    request,
+                    cancel.clone(),
+                    emit.clone(),
+                    AgentLoop {
+                        repair: repair.as_ref(),
+                        used_tokens: &used_tokens,
+                        started,
+                    },
+                )
+                .await
+            {
+                Ok(hit) => hit,
+                Err(err) => return Err(Box::new((err, repair_rounds, Value::Null))),
+            };
+            if cancel.load(Ordering::Acquire) {
+                return Err(Box::new((
+                    HarnessError::conflict("Cancellation requested."),
+                    repair_rounds,
+                    Value::Null,
+                )));
+            }
+            match files::read(&task, "harness-questions.md", false, 1024 * 1024) {
+                Ok(Some(v)) if v.iter().any(|b| !b.is_ascii_whitespace()) => {
+                    return Ok(("needs_input", repair_rounds));
+                }
+                Ok(_) => {}
+                Err(err) => return Err(Box::new((err, repair_rounds, Value::Null))),
+            }
+            match self.verify_structured(request, phase == "generate", false, &emit) {
+                Ok(Ok(())) => break,
+                Ok(Err(failure)) => {
+                    let budget_exhausted = max_tokens
+                        .is_some_and(|limit| used_tokens.load(Ordering::Acquire) >= limit)
+                        || max_seconds.is_some_and(|limit| started.elapsed().as_secs() >= limit);
+                    if !failure.repairable
+                        || output_limited
+                        || budget_exhausted
+                        || repair_rounds >= max_repair_rounds
+                    {
+                        let diagnostics = json!(failure.diagnostics);
+                        return Err(Box::new((failure.into_error(), repair_rounds, diagnostics)));
+                    }
+                    repair_rounds += 1;
+                    let _ = emit(json!({
+                        "kind": "status",
+                        "text": format!(
+                            "Canonical gate `{}` reported {} diagnostic error(s); starting bounded repair round {}/{}.",
+                            failure.op, failure.error_count, repair_rounds, max_repair_rounds
+                        )
+                    }));
+                    repair = Some(RepairContext {
+                        round: repair_rounds,
+                        max_rounds: max_repair_rounds,
+                        op: failure.op,
+                        diagnostics_summary: failure.summary,
+                    });
+                }
+                Err(err) => return Err(Box::new((err, repair_rounds, Value::Null))),
+            }
         }
-        self.verify(request, phase == "generate", false, &emit)?;
         if phase == "generate" {
             let mut run = request.clone();
             run["status"] = "preview".into();
-            files::preview(&run, &directory)?;
+            if let Err(err) = files::preview(&run, &directory) {
+                return Err(Box::new((err, repair_rounds, Value::Null)));
+            }
         }
-        Ok(if phase == "scan" { "review" } else { "preview" })
+        Ok((
+            if phase == "scan" { "review" } else { "preview" },
+            repair_rounds,
+        ))
     }
 }
 impl SpecialWorkflow for CreatorRunner {
@@ -643,43 +1046,78 @@ impl SpecialWorkflow for CreatorRunner {
                     "Creator request does not match the queued session.",
                 ));
             }
-            let result = self.execute(&session, &request, cancel, emit.clone()).await;
-            let (status, message, ok) = match &result {
-                Ok("review") => (
+            let outcome = self
+                .execute_with_report(&session, &request, cancel, emit.clone())
+                .await;
+            let (status, message, ok, repair_rounds, diagnostics) = match &outcome {
+                Ok(("review", rounds)) => (
                     "review",
                     "Scan checks passed. Review the profile and plan before generating.".to_owned(),
                     true,
+                    *rounds,
+                    Value::Null,
                 ),
-                Ok("preview") => (
+                Ok(("preview", rounds)) => (
                     "preview",
                     "Generated bundle passed verification. Review file changes before applying."
                         .to_owned(),
                     true,
+                    *rounds,
+                    Value::Null,
                 ),
-                Ok("needs_input") => (
+                Ok(("needs_input", rounds)) => (
                     "needs_input",
                     "Answer the questions or provide corrections to continue.".to_owned(),
                     true,
+                    *rounds,
+                    Value::Null,
                 ),
-                Ok("complete") => (
+                Ok(("complete", rounds)) => (
                     "complete",
                     "Published and verified on the target project.".to_owned(),
                     true,
+                    *rounds,
+                    Value::Null,
                 ),
-                Ok("rolled_back") => ("rolled_back", "Publication recovered.".to_owned(), true),
+                Ok(("rolled_back", rounds)) => (
+                    "rolled_back",
+                    "Publication recovered.".to_owned(),
+                    true,
+                    *rounds,
+                    Value::Null,
+                ),
                 Ok(_) => return Err(HarnessError::invalid("Unexpected Creator outcome.")),
-                Err(error) => ("failed", error.message.clone(), false),
+                Err(boxed) => {
+                    let (error, rounds, diagnostics) = &**boxed;
+                    (
+                        "failed",
+                        error.message.clone(),
+                        false,
+                        *rounds,
+                        diagnostics.clone(),
+                    )
+                }
             };
+            let mut written = json!({
+                "status": status,
+                "message": message,
+                "repair_rounds": repair_rounds,
+            });
+            if !diagnostics.is_null() {
+                written["diagnostics"] = diagnostics;
+            }
             files::write(
                 &directory,
                 request["result_file"]
                     .as_str()
                     .ok_or_else(|| HarnessError::invalid("Creator result file missing."))?,
-                &json!({"status":status,"message":message}),
+                &written,
             )?;
             emit(json!({"kind":if ok{"result"}else{"error"},"text":message,"ok":ok}))?;
-            result?;
-            Ok(json!({"kind":"result","ok":ok,"text":message,"creator_status":status}))
+            outcome.map_err(|boxed| boxed.0)?;
+            Ok(
+                json!({"kind":"result","ok":ok,"text":message,"creator_status":status,"repair_rounds":repair_rounds}),
+            )
         })
     }
 }
@@ -859,5 +1297,93 @@ mod tests {
         assert!(spec.protected.contains(&db));
         assert!(spec.protected.contains(&other_run));
         assert!(spec.protected.contains(&req_file));
+    }
+
+    #[test]
+    fn parse_gate_diagnostics_extracts_coded_errors_and_caps_output() {
+        let json_out = json!({
+            "valid": false,
+            "error_count": 2,
+            "diagnostics": [
+                {"severity": "error", "code": "MISSING_PLAN", "message": "skill-generation-plan.json missing"},
+                {"severity": "error", "code": "LEAK", "message": "bad token sk-abcdefghijklmnopqrstuvwxyz123456"}
+            ]
+        });
+        let (count, summary, items) = parse_gate_diagnostics(
+            "validate-plan-review",
+            &serde_json::to_vec(&json_out).unwrap(),
+            b"",
+        );
+        assert_eq!(count, 2);
+        assert_eq!(items.len(), 2);
+        assert!(summary.contains("[error/MISSING_PLAN]"));
+        assert!(!summary.contains("sk-abcdefghijklmnopqrstuvwxyz123456"));
+    }
+
+    #[test]
+    fn validation_gates_refuses_unlisted_runtime_arguments() {
+        struct Stub;
+        impl NativeGateServices for Stub {
+            fn validate_host(
+                &self,
+                _: &Path,
+                _: &Path,
+                _: &str,
+                _: &BTreeMap<String, String>,
+            ) -> infra_core::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn runtime_command(
+                &self,
+                _: &Path,
+                _: &[String],
+                _: std::time::Duration,
+            ) -> infra_core::Result<infra_generator::NativeOutput> {
+                Ok(infra_generator::NativeOutput {
+                    code: 0,
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let base = dir.path().join("base");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        let gates = ValidationGates { inner: &Stub, base };
+        let err = gates
+            .runtime_command(
+                &target,
+                &["--arbitrary".into()],
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("status --json"));
+        let ok = gates
+            .runtime_command(
+                &target,
+                &["validate".into()],
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(ok.code, 0);
+    }
+
+    #[test]
+    fn bounded_repair_context_is_formatted_only_when_present() {
+        assert_eq!(format_repair_prompt("base".into(), None), "base");
+        let repaired = format_repair_prompt(
+            "base".into(),
+            Some(&RepairContext {
+                round: 1,
+                max_rounds: 3,
+                op: "validate-plan-review".into(),
+                diagnostics_summary: "- [error/CODE] fix me".into(),
+            }),
+        );
+        assert!(repaired.contains("round 1/3"));
+        assert!(repaired.contains("validate-plan-review"));
+        assert!(repaired.contains("- [error/CODE] fix me"));
     }
 }
