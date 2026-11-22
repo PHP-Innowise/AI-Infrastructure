@@ -137,6 +137,54 @@ pub(crate) fn append_draft_block(textarea_id: &str, block: &str, max_chars: usiz
     true
 }
 
+pub(super) fn send_error_message(error: &api::Error) -> String {
+    let trimmed = error.message.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_owned();
+    }
+    if error.status == 0 {
+        "Could not reach the local runner. Your prompt and attachments were preserved.".to_owned()
+    } else {
+        format!(
+            "The local runner returned HTTP {}. Your prompt and attachments were preserved.",
+            error.status
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SendOutcomePlan {
+    pub(super) clear_draft: bool,
+    pub(super) clear_files: bool,
+    pub(super) error: String,
+}
+
+pub(super) fn plan_send_outcome(follow: bool, result: Result<&V, &api::Error>) -> SendOutcomePlan {
+    match result {
+        Ok(v) => {
+            let has_session_id = v["session"]["id"].as_str().is_some_and(|id| !id.is_empty());
+            if !follow && !has_session_id {
+                SendOutcomePlan {
+                    clear_draft: false,
+                    clear_files: false,
+                    error: "No session returned. Refresh the list before retrying.".to_owned(),
+                }
+            } else {
+                SendOutcomePlan {
+                    clear_draft: true,
+                    clear_files: true,
+                    error: String::new(),
+                }
+            }
+        }
+        Err(err) => SendOutcomePlan {
+            clear_draft: false,
+            clear_files: false,
+            error: send_error_message(err),
+        },
+    }
+}
+
 pub async fn send() {
     flush_preferences();
     if inbox::needs_confirmation() || m::read(|s| m::active(&s.selected)) {
@@ -352,46 +400,42 @@ pub async fn send() {
     dom::cancel_timer("preflight-debounce");
     crate::graph_map::focus_from_prompt(&prompt);
     crate::graph::run_state(true);
-    match api::post(&path, turn).await {
-        Ok(v) => {
-            let session = &v["session"];
-            if !follow && !session["id"].is_string() {
-                dom::error(
-                    "composer-error",
-                    "No session returned. Refresh the list before retrying.",
-                );
-            } else {
-                m::upsert(session.clone());
-                if session["graph_focus"].is_object()
-                    && !should_keep_predicting(
-                        &m::data("session-graph-focus"),
-                        &session["graph_focus"],
-                    )
-                {
-                    crate::graph_map::apply_focus(&session["graph_focus"]);
-                }
-                if follow {
-                    inbox::clear_draft(&sid, &prompt);
-                }
-                dom::set_value("prompt", "");
-                reset_preflight(false);
-                clear_files();
-                reset_session_settings_state();
-                m::write(|s| s.pending = false);
-                if follow {
-                    let e = m::read(|s| s.epoch);
-                    poll(e).await;
-                } else {
-                    m::take("merge-draft");
-                    omnigraph::clear_draft_peers();
-                    if session["omnigraph"]["linked_session_ids"].is_array() {
-                        refresh().await;
-                    }
-                    select(&m::text(session, "id")).await;
-                }
-            }
+    let response = api::post(&path, turn).await;
+    let plan = plan_send_outcome(follow, response.as_ref());
+    if plan.clear_draft {
+        let v = response.expect("clear_draft implies Ok response");
+        let session = v["session"].clone();
+        m::upsert(session.clone());
+        if session["graph_focus"].is_object()
+            && !should_keep_predicting(&m::data("session-graph-focus"), &session["graph_focus"])
+        {
+            crate::graph_map::apply_focus(&session["graph_focus"]);
         }
-        Err(e) => dom::error("composer-error", &e.message),
+        if follow {
+            inbox::clear_draft(&sid, &prompt);
+        }
+        dom::set_value("prompt", "");
+        reset_preflight(false);
+        if plan.clear_files {
+            clear_files();
+        }
+        reset_session_settings_state();
+        m::write(|s| s.pending = false);
+        if follow {
+            let e = m::read(|s| s.epoch);
+            poll(e).await;
+        } else {
+            m::take("merge-draft");
+            omnigraph::clear_draft_peers();
+            if session["omnigraph"]["linked_session_ids"].is_array() {
+                refresh().await;
+            }
+            select(&m::text(&session, "id")).await;
+        }
+    } else {
+        dom::error("composer-error", &plan.error);
+        // Re-sync attachment chips on error (`409`/`422`/`500`) so unsent prompt & files stay visible.
+        render_files();
     }
     m::write(|s| s.pending = false);
     controls();

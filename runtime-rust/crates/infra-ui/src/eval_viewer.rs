@@ -1345,22 +1345,52 @@ fn ensure_editor_section_row(
     tr
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorRowA11y {
+    query_id: String,
+    query_label: String,
+    trigger_id: String,
+    trigger_label: String,
+    trigger_text: &'static str,
+    delete_label: String,
+}
+
+fn editor_row_a11y_labels(index: usize, row_id: &str, expected: bool) -> EditorRowA11y {
+    let display_num = index + 1;
+    let trigger_text = if expected { "Yes" } else { "No" };
+    EditorRowA11y {
+        query_id: format!("eval-query-{row_id}"),
+        query_label: format!("Evaluation query {display_num}"),
+        trigger_id: format!("eval-trigger-{row_id}"),
+        trigger_label: format!("Should trigger query {display_num}"),
+        trigger_text,
+        delete_label: format!("Delete query {display_num}"),
+    }
+}
+
 fn create_editor_item_row(row_id: &str) -> Element {
     let tr = dom::el("tr", "", "");
     let _ = tr.set_attribute("data-editor-row", row_id);
 
     let td_query = add(&tr, "td", "", "");
+    let query_label = add(&td_query, "label", "sr-only query-label", "");
+    let _ = query_label.set_attribute("for", &format!("eval-query-{row_id}"));
     let input = add(&td_query, "textarea", "query-input", "");
+    let _ = input.set_attribute("id", &format!("eval-query-{row_id}"));
     let _ = input.set_attribute("data-editor-field", "query");
 
     let td_toggle = add(&tr, "td", "", "");
-    let label = add(&td_toggle, "label", "toggle", "");
+    let wrap = add(&td_toggle, "div", "toggle-wrap", "");
+    let label = add(&wrap, "label", "toggle", "");
+    let _ = label.set_attribute("for", &format!("eval-trigger-{row_id}"));
     let checkbox = add(&label, "input", "", "");
     let _ = checkbox.set_attribute("type", "checkbox");
     let _ = checkbox.set_attribute("id", &format!("eval-trigger-{row_id}"));
     let _ = checkbox.set_attribute("data-editor-field", "should_trigger");
-    add(&label, "span", "slider", "");
-    let trig_label = add(&td_toggle, "label", "trigger-label", "");
+    let slider = add(&label, "span", "slider", "");
+    let _ = slider.set_attribute("aria-hidden", "true");
+    add(&label, "span", "sr-only toggle-state-sr", "");
+    let trig_label = add(&wrap, "label", "trigger-label", "");
     let _ = trig_label.set_attribute("for", &format!("eval-trigger-{row_id}"));
 
     let td_actions = add(&tr, "td", "", "");
@@ -1371,21 +1401,36 @@ fn create_editor_item_row(row_id: &str) -> Element {
 }
 
 fn sync_editor_item_row(tr: &Element, index: usize, row_id: &str, item: &V, expected: bool) {
-    let display_num = index + 1;
+    let a11y = editor_row_a11y_labels(index, row_id, expected);
     let index_str = index.to_string();
+    if let Ok(Some(query_label)) = tr.query_selector("label.query-label") {
+        let _ = query_label.set_attribute("for", &a11y.query_id);
+        if query_label.text_content().as_deref() != Some(a11y.query_label.as_str()) {
+            query_label.set_text_content(Some(&a11y.query_label));
+        }
+    }
     if let Ok(Some(textarea)) = tr.query_selector("textarea.query-input") {
+        let _ = textarea.set_attribute("id", &a11y.query_id);
         let _ = textarea.set_attribute("data-editor-index", &index_str);
-        let _ = textarea.set_attribute("aria-label", &format!("Evaluation query {display_num}"));
+        let _ = textarea.set_attribute("aria-label", &a11y.query_label);
         let next_val = text(item, "query");
         if dom::value_of(&textarea) != next_val {
             dom::set_element_value(&textarea, &next_val);
         }
     }
+    if let Ok(Some(toggle_wrap_label)) = tr.query_selector("label.toggle") {
+        let _ = toggle_wrap_label.set_attribute("for", &a11y.trigger_id);
+    }
+    if let Ok(Some(toggle_sr)) = tr.query_selector("label.toggle .toggle-state-sr") {
+        let sr_text = format!("{}: {}", a11y.trigger_label, a11y.trigger_text);
+        if toggle_sr.text_content().as_deref() != Some(sr_text.as_str()) {
+            toggle_sr.set_text_content(Some(&sr_text));
+        }
+    }
     if let Ok(Some(checkbox)) = tr.query_selector("input[data-editor-field='should_trigger']") {
-        let _ = checkbox.set_attribute("id", &format!("eval-trigger-{row_id}"));
+        let _ = checkbox.set_attribute("id", &a11y.trigger_id);
         let _ = checkbox.set_attribute("data-editor-index", &index_str);
-        let _ =
-            checkbox.set_attribute("aria-label", &format!("Should trigger query {display_num}"));
+        let _ = checkbox.set_attribute("aria-label", &a11y.trigger_label);
         if let Some(input) = checkbox.dyn_ref::<web_sys::HtmlInputElement>() {
             if input.checked() != expected {
                 input.set_checked(expected);
@@ -1393,15 +1438,14 @@ fn sync_editor_item_row(tr: &Element, index: usize, row_id: &str, item: &V, expe
         }
     }
     if let Ok(Some(trig_label)) = tr.query_selector("label.trigger-label") {
-        let _ = trig_label.set_attribute("for", &format!("eval-trigger-{row_id}"));
-        let txt = if expected { "Yes" } else { "No" };
-        if trig_label.text_content().as_deref() != Some(txt) {
-            trig_label.set_text_content(Some(txt));
+        let _ = trig_label.set_attribute("for", &a11y.trigger_id);
+        if trig_label.text_content().as_deref() != Some(a11y.trigger_text) {
+            trig_label.set_text_content(Some(a11y.trigger_text));
         }
     }
     if let Ok(Some(btn)) = tr.query_selector("button.btn-delete") {
         let _ = btn.set_attribute("data-editor-index", &index_str);
-        let _ = btn.set_attribute("aria-label", &format!("Delete query {display_num}"));
+        let _ = btn.set_attribute("aria-label", &a11y.delete_label);
     }
 }
 
@@ -1748,5 +1792,24 @@ mod tests {
                 (2, "row-2".into(), false),
             ]
         );
+    }
+
+    #[test]
+    fn editor_row_a11y_labels_match_row_ids_and_trigger_text() {
+        let yes = editor_row_a11y_labels(0, "row-7", true);
+        assert_eq!(yes.query_id, "eval-query-row-7");
+        assert_eq!(yes.query_label, "Evaluation query 1");
+        assert_eq!(yes.trigger_id, "eval-trigger-row-7");
+        assert_eq!(yes.trigger_label, "Should trigger query 1");
+        assert_eq!(yes.trigger_text, "Yes");
+        assert_eq!(yes.delete_label, "Delete query 1");
+
+        let no = editor_row_a11y_labels(2, "row-0", false);
+        assert_eq!(no.query_id, "eval-query-row-0");
+        assert_eq!(no.query_label, "Evaluation query 3");
+        assert_eq!(no.trigger_id, "eval-trigger-row-0");
+        assert_eq!(no.trigger_label, "Should trigger query 3");
+        assert_eq!(no.trigger_text, "No");
+        assert_eq!(no.delete_label, "Delete query 3");
     }
 }
