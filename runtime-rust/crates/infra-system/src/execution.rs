@@ -1023,7 +1023,308 @@ fn now_unix_ns() -> i128 {
     time_to_unix_ns(std::time::SystemTime::now()).unwrap_or(0)
 }
 
+#[cfg(test)]
 fn verify_tree_stamp(root: &Path) -> Option<(String, i128)> {
+    verify_tree_stamp_tier(root, &[], None).map(|(_, stamp, mtime)| (stamp, mtime))
+}
+
+fn resolve_state_dir_from_health_db(health_db: &Path) -> Option<PathBuf> {
+    let mut cur = health_db.parent();
+    for _ in 0..4 {
+        let candidate = cur?;
+        if candidate.join("graphs").is_dir() || candidate.join("sessions.sqlite3").is_file() {
+            return Some(candidate.to_path_buf());
+        }
+        cur = candidate.parent();
+    }
+    None
+}
+
+fn root_command_basename(cmd: &str) -> String {
+    cmd.rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(cmd)
+        .to_ascii_lowercase()
+}
+
+fn stat_regular_non_symlink(path: &Path) -> Option<(u64, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+    Some((meta.len(), mtime))
+}
+
+fn scoped_closure_files(root: &Path, argv: &[String]) -> Option<Vec<PathBuf>> {
+    let exe = root_command_basename(argv.first()?);
+    let args = &argv[1..];
+    match exe.as_str() {
+        "composer" => {
+            let subcmd = args.iter().find(|a| !a.starts_with('-'))?.as_str();
+            if subcmd != "validate" {
+                return None;
+            }
+            let mut closure = Vec::new();
+            let composer = root.join("composer.json");
+            if !composer.is_file() {
+                return None;
+            }
+            closure.push(composer);
+            let lock = root.join("composer.lock");
+            if lock.exists() {
+                closure.push(lock);
+            }
+            Some(closure)
+        }
+        "php" => {
+            if !args.iter().any(|a| a == "-l" || a == "--syntax-check")
+                || args
+                    .iter()
+                    .any(|a| matches!(a.as_str(), "-r" | "-f" | "-B" | "-R" | "-E" | "-F"))
+            {
+                return None;
+            }
+            let mut targets = Vec::new();
+            let mut i = 0;
+            while i < args.len() {
+                let arg = &args[i];
+                if matches!(arg.as_str(), "-c" | "-d" | "-z") {
+                    i += 2;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    i += 1;
+                    continue;
+                }
+                let p = root.join(arg);
+                let canon = infra_core::fs::canonicalize(&p).ok()?;
+                if !canon.starts_with(root) || !canon.is_file() {
+                    return None;
+                }
+                targets.push(p);
+                i += 1;
+            }
+            (!targets.is_empty()).then_some(targets)
+        }
+        _ => None,
+    }
+}
+
+fn find_graph_ir_db(root: &Path, state_dir: &Path) -> Option<PathBuf> {
+    let canon = infra_core::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let sessions_db = state_dir.join("sessions.sqlite3");
+    let mut candidate_ids: Vec<String> = Vec::new();
+    if sessions_db.is_file()
+        && let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &sessions_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        && let Ok(mut stmt) = conn.prepare("SELECT id, path FROM registered_projects")
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+    {
+        for (pid, raw_path) in rows.flatten() {
+            let reg_canon = infra_core::fs::canonicalize(Path::new(&raw_path))
+                .unwrap_or_else(|_| PathBuf::from(&raw_path));
+            if reg_canon == canon {
+                candidate_ids.push(pid);
+            }
+        }
+    }
+    let root_hash16 = &digest(canon.to_string_lossy().as_bytes())[..16];
+    candidate_ids.push(format!("sys-{root_hash16}"));
+    candidate_ids.push(root_hash16.to_string());
+
+    for pid in candidate_ids {
+        let db = state_dir.join("graphs").join(&pid).join("graph_ir.sqlite3");
+        if db.is_file() {
+            return Some(db);
+        }
+    }
+    None
+}
+
+fn git_dirty_entries(root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain", "-z", "-uall"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for raw in out.stdout.split(|b| *b == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let s = String::from_utf8_lossy(raw);
+        if s.len() > 3 {
+            entries.push(s[3..].to_string());
+        } else {
+            entries.push(s.into_owned());
+        }
+    }
+    entries.sort();
+    Some(entries)
+}
+
+fn try_ir_tree_stamp(root: &Path, state_dir: &Path) -> Option<(&'static str, String, i128)> {
+    let db_path = find_graph_ir_db(root, state_dir)?;
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let write_epoch: String = conn
+        .query_row(
+            "SELECT value FROM ir_meta WHERE key = 'write_epoch'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let mut stmt = conn
+        .prepare("SELECT path, size, mtime_ns FROM ir_files ORDER BY path ASC")
+        .ok()?;
+    let rows: Vec<(String, i64, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .ok()?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut max_mtime: i128 = root
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(time_to_unix_ns)
+        .unwrap_or(0);
+    let ir_max_mtime: i128 = rows
+        .iter()
+        .map(|(_, _, m)| i128::from(*m))
+        .max()
+        .unwrap_or(0);
+    max_mtime = max_mtime.max(ir_max_mtime);
+
+    if let Some(head) = crate::catalog::git_head(root)
+        && let Some(dirty) = git_dirty_entries(root)
+    {
+        let mut parts = vec![
+            format!("ir_epoch:{write_epoch}"),
+            format!("ir_count:{}", rows.len()),
+            format!("git_head:{head}"),
+        ];
+        for rel in dirty {
+            let full = root.join(&rel);
+            if let Ok(meta) = std::fs::symlink_metadata(&full) {
+                if meta.file_type().is_symlink() {
+                    return None;
+                }
+                if meta.is_file() {
+                    let mtime = meta.modified().ok().and_then(time_to_unix_ns)?;
+                    max_mtime = max_mtime.max(mtime);
+                    parts.push(format!("dirty:{rel}:{}:{mtime}", meta.len()));
+                } else {
+                    parts.push(format!("dirty:{rel}:other"));
+                }
+            } else {
+                parts.push(format!("dirty:{rel}:missing"));
+            }
+        }
+        for manifest_rel in [
+            "composer.json",
+            "composer.lock",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "Cargo.toml",
+            "Cargo.lock",
+            "pyproject.toml",
+            "go.mod",
+        ] {
+            let path = root.join(manifest_rel);
+            if let Some((len, mtime)) = stat_regular_non_symlink(&path) {
+                max_mtime = max_mtime.max(mtime);
+                parts.push(format!("manifest:{manifest_rel}:{len}:{mtime}"));
+            }
+        }
+        return Some(("ir_git", digest(parts.join("\n").as_bytes()), max_mtime));
+    }
+
+    // Non-Git fallback: verify every indexed file and its parent directory against the IR DB.
+    let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut parts = vec![
+        format!("ir_epoch:{write_epoch}"),
+        format!("ir_count:{}", rows.len()),
+    ];
+    for (rel, expected_size, expected_mtime) in rows {
+        let full = root.join(&rel);
+        let (len, mtime) = stat_regular_non_symlink(&full)?;
+        if i64::try_from(len).ok() != Some(expected_size) || i128::from(expected_mtime) != mtime {
+            return None;
+        }
+        max_mtime = max_mtime.max(mtime);
+        if let Some(parent) = full.parent()
+            && seen_dirs.insert(parent.to_path_buf())
+            && let Some(dir_mtime) = parent
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(time_to_unix_ns)
+        {
+            if dir_mtime > ir_max_mtime {
+                return None;
+            }
+            max_mtime = max_mtime.max(dir_mtime);
+        }
+        parts.push(format!("{rel}:{len}:{mtime}"));
+    }
+    Some(("ir_indexed", digest(parts.join("\n").as_bytes()), max_mtime))
+}
+
+pub fn verify_tree_stamp_tier(
+    root: &Path,
+    argv: &[String],
+    state_dir: Option<&Path>,
+) -> Option<(&'static str, String, i128)> {
+    // Tier 1: exact scoped file closure for self-contained commands (composer validate, php -l).
+    if let Some(files) = scoped_closure_files(root, argv) {
+        let mut max_mtime: i128 = 0;
+        let mut parts = Vec::with_capacity(files.len() + 1);
+        for file in files {
+            let (len, mtime) = stat_regular_non_symlink(&file)?;
+            max_mtime = max_mtime.max(mtime);
+            let rel = file
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            parts.push(format!("{rel}:{len}:{mtime}"));
+        }
+        parts.sort();
+        let head = crate::catalog::git_head(root).unwrap_or_default();
+        parts.push(format!("git_head:{head}"));
+        return Some((
+            "scoped_files",
+            digest(parts.join("\n").as_bytes()),
+            max_mtime,
+        ));
+    }
+
+    // Tier 2: Graph-IR revision / indexed stat snapshot (no 3000-file walk).
+    if let Some(state) = state_dir
+        && let Some(ir_stamp) = try_ir_tree_stamp(root, state)
+    {
+        return Some(ir_stamp);
+    }
+
+    // Tier 3: bounded directory walk fallback when no narrower scope or Graph-IR store exists.
     const MAX_FILES: usize = 3000;
     let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
     let mut entries = Vec::new();
@@ -1072,7 +1373,11 @@ fn verify_tree_stamp(root: &Path) -> Option<(String, i128)> {
     }
     let head = crate::catalog::git_head(root).unwrap_or_default();
     entries.push(format!("git_head:{head}"));
-    Some((digest(entries.join("\n").as_bytes()), max_mtime))
+    Some((
+        "bounded_walk",
+        digest(entries.join("\n").as_bytes()),
+        max_mtime,
+    ))
 }
 
 fn ensure_system_ledger(db_path: &Path) -> Result<rusqlite::Connection> {
@@ -1107,6 +1412,11 @@ fn ensure_system_ledger(db_path: &Path) -> Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+pub const HEALTH_DECAY: f64 = 0.82;
+pub const HEALTH_PRIOR_ALPHA: f64 = 0.25;
+pub const HEALTH_PRIOR_WEIGHT: f64 = 1.5;
+pub const HEALTH_HISTORY_LIMIT: usize = 50;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemHealthSummary {
     pub total_runs: usize,
@@ -1115,6 +1425,35 @@ pub struct SystemHealthSummary {
     pub schema_error_rate: f64,
     pub deopt_rate: f64,
     pub warnings: Vec<String>,
+}
+
+impl SystemHealthSummary {
+    pub fn is_degraded(&self) -> bool {
+        self.total_runs >= 3 && (self.schema_error_rate > 0.25 || self.deopt_rate > 0.30)
+    }
+
+    pub fn recommended_max_attempts(&self, base_limit: u64) -> u64 {
+        if !self.is_degraded() {
+            return base_limit;
+        }
+        if self.schema_error_rate > 0.50 || self.deopt_rate > 0.50 {
+            base_limit.min(2)
+        } else {
+            base_limit.min(4)
+        }
+    }
+
+    pub fn recommended_concurrency(&self, base_concurrency: usize) -> usize {
+        let base = base_concurrency.max(1);
+        if !self.is_degraded() {
+            return base;
+        }
+        if self.schema_error_rate > 0.50 || self.deopt_rate > 0.50 {
+            1
+        } else {
+            (base / 2).max(1)
+        }
+    }
 }
 
 #[expect(
@@ -1166,32 +1505,41 @@ pub fn summarize_system_health(
     };
     let model_key = model.unwrap_or("default");
     let Ok(mut stmt) = conn.prepare(
-        "SELECT schema_error, deopt FROM workflow_health_runs WHERE workflow=?1 AND provider=?2 AND model=?3 ORDER BY id DESC LIMIT 20",
+        "SELECT schema_error, deopt FROM workflow_health_runs WHERE workflow=?1 AND provider=?2 AND model=?3 ORDER BY id DESC LIMIT ?4",
     ) else {
         return summary;
     };
-    let Ok(rows) = stmt.query_map(rusqlite::params![workflow, provider, model_key], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-    }) else {
+    let Ok(rows) = stmt.query_map(
+        rusqlite::params![workflow, provider, model_key, HEALTH_HISTORY_LIMIT as i64],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    ) else {
         return summary;
     };
-    for row in rows.flatten() {
+    let mut total_weight = 0.0_f64;
+    let mut weighted_schema = 0.0_f64;
+    let mut weighted_deopt = 0.0_f64;
+    for (idx, row) in rows.flatten().enumerate() {
+        let weight = HEALTH_DECAY.powi(idx as i32);
         summary.total_runs += 1;
+        total_weight += weight;
         if row.0 != 0 {
             summary.schema_error_runs += 1;
+            weighted_schema += weight;
         }
         if row.1 != 0 {
             summary.deopt_runs += 1;
+            weighted_deopt += weight;
         }
     }
     if summary.total_runs > 0 {
-        summary.schema_error_rate = summary.schema_error_runs as f64 / summary.total_runs as f64;
-        summary.deopt_rate = summary.deopt_runs as f64 / summary.total_runs as f64;
+        let denom = total_weight + HEALTH_PRIOR_WEIGHT;
+        summary.schema_error_rate = (weighted_schema + HEALTH_PRIOR_ALPHA) / denom;
+        summary.deopt_rate = (weighted_deopt + HEALTH_PRIOR_ALPHA) / denom;
     }
     if summary.total_runs >= 3 {
         if summary.schema_error_rate > 0.25 {
             summary.warnings.push(format!(
-                "High schema error rate for {workflow}/{provider}/{model_key}: {:.0}% ({}/{})",
+                "High schema error rate for {workflow}/{provider}/{model_key}: {:.0}% smoothed ({}/{} recent)",
                 summary.schema_error_rate * 100.0,
                 summary.schema_error_runs,
                 summary.total_runs
@@ -1199,7 +1547,7 @@ pub fn summarize_system_health(
         }
         if summary.deopt_rate > 0.30 {
             summary.warnings.push(format!(
-                "Degraded ROI/deopt warning for {workflow}/{provider}/{model_key}: {:.0}% deopted ({}/{})",
+                "Degraded ROI/deopt warning for {workflow}/{provider}/{model_key}: {:.0}% smoothed ({}/{} recent)",
                 summary.deopt_rate * 100.0,
                 summary.deopt_runs,
                 summary.total_runs
@@ -1207,6 +1555,54 @@ pub fn summarize_system_health(
         }
     }
     summary
+}
+
+/// Selects a healthier tracked model for `(workflow, provider)` when the requested model
+/// exhibits degraded smoothed health and another model has >= 3 runs and healthy metrics.
+pub fn select_healthier_model(
+    db_path: &Path,
+    workflow: &str,
+    provider: &str,
+    requested_model: Option<&str>,
+) -> Option<String> {
+    let current = summarize_system_health(db_path, workflow, provider, requested_model);
+    if !current.is_degraded() {
+        return None;
+    }
+    let current_key = requested_model.unwrap_or("default");
+    let current_score = current.schema_error_rate + current.deopt_rate;
+    let conn = ensure_system_ledger(db_path).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT model FROM workflow_health_runs WHERE workflow=?1 AND provider=?2 AND model != 'default' ORDER BY model ASC",
+        )
+        .ok()?;
+    let candidates: Vec<String> = stmt
+        .query_map(rusqlite::params![workflow, provider], |r| r.get(0))
+        .ok()?
+        .flatten()
+        .collect();
+    let mut best: Option<(f64, String)> = None;
+    for candidate in candidates {
+        if candidate == current_key {
+            continue;
+        }
+        let health = summarize_system_health(db_path, workflow, provider, Some(&candidate));
+        if health.total_runs < 3 || health.is_degraded() {
+            continue;
+        }
+        let score = health.schema_error_rate + health.deopt_rate;
+        if score + 0.10 >= current_score {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, best_name)| (score, &candidate) < (*best_score, best_name))
+        {
+            best = Some((score, candidate));
+        }
+    }
+    best.map(|(_, model)| model)
 }
 
 /// Executes deterministic verification checks with `VERIFY_RACY_NS`-guarded cross-run
@@ -1287,9 +1683,11 @@ async fn run_deterministic_verify_checks_at(
         let path_env = std::env::var("PATH").ok();
         let env =
             infra_host::sandbox::scrub_env(std::env::vars(), &std::collections::BTreeMap::new());
+        let state_dir = health_db.and_then(resolve_state_dir_from_health_db);
         let cache_key = if !disable_cache {
             health_db.and_then(|_| {
-                let (tree_digest, max_mtime) = verify_tree_stamp(&cwd_canon)?;
+                let (_tier, tree_digest, max_mtime) =
+                    verify_tree_stamp_tier(&cwd_canon, &argv, state_dir.as_deref())?;
                 (max_mtime > 0 && now_ns > VERIFY_RACY_NS && max_mtime <= now_ns - VERIFY_RACY_NS)
                     .then(|| {
                         let env_digest =
@@ -1619,6 +2017,155 @@ mod usage_components_tests {
         assert!(third.all_passed);
         assert!(third.checks[0].get("cached").is_none());
         assert_eq!(exec_calls.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exponential_health_weights_decay_old_failures_and_select_healthier_model() {
+        let dir =
+            std::env::temp_dir().join(format!("infra-sys-health-decay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("system_health.sqlite3");
+
+        // Record 3 bad runs on flaky-model, then 5 good runs -> exponential decay heals score.
+        for i in 0..3 {
+            record_system_health(
+                &db,
+                "system",
+                "codex",
+                Some("flaky-model"),
+                &format!("bad-{i}"),
+                "verify",
+                "blocked",
+                true,
+                true,
+                1.0,
+            );
+        }
+        let degraded = summarize_system_health(&db, "system", "codex", Some("flaky-model"));
+        assert!(degraded.is_degraded(), "{degraded:?}");
+        assert_eq!(degraded.recommended_max_attempts(100), 2);
+        assert_eq!(degraded.recommended_concurrency(4), 1);
+
+        // Also record 4 healthy runs on steady-model.
+        for i in 0..4 {
+            record_system_health(
+                &db,
+                "system",
+                "codex",
+                Some("steady-model"),
+                &format!("good-{i}"),
+                "verify",
+                "completed",
+                false,
+                false,
+                0.5,
+            );
+        }
+        assert_eq!(
+            select_healthier_model(&db, "system", "codex", Some("flaky-model")).as_deref(),
+            Some("steady-model")
+        );
+
+        // 8 consecutive recent good runs on flaky-model outweigh the 3 old failures.
+        for i in 0..8 {
+            record_system_health(
+                &db,
+                "system",
+                "codex",
+                Some("flaky-model"),
+                &format!("recover-{i}"),
+                "verify",
+                "completed",
+                false,
+                false,
+                0.5,
+            );
+        }
+        let recovered = summarize_system_health(&db, "system", "codex", Some("flaky-model"));
+        assert!(!recovered.is_degraded(), "{recovered:?}");
+        assert!(recovered.warnings.is_empty(), "{recovered:?}");
+        assert_eq!(recovered.recommended_max_attempts(100), 100);
+        assert_eq!(
+            select_healthier_model(&db, "system", "codex", Some("flaky-model")),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_tree_stamp_tier_prefers_scoped_and_graph_ir_over_walk() {
+        let dir =
+            std::env::temp_dir().join(format!("infra-sys-stamp-tier-{}", uuid::Uuid::new_v4()));
+        let ws = dir.join("ws");
+        let state = dir.join("state");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("composer.json"), r#"{"name":"acme/ws"}"#).unwrap();
+        std::fs::write(ws.join("composer.lock"), "{}").unwrap();
+        std::fs::write(ws.join("src/App.php"), "<?php\n").unwrap();
+        std::fs::write(ws.join("unrelated.txt"), "noise-1\n").unwrap();
+
+        let ws_canon = infra_core::fs::canonicalize(&ws).unwrap();
+
+        // Tier 1: `composer validate` depends only on composer.{json,lock}, ignoring unrelated files.
+        let composer_argv = vec![
+            "composer".into(),
+            "validate".into(),
+            "--no-interaction".into(),
+        ];
+        let (tier1, digest1, _) =
+            verify_tree_stamp_tier(&ws_canon, &composer_argv, Some(&state)).unwrap();
+        assert_eq!(tier1, "scoped_files");
+        std::fs::write(ws.join("unrelated.txt"), "noise-2\n").unwrap();
+        let (_, digest1_after, _) =
+            verify_tree_stamp_tier(&ws_canon, &composer_argv, Some(&state)).unwrap();
+        assert_eq!(digest1, digest1_after);
+        std::fs::write(
+            ws.join("composer.json"),
+            r#"{"name":"acme/ws","version":"1.0"}"#,
+        )
+        .unwrap();
+        let (_, digest1_changed, _) =
+            verify_tree_stamp_tier(&ws_canon, &composer_argv, Some(&state)).unwrap();
+        assert_ne!(digest1, digest1_changed);
+
+        // Tier 1 also handles `php -l src/App.php`.
+        let php_argv = vec!["php".into(), "-l".into(), "src/App.php".into()];
+        let (php_tier, _, _) = verify_tree_stamp_tier(&ws_canon, &php_argv, Some(&state)).unwrap();
+        assert_eq!(php_tier, "scoped_files");
+
+        // Tier 2: Graph-IR database present with synthetic `sys-<sha16>` avoids bounded walk.
+        let root_hash16 = &digest(ws_canon.to_string_lossy().as_bytes())[..16];
+        let ir_home = state.join("graphs").join(format!("sys-{root_hash16}"));
+        std::fs::create_dir_all(&ir_home).unwrap();
+        let ir_db = ir_home.join("graph_ir.sqlite3");
+        let conn = rusqlite::Connection::open(&ir_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ir_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE ir_files(path TEXT PRIMARY KEY, language TEXT NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, content_sha256 TEXT NOT NULL, namespace TEXT, indexed_at TEXT NOT NULL);
+             INSERT INTO ir_meta(key, value) VALUES ('write_epoch', '7');",
+        )
+        .unwrap();
+        let app_meta = std::fs::symlink_metadata(ws.join("src/App.php")).unwrap();
+        let app_mtime = time_to_unix_ns(app_meta.modified().unwrap()).unwrap();
+        conn.execute(
+            "INSERT INTO ir_files(path, language, size, mtime_ns, content_sha256, namespace, indexed_at) VALUES(?1,'php',?2,?3,'abc','','now')",
+            rusqlite::params!["src/App.php", i64::try_from(app_meta.len()).unwrap(), i64::try_from(app_mtime).unwrap()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let generic_argv = vec!["vendor/bin/phpunit".into()];
+        let (tier2, ir_digest, _) =
+            verify_tree_stamp_tier(&ws_canon, &generic_argv, Some(&state)).unwrap();
+        assert_eq!(tier2, "ir_indexed");
+        assert!(!ir_digest.is_empty());
+
+        // Tier 3: without Graph-IR state_dir or narrow closure, falls back to bounded_walk.
+        let (tier3, _, _) = verify_tree_stamp_tier(&ws_canon, &generic_argv, None).unwrap();
+        assert_eq!(tier3, "bounded_walk");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
