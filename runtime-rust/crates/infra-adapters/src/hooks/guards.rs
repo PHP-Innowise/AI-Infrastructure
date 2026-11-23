@@ -1,11 +1,14 @@
 use super::{Context, first, project_root, strings};
 use crate::TailTrim;
 use crate::{counters, output::Output, shell};
-use infra_core::{Result, Roots, RuntimeConfig, RuntimeError};
+use infra_core::{Result, Roots, RuntimeConfig};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::UNIX_EPOCH,
 };
 const EDIT_TOOLS: &[&str] = &[
     "write",
@@ -16,6 +19,17 @@ const EDIT_TOOLS: &[&str] = &[
     "notebook_edit",
     "apply_patch",
 ];
+const CHECK_TOOLS: &[&str] = &["bash", "shell", "terminal", "run_command"];
+const SKILL_CACHE_RACY_NS: i128 = 2_000_000_000;
+
+#[cfg(test)]
+thread_local! {
+    static SKILL_DIR_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn bump_skill_dir_scans() {
+    SKILL_DIR_SCANS.with(|cell| cell.set(cell.get() + 1));
+}
 fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
     let tools = strings(payload, &["tool_name"]);
     tools.is_empty()
@@ -28,12 +42,103 @@ fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
             names.contains(&name.as_str())
         })
 }
+fn integer_field(value: &Value, keys: &[&str]) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(found) = map.get(*key).and_then(Value::as_i64) {
+                    return Some(found);
+                }
+            }
+            map.values().find_map(|child| integer_field(child, keys))
+        }
+        Value::Array(items) => items.iter().find_map(|child| integer_field(child, keys)),
+        _ => None,
+    }
+}
+fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(found) = map.get(*key).and_then(Value::as_bool) {
+                    return Some(found);
+                }
+            }
+            map.values().find_map(|child| bool_field(child, keys))
+        }
+        Value::Array(items) => items.iter().find_map(|child| bool_field(child, keys)),
+        _ => None,
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckOutcome {
+    PreExecution,
+    Passing,
+    Failing,
+}
+fn check_outcome(payload: &Value, command: &str, err_sig: &str) -> CheckOutcome {
+    let exit_code = integer_field(
+        payload,
+        &["exit_code", "returncode", "exitCode", "status_code"],
+    );
+    let explicit_ok = bool_field(payload, &["passed", "ok", "success"]);
+    let status_str = first(payload, "status").map(str::to_ascii_lowercase);
+    if !err_sig.is_empty()
+        || exit_code.is_some_and(|code| code != 0)
+        || explicit_ok == Some(false)
+        || matches!(
+            status_str.as_deref(),
+            Some("failed" | "failure" | "error" | "errored")
+        )
+    {
+        CheckOutcome::Failing
+    } else if !shell::polling(command)
+        && (exit_code == Some(0)
+            || explicit_ok == Some(true)
+            || matches!(
+                status_str.as_deref(),
+                Some("passed" | "pass" | "ok" | "success" | "succeeded")
+            ))
+    {
+        CheckOutcome::Passing
+    } else {
+        CheckOutcome::PreExecution
+    }
+}
+fn combine_command_error_signature(normalized_cmd: &str, err_sig: &str) -> String {
+    if normalized_cmd.is_empty() && err_sig.is_empty() {
+        String::new()
+    } else if err_sig.is_empty() {
+        format!("norm:{normalized_cmd}")
+    } else if normalized_cmd.is_empty() {
+        format!("err:{err_sig}")
+    } else {
+        format!("norm:{normalized_cmd}\0{err_sig}")
+    }
+}
+fn is_check_event(payload: &Value) -> bool {
+    let has_cmd = first(payload, "command").is_some() || first(payload, "cmd").is_some();
+    if !has_cmd {
+        return false;
+    }
+    let tools = strings(payload, &["tool_name"]);
+    (!tools.is_empty() && allowed_tool(payload, CHECK_TOOLS))
+        || integer_field(
+            payload,
+            &["exit_code", "returncode", "exitCode", "status_code"],
+        )
+        .is_some()
+        || bool_field(payload, &["passed", "ok", "success"]).is_some()
+        || first(payload, "status").is_some()
+        || !normalized_error_signature(payload).is_empty()
+}
 pub(super) fn payload_noop(role: &str, payload: &Value) -> bool {
     match role {
         // These borrowed searches have the same existence test as strings(),
         // without copying a possibly large command before shell validation.
         "bash-validator" => first(payload, "command").is_none() && first(payload, "cmd").is_none(),
-        "file-naming-validator" | "loop-detection" => !allowed_tool(payload, EDIT_TOOLS),
+        "file-naming-validator" => !allowed_tool(payload, EDIT_TOOLS),
+        "loop-detection" => !allowed_tool(payload, EDIT_TOOLS) && !is_check_event(payload),
         _ => false,
     }
 }
@@ -212,16 +317,22 @@ pub fn bash(scope: &Context) -> Result<Output> {
         return Ok(Output::default());
     }
     let root = project_root(&scope.roots.project);
-    let exact_count = match counters::advance(&root, &scope.payload, "cmd", &command, true) {
-        Ok(count) => count,
-        Err(_) => return Ok(Output::default()),
-    };
     let normalized = normalize_command_signature(&command);
     let err_sig = normalized_error_signature(&scope.payload);
-    let norm_identity = if err_sig.is_empty() {
-        format!("norm:{normalized}")
+    if check_outcome(&scope.payload, &command, &err_sig) == CheckOutcome::Passing {
+        let _ = counters::reset(&root, &scope.payload);
+        return Ok(Output::default());
+    }
+    let norm_identity = combine_command_error_signature(&normalized, &err_sig);
+    let _ = counters::record_signature(&root, &scope.payload, &norm_identity);
+    let exact_identity = if err_sig.is_empty() {
+        command.clone()
     } else {
-        format!("norm:{normalized}\0{err_sig}")
+        format!("{command}\0{err_sig}")
+    };
+    let exact_count = match counters::advance(&root, &scope.payload, "cmd", &exact_identity, true) {
+        Ok(count) => count,
+        Err(_) => return Ok(Output::default()),
     };
     let norm_count = if normalized != command.trim() || !err_sig.is_empty() {
         counters::advance(&root, &scope.payload, "cmd", &norm_identity, true).unwrap_or(exact_count)
@@ -284,6 +395,146 @@ fn patch_paths(value: &Value, paths: &mut BTreeSet<String>) {
         _ => {}
     }
 }
+fn memory_filename_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^MEM-[0-9]{4,}-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+            .expect("constant memory filename regex")
+    })
+}
+fn task_directory_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^TASK-[0-9]{3,}$").expect("constant task directory regex")
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SkillDirStamp {
+    mtime_ns: i128,
+    ctime_ns: i128,
+    size: u64,
+    ino: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SkillDirCacheEntry {
+    skills_dir: String,
+    stamp: SkillDirStamp,
+    prefixes: Vec<String>,
+}
+
+fn dir_stamp(path: &Path) -> Option<(SkillDirStamp, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return None;
+    }
+    let mtime_ns = i128::try_from(
+        meta.modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+    )
+    .ok()?;
+    #[cfg(unix)]
+    let (ctime_ns, size, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+        (ctime, meta.size(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let (ctime_ns, size, ino) = (mtime_ns, meta.len(), 0u64);
+    let settled = mtime_ns.max(ctime_ns);
+    Some((
+        SkillDirStamp {
+            mtime_ns,
+            ctime_ns,
+            size,
+            ino,
+        },
+        settled,
+    ))
+}
+
+fn current_unix_ns() -> i128 {
+    i128::try_from(
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    )
+    .unwrap_or(0)
+}
+
+fn scan_skill_prefixes(skills: &Path) -> Vec<String> {
+    #[cfg(test)]
+    bump_skill_dir_scans();
+    let mut prefixes = std::fs::read_dir(skills)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(|name| format!("{name}-")))
+        .collect::<Vec<_>>();
+    prefixes.sort();
+    prefixes
+}
+
+fn skill_prefixes_with_now(skills: &Path, cache_file: Option<&Path>, now_ns: i128) -> Vec<String> {
+    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, SkillDirCacheEntry>>> = OnceLock::new();
+    let Some((stamp, settled_ns)) = dir_stamp(skills) else {
+        return Vec::new();
+    };
+    let key_str = skills.to_string_lossy().into_owned();
+    let racy_settled = now_ns - settled_ns >= SKILL_CACHE_RACY_NS;
+    let memory = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if racy_settled
+        && let Ok(guard) = memory.lock()
+        && let Some(entry) = guard.get(skills)
+        && entry.stamp == stamp
+    {
+        return entry.prefixes.clone();
+    }
+    if racy_settled
+        && let Some(cache_path) = cache_file
+        && let Ok(meta) = std::fs::symlink_metadata(cache_path)
+        && !meta.file_type().is_symlink()
+        && meta.is_file()
+        && let Ok(raw) = std::fs::read(cache_path)
+        && let Ok(entry) = serde_json::from_slice::<SkillDirCacheEntry>(&raw)
+        && entry.skills_dir == key_str
+        && entry.stamp == stamp
+    {
+        if let Ok(mut guard) = memory.lock() {
+            guard.insert(skills.to_path_buf(), entry.clone());
+        }
+        return entry.prefixes;
+    }
+
+    let prefixes = scan_skill_prefixes(skills);
+    let entry = SkillDirCacheEntry {
+        skills_dir: key_str,
+        stamp,
+        prefixes: prefixes.clone(),
+    };
+    if racy_settled {
+        if let Ok(mut guard) = memory.lock() {
+            guard.insert(skills.to_path_buf(), entry.clone());
+        }
+        if let Some(cache_path) = cache_file
+            && cache_path.parent().is_some_and(|parent| {
+                std::fs::symlink_metadata(parent)
+                    .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+            })
+            && let Ok(bytes) = serde_json::to_vec(&entry)
+        {
+            let _ = std::fs::write(cache_path, bytes);
+        }
+    }
+    prefixes
+}
+
 pub fn file_naming(scope: &Context) -> Result<Output> {
     if !allowed_tool(&scope.payload, EDIT_TOOLS) {
         return Ok(Output::default());
@@ -292,21 +543,7 @@ pub fn file_naming(scope: &Context) -> Result<Output> {
         .into_iter()
         .collect::<BTreeSet<_>>();
     patch_paths(&scope.payload, &mut paths);
-    let skills = scope.roots.tooling.join(match scope.host.as_str() {
-        "cursor" => ".cursor/skills",
-        "codex" => ".agents/skills",
-        _ => ".claude/skills",
-    });
-    let prefixes = std::fs::read_dir(&skills)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().to_str().map(|name| format!("{name}-")))
-        .collect::<Vec<_>>();
-    let memory_filename = regex::Regex::new(r"^MEM-[0-9]{4,}-[a-z0-9]+(?:-[a-z0-9]+)*\.md$");
-    let task_directory = regex::Regex::new(r"^TASK-[0-9]{3,}$");
+    let mut cached_prefixes: Option<Vec<String>> = None;
     for path in paths {
         if !path.ends_with(".md") {
             continue;
@@ -321,11 +558,7 @@ pub fn file_naming(scope: &Context) -> Result<Output> {
                 reason = Some(format!(
                     "Memory chunks must be stored directly in memory-bank/chunks/: '{path}'"
                 ));
-            } else if !memory_filename
-                .as_ref()
-                .map_err(|_| RuntimeError::invalid("Invalid memory filename expression"))?
-                .is_match(file)
-            {
+            } else if !memory_filename_re().is_match(file) {
                 reason = Some(format!(
                     "Memory chunks must use memory-bank/chunks/MEM-0001-short-slug.md: '{path}'"
                 ));
@@ -333,11 +566,7 @@ pub fn file_naming(scope: &Context) -> Result<Output> {
         } else if normalized.starts_with("tasks/") || normalized.starts_with("specs/") {
             if let Some(relative) = normalized.strip_prefix("tasks/") {
                 if let Some((directory, _)) = relative.split_once('/') {
-                    if !task_directory
-                        .as_ref()
-                        .map_err(|_| RuntimeError::invalid("Invalid task directory expression"))?
-                        .is_match(directory)
-                    {
+                    if !task_directory_re().is_match(directory) {
                         reason = Some(format!(
                             "Task Markdown must be inside a zero-padded directory such as tasks/TASK-001/: '{path}'"
                         ));
@@ -348,13 +577,25 @@ pub fn file_naming(scope: &Context) -> Result<Output> {
                     ));
                 }
             }
-            if reason.is_none()
-                && !["README.md", "CHANGELOG.md", "MANIFEST.md"].contains(&file)
-                && !prefixes.iter().any(|prefix| file.starts_with(prefix))
-            {
-                reason = Some(format!(
-                    "'{file}' must start with a discovered skill name followed by '-'"
-                ));
+            if reason.is_none() && !["README.md", "CHANGELOG.md", "MANIFEST.md"].contains(&file) {
+                let prefixes = cached_prefixes.get_or_insert_with(|| {
+                    let subdir = match scope.host.as_str() {
+                        "cursor" => ".cursor/skills",
+                        "codex" => ".agents/skills",
+                        _ => ".claude/skills",
+                    };
+                    let skills = scope.roots.tooling.join(subdir);
+                    let cache_file = scope.roots.state.join(format!(
+                        "memory-bank/local/skill-naming-cache-{}.json",
+                        scope.host
+                    ));
+                    skill_prefixes_with_now(&skills, Some(&cache_file), current_unix_ns())
+                });
+                if !prefixes.iter().any(|prefix| file.starts_with(prefix)) {
+                    reason = Some(format!(
+                        "'{file}' must start with a discovered skill name followed by '-'"
+                    ));
+                }
             }
         }
         if let Some(reason) = reason {
@@ -367,6 +608,22 @@ pub fn file_naming(scope: &Context) -> Result<Output> {
     Ok(Output::default())
 }
 pub fn edit_loop(scope: &Context) -> Result<Output> {
+    let root = project_root(&scope.roots.project);
+    if is_check_event(&scope.payload) {
+        let command = strings(&scope.payload, &["command", "cmd"]).join("\n");
+        let err_sig = normalized_error_signature(&scope.payload);
+        let normalized = normalize_command_signature(&command);
+        match check_outcome(&scope.payload, &command, &err_sig) {
+            CheckOutcome::Passing => {
+                let _ = counters::reset(&root, &scope.payload);
+            }
+            CheckOutcome::Failing | CheckOutcome::PreExecution => {
+                let sig = combine_command_error_signature(&normalized, &err_sig);
+                let _ = counters::record_signature(&root, &scope.payload, &sig);
+            }
+        }
+        return Ok(Output::default());
+    }
     if !allowed_tool(&scope.payload, EDIT_TOOLS) {
         return Ok(Output::default());
     }
@@ -387,12 +644,24 @@ pub fn edit_loop(scope: &Context) -> Result<Output> {
     } else {
         patch_paths(&scope.payload, &mut paths);
     }
+    let inline_cmd = strings(&scope.payload, &["command", "cmd"]).join("\n");
+    let inline_err = normalized_error_signature(&scope.payload);
+    let inline_sig =
+        combine_command_error_signature(&normalize_command_signature(&inline_cmd), &inline_err);
+    let active_sig = if !inline_sig.is_empty() {
+        Some(inline_sig)
+    } else {
+        counters::active_signature(&root, &scope.payload)
+    };
     let mut warnings = vec![];
     let mut blocked = vec![];
-    let root = project_root(&scope.roots.project);
     let debugger = debugger(&scope.host);
     for path in paths {
-        let count = match counters::advance(&root, &scope.payload, "edit", &path, false) {
+        let identity = match active_sig.as_deref() {
+            Some(sig) => format!("{path}\0{sig}"),
+            None => path.clone(),
+        };
+        let count = match counters::advance(&root, &scope.payload, "edit", &identity, false) {
             Ok(count) => count,
             Err(_) => continue,
         };
@@ -751,6 +1020,211 @@ mod smart_loop_breaker_tests {
         assert!(
             stderr.contains("BLOCKED:") && stderr.contains("Hint:"),
             "{stderr}"
+        );
+    }
+
+    #[test]
+    fn file_naming_defers_non_markdown_and_reuses_settled_skill_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let skills = root.join(".claude/skills");
+        std::fs::create_dir_all(skills.join("alpha-skill")).unwrap();
+        std::fs::create_dir_all(root.join("memory-bank/local")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let (stamp, settled_ns) = dir_stamp(&skills).unwrap();
+        let cache_file = root.join("memory-bank/local/skill-naming-cache-claude.json");
+
+        SKILL_DIR_SCANS.with(|c| c.set(0));
+        // Inside racy window (< 2s) always scans and avoids persisting stale cache.
+        let racy_prefixes = skill_prefixes_with_now(
+            &skills,
+            Some(&cache_file),
+            settled_ns + SKILL_CACHE_RACY_NS - 1,
+        );
+        assert_eq!(racy_prefixes, vec!["alpha-skill-".to_string()]);
+        assert_eq!(SKILL_DIR_SCANS.with(|c| c.get()), 1);
+        assert!(!cache_file.exists());
+
+        // Outside racy window: first call scans once and caches; second call hits cache with 0 scans!
+        let settled_now = settled_ns + SKILL_CACHE_RACY_NS + 1;
+        let first = skill_prefixes_with_now(&skills, Some(&cache_file), settled_now);
+        assert_eq!(first, vec!["alpha-skill-".to_string()]);
+        assert_eq!(SKILL_DIR_SCANS.with(|c| c.get()), 2);
+        assert!(cache_file.is_file());
+
+        let second = skill_prefixes_with_now(&skills, Some(&cache_file), settled_now + 500);
+        assert_eq!(second, first);
+        assert_eq!(SKILL_DIR_SCANS.with(|c| c.get()), 2);
+
+        // Editing a non-Markdown file through file-naming-validator skips skill dir scanning altogether.
+        let payload = json!({
+            "session_id": "naming-skip",
+            "tool_name": "Edit",
+            "file_path": root.join("src/App.php")
+        });
+        let before_scans = SKILL_DIR_SCANS.with(|c| c.get());
+        let out = hooks::execute(
+            root,
+            "claude",
+            "file-naming-validator",
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out.code, 0);
+        assert_eq!(SKILL_DIR_SCANS.with(|c| c.get()), before_scans);
+        let _ = stamp;
+    }
+
+    #[test]
+    fn edit_loop_discriminates_signatures_resets_on_passing_checks_and_isolates_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let sess_a = format!("loop-a-{}", infra_core::domain::uuid4());
+        let sess_b = format!("loop-b-{}", infra_core::domain::uuid4());
+        let target_file = root.join("src/Service.php").to_string_lossy().into_owned();
+
+        // Fail under normalized signature A (`cargo test foo`), edit 6 times -> below warning threshold.
+        let fail_a = json!({
+            "session_id": sess_a,
+            "tool_name": "Bash",
+            "command": "cargo test foo",
+            "exit_code": 1,
+            "stderr": "error[E0308]: mismatch"
+        });
+        hooks::execute(
+            root,
+            "claude",
+            "bash-validator",
+            &serde_json::to_vec(&fail_a).unwrap(),
+        )
+        .unwrap();
+        let edit_payload = json!({
+            "session_id": sess_a,
+            "tool_name": "Edit",
+            "file_path": target_file
+        });
+        for i in 0..6 {
+            let out = hooks::execute(
+                root,
+                "claude",
+                "loop-detection",
+                &serde_json::to_vec(&edit_payload).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(out.code, 0);
+            assert!(
+                out.stdout.is_empty(),
+                "edit {i} under sig A should be silent"
+            );
+        }
+
+        // Switching to distinct signature B (`cargo test bar`) tracks (file, sig B) separately rather than blocking!
+        let fail_b = json!({
+            "session_id": sess_a,
+            "tool_name": "Bash",
+            "command": "cargo test bar",
+            "exit_code": 1,
+            "stderr": "error[E0425]: missing name"
+        });
+        hooks::execute(
+            root,
+            "claude",
+            "bash-validator",
+            &serde_json::to_vec(&fail_b).unwrap(),
+        )
+        .unwrap();
+        for i in 0..6 {
+            let out = hooks::execute(
+                root,
+                "claude",
+                "loop-detection",
+                &serde_json::to_vec(&edit_payload).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(out.code, 0);
+            assert!(
+                out.stdout.is_empty(),
+                "edit {i} under distinct sig B should not warn: {out:?}"
+            );
+        }
+
+        // 7th edit under sig B warns, and 10th edit blocks when stuck under the same signature.
+        let warn = hooks::execute(
+            root,
+            "claude",
+            "loop-detection",
+            &serde_json::to_vec(&edit_payload).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !warn.stdout.is_empty(),
+            "7th edit under same sig should warn"
+        );
+
+        // Passing check via PostToolUse loop-detection resets session edit counters completely.
+        let pass_check = json!({
+            "session_id": sess_a,
+            "tool_name": "Bash",
+            "command": "cargo test bar",
+            "exit_code": 0
+        });
+        let pass_out = hooks::execute(
+            root,
+            "claude",
+            "loop-detection",
+            &serde_json::to_vec(&pass_check).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pass_out.code, 0);
+        for i in 0..6 {
+            let out = hooks::execute(
+                root,
+                "claude",
+                "loop-detection",
+                &serde_json::to_vec(&edit_payload).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                out.stdout.is_empty(),
+                "post-reset edit {i} must start fresh: {out:?}"
+            );
+        }
+
+        // Edits in session B must not reset session A's bash counter (`reset_after_edit` session isolation).
+        let cmd_a =
+            json!({"session_id": sess_a, "tool_name": "Bash", "command": "phpunit --filter A"});
+        for _ in 0..6 {
+            hooks::execute(
+                root,
+                "claude",
+                "bash-validator",
+                &serde_json::to_vec(&cmd_a).unwrap(),
+            )
+            .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let edit_b = json!({"session_id": sess_b, "tool_name": "Edit", "file_path": target_file});
+        hooks::execute(
+            root,
+            "claude",
+            "loop-detection",
+            &serde_json::to_vec(&edit_b).unwrap(),
+        )
+        .unwrap();
+        let next_a = hooks::execute(
+            root,
+            "claude",
+            "bash-validator",
+            &serde_json::to_vec(&cmd_a).unwrap(),
+        )
+        .unwrap();
+        let stdout_a = String::from_utf8_lossy(&next_a.stdout);
+        assert!(
+            stdout_a.contains("WARNING:"),
+            "session B edit leaked into session A reset: {stdout_a}"
         );
     }
 }

@@ -55,6 +55,95 @@ const INLINE_CODE: &[&str] = &[
     "/k", "/K",
 ];
 
+fn is_disallowed_wrapper_runtime(runtime: &str) -> bool {
+    matches!(
+        runtime.to_ascii_lowercase().as_str(),
+        "env"
+            | "sudo"
+            | "doas"
+            | "xargs"
+            | "nohup"
+            | "nice"
+            | "time"
+            | "timeout"
+            | "stdbuf"
+            | "setsid"
+            | "chroot"
+            | "su"
+            | "script"
+            | "expect"
+    )
+}
+
+fn is_shell_runtime(runtime: &str) -> bool {
+    matches!(
+        runtime.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "ash" | "csh" | "tcsh"
+    )
+}
+
+fn is_python_runtime(runtime: &str) -> bool {
+    let lower = runtime.to_ascii_lowercase();
+    lower == "python" || lower.starts_with("python3") || lower.starts_with("python2")
+}
+
+fn is_env_assignment_token(argument: &str) -> bool {
+    let Some((lhs, _)) = argument.split_once('=') else {
+        return false;
+    };
+    !lhs.is_empty()
+        && !lhs.starts_with('-')
+        && lhs
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| (i > 0 && b.is_ascii_digit()) || b.is_ascii_alphabetic() || b == b'_')
+}
+
+fn strip_leading_dot_slashes(path: &str) -> &str {
+    let mut rest = path;
+    while let Some(tail) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
+        rest = tail;
+    }
+    rest
+}
+
+/// Whether an argument appearing before the `programs/...` file uses wrapper/inline/stdin execution.
+fn is_pre_script_smuggling_arg(runtime: &str, argument: &str) -> bool {
+    let lower = argument.to_ascii_lowercase();
+    if argument == "-" || lower == "--stdin" || lower == "env" || is_env_assignment_token(argument)
+    {
+        return true;
+    }
+    if argument == "-s"
+        || lower == "--rcfile"
+        || lower.starts_with("--rcfile=")
+        || lower == "--init-file"
+        || lower.starts_with("--init-file=")
+        || lower == "--command"
+        || lower.starts_with("--command=")
+    {
+        return true;
+    }
+    if argument == "-m"
+        || lower == "--module"
+        || lower.starts_with("--module=")
+        || (is_python_runtime(runtime) && argument.starts_with("-m"))
+    {
+        return true;
+    }
+    if is_shell_runtime(runtime)
+        && argument.starts_with('-')
+        && !argument.starts_with("--")
+        && argument.len() > 1
+        && argument[1..]
+            .chars()
+            .any(|ch| matches!(ch, 'c' | 's' | 'i' | 'm'))
+    {
+        return true;
+    }
+    false
+}
+
 /// Whether `argument` asks an interpreter to execute inline code rather than a package file.
 fn is_inline_code_arg(argument: &str) -> bool {
     if INLINE_CODE.contains(&argument) {
@@ -93,6 +182,13 @@ fn check_arguments(
         ));
         return;
     };
+    if is_disallowed_wrapper_runtime(runtime) {
+        violations.push(Violation::new(
+            "argv_inline_code",
+            format!("{at}[0]"),
+            format!("`{runtime}` is a process wrapper, not a direct language interpreter."),
+        ));
+    }
     if !capsule.capabilities.runtimes.contains(runtime) {
         violations.push(Violation::new(
             "runtime_undeclared",
@@ -100,6 +196,14 @@ fn check_arguments(
             format!("`{runtime}` is not one of `capabilities.runtimes`."),
         ));
     }
+    let first_program_idx = arguments.iter().enumerate().skip(1).find_map(|(idx, arg)| {
+        if arg.starts_with('-') || is_env_assignment_token(arg) {
+            return None;
+        }
+        strip_leading_dot_slashes(arg)
+            .starts_with("programs/")
+            .then_some(idx)
+    });
     let mut package_file = false;
     for (index, argument) in arguments.iter().enumerate() {
         let here = format!("{at}[{index}]");
@@ -113,11 +217,14 @@ fn check_arguments(
         if index == 0 {
             continue;
         }
-        if is_inline_code_arg(argument) {
+        let before_script = first_program_idx.is_none_or(|pos| index < pos);
+        if is_inline_code_arg(argument)
+            || (before_script && is_pre_script_smuggling_arg(runtime, argument))
+        {
             violations.push(Violation::new(
                 "argv_inline_code",
                 &here,
-                "A program is a file of the package, not code passed on the command line.",
+                "A program is a file of the package, not code or stdin/module/env redirection passed on the command line.",
             ));
             continue;
         }
@@ -220,7 +327,8 @@ fn check_dataflow(capsule: &SkillCapsule, violations: &mut Vec<Violation>) {
             violations,
         );
     }
-    let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
+    // program id -> (total uses, unparameterized uses)
+    let mut uses: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for (index, step) in capsule.plan().enumerate() {
         let verification = capsule.is_verification(index);
         let at = if verification {
@@ -241,7 +349,11 @@ fn check_dataflow(capsule: &SkillCapsule, violations: &mut Vec<Violation>) {
                 }
             }
             Step::Inspection { .. } => {}
-            Step::Program { program: id } => {
+            Step::Program {
+                program: id,
+                inputs: step_inputs,
+                outputs: step_outputs,
+            } => {
                 let Some(program) = capsule.program(id) else {
                     violations.push(Violation::new(
                         "unknown_program",
@@ -250,12 +362,17 @@ fn check_dataflow(capsule: &SkillCapsule, violations: &mut Vec<Violation>) {
                     ));
                     continue;
                 };
-                *uses.entry(id.as_str()).or_default() += 1;
-                if uses[id.as_str()] > 1 {
+                let parameterized = !step_inputs.is_empty() || !step_outputs.is_empty();
+                let entry = uses.entry(id.as_str()).or_insert((0, 0));
+                entry.0 += 1;
+                if !parameterized {
+                    entry.1 += 1;
+                }
+                if entry.0 > 1 && entry.1 > 1 {
                     violations.push(Violation::new(
                         "program_referenced_twice",
                         format!("{at}.program"),
-                        format!("Program `{id}` already runs in an earlier step."),
+                        format!("Program `{id}` already runs in an earlier step without parameterization."),
                     ));
                     continue;
                 }
@@ -271,29 +388,65 @@ fn check_dataflow(capsule: &SkillCapsule, violations: &mut Vec<Violation>) {
                     .iter()
                     .position(|candidate| candidate.id == *id)
                     .unwrap_or_default();
+                for param in step_inputs.keys() {
+                    if !program.inputs.contains(param) {
+                        violations.push(Violation::new(
+                            "unknown_input",
+                            format!("{at}.inputs.{param}"),
+                            format!("Program `{id}` declares no input named `{param}`."),
+                        ));
+                    }
+                }
+                for out in step_outputs.keys() {
+                    if !program.outputs.contains(out) {
+                        violations.push(Violation::new(
+                            "unknown_output",
+                            format!("{at}.outputs.{out}"),
+                            format!("Program `{id}` declares no output named `{out}`."),
+                        ));
+                    }
+                }
+                let mut effective_inputs = Vec::with_capacity(program.inputs.len());
                 for (item, input) in program.inputs.iter().enumerate() {
-                    match defined.get_mut(input) {
+                    let effective = step_inputs
+                        .get(input)
+                        .map(String::as_str)
+                        .unwrap_or(input.as_str());
+                    effective_inputs.push(effective);
+                    match defined.get_mut(effective) {
                         Some(entry) => entry.2 += 1,
                         None => violations.push(Violation::new(
                             "dangling_input",
-                            format!("programs[{place}].inputs[{item}]"),
+                            if step_inputs.contains_key(input) {
+                                format!("{at}.inputs.{input}")
+                            } else {
+                                format!("programs[{place}].inputs[{item}]")
+                            },
                             format!(
-                                "`{input}` is not a binding, an earlier program's output or a value an earlier instruction produces."
+                                "`{effective}` is not a binding, an earlier program's output or a value an earlier instruction produces."
                             ),
                         )),
                     }
                 }
                 for (item, output) in program.outputs.iter().enumerate() {
-                    let here = format!("programs[{place}].outputs[{item}]");
-                    if program.inputs.contains(output) {
+                    let effective = step_outputs
+                        .get(output)
+                        .map(String::as_str)
+                        .unwrap_or(output.as_str());
+                    let here = if step_outputs.contains_key(output) {
+                        format!("{at}.outputs.{output}")
+                    } else {
+                        format!("programs[{place}].outputs[{item}]")
+                    };
+                    if program.inputs.contains(output) || effective_inputs.contains(&effective) {
                         violations.push(Violation::new(
                             "output_overlaps_input",
                             &here,
-                            format!("`{output}` is an input of the same program."),
+                            format!("`{effective}` is an input of the same program step."),
                         ));
                         continue;
                     }
-                    define(&mut defined, output, "output", here, violations);
+                    define(&mut defined, effective, "output", here, violations);
                 }
             }
         }
@@ -507,7 +660,111 @@ fn source_non_comment_code(source: &str) -> String {
     out
 }
 
-fn source_contains_example_literal(source: &str, text: &str) -> bool {
+const GENERIC_SHORT_LITERALS: &[&str] = &[
+    "csv", "tsv", "pdf", "json", "xml", "yaml", "yml", "toml", "html", "text", "txt", "md", "utf8",
+    "utf-8", "ascii", "true", "false", "null", "none", "ok", "done", "pass", "fail", "read",
+    "write", "check", "list", "all", "main", "test", "file", "files", "path", "name", "data",
+    "item", "items", "count", "total", "input", "output", "error", "status", "complete", "result",
+];
+
+fn is_generic_short_literal(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    GENERIC_SHORT_LITERALS.contains(&lower.as_str())
+}
+
+fn contains_number_token(haystack: &str, number: &str) -> bool {
+    if number.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(found) = haystack[start..].find(number) {
+        let idx = start + found;
+        let end = idx + number.len();
+        let left = haystack[..idx].chars().next_back();
+        let right = haystack[end..].chars().next();
+        let left_ok = left.is_none_or(|c| {
+            !c.is_alphanumeric()
+                && c != '_'
+                && c != '.'
+                && c != '+'
+                && (c != '-' || number.starts_with('-'))
+        });
+        let right_ok = right.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '.');
+        // Ignore Markdown/prose ordered list prefixes like `3. Open ...` at line starts.
+        let ordered_list_prefix = left.is_none_or(|c| matches!(c, '\n' | '\r' | ' ' | '\t'))
+            && haystack[end..].starts_with(". ");
+        let preceded_only_by_ws = haystack[..idx]
+            .rsplit_once('\n')
+            .map_or(&haystack[..idx], |(_, line)| line)
+            .trim()
+            .is_empty();
+        if left_ok && right_ok && !(ordered_list_prefix && preceded_only_by_ws) {
+            return true;
+        }
+        start = idx + haystack[idx..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+fn non_trivial_example_scalar(text: &str, is_number: bool) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    if is_number {
+        if matches!(
+            text,
+            "-1" | "0" | "1" | "2" | "0.0" | "1.0" | "-1.0" | "2.0"
+        ) {
+            return false;
+        }
+        return true;
+    }
+    let count = text.chars().count();
+    if count >= EXAMPLE_LITERAL_CHARS {
+        return true;
+    }
+    if count >= 3 {
+        return !is_generic_short_literal(text);
+    }
+    if count == 2 {
+        return text
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            || text.contains(['/', '\\']);
+    }
+    false
+}
+
+fn collect_example_scalars(value: &Value, out: &mut Vec<(String, bool)>) {
+    match value {
+        Value::String(text) => out.push((normalized(text), false)),
+        Value::Number(num) => out.push((num.to_string(), true)),
+        Value::Array(items) => {
+            for item in items {
+                collect_example_scalars(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_example_scalars(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn literal_matches_text(haystack: &str, literal: &str, is_number: bool) -> bool {
+    if is_number {
+        contains_number_token(haystack, literal)
+    } else {
+        contains_literal(haystack, literal)
+    }
+}
+
+fn source_contains_example_scalar(source: &str, text: &str, is_number: bool) -> bool {
+    if is_number {
+        return contains_number_token(&source_non_comment_code(source), text);
+    }
     if extract_source_literals(source)
         .iter()
         .any(|lit| contains_literal(lit, text))
@@ -515,6 +772,52 @@ fn source_contains_example_literal(source: &str, text: &str) -> bool {
         return true;
     }
     is_compound_or_path_literal(text) && contains_literal(&source_non_comment_code(source), text)
+}
+
+#[cfg(test)]
+fn source_contains_example_literal(source: &str, text: &str) -> bool {
+    source_contains_example_scalar(source, text, false)
+}
+
+fn check_smuggled_example_value(
+    capsule: &SkillCapsule,
+    package_files: &Files,
+    at: &str,
+    value: &Value,
+    violations: &mut Vec<Violation>,
+) -> bool {
+    let mut scalars = Vec::new();
+    collect_example_scalars(value, &mut scalars);
+    for (text, is_number) in scalars {
+        if !non_trivial_example_scalar(&text, is_number) {
+            continue;
+        }
+        if capsule_authored_strings(capsule)
+            .iter()
+            .any(|field| literal_matches_text(field, &text, is_number))
+        {
+            violations.push(Violation::new(
+                "example_value_in_capsule",
+                at,
+                "The capsule repeats this observed value; a capsule carries the parameter, not the instance.",
+            ));
+            return true;
+        }
+        if let Some((path, _)) = package_files.iter().find(|(_, content)| {
+            std::str::from_utf8(content)
+                .is_ok_and(|source| source_contains_example_scalar(source, &text, is_number))
+        }) {
+            violations.push(Violation::new(
+                "example_value_in_capsule",
+                at,
+                format!(
+                    "The package file `{path}` repeats this observed value; a capsule carries the parameter, not the instance."
+                ),
+            ));
+            return true;
+        }
+    }
+    false
 }
 
 fn check_examples(
@@ -616,33 +919,8 @@ fn check_examples(
                 ));
                 break;
             }
-            if text.chars().count() >= EXAMPLE_LITERAL_CHARS {
-                if capsule_authored_strings(capsule)
-                    .iter()
-                    .any(|field| contains_literal(field, &text))
-                {
-                    violations.push(Violation::new(
-                        "example_value_in_capsule",
-                        &at,
-                        "The capsule repeats this observed value; a capsule carries the parameter, not the instance.",
-                    ));
-                    break;
-                }
-                if let Some((path, _)) = package_files.iter().find(|(_, content)| {
-                    std::str::from_utf8(content)
-                        .is_ok_and(|source| source_contains_example_literal(source, &text))
-                }) {
-                    violations.push(Violation::new(
-                        "example_value_in_capsule",
-                        &at,
-                        format!(
-                            "The package file `{path}` repeats this observed value; a capsule carries the parameter, not the instance."
-                        ),
-                    ));
-                    break;
-                }
-            }
         }
+        check_smuggled_example_value(capsule, package_files, &at, value, violations);
     }
     for (index, result) in &examples.steps {
         let at = format!("examples.steps.{index}");
@@ -681,8 +959,17 @@ fn check_examples(
                         format!("An observed output is at most {BINDING_BYTES} bytes."),
                     ));
                 }
-                Some(_) => {}
+                Some(value) => {
+                    check_smuggled_example_value(capsule, package_files, &here, value, violations);
+                }
             }
+        }
+        for (field, value) in result {
+            if program.outputs.contains(field) {
+                continue;
+            }
+            let here = format!("{at}.{field}");
+            check_smuggled_example_value(capsule, package_files, &here, value, violations);
         }
         if serde_json::to_vec(result).map_or(usize::MAX, |bytes| bytes.len()) > 64 * 1024 {
             violations.push(Violation::new(
@@ -899,28 +1186,22 @@ pub fn check_textual(capsule: &[u8], markdown: &[u8], examples: Option<&Examples
     check_secrets("capsule.md", text, &mut violations);
     if let Some(examples) = examples {
         for (name, value) in &examples.bindings {
-            let literals: Vec<&str> = match value {
-                Value::String(literal) => vec![literal.as_str()],
-                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
-                _ => Vec::new(),
-            };
-            let mut leaked = false;
-            for raw in literals {
-                check_secrets(&format!("examples.bindings.{name}"), raw, &mut violations);
-                if leaked {
-                    continue;
+            let mut scalars = Vec::new();
+            collect_example_scalars(value, &mut scalars);
+            for (raw, is_number) in &scalars {
+                if !*is_number {
+                    check_secrets(&format!("examples.bindings.{name}"), raw, &mut violations);
                 }
-                let literal = normalized(raw);
-                if literal.chars().count() >= EXAMPLE_LITERAL_CHARS
-                    && contains_literal(text, &literal)
-                {
-                    violations.push(Violation::new(
-                        "example_value_in_capsule",
-                        format!("examples.bindings.{name}"),
-                        "The procedure repeats this observed value; it describes the parameter, not the instance.",
-                    ));
-                    leaked = true;
-                }
+            }
+            if scalars.iter().any(|(literal, is_number)| {
+                non_trivial_example_scalar(literal, *is_number)
+                    && literal_matches_text(text, literal, *is_number)
+            }) {
+                violations.push(Violation::new(
+                    "example_value_in_capsule",
+                    format!("examples.bindings.{name}"),
+                    "The procedure repeats this observed value; it describes the parameter, not the instance.",
+                ));
             }
         }
     }

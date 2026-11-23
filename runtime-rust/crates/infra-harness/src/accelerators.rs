@@ -140,6 +140,27 @@ impl Accelerators {
         }
         attach::prepare_state(&self.source, &path, &self.state(project)?, &edition)?;
         self.store.connection()?.execute("INSERT INTO project_accelerators(project_id,edition,attached_at)VALUES(?1,?2,?3)ON CONFLICT(project_id)DO UPDATE SET edition=excluded.edition,attached_at=excluded.attached_at",params![project,edition,store::now()])?;
+        let sc_runtime = runner.skillcache_runtime();
+        let _ = crate::skillcache::compile::admit_textual_templates_sync(
+            &sc_runtime,
+            project,
+            &path,
+            &edition,
+        );
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let project_owned = project.to_owned();
+            let workspace_owned = path.clone();
+            let edition_owned = edition.clone();
+            handle.spawn(async move {
+                let _ = crate::skillcache::compile::admit_edition_templates_for_project(
+                    &sc_runtime,
+                    &project_owned,
+                    &workspace_owned,
+                    &edition_owned,
+                )
+                .await;
+            });
+        }
         self.get(project)
     }
     pub fn detach(&self, project: &str) -> Result<Value> {
@@ -192,17 +213,31 @@ impl Accelerators {
             ));
         }
         crate::permissions::warm_read_only_cache(&canon);
-        desk.enable_read_only_auto_rules(session_id, canon);
+        desk.enable_read_only_auto_rules_with_store(session_id, canon, self.store.clone());
         Ok(())
     }
 
     /// Computes a deterministic scoped `session_rule_key` (`readonly:program:...`) for a
-    /// verified read-only / Gate-1 program command inside `workspace`.
+    /// verified read-only CLI command inside `workspace`.
     pub fn read_only_session_rule_key(
         workspace: &Path,
         command: &str,
     ) -> std::result::Result<Option<String>, String> {
         crate::permissions::classify_read_only_program_command(Some(workspace), command)
+    }
+
+    /// Computes a deterministic scoped `session_rule_key` (`readonly:program:...`) for a
+    /// verified read-only CLI or active gate-verified capsule program inside `workspace`.
+    pub fn read_only_session_rule_key_in_store(
+        &self,
+        workspace: &Path,
+        command: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        crate::permissions::classify_read_only_program_command_in_store(
+            Some(workspace),
+            Some(&self.store),
+            command,
+        )
     }
 
     pub fn overlay(&self, project: &str, host: &str, cwd: &Path) -> Result<Option<Overlay>> {
@@ -972,8 +1007,8 @@ mod system_launch_tests {
         );
     }
 
-    #[test]
-    fn register_read_only_auto_rules_enforces_registered_workspace_and_gate1_safety() {
+    #[tokio::test]
+    async fn register_read_only_auto_rules_enforces_registered_workspace_and_gate1_safety() {
         let root = tempfile::tempdir().unwrap();
         let proj = infra_core::fs::canonicalize(root.path())
             .unwrap()
@@ -982,17 +1017,21 @@ mod system_launch_tests {
             .unwrap()
             .join("outside");
         std::fs::create_dir_all(proj.join("programs")).unwrap();
-        std::fs::write(proj.join("programs/ro.py"), "print('hi')\n").unwrap();
+        let ro_bytes = b"print('hi')\n";
+        std::fs::write(proj.join("programs/ro.py"), ro_bytes).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
 
         let store = SessionStore::open(&root.path().join("state")).unwrap();
-        store.register(&proj).unwrap();
+        let project_id = store.register(&proj).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let providers = Arc::new(ProviderDomain {
             providers: Arc::new(RwLock::new(BTreeMap::new())),
         });
         let accelerators =
-            Accelerators::new(store, root.path().into(), providers, Weak::new()).unwrap();
-        let desk = crate::permissions::PermissionDesk::default();
+            Accelerators::new(store.clone(), root.path().into(), providers, Weak::new()).unwrap();
+        let desk = Arc::new(crate::permissions::PermissionDesk::default());
         assert!(
             accelerators
                 .register_read_only_auto_rules(&desk, "s1", &outside)
@@ -1001,11 +1040,242 @@ mod system_launch_tests {
         accelerators
             .register_read_only_auto_rules(&desk, "s1", &proj)
             .unwrap();
+
+        // Bare workspace `programs/ro.py` without an active sealed capsule MUST NOT be approved.
         assert_eq!(
-            Accelerators::read_only_session_rule_key(&proj, "python3 programs/ro.py")
+            Accelerators::read_only_session_rule_key(&proj, "python3 programs/ro.py").unwrap(),
+            None
+        );
+        assert_eq!(
+            accelerators
+                .read_only_session_rule_key_in_store(&proj, "python3 programs/ro.py")
+                .unwrap(),
+            None
+        );
+        // Safe read-only CLI works even without a capsule.
+        assert_eq!(
+            Accelerators::read_only_session_rule_key(&proj, "git status --short")
+                .unwrap()
+                .as_deref(),
+            Some("readonly:program:git status --short")
+        );
+
+        // Seed an active sealed, gate-verified read_only capsule in SessionStore.
+        let warm_root = store
+            .state
+            .join(format!("skillcache/capsules/{project_id}/cap-accel-ro/1"));
+        let warm_dir = warm_root.join("warm");
+        let capsule_json = json!({
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "form": "hybrid",
+            "mu": {"name": "ro-accel", "description": "Read-only accelerator check"},
+            "source": {"skills": [{"name": "ro-accel", "path": ".agents/skills/ro-accel/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "main",
+                "entry": ["python3", "programs/ro.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/ro.py", "--check"],
+                "timeout_seconds": 60,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "main"}],
+            "verification": []
+        });
+        let cap = infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/ro.py", ro_bytes.to_vec());
+        let pkg_sha = infra_skillcache::package::write_warm(&warm_dir, &cap, None, &files).unwrap();
+        let loaded = infra_skillcache::package::load(&warm_dir).unwrap();
+        {
+            let db = store.connection().unwrap();
+            let skill_ref = json!({"name": "ro-accel", "path": ".agents/skills/ro-accel/SKILL.md", "tree_sha256": "0".repeat(64)});
+            crate::skillcache::db::begin_capsule(
+                &db,
+                "cap-accel-ro",
+                "cmp-accel-ro",
+                &project_id,
+                "s1",
+                "gen-accel-ro",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            crate::skillcache::db::activate_capsule(
+                &db,
+                &crate::skillcache::db::Qualified {
+                    capsule_id: "cap-accel-ro",
+                    mu_name: "ro-accel",
+                    mu_description: "Read-only accelerator check",
+                    form: "hybrid",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: "env",
+                    engine_digest: "eng",
+                    artifact_dir: warm_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                crate::skillcache::db::record_gate(
+                    &db,
+                    "cap-accel-ro",
+                    1,
+                    gate,
+                    true,
+                    &json!({"gate": gate, "passed": true}),
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            accelerators
+                .read_only_session_rule_key_in_store(&proj, "python3 programs/ro.py")
                 .unwrap()
                 .as_deref(),
             Some("readonly:program:python3 programs/ro.py")
         );
+
+        let approvals = desk.approvals("s1", Arc::new(|_| Ok(())));
+        let rx = approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "ro-1".into(),
+                provider: "codex".into(),
+                tool: "Shell".into(),
+                summary: "python3 programs/ro.py".into(),
+                kind: "command".into(),
+                session_rule_key: Some("readonly:program:python3 programs/ro.py".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            rx.await.unwrap().decision,
+            infra_host::permission::Decision::Allow
+        );
+        let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[tokio::test]
+    async fn attach_proactively_admits_matching_portable_edition_templates() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("laravel-app");
+        let skill_dir = root.join(".claude/skills/check-app");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Check App\n").unwrap();
+        std::fs::write(root.join("artisan"), "#!/usr/bin/env php\n").unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"require":{"laravel/framework":"^11.0"}}"#,
+        )
+        .unwrap();
+        let tree = infra_skillcache::fingerprint::tree_sha256(&skill_dir).unwrap();
+
+        let source = scratch.path().join("acc-source");
+        std::fs::create_dir_all(source.join("Laravel/.claude/skills")).unwrap();
+        std::fs::create_dir_all(source.join("Laravel/.cursor/skills")).unwrap();
+        std::fs::create_dir_all(source.join("Laravel/.agents/skills")).unwrap();
+        std::fs::create_dir_all(source.join("Laravel/memory-bank")).unwrap();
+        std::fs::write(source.join("Laravel/AGENTS.md"), "# Laravel\n").unwrap();
+
+        struct NoSpecial;
+        impl crate::sessions::BlackboardFactory for NoSpecial {
+            fn for_session(&self, _session: &Value) -> Result<Arc<dyn crate::fleet::Blackboard>> {
+                Err(HarnessError::unavailable("unused"))
+            }
+        }
+        impl crate::sessions::SpecialWorkflow for NoSpecial {
+            fn run<'a>(
+                &'a self,
+                _session: Value,
+                _prompt: String,
+                _generation: String,
+                _cancel: Arc<std::sync::atomic::AtomicBool>,
+                _emit: crate::sessions::Event,
+            ) -> crate::sessions::RunReply<'a> {
+                Box::pin(async { Ok(json!({})) })
+            }
+        }
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let providers = Arc::new(crate::provider::ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let knowledge = Arc::new(crate::knowledge::KnowledgeDomain::new(
+            store.clone(),
+            source.clone(),
+        ));
+        let special = ["creator", "system_run", "system_discovery"]
+            .into_iter()
+            .map(|k| {
+                (
+                    k.to_owned(),
+                    Arc::new(NoSpecial) as Arc<dyn crate::sessions::SpecialWorkflow>,
+                )
+            })
+            .collect();
+        let sessions = crate::sessions::Sessions::new(
+            store.clone(),
+            source.clone(),
+            providers.clone(),
+            knowledge,
+            Arc::new(NoSpecial),
+            special,
+            crate::sessions::SessionLimits {
+                seconds: 60,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        let accelerators =
+            Accelerators::new(store.clone(), source, providers, Arc::downgrade(&sessions)).unwrap();
+        let project = store.register(&root).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+
+        // Index a portable Laravel textual template for `check-app`.
+        let skill = infra_skillcache::candidate::KnownSkill {
+            name: "check-app".into(),
+            path: ".claude/skills/check-app/SKILL.md".into(),
+            tree_sha256: tree.sha256.clone(),
+        };
+        let answer = json!({
+            "form": "textual",
+            "capsule": {
+                "mu": {"name": "check-app", "description": "Inspect Laravel routes"},
+                "source": {"skills": [{"name": "check-app", "path": ".claude/skills/check-app/SKILL.md"}]}
+            },
+            "markdown": "# Check App\n\n1. Inspect `routes/web.php`.\n"
+        });
+        let cand = infra_skillcache::candidate::from_answer(
+            &answer,
+            std::slice::from_ref(&skill),
+            infra_skillcache::Form::Textual,
+        )
+        .unwrap();
+        let tpl = infra_skillcache::candidate::as_portable_template(&cand, "Laravel");
+        crate::skillcache::db::upsert_template(
+            &store.connection().unwrap(),
+            "Laravel",
+            "check-app",
+            &tree.sha256,
+            &tpl,
+        )
+        .unwrap();
+
+        accelerators.attach(&project_id, Some("Laravel")).unwrap();
+        let active = crate::skillcache::db::active_capsules_for_skill_or_mirror(
+            &store.connection().unwrap(),
+            &project_id,
+            ".claude/skills/check-app/SKILL.md",
+            "check-app",
+            &tree.sha256,
+            None,
+        )
+        .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0]["kind"], "template");
+        assert_eq!(active[0]["status"], "active");
     }
 }

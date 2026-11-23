@@ -24,10 +24,10 @@ use compile::{EnqueueCompileFn, Job, Runtime};
 use infra_skillcache::{compile_rules, fingerprint, package};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -43,10 +43,12 @@ enum Work {
     Requalify {
         project_id: String,
         capsule_id: String,
+        prior_status: String,
     },
 }
 
 struct WorkQueue {
+    self_ref: std::sync::Weak<WorkQueue>,
     slots: Arc<Semaphore>,
     project_locks: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     requalifying: Arc<Mutex<BTreeSet<String>>>,
@@ -54,7 +56,8 @@ struct WorkQueue {
 
 impl WorkQueue {
     fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
+            self_ref: weak.clone(),
             slots: Arc::new(Semaphore::new(WAITING)),
             project_locks: Mutex::new(BTreeMap::new()),
             requalifying: Arc::new(Mutex::new(BTreeSet::new())),
@@ -87,9 +90,9 @@ impl WorkQueue {
         let lock = self.project_lock(&project_id);
         let runtime = runtime.clone();
         let requalifying = self.requalifying.clone();
+        let queue_weak = self.self_ref.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            let _project_guard = lock.lock().await;
+            let project_guard = lock.lock().await;
             if runtime.cancel.load(Ordering::Acquire) {
                 if let Work::Requalify { capsule_id, .. } = &work
                     && let Ok(mut pending) = requalifying.lock()
@@ -100,47 +103,114 @@ impl WorkQueue {
             }
             match work {
                 Work::Compile(job) => compile::run(&runtime, &job).await,
-                Work::Requalify { capsule_id, .. } => {
+                Work::Requalify {
+                    capsule_id,
+                    prior_status,
+                    ..
+                } => {
                     let capsule = runtime
                         .store
                         .connection()
                         .and_then(|db| db::capsule(&db, &capsule_id));
-                    if let Ok(Some(capsule)) = capsule
-                        && let Ok(workspace) = project_path(&runtime.store, &capsule)
-                    {
-                        let was_needs_recompile = capsule["status"] == "needs_recompile";
-                        match compile::requalify(&runtime, &capsule, &workspace).await {
-                            Ok(report) => {
-                                if was_needs_recompile && report["passed"] != true {
-                                    let _ = enqueue_recompile_for_capsule(&runtime, &capsule);
+                    match capsule {
+                        Ok(Some(capsule)) => {
+                            let was_needs_recompile = prior_status == "needs_recompile"
+                                || capsule["status"] == "needs_recompile";
+                            match project_path(&runtime.store, &capsule) {
+                                Ok(workspace) => {
+                                    match compile::requalify(&runtime, &capsule, &workspace).await {
+                                        Ok(report) => {
+                                            if let Ok(db) = runtime.store.connection() {
+                                                let _ =
+                                                    db::delete_pending_requalify(&db, &capsule_id);
+                                            }
+                                            if was_needs_recompile && report["passed"] != true {
+                                                let _ = enqueue_recompile_for_capsule(
+                                                    &runtime, &capsule,
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let error_text = error.to_string();
+                                            let transient = error.code == "unavailable";
+                                            if let Ok(db) = runtime.store.connection() {
+                                                let drop_pending =
+                                                    if runtime.cancel.load(Ordering::Acquire) {
+                                                        false
+                                                    } else if transient {
+                                                        db::record_pending_requalify_attempt(
+                                                            &db,
+                                                            &capsule_id,
+                                                            &error_text,
+                                                        )
+                                                        .is_ok_and(|attempts| attempts >= 3)
+                                                    } else {
+                                                        true
+                                                    };
+                                                if drop_pending {
+                                                    let _ = db::delete_pending_requalify(
+                                                        &db,
+                                                        &capsule_id,
+                                                    );
+                                                }
+                                                let target = if capsule["status"] == "retired" {
+                                                    "retired"
+                                                } else if was_needs_recompile {
+                                                    "needs_recompile"
+                                                } else {
+                                                    "stale"
+                                                };
+                                                let _ = db::set_capsule_status(
+                                                    &db,
+                                                    &capsule_id,
+                                                    target,
+                                                    Some(&error_text),
+                                                );
+                                            }
+                                            runtime.publish(
+                                                capsule["project_id"].as_str().unwrap_or(""),
+                                                "failed",
+                                                json!({"capsule_id": capsule_id, "outcome": error_text}),
+                                            );
+                                        }
+                                    }
                                 }
-                            }
-                            Err(error) => {
-                                if let Ok(db) = runtime.store.connection() {
-                                    let target = if capsule["status"] == "retired" {
-                                        "retired"
-                                    } else {
-                                        "stale"
-                                    };
-                                    let _ = db::set_capsule_status(
-                                        &db,
-                                        &capsule_id,
-                                        target,
-                                        Some(&error.to_string()),
-                                    );
+                                Err(error) => {
+                                    if let Ok(db) = runtime.store.connection() {
+                                        let _ = db::delete_pending_requalify(&db, &capsule_id);
+                                        let target = if capsule["status"] == "retired" {
+                                            "retired"
+                                        } else if was_needs_recompile {
+                                            "needs_recompile"
+                                        } else {
+                                            "stale"
+                                        };
+                                        let _ = db::set_capsule_status(
+                                            &db,
+                                            &capsule_id,
+                                            target,
+                                            Some(&error.to_string()),
+                                        );
+                                    }
                                 }
-                                runtime.publish(
-                                    capsule["project_id"].as_str().unwrap_or(""),
-                                    "failed",
-                                    json!({"capsule_id": capsule_id, "outcome": error.to_string()}),
-                                );
                             }
                         }
+                        Ok(None) => {
+                            if let Ok(db) = runtime.store.connection() {
+                                let _ = db::delete_pending_requalify(&db, &capsule_id);
+                            }
+                        }
+                        Err(_) => {}
                     }
                     if let Ok(mut pending) = requalifying.lock() {
                         pending.remove(&capsule_id);
                     }
                 }
+            }
+            drop(project_guard);
+            drop(permit);
+            if let Some(wq) = queue_weak.upgrade() {
+                drain_pending_requalifies(&runtime, &wq);
             }
         });
         Ok(())
@@ -191,20 +261,30 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
     if capsule["compile_rules_version"].as_str() != Some(compile_rules::version().as_str()) {
         return Some("The compiler's rules changed since this capsule was compiled.".into());
     }
-    if capsule["kind"] == "tool_chain"
-        && let Some(expected_tree) = capsule["tool_chain_tree_sha"]
-            .as_str()
-            .filter(|sha| !sha.is_empty())
-    {
-        match trace::workspace_tree_sha(workspace) {
-            Ok(now_tree) if now_tree == expected_tree => {}
-            Ok(_) => {
+    if capsule["kind"] == "tool_chain" {
+        let manifest = db::ArtifactDependencyManifest::from_value(&capsule["dependency_manifest"]);
+        if !manifest.path_hashes.is_empty() {
+            if !trace::verify_toolchain_manifest(workspace, &manifest.path_hashes) {
                 return Some(
-                    "The workspace tree changed since this tool-chain capsule was compiled.".into(),
+                    "Watched workspace files changed since this tool-chain capsule was compiled."
+                        .into(),
                 );
             }
-            Err(_) => {
-                return Some("The workspace tree could not be fingerprinted.".into());
+        } else if let Some(expected_tree) = capsule["tool_chain_tree_sha"]
+            .as_str()
+            .filter(|sha| !sha.is_empty())
+        {
+            match trace::workspace_tree_sha(workspace) {
+                Ok(now_tree) if now_tree == expected_tree => {}
+                Ok(_) => {
+                    return Some(
+                        "The workspace tree changed since this tool-chain capsule was compiled."
+                            .into(),
+                    );
+                }
+                Err(_) => {
+                    return Some("The workspace tree could not be fingerprinted.".into());
+                }
             }
         }
     }
@@ -263,10 +343,166 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
         );
     }
     let warm = PathBuf::from(capsule["artifact_dir"].as_str().unwrap_or("")).join("warm");
-    match package::digest(&warm) {
+    match cached_package_digest(&warm) {
         Ok(digest) if capsule["package_sha256"].as_str() == Some(digest.as_str()) => None,
         _ => Some("The capsule's package is missing or was changed.".into()),
     }
+}
+
+#[derive(Clone)]
+struct CachedPackageMeta {
+    stats: Vec<(String, u64, u128)>,
+    digest: String,
+    read_only: bool,
+}
+
+#[derive(Default)]
+struct PackageMetaCache {
+    entries: HashMap<PathBuf, CachedPackageMeta>,
+    order: VecDeque<PathBuf>,
+}
+
+const MAX_PACKAGE_META_CACHE: usize = 256;
+
+fn package_meta_cache() -> &'static Mutex<PackageMetaCache> {
+    static CACHE: OnceLock<Mutex<PackageMetaCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PackageMetaCache::default()))
+}
+
+fn stat_package_tree(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    now_ns: u128,
+    stats: &mut Vec<(String, u64, u128)>,
+    racy_safe: &mut bool,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if infra_core::fs::linked(&meta) {
+            return false;
+        }
+        if meta.is_dir() {
+            if !stat_package_tree(root, &path, depth + 1, now_ns, stats, racy_safe) {
+                return false;
+            }
+        } else if meta.is_file() {
+            let Ok(rel) = path.strip_prefix(root) else {
+                return false;
+            };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            if mtime_ns == 0 || now_ns.saturating_sub(mtime_ns) < db::RACY_NS {
+                *racy_safe = false;
+            }
+            stats.push((rel_str, meta.len(), mtime_ns));
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn cached_package_meta(
+    warm: &Path,
+) -> std::result::Result<(String, bool), infra_core::RuntimeError> {
+    let canonical_warm = std::fs::canonicalize(warm).unwrap_or_else(|_| warm.to_path_buf());
+    let now_ns = db::current_unix_ns();
+    let mut stats = Vec::new();
+    let mut racy_safe = true;
+    let stat_ok = std::fs::symlink_metadata(warm)
+        .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+        && stat_package_tree(warm, warm, 0, now_ns, &mut stats, &mut racy_safe);
+    if stat_ok {
+        stats.sort();
+        if racy_safe
+            && let Ok(guard) = package_meta_cache().lock()
+            && let Some(cached) = guard.entries.get(&canonical_warm)
+            && cached.stats == stats
+        {
+            return Ok((cached.digest.clone(), cached.read_only));
+        }
+    }
+    let loaded = package::load(warm)?;
+    let read_only = loaded.capsule.form == infra_skillcache::Form::Textual
+        || loaded.capsule.programs.iter().all(|p| p.read_only);
+    let digest = loaded.package_sha256;
+    if stat_ok
+        && racy_safe
+        && let Ok(mut guard) = package_meta_cache().lock()
+    {
+        if !guard.entries.contains_key(&canonical_warm) {
+            if guard.entries.len() >= MAX_PACKAGE_META_CACHE
+                && let Some(evicted) = guard.order.pop_front()
+            {
+                guard.entries.remove(&evicted);
+            }
+            guard.order.push_back(canonical_warm.clone());
+        }
+        guard.entries.insert(
+            canonical_warm,
+            CachedPackageMeta {
+                stats,
+                digest: digest.clone(),
+                read_only,
+            },
+        );
+    }
+    Ok((digest, read_only))
+}
+
+pub(super) fn cached_package_digest(
+    warm: &Path,
+) -> std::result::Result<String, infra_core::RuntimeError> {
+    cached_package_meta(warm).map(|(digest, _)| digest)
+}
+
+pub(super) fn cached_package_read_only(warm: &Path) -> Option<bool> {
+    cached_package_meta(warm).ok().map(|(_, ro)| ro)
+}
+
+fn ir_revisions() -> &'static Mutex<HashMap<String, u64>> {
+    static REVS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REVS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn record_ir_revision(project_id: &str, ir_revision: u64) {
+    if ir_revision == 0 || project_id.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = ir_revisions().lock() {
+        let entry = guard.entry(project_id.to_owned()).or_insert(0);
+        if ir_revision > *entry {
+            *entry = ir_revision;
+        }
+    }
+}
+
+pub(super) fn latest_ir_revision(state: &Path, project_id: &str) -> u64 {
+    if let Ok(guard) = ir_revisions().lock()
+        && let Some(&rev) = guard.get(project_id)
+        && rev > 0
+    {
+        return rev;
+    }
+    crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
+        .ok()
+        .flatten()
+        .map(|ir| ir.current_write_epoch())
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -295,7 +531,61 @@ fn register_requalify_hook(runtime: &Arc<Runtime>, work: &Arc<WorkQueue>) {
     }
 }
 
-fn trigger_background_requalify(db: &rusqlite::Connection, project_id: &str, capsule_id: &str) {
+fn drain_pending_requalifies(runtime: &Arc<Runtime>, wq: &Arc<WorkQueue>) {
+    if runtime.cancel.load(Ordering::Acquire) || tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let Ok(db) = runtime.store.connection() else {
+        return;
+    };
+    let Ok(rows) = db::list_pending_requalify(&db, WAITING as i64) else {
+        return;
+    };
+    let Ok(pending_compiles) = db::pending_compiles(&db) else {
+        return;
+    };
+    for row in rows {
+        if let Ok(Some(cap)) = db::capsule(&db, &row.capsule_id) {
+            if matches!(cap["status"].as_str(), Some("retired" | "compiling")) {
+                let _ = db::delete_pending_requalify(&db, &row.capsule_id);
+                continue;
+            }
+        } else {
+            let _ = db::delete_pending_requalify(&db, &row.capsule_id);
+            continue;
+        }
+        {
+            let Ok(mut pending) = wq.requalifying.lock() else {
+                return;
+            };
+            if pending.contains(&row.capsule_id) {
+                continue;
+            }
+            if pending_compiles + pending.len() as i64 >= WAITING as i64 {
+                break;
+            }
+            pending.insert(row.capsule_id.clone());
+        }
+        if wq
+            .queue(
+                runtime,
+                Work::Requalify {
+                    project_id: row.project_id,
+                    capsule_id: row.capsule_id.clone(),
+                    prior_status: row.prior_status,
+                },
+            )
+            .is_err()
+        {
+            if let Ok(mut pending) = wq.requalifying.lock() {
+                pending.remove(&row.capsule_id);
+            }
+            break;
+        }
+    }
+}
+
+fn trigger_background_requalify(db: &rusqlite::Connection) {
     if tokio::runtime::Handle::try_current().is_err() {
         return;
     }
@@ -316,32 +606,7 @@ fn trigger_background_requalify(db: &rusqlite::Connection, project_id: &str, cap
     let (Some(rt), Some(wq)) = (hook.runtime.upgrade(), hook.work.upgrade()) else {
         return;
     };
-    let Ok(pending_compiles) = db::pending_compiles(db) else {
-        return;
-    };
-    {
-        let Ok(mut pending) = wq.requalifying.lock() else {
-            return;
-        };
-        if pending.contains(capsule_id) || pending_compiles + pending.len() as i64 >= WAITING as i64
-        {
-            return;
-        }
-        pending.insert(capsule_id.to_owned());
-    }
-    if wq
-        .queue(
-            &rt,
-            Work::Requalify {
-                project_id: project_id.to_owned(),
-                capsule_id: capsule_id.to_owned(),
-            },
-        )
-        .is_err()
-        && let Ok(mut pending) = wq.requalifying.lock()
-    {
-        pending.remove(capsule_id);
-    }
+    drain_pending_requalifies(&rt, &wq);
 }
 
 impl SkillCacheDomain {
@@ -369,6 +634,7 @@ impl SkillCacheDomain {
             requalifying,
         };
         register_requalify_hook(&domain.runtime, &domain.work);
+        drain_pending_requalifies(&domain.runtime, &domain.work);
         domain
     }
     /// Names the engine the gates run, for a process that is not one itself.
@@ -383,6 +649,7 @@ impl SkillCacheDomain {
             requalifying: runtime.requalifying.clone(),
         });
         register_requalify_hook(&self.runtime, &self.work);
+        drain_pending_requalifies(&self.runtime, &self.work);
         self
     }
     pub fn runtime(&self) -> Arc<Runtime> {
@@ -588,6 +855,7 @@ impl SkillCacheDomain {
                 "Only a compiled capsule can be requalified.",
             ));
         }
+        let prior_status = capsule["status"].as_str().unwrap_or("active").to_owned();
         {
             let db = self.runtime.store.connection()?;
             let pending_compiles = db::pending_compiles(&db)?;
@@ -609,6 +877,7 @@ impl SkillCacheDomain {
         if let Err(error) = self.queue(Work::Requalify {
             project_id: project_id.into(),
             capsule_id: capsule_id.into(),
+            prior_status,
         }) {
             if let Ok(mut pending) = self.requalifying.lock() {
                 pending.remove(capsule_id);
@@ -789,6 +1058,9 @@ fn summary(capsule: &Value) -> Value {
     if let Some(kind) = capsule["kind"].as_str().filter(|k| *k != "skill") {
         summary["kind"] = kind.into();
     }
+    if capsule["needs_trace"] == true {
+        summary["needs_trace"] = true.into();
+    }
     summary
 }
 
@@ -906,6 +1178,7 @@ pub fn on_ir_paths_updated(
     caller_files: &[String],
     ir_revision: u64,
 ) -> Result<usize> {
+    record_ir_revision(project_id, ir_revision);
     if changed_paths.is_empty() && caller_files.is_empty() {
         return Ok(0);
     }
@@ -931,21 +1204,38 @@ pub fn on_ir_paths_updated(
         if delta == db::DeltaMatch::None {
             continue;
         }
+        let prior_status = capsule["status"].as_str().unwrap_or("active").to_owned();
         let reason = match delta {
             db::DeltaMatch::ExactSkill => "The source skill changed.",
             db::DeltaMatch::Dependency => "Watched project files or IR dependencies changed.",
             db::DeltaMatch::None => unreachable!(),
         };
-        db::set_capsule_status(db, &capsule_id, "stale", Some(reason))?;
-        touched.push((capsule_id, delta, reason));
+        let next_status = if prior_status == "needs_recompile" {
+            "needs_recompile"
+        } else {
+            "stale"
+        };
+        if next_status != prior_status {
+            db::set_capsule_status(db, &capsule_id, next_status, Some(reason))?;
+        }
+        if delta == db::DeltaMatch::Dependency {
+            db::enqueue_pending_requalify(
+                db,
+                project_id,
+                &capsule_id,
+                &prior_status,
+                Some(reason),
+            )?;
+        }
+        touched.push((capsule_id, delta, reason, next_status));
     }
-    for (id, _, reason) in &touched {
+    for (id, _, reason, state) in &touched {
         hub.publish(
             "skillcache_capsule",
             None,
             Some(project_id.to_owned()),
             json!({
-                "state": "stale",
+                "state": state,
                 "project_id": project_id,
                 "capsule_id": id,
                 "reason": reason,
@@ -953,41 +1243,100 @@ pub fn on_ir_paths_updated(
             }),
         );
     }
-    for (id, delta, _) in &touched {
-        if *delta == db::DeltaMatch::Dependency {
-            trigger_background_requalify(db, project_id, id);
-        }
+    if touched
+        .iter()
+        .any(|(_, delta, _, _)| *delta == db::DeltaMatch::Dependency)
+    {
+        trigger_background_requalify(db);
     }
     Ok(touched.len())
 }
 
+fn trace_matches_capsule(trace: &Value, capsule: &Value) -> bool {
+    if capsule["kind"] == "tool_chain" {
+        return trace["redaction"]["trace_kind"] == "tool_chain";
+    }
+    let cap_path = capsule["skill_path"].as_str().unwrap_or("");
+    let cap_name = capsule["skill_name"].as_str().unwrap_or("");
+    let cap_mirror = db::canonical_mirror_skill(cap_path);
+    trace["skill_refs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|sref| {
+            let sp = sref["path"].as_str().unwrap_or("");
+            let sn = sref["name"].as_str().unwrap_or("");
+            sp == cap_path
+                || (!cap_name.is_empty() && sn == cap_name)
+                || (cap_mirror.is_some() && db::canonical_mirror_skill(sp) == cap_mirror)
+        })
+}
+
 /// Enqueues compilation of an observed turn when `compile_after_observe` is set
-/// on the session; emits `"queued"` or `"not_queued"` feedback event.
+/// on the session, or when `auto_recompile` is enabled and a matching capsule
+/// was flagged `needs_trace` after a warm deopt.
 pub(crate) fn maybe_enqueue_after_observe(
     runtime: &Arc<Runtime>,
     session: &Value,
     generation: &str,
 ) -> Option<Value> {
-    if session["skillcache"]["compile_after_observe"] != true {
-        return None;
-    }
-    let enqueuer = runtime.enqueuer.as_ref()?;
+    let compile_after_observe = session["skillcache"]["compile_after_observe"] == true;
+    let auto_recompile = runtime
+        .store
+        .setting(warm::RECOMPILE_THRESHOLDS)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v["auto_recompile"] == true);
     let eval_arm = if settings::eval_enabled(&runtime.store) {
         session["skillcache"]["eval_arm"].as_str().map(String::from)
     } else {
         None
     };
+    let project_id = session["project_id"].as_str().unwrap_or("");
+    let matching_deopted: Vec<String> = if let Ok(db) = runtime.store.connection()
+        && let Ok(Some(stored_trace)) = db::trace(&db, generation)
+        && let Ok(waiting) = db::capsules_needing_trace(&db, project_id)
+    {
+        waiting
+            .into_iter()
+            .filter(|cap| {
+                cap["eval_arm"].as_str() == eval_arm.as_deref()
+                    && trace_matches_capsule(&stored_trace, cap)
+            })
+            .filter_map(|cap| cap["capsule_id"].as_str().map(str::to_owned))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !compile_after_observe && (!auto_recompile || matching_deopted.is_empty()) {
+        return None;
+    }
+    let enqueuer = runtime.enqueuer.as_ref()?;
     match enqueue_compile_for_trace(runtime, session, generation, None, eval_arm, &|job| {
         enqueuer(runtime, job)
     }) {
-        Ok(queued) => Some(json!({
-            "kind": "skillcache",
-            "phase": "queued",
-            "compile_id": queued["compile_id"],
-            "capsule_id": queued["capsule_id"],
-            "generation": generation,
-            "text": "SkillCache queued compilation for this observed turn.",
-        })),
+        Ok(queued) => {
+            if !matching_deopted.is_empty()
+                && let Ok(db) = runtime.store.connection()
+            {
+                for cap_id in &matching_deopted {
+                    let _ = db::clear_capsule_needs_trace(&db, cap_id);
+                }
+            }
+            let text = if !compile_after_observe {
+                "SkillCache queued recompilation from this fresh observed trace."
+            } else {
+                "SkillCache queued compilation for this observed turn."
+            };
+            Some(json!({
+                "kind": "skillcache",
+                "phase": "queued",
+                "compile_id": queued["compile_id"],
+                "capsule_id": queued["capsule_id"],
+                "generation": generation,
+                "text": text,
+            }))
+        }
         Err(error) => Some(json!({
             "kind": "skillcache",
             "phase": "not_queued",
@@ -998,8 +1347,8 @@ pub(crate) fn maybe_enqueue_after_observe(
     }
 }
 
-/// Triggers recompilation from the capsule's stored source trace when
-/// eligible (`needs_recompile` / `stale` / `failed`), or notifies `"not_queued"`.
+/// Triggers recompilation from a fresh observed trace (when `needs_trace` is set)
+/// or from the capsule's stored source trace otherwise.
 pub(crate) fn enqueue_recompile_for_capsule(
     runtime: &Arc<Runtime>,
     capsule: &Value,
@@ -1008,32 +1357,71 @@ pub(crate) fn enqueue_recompile_for_capsule(
         .enqueuer
         .as_ref()
         .ok_or_else(|| HarnessError::unavailable("SkillCache compiler queue is unavailable."))?;
-    let session_id = capsule["source_session_id"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            HarnessError::missing("This capsule has no source session to recompile from.")
+    let capsule_id = capsule["capsule_id"].as_str().unwrap_or("");
+    let project_id = capsule["project_id"].as_str().unwrap_or("");
+    let needs_trace = capsule["needs_trace"] == true;
+    let (session_id, generation) = if needs_trace {
+        let db = runtime.store.connection()?;
+        let fresh = db::find_fresh_trace_after(&db, project_id, capsule)?.ok_or_else(|| {
+            HarnessError::conflict(
+                "This capsule deopted during a warm turn and needs a fresh observed trace before recompiling.",
+            )
         })?;
-    let generation = capsule["source_generation"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            HarnessError::missing("This capsule has no source trace to recompile from.")
-        })?;
-    let session = runtime.store.get(session_id)?;
+        let sid = fresh["session_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                HarnessError::missing("The fresh trace has no source session to recompile from.")
+            })?
+            .to_owned();
+        let generation_id = fresh["generation"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                HarnessError::missing("The fresh trace has no generation to recompile from.")
+            })?
+            .to_owned();
+        (sid, generation_id)
+    } else {
+        let sid = capsule["source_session_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                HarnessError::missing("This capsule has no source session to recompile from.")
+            })?
+            .to_owned();
+        let generation_id = capsule["source_generation"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                HarnessError::missing("This capsule has no source trace to recompile from.")
+            })?
+            .to_owned();
+        (sid, generation_id)
+    };
+    let session = runtime.store.get(&session_id)?;
     let eval_arm = if settings::eval_enabled(&runtime.store) {
         capsule["eval_arm"].as_str().map(String::from)
     } else {
         None
     };
-    enqueue_compile_for_trace(runtime, &session, generation, None, eval_arm, &|job| {
-        enqueuer(runtime, job)
-    })
+    let queued =
+        enqueue_compile_for_trace(runtime, &session, &generation, None, eval_arm, &|job| {
+            enqueuer(runtime, job)
+        })?;
+    if needs_trace
+        && !capsule_id.is_empty()
+        && let Ok(db) = runtime.store.connection()
+    {
+        let _ = db::clear_capsule_needs_trace(&db, capsule_id);
+    }
+    Ok(queued)
 }
 
-/// When `RECOMPILE_THRESHOLDS["auto_recompile"]` is enabled (opt-in, default off)
-/// and a warm turn just moved `capsule_id` into `"needs_recompile"`, queues a
-/// background recompilation from its stored source trace.
+/// When `RECOMPILE_THRESHOLDS["auto_recompile"]` is enabled and a warm turn
+/// moved `capsule_id` into `"needs_recompile"`, flags it `needs_trace` so the
+/// next cold run captures a fresh observed trace instead of looping on the
+/// failed `source_generation`.
 pub(crate) fn maybe_enqueue_recompile_on_finish(
     runtime: &Arc<Runtime>,
     capsule_id: &str,
@@ -1045,9 +1433,6 @@ pub(crate) fn maybe_enqueue_recompile_on_finish(
         .ok()
         .flatten()
         .is_some_and(|v| v["auto_recompile"] == true);
-    if !auto_recompile {
-        return;
-    }
     let Ok(db) = runtime.store.connection() else {
         return;
     };
@@ -1057,23 +1442,20 @@ pub(crate) fn maybe_enqueue_recompile_on_finish(
     if capsule["status"] != "needs_recompile" {
         return;
     }
-    match enqueue_recompile_for_capsule(runtime, &capsule) {
-        Ok(queued) => emit(json!({
-            "kind": "skillcache",
-            "phase": "queued",
-            "compile_id": queued["compile_id"],
-            "capsule_id": queued["capsule_id"],
-            "generation": capsule["source_generation"],
-            "text": "SkillCache queued recompilation after repeated warm turn failures.",
-        })),
-        Err(error) => emit(json!({
-            "kind": "skillcache",
-            "phase": "not_queued",
-            "reason": if error.code == "conflict" { "queue_full" } else { "unavailable" },
-            "generation": capsule["source_generation"],
-            "text": format!("SkillCache could not queue recompilation: {error}"),
-        })),
+    if capsule["needs_trace"] != true {
+        let _ = db::mark_capsule_needs_trace(&db, capsule_id);
     }
+    if !auto_recompile {
+        return;
+    }
+    emit(json!({
+        "kind": "skillcache",
+        "phase": "not_queued",
+        "reason": "needs_trace",
+        "capsule_id": capsule_id,
+        "generation": capsule["source_generation"],
+        "text": "SkillCache deferred recompilation until the next cold turn captures a fresh observed trace.",
+    }));
 }
 
 fn enqueue_compile_for_trace(
@@ -1505,5 +1887,385 @@ mod tests {
         assert_eq!(frame.data["state"], "stale");
         assert_eq!(frame.data["capsule_id"], "cap-ir");
         assert_eq!(frame.data["ir_revision"], 51);
+    }
+
+    #[test]
+    fn warm_deopt_flags_needs_trace_and_blocks_stale_recompile_until_fresh_trace() {
+        let root = test_support::scratch();
+        let ws = root.path().join("proj");
+        std::fs::create_dir_all(ws.join(".claude/skills/pdf")).unwrap();
+        std::fs::write(ws.join(".claude/skills/pdf/SKILL.md"), "# PDF\n").unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "codex"}),
+                "Run pdf",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+        let tree_sha = "c".repeat(64);
+        {
+            let db = store.connection().unwrap();
+            db.execute(
+                "INSERT OR REPLACE INTO harness_settings(name,value) VALUES(?1,?2)",
+                rusqlite::params![
+                    warm::RECOMPILE_THRESHOLDS,
+                    json!({"auto_recompile": true}).to_string()
+                ],
+            )
+            .unwrap();
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: "g-old",
+                    session_id: &sid,
+                    provider: "codex",
+                    model: None,
+                    request: "Run pdf",
+                    skill_refs: &json!([{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": tree_sha}]),
+                    steps: &json!([{"kind": "command", "command": "php -v"}]),
+                    usage: &json!({}),
+                    redaction: &json!({"admissible": true}),
+                },
+            )
+            .unwrap();
+            let skill_ref = json!({
+                "name": "pdf",
+                "path": ".claude/skills/pdf/SKILL.md",
+                "tree_sha256": tree_sha
+            });
+            db::begin_capsule(
+                &db,
+                "cap-deopt",
+                "cmp-deopt",
+                &project_id,
+                &sid,
+                "g-old",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-deopt",
+                    mu_name: "pdf-run",
+                    mu_description: "PDF",
+                    form: "textual",
+                    capsule_sha256: "cap-sha",
+                    package_sha256: "pkg-sha",
+                    skill_files: &json!({}),
+                    env_fingerprint: "env",
+                    engine_digest: "eng",
+                    artifact_dir: "/tmp/cap-deopt",
+                    capabilities: &json!({}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_status(&db, "cap-deopt", "needs_recompile", Some("Warm deopt"))
+                .unwrap();
+            db::mark_capsule_needs_trace(&db, "cap-deopt").unwrap();
+        }
+
+        let queued = Arc::new(Mutex::new(Vec::<String>::new()));
+        let queued_hook = Arc::clone(&queued);
+        let rt = Arc::new(Runtime {
+            store: store.clone(),
+            providers: Arc::new(ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: Some(Arc::new(move |_, job| {
+                queued_hook.lock().unwrap().push(job.generation);
+                Ok(())
+            })),
+            requalifying: None,
+        });
+
+        let deopted = {
+            let db = store.connection().unwrap();
+            db::capsule(&db, "cap-deopt").unwrap().unwrap()
+        };
+        assert_eq!(deopted["needs_trace"], true);
+        let err = enqueue_recompile_for_capsule(&rt, &deopted).unwrap_err();
+        assert_eq!(err.status, 409);
+        assert!(queued.lock().unwrap().is_empty());
+
+        let emitted = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let emitted_hook = Arc::clone(&emitted);
+        maybe_enqueue_recompile_on_finish(&rt, "cap-deopt", &move |v| {
+            emitted_hook.lock().unwrap().push(v);
+        });
+        assert!(queued.lock().unwrap().is_empty());
+        let events = emitted.lock().unwrap().clone();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["phase"] == "not_queued" && e["reason"] == "needs_trace"),
+            "{events:?}"
+        );
+
+        // Once a fresh observed trace lands, recompile picks the fresh generation and clears needs_trace.
+        {
+            let db = store.connection().unwrap();
+            db::save_trace(
+                &db,
+                &db::TraceRow {
+                    generation: "g-fresh",
+                    session_id: &sid,
+                    provider: "codex",
+                    model: None,
+                    request: "Run pdf",
+                    skill_refs: &json!([{"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": tree_sha}]),
+                    steps: &json!([{"kind": "command", "command": "php -v"}]),
+                    usage: &json!({}),
+                    redaction: &json!({"admissible": true}),
+                },
+            )
+            .unwrap();
+        }
+        let refreshed = {
+            let db = store.connection().unwrap();
+            db::capsule(&db, "cap-deopt").unwrap().unwrap()
+        };
+        enqueue_recompile_for_capsule(&rt, &refreshed).unwrap();
+        assert_eq!(*queued.lock().unwrap(), vec!["g-fresh".to_string()]);
+        let cleared = {
+            let db = store.connection().unwrap();
+            db::capsule(&db, "cap-deopt").unwrap().unwrap()
+        };
+        assert_eq!(cleared["needs_trace"], false);
+    }
+
+    #[test]
+    fn ir_delta_preserves_needs_recompile_and_persists_pending_requalify_when_queue_saturated() {
+        let root = test_support::scratch();
+        let ws = root.path().join("proj");
+        std::fs::create_dir_all(&ws).unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "codex"}),
+                "Inspect routes",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap().to_owned();
+
+        let wq = WorkQueue::new();
+        let rt = Arc::new(Runtime {
+            store: store.clone(),
+            providers: Arc::new(ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: Some(Arc::clone(&wq.requalifying)),
+        });
+        register_requalify_hook(&rt, &wq);
+
+        let manifest = db::ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/routes/SKILL.md".into()],
+            watched_globs: Vec::new(),
+            manifest_files: Vec::new(),
+            ast_selectors: Vec::new(),
+            route_selectors: vec!["routes/api.php".into()],
+            table_selectors: Vec::new(),
+            caller_files: Vec::new(),
+            path_hashes: BTreeMap::new(),
+            ir_revision: 10,
+            verified_ns: 1,
+        };
+        {
+            let db = store.connection().unwrap();
+            let skill_ref = json!({
+                "name": "routes",
+                "path": ".claude/skills/routes/SKILL.md",
+                "tree_sha256": "a".repeat(64)
+            });
+            for (cid, cmp_id, gen_id, status) in [
+                ("cap-active", "cmp-a", "g-a", "active"),
+                ("cap-recomp", "cmp-r", "g-r", "needs_recompile"),
+            ] {
+                db::save_trace(
+                    &db,
+                    &db::TraceRow {
+                        generation: gen_id,
+                        session_id: &sid,
+                        provider: "codex",
+                        model: None,
+                        request: "Inspect routes",
+                        skill_refs: &json!([skill_ref]),
+                        steps: &json!([]),
+                        usage: &json!({}),
+                        redaction: &json!({}),
+                    },
+                )
+                .unwrap();
+                db::begin_capsule(
+                    &db,
+                    cid,
+                    cmp_id,
+                    &project_id,
+                    &sid,
+                    gen_id,
+                    &skill_ref,
+                    None,
+                )
+                .unwrap();
+                db::activate_capsule(
+                    &db,
+                    &db::Qualified {
+                        capsule_id: cid,
+                        mu_name: cid,
+                        mu_description: "Routes",
+                        form: "textual",
+                        capsule_sha256: "cap-sha",
+                        package_sha256: "pkg-sha",
+                        skill_files: &json!({}),
+                        env_fingerprint: "env",
+                        engine_digest: "eng",
+                        artifact_dir: "/tmp/cap",
+                        capabilities: &json!({}),
+                    },
+                )
+                .unwrap();
+                db::set_dependency_manifest(&db, cid, &manifest).unwrap();
+                if status != "active" {
+                    db::set_capsule_status(&db, cid, status, Some("Deopted")).unwrap();
+                }
+            }
+        }
+
+        // Saturate all WAITING = 8 queue slots so background requalify cannot grab a slot now.
+        let held = wq
+            .slots
+            .clone()
+            .try_acquire_many_owned(WAITING as u32)
+            .unwrap();
+        {
+            let db = store.connection().unwrap();
+            let invalidated = on_ir_paths_updated(
+                &db,
+                store.stream(),
+                &project_id,
+                &["routes/api.php".into()],
+                &[],
+                11,
+            )
+            .unwrap();
+            assert_eq!(invalidated, 2);
+            assert_eq!(
+                db::capsule(&db, "cap-active").unwrap().unwrap()["status"],
+                "stale"
+            );
+            assert_eq!(
+                db::capsule(&db, "cap-recomp").unwrap().unwrap()["status"],
+                "needs_recompile"
+            );
+            assert_eq!(db::pending_requalify_count(&db).unwrap(), 2);
+            let pending = db::list_pending_requalify(&db, 10).unwrap();
+            let active_row = pending
+                .iter()
+                .find(|r| r.capsule_id == "cap-active")
+                .unwrap();
+            let recomp_row = pending
+                .iter()
+                .find(|r| r.capsule_id == "cap-recomp")
+                .unwrap();
+            assert_eq!(active_row.prior_status, "active");
+            assert_eq!(recomp_row.prior_status, "needs_recompile");
+
+            db::set_capsule_status(&db, "cap-active", "retired", Some("Superseded")).unwrap();
+            db::set_capsule_status(&db, "cap-recomp", "retired", Some("Superseded")).unwrap();
+        }
+        drop(held);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                drain_pending_requalifies(&rt, &wq);
+            });
+        let db = store.connection().unwrap();
+        assert_eq!(db::pending_requalify_count(&db).unwrap(), 0);
+    }
+
+    #[test]
+    fn package_meta_cache_validates_with_racy_ns_and_avoids_stale_reads() {
+        let dir = test_support::scratch();
+        let warm = dir.path().join("warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "mu": {"name": "cached-pkg", "description": "Test cached digest"},
+            "source": {"skills": [{"name": "s", "path": ".claude/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/scan/main.py", b"print('ok')\n".to_vec());
+        let expected_digest = package::write_warm(&warm, &cap, None, &files).unwrap();
+
+        // Backdate package files beyond RACY_NS so cache populates and hits cleanly.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        for rel in ["capsule.json", "programs/scan/main.py"] {
+            let file_path = warm.join(rel);
+            let orig_perms = std::fs::metadata(&file_path).unwrap().permissions();
+            #[cfg(unix)]
+            let writable = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::Permissions::from_mode(orig_perms.mode() | 0o200)
+            };
+            #[cfg(not(unix))]
+            #[expect(clippy::permissions_set_readonly_false)]
+            let writable = {
+                let mut p = orig_perms.clone();
+                p.set_readonly(false);
+                p
+            };
+            std::fs::set_permissions(&file_path, writable).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file_path)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+            std::fs::set_permissions(&file_path, orig_perms).unwrap();
+        }
+        assert_eq!(cached_package_digest(&warm).unwrap(), expected_digest);
+        assert_eq!(cached_package_read_only(&warm), Some(true));
+        let canon_warm = std::fs::canonicalize(&warm).unwrap();
+        assert!(
+            package_meta_cache()
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&canon_warm)
+        );
+        let _ = package::remove(&warm);
     }
 }

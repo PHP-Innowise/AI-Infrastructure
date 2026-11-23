@@ -16,6 +16,8 @@ use std::{
 };
 use uuid::Uuid;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+const MAX_COMPRESSED_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CACHED_SKILL_ARCHIVES: usize = 32;
 const MAX_FILES: usize = 5000;
 const TTL: Duration = Duration::from_secs(900);
 const AGENTS: &[(&str, &str, &str)] = &[
@@ -191,12 +193,102 @@ impl SkillsDomain {
         )?;
         Ok(())
     }
+    fn skill_tarball_cache_dir(&self) -> PathBuf {
+        self.store.state.join("cache").join("skills")
+    }
+    fn skill_tarball_cache_path(&self, source: &str, revision: &str) -> Result<PathBuf> {
+        let file = format!(
+            "{}-{revision}.tar.gz",
+            core::query::sha256(source.as_bytes())
+        );
+        let path = self.skill_tarball_cache_dir().join(file);
+        core::fs::admit_descendant(&self.store.state, &path)?;
+        Ok(path)
+    }
+    fn read_cached_skill_tarball(
+        &self,
+        source: &str,
+        revision: &str,
+    ) -> Option<BTreeMap<String, Skill>> {
+        let path = self.skill_tarball_cache_path(source, revision).ok()?;
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if core::fs::linked(&meta)
+            || !meta.is_file()
+            || meta.len() > MAX_COMPRESSED_ARCHIVE_BYTES as u64
+        {
+            return None;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(&path).ok()?;
+        let mut compressed = Vec::with_capacity(meta.len() as usize);
+        if file
+            .take(MAX_COMPRESSED_ARCHIVE_BYTES as u64 + 1)
+            .read_to_end(&mut compressed)
+            .is_err()
+            || compressed.len() > MAX_COMPRESSED_ARCHIVE_BYTES
+        {
+            return None;
+        }
+        match parse_skill_tarball(&compressed, source, revision) {
+            Ok(skills) => Some(skills),
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+        }
+    }
+    fn write_cached_skill_tarball(&self, source: &str, revision: &str, compressed: &[u8]) {
+        if compressed.len() > MAX_COMPRESSED_ARCHIVE_BYTES {
+            return;
+        }
+        let cache_parent = self.store.state.join("cache");
+        if infra_host::util::private_directory(&cache_parent).is_err() {
+            return;
+        }
+        let cache_dir = self.skill_tarball_cache_dir();
+        if infra_host::util::private_directory(&cache_dir).is_err() {
+            return;
+        }
+        let Ok(path) = self.skill_tarball_cache_path(source, revision) else {
+            return;
+        };
+        if core::fs::atomic_write(&path, compressed).is_ok() {
+            let _ = infra_host::util::private_file(&path);
+        }
+        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+            let mut archives: Vec<(SystemTime, PathBuf)> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("gz") {
+                        return None;
+                    }
+                    let meta = std::fs::symlink_metadata(&p).ok()?;
+                    if core::fs::linked(&meta) || !meta.is_file() {
+                        return None;
+                    }
+                    let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+                    Some((modified, p))
+                })
+                .collect();
+            if archives.len() > MAX_CACHED_SKILL_ARCHIVES {
+                archives.sort_by_key(|(modified, _)| *modified);
+                let excess = archives.len() - MAX_CACHED_SKILL_ARCHIVES;
+                for (_, old_path) in archives.into_iter().take(excess) {
+                    if old_path != path {
+                        let _ = std::fs::remove_file(old_path);
+                    }
+                }
+            }
+        }
+    }
     fn load(&self, source_id: &str) -> Result<BTreeMap<String, Skill>> {
-        let catalog = self
-            .sources
-            .get(source_id)
-            .ok_or_else(|| HarnessError::invalid("Select a supported skill source."))?;
-        let source = repository(required(catalog, "skills_source", 300)?)?;
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
@@ -205,190 +297,94 @@ impl SkillsDomain {
             .map_err(|_| {
                 HarnessError::unavailable("Could not initialize the skill source client.")
             })?;
-        let url = format!("https://api.github.com/repos/{source}/commits/HEAD");
-        let mut response = client
-            .get(&url)
-            .header("Accept", "application/vnd.github.sha")
-            .send()
-            .map_err(|_| {
-                HarnessError::unavailable("Could not resolve the skill source revision.")
-            })?;
-        if !response.status().is_success() || response.url().as_str() != url {
-            return Err(HarnessError::unavailable(
-                "Unexpected skill source response or redirect.",
-            ));
-        }
-        let mut revision = String::new();
-        response
-            .by_ref()
-            .take(129)
-            .read_to_string(&mut revision)
-            .map_err(|_| HarnessError::unavailable("Invalid skill source revision response."))?;
-        let revision = revision.trim().to_owned();
+        self.load_with_transport(
+            source_id,
+            |source| {
+                let url = format!("https://api.github.com/repos/{source}/commits/HEAD");
+                let mut response = client
+                    .get(&url)
+                    .header("Accept", "application/vnd.github.sha")
+                    .send()
+                    .map_err(|_| {
+                        HarnessError::unavailable("Could not resolve the skill source revision.")
+                    })?;
+                if !response.status().is_success() || response.url().as_str() != url {
+                    return Err(HarnessError::unavailable(
+                        "Unexpected skill source response or redirect.",
+                    ));
+                }
+                let mut revision = String::new();
+                response
+                    .by_ref()
+                    .take(129)
+                    .read_to_string(&mut revision)
+                    .map_err(|_| {
+                        HarnessError::unavailable("Invalid skill source revision response.")
+                    })?;
+                Ok(revision.trim().to_owned())
+            },
+            |source, revision| {
+                let url = format!("https://codeload.github.com/{source}/tar.gz/{revision}");
+                let mut response = client.get(&url).send().map_err(|_| {
+                    HarnessError::unavailable("Could not download the skill source archive.")
+                })?;
+                if !response.status().is_success() || response.url().as_str() != url {
+                    return Err(HarnessError::unavailable(
+                        "Unexpected skill archive response or redirect.",
+                    ));
+                }
+                let mut compressed = vec![];
+                response
+                    .by_ref()
+                    .take(MAX_COMPRESSED_ARCHIVE_BYTES as u64 + 1)
+                    .read_to_end(&mut compressed)
+                    .map_err(|_| HarnessError::unavailable("Could not read the skill archive."))?;
+                if compressed.len() > MAX_COMPRESSED_ARCHIVE_BYTES {
+                    return Err(HarnessError::invalid("The skill archive exceeds16MiB."));
+                }
+                Ok(compressed)
+            },
+        )
+    }
+    fn load_with_transport<R, D>(
+        &self,
+        source_id: &str,
+        resolve_head: R,
+        fetch_archive: D,
+    ) -> Result<BTreeMap<String, Skill>>
+    where
+        R: FnOnce(&str) -> Result<String>,
+        D: FnOnce(&str, &str) -> Result<Vec<u8>>,
+    {
+        let catalog = self
+            .sources
+            .get(source_id)
+            .ok_or_else(|| HarnessError::invalid("Select a supported skill source."))?;
+        let source = repository(required(catalog, "skills_source", 300)?)?;
+        let revision = resolve_head(source)?.trim().to_owned();
         if !hex(&revision, 40) {
             return Err(HarnessError::invalid(
                 "The source did not return a valid immutable commit.",
             ));
         }
-        let url = format!("https://codeload.github.com/{source}/tar.gz/{revision}");
-        let mut response = client.get(&url).send().map_err(|_| {
-            HarnessError::unavailable("Could not download the skill source archive.")
-        })?;
-        if !response.status().is_success() || response.url().as_str() != url {
-            return Err(HarnessError::unavailable(
-                "Unexpected skill archive response or redirect.",
-            ));
+        if let Ok(state) = self.state()
+            && let Some(loaded) = state.loaded.get(source_id)
+            && !loaded.is_empty()
+            && loaded
+                .values()
+                .all(|skill| skill.source == source && skill.revision == revision)
+        {
+            return Ok(loaded.clone());
         }
-        let mut compressed = vec![];
-        response
-            .by_ref()
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_end(&mut compressed)
-            .map_err(|_| HarnessError::unavailable("Could not read the skill archive."))?;
-        if compressed.len() > 16 * 1024 * 1024 {
+        if let Some(skills) = self.read_cached_skill_tarball(source, &revision) {
+            return Ok(skills);
+        }
+        let compressed = fetch_archive(source, &revision)?;
+        if compressed.len() > MAX_COMPRESSED_ARCHIVE_BYTES {
             return Err(HarnessError::invalid("The skill archive exceeds16MiB."));
         }
-        let archive_limit = MAX_BYTES + MAX_FILES * 2048;
-        let mut expanded = vec![];
-        flate2::read::GzDecoder::new(Cursor::new(compressed))
-            .take(archive_limit as u64 + 1)
-            .read_to_end(&mut expanded)
-            .map_err(|_| HarnessError::invalid("Invalid skill archive compression."))?;
-        if expanded.len() > archive_limit {
-            return Err(HarnessError::invalid(
-                "The expanded skill archive exceeds its limit.",
-            ));
-        }
-        let mut archive = tar::Archive::new(Cursor::new(expanded));
-        let mut members = BTreeMap::<String, Asset>::new();
-        let mut links = vec![];
-        let (mut count, mut total) = (0, 0usize);
-        for member in archive
-            .entries()
-            .map_err(|_| HarnessError::invalid("Invalid skill archive."))?
-        {
-            let mut entry =
-                member.map_err(|_| HarnessError::invalid("Invalid skill archive member."))?;
-            count += 1;
-            let name = repeated_suffix_removed(
-                entry
-                    .path()
-                    .map_err(|_| HarnessError::invalid("Invalid archive path."))?
-                    .to_str()
-                    .ok_or_else(|| HarnessError::invalid("Non-UTF8 archive path."))?,
-                "/",
-            )
-            .to_owned();
-            safe(&name)?;
-            let size = usize::try_from(entry.size())
-                .map_err(|_| HarnessError::invalid("Skill archive size overflow."))?;
-            total = total
-                .checked_add(size)
-                .ok_or_else(|| HarnessError::invalid("Skill archive size overflow."))?;
-            if count > MAX_FILES || total > MAX_BYTES {
-                return Err(HarnessError::invalid(
-                    "The skill archive exceeds file or byte bounds.",
-                ));
-            }
-            let kind = entry.header().entry_type();
-            if kind.is_symlink() || kind.is_hard_link() {
-                links.push(name);
-                continue;
-            }
-            if kind.is_dir() {
-                continue;
-            }
-            if !kind.is_file() {
-                return Err(HarnessError::invalid(
-                    "The skill archive contains unsupported file types.",
-                ));
-            }
-            let mut body = vec![];
-            entry
-                .by_ref()
-                .take(size as u64 + 1)
-                .read_to_end(&mut body)
-                .map_err(|_| HarnessError::invalid("Could not read skill archive member."))?;
-            if body.len() != size {
-                return Err(HarnessError::invalid(
-                    "Skill archive member length changed.",
-                ));
-            }
-            let mode = if entry.header().mode().unwrap_or(0) & 0o111 != 0 {
-                0o755
-            } else {
-                0o644
-            };
-            if members.insert(name, Asset { body, mode }).is_some() {
-                return Err(HarnessError::invalid("Duplicate skill archive path."));
-            }
-        }
-        let roots = members
-            .keys()
-            .filter_map(|path| path.strip_suffix("/SKILL.md").map(str::to_owned))
-            .collect::<Vec<_>>();
-        if roots.is_empty() {
-            return Err(HarnessError::missing(
-                "No SKILL.md files were found in this source.",
-            ));
-        }
-        if links
-            .iter()
-            .any(|link| roots.iter().any(|r| link.starts_with(&format!("{r}/"))))
-        {
-            return Err(HarnessError::forbidden(
-                "Links inside skill directories are unsupported.",
-            ));
-        }
-        let mut skills = BTreeMap::new();
-        for root in roots {
-            let raw = &members[&format!("{root}/SKILL.md")].body;
-            let text = std::str::from_utf8(raw)
-                .map_err(|_| HarnessError::invalid("Skill metadata must be UTF8."))?;
-            let front = text
-                .strip_prefix("---\n")
-                .or_else(|| text.strip_prefix("---\r\n"))
-                .and_then(|tail| tail.split_once("\n---").map(|(v, _)| v))
-                .ok_or_else(|| HarnessError::invalid("Skill metadata frontmatter is missing."))?;
-            let metadata: V = serde_yaml::from_str(front)
-                .map_err(|_| HarnessError::invalid("Skill metadata is invalid."))?;
-            let name = metadata["name"]
-                .as_str()
-                .unwrap_or_else(|| root.rsplit('/').next().unwrap_or(""));
-            valid_name(name, false)?;
-            let description = metadata["description"]
-                .as_str()
-                .unwrap_or("")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(1200)
-                .collect();
-            let prefix = format!("{root}/");
-            let files = members
-                .iter()
-                .filter_map(|(p, a)| p.strip_prefix(&prefix).map(|r| (r.to_owned(), a.clone())))
-                .collect::<BTreeMap<_, _>>();
-            if skills
-                .insert(
-                    name.to_owned(),
-                    Skill {
-                        title: name.to_owned(),
-                        description,
-                        source: source.into(),
-                        revision: revision.clone(),
-                        files,
-                    },
-                )
-                .is_some()
-            {
-                return Err(HarnessError::invalid("Source skills have duplicate names."));
-            }
-            if skills.len() > 500 {
-                return Err(HarnessError::invalid("Source contains too many skills."));
-            }
-        }
+        let skills = parse_skill_tarball(&compressed, source, &revision)?;
+        self.write_cached_skill_tarball(source, &revision, &compressed);
         Ok(skills)
     }
     fn discover(&self, source_id: &str, refresh: bool) -> Result<V> {
@@ -1109,6 +1105,155 @@ impl Domain for SkillsDomain {
         })
     }
 }
+fn parse_skill_tarball(
+    compressed: &[u8],
+    source: &str,
+    revision: &str,
+) -> Result<BTreeMap<String, Skill>> {
+    let archive_limit = MAX_BYTES + MAX_FILES * 2048;
+    let mut expanded = vec![];
+    flate2::read::GzDecoder::new(Cursor::new(compressed))
+        .take(archive_limit as u64 + 1)
+        .read_to_end(&mut expanded)
+        .map_err(|_| HarnessError::invalid("Invalid skill archive compression."))?;
+    if expanded.len() > archive_limit {
+        return Err(HarnessError::invalid(
+            "The expanded skill archive exceeds its limit.",
+        ));
+    }
+    let mut archive = tar::Archive::new(Cursor::new(expanded));
+    let mut members = BTreeMap::<String, Asset>::new();
+    let mut links = vec![];
+    let (mut count, mut total) = (0, 0usize);
+    for member in archive
+        .entries()
+        .map_err(|_| HarnessError::invalid("Invalid skill archive."))?
+    {
+        let mut entry =
+            member.map_err(|_| HarnessError::invalid("Invalid skill archive member."))?;
+        count += 1;
+        let name = repeated_suffix_removed(
+            entry
+                .path()
+                .map_err(|_| HarnessError::invalid("Invalid archive path."))?
+                .to_str()
+                .ok_or_else(|| HarnessError::invalid("Non-UTF8 archive path."))?,
+            "/",
+        )
+        .to_owned();
+        safe(&name)?;
+        let size = usize::try_from(entry.size())
+            .map_err(|_| HarnessError::invalid("Skill archive size overflow."))?;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| HarnessError::invalid("Skill archive size overflow."))?;
+        if count > MAX_FILES || total > MAX_BYTES {
+            return Err(HarnessError::invalid(
+                "The skill archive exceeds file or byte bounds.",
+            ));
+        }
+        let kind = entry.header().entry_type();
+        if kind.is_symlink() || kind.is_hard_link() {
+            links.push(name);
+            continue;
+        }
+        if kind.is_dir() {
+            continue;
+        }
+        if !kind.is_file() {
+            return Err(HarnessError::invalid(
+                "The skill archive contains unsupported file types.",
+            ));
+        }
+        let mut body = vec![];
+        entry
+            .by_ref()
+            .take(size as u64 + 1)
+            .read_to_end(&mut body)
+            .map_err(|_| HarnessError::invalid("Could not read skill archive member."))?;
+        if body.len() != size {
+            return Err(HarnessError::invalid(
+                "Skill archive member length changed.",
+            ));
+        }
+        let mode = if entry.header().mode().unwrap_or(0) & 0o111 != 0 {
+            0o755
+        } else {
+            0o644
+        };
+        if members.insert(name, Asset { body, mode }).is_some() {
+            return Err(HarnessError::invalid("Duplicate skill archive path."));
+        }
+    }
+    let roots = members
+        .keys()
+        .filter_map(|path| path.strip_suffix("/SKILL.md").map(str::to_owned))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Err(HarnessError::missing(
+            "No SKILL.md files were found in this source.",
+        ));
+    }
+    if links
+        .iter()
+        .any(|link| roots.iter().any(|r| link.starts_with(&format!("{r}/"))))
+    {
+        return Err(HarnessError::forbidden(
+            "Links inside skill directories are unsupported.",
+        ));
+    }
+    let mut skills = BTreeMap::new();
+    for root in roots {
+        let raw = &members[&format!("{root}/SKILL.md")].body;
+        let text = std::str::from_utf8(raw)
+            .map_err(|_| HarnessError::invalid("Skill metadata must be UTF8."))?;
+        let front = text
+            .strip_prefix("---\n")
+            .or_else(|| text.strip_prefix("---\r\n"))
+            .and_then(|tail| tail.split_once("\n---").map(|(v, _)| v))
+            .ok_or_else(|| HarnessError::invalid("Skill metadata frontmatter is missing."))?;
+        let metadata: V = serde_yaml::from_str(front)
+            .map_err(|_| HarnessError::invalid("Skill metadata is invalid."))?;
+        let name = metadata["name"]
+            .as_str()
+            .unwrap_or_else(|| root.rsplit('/').next().unwrap_or(""));
+        valid_name(name, false)?;
+        let description = metadata["description"]
+            .as_str()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(1200)
+            .collect();
+        let prefix = format!("{root}/");
+        let files = members
+            .iter()
+            .filter_map(|(p, a)| p.strip_prefix(&prefix).map(|r| (r.to_owned(), a.clone())))
+            .collect::<BTreeMap<_, _>>();
+        if skills
+            .insert(
+                name.to_owned(),
+                Skill {
+                    title: name.to_owned(),
+                    description,
+                    source: source.into(),
+                    revision: revision.to_owned(),
+                    files,
+                },
+            )
+            .is_some()
+        {
+            return Err(HarnessError::invalid("Source skills have duplicate names."));
+        }
+        if skills.len() > 500 {
+            return Err(HarnessError::invalid("Source contains too many skills."));
+        }
+    }
+    Ok(skills)
+}
+
 fn required<'a>(v: &'a V, key: &str, limit: usize) -> Result<&'a str> {
     let value = v[key]
         .as_str()
@@ -2090,5 +2235,136 @@ mod apply_tests {
             std::fs::read(fixture.root.join(PREFIX).join("SKILL.md")).unwrap(),
             original_content
         );
+    }
+
+    #[test]
+    fn load_with_transport_persists_commit_sha_tarballs_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let source_dir = base.join("source");
+        std::fs::create_dir_all(source_dir.join("install/open-source-kit")).unwrap();
+        std::fs::write(
+            source_dir.join("install/open-source-kit/resources.json"),
+            r#"{"resources":[{"id":"acme","name":"Acme","description":"Demo","url":"https://example.invalid","skills_source":"acme/skills"}]}"#,
+        )
+        .unwrap();
+        let state_dir = base.join("state");
+
+        let make_tar_gz = |skill_desc: &str| -> Vec<u8> {
+            use std::io::Write;
+            let mut tar_bytes = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut tar_bytes);
+                let body = format!(
+                    "---\nname: \"demo\"\ndescription: \"{skill_desc}\"\n---\n\n# Steps\nUse checks.\n"
+                );
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(
+                        &mut header,
+                        "acme-skills-rev/skills/demo/SKILL.md",
+                        body.as_bytes(),
+                    )
+                    .unwrap();
+                builder.finish().unwrap();
+            }
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+
+        let rev1 = "1111111111111111111111111111111111111111";
+        let rev2 = "2222222222222222222222222222222222222222";
+        let gz1 = make_tar_gz("First commit");
+        let gz2 = make_tar_gz("Second commit");
+
+        let downloads = std::sync::atomic::AtomicUsize::new(0);
+        {
+            let store = SessionStore::open(&state_dir).unwrap();
+            let domain = SkillsDomain::new(store, source_dir.clone()).unwrap();
+            let skills = domain
+                .load_with_transport(
+                    "acme",
+                    |_| Ok(rev1.into()),
+                    |_, rev| {
+                        assert_eq!(rev, rev1);
+                        downloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(gz1.clone())
+                    },
+                )
+                .unwrap();
+            assert_eq!(skills["demo"].description, "First commit");
+            assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+            // Seed in-memory state and confirm same-commit call skips both download and disk parse.
+            domain.state().unwrap().loaded.insert("acme".into(), skills);
+            let cached_mem = domain
+                .load_with_transport(
+                    "acme",
+                    |_| Ok(rev1.into()),
+                    |_, _| panic!("must not re-download unchanged in-memory revision"),
+                )
+                .unwrap();
+            assert_eq!(cached_mem["demo"].description, "First commit");
+        }
+
+        // Simulate full process restart: brand-new SessionStore & SkillsDomain with empty in-memory map.
+        {
+            let store = SessionStore::open(&state_dir).unwrap();
+            let domain = SkillsDomain::new(store, source_dir.clone()).unwrap();
+            let skills = domain
+                .load_with_transport(
+                    "acme",
+                    |_| Ok(rev1.into()),
+                    |_, _| panic!("must hit persistent commit-SHA disk cache across restarts"),
+                )
+                .unwrap();
+            assert_eq!(skills["demo"].description, "First commit");
+            assert_eq!(skills["demo"].revision, rev1);
+            assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+            // Corrupt disk cache file -> recovers cleanly by re-downloading rev1.
+            let cache_path = domain
+                .skill_tarball_cache_path("acme/skills", rev1)
+                .unwrap();
+            std::fs::write(&cache_path, b"corrupt-tar-gz").unwrap();
+            let recovered = domain
+                .load_with_transport(
+                    "acme",
+                    |_| Ok(rev1.into()),
+                    |_, _| {
+                        downloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(gz1.clone())
+                    },
+                )
+                .unwrap();
+            assert_eq!(recovered["demo"].description, "First commit");
+            assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+            // New commit SHA downloads rev2 cleanly and caches it separately.
+            let updated = domain
+                .load_with_transport(
+                    "acme",
+                    |_| Ok(rev2.into()),
+                    |_, rev| {
+                        assert_eq!(rev, rev2);
+                        downloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(gz2.clone())
+                    },
+                )
+                .unwrap();
+            assert_eq!(updated["demo"].description, "Second commit");
+            assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert!(
+                domain
+                    .skill_tarball_cache_path("acme/skills", rev2)
+                    .unwrap()
+                    .is_file()
+            );
+        }
     }
 }

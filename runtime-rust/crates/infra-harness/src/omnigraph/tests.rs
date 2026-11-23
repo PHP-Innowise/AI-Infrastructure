@@ -7620,3 +7620,163 @@ fn detects_pre_restart_docker_container_via_inspect() {
         None
     );
 }
+
+#[tokio::test]
+async fn graph_view_overlays_ir_edges_semantics_violations_and_blast_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().join("state");
+    let proj_root = tmp.path().join("proj");
+    std::fs::create_dir_all(proj_root.join("src/controller")).unwrap();
+    std::fs::create_dir_all(proj_root.join("src/db")).unwrap();
+    std::fs::write(
+        proj_root.join(".harness-architecture.json"),
+        serde_json::to_string_pretty(&json!({
+            "version": 1,
+            "max_cycles": 0,
+            "layers": [
+                {
+                    "id": "controller",
+                    "name": "Controller",
+                    "paths": ["src/controller"],
+                    "allows": [],
+                    "forbids": ["db"],
+                    "forbids_semantic": ["writes_table"]
+                },
+                { "id": "db", "name": "Database", "paths": ["src/db"], "allows": [] }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        proj_root.join("src/db/CycleHelper.php"),
+        "<?php\nnamespace App\\Db;\nclass CycleHelper {\n    public static function ping(): void {\n        OrderRepo::save();\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj_root.join("src/db/OrderRepo.php"),
+        "<?php\nnamespace App\\Db;\nclass OrderRepo {\n    public static function save(): void {\n        CycleHelper::ping();\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj_root.join("src/controller/OrderController.php"),
+        "<?php\nnamespace App\\Controller;\nuse App\\Db\\OrderRepo;\nclass OrderController {\n    public function store(): void {\n        OrderRepo::save();\n        $sql = \"INSERT INTO orders (id) VALUES (1)\";\n    }\n}\n",
+    )
+    .unwrap();
+
+    let store = crate::store::SessionStore::open(&state_dir).unwrap();
+    let project_id = store.register(&proj_root).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ir = crate::graph_ir::GraphIrStore::open(&state_dir, &project_id).unwrap();
+    ir.sync_workspace(&proj_root).unwrap();
+
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir, Some(store)).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": "main",
+        "atom_id": "atom-ctrl-1",
+        "kind": "finding",
+        "title": "OrderController::store writes orders directly",
+        "body": "Review OrderController::store calling OrderRepo::save",
+        "files": ["src/controller/OrderController.php"]
+    }))
+    .await
+    .unwrap();
+
+    let view = mgr
+        .graph_view_json(&project_id, Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+
+    let ir_edges = view["ir_edges"].as_array().unwrap();
+    assert!(
+        ir_edges
+            .iter()
+            .any(|e| e["source_file"] == "src/controller/OrderController.php"
+                && e["target_file"] == "src/db/OrderRepo.php"),
+        "expected structural ir_edge between controller and db: {ir_edges:?}"
+    );
+    let sem_edges = view["ir_semantic_edges"].as_array().unwrap();
+    assert!(
+        sem_edges
+            .iter()
+            .any(|e| e["file_path"] == "src/controller/OrderController.php"
+                && e["relation"] == "writes_table"
+                && e["target"] == "table:orders"),
+        "expected writes_table semantic edge: {sem_edges:?}"
+    );
+    let violations = view["architecture_violations"].as_array().unwrap();
+    assert!(
+        violations.iter().any(|v| {
+            v["kind"] == "layer"
+                && v["from"] == "src/controller/OrderController.php"
+                && v["to"] == "src/db/OrderRepo.php"
+        }),
+        "expected layer architecture violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| {
+            v["kind"] == "semantic"
+                && v["from"] == "src/controller/OrderController.php"
+                && v["to"] == "table:orders"
+        }),
+        "expected semantic architecture violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v["kind"] == "cycle_budget"),
+        "expected cycle_budget architecture violation: {violations:?}"
+    );
+    let blast_markers = view["blast_markers"].as_array().unwrap();
+    assert!(
+        blast_markers.iter().any(|m| {
+            m["path"] == "src/controller/OrderController.php"
+                && m["violation_count"].as_u64().unwrap_or(0) >= 2
+                && m["risk"] == "high"
+        }),
+        "expected high-risk blast marker on violating file: {blast_markers:?}"
+    );
+    assert!(
+        blast_markers
+            .iter()
+            .any(|m| m["path"] == "src/db/OrderRepo.php" && m["in_cycle"] == json!(true)),
+        "expected in_cycle=true from idx.scc_groups on OrderRepo.php: {blast_markers:?}"
+    );
+    assert!(
+        blast_markers
+            .iter()
+            .any(|m| m["path"] == "src/db/CycleHelper.php" && m["in_cycle"] == json!(true)),
+        "expected in_cycle=true from idx.scc_groups on CycleHelper.php: {blast_markers:?}"
+    );
+    assert!(
+        !blast_markers.iter().any(|m| {
+            let p = m["path"].as_str().unwrap_or("");
+            p == "table:orders" || p.contains("<->")
+        }),
+        "semantic targets and cycle summary strings must not enter blast_markers: {blast_markers:?}"
+    );
+    assert_eq!(view["telemetry"]["ir_edge_count"], ir_edges.len());
+    assert_eq!(view["telemetry"]["ir_semantic_edge_count"], sem_edges.len());
+    assert_eq!(view["telemetry"]["violation_count"], violations.len());
+    assert_eq!(view["telemetry"]["blast_count"], blast_markers.len());
+    assert_eq!(
+        view["telemetry"]["symbol_count"],
+        view["symbols"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        view["telemetry"]["symbol_edge_count"],
+        view["symbol_edges"].as_array().unwrap().len()
+    );
+
+    mgr.close().await.unwrap();
+}

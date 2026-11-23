@@ -18,6 +18,7 @@ const BYTES: usize = 256 * 1024 * 1024;
 const DEPTH: usize = 32;
 const EVIDENCE_BYTES: usize = 8 * 1024 * 1024;
 const OBSERVED_TEXT_BYTES: usize = 16 * 1024;
+pub(super) const OBSERVED_JSON_BYTES: usize = 1024 * 1024;
 const FILE: &str = "observed-result.json";
 const META_FILE: &str = "observed-meta.json";
 pub(super) const MISSING: &str = "the observed workspace result was not captured within its file, size, depth and time limits; observe a new turn in a workspace the Harness can capture";
@@ -137,24 +138,157 @@ fn mask_relative_path(relative: &str) -> String {
     }
 }
 
-fn canonicalize_json(value: &Value) -> Value {
+fn is_hex_run(bytes: &[u8], start: usize, len: usize) -> bool {
+    bytes
+        .get(start..start + len)
+        .is_some_and(|slice| slice.iter().all(u8::is_ascii_hexdigit))
+}
+
+fn match_uuid_at(bytes: &[u8], pos: usize) -> Option<usize> {
+    if pos + 36 > bytes.len() {
+        return None;
+    }
+    if pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'-') {
+        return None;
+    }
+    if bytes
+        .get(pos + 36)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'-')
+    {
+        return None;
+    }
+    if bytes[pos + 8] == b'-'
+        && bytes[pos + 13] == b'-'
+        && bytes[pos + 18] == b'-'
+        && bytes[pos + 23] == b'-'
+        && is_hex_run(bytes, pos, 8)
+        && is_hex_run(bytes, pos + 9, 4)
+        && is_hex_run(bytes, pos + 14, 4)
+        && is_hex_run(bytes, pos + 19, 4)
+        && is_hex_run(bytes, pos + 24, 12)
+    {
+        Some(36)
+    } else {
+        None
+    }
+}
+
+fn match_iso_timestamp_at(bytes: &[u8], pos: usize) -> Option<usize> {
+    // Expects YYYY-MM-DD[T|t| ]HH:MM:SS[(.digits)?(Z|z|[+-]HH:?MM)?]
+    if pos + 19 > bytes.len() {
+        return None;
+    }
+    if pos > 0 && bytes[pos - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let digits = |start: usize, len: usize| {
+        bytes
+            .get(start..start + len)
+            .is_some_and(|s| s.iter().all(u8::is_ascii_digit))
+    };
+    if !digits(pos, 4)
+        || bytes[pos + 4] != b'-'
+        || !digits(pos + 5, 2)
+        || bytes[pos + 7] != b'-'
+        || !digits(pos + 8, 2)
+        || !matches!(bytes[pos + 10], b'T' | b't' | b' ')
+        || !digits(pos + 11, 2)
+        || bytes[pos + 13] != b':'
+        || !digits(pos + 14, 2)
+        || bytes[pos + 16] != b':'
+        || !digits(pos + 17, 2)
+    {
+        return None;
+    }
+    let mut end = pos + 19;
+    if bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+    if matches!(bytes.get(end), Some(b'Z' | b'z')) {
+        end += 1;
+    } else if matches!(bytes.get(end), Some(b'+' | b'-')) && digits(end + 1, 2) {
+        let mut tz_end = end + 3;
+        if bytes.get(tz_end) == Some(&b':') && digits(tz_end + 1, 2) {
+            tz_end += 3;
+        } else if digits(tz_end, 2) {
+            tz_end += 2;
+        }
+        if tz_end > end + 3 {
+            end = tz_end;
+        }
+    }
+    if bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    Some(end - pos)
+}
+
+pub(super) fn normalize_volatile_tokens(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(len) = match_iso_timestamp_at(bytes, i) {
+            out.push_str("<TIMESTAMP>");
+            i += len;
+            continue;
+        }
+        if let Some(len) = match_uuid_at(bytes, i) {
+            out.push_str("<UUID>");
+            i += len;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn canonicalize_json_inner(value: &Value, sort_arrays: bool) -> Value {
     match value {
         Value::Object(map) => {
             let mut entries: Vec<(&String, &Value)> = map.iter().collect();
             entries.sort_by_key(|(a, _)| *a);
             let sorted = entries
                 .into_iter()
-                .map(|(k, v)| (k.clone(), canonicalize_json(v)))
+                .map(|(k, v)| (k.clone(), canonicalize_json_inner(v, sort_arrays)))
                 .collect::<serde_json::Map<String, Value>>();
             Value::Object(sorted)
         }
-        Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+        Value::Array(items) => {
+            let mut normalized: Vec<(String, Value)> = items
+                .iter()
+                .map(|item| {
+                    let canon = canonicalize_json_inner(item, sort_arrays);
+                    let key = if sort_arrays {
+                        serde_json::to_string(&canon).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    (key, canon)
+                })
+                .collect();
+            if sort_arrays {
+                normalized.sort_by(|(a, _), (b, _)| a.cmp(b));
+            }
+            Value::Array(normalized.into_iter().map(|(_, v)| v).collect())
+        }
+        Value::String(s) => Value::String(normalize_volatile_tokens(s)),
         other => other.clone(),
     }
 }
 
+fn canonicalize_json(value: &Value) -> Value {
+    canonicalize_json_inner(value, true)
+}
+
 fn normalize_text(text: &str) -> String {
-    text.replace("\r\n", "\n")
+    let normalized = normalize_volatile_tokens(&text.replace("\r\n", "\n"));
+    normalized
         .lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()
@@ -186,6 +320,7 @@ pub(super) fn structural_digest(relative: &str, bytes: &[u8]) -> Option<String> 
             }
         }
         if all_json && !lines.is_empty() {
+            lines.sort();
             return Some(format!(
                 "canon-jsonl-v1:{}",
                 sha256(lines.join("\n").as_bytes())
@@ -321,6 +456,9 @@ fn extract_observed_output(text: Option<&str>) -> (Option<String>, Option<Value>
     if trimmed.is_empty() {
         return (None, None);
     }
+    // Parse structured JSON over the untruncated output up to OBSERVED_JSON_BYTES
+    // so payloads beyond OBSERVED_TEXT_BYTES (16 KiB) are not silently lost.
+    let parsed_json = parse_observed_json(trimmed);
     let bounded = if trimmed.len() <= OBSERVED_TEXT_BYTES {
         trimmed.to_owned()
     } else {
@@ -330,7 +468,6 @@ fn extract_observed_output(text: Option<&str>) -> (Option<String>, Option<Value>
         }
         trimmed[..end].to_owned()
     };
-    let parsed_json = parse_observed_json(&bounded);
     (Some(bounded), parsed_json)
 }
 
@@ -341,7 +478,7 @@ fn parse_observed_json(text: &str) -> Option<Value> {
             return None;
         }
         let val =
-            infra_core::strict_json::parse(trimmed.as_bytes(), OBSERVED_TEXT_BYTES, 32, 10_000)
+            infra_core::strict_json::parse(trimmed.as_bytes(), OBSERVED_JSON_BYTES, 64, 100_000)
                 .ok()?;
         match &val {
             Value::Object(map) if !map.is_empty() => Some(val),
@@ -366,7 +503,21 @@ fn parse_observed_json(text: &str) -> Option<Value> {
         }
         cursor = &body_rest[end + 3..];
     }
-    candidate
+    if candidate.is_some() {
+        return candidate;
+    }
+    // Fall back to trailing JSON objects/arrays in prose responses.
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if (trimmed.starts_with('{') || trimmed.starts_with('['))
+            && let Some(val) = parse_obj_or_arr(&text[offset + (line.len() - trimmed.len())..])
+        {
+            return Some(val);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -562,5 +713,36 @@ mod tests {
         let allow = vec!["node_modules".into()];
         let with_allow = capture_with(&workspace, Some(&state), &allow).unwrap();
         assert_eq!(with_allow.digests.len(), 2);
+    }
+
+    #[test]
+    fn extract_observed_output_parses_json_past_16kib_and_normalizes_volatile_digests() {
+        let big_items: Vec<Value> = (0..500)
+            .map(|idx| serde_json::json!({"id": idx, "label": format!("item-{idx:04}-payload-entry")}))
+            .collect();
+        let big_json = serde_json::to_string(&serde_json::json!({"items": big_items})).unwrap();
+        assert!(big_json.len() > OBSERVED_TEXT_BYTES);
+        let (text, parsed) = extract_observed_output(Some(&big_json));
+        assert_eq!(text.as_ref().unwrap().len(), OBSERVED_TEXT_BYTES);
+        assert_eq!(parsed.unwrap()["items"].as_array().unwrap().len(), 500);
+
+        let a = br#"{"run_id": "550e8400-e29b-41d4-a716-446655440000", "generated_at": "2026-01-01T00:00:00Z", "tags": ["beta", "alpha"]}"#;
+        let b = br#"{"tags": ["alpha", "beta"], "generated_at": "2026-11-23T14:30:00+02:00", "run_id": "123e4567-e89b-12d3-a456-426614174000"}"#;
+        let c = br#"{"tags": ["alpha"], "generated_at": "2026-11-23T14:30:00+02:00", "run_id": "123e4567-e89b-12d3-a456-426614174000"}"#;
+        assert_eq!(
+            structural_digest("out.json", a),
+            structural_digest("out.json", b)
+        );
+        assert_ne!(
+            structural_digest("out.json", a),
+            structural_digest("out.json", c)
+        );
+
+        let jl_a = b"{\"id\":2,\"ts\":\"2026-01-01T00:00:00Z\"}\n{\"id\":1}\n";
+        let jl_b = b"{\"id\":1}\n{\"ts\":\"2026-11-23T12:00:00Z\",\"id\":2}\n";
+        assert_eq!(
+            structural_digest("events.jsonl", jl_a),
+            structural_digest("events.jsonl", jl_b)
+        );
     }
 }

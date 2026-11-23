@@ -13,7 +13,7 @@ impl Graphs {
             None => BuildBackend::NativeIr,
         })
     }
-    pub(super) fn ir_store(&self, project: &str) -> Result<Arc<crate::graph_ir::GraphIrStore>> {
+    pub(crate) fn ir_store(&self, project: &str) -> Result<Arc<crate::graph_ir::GraphIrStore>> {
         if let Some(existing) = lock(&self.ir_stores)?.get(project).cloned() {
             return Ok(existing);
         }
@@ -66,6 +66,10 @@ impl Graphs {
         if let Ok(mut stores_ro) = self.ir_stores_ro.lock() {
             stores_ro.remove(project);
         }
+        crate::graph_ir::GraphIrStore::evict_readonly_cache_for_dir(&folder(
+            &self.store.state,
+            project,
+        ));
     }
     pub(super) fn stop_watcher(&self, project: &str) {
         let removed = self
@@ -144,7 +148,7 @@ impl Graphs {
                         match rx.recv_timeout(wait) {
                             Ok(WatcherMsg::Paths(more)) => {
                                 for path in more {
-                                    if pending.len() >= MAX_WATCHER_BATCH {
+                                    if pending.len() >= MAX_WATCHER_COLLECT {
                                         break;
                                     }
                                     if let Some(rel) = crate::graph_ir::normalize_rel_path(
@@ -204,7 +208,9 @@ impl Graphs {
         }
     }
     /// Triggers incremental SQLite IR updates (and refreshes `live/graph.json` when using native IR)
-    /// for modified/deleted workspace relative paths.
+    /// for modified/deleted workspace relative paths. Even when the `GraphDomain` UI view is
+    /// disabled, forwards path updates through the Graph-IR invalidation bus so SkillCache,
+    /// SystemGraph, and SDD remain coherent.
     pub fn record_live_paths(&self, project: &str, rel_paths: &[String]) {
         if self.stopping.load(Ordering::Acquire) || project.is_empty() || rel_paths.is_empty() {
             return;
@@ -213,12 +219,6 @@ impl Graphs {
             return;
         };
         if !root.is_dir() {
-            return;
-        }
-        let Ok(setting) = self.setting(project) else {
-            return;
-        };
-        if setting["enabled"] != true {
             return;
         }
         let mut unique = BTreeSet::new();
@@ -287,9 +287,53 @@ impl Graphs {
             &delta.incoming_caller_files,
             delta.ir_revision,
         );
+        let _ = crate::sdd::on_ir_paths_updated(&self.store, project, root, delta);
     }
 
-    fn finalize_ir_update_delta(
+    fn enrich_bus_delta(
+        ir: Option<&crate::graph_ir::GraphIrStore>,
+        rel_paths: &[String],
+        delta: Option<crate::graph_ir::IrUpdateDelta>,
+        rev: u64,
+    ) -> crate::graph_ir::IrUpdateDelta {
+        let mut bus_delta = delta.unwrap_or_else(|| crate::graph_ir::IrUpdateDelta {
+            changed_paths: rel_paths.to_vec(),
+            manifest_changed: rel_paths
+                .iter()
+                .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p))),
+            ..Default::default()
+        });
+        if !rel_paths.is_empty() {
+            let mut merged: BTreeSet<String> = bus_delta.changed_paths.into_iter().collect();
+            merged.extend(rel_paths.iter().cloned());
+            bus_delta.changed_paths = merged.into_iter().collect();
+            bus_delta.manifest_changed |= rel_paths
+                .iter()
+                .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p)));
+        }
+        if let Some(ir) = ir {
+            let caller_targets: Vec<String> =
+                if bus_delta.edited_files.is_empty() && bus_delta.removed_files.is_empty() {
+                    bus_delta.changed_paths.clone()
+                } else {
+                    bus_delta
+                        .edited_files
+                        .iter()
+                        .chain(bus_delta.removed_files.iter())
+                        .cloned()
+                        .collect()
+                };
+            bus_delta.incoming_caller_files = crate::graph_impact::resolve_incoming_caller_files(
+                ir,
+                &caller_targets,
+                &bus_delta.incoming_caller_files,
+            );
+        }
+        bus_delta.ir_revision = rev;
+        bus_delta
+    }
+
+    pub(super) fn finalize_ir_update_delta(
         &self,
         project: &str,
         root: &Path,
@@ -302,12 +346,31 @@ impl Graphs {
             return Ok(None);
         }
         let setting = self.setting(project)?;
-        if setting["enabled"] != true {
-            return Ok(None);
-        }
         let arch_only = rel_paths
             .iter()
             .all(|p| crate::graph_ast::is_graph_architecture_path(Path::new(p)));
+        if setting["enabled"] != true {
+            let rev = self.bump_ir_revision(project);
+            if arch_only {
+                return Ok(Some(Self::enrich_bus_delta(None, rel_paths, None, rev)));
+            }
+            if crate::graph_ir::GraphIrStore::exists(&self.store.state, project) {
+                let ir = self.ir_store(project)?;
+                let delta =
+                    if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_INCREMENTAL_BATCH {
+                        Some(ir.sync_workspace_with_delta(root)?)
+                    } else {
+                        Some(ir.update_paths_with_delta(root, rel_paths)?)
+                    };
+                return Ok(Some(Self::enrich_bus_delta(
+                    Some(&ir),
+                    rel_paths,
+                    delta,
+                    rev,
+                )));
+            }
+            return Ok(Some(Self::enrich_bus_delta(None, rel_paths, None, rev)));
+        }
         if arch_only {
             let rev = self.emit_architecture_updated(project, &setting);
             return Ok(Some(crate::graph_ir::IrUpdateDelta {
@@ -319,7 +382,7 @@ impl Graphs {
         if let Some(job) = lock(&self.jobs)?.get(project) {
             if let Ok(mut pending) = job.pending_paths.lock() {
                 for path in rel_paths {
-                    if pending.len() >= MAX_WATCHER_BATCH * 4 {
+                    if pending.len() >= MAX_WATCHER_COLLECT {
                         break;
                     }
                     if !pending.contains(path) {
@@ -331,7 +394,8 @@ impl Graphs {
             drop(_guard);
             drop(_publish_guard);
             let rev = self.ir_revision_of(project);
-            self.notify_skillcache_ir_paths(project, rel_paths, &[], rev);
+            let pending_delta = Self::enrich_bus_delta(None, rel_paths, None, rev);
+            self.emit_ir_invalidation_bus(project, root, &pending_delta);
             return Ok(None);
         }
         let any_arch = rel_paths
@@ -339,18 +403,20 @@ impl Graphs {
             .any(|p| crate::graph_ast::is_graph_architecture_path(Path::new(p)));
         let started = Instant::now();
         let ir = self.ir_store(project)?;
-        let delta = if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_WATCHER_BATCH {
-            let _ = ir.sync_workspace(root)?;
-            None
-        } else {
-            Some(ir.update_paths_with_delta(root, rel_paths)?)
-        };
-        if delta.as_ref().is_some_and(|d| {
-            d.edited_files.is_empty()
-                && d.removed_files.is_empty()
-                && d.re_resolved_files.is_empty()
-                && !d.manifest_changed
-        }) && self.maps.latest_live_ir_index(project).is_some()
+        let (delta, is_sync_delta) =
+            if ir.summary_counts()?.is_none() || rel_paths.len() >= MAX_INCREMENTAL_BATCH {
+                (Some(ir.sync_workspace_with_delta(root)?), true)
+            } else {
+                (Some(ir.update_paths_with_delta(root, rel_paths)?), false)
+            };
+        if !is_sync_delta
+            && delta.as_ref().is_some_and(|d| {
+                d.edited_files.is_empty()
+                    && d.removed_files.is_empty()
+                    && d.re_resolved_files.is_empty()
+                    && !d.manifest_changed
+            })
+            && self.maps.latest_live_ir_index(project).is_some()
         {
             let mut d = delta.expect("checked Some above");
             d.ir_revision = if any_arch {
@@ -364,60 +430,63 @@ impl Graphs {
         let using_native = matches!(backend, Some(BuildBackend::NativeIr))
             || setting["built"]["tool"].as_str() == Some(crate::graph_ir::NATIVE_IR_TOOL);
         if !using_native {
-            let mut bus_delta = delta.unwrap_or_else(|| crate::graph_ir::IrUpdateDelta {
-                changed_paths: rel_paths.to_vec(),
-                manifest_changed: rel_paths
-                    .iter()
-                    .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p))),
-                ..Default::default()
-            });
-            bus_delta.incoming_caller_files = crate::graph_impact::resolve_incoming_caller_files(
-                &ir,
-                &bus_delta.changed_paths,
-                &bus_delta.incoming_caller_files,
-            );
-            bus_delta.ir_revision = self.ir_revision_of(project);
-            return Ok(Some(bus_delta));
+            let rev = self.ir_revision_of(project);
+            return Ok(Some(Self::enrich_bus_delta(
+                Some(&ir),
+                rel_paths,
+                delta,
+                rev,
+            )));
         }
         if self.stopping.load(Ordering::Acquire) || self.setting(project)?["enabled"] != true {
             return Ok(None);
         }
         let home = folder(&self.store.state, project);
         let write_epoch = ir.current_write_epoch();
-        let incremental_index = if let Some(ref delta) = delta
+        let incremental_index = if !is_sync_delta
+            && let Some(ref delta) = delta
             && let Some(prev_index) = self.maps.latest_live_ir_index(project)
             && let Some(ir_delta) = ir.export_ir_delta_for_files(delta)?
         {
-            prev_index.update_files(root, ir_delta).map(Arc::new)
+            let shared_delta = Arc::new(ir_delta.clone());
+            prev_index
+                .update_files(root, ir_delta)
+                .map(|idx| (Arc::new(idx), shared_delta))
         } else {
             None
         };
-        let (index, nodes, edges, pending_live_json) = if let Some(idx) = incremental_index {
-            let (nodes, edges) = idx.node_link_counts();
-            (idx, nodes, edges, None)
-        } else {
-            let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
-            let shared_nodes = Arc::new(ir_nodes);
-            let shared_links = Arc::new(ir_links);
-            let idx = Arc::new(crate::graph_map::Index::from_ir_parts(
-                root,
-                Some(ir.db_path().to_path_buf()),
-                Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
-                (*shared_nodes).clone(),
-                (*shared_links).clone(),
-            )?);
-            (
-                idx,
-                nodes,
-                edges,
-                Some(PendingLiveJson::Elements {
+        let (index, nodes, edges, pending_live_json) =
+            if let Some((idx, shared_delta)) = incremental_index {
+                let (nodes, edges) = idx.node_link_counts();
+                (
+                    idx,
                     nodes,
                     edges,
-                    ir_nodes: shared_nodes,
-                    ir_links: shared_links,
-                }),
-            )
-        };
+                    Some(PendingLiveJson::Deltas(vec![shared_delta])),
+                )
+            } else {
+                let (ir_nodes, ir_links, nodes, edges) = ir.export_ir_graph_elements()?;
+                let shared_nodes = Arc::new(ir_nodes);
+                let shared_links = Arc::new(ir_links);
+                let idx = Arc::new(crate::graph_map::Index::from_ir_parts(
+                    root,
+                    Some(ir.db_path().to_path_buf()),
+                    Some(crate::graph_ir::NATIVE_IR_TOOL.to_owned()),
+                    (*shared_nodes).clone(),
+                    (*shared_links).clone(),
+                )?);
+                (
+                    idx,
+                    nodes,
+                    edges,
+                    Some(PendingLiveJson::Elements {
+                        nodes,
+                        edges,
+                        ir_nodes: shared_nodes,
+                        ir_links: shared_links,
+                    }),
+                )
+            };
         let rev = self.publish_native_index(project, write_epoch, index);
         let fresh_print = self.print(project, root, true);
         let elapsed = tenth(started.elapsed().as_secs_f64());
@@ -447,40 +516,35 @@ impl Graphs {
             }
         })?;
         self.schedule_live_json_write(project, root.to_path_buf(), pending_live_json);
-        self.emit_status_event(
-            project,
-            "ready",
-            "incremental_update",
+        if let Some(ref d) = delta {
+            self.emit_status_event_with_delta(
+                project,
+                "ready",
+                "incremental_update",
+                rev,
+                Some(nodes),
+                Some(edges),
+                Some(NATIVE_READY_MESSAGE.to_owned()),
+                d,
+                is_sync_delta,
+            );
+        } else {
+            self.emit_status_event(
+                project,
+                "ready",
+                "incremental_update",
+                rev,
+                Some(nodes),
+                Some(edges),
+                Some(NATIVE_READY_MESSAGE.to_owned()),
+            );
+        }
+        Ok(Some(Self::enrich_bus_delta(
+            Some(&ir),
+            rel_paths,
+            delta,
             rev,
-            Some(nodes),
-            Some(edges),
-            Some(NATIVE_READY_MESSAGE.to_owned()),
-        );
-        let mut bus_delta = delta.unwrap_or_else(|| crate::graph_ir::IrUpdateDelta {
-            changed_paths: rel_paths.to_vec(),
-            manifest_changed: rel_paths
-                .iter()
-                .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p))),
-            ..Default::default()
-        });
-        let caller_targets: Vec<String> =
-            if bus_delta.edited_files.is_empty() && bus_delta.removed_files.is_empty() {
-                bus_delta.changed_paths.clone()
-            } else {
-                bus_delta
-                    .edited_files
-                    .iter()
-                    .chain(bus_delta.removed_files.iter())
-                    .cloned()
-                    .collect()
-            };
-        bus_delta.incoming_caller_files = crate::graph_impact::resolve_incoming_caller_files(
-            &ir,
-            &caller_targets,
-            &bus_delta.incoming_caller_files,
-        );
-        bus_delta.ir_revision = rev;
-        Ok(Some(bus_delta))
+        )))
     }
 
     pub(super) fn apply_ir_path_updates(
@@ -784,10 +848,61 @@ impl Graphs {
             return Outcome::Failed("The new graph could not be published.".into());
         }
         write_live_summary(&live_graph, commit, None, ran.built);
+        let prev_commit = self
+            .setting(project)
+            .ok()
+            .and_then(|s| s["built"]["commit"].as_str().map(str::to_owned));
         let plock = self.project_publish_lock(project);
-        if let Ok(_publish_guard) = plock.lock() {
-            let _ = self.bump_ir_revision(project);
+        let rev = if let Ok(_publish_guard) = plock.lock() {
+            let rev = self.bump_ir_revision(project);
             self.maps.forget_live(project);
+            rev
+        } else {
+            self.ir_revision_of(project)
+        };
+        let mut bus_delta = if crate::graph_ir::GraphIrStore::exists(&self.store.state, project)
+            && let Ok(ir) = self.ir_store(project)
+            && let Ok(mut delta) = ir.sync_workspace_with_delta(root)
+        {
+            delta.ir_revision = rev;
+            delta
+        } else {
+            let mut changed = BTreeSet::new();
+            if let Ok(work) = graph_changes::resolve(root, &Target::Work, &[]) {
+                changed.extend(work.files.into_iter().map(|c| c.path));
+            }
+            if let (Some(base), Some(head)) = (prev_commit.as_deref(), commit)
+                && base != head
+                && let Ok(range) = graph_changes::resolve(
+                    root,
+                    &Target::Range {
+                        from: base.to_owned(),
+                        to: head.to_owned(),
+                        three_dot: false,
+                    },
+                    &[],
+                )
+            {
+                changed.extend(range.files.into_iter().map(|c| c.path));
+            }
+            let changed_paths: Vec<String> = changed.into_iter().collect();
+            let manifest_changed = changed_paths
+                .iter()
+                .any(|p| crate::graph_ast::is_graph_manifest_path(Path::new(p)));
+            crate::graph_ir::IrUpdateDelta {
+                changed_paths,
+                manifest_changed,
+                ir_revision: rev,
+                ..Default::default()
+            }
+        };
+        if !bus_delta.changed_paths.is_empty()
+            || !bus_delta.incoming_caller_files.is_empty()
+            || bus_delta.manifest_changed
+            || bus_delta.semantic_changed
+        {
+            bus_delta.ir_revision = rev;
+            self.emit_ir_invalidation_bus(project, root, &bus_delta);
         }
         Outcome::Built(ran.record(size(&home)))
     }
@@ -815,14 +930,15 @@ impl Graphs {
             Err(err) => return Outcome::Failed(err.message),
         };
         let plock = self.project_publish_lock(project);
-        let _publish_guard = match plock.lock() {
+        let publish_guard = match plock.lock() {
             Ok(guard) => guard,
             Err(_) => return Outcome::Failed("The code graph lock is poisoned.".into()),
         };
-        let stats = match ir.sync_workspace(root) {
-            Ok(stats) => stats,
+        let mut delta = match ir.sync_workspace_with_delta(root) {
+            Ok(delta) => delta,
             Err(err) => return Outcome::Failed(err.message),
         };
+        let stats = delta.stats.clone();
         if stopped() {
             return Outcome::Cancelled;
         }
@@ -861,8 +977,8 @@ impl Graphs {
                 .and_then(|s| s["built"]["tool"].as_str().map(str::to_owned))
                 .as_deref()
                 == Some(crate::graph_ir::NATIVE_IR_TOOL);
-        if can_defer_live_json {
-            let _rev = self.publish_native_index(project, write_epoch, index);
+        let rev = if can_defer_live_json {
+            let rev = self.publish_native_index(project, write_epoch, index);
             self.schedule_live_json_write(
                 project,
                 root.to_path_buf(),
@@ -873,6 +989,7 @@ impl Graphs {
                     ir_links: shared_links,
                 }),
             );
+            rev
         } else {
             if let Err(err) = crate::graph_ir::write_live_graph_from_elements_atomic(
                 &live_graph,
@@ -885,7 +1002,16 @@ impl Graphs {
                 return Outcome::Cancelled;
             }
             write_live_summary(&live_graph, commit, Some((nodes, edges)), None);
-            let _rev = self.publish_native_index(project, write_epoch, index);
+            self.publish_native_index(project, write_epoch, index)
+        };
+        drop(publish_guard);
+        if !delta.changed_paths.is_empty()
+            || !delta.incoming_caller_files.is_empty()
+            || delta.manifest_changed
+            || delta.semantic_changed
+        {
+            delta.ir_revision = rev;
+            self.emit_ir_invalidation_bus(project, root, &delta);
         }
         let bytes = std::fs::metadata(&live_graph).map_or(0, |m| m.len());
         let elapsed = job.started().elapsed().as_secs_f64();
@@ -1160,6 +1286,206 @@ mod ir_bus_tests {
             ])
         );
 
+        graphs.close();
+    }
+
+    #[test]
+    fn disabled_graph_domain_and_full_builds_still_emit_ir_invalidation_bus() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".claude/skills/deploy-check")).unwrap();
+        std::fs::create_dir_all(root.join("specs/001-bus")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"bus2\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod dep;\npub mod caller;\n").unwrap();
+        std::fs::write(
+            root.join("src/dep.rs"),
+            "pub struct DepService;\nimpl DepService {\n    pub fn dep_fn() -> i32 { 1 }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/caller.rs"),
+            "pub fn caller_fn() -> i32 { crate::dep::DepService::dep_fn() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".claude/skills/deploy-check/SKILL.md"),
+            "---\nname: \"deploy-check\"\ndescription: \"Check deploy\"\n---\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("specs/001-bus/spec.md"), "# Spec\n- FR-001: Ok\n").unwrap();
+        std::fs::write(root.join("specs/001-bus/plan.md"), "# Plan\nFR-001\n").unwrap();
+        std::fs::write(
+            root.join("specs/001-bus/tasks.md"),
+            "- [x] T001 Wire `DepService::dep_fn` in `src/dep.rs`\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("specs/001-bus/progress.md"), "- [x] T001 Done\n").unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let proj = store.register(&root).unwrap();
+        let pid = proj["id"].as_str().unwrap().to_owned();
+        let db = store.connection().unwrap();
+        crate::skillcache::db::begin_capsule(
+            &db,
+            "cap-disabled",
+            "cap-disabled",
+            &pid,
+            "sess-1",
+            "gen-1",
+            &json!({"name": "deploy-check", "path": ".claude/skills/deploy-check", "tree_sha256": "0"}),
+            None,
+        )
+        .unwrap();
+        let artifact_dir = root
+            .join(".claude/skills/deploy-check")
+            .to_string_lossy()
+            .into_owned();
+        let q = crate::skillcache::db::Qualified {
+            capsule_id: "cap-disabled",
+            mu_name: "deploy-check",
+            mu_description: "test skill",
+            form: "textual",
+            capsule_sha256: "0",
+            package_sha256: "0",
+            skill_files: &json!({}),
+            env_fingerprint: "{}",
+            engine_digest: "0",
+            artifact_dir: &artifact_dir,
+            capabilities: &json!({}),
+        };
+        crate::skillcache::db::activate_capsule(&db, &q).unwrap();
+
+        let sid = store::id();
+        db.execute(
+            "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
+             VALUES(?1,'SDD Disabled',?2,?3,'claude','plan','sdd',0,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+            rusqlite::params![
+                sid,
+                pid,
+                root.to_string_lossy().as_ref(),
+                json!({"feature": "001-bus", "phase": "review"}).to_string(),
+            ],
+        )
+        .unwrap();
+        drop(db);
+
+        let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+        assert_eq!(graphs.status(&pid, false).unwrap()["enabled"], false);
+        let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
+        else {
+            panic!("expected frames");
+        };
+
+        // 1. Even with GraphDomain UI disabled, record_live_paths fires invalidation bus (SkillCache + SDD).
+        std::fs::write(root.join("src/dep.rs"), "pub fn other_fn() -> i32 { 2 }\n").unwrap();
+        graphs.record_live_paths(
+            &pid,
+            &[
+                ".claude/skills/deploy-check/SKILL.md".to_owned(),
+                "src/dep.rs".to_owned(),
+            ],
+        );
+        {
+            let db = store.connection().unwrap();
+            assert_eq!(
+                crate::skillcache::db::capsule(&db, "cap-disabled")
+                    .unwrap()
+                    .unwrap()["status"],
+                "stale"
+            );
+        }
+        assert_eq!(
+            graphs.status(&pid, false).unwrap()["enabled"],
+            false,
+            "bus emission must not turn GraphDomain UI on"
+        );
+        let mut saw_sdd_stale = false;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.event == "sdd_staleness" && frame.data["stale"] == true {
+                saw_sdd_stale = true;
+            }
+        }
+        assert!(
+            saw_sdd_stale,
+            "expected sdd_staleness when GraphDomain UI is off"
+        );
+
+        // 2. Seed IR via initial build_native, then register a caller-watching capsule,
+        // edit src/dep.rs offline, and run full build_native -> bus fires for incoming callers.
+        std::fs::write(
+            root.join("src/dep.rs"),
+            "pub struct DepService;\nimpl DepService {\n    pub fn dep_fn() -> i32 { 2 }\n}\n",
+        )
+        .unwrap();
+        let seed_job = Arc::new(Job::new());
+        let seed_outcome = graphs.build_native(&pid, &root, &seed_job, None);
+        assert!(matches!(seed_outcome, Outcome::Built(_)));
+
+        let db = store.connection().unwrap();
+        crate::skillcache::db::begin_capsule(
+            &db,
+            "cap-full",
+            "cap-full",
+            &pid,
+            "sess-1",
+            "gen-2",
+            &json!({"name": "deploy-check", "path": ".claude/skills/deploy-check", "tree_sha256": "1"}),
+            None,
+        )
+        .unwrap();
+        crate::skillcache::db::activate_capsule(
+            &db,
+            &crate::skillcache::db::Qualified {
+                capsule_id: "cap-full",
+                mu_name: "deploy-check",
+                mu_description: "test skill",
+                form: "textual",
+                capsule_sha256: "1",
+                package_sha256: "1",
+                skill_files: &json!({}),
+                env_fingerprint: "{}",
+                engine_digest: "1",
+                artifact_dir: &artifact_dir,
+                capabilities: &json!({}),
+            },
+        )
+        .unwrap();
+        crate::skillcache::db::set_dependency_manifest(
+            &db,
+            "cap-full",
+            &crate::skillcache::db::ArtifactDependencyManifest {
+                skill_paths: vec![".claude/skills/deploy-check".to_owned()],
+                caller_files: vec!["src/caller.rs".to_owned()],
+                ir_revision: 0,
+                verified_ns: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(db);
+
+        std::fs::write(
+            root.join("src/dep.rs"),
+            "pub struct DepService;\nimpl DepService {\n    pub fn dep_fn() -> i32 { 3 }\n}\n",
+        )
+        .unwrap();
+        let job = Arc::new(Job::new());
+        let outcome = graphs.build_native(&pid, &root, &job, None);
+        assert!(matches!(outcome, Outcome::Built(_)));
+        let db = store.connection().unwrap();
+        assert_eq!(
+            crate::skillcache::db::capsule(&db, "cap-full")
+                .unwrap()
+                .unwrap()["status"],
+            "stale",
+            "full build_native must emit invalidation bus for changed paths and callers"
+        );
         graphs.close();
     }
 }

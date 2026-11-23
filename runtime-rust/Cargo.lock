@@ -1376,6 +1376,7 @@ dependencies = [
  "libc",
  "ooxml-numfmt",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1405,6 +1406,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "infra-core",
+ "infra-generator",
  "infra-host",
  "libc",
  "regex",

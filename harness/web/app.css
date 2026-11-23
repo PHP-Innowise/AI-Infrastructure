@@ -1042,6 +1042,7 @@ button.merge-source:hover:not(:disabled) { border-color:var(--purple-line); text
 .run-badge { padding:0 4px; border-radius:var(--radius-sm); background:var(--hover); color:var(--ink-2); font-size:var(--text-meta); font-weight:var(--weight-regular); font-variant-numeric:tabular-nums; }
 .run-badge:empty { display:none; }
 .run-pane { position:relative; overflow:auto; min-height:0; flex:1; padding:12px 16px 16px; }
+#run-pane-skillcache { padding-bottom:48px; scroll-padding-bottom:48px; }
 .run-strip { display:grid; gap:4px; padding:8px 12px; }
 .run-now { display:flex; align-items:center; gap:8px; width:calc(100% + 8px); min-width:0; min-height:24px; margin:0 -4px; padding:0 4px; border:0; border-radius:var(--radius-sm); background:transparent; color:var(--ink); font-size:var(--text-ui); line-height:var(--leading-ui); text-align:left; transition:background-color var(--motion-fast) var(--ease-standard); }
 .run-now:hover { background:var(--hover); }

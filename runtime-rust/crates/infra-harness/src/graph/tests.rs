@@ -3981,13 +3981,28 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
         }
         assert!(graphs.live_index(&pid).is_some());
 
-        // Read-only `GraphIrStore` handle cache hits and `evict_ir_store` clears both caches.
+        // Read-only `GraphIrStore` handle cache hits and `evict_ir_store` clears both per-manager and RO_CACHE handles.
         let ro1 = graphs.get_ir_store_readonly(&pid).expect("ro1");
         let ro2 = graphs.get_ir_store_readonly(&pid).expect("ro2");
         assert!(Arc::ptr_eq(&ro1, &ro2));
+        let cached_ro1 = crate::graph_ir::GraphIrStore::open_readonly_cached(&state, &pid)
+            .unwrap()
+            .expect("cached_ro1");
+        let cached_ro2 = crate::graph_ir::GraphIrStore::open_readonly_cached(&state, &pid)
+            .unwrap()
+            .expect("cached_ro2");
+        assert!(Arc::ptr_eq(&cached_ro1, &cached_ro2));
         graphs.evict_ir_store(&pid);
         let ro3 = graphs.get_ir_store_readonly(&pid).expect("ro3");
         assert!(!Arc::ptr_eq(&ro1, &ro3));
+        let cached_ro3 = crate::graph_ir::GraphIrStore::open_readonly_cached(&state, &pid)
+            .unwrap()
+            .expect("cached_ro3");
+        assert!(!Arc::ptr_eq(&cached_ro1, &cached_ro3));
+        drop(cached_ro1);
+        drop(cached_ro2);
+        drop(cached_ro3);
+        graphs.evict_ir_store(&pid);
 
         // Rapid incremental updates coalesce via cooldown and produce exact full-rebuild parity.
         std::fs::write(
@@ -4098,6 +4113,87 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             Some(&rules_b),
         );
         assert_eq!(lock(&graphs.diff_overlays).unwrap().len(), 2);
+
+        graphs.close();
+    }
+
+    #[test]
+    fn incremental_updates_emit_sse_delta_hints_and_handle_batches_above_512() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = dir.path().join("state");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() -> i32 { 1 }\n").unwrap();
+        let store = SessionStore::open(&state).unwrap();
+        let project = store.register(&root).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let graphs = Graphs::with_native_backend(store, Duration::ZERO);
+        let mut rx = graphs.events.subscribe();
+        assert_eq!(graphs.act(&project, "enable").unwrap()["state"], "building");
+        let dead = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < dead {
+            if graphs.status(&project, false).unwrap()["state"] == "ready" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        while rx.try_recv().is_ok() {}
+        std::fs::write(
+            root.join("src/b.rs"),
+            "pub fn beta() -> i32 { crate::a::alpha() }\n",
+        )
+        .unwrap();
+        graphs
+            .apply_ir_path_updates(&project, &root, &["src/b.rs".to_owned()])
+            .unwrap();
+
+        let mut matched_event = None;
+        let event_dead = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < event_dead {
+            if let Ok(ev) = rx.try_recv()
+                && ev.project_id == project
+                && ev.reason == "incremental_update"
+            {
+                matched_event = Some(ev);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ev = matched_event.expect("incremental_update SSE status event");
+        assert_eq!(ev.changed_files, vec!["src/b.rs".to_owned()]);
+        assert_eq!(ev.ir_revision, ev.revision);
+        assert!(!ev.full_reload);
+
+        let serialized = serde_json::to_value(&ev).unwrap();
+        assert_eq!(serialized["changed_files"], json!(["src/b.rs"]));
+        assert_eq!(serialized["ir_revision"], json!(ev.ir_revision));
+
+        // Ensure >512 rel_paths do not fall back to full sync_workspace_with_delta.
+        let mut batch = Vec::new();
+        for i in 0..600 {
+            let rel = format!("src/f{i:03}.rs");
+            if i < 4 {
+                std::fs::write(root.join(&rel), format!("pub fn f{i}() -> i32 {{ {i} }}\n"))
+                    .unwrap();
+            }
+            batch.push(rel);
+        }
+        let large_delta = graphs
+            .finalize_ir_update_delta(&project, &root, &batch)
+            .unwrap()
+            .expect("large batch incremental delta");
+        assert!(
+            large_delta.stats.files_scanned >= 600,
+            "all 600 paths should be processed without MAX_WATCHER_BATCH tail truncation: {:?}",
+            large_delta.stats
+        );
+        assert!(
+            large_delta.edited_files.contains(&"src/f003.rs".to_owned()),
+            "expected newly added files processed"
+        );
 
         graphs.close();
     }

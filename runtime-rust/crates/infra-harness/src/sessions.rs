@@ -925,7 +925,11 @@ impl Sessions {
         value["branch"] = json!(branch);
         value["git_common_dir"] = json!(common);
         if !value["sdd"].is_null() {
-            crate::sdd::require_documents(&root, &value["sdd"])?;
+            let ir_context = project["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| (self.store.state.as_path(), id));
+            crate::sdd::require_documents_in(&root, &value["sdd"], ir_context)?;
         }
         Ok(value)
     }
@@ -1174,7 +1178,7 @@ impl Sessions {
         }))
     }
     /// Resolves the shared SkillCache runtime.
-    fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
+    pub(crate) fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
         lock(&self.skillcache)
             .ok()
             .and_then(|slot| slot.clone())
@@ -1755,7 +1759,11 @@ impl Sessions {
             )
         };
         if !session["sdd"].is_null() {
-            crate::sdd::require_documents(&root, &session["sdd"])?;
+            let ir_context = session["project_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(|id| (self.store.state.as_path(), id));
+            crate::sdd::require_documents_in(&root, &session["sdd"], ir_context)?;
         }
         Ok(Launch {
             provider: provider.into(),
@@ -2366,8 +2374,34 @@ impl Sessions {
         }
         // A turn that may run a SkillCache capsule decides it only once the
         // turn is ready to dispatch, so `awaiting_context` never leaves stage files.
-        let warm = {
-            let decision = crate::skillcache::warm::decide(
+        let mut decision = crate::skillcache::warm::decide(
+            &self.skillcache_runtime(),
+            &session,
+            &route,
+            &job.prompt,
+            &workspace,
+            &job.generation,
+        );
+        if matches!(
+            &decision,
+            crate::skillcache::warm::Decision::Miss {
+                reason: "no_capsule",
+                ..
+            }
+        ) && crate::skillcache::settings::eval_arm(&session).is_none()
+            && crate::skillcache::compile::try_admit_template_on_miss(
+                &self.skillcache_runtime(),
+                &session,
+                &job.generation,
+                &route,
+                &workspace,
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            decision = crate::skillcache::warm::decide(
                 &self.skillcache_runtime(),
                 &session,
                 &route,
@@ -2375,16 +2409,220 @@ impl Sessions {
                 &workspace,
                 &job.generation,
             );
-            if let Some(event) = decision.event() {
-                emit(event)?;
+        }
+        let mut direct_answer: Option<(serde_json::Value, String)> = None;
+        let warm = match decision {
+            crate::skillcache::warm::Decision::Hit(warm) if warm.direct_dispatch => {
+                let warm_run = warm.clone();
+                let ws_run = workspace.clone();
+                let gen_run = job.generation.clone();
+                let direct = tokio::task::spawn_blocking(move || {
+                    crate::skillcache::warm::try_direct_execute(&warm_run, &ws_run, &gen_run, None)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    crate::skillcache::warm::DirectDispatchOutcome::Fallback {
+                        reason: "join_error".into(),
+                        program_failed: false,
+                    }
+                });
+                match direct {
+                    crate::skillcache::warm::DirectDispatchOutcome::Completed {
+                        answer,
+                        formatted,
+                    } => {
+                        let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
+                        if let Some(mut event) = hit_decision.event() {
+                            event["direct_dispatch"] = json!(true);
+                            emit(event)?;
+                        }
+                        if let Some(mut record) = hit_decision.record() {
+                            record["direct_dispatch"] = json!(true);
+                            let _ = results.note_skillcache(&job.generation, &record);
+                        }
+                        direct_answer = Some((answer, formatted));
+                        Some(warm)
+                    }
+                    crate::skillcache::warm::DirectDispatchOutcome::Fallback {
+                        reason,
+                        program_failed,
+                    } => {
+                        if reason == "needs_bindings" && !program_failed {
+                            let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
+                            if let Some(event) = hit_decision.event() {
+                                emit(event)?;
+                            }
+                            if let Some(record) = hit_decision.record() {
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            Some(warm)
+                        } else {
+                            if program_failed {
+                                warm.finish(&self.store, &session, &job.generation, &|event| {
+                                    emit(event)
+                                });
+                                crate::skillcache::maybe_enqueue_recompile_on_finish(
+                                    &self.skillcache_runtime(),
+                                    &warm.capsule_id,
+                                    &|event| {
+                                        let _ = emit(event);
+                                    },
+                                );
+                            } else {
+                                warm.cleanup_abandoned();
+                            }
+                            let fallback_decision = crate::skillcache::warm::Decision::Miss {
+                                reason: "direct_fallback",
+                                text: format!("direct execution fell back to cold run ({reason})"),
+                            };
+                            if let Some(event) = fallback_decision.event() {
+                                emit(event)?;
+                            }
+                            if let Some(record) = fallback_decision.record() {
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            None
+                        }
+                    }
+                }
             }
-            if let Some(record) = decision.record() {
-                let _ = results.note_skillcache(&job.generation, &record);
+            other => {
+                if let Some(event) = other.event() {
+                    emit(event)?;
+                }
+                if let Some(record) = other.record() {
+                    let _ = results.note_skillcache(&job.generation, &record);
+                }
+                match other {
+                    crate::skillcache::warm::Decision::Hit(warm) => Some(warm),
+                    _ => None,
+                }
             }
-            match decision {
-                crate::skillcache::warm::Decision::Hit(warm) => Some(warm),
-                _ => None,
+        };
+        let thin_formatter_results = if let Some((answer, formatted)) = direct_answer {
+            let warm_ref = warm.as_ref().expect("direct dispatch requires warm");
+            if session["skillcache_thin_formatter"] == true {
+                Some(answer["result"].clone())
+            } else {
+                let started = std::time::Instant::now();
+                let initial_focus =
+                    self.emit_initial_focus(&job.sid, &session, &workspace, &route.text, &emit)?;
+                let live_focus = Arc::new(Mutex::new(crate::graph_live::LiveFocusTracker::new(
+                    workspace.clone(),
+                )));
+                if let Ok(mut tracker) = live_focus.lock() {
+                    tracker.seed_focus(initial_focus);
+                }
+                let graphs = lock(&self.graphs).ok().and_then(|slot| slot.clone());
+                let direct_ledger = json!({
+                    "total": 0,
+                    "direct_dispatch": true,
+                    "message": 0,
+                    "instructions": 0,
+                    "skillcache": 0,
+                    "prefix_cache_hit": true,
+                });
+                let direct_setup = (|| -> Result<Launch> {
+                    let mut launch = self.configure_launch(&session, &route.text)?;
+                    launch.prompt = formatted.clone();
+                    self.lifecycle
+                        .set_prompt_ledger(&binding, &direct_ledger, 1)?;
+                    if let Some(model) = launch.model.as_deref() {
+                        self.lifecycle
+                            .set_window(&binding, results.last_window(&job.sid, model)?)?;
+                    }
+                    self.lifecycle.before_dispatch(&binding, &launch)?;
+                    Ok(launch)
+                })();
+                if let Err(err) = direct_setup {
+                    warm_ref.cleanup_abandoned();
+                    let _ = self.lifecycle.abort(&binding, "failed");
+                    return Err(err);
+                }
+                let usage_ev = json!({
+                    "kind": "usage",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cost_usd": 0.0,
+                    "model_calls": 0,
+                    "direct_dispatch": true,
+                });
+                provider::RunEvents::observe(&binding, None, Some(&usage_ev))?;
+                emit(usage_ev)?;
+                emit(json!({"kind": "text", "text": formatted.clone()}))?;
+                let result_ev = json!({
+                    "kind": "result",
+                    "ok": true,
+                    "text": formatted.clone(),
+                    "cost_usd": 0.0,
+                    "direct_dispatch": true,
+                });
+                provider::RunEvents::observe(&binding, None, Some(&result_ev))?;
+                emit(result_ev)?;
+                ingest_warm_with_live_focus(
+                    warm_ref,
+                    &self.store,
+                    &job.sid,
+                    session["project_id"].as_str().unwrap_or(""),
+                    &workspace,
+                    graphs.as_deref(),
+                    &live_focus,
+                    &|event| emit(event),
+                );
+                warm_ref.finish(&self.store, &session, &job.generation, &|event| emit(event));
+                crate::skillcache::maybe_enqueue_recompile_on_finish(
+                    &self.skillcache_runtime(),
+                    &warm_ref.capsule_id,
+                    &|event| {
+                        let _ = emit(event);
+                    },
+                );
+                let mut recovery = NativeRecovery {
+                    adapter: self.launch_adapter(&session)?,
+                    human_cancel: cancel.clone(),
+                };
+                let worker = infra_host::provider::WorkerResult {
+                    text: formatted,
+                    ok: true,
+                    cost_usd: Some(0.0),
+                    session_id: session["native_session_id"].as_str().map(str::to_owned),
+                    duration_seconds: started.elapsed().as_secs_f64(),
+                    error: None,
+                    limit_reached: None,
+                };
+                let memory =
+                    Box::pin(
+                        self.lifecycle
+                            .finish(&binding, &worker, &emit, &mut recovery),
+                    )
+                    .await?;
+                if let Ok(mut tracker) = live_focus.lock()
+                    && tracker.complete()
+                {
+                    let _ = crate::graph_live::save_session_focus(
+                        &self.store,
+                        &job.sid,
+                        tracker.focus(),
+                    );
+                    if let Some(delta) = tracker.take_delta_event() {
+                        let _ = emit(delta);
+                    }
+                }
+                *native_proof = worker.session_id.clone();
+                return Ok(json!({
+                    "kind": "result",
+                    "ok": true,
+                    "text": worker.text,
+                    "observed_cost_usd": worker.cost_usd,
+                    "provider_billing": "direct_dispatch",
+                    "memory": memory["memory"],
+                    "full_cost": memory["full_cost"],
+                }));
             }
+        } else {
+            None
         };
         self.graph_moment(&job.sid, crate::graph::Trigger::Launch);
         let initial_focus =
@@ -2397,14 +2635,19 @@ impl Sessions {
         }
         let configured = (|| -> Result<Launch> {
             let mut launch = self.configure_launch(&session, &route.text)?;
-            let prepared = crate::prompt::build_with_skillcache(
-                &self.store,
-                &session,
-                &job.prompt,
-                &route,
-                &binding.instructions,
-                warm.as_ref().map(|warm| warm.block.as_str()),
-            )?;
+            let prepared = if let Some(results_json) = &thin_formatter_results {
+                let warm_name = warm.as_ref().map_or("capsule", |w| w.name.as_str());
+                crate::prompt::build_thin_formatter_prompt(&job.prompt, warm_name, results_json)?
+            } else {
+                crate::prompt::build_with_skillcache(
+                    &self.store,
+                    &session,
+                    &job.prompt,
+                    &route,
+                    &binding.instructions,
+                    warm.as_ref().map(|warm| warm.block.as_str()),
+                )?
+            };
             launch.prompt = if session["system_explain"].is_object() {
                 format!(
                     "{}{}",
@@ -6470,8 +6713,86 @@ mod phase3c_approvals_tests {
             .unwrap()
             .join("project");
         std::fs::create_dir_all(proj.join("programs")).unwrap();
-        std::fs::write(proj.join("programs/ro.py"), "print('ok')\n").unwrap();
-        fixture.sessions.store.register(&proj).unwrap();
+        let ro_bytes = b"print('ok')\n";
+        std::fs::write(proj.join("programs/ro.py"), ro_bytes).unwrap();
+        let project = fixture.sessions.store.register(&proj).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+
+        // Seed an active, sealed, Gate 1+2+3-verified `read_only: true` capsule in `SessionStore`
+        // so both legacy and strict store-backed `PermissionDesk` checks admit `programs/ro.py`.
+        let warm_root = fixture
+            .sessions
+            .store
+            .state
+            .join(format!("skillcache/capsules/{project_id}/cap-session-ro/1"));
+        let warm_dir = warm_root.join("warm");
+        let capsule_json = json!({
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "form": "hybrid",
+            "mu": {"name": "ro-session", "description": "Read-only session check"},
+            "source": {"skills": [{"name": "ro-session", "path": ".agents/skills/ro-session/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "main",
+                "entry": ["python3", "programs/ro.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/ro.py", "--check"],
+                "timeout_seconds": 60,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "main"}],
+            "verification": []
+        });
+        let cap = infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/ro.py", ro_bytes.to_vec());
+        let pkg_sha = infra_skillcache::package::write_warm(&warm_dir, &cap, None, &files).unwrap();
+        let loaded = infra_skillcache::package::load(&warm_dir).unwrap();
+        {
+            let db = fixture.sessions.store.connection().unwrap();
+            let skill_ref = json!({"name": "ro-session", "path": ".agents/skills/ro-session/SKILL.md", "tree_sha256": "0".repeat(64)});
+            crate::skillcache::db::begin_capsule(
+                &db,
+                "cap-session-ro",
+                "cmp-session-ro",
+                &project_id,
+                "s-ordinary",
+                "gen-session-ro",
+                &skill_ref,
+                None,
+            )
+            .unwrap();
+            crate::skillcache::db::activate_capsule(
+                &db,
+                &crate::skillcache::db::Qualified {
+                    capsule_id: "cap-session-ro",
+                    mu_name: "ro-session",
+                    mu_description: "Read-only session check",
+                    form: "hybrid",
+                    capsule_sha256: &loaded.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: "env",
+                    engine_digest: "eng",
+                    artifact_dir: warm_root.to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                crate::skillcache::db::record_gate(
+                    &db,
+                    "cap-session-ro",
+                    1,
+                    gate,
+                    true,
+                    &json!({"gate": gate, "passed": true}),
+                )
+                .unwrap();
+            }
+        }
 
         let accelerators = Arc::new(
             crate::accelerators::Accelerators::new(
@@ -6522,6 +6843,28 @@ mod phase3c_approvals_tests {
                 .is_empty()
         );
 
+        let rx_cli = ordinary_approvals
+            .ask_answer(&infra_host::permission::PermissionAsk {
+                id: "cmd-cli".into(),
+                provider: "codex".into(),
+                tool: "Shell".into(),
+                summary: "git status --short".into(),
+                kind: "command".into(),
+                session_rule_key: Some("readonly:program:git status --short".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            rx_cli.await.unwrap().decision,
+            infra_host::permission::Decision::Allow
+        );
+        assert!(
+            fixture
+                .sessions
+                .waiting_permissions("s-ordinary")
+                .is_empty()
+        );
+
         // Mutating command still waits for manual approval.
         let _rx_mut = ordinary_approvals
             .ask_answer(&infra_host::permission::PermissionAsk {
@@ -6551,5 +6894,125 @@ mod phase3c_approvals_tests {
             })
             .unwrap();
         assert_eq!(fixture.sessions.waiting_permissions("s-creator").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sdd_session_create_and_launch_verify_claims_against_graph_ir() {
+        let fixture = generation_completion_tests::Fixture::new();
+        let proj = infra_core::fs::canonicalize(fixture.temporary.path())
+            .unwrap()
+            .join("project");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(proj.join("specs/001-ir")).unwrap();
+        std::fs::write(
+            proj.join("src/auth.rs"),
+            "pub struct TokenService;\nimpl TokenService {\n    pub fn issue(&self) {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("specs/001-ir/spec.md"),
+            "# Spec\n- FR-001: Tokens\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("specs/001-ir/plan.md"),
+            "# Plan\nCovers FR-001.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("specs/001-ir/tasks.md"),
+            "- [x] T001 Implement `TokenService::issue` in `src/auth.rs`\n",
+        )
+        .unwrap();
+        std::fs::write(proj.join("specs/001-ir/progress.md"), "- [x] T001 Done\n").unwrap();
+
+        let registered = fixture.sessions.store.register(&proj).unwrap();
+        let pid = registered["id"].as_str().unwrap().to_owned();
+        let ir = crate::graph_ir::GraphIrStore::open(&fixture.sessions.store.state, &pid).unwrap();
+        ir.sync_workspace(&proj).unwrap();
+        drop(ir);
+
+        {
+            let mut map = fixture.sessions.providers.providers.write().unwrap();
+            map.insert(
+                "claude".into(),
+                provider::Provider {
+                    id: "claude".into(),
+                    name: "offline fixture".into(),
+                    available: true,
+                    executable: Some(std::env::current_exe().unwrap()),
+                    detail: "No model".into(),
+                },
+            );
+        }
+        infra_host::model_catalog::model_options("claude", None, None)
+            .await
+            .unwrap();
+        fixture
+            .sessions
+            .install_commands(Arc::new(crate::commands::CommandCatalog::new(
+                fixture.sessions.store.clone(),
+                fixture.temporary.path().join("source"),
+                fixture.sessions.providers.providers.clone(),
+            )))
+            .unwrap();
+
+        let valid_opts = fixture
+            .sessions
+            .create_options_for_test(&json!({
+                "project_id": pid,
+                "provider": "claude",
+                "workflow": "sdd",
+                "mode": "plan",
+                "prompt": "Review SDD implementation",
+                "sdd": {"feature": "001-ir", "phase": "review"},
+            }))
+            .unwrap();
+        assert_eq!(valid_opts["sdd"]["feature"], "001-ir");
+
+        let created = fixture
+            .sessions
+            .store
+            .create_uploaded(&valid_opts, "Review SDD implementation", &[])
+            .unwrap();
+        fixture
+            .sessions
+            .configure_launch(&created, "Review SDD implementation")
+            .unwrap();
+
+        // Break the [x] symbol claim and verify both create_options and configure_launch reject it via Graph-IR.
+        std::fs::write(
+            proj.join("specs/001-ir/tasks.md"),
+            "- [x] T001 Implement `TokenService::bogus` in `src/auth.rs`\n",
+        )
+        .unwrap();
+        let create_err = fixture
+            .sessions
+            .create_options_for_test(&json!({
+                "project_id": pid,
+                "provider": "claude",
+                "workflow": "sdd",
+                "mode": "plan",
+                "prompt": "Review SDD implementation",
+                "sdd": {"feature": "001-ir", "phase": "review"},
+            }))
+            .unwrap_err();
+        assert!(
+            create_err.message.contains("TokenService::bogus"),
+            "{}",
+            create_err.message
+        );
+        let launch_err = match fixture
+            .sessions
+            .configure_launch(&created, "Review SDD implementation")
+        {
+            Ok(_) => panic!("expected configure_launch to reject missing symbol via Graph-IR"),
+            Err(err) => err,
+        };
+        assert!(
+            launch_err.message.contains("TokenService::bogus"),
+            "{}",
+            launch_err.message
+        );
     }
 }

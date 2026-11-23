@@ -18,6 +18,7 @@ struct State {
     pending: Option<V>,
     saving: bool,
     done_opener: Option<Element>,
+    load_error: Option<String>,
     editor_row_ids: Vec<String>,
     next_editor_row_id: u64,
 }
@@ -43,7 +44,7 @@ fn ensure_eval_viewer_styles() {
     if let Ok(style) = doc.create_element("style") {
         style.set_id("eval-viewer-a11y");
         style.set_text_content(Some(
-            "[hidden]{display:none!important;}.eval-output-error{color:var(--error,var(--red));}",
+            "[hidden]{display:none!important;}.eval-output-error{color:var(--error,var(--red));}.table-scroll{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}.eval-load-error{padding:0.75rem 1rem;border:1px solid var(--red,#b3261e);border-radius:var(--radius,6px);background:var(--red-bg,#fceaea);color:var(--red,#b3261e);font-size:0.875rem;font-weight:500;}",
         ));
         if let Some(parent) = doc
             .query_selector("head")
@@ -464,6 +465,72 @@ fn download_feedback(data: &V) {
     a.remove();
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct InitialFeedbackPlan {
+    banner_message: Option<String>,
+    status_text: Option<&'static str>,
+    status_error: bool,
+}
+
+fn plan_initial_feedback_load(result: Option<&Result<(), String>>) -> InitialFeedbackPlan {
+    match result {
+        Some(Err(detail)) => {
+            let detail = detail.trim();
+            let banner = if detail.is_empty() {
+                "Could not load existing feedback from the server. New edits will still attempt to save or download on submit.".to_owned()
+            } else {
+                format!(
+                    "Could not load existing feedback from the server ({detail}). New edits will still attempt to save or download on submit."
+                )
+            };
+            InitialFeedbackPlan {
+                banner_message: Some(banner),
+                status_text: Some("Could not load saved feedback from server"),
+                status_error: true,
+            }
+        }
+        None | Some(Ok(())) => InitialFeedbackPlan {
+            banner_message: None,
+            status_text: None,
+            status_error: false,
+        },
+    }
+}
+
+fn ensure_load_error_banner() -> Option<Element> {
+    if let Some(el) = dom::get("eval-load-error") {
+        return Some(el);
+    }
+    let main = dom::all(".main").into_iter().next()?;
+    let banner = dom::el("div", "eval-load-error", "");
+    let _ = banner.set_attribute("id", "eval-load-error");
+    let _ = banner.set_attribute("role", "alert");
+    let _ = banner.set_attribute("hidden", "");
+    if let Some(first) = main.first_element_child() {
+        let _ = main.insert_before(&banner, Some(&first));
+    } else {
+        dom::add(&main, &banner);
+    }
+    Some(banner)
+}
+
+fn apply_initial_feedback_load_state(plan: &InitialFeedbackPlan) {
+    write(|s| s.load_error = plan.banner_message.clone());
+    if let Some(banner) = ensure_load_error_banner() {
+        if let Some(msg) = plan.banner_message.as_deref() {
+            banner.set_text_content(Some(msg));
+            let _ = banner.remove_attribute("hidden");
+        } else {
+            banner.set_text_content(Some(""));
+            let _ = banner.set_attribute("hidden", "");
+        }
+    }
+    if let Some(status) = plan.status_text {
+        dom::text("feedback-status", status);
+        class("feedback-status", "error", plan.status_error);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SaveOutcomePlan {
     status_text: &'static str,
     status_error: bool,
@@ -602,6 +669,13 @@ fn save(complete: bool) {
                 request("POST", Some(&data)).await.is_ok()
             };
             let outcome = save_outcome_plan(standalone, complete, server_ok);
+            if !standalone && !outcome.status_error && read(|s| s.load_error.is_some()) {
+                write(|s| s.load_error = None);
+                if let Some(banner) = dom::get("eval-load-error") {
+                    banner.set_text_content(Some(""));
+                    let _ = banner.set_attribute("hidden", "");
+                }
+            }
             dom::text("feedback-status", outcome.status_text);
             class("feedback-status", "error", outcome.status_error);
             if outcome.trigger_download {
@@ -726,7 +800,8 @@ fn stat(value: &V, pct: bool, decimals: usize) -> String {
     }
 }
 fn table(parent: &Element, headers: &[String]) -> Element {
-    let table = add(parent, "table", "benchmark-table", "");
+    let wrap = add(parent, "div", "table-scroll", "");
+    let table = add(&wrap, "table", "benchmark-table", "");
     let head = add(&table, "thead", "", "");
     let tr = add(&head, "tr", "", "");
     for h in headers {
@@ -1012,6 +1087,7 @@ pub fn start() -> Result<(), JsValue> {
         s.visited.clear();
         s.pending = None;
         s.saving = false;
+        s.load_error = None;
     });
     dom::text("skill-name", &read(|s| text(&s.data, "skill_name")));
     dom::disabled("feedback", true);
@@ -1165,26 +1241,41 @@ pub fn start() -> Result<(), JsValue> {
                     .as_object()
                     .is_none_or(|m| m.is_empty())
         });
-        if should_load {
-            if let Ok(value) = request("GET", None).await {
-                write(|s| {
-                    for r in list(&value["reviews"]) {
-                        if let (Some(id), Some(feedback)) =
-                            (r["run_id"].as_str(), r["feedback"].as_str())
-                        {
-                            s.feedback
-                                .entry(id.into())
-                                .or_insert_with(|| feedback.into());
+        let load_outcome = if should_load {
+            Some(match request("GET", None).await {
+                Ok(value) => {
+                    write(|s| {
+                        for r in list(&value["reviews"]) {
+                            if let (Some(id), Some(feedback)) =
+                                (r["run_id"].as_str(), r["feedback"].as_str())
+                            {
+                                s.feedback
+                                    .entry(id.into())
+                                    .or_insert_with(|| feedback.into());
+                            }
                         }
-                    }
-                });
-            }
-        }
+                    });
+                    Ok(())
+                }
+                Err(error) => Err(error
+                    .as_string()
+                    .or_else(|| {
+                        js_sys::Reflect::get(&error, &JsValue::from_str("message"))
+                            .ok()
+                            .and_then(|v| v.as_string())
+                    })
+                    .unwrap_or_else(|| "Request failed".to_owned())),
+            })
+        } else {
+            None
+        };
+        let load_plan = plan_initial_feedback_load(load_outcome.as_ref());
         if let Err(error) = bind_review() {
             dom::text(
                 "feedback-status",
                 "The review could not start. Reload this page to retry.",
             );
+            class("feedback-status", "error", true);
             web_sys::console::error_1(&error);
             return;
         }
@@ -1193,6 +1284,7 @@ pub fn start() -> Result<(), JsValue> {
         }
         dom::disabled("feedback", false);
         show_run(0);
+        apply_initial_feedback_load_state(&load_plan);
         render_benchmark();
     });
     Ok(())
@@ -1237,7 +1329,8 @@ fn render_sheet(parent: &Element, sheet: &V) {
             );
         }
     }
-    let table = add(parent, "table", "xlsx-table", "");
+    let wrap = add(parent, "div", "table-scroll", "");
+    let table = add(&wrap, "table", "xlsx-table", "");
     let merges = list(&sheet["merges"]);
     for (r, row) in list(&sheet["rows"]).iter().enumerate() {
         let tr = add(&table, "tr", "", "");
@@ -1811,5 +1904,33 @@ mod tests {
         assert_eq!(no.trigger_label, "Should trigger query 3");
         assert_eq!(no.trigger_text, "No");
         assert_eq!(no.delete_label, "Delete query 3");
+    }
+
+    #[test]
+    fn initial_feedback_load_surfaces_explicit_error_state_on_failure() {
+        let skipped = plan_initial_feedback_load(None);
+        assert_eq!(skipped.banner_message, None);
+        assert_eq!(skipped.status_text, None);
+        assert!(!skipped.status_error);
+
+        let loaded = plan_initial_feedback_load(Some(&Ok(())));
+        assert_eq!(loaded.banner_message, None);
+        assert_eq!(loaded.status_text, None);
+        assert!(!loaded.status_error);
+
+        let failed = plan_initial_feedback_load(Some(&Err("Feedback HTTP 500".into())));
+        assert!(failed
+            .banner_message
+            .as_deref()
+            .is_some_and(|msg| msg.contains("Feedback HTTP 500")));
+        assert_eq!(
+            failed.status_text,
+            Some("Could not load saved feedback from server")
+        );
+        assert!(failed.status_error);
+
+        let blank_err = plan_initial_feedback_load(Some(&Err("   ".into())));
+        assert!(blank_err.banner_message.is_some());
+        assert!(blank_err.status_error);
     }
 }

@@ -714,6 +714,13 @@ impl Index {
     }
 
     pub(crate) fn mark_architecture(&self, view: &mut Value, certain: bool, rules: Option<&Rules>) {
+        self.mark_architecture_inner(view, certain, rules);
+        if let Some(rules) = rules {
+            self.mark_extended_architecture(view, certain, rules);
+        }
+    }
+
+    fn mark_architecture_inner(&self, view: &mut Value, certain: bool, rules: Option<&Rules>) {
         if !matches!(view["mode"].as_str(), None | Some("changes" | "file")) {
             return;
         }
@@ -827,11 +834,12 @@ impl Index {
             }
             let layer = if node["folder"] == true {
                 folder_nodes.insert(node_path.to_owned());
+                let scope_path = if path == "." { "" } else { path };
                 let mut under = self
                     .files
                     .iter()
                     .zip(&way.of)
-                    .filter(|(file, _)| under(path, file))
+                    .filter(|(file, _)| under(scope_path, file))
                     .map(|(_, layer)| *layer);
                 under
                     .next()
@@ -858,10 +866,10 @@ impl Index {
                 }
                 parent = holder(parent);
             }
-            None
+            folder_nodes.get(".").map(String::as_str)
         };
         let mut drawn = HashMap::new();
-        let symbols = view["mode"] == "file";
+        let symbols = view["mode"] == "file" || view["lod"] == "symbol";
         // Folder arrows represent many file links. Attribute a violation only
         // to the boxes representing its two ends.
         if !symbols {
@@ -1510,5 +1518,320 @@ impl Held {
         sum
     }
 }
+
+/// Structured architectural rule violation covering layer, package/crate, cycle budget, and semantic rules.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ArchitectureViolation {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    pub from: String,
+    pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    pub message: String,
+}
+
+impl Index {
+    /// Evaluates declared layer, `forbids`, package/crate boundary, `max_cycles`, and semantic-edge rules.
+    pub(crate) fn architecture_violations(
+        &self,
+        scope: &str,
+        certain: bool,
+        rules: &Rules,
+    ) -> Vec<ArchitectureViolation> {
+        let mut out = Vec::new();
+        let norm_scope = scope.trim_matches('/');
+
+        // 1. Layer violations (allows + forbids).
+        if !rules.layers.is_empty() {
+            for (from_path, to_path, _, _) in self.declared_rule_violations(certain, rules) {
+                if !under(norm_scope, &from_path) && !under(norm_scope, &to_path) {
+                    continue;
+                }
+                let from_layer = rules.layer(&from_path);
+                let to_layer = rules.layer(&to_path);
+                let from_name =
+                    from_layer.map_or(from_path.as_str(), |i| rules.layers[i].name.as_str());
+                let to_name = to_layer.map_or(to_path.as_str(), |i| rules.layers[i].name.as_str());
+                let message = format!("Layer `{from_name}` forbids dependencies on `{to_name}`.");
+                out.push(ArchitectureViolation {
+                    kind: "layer".to_owned(),
+                    rule_id: from_layer.map(|i| rules.layers[i].id.clone()),
+                    from: from_path,
+                    to: to_path,
+                    relation: None,
+                    message,
+                });
+            }
+        }
+
+        // 2. Package & Rust crate boundary violations.
+        if rules.enforce_crate_boundaries || !rules.package_rules.is_empty() {
+            let manifest_dirs = self.manifest_dirs();
+            let mut seen_pkg_pairs = HashSet::new();
+            for &(from, to, ref pair) in &self.pairs {
+                if pair.weight(certain) == 0 {
+                    continue;
+                }
+                let from_path = &self.files[from as usize];
+                let to_path = &self.files[to as usize];
+                if !under(norm_scope, from_path) && !under(norm_scope, to_path) {
+                    continue;
+                }
+                let from_bucket = crate::graph_map::lod::crate_bucket(manifest_dirs, from_path);
+                let to_bucket = crate::graph_map::lod::crate_bucket(manifest_dirs, to_path);
+                if let Some((rule_id, message)) =
+                    rules.check_package_violation(from_path, to_path, &from_bucket, &to_bucket)
+                {
+                    if seen_pkg_pairs.insert((from_path.clone(), to_path.clone())) {
+                        out.push(ArchitectureViolation {
+                            kind: "package".to_owned(),
+                            rule_id,
+                            from: from_path.clone(),
+                            to: to_path.clone(),
+                            relation: None,
+                            message,
+                        });
+                    }
+                    continue;
+                }
+                if rules.enforce_crate_boundaries
+                    && !self.crates.allows_files(&self.files, from_path, to_path)
+                    && seen_pkg_pairs.insert((from_path.clone(), to_path.clone()))
+                {
+                    out.push(ArchitectureViolation {
+                        kind: "package".to_owned(),
+                        rule_id: Some("crate-boundary".to_owned()),
+                        from: from_path.clone(),
+                        to: to_path.clone(),
+                        relation: None,
+                        message: format!(
+                            "Crate boundary violated from `{from_bucket}` to `{to_bucket}`."
+                        ),
+                    });
+                }
+            }
+        }
+
+        // 3. Cycle budgets (`max_cycles` global and per-layer).
+        if rules.max_cycles.is_some() || rules.layers.iter().any(|l| l.max_cycles.is_some()) {
+            let sccs = self.scc_groups(certain);
+            let scoped_sccs: Vec<&Vec<String>> = sccs
+                .iter()
+                .filter(|g| norm_scope.is_empty() || g.iter().any(|p| under(norm_scope, p)))
+                .collect();
+            if let Some(budget) = rules.max_cycles
+                && scoped_sccs.len() > budget
+            {
+                let summary = scoped_sccs
+                    .iter()
+                    .take(3)
+                    .map(|g| g.join(" <-> "))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let first_file = scoped_sccs
+                    .first()
+                    .and_then(|g| g.first())
+                    .cloned()
+                    .unwrap_or_else(|| "workspace".to_owned());
+                out.push(ArchitectureViolation {
+                    kind: "cycle_budget".to_owned(),
+                    rule_id: Some("workspace_max_cycles".to_owned()),
+                    from: first_file,
+                    to: summary,
+                    relation: None,
+                    message: format!(
+                        "Dependency cycle count ({}) exceeds max_cycles budget ({budget}).",
+                        scoped_sccs.len()
+                    ),
+                });
+            }
+            for (idx, layer) in rules.layers.iter().enumerate() {
+                if let Some(budget) = layer.max_cycles {
+                    let touching: Vec<&&Vec<String>> = scoped_sccs
+                        .iter()
+                        .filter(|g| g.iter().any(|p| rules.layer(p) == Some(idx)))
+                        .collect();
+                    if touching.len() > budget {
+                        let first_file = touching
+                            .first()
+                            .and_then(|g| g.iter().find(|p| rules.layer(p) == Some(idx)))
+                            .cloned()
+                            .unwrap_or_else(|| layer.id.clone());
+                        let summary = touching
+                            .iter()
+                            .take(3)
+                            .map(|g| g.join(" <-> "))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        out.push(ArchitectureViolation {
+                            kind: "cycle_budget".to_owned(),
+                            rule_id: Some(layer.id.clone()),
+                            from: first_file,
+                            to: summary,
+                            relation: None,
+                            message: format!(
+                                "Layer `{}` participates in {} dependency cycles (max_cycles budget: {budget}).",
+                                layer.name,
+                                touching.len()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 4. Semantic-edge rules (layer `forbids_semantic` + top-level `semantic_rules`).
+        if !rules.semantic_rules.is_empty()
+            || rules.layers.iter().any(|l| !l.forbids_semantic.is_empty())
+        {
+            let mut seen_sem = HashSet::new();
+            for &(from_sym, to_sym, kind_id, guessed) in &self.uses {
+                if certain && guessed {
+                    continue;
+                }
+                let to_s = &self.symbols[to_sym as usize];
+                let rel = self
+                    .kinds
+                    .get(kind_id as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let is_sem_rel = matches!(
+                    rel,
+                    "writes_table"
+                        | "reads_table"
+                        | "exposes_route"
+                        | "calls_route"
+                        | "publishes_event"
+                        | "handles_event"
+                        | "di_binds"
+                );
+                if !to_s.is_semantic && !is_sem_rel {
+                    continue;
+                }
+                let from_path = &self.files[self.symbols[from_sym as usize].file as usize];
+                if !under(norm_scope, from_path) {
+                    continue;
+                }
+                let target_label =
+                    &self.names[to_s.at as usize..to_s.at as usize + to_s.len as usize];
+                let from_layer = rules.layer(from_path);
+                if let Some((rule_id, message)) =
+                    rules.check_semantic_violation(from_path, from_layer, rel, target_label)
+                    && seen_sem.insert((from_path.clone(), rel.to_owned(), target_label.to_owned()))
+                {
+                    out.push(ArchitectureViolation {
+                        kind: "semantic".to_owned(),
+                        rule_id,
+                        from: from_path.clone(),
+                        to: target_label.to_owned(),
+                        relation: Some(rel.to_owned()),
+                        message,
+                    });
+                }
+            }
+        }
+
+        out
+    }
+
+    fn mark_extended_architecture(&self, view: &mut Value, certain: bool, rules: &Rules) {
+        if !rules.has_extended_rules() {
+            return;
+        }
+        let scope = view["scope"].as_str().unwrap_or("").to_owned();
+        let all = self.architecture_violations(&scope, certain, rules);
+        let package_v: Vec<&ArchitectureViolation> =
+            all.iter().filter(|v| v.kind == "package").collect();
+        let cycle_v: Vec<&ArchitectureViolation> =
+            all.iter().filter(|v| v.kind == "cycle_budget").collect();
+        let semantic_v: Vec<&ArchitectureViolation> =
+            all.iter().filter(|v| v.kind == "semantic").collect();
+
+        if package_v.is_empty() && cycle_v.is_empty() && semantic_v.is_empty() {
+            if let Some(pat) = view["pattern"].as_object_mut() {
+                pat.insert("package_violations".to_owned(), json!([]));
+                pat.insert(
+                    "cycle_budget".to_owned(),
+                    json!({ "exceeded": false, "violations": [] }),
+                );
+                pat.insert("semantic_violations".to_owned(), json!([]));
+            }
+            return;
+        }
+
+        let pkg_pairs: HashSet<(&str, &str)> = package_v
+            .iter()
+            .map(|v| (v.from.as_str(), v.to.as_str()))
+            .collect();
+        let sem_from_to: HashSet<(&str, &str)> = semantic_v
+            .iter()
+            .map(|v| (v.from.as_str(), v.to.as_str()))
+            .collect();
+        let mut violated_files: HashSet<&str> = HashSet::new();
+        for v in package_v.iter().chain(semantic_v.iter()) {
+            violated_files.insert(v.from.as_str());
+        }
+        if !cycle_v.is_empty() {
+            for group in self.scc_groups(certain) {
+                if scope.is_empty() || group.iter().any(|p| under(&scope, p)) {
+                    for p in group {
+                        if let Some(stored) = self.files.iter().find(|f| f.as_str() == p) {
+                            violated_files.insert(stored.as_str());
+                        }
+                    }
+                }
+            }
+        }
+
+        let file_of_edge_end =
+            |raw: &str| -> String { raw.split_once('#').map_or(raw, |(f, _)| f).to_owned() };
+        if let Some(edges) = view["edges"].as_array_mut() {
+            for edge in edges {
+                let from_raw = edge["from"].as_str().unwrap_or("");
+                let to_raw = edge["to"].as_str().unwrap_or("");
+                let from_f = file_of_edge_end(from_raw);
+                let to_f = file_of_edge_end(to_raw);
+                let is_pkg_bad = pkg_pairs.contains(&(from_f.as_str(), to_f.as_str()));
+                let is_sem_bad = sem_from_to
+                    .iter()
+                    .any(|(vf, vt)| *vf == from_f && (to_raw.contains(vt) || to_f == *vt));
+                if is_pkg_bad || is_sem_bad {
+                    edge["against"] = json!(true);
+                    let prev = edge["architecture_violation"].as_u64().unwrap_or(0);
+                    edge["architecture_violation"] = json!(prev + 1);
+                }
+            }
+        }
+        if let Some(nodes) = view["nodes"].as_array_mut() {
+            for node in nodes {
+                let p = node["path"].as_str().unwrap_or("");
+                let file_p = p.split_once('#').map_or(p, |(f, _)| f);
+                if violated_files.contains(file_p) {
+                    node["architecture_violation"] = json!(true);
+                }
+            }
+        }
+
+        if !view["pattern"].is_object() {
+            view["pattern"] = json!({});
+        }
+        if let Some(pat) = view["pattern"].as_object_mut() {
+            pat.insert("package_violations".to_owned(), json!(package_v));
+            pat.insert(
+                "cycle_budget".to_owned(),
+                json!({
+                    "exceeded": !cycle_v.is_empty(),
+                    "max_cycles": rules.max_cycles,
+                    "violations": cycle_v,
+                }),
+            );
+            pat.insert("semantic_violations".to_owned(), json!(semantic_v));
+            pat.insert("extended_violations".to_owned(), json!(all));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

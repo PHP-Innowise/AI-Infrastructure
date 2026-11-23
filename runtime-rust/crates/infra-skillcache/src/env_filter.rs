@@ -16,12 +16,21 @@ pub const LOG_FILE: &str = "SKILLCACHE_LOG_FILE";
 pub const GENERATION: &str = "SKILLCACHE_GENERATION";
 
 /// Whether a variable is withheld from programs: its name contains `KEY`,
-/// `TOKEN` or `PASSWORD` in any letter case.
+/// `TOKEN`, `PASSWORD`, `SECRET`, `CREDENTIAL`, `PASSWD` or `AUTH` in any
+/// letter case.
 pub fn withheld(name: &str) -> bool {
     let name = name.to_uppercase();
-    ["KEY", "TOKEN", "PASSWORD"]
-        .iter()
-        .any(|part| name.contains(part))
+    [
+        "KEY",
+        "TOKEN",
+        "PASSWORD",
+        "SECRET",
+        "CREDENTIAL",
+        "PASSWD",
+        "AUTH",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
 }
 
 /// The complete environment of one program run. `inherited` is the starting
@@ -124,6 +133,10 @@ mod tests {
                 ("Db_Password", "e"),
                 ("npm_config_authToken", "f"),
                 ("SSH_KEYFILE", "g"),
+                ("AWS_SECRET_VAL", "h"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", "i"),
+                ("SUDO_PASSWD", "j"),
+                ("basic_auth_header", "k"),
                 ("SKILLCACHE_STATE_FILE", "/state/plan-state.json"),
                 ("SKILLCACHE_GENERATION", "gen"),
                 ("skillcache_input", "stale"),
@@ -169,7 +182,19 @@ mod tests {
         ] {
             assert!(!withheld(name), "{name}");
         }
-        for name in ["API_KEY", "apiKey", "X_TOKEN_Y", "PGPASSWORD", "MONKEY"] {
+        for name in [
+            "API_KEY",
+            "apiKey",
+            "X_TOKEN_Y",
+            "PGPASSWORD",
+            "MONKEY",
+            "APP_SECRET",
+            "app_secret",
+            "CLOUD_CREDENTIAL",
+            "ROOT_PASSWD",
+            "OAUTH_HEADER",
+            "basic_auth",
+        ] {
             assert!(withheld(name), "{name}");
         }
     }

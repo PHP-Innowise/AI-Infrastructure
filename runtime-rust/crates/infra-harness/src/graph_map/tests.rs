@@ -7783,3 +7783,457 @@ fn update_files_preserves_communities_and_exact_link_unplaced_totals() {
         full1.modules("proj", None, false, "")
     );
 }
+
+#[test]
+fn lod_symbol_preserves_focus_blast_marks_architecture_and_discovers_extended_manifests() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("packages/swift-mod/Sources")).unwrap();
+    std::fs::create_dir_all(root.join("services/py-svc")).unwrap();
+    std::fs::write(root.join("tsconfig.json"), "{}\n").unwrap();
+    std::fs::write(root.join("packages/swift-mod/Package.swift"), "// swift\n").unwrap();
+    std::fs::write(root.join("services/py-svc/setup.py"), "setup()\n").unwrap();
+    std::fs::write(root.join("src/api.ts"), "export function apiCall() {}\n").unwrap();
+    std::fs::write(root.join("src/core.ts"), "export function coreLeaf() {}\n").unwrap();
+    std::fs::write(
+        root.join("packages/swift-mod/Sources/Mod.swift"),
+        "func swiftHelper() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("services/py-svc/app.py"),
+        "def py_entry(): pass\n",
+    )
+    .unwrap();
+
+    let ir_nodes = vec![
+        crate::graph_ir::IrNodeSpec {
+            id: "file:src/api.ts".into(),
+            label: "api.ts".into(),
+            source_file: "src/api.ts".into(),
+            source_location: None,
+            end_line: 0,
+            file_type: Some("code".into()),
+            node_kind: Some("page".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "fn:api".into(),
+            label: "apiCall()".into(),
+            source_file: "src/api.ts".into(),
+            source_location: Some("L1".into()),
+            end_line: 1,
+            file_type: None,
+            node_kind: Some("function".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "file:src/core.ts".into(),
+            label: "core.ts".into(),
+            source_file: "src/core.ts".into(),
+            source_location: None,
+            end_line: 0,
+            file_type: Some("code".into()),
+            node_kind: Some("page".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "fn:core".into(),
+            label: "coreLeaf()".into(),
+            source_file: "src/core.ts".into(),
+            source_location: Some("L1".into()),
+            end_line: 1,
+            file_type: None,
+            node_kind: Some("function".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "file:packages/swift-mod/Sources/Mod.swift".into(),
+            label: "Mod.swift".into(),
+            source_file: "packages/swift-mod/Sources/Mod.swift".into(),
+            source_location: None,
+            end_line: 0,
+            file_type: Some("code".into()),
+            node_kind: Some("page".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        crate::graph_ir::IrNodeSpec {
+            id: "file:services/py-svc/app.py".into(),
+            label: "app.py".into(),
+            source_file: "services/py-svc/app.py".into(),
+            source_location: None,
+            end_line: 0,
+            file_type: Some("code".into()),
+            node_kind: Some("page".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+    ];
+    let ir_links = vec![crate::graph_ir::IrLinkSpec {
+        source: "fn:api".into(),
+        target: "fn:core".into(),
+        relation: Some("calls".into()),
+        confidence: Some("EXTRACTED".into()),
+        source_file: Some("src/api.ts".into()),
+        context: None,
+        evidence: None,
+    }];
+    let idx = Index::from_ir_parts(&root, None, None, ir_nodes, ir_links).unwrap();
+
+    // Extended manifest discovery finds root tsconfig.json, Package.swift, and setup.py,
+    // and root "." bucket keeps `folder: true` at Crate LOD.
+    let manifests = idx.manifest_dirs();
+    assert!(manifests.iter().any(|m| m.is_empty()), "{manifests:?}");
+    assert!(
+        manifests.iter().any(|m| m == "packages/swift-mod"),
+        "{manifests:?}"
+    );
+    assert!(
+        manifests.iter().any(|m| m == "services/py-svc"),
+        "{manifests:?}"
+    );
+
+    let crate_view = idx.view_at_lod_unfiltered(
+        "demo",
+        Lod::Crate,
+        &LodFilter {
+            scope: "",
+            focus: None,
+            filter: "",
+            certain: false,
+            offset: 0,
+            limit: None,
+        },
+    );
+    let root_node = crate_view["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"] == ".")
+        .expect("root '.' bucket node");
+    assert_eq!(root_node["folder"], true, "{root_node}");
+
+    // `Lod::Symbol` preserves `view["focus"]` for `mark_blast`, and `mark_architecture` marks symbol edges.
+    let rules = crate::graph_map::layer_rules::Rules::parse(
+        serde_json::json!({
+            "version": 1,
+            "layers": [
+                {"id": "api", "name": "API", "paths": ["src/api.ts"], "allows": []},
+                {"id": "core", "name": "Core", "paths": ["src/core.ts"], "allows": []}
+            ]
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    let core_focus = "src/core.ts#L1:coreLeaf()";
+    let mut sym_view = idx.view_at_lod_unfiltered(
+        "demo",
+        Lod::Symbol,
+        &LodFilter {
+            scope: "",
+            focus: Some(core_focus),
+            filter: "",
+            certain: false,
+            offset: 0,
+            limit: None,
+        },
+    );
+    assert_eq!(sym_view["lod"], "symbol");
+    assert_eq!(sym_view["focus"]["path"], core_focus);
+    idx.mark_architecture(&mut sym_view, false, Some(&rules));
+    idx.mark_blast(&mut sym_view);
+    assert!(
+        sym_view["focus"]["blast"]["files"].as_u64().unwrap_or(0) >= 1,
+        "expected mark_blast at symbol LOD: {}",
+        sym_view["focus"]
+    );
+    assert!(
+        sym_view["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["architecture_violation"].as_u64().unwrap_or(0) >= 1),
+        "expected architecture_violation on symbol LOD edge: {}",
+        sym_view["edges"]
+    );
+
+    // `Maps::ir_summary` reads via `open_readonly_cached` cleanly.
+    let ir_store = crate::graph_ir::GraphIrStore::open(&state, "cache-ro").unwrap();
+    ir_store.sync_workspace(&root).unwrap();
+    let maps = Maps::default();
+    let summary = maps
+        .ir_summary(&state, "cache-ro")
+        .expect("cached ir_summary");
+    assert!(summary.files >= 2);
+}
+
+#[test]
+fn architecture_rules_support_forbids_package_boundaries_cycle_budgets_and_semantic_rules() {
+    use crate::graph_ir::{IrLinkSpec, IrNodeSpec};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let bad = crate::graph_map::layer_rules::Rules::parse(
+        br#"{"version":1,"layers":[{"id":"api","name":"API","paths":["src/api/**"],"forbids":["ghost"]}]}"#,
+    );
+    assert!(
+        bad.is_err(),
+        "unknown layer ID in `forbids` must be rejected"
+    );
+
+    let rules_json = serde_json::json!({
+        "version": 1,
+        "enforce_crate_boundaries": true,
+        "max_cycles": 0,
+        "layers": [
+            {
+                "id": "controller",
+                "name": "Controllers",
+                "paths": ["app/Controllers/**"],
+                "forbids": ["ui"],
+                "forbids_semantic": ["writes_table"],
+                "max_cycles": 0
+            },
+            {
+                "id": "service",
+                "name": "Services",
+                "paths": ["app/Services/**"]
+            },
+            {
+                "id": "ui",
+                "name": "UI",
+                "paths": ["app/Ui/**"],
+                "allows": []
+            }
+        ],
+        "package_rules": [
+            {
+                "id": "ui-pkg",
+                "paths": ["packages/ui/**"],
+                "forbids": ["db-pkg"]
+            },
+            {
+                "id": "db-pkg",
+                "paths": ["packages/db/**"]
+            }
+        ],
+        "semantic_rules": [
+            {
+                "id": "no-ui-routes",
+                "from": "app/Ui/**",
+                "relation": "exposes_route",
+                "target": "*",
+                "effect": "forbid"
+            }
+        ]
+    });
+    let rules = crate::graph_map::layer_rules::Rules::parse(rules_json.to_string().as_bytes())
+        .expect("parse extended rules");
+
+    let mk_file = |path: &str| IrNodeSpec {
+        id: format!("file:{path}"),
+        label: path.rsplit('/').next().unwrap_or(path).to_owned(),
+        source_file: path.to_owned(),
+        source_location: None,
+        end_line: 0,
+        file_type: Some("code".into()),
+        node_kind: Some("page".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+    let mk_fn = |id: &str, path: &str, name: &str| IrNodeSpec {
+        id: id.to_owned(),
+        label: format!("{name}()"),
+        source_file: path.to_owned(),
+        source_location: Some("L1".into()),
+        end_line: 1,
+        file_type: None,
+        node_kind: Some("function".into()),
+        community: None,
+        community_name: None,
+        callable_class: false,
+        is_abstract: false,
+        is_test: false,
+    };
+
+    let nodes = vec![
+        mk_file("app/Controllers/OrderController.php"),
+        mk_fn("fn:ctrl", "app/Controllers/OrderController.php", "store"),
+        mk_file("app/Services/OrderService.php"),
+        mk_fn("fn:svc", "app/Services/OrderService.php", "handle"),
+        mk_file("app/Ui/Button.php"),
+        mk_fn("fn:ui", "app/Ui/Button.php", "render"),
+        mk_file("packages/ui/view.ts"),
+        mk_fn("fn:pkg_ui", "packages/ui/view.ts", "renderView"),
+        mk_file("packages/db/client.ts"),
+        mk_fn("fn:pkg_db", "packages/db/client.ts", "queryDb"),
+        IrNodeSpec {
+            id: "sem:table:orders".into(),
+            label: "table:orders".into(),
+            source_file: "app/Services/OrderService.php".into(),
+            source_location: Some("L2".into()),
+            end_line: 0,
+            file_type: None,
+            node_kind: Some("semantic".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+        IrNodeSpec {
+            id: "sem:route:GET /bad".into(),
+            label: "route:GET /bad".into(),
+            source_file: "app/Ui/Button.php".into(),
+            source_location: Some("L2".into()),
+            end_line: 0,
+            file_type: None,
+            node_kind: Some("semantic".into()),
+            community: None,
+            community_name: None,
+            callable_class: false,
+            is_abstract: false,
+            is_test: false,
+        },
+    ];
+    let mk_call = |src: &str, dst: &str, file: &str| IrLinkSpec {
+        source: src.into(),
+        target: dst.into(),
+        relation: Some("calls".into()),
+        confidence: Some("EXTRACTED".into()),
+        source_file: Some(file.into()),
+        context: None,
+        evidence: None,
+    };
+    let links = vec![
+        // Allowed: controller -> service (since controller only `forbids: ["ui"]`).
+        mk_call("fn:ctrl", "fn:svc", "app/Controllers/OrderController.php"),
+        // Layer `forbids` violation + cycle: controller -> ui and ui -> controller.
+        mk_call("fn:ctrl", "fn:ui", "app/Controllers/OrderController.php"),
+        mk_call("fn:ui", "fn:ctrl", "app/Ui/Button.php"),
+        // Package boundary violation: ui-pkg -> db-pkg.
+        mk_call("fn:pkg_ui", "fn:pkg_db", "packages/ui/view.ts"),
+        // Semantic violation: controller -> writes_table.
+        IrLinkSpec {
+            source: "fn:ctrl".into(),
+            target: "sem:table:orders".into(),
+            relation: Some("writes_table".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Controllers/OrderController.php".into()),
+            context: Some("writes_table".into()),
+            evidence: Some("DB::table('orders')->insert".into()),
+        },
+        // Top-level semantic_rules violation: app/Ui/** -> exposes_route.
+        IrLinkSpec {
+            source: "fn:ui".into(),
+            target: "sem:route:GET /bad".into(),
+            relation: Some("exposes_route".into()),
+            confidence: Some("EXTRACTED".into()),
+            source_file: Some("app/Ui/Button.php".into()),
+            context: Some("exposes_route".into()),
+            evidence: Some("Route::get('/bad')".into()),
+        },
+    ];
+
+    let idx = Index::from_ir_parts(root, None, None, nodes, links).unwrap();
+    let violations = idx.architecture_violations("", false, &rules);
+    assert!(
+        violations.iter().any(|v| v.kind == "layer"
+            && v.from == "app/Controllers/OrderController.php"
+            && v.to == "app/Ui/Button.php"),
+        "expected layer forbids violation: {violations:?}"
+    );
+    assert!(
+        !violations.iter().any(|v| v.kind == "layer"
+            && v.from == "app/Controllers/OrderController.php"
+            && v.to == "app/Services/OrderService.php"),
+        "omitting `allows` with `forbids` must allow non-forbidden layer `service`: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "package"
+            && v.from == "packages/ui/view.ts"
+            && v.to == "packages/db/client.ts"),
+        "expected package boundary violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "cycle_budget"),
+        "expected max_cycles budget violation: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "semantic"
+            && v.from == "app/Controllers/OrderController.php"
+            && v.relation.as_deref() == Some("writes_table")),
+        "expected semantic writes_table violation on controller: {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| v.kind == "semantic"
+            && v.from == "app/Ui/Button.php"
+            && v.relation.as_deref() == Some("exposes_route")),
+        "expected top-level semantic_rules violation: {violations:?}"
+    );
+
+    let mut file_view = idx.view_at_lod_unfiltered(
+        "demo",
+        Lod::File,
+        &LodFilter {
+            scope: "",
+            focus: None,
+            filter: "",
+            certain: false,
+            offset: 0,
+            limit: None,
+        },
+    );
+    idx.mark_architecture(&mut file_view, false, Some(&rules));
+    assert!(
+        file_view["pattern"]["cycle_budget"]["exceeded"] == true,
+        "expected cycle_budget telemetry in mark_architecture: {}",
+        file_view["pattern"]
+    );
+    assert!(
+        !file_view["pattern"]["package_violations"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected package_violations in mark_architecture: {}",
+        file_view["pattern"]
+    );
+    assert!(
+        !file_view["pattern"]["semantic_violations"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected semantic_violations in mark_architecture: {}",
+        file_view["pattern"]
+    );
+}

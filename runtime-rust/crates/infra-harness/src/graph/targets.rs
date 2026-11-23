@@ -1109,6 +1109,7 @@ impl Graphs {
                     }
                     None => {
                         self.cancel_live_json_writer(project);
+                        self.evict_ir_store(project);
                         let home = folder(&self.store.state, project);
                         // Under a commit's build the folder may not go at
                         // once: what that build still writes goes with it.
@@ -1191,6 +1192,9 @@ impl Graphs {
         if let Ok(mut stores_ro) = self.ir_stores_ro.lock() {
             stores_ro.clear();
         }
+        crate::graph_ir::GraphIrStore::evict_readonly_cache_for_dir(
+            &self.store.state.join("graphs"),
+        );
         let workers = match self.workers.lock() {
             Ok(mut workers) => std::mem::take(&mut *workers),
             Err(_) => return,

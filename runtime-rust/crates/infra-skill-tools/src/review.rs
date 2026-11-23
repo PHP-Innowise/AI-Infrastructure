@@ -374,6 +374,12 @@ pub fn eval_set_execute(v: &Value) -> Result<Value> {
     ))
 }
 
+const REVIEW_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'";
+
+fn request_path(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
 fn response(
     status: u16,
     mime: &str,
@@ -391,6 +397,103 @@ fn response(
             )
             .unwrap(),
         )
+        .with_header(
+            tiny_http::Header::from_bytes("Referrer-Policy".as_bytes(), "no-referrer".as_bytes())
+                .unwrap(),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(
+                "Cross-Origin-Resource-Policy".as_bytes(),
+                "same-origin".as_bytes(),
+            )
+            .unwrap(),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes("X-Frame-Options".as_bytes(), "DENY".as_bytes()).unwrap(),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(
+                "Content-Security-Policy".as_bytes(),
+                REVIEW_CSP.as_bytes(),
+            )
+            .unwrap(),
+        )
+}
+
+struct RequestContext<'a> {
+    workspace: &'a Path,
+    name: &'a str,
+    previous: &'a Value,
+    benchmark: Option<&'a Path>,
+    assets: &'a Assets,
+    feedback_store: &'a mut FeedbackStore,
+}
+
+fn handle_request(
+    method: &str,
+    raw_url: &str,
+    content_type: Option<&str>,
+    body_reader: &mut impl Read,
+    ctx: &mut RequestContext<'_>,
+) -> Result<tiny_http::Response<std::io::Cursor<Vec<u8>>>> {
+    let path = request_path(raw_url);
+    Ok(match (method, path) {
+        ("GET", "/") | ("GET", "/index.html") => {
+            let runs = find_runs(ctx.workspace)?;
+            let b = ctx.benchmark.and_then(|p| common::json_file(p).ok());
+            response(
+                200,
+                "text/html; charset=utf-8",
+                generate_html(&runs, ctx.name, ctx.previous, b.as_ref(), ctx.assets, false)?
+                    .into_bytes(),
+            )
+        }
+        ("GET", "/boot.js") => response(
+            200,
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../harness/web/boot.js").to_vec(),
+        ),
+        ("GET", "/assets/infra_ui.js") => response(
+            200,
+            "text/javascript; charset=utf-8",
+            ctx.assets.image.javascript.clone(),
+        ),
+        ("GET", "/assets/infra_ui_bg.wasm") => {
+            response(200, "application/wasm", ctx.assets.image.wasm.clone())
+        }
+        ("GET", "/api/feedback") => match ctx.feedback_store.read() {
+            Ok(bytes) => response(200, "application/json", bytes),
+            Err(error) => response(
+                500,
+                "application/json",
+                json!({"error":error.to_string()}).to_string().into_bytes(),
+            ),
+        },
+        ("POST", "/api/feedback") => {
+            let mut body = vec![];
+            let outcome = (|| -> Result<()> {
+                if !content_type.is_some_and(feedback::json_content_type) {
+                    return Err(RuntimeError::invalid("Feedback requires application/json"));
+                }
+                body_reader
+                    .take(8 * 1024 * 1024 + 1)
+                    .read_to_end(&mut body)?;
+                if body.len() > 8 * 1024 * 1024 {
+                    return Err(RuntimeError::invalid("Feedback exceeds limit"));
+                }
+                ctx.feedback_store.save(&body)
+            })();
+            match outcome {
+                Ok(()) => response(200, "application/json", b"{\"ok\":true}".to_vec()),
+                Err(e) => response(
+                    500,
+                    "application/json",
+                    json!({"error":e.to_string()}).to_string().into_bytes(),
+                ),
+            }
+        }
+        _ => response(404, "text/plain", b"Not found".to_vec()),
+    })
 }
 pub fn kill_port(port: u16, log: &mut String) -> Result<()> {
     if port == 0 {
@@ -512,9 +615,19 @@ pub fn execute(v: &Value) -> Result<Value> {
     print!("{announcement}");
     use std::io::Write;
     let _ = std::io::stdout().flush();
-    if let Err(e) = common::browser(&url) {
+    let suppress_browser =
+        std::env::var_os("INFRA_NO_BROWSER").is_some_and(|v| !v.is_empty() && v != "0");
+    if !suppress_browser && let Err(e) = common::browser(&url) {
         log.push_str(&format!("Browser: {e}\n"));
     }
+    let mut ctx = RequestContext {
+        workspace: &workspace,
+        name: &name,
+        previous: &previous,
+        benchmark: benchmark.as_deref(),
+        assets: &assets,
+        feedback_store: &mut feedback_store,
+    };
     while !infra_eval::cancel::interrupted() {
         let Some(mut request) = server
             .recv_timeout(Duration::from_millis(200))
@@ -522,69 +635,20 @@ pub fn execute(v: &Value) -> Result<Value> {
         else {
             continue;
         };
-        let path = request.url().to_owned();
+        let raw_url = request.url().to_owned();
         let method = request.method().as_str().to_owned();
-        let reply = match (method.as_str(), path.as_str()) {
-            ("GET", "/") | ("GET", "/index.html") => {
-                let runs = find_runs(&workspace)?;
-                let b = benchmark.as_deref().and_then(|p| common::json_file(p).ok());
-                response(
-                    200,
-                    "text/html; charset=utf-8",
-                    generate_html(&runs, &name, &previous, b.as_ref(), &assets, false)?
-                        .into_bytes(),
-                )
-            }
-            ("GET", "/boot.js") => response(
-                200,
-                "text/javascript; charset=utf-8",
-                include_bytes!("../../../../harness/web/boot.js").to_vec(),
-            ),
-            ("GET", "/assets/infra_ui.js") => response(
-                200,
-                "text/javascript; charset=utf-8",
-                assets.image.javascript.clone(),
-            ),
-            ("GET", "/assets/infra_ui_bg.wasm") => {
-                response(200, "application/wasm", assets.image.wasm.clone())
-            }
-            ("GET", "/api/feedback") => match feedback_store.read() {
-                Ok(bytes) => response(200, "application/json", bytes),
-                Err(error) => response(
-                    500,
-                    "application/json",
-                    json!({"error":error.to_string()}).to_string().into_bytes(),
-                ),
-            },
-            ("POST", "/api/feedback") => {
-                let mut body = vec![];
-                let outcome = (|| -> Result<()> {
-                    if !request.headers().iter().any(|h| {
-                        h.field.equiv("Content-Type")
-                            && feedback::json_content_type(h.value.as_str())
-                    }) {
-                        return Err(RuntimeError::invalid("Feedback requires application/json"));
-                    }
-                    request
-                        .as_reader()
-                        .take(8 * 1024 * 1024 + 1)
-                        .read_to_end(&mut body)?;
-                    if body.len() > 8 * 1024 * 1024 {
-                        return Err(RuntimeError::invalid("Feedback exceeds limit"));
-                    }
-                    feedback_store.save(&body)
-                })();
-                match outcome {
-                    Ok(()) => response(200, "application/json", b"{\"ok\":true}".to_vec()),
-                    Err(e) => response(
-                        500,
-                        "application/json",
-                        json!({"error":e.to_string()}).to_string().into_bytes(),
-                    ),
-                }
-            }
-            _ => response(404, "text/plain", b"Not found".to_vec()),
-        };
+        let content_type = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Content-Type"))
+            .map(|h| h.value.as_str().to_owned());
+        let reply = handle_request(
+            &method,
+            &raw_url,
+            content_type.as_deref(),
+            &mut request.as_reader(),
+            &mut ctx,
+        )?;
         let _ = request.respond(reply);
     }
     Ok(common::cli(
@@ -816,5 +880,137 @@ mod viewer_data_tests {
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod http_hardening_tests {
+    use super::*;
+    use std::io::{Cursor, Read};
+
+    fn header_value(headers: &[tiny_http::Header], name: &'static str) -> Option<String> {
+        headers
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str().to_owned())
+    }
+
+    fn assert_security_headers(headers: &[tiny_http::Header]) {
+        assert_eq!(
+            header_value(headers, "X-Content-Type-Options").as_deref(),
+            Some("nosniff")
+        );
+        assert_eq!(
+            header_value(headers, "Referrer-Policy").as_deref(),
+            Some("no-referrer")
+        );
+        assert_eq!(
+            header_value(headers, "Cross-Origin-Resource-Policy").as_deref(),
+            Some("same-origin")
+        );
+        assert_eq!(
+            header_value(headers, "X-Frame-Options").as_deref(),
+            Some("DENY")
+        );
+        let csp = header_value(headers, "Content-Security-Policy")
+            .expect("missing Content-Security-Policy");
+        assert!(csp.contains("default-src 'self'"), "csp={csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "csp={csp}");
+        assert!(csp.contains("'wasm-unsafe-eval'"), "csp={csp}");
+        assert!(csp.contains("base-uri 'none'"), "csp={csp}");
+        assert!(csp.contains("object-src 'none'"), "csp={csp}");
+    }
+
+    fn test_assets(dir: &Path) -> Assets {
+        let js = b"export default async function init() {}\n";
+        let wasm = b"\x00asm\x01\x00\x00\x00";
+        std::fs::write(dir.join("infra_ui.js"), js).unwrap();
+        std::fs::write(dir.join("infra_ui_bg.wasm"), wasm).unwrap();
+        let manifest = json!({
+            "schema_version": 1,
+            "js_sha256": infra_core::bank::publication::sha256(js),
+            "wasm_sha256": infra_core::bank::publication::sha256(wasm),
+        });
+        std::fs::write(dir.join("abi-manifest.json"), manifest.to_string()).unwrap();
+        Assets::load(&json!({ "ui_assets": dir })).unwrap()
+    }
+
+    #[test]
+    fn route_strips_query_and_applies_security_headers() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("workspace");
+        let run_dir = ws.join("eval-1/outputs");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("out.txt"), "hello").unwrap();
+
+        let assets_dir = temp.path().join("wasm-ui");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let assets = test_assets(&assets_dir);
+        let mut feedback_store = FeedbackStore::open(&ws).unwrap();
+        let previous = json!({});
+        let mut ctx = RequestContext {
+            workspace: &ws,
+            name: "test-skill",
+            previous: &previous,
+            benchmark: None,
+            assets: &assets,
+            feedback_store: &mut feedback_store,
+        };
+
+        for route in ["/", "/?run=1&tab=benchmark", "/index.html?v=2"] {
+            let reply = handle_request("GET", route, None, &mut Cursor::new(&[]), &mut ctx)
+                .expect("index reply");
+            assert_eq!(reply.status_code().0, 200, "route={route}");
+            assert_eq!(
+                header_value(reply.headers(), "Content-Type").as_deref(),
+                Some("text/html; charset=utf-8")
+            );
+            assert_security_headers(reply.headers());
+            let mut body = String::new();
+            reply.into_reader().read_to_string(&mut body).unwrap();
+            assert!(
+                body.contains("Eval Review"),
+                "missing HTML title on {route}"
+            );
+        }
+
+        let feedback_get = handle_request(
+            "GET",
+            "/api/feedback?ts=123",
+            None,
+            &mut Cursor::new(&[]),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(feedback_get.status_code().0, 200);
+        assert_security_headers(feedback_get.headers());
+
+        let payload = br#"{"reviews":[{"run_id":"eval-1","feedback":"looks solid"}]}"#;
+        let feedback_post = handle_request(
+            "POST",
+            "/api/feedback",
+            Some("application/json; charset=utf-8"),
+            &mut Cursor::new(payload.as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(feedback_post.status_code().0, 200);
+        assert_security_headers(feedback_post.headers());
+
+        let bad_post = handle_request(
+            "POST",
+            "/api/feedback",
+            Some("text/plain"),
+            &mut Cursor::new(payload.as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(bad_post.status_code().0, 500);
+        assert_security_headers(bad_post.headers());
+
+        let not_found =
+            handle_request("GET", "/unknown?x=1", None, &mut Cursor::new(&[]), &mut ctx).unwrap();
+        assert_eq!(not_found.status_code().0, 404);
+        assert_security_headers(not_found.headers());
     }
 }

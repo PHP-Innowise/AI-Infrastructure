@@ -384,14 +384,10 @@ pub fn sync_working_indicator() {
     dom::attr("session-form", "data-working", active);
 }
 
-pub fn new_session(project: Option<&str>) {
-    if m::read(|s| s.pending) {
-        return;
-    }
+fn reset_active_session_core(project: Option<&str>) {
     reset_preflight(true);
     reset_results();
     run::reset_diff_view_state();
-    save_preferences();
     reset_merge_archive();
     m::take("merge-draft");
     stop_poll();
@@ -419,6 +415,22 @@ pub fn new_session(project: Option<&str>) {
     }
     crate::graph_map::sync_embedded_changes();
     restore_draft(&dom::value("project"));
+}
+
+pub(crate) fn clear_session_for_route_project(project: &str) {
+    reset_active_session_core(Some(project));
+    history();
+    controls();
+    run::sync_approvals_badge();
+    run::render_permission_rules_panel();
+}
+
+pub fn new_session(project: Option<&str>) {
+    if m::read(|s| s.pending) {
+        return;
+    }
+    save_preferences();
+    reset_active_session_core(project);
     let selected = preferences_selection(dom::json_storage(PREFS), &dom::value("project"), "");
     dom::save(PREFS, Some(&selected.to_string()));
     history();
@@ -440,6 +452,20 @@ pub(crate) fn select_target_view_needed<'a>(
         return None;
     }
     target_view.filter(|view| !view.is_empty() && *view != current_view)
+}
+
+pub(crate) fn route_blocks_cross_project_sync(
+    bootstrapping: bool,
+    route_project: &str,
+    route_project_valid: bool,
+    route_session: &str,
+    selected_project: &str,
+) -> bool {
+    bootstrapping
+        && route_project_valid
+        && route_session.is_empty()
+        && !selected_project.is_empty()
+        && selected_project != route_project
 }
 
 pub async fn select(id: &str) {
@@ -492,6 +518,18 @@ pub async fn select_with_view(id: &str, target_view: Option<&str>) {
         return;
     }
     let project = m::read(|s| m::text(&s.selected, "project_id"));
+    let route = dom::hash_route();
+    let route_project_valid = !route.project.is_empty() && !m::project(&route.project).is_null();
+    if route_blocks_cross_project_sync(
+        m::yes(&m::data("bootstrapping")),
+        &route.project,
+        route_project_valid,
+        &route.session,
+        &project,
+    ) {
+        clear_session_for_route_project(&route.project);
+        return;
+    }
     if !project.is_empty() {
         sync_project(&project);
         if project != before_project {

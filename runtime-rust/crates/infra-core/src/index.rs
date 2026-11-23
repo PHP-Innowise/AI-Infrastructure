@@ -14,9 +14,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Older indexes omitted canonical Memory Bank citation digests. Rebuild only
-// derived rows once; retain working tasks, pending turns and their bindings.
-const INDEX_DOCUMENT_FORMAT: &str = "source-digests-v1";
+// Older indexes omitted canonical Memory Bank citation digests and preparsed
+// section digests. Rebuild only derived rows once; retain working tasks,
+// pending turns and their bindings.
+const INDEX_DOCUMENT_FORMAT: &str = "section-digests-v1";
 const RACY_NS: i128 = 2_000_000_000;
 const CITED_SOURCES_STATE_KEY: &str = "memory-cited-sources-v1";
 const CHUNK_SHA256_STATE_KEY: &str = "memory-chunk-sha256-v1";
@@ -1330,6 +1331,7 @@ pub fn refresh_index(
                             conn.prepare("DELETE FROM document_metadata WHERE path=?1")?,
                             conn.prepare("DELETE FROM document_links WHERE path=?1")?,
                             conn.prepare("DELETE FROM identifier_terms WHERE path=?1")?,
+                            conn.prepare("DELETE FROM document_sections WHERE path=?1")?,
                         ];
                         for path in latest.difference(&retained) {
                             if let Some(statement) = delete_document.as_mut() {
@@ -1347,6 +1349,7 @@ pub fn refresh_index(
                             conn.prepare("DELETE FROM document_metadata WHERE path=?1")?,
                             conn.prepare("DELETE FROM document_links WHERE path=?1")?,
                             conn.prepare("DELETE FROM identifier_terms WHERE path=?1")?,
+                            conn.prepare("DELETE FROM document_sections WHERE path=?1")?,
                         ];
                         for (path, rowids) in obsolete {
                             for rowid in rowids {
@@ -1363,6 +1366,7 @@ pub fn refresh_index(
                 let mut insert_document = conn.prepare("INSERT INTO documents(path,layer,kind,title,summary,content) VALUES(?1,?2,?3,?4,?5,?6)")?;
                 let mut insert_metadata = conn.prepare("INSERT INTO document_metadata(path,category,privacy,owner,authority,lifecycle,source_hash,record_id,conflicts,source_fingerprints,updated_at,confidence,attestation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)")?;
                 let mut insert_identifier = conn.prepare("INSERT OR REPLACE INTO identifier_terms(path,identifier,expansion) VALUES(?1,?2,?3)")?;
+                let mut insert_section = conn.prepare("INSERT OR REPLACE INTO document_sections(path,source_hash,content_sha256,payload) VALUES(?1,?2,?3,?4)")?;
                 for document in &discovery.documents {
                     insert_document.execute(params![
                         document.path,
@@ -1392,6 +1396,19 @@ pub fn refresh_index(
                     {
                         insert_identifier.execute(params![document.path, identifier, expansion])?;
                     }
+                    let preparsed = crate::excerpts::preparse_document(
+                        &document.title,
+                        &document.kind,
+                        &document.content,
+                    );
+                    let content_sha256 = sha256(document.content.as_bytes());
+                    let payload = serde_json::to_string(&preparsed)?;
+                    insert_section.execute(params![
+                        document.path,
+                        document.source_hash,
+                        content_sha256,
+                        payload
+                    ])?;
                 }
             }
             {

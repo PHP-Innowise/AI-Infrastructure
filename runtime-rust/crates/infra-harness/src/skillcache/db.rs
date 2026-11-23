@@ -7,6 +7,7 @@ use infra_skillcache::candidate::Candidate;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Filesystem/IR verification race window (2 seconds in nanoseconds).
@@ -40,6 +41,8 @@ pub(crate) struct ArtifactDependencyManifest {
     pub ir_revision: u64,
     #[serde(default)]
     pub verified_ns: u128,
+    #[serde(default)]
+    pub path_hashes: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,8 +206,21 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             package_sha256 TEXT NOT NULL DEFAULT '', capabilities TEXT NOT NULL DEFAULT '{}',
             engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0,
             dependency_manifest TEXT NOT NULL DEFAULT '{}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
-            tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT);
+            tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT,
+            needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0,
+            is_read_only INTEGER);
         CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);
+        CREATE TABLE IF NOT EXISTS skillcache_pending_requalify(
+            capsule_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            prior_status TEXT NOT NULL DEFAULT 'active',
+            reason TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS skillcache_pending_requalify_order
+            ON skillcache_pending_requalify(created_at);
         CREATE VIRTUAL TABLE IF NOT EXISTS skillcache_capsules_fts USING fts5(
             capsule_id UNINDEXED, project_id UNINDEXED, skill_name, mu_name, mu_description,
             tokenize='porter unicode61');
@@ -270,6 +286,17 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             "tool_chain_tree_sha",
             "TEXT NOT NULL DEFAULT ''",
         ),
+        (
+            "skillcache_capsules",
+            "needs_trace",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "skillcache_capsules",
+            "needs_trace_after_rowid",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("skillcache_capsules", "is_read_only", "INTEGER"),
         ("skillcache_compiles", "eval_arm", "TEXT"),
     ] {
         let cols = {
@@ -311,7 +338,9 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
                  package_sha256 TEXT NOT NULL DEFAULT '', capabilities TEXT NOT NULL DEFAULT '{{}}',
                  engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0,
                  dependency_manifest TEXT NOT NULL DEFAULT '{{}}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
-                 tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT);
+                 tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT,
+                 needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0,
+                 is_read_only INTEGER);
              INSERT INTO skillcache_capsules_new({CAPSULE_COLUMNS},runs_reset_rowid)
              SELECT {CAPSULE_COLUMNS},runs_reset_rowid FROM skillcache_capsules;
              DROP TABLE skillcache_capsules;
@@ -462,7 +491,7 @@ pub(crate) fn delete_trace(db: &Connection, generation: &str) -> Result<bool> {
     )? > 0)
 }
 
-const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha";
+const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha,needs_trace,needs_trace_after_rowid,is_read_only";
 
 fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -495,6 +524,9 @@ fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "dependency_manifest": decoded(row.get(27)?),
         "kind": row.get::<_, String>(28)?,
         "tool_chain_tree_sha": row.get::<_, String>(29)?,
+        "needs_trace": row.get::<_, i64>(30)? != 0,
+        "needs_trace_after_rowid": row.get::<_, i64>(31)?,
+        "is_read_only": row.get::<_, Option<i64>>(32)?.map(|v| v != 0),
     }))
 }
 
@@ -615,6 +647,7 @@ pub(crate) fn refresh_capsule(
     db.execute(
         "UPDATE skillcache_capsules SET skill_files=?2,tree_sha256=?3,env_fingerprint=?4,engine_digest=?5,
            schema_version=?6,compile_rules_version=?7,status='active',reason=NULL,
+           needs_trace=0,needs_trace_after_rowid=0,
            runs_reset_rowid=COALESCE((SELECT MAX(rowid) FROM skillcache_runs WHERE capsule_id=?1),0),
            updated_at=?8
          WHERE capsule_id=?1",
@@ -630,6 +663,91 @@ pub(crate) fn refresh_capsule(
         ],
     )?;
     Ok(())
+}
+
+/// Marks a deopted capsule as needing a fresh cold observed trace before recompiling.
+pub(crate) fn mark_capsule_needs_trace(db: &Connection, capsule_id: &str) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE skillcache_capsules
+         SET needs_trace=1,
+             needs_trace_after_rowid=CASE
+                 WHEN needs_trace=0 THEN COALESCE((SELECT MAX(rowid) FROM skillcache_traces),0)
+                 ELSE needs_trace_after_rowid
+             END,
+             updated_at=?2
+         WHERE capsule_id=?1",
+        params![capsule_id, store::now()],
+    )?;
+    if changed == 0 {
+        return Err(HarnessError::missing("Capsule not found."));
+    }
+    Ok(())
+}
+
+/// Clears the `needs_trace` flag once a fresh trace has been queued or requalified.
+pub(crate) fn clear_capsule_needs_trace(db: &Connection, capsule_id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE skillcache_capsules SET needs_trace=0,needs_trace_after_rowid=0 WHERE capsule_id=?1",
+        [capsule_id],
+    )?;
+    Ok(())
+}
+
+/// Lists `needs_recompile` capsules in `project_id` waiting for a fresh observed trace.
+pub(crate) fn capsules_needing_trace(db: &Connection, project_id: &str) -> Result<Vec<Value>> {
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id=?1 AND status='needs_recompile' AND needs_trace != 0"
+    ))?;
+    let rows = query.query_map([project_id], capsule_row)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Finds a freshly observed trace recorded strictly after `capsule` was flagged `needs_trace`.
+pub(crate) fn find_fresh_trace_after(
+    db: &Connection,
+    project_id: &str,
+    capsule: &Value,
+) -> Result<Option<Value>> {
+    let after_rowid = capsule["needs_trace_after_rowid"].as_i64().unwrap_or(0);
+    let old_gen = capsule["source_generation"].as_str().unwrap_or("");
+    let is_tool_chain = capsule["kind"] == "tool_chain";
+    let skill_path = capsule["skill_path"].as_str().unwrap_or("");
+    let skill_name = capsule["skill_name"].as_str().unwrap_or("");
+    let mut query = db.prepare(
+        "SELECT t.generation,t.session_id,t.provider,t.model,t.request,t.skill_refs,t.steps,t.usage,t.redaction,t.trace_sha256,t.created_at
+         FROM skillcache_traces t
+         JOIN sessions s ON s.id=t.session_id
+         WHERE s.project_id=?1 AND t.rowid>?2 AND t.generation!=?3
+         ORDER BY t.rowid DESC
+         LIMIT 64",
+    )?;
+    let rows = query.query_map(params![project_id, after_rowid, old_gen], trace_from_row)?;
+    for row in rows {
+        let candidate = row?;
+        if is_tool_chain {
+            if candidate["redaction"]["trace_kind"] == "tool_chain" {
+                return Ok(Some(candidate));
+            }
+            continue;
+        }
+        let matches = candidate["skill_refs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|sref| {
+                let sp = sref["path"].as_str().unwrap_or("");
+                let sn = sref["name"].as_str().unwrap_or("");
+                sp == skill_path
+                    || (!skill_name.is_empty() && sn == skill_name)
+                    || (canonical_mirror_skill(sp).is_some()
+                        && canonical_mirror_skill(sp) == canonical_mirror_skill(skill_path))
+            });
+        if matches {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn capsule(db: &Connection, capsule_id: &str) -> Result<Option<Value>> {
@@ -679,6 +797,7 @@ pub(crate) fn capsules(
 
 /// The active capsules compiled from the skill at `skill_path` (excluding
 /// evaluation-only ablation capsules).
+#[cfg(test)]
 pub(crate) fn active_capsules(
     db: &Connection,
     project_id: &str,
@@ -693,9 +812,28 @@ pub(crate) fn set_dependency_manifest(
     capsule_id: &str,
     manifest: &ArtifactDependencyManifest,
 ) -> Result<()> {
+    let mut stored_manifest = manifest.clone();
+    if stored_manifest.path_hashes.is_empty()
+        && let Some(cap) = capsule(db, capsule_id)?
+        && let Some(generation_id) = cap["source_generation"].as_str().filter(|s| !s.is_empty())
+        && let Some(source_trace) = trace(db, generation_id)?
+        && let Some(obj) = source_trace["redaction"]["tool_chain_manifest_hashes"].as_object()
+    {
+        for (path, hash) in obj {
+            if let Some(hash_str) = hash.as_str() {
+                stored_manifest
+                    .path_hashes
+                    .insert(path.clone(), hash_str.to_owned());
+            }
+        }
+    }
     let changed = db.execute(
         "UPDATE skillcache_capsules SET dependency_manifest=?2,updated_at=?3 WHERE capsule_id=?1",
-        params![capsule_id, manifest.to_value().to_string(), store::now()],
+        params![
+            capsule_id,
+            stored_manifest.to_value().to_string(),
+            store::now()
+        ],
     )?;
     if changed == 0 {
         return Err(HarnessError::missing("Capsule not found."));
@@ -720,20 +858,57 @@ pub(crate) fn set_capsule_kind_meta(
     Ok(())
 }
 
-/// Active `ToolChain` capsules shared within a project for a matching tree digest.
-pub(crate) fn active_toolchain_capsules(
+/// Persists whether every program in the compiled capsule is declared read-only.
+pub(crate) fn set_capsule_read_only(
+    db: &Connection,
+    capsule_id: &str,
+    read_only: bool,
+) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE skillcache_capsules SET is_read_only=?2 WHERE capsule_id=?1",
+        params![capsule_id, i64::from(read_only)],
+    )?;
+    if changed == 0 {
+        return Err(HarnessError::missing("Capsule not found."));
+    }
+    Ok(())
+}
+
+/// Returns the attached accelerator edition recorded in `project_accelerators`, if any.
+pub(crate) fn project_accelerator_edition(
     db: &Connection,
     project_id: &str,
-    tree_sha: &str,
+) -> Result<Option<String>> {
+    match db
+        .query_row(
+            "SELECT edition FROM project_accelerators WHERE project_id=?1",
+            [project_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+    {
+        Ok(found) => Ok(found.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// All active `ToolChain` capsules in `project_id` matching `eval_arm`, filtered in-memory
+/// by dependency manifest / touched-path hashes.
+pub(crate) fn active_toolchain_capsules_for_project(
+    db: &Connection,
+    project_id: &str,
     eval_arm: Option<&str>,
 ) -> Result<Vec<Value>> {
     let mut query = db.prepare(&format!(
         "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
-         WHERE project_id=?1 AND capsule_kind='tool_chain' AND tool_chain_tree_sha=?2 AND status='active'
-           AND ((?3 IS NULL AND eval_arm IS NULL) OR eval_arm=?3)
+         WHERE project_id=?1 AND capsule_kind='tool_chain' AND status='active'
+           AND ((?2 IS NULL AND eval_arm IS NULL) OR eval_arm=?2)
          ORDER BY created_at DESC,rowid DESC"
     ))?;
-    let rows = query.query_map(params![project_id, tree_sha, eval_arm], capsule_row)?;
+    let rows = query.query_map(params![project_id, eval_arm], capsule_row)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
@@ -793,6 +968,24 @@ pub(crate) fn upsert_template(
     Ok(template_id)
 }
 
+fn template_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "template_id": row.get::<_, String>(0)?,
+        "edition": row.get::<_, String>(1)?,
+        "skill_name": row.get::<_, String>(2)?,
+        "skill_tree_sha256": row.get::<_, String>(3)?,
+        "form": row.get::<_, String>(4)?,
+        "mu": {"name": row.get::<_, String>(5)?, "description": row.get::<_, String>(6)?},
+        "capsule_json": row.get::<_, String>(7)?,
+        "files_json": decoded(row.get(8)?),
+        "markdown": row.get::<_, Option<String>>(9)?,
+        "examples_json": row.get::<_, Option<String>>(10)?,
+        "portability_sha256": row.get::<_, String>(11)?,
+        "created_at": row.get::<_, String>(12)?,
+        "updated_at": row.get::<_, String>(13)?,
+    }))
+}
+
 /// Looks up portable edition templates matching `(edition, skill_name, skill_tree_sha256)`.
 pub(crate) fn find_templates(
     db: &Connection,
@@ -807,23 +1000,23 @@ pub(crate) fn find_templates(
          WHERE edition=?1 AND skill_name=?2 AND skill_tree_sha256=?3
          ORDER BY updated_at DESC",
     )?;
-    let rows = query.query_map(params![edition, skill_name, skill_tree_sha256], |row| {
-        Ok(json!({
-            "template_id": row.get::<_, String>(0)?,
-            "edition": row.get::<_, String>(1)?,
-            "skill_name": row.get::<_, String>(2)?,
-            "skill_tree_sha256": row.get::<_, String>(3)?,
-            "form": row.get::<_, String>(4)?,
-            "mu": {"name": row.get::<_, String>(5)?, "description": row.get::<_, String>(6)?},
-            "capsule_json": row.get::<_, String>(7)?,
-            "files_json": decoded(row.get(8)?),
-            "markdown": row.get::<_, Option<String>>(9)?,
-            "examples_json": row.get::<_, Option<String>>(10)?,
-            "portability_sha256": row.get::<_, String>(11)?,
-            "created_at": row.get::<_, String>(12)?,
-            "updated_at": row.get::<_, String>(13)?,
-        }))
-    })?;
+    let rows = query.query_map(
+        params![edition, skill_name, skill_tree_sha256],
+        template_row,
+    )?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Lists all portable templates indexed for `edition`.
+pub(crate) fn edition_templates(db: &Connection, edition: &str) -> Result<Vec<Value>> {
+    let mut query = db.prepare(
+        "SELECT template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
+                capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
+         FROM skillcache_templates
+         WHERE edition=?1
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = query.query_map([edition], template_row)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
@@ -840,8 +1033,51 @@ pub(crate) fn active_or_needs_recompile_capsules(
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// Canonical `(scope, relative_subpath)` for tool-mirror skills across
+/// `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/` (workspace or `~/`).
+pub(crate) fn canonical_mirror_skill(skill_path: &str) -> Option<(&'static str, String)> {
+    let normalized = normalize_rel_path(skill_path);
+    let (scope, rest) = match normalized.strip_prefix("~/") {
+        Some(tail) => ("~", tail),
+        None => ("ws", normalized.as_str()),
+    };
+    for prefix in [".claude/skills/", ".agents/skills/", ".cursor/skills/"] {
+        if let Some(sub) = rest.strip_prefix(prefix)
+            && !sub.is_empty()
+        {
+            return Some((scope, sub.to_owned()));
+        }
+    }
+    None
+}
+
+/// Whether `capsule` matches `skill_path` directly or via canonical tool-mirror
+/// identity (`skill_name` + canonical subpath + `tree_sha256` content digest).
+pub(crate) fn capsule_matches_skill_or_mirror(
+    capsule: &Value,
+    skill_path: &str,
+    skill_name: &str,
+    tree_sha256: &str,
+) -> bool {
+    let cap_path = capsule["skill_path"].as_str().unwrap_or("");
+    if cap_path == skill_path {
+        return true;
+    }
+    if tree_sha256.is_empty() || capsule["tree_sha256"].as_str() != Some(tree_sha256) {
+        return false;
+    }
+    if !skill_name.is_empty() && capsule["skill_name"].as_str() != Some(skill_name) {
+        return false;
+    }
+    matches!(
+        (canonical_mirror_skill(cap_path), canonical_mirror_skill(skill_path)),
+        (Some(a), Some(b)) if a == b
+    )
+}
+
 /// The active capsules compiled for `eval_arm` (or normal non-eval capsules
 /// when `eval_arm` is `None`).
+#[cfg(test)]
 pub(crate) fn active_capsules_for_eval(
     db: &Connection,
     project_id: &str,
@@ -856,6 +1092,133 @@ pub(crate) fn active_capsules_for_eval(
     ))?;
     let rows = query.query_map(params![project_id, skill_path, eval_arm], capsule_row)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Active capsules matching `skill_path` or an identical tool mirror
+/// (`.claude`/`.agents`/`.cursor`) with matching canonical skill name and `tree_sha256`.
+pub(crate) fn active_capsules_for_skill_or_mirror(
+    db: &Connection,
+    project_id: &str,
+    skill_path: &str,
+    skill_name: &str,
+    tree_sha256: &str,
+    eval_arm: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut query = db.prepare(&format!(
+        "SELECT {CAPSULE_COLUMNS} FROM skillcache_capsules
+         WHERE project_id=?1 AND status='active'
+           AND ((?3 IS NULL AND eval_arm IS NULL) OR eval_arm=?3)
+           AND (
+               skill_path=?2
+               OR (?4 != '' AND tree_sha256=?4 AND (?5 = '' OR skill_name=?5))
+           )
+         ORDER BY (skill_path=?2) DESC, created_at DESC, rowid DESC"
+    ))?;
+    let rows = query.query_map(
+        params![project_id, skill_path, eval_arm, tree_sha256, skill_name],
+        capsule_row,
+    )?;
+    let mut matched = Vec::new();
+    for row in rows {
+        let cap = row?;
+        if capsule_matches_skill_or_mirror(&cap, skill_path, skill_name, tree_sha256) {
+            matched.push(cap);
+        }
+    }
+    Ok(matched)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingRequalify {
+    pub capsule_id: String,
+    pub project_id: String,
+    pub prior_status: String,
+    pub reason: Option<String>,
+    pub attempts: i64,
+}
+
+/// Persists a pending background requalification in SQLite so `WorkQueue` saturation
+/// or restarts never drop requalification work.
+pub(crate) fn enqueue_pending_requalify(
+    db: &Connection,
+    project_id: &str,
+    capsule_id: &str,
+    prior_status: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    let now = store::now();
+    db.execute(
+        "INSERT INTO skillcache_pending_requalify(
+            capsule_id,project_id,prior_status,reason,attempts,created_at,updated_at
+         ) VALUES(?1,?2,?3,?4,0,?5,?5)
+         ON CONFLICT(capsule_id) DO UPDATE SET
+            project_id=excluded.project_id,
+            prior_status=CASE
+                WHEN skillcache_pending_requalify.prior_status='needs_recompile' THEN 'needs_recompile'
+                ELSE excluded.prior_status
+            END,
+            reason=COALESCE(excluded.reason, skillcache_pending_requalify.reason),
+            updated_at=excluded.updated_at",
+        params![capsule_id, project_id, prior_status, reason, now],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn list_pending_requalify(db: &Connection, limit: i64) -> Result<Vec<PendingRequalify>> {
+    let mut query = db.prepare(
+        "SELECT capsule_id,project_id,prior_status,reason,attempts
+         FROM skillcache_pending_requalify
+         ORDER BY created_at ASC,rowid ASC
+         LIMIT ?1",
+    )?;
+    let rows = query.query_map([limit], |row| {
+        Ok(PendingRequalify {
+            capsule_id: row.get(0)?,
+            project_id: row.get(1)?,
+            prior_status: row.get(2)?,
+            reason: row.get(3)?,
+            attempts: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub(crate) fn record_pending_requalify_attempt(
+    db: &Connection,
+    capsule_id: &str,
+    error: &str,
+) -> Result<i64> {
+    db.execute(
+        "UPDATE skillcache_pending_requalify
+         SET attempts=attempts+1,last_error=?2,updated_at=?3
+         WHERE capsule_id=?1",
+        params![capsule_id, error, store::now()],
+    )?;
+    Ok(db
+        .query_row(
+            "SELECT attempts FROM skillcache_pending_requalify WHERE capsule_id=?1",
+            [capsule_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+pub(crate) fn delete_pending_requalify(db: &Connection, capsule_id: &str) -> Result<()> {
+    db.execute(
+        "DELETE FROM skillcache_pending_requalify WHERE capsule_id=?1",
+        [capsule_id],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn pending_requalify_count(db: &Connection) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM skillcache_pending_requalify",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 pub(crate) fn touch_capsule(db: &Connection, capsule_id: &str) -> Result<()> {
@@ -975,6 +1338,10 @@ pub(crate) fn delete_capsule(db: &Connection, capsule_id: &str) -> Result<bool> 
     )?;
     db.execute(
         "DELETE FROM skillcache_runs WHERE capsule_id=?1",
+        [capsule_id],
+    )?;
+    db.execute(
+        "DELETE FROM skillcache_pending_requalify WHERE capsule_id=?1",
         [capsule_id],
     )?;
     db.execute(
@@ -1538,6 +1905,7 @@ mod tests {
             route_selectors: vec!["routes/api.php".into()],
             table_selectors: vec!["database/migrations/**".into()],
             caller_files: vec!["app/Http/Kernel.php".into()],
+            path_hashes: BTreeMap::new(),
             ir_revision: 10,
             verified_ns: now,
         };
@@ -1616,5 +1984,197 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0]["edition"], "Laravel");
         assert_eq!(found[0]["mu"]["name"], "php-lint");
+    }
+
+    #[test]
+    fn pending_requalify_needs_trace_and_mirror_dedup_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("proj");
+        std::fs::create_dir_all(&ws).unwrap();
+        let store = crate::store::SessionStore::open(&dir.path().join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = store
+            .create(
+                &json!({"project_id": project_id, "provider": "codex"}),
+                "Run pdf skill",
+                &[],
+            )
+            .unwrap();
+        let sid = session["id"].as_str().unwrap();
+        let db = store.connection().unwrap();
+
+        let tree_sha = "d".repeat(64);
+        save_trace(
+            &db,
+            &TraceRow {
+                generation: "g-old",
+                session_id: sid,
+                provider: "codex",
+                model: None,
+                request: "Run pdf skill",
+                skill_refs: &json!([{"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "tree_sha256": tree_sha}]),
+                steps: &json!([{"kind": "command", "command": "php artisan --version"}]),
+                usage: &json!({}),
+                redaction: &json!({"tool_chain_manifest_hashes": {"composer.json": "h123"}}),
+            },
+        )
+        .unwrap();
+
+        let skill_ref = json!({
+            "name": "pdf",
+            "path": ".claude/skills/pdf/SKILL.md",
+            "tree_sha256": tree_sha
+        });
+        begin_capsule(
+            &db,
+            "c1",
+            "cmp1",
+            &project_id,
+            sid,
+            "g-old",
+            &skill_ref,
+            None,
+        )
+        .unwrap();
+        activate_capsule(
+            &db,
+            &Qualified {
+                capsule_id: "c1",
+                mu_name: "pdf-run",
+                mu_description: "Run pdf workflow",
+                form: "hybrid",
+                capsule_sha256: "cap-sha",
+                package_sha256: "pkg-sha",
+                skill_files: &json!({}),
+                env_fingerprint: "env",
+                engine_digest: "eng",
+                artifact_dir: "/tmp/c1",
+                capabilities: &json!({"network": "none"}),
+            },
+        )
+        .unwrap();
+
+        let manifest = ArtifactDependencyManifest {
+            skill_paths: vec![".claude/skills/pdf/SKILL.md".into()],
+            watched_globs: Vec::new(),
+            manifest_files: vec!["composer.json".into()],
+            ast_selectors: Vec::new(),
+            route_selectors: Vec::new(),
+            table_selectors: Vec::new(),
+            caller_files: Vec::new(),
+            path_hashes: BTreeMap::new(),
+            ir_revision: 1,
+            verified_ns: 1,
+        };
+        set_dependency_manifest(&db, "c1", &manifest).unwrap();
+        let stored_cap = capsule(&db, "c1").unwrap().unwrap();
+        assert_eq!(
+            stored_cap["dependency_manifest"]["path_hashes"]["composer.json"],
+            "h123"
+        );
+
+        assert_eq!(
+            canonical_mirror_skill(".claude/skills/pdf/SKILL.md"),
+            Some(("ws", "pdf/SKILL.md".into()))
+        );
+        assert_eq!(
+            canonical_mirror_skill(".agents/skills/pdf/SKILL.md"),
+            Some(("ws", "pdf/SKILL.md".into()))
+        );
+        assert_eq!(
+            canonical_mirror_skill(".cursor/skills/pdf/SKILL.md"),
+            Some(("ws", "pdf/SKILL.md".into()))
+        );
+        assert_eq!(
+            canonical_mirror_skill("~/.claude/skills/pdf/SKILL.md"),
+            Some(("~", "pdf/SKILL.md".into()))
+        );
+        assert_eq!(
+            active_capsules_for_skill_or_mirror(
+                &db,
+                &project_id,
+                ".agents/skills/pdf/SKILL.md",
+                "pdf",
+                &tree_sha,
+                None,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        assert_eq!(
+            active_capsules_for_skill_or_mirror(
+                &db,
+                &project_id,
+                ".cursor/skills/pdf/SKILL.md",
+                "pdf",
+                &tree_sha,
+                None,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        assert!(
+            active_capsules_for_skill_or_mirror(
+                &db,
+                &project_id,
+                ".cursor/skills/pdf/SKILL.md",
+                "pdf",
+                &"f".repeat(64),
+                None,
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        set_capsule_status(&db, "c1", "needs_recompile", Some("Warm deopt")).unwrap();
+        mark_capsule_needs_trace(&db, "c1").unwrap();
+        assert_eq!(capsules_needing_trace(&db, &project_id).unwrap().len(), 1);
+        let deopted_cap = capsule(&db, "c1").unwrap().unwrap();
+        assert!(
+            find_fresh_trace_after(&db, &project_id, &deopted_cap)
+                .unwrap()
+                .is_none()
+        );
+
+        save_trace(
+            &db,
+            &TraceRow {
+                generation: "g-fresh",
+                session_id: sid,
+                provider: "codex",
+                model: None,
+                request: "Run pdf skill",
+                skill_refs: &json!([{"name": "pdf", "path": ".agents/skills/pdf/SKILL.md", "tree_sha256": tree_sha}]),
+                steps: &json!([{"kind": "command", "command": "php artisan --version"}]),
+                usage: &json!({}),
+                redaction: &json!({"admissible": true}),
+            },
+        )
+        .unwrap();
+        let fresh = find_fresh_trace_after(&db, &project_id, &deopted_cap)
+            .unwrap()
+            .expect("fresh observed trace after deopt must be discovered");
+        assert_eq!(fresh["generation"], "g-fresh");
+        clear_capsule_needs_trace(&db, "c1").unwrap();
+        assert!(capsules_needing_trace(&db, &project_id).unwrap().is_empty());
+
+        enqueue_pending_requalify(&db, &project_id, "c1", "needs_recompile", Some("Deopted"))
+            .unwrap();
+        enqueue_pending_requalify(&db, &project_id, "c1", "stale", Some("IR delta")).unwrap();
+        let pending = list_pending_requalify(&db, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].prior_status, "needs_recompile");
+        assert_eq!(
+            record_pending_requalify_attempt(&db, "c1", "busy").unwrap(),
+            1
+        );
+        assert_eq!(pending_requalify_count(&db).unwrap(), 1);
+        delete_pending_requalify(&db, "c1").unwrap();
+        assert_eq!(pending_requalify_count(&db).unwrap(), 0);
     }
 }

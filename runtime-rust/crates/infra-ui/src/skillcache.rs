@@ -273,6 +273,95 @@ fn action_button(label: &str, action: &str, payload: &V) -> String {
     )
 }
 
+pub(crate) fn is_compile_in_flight_for_session(sid: &str, generation: &str, state: &V) -> bool {
+    !sid.is_empty()
+        && !generation.is_empty()
+        && state["session_id"].as_str() == Some(sid)
+        && state["generation"].as_str() == Some(generation)
+}
+
+pub(crate) fn render_compile_button_html(generation: &str, compiling: bool) -> String {
+    let payload = esc(&json!({"generation": generation}).to_string());
+    if compiling {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"skillcache-compile\" data-payload=\"{payload}\" disabled>Compiling…</button>"
+        )
+    } else {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"skillcache-compile\" data-payload=\"{payload}\">Compile into a capsule</button>"
+        )
+    }
+}
+
+pub(crate) fn session_error_for(store: &V, sid: &str) -> String {
+    if sid.is_empty() {
+        return String::new();
+    }
+    store.get(sid).and_then(V::as_str).unwrap_or("").to_owned()
+}
+
+fn set_session_error(sid: &str, message: &str) {
+    if sid.is_empty() {
+        return;
+    }
+    let mut store = m::data("skillcache-error");
+    if !store.is_object() {
+        store = json!({});
+    }
+    if message.is_empty() {
+        if let Some(obj) = store.as_object_mut() {
+            obj.remove(sid);
+        }
+    } else {
+        store[sid] = json!(message);
+    }
+    m::set("skillcache-error", store);
+}
+
+pub(crate) fn configured_compiler_provider(selected: &V, state: &V, boot: &V) -> Option<String> {
+    for candidate in [
+        selected["skillcache"]["compiler"]["provider"].as_str(),
+        state["compiler"]["provider"].as_str(),
+        boot["skillcache"]["compiler"]["provider"].as_str(),
+        boot["runtime"]["skillcache"]["compiler"]["provider"].as_str(),
+    ] {
+        if let Some(provider) = candidate.map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(provider.to_owned());
+        }
+    }
+    None
+}
+
+pub(crate) fn build_compile_request_body(
+    generation: &str,
+    model: &str,
+    selected: &V,
+    state: &V,
+    boot: &V,
+) -> V {
+    let mut body = json!({"generation": generation});
+    let trimmed_model = model.trim();
+    if !trimmed_model.is_empty() {
+        let mut compiler = json!({"model": trimmed_model});
+        if let Some(provider) = configured_compiler_provider(selected, state, boot) {
+            compiler["provider"] = json!(provider);
+        }
+        body["compiler"] = compiler;
+    } else if let Some(provider) = configured_compiler_provider(selected, state, boot) {
+        let configured_model = selected["skillcache"]["compiler"]["model"]
+            .as_str()
+            .or_else(|| state["compiler"]["model"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        body["compiler"] = if let Some(m_id) = configured_model {
+            json!({"provider": provider, "model": m_id})
+        } else {
+            json!({"provider": provider})
+        };
+    }
+    body
+}
+
 /// What can be done about one event, given the session's SkillCache state.
 /// An observed turn can be compiled once; a capsule can be opened.
 pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
@@ -303,6 +392,9 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
     let trace = m::array(&state["traces"])
         .into_iter()
         .find(|trace| trace["generation"] == generation);
+    let sid = m::read(|s| s.sid.clone());
+    let compiling =
+        is_compile_in_flight_for_session(&sid, generation, &m::data("skillcache-compiling"));
     if let Some(compile) = compile {
         let status = compile["status"].as_str().unwrap_or("queued");
         let outcome = compile["outcome"].as_str().unwrap_or("");
@@ -338,11 +430,7 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
                 .as_ref()
                 .is_some_and(|trace| trace["replayable"] != false)
         {
-            out.push_str(&action_button(
-                "Compile into a capsule",
-                "skillcache-compile",
-                &json!({"generation": generation}),
-            ));
+            out.push_str(&render_compile_button_html(generation, compiling));
         }
         return out;
     }
@@ -357,11 +445,7 @@ pub(crate) fn event_actions_html(event: &V, state: &V) -> String {
                 "<span class=\"skillcache-compile\" data-status=\"unavailable\">This turn cannot be compiled: replay evidence is unavailable{why}.</span>"
             ));
         }
-        Some(_) => out.push_str(&action_button(
-            "Compile into a capsule",
-            "skillcache-compile",
-            &json!({"generation": generation}),
-        )),
+        Some(_) => out.push_str(&render_compile_button_html(generation, compiling)),
         None => out.push_str(
             "<span class=\"skillcache-compile\" data-status=\"unavailable\">The trace of this turn is no longer kept.</span>",
         ),
@@ -604,18 +688,67 @@ pub fn render_preview(preview: &V) {
     }
 }
 
+pub(crate) fn provider_display_name(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "claude" | "" => "Claude".to_owned(),
+        "codex" => "Codex".to_owned(),
+        "cursor" => "Cursor".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => "Claude".to_owned(),
+            }
+        }
+    }
+}
+
+/// Placeholder and helper copy for `#skillcache-compiler-model` / `#skillcache-compiler-hint`.
+/// Compilation always runs via Claude (the only shell-less provider), so non-Claude
+/// session providers explicitly clarify why Claude remains the compiler.
+pub(crate) fn compiler_copy(
+    session_provider: &str,
+    configured_compiler: Option<&str>,
+) -> (String, String) {
+    let compiler_raw = configured_compiler
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude");
+    let compiler_name = provider_display_name(compiler_raw);
+    let session_trimmed = session_provider.trim();
+    if compiler_raw.eq_ignore_ascii_case("claude")
+        && !session_trimmed.is_empty()
+        && !session_trimmed.eq_ignore_ascii_case("claude")
+    {
+        let session_name = provider_display_name(session_trimmed);
+        return (
+            "Claude's default model (compiler)".to_owned(),
+            format!(
+                "Always compiled by Claude (the only shell-less compiler), even for {session_name} sessions."
+            ),
+        );
+    }
+    (
+        format!("{compiler_name}'s default model"),
+        format!("A capsule is compiled by {compiler_name}, started without a shell."),
+    )
+}
+
 /// The chip, the panel's note and whether the option can be changed now.
 pub fn controls() {
     let allowed = workflow_eligible();
     let mode = dom::value("skillcache-mode");
+    let session_provider = dom::value("provider");
+    let (selected, boot) = m::read(|s| (s.selected.clone(), s.boot.clone()));
+    let configured_compiler = configured_compiler_provider(&selected, &session_state(), &boot);
+    let (placeholder, hint) = compiler_copy(&session_provider, configured_compiler.as_deref());
     let shown = if allowed { mode.as_str() } else { "off" };
     dom::text("option-skillcache-value", mode_label(shown));
     dom::disabled("skillcache-mode", !allowed);
     dom::disabled("skillcache-compiler-model", !allowed || mode == "off");
-    dom::text(
-        "skillcache-note",
-        &note(&mode, &dom::value("provider"), allowed),
-    );
+    dom::attr("skillcache-compiler-model", "placeholder", &placeholder);
+    dom::text("skillcache-compiler-hint", &hint);
+    dom::text("skillcache-note", &note(&mode, &session_provider, allowed));
     if preflight_request().is_none() {
         dom::hidden("skillcache-preview", true);
     }
@@ -643,13 +776,11 @@ pub(crate) fn snapshot(session: &V) -> V {
 /// Renders the run view's tab for the current run.
 pub fn render_run_pane(run: &V) {
     if let Some(pane) = dom::get("run-pane-skillcache") {
+        let sid = m::read(|s| s.sid.clone());
+        let error = session_error_for(&m::data("skillcache-error"), &sid);
         set_markup(
             &pane,
-            &render_run_pane_html(
-                &m::array(&run["skillcache"]),
-                &session_state(),
-                m::data("skillcache-error").as_str().unwrap_or(""),
-            ),
+            &render_run_pane_html(&m::array(&run["skillcache"]), &session_state(), &error),
         );
     }
 }
@@ -765,19 +896,33 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V) -> bool {
             if sid.is_empty() || generation.is_empty() {
                 return true;
             }
-            let model = dom::value("skillcache-compiler-model");
-            let mut body = json!({"generation": generation});
-            if !model.trim().is_empty() {
-                body["compiler"] = json!({"provider": "claude", "model": model.trim()});
+            if is_compile_in_flight_for_session(&sid, &generation, &m::data("skillcache-compiling"))
+            {
+                return true;
             }
-            m::take("skillcache-error");
+            m::set(
+                "skillcache-compiling",
+                json!({"session_id": sid, "generation": generation}),
+            );
+            set_session_error(&sid, "");
+            run::render();
+            run::refresh_skillcache_cards();
+            let model = dom::value("skillcache-compiler-model");
+            let (selected, boot) = m::read(|s| (s.selected.clone(), s.boot.clone()));
+            let body =
+                build_compile_request_body(&generation, &model, &selected, &session_state(), &boot);
             let path = format!("/api/sessions/{}/skillcache/compile", dom::enc(&sid));
             if let Err(error) = api::post(&path, body).await {
-                m::set("skillcache-error", json!(error.message));
+                set_session_error(&sid, &error.message);
+            }
+            if is_compile_in_flight_for_session(&sid, &generation, &m::data("skillcache-compiling"))
+            {
+                m::take("skillcache-compiling");
             }
             invalidate_session();
             load_session(&sid, "").await;
             run::render();
+            run::refresh_skillcache_cards();
         }
         _ => return false,
     }
@@ -1105,5 +1250,67 @@ mod tests {
         assert_no_inline_hex_colors(&card);
         assert!(card.contains("Trace kept"));
         assert!(card.contains("Kept this turn&#39;s trace"));
+    }
+
+    #[test]
+    fn compile_controls_follow_configured_provider_track_inflight_and_scope_errors() {
+        // Configured compiler provider is followed instead of hardcoding "claude"; when omitted,
+        // "provider" is left unset so backend defaults apply cleanly.
+        assert_eq!(
+            build_compile_request_body("g1", "opus", &V::Null, &V::Null, &V::Null),
+            json!({"generation": "g1", "compiler": {"model": "opus"}})
+        );
+        assert_eq!(
+            build_compile_request_body(
+                "g1",
+                "sonnet",
+                &json!({"skillcache": {"compiler": {"provider": "claude"}}}),
+                &V::Null,
+                &V::Null,
+            ),
+            json!({"generation": "g1", "compiler": {"provider": "claude", "model": "sonnet"}})
+        );
+        assert_eq!(
+            build_compile_request_body("g1", "", &V::Null, &V::Null, &V::Null),
+            json!({"generation": "g1"})
+        );
+
+        let compiling = json!({"session_id": "s1", "generation": "g1"});
+        assert!(is_compile_in_flight_for_session("s1", "g1", &compiling));
+        assert!(!is_compile_in_flight_for_session("s2", "g1", &compiling));
+        let disabled_btn = render_compile_button_html("g1", true);
+        assert!(disabled_btn.contains("disabled"));
+        assert!(disabled_btn.contains("Compiling…"));
+        let enabled_btn = render_compile_button_html("g1", false);
+        assert!(!enabled_btn.contains("disabled"));
+        assert!(enabled_btn.contains("Compile into a capsule"));
+
+        m::take("skillcache-error");
+        set_session_error("s1", "Compile timed out");
+        assert_eq!(
+            session_error_for(&m::data("skillcache-error"), "s1"),
+            "Compile timed out"
+        );
+        assert_eq!(session_error_for(&m::data("skillcache-error"), "s2"), "");
+        set_session_error("s1", "");
+        assert_eq!(session_error_for(&m::data("skillcache-error"), "s1"), "");
+        m::take("skillcache-error");
+
+        let (claude_ph, claude_hint) = compiler_copy("claude", None);
+        assert_eq!(claude_ph, "Claude's default model");
+        assert!(claude_hint.contains("compiled by Claude"));
+
+        let (codex_ph, codex_hint) = compiler_copy("codex", Some("claude"));
+        assert_eq!(codex_ph, "Claude's default model (compiler)");
+        assert!(codex_hint.contains("Codex sessions"));
+        assert!(codex_hint.contains("Always compiled by Claude"));
+
+        let (cursor_ph, cursor_hint) = compiler_copy("cursor", None);
+        assert_eq!(cursor_ph, "Claude's default model (compiler)");
+        assert!(cursor_hint.contains("Cursor sessions"));
+
+        let (custom_ph, custom_hint) = compiler_copy("codex", Some("codex"));
+        assert_eq!(custom_ph, "Codex's default model");
+        assert!(custom_hint.contains("compiled by Codex"));
     }
 }

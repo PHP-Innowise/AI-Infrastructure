@@ -120,6 +120,10 @@ impl MapQueryParams {
     }
 }
 
+fn is_false_status(b: &bool) -> bool {
+    !*b
+}
+
 /// Real-time status / invalidation event published for SSE streaming.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct GraphStatusEvent {
@@ -138,6 +142,12 @@ pub struct GraphStatusEvent {
     pub edges: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false_status")]
+    pub full_reload: bool,
 }
 
 pub(super) fn global_graph_events() -> &'static tokio::sync::broadcast::Sender<GraphStatusEvent> {
@@ -395,6 +405,7 @@ pub(super) enum PendingLiveJson {
         ir_nodes: Arc<Vec<crate::graph_ir::IrNodeSpec>>,
         ir_links: Arc<Vec<crate::graph_ir::IrLinkSpec>>,
     },
+    Deltas(Vec<Arc<crate::graph_ir::IrDeltaElements>>),
     #[allow(dead_code)]
     Bytes {
         nodes: u64,
@@ -642,6 +653,77 @@ impl Graphs {
         edges: Option<u64>,
         message: Option<String>,
     ) {
+        self.emit_status_event_inner(
+            project,
+            state,
+            reason,
+            revision,
+            nodes,
+            edges,
+            message,
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_status_event_with_delta(
+        &self,
+        project: &str,
+        state: &str,
+        reason: &'static str,
+        revision: u64,
+        nodes: Option<u64>,
+        edges: Option<u64>,
+        message: Option<String>,
+        delta: &crate::graph_ir::IrUpdateDelta,
+        full_reload: bool,
+    ) {
+        const SSE_DELTA_CAP: usize = 32;
+        let overflow = delta.changed_paths.len() > SSE_DELTA_CAP
+            || !delta.removed_files.is_empty()
+            || delta.manifest_changed;
+        let changed_files: Vec<String> = delta
+            .changed_paths
+            .iter()
+            .take(SSE_DELTA_CAP)
+            .cloned()
+            .collect();
+        let removed_files: Vec<String> = delta
+            .removed_files
+            .iter()
+            .take(SSE_DELTA_CAP)
+            .cloned()
+            .collect();
+        self.emit_status_event_inner(
+            project,
+            state,
+            reason,
+            revision,
+            nodes,
+            edges,
+            message,
+            changed_files,
+            removed_files,
+            full_reload || overflow,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_status_event_inner(
+        &self,
+        project: &str,
+        state: &str,
+        reason: &'static str,
+        revision: u64,
+        nodes: Option<u64>,
+        edges: Option<u64>,
+        message: Option<String>,
+        changed_files: Vec<String>,
+        removed_files: Vec<String>,
+        full_reload: bool,
+    ) {
         let backend = self
             .setting(project)
             .ok()
@@ -657,6 +739,9 @@ impl Graphs {
             nodes,
             edges,
             message,
+            changed_files,
+            removed_files,
+            full_reload,
         };
         let _ = self.events.send(event.clone());
         let _ = global_graph_events().send(event);
@@ -745,8 +830,29 @@ impl Graphs {
             let Ok(mut st) = slot.state.lock() else {
                 return;
             };
-            if let Some(snap) = snapshot {
-                st.pending = Some(snap);
+            match (st.dirty, st.pending.take(), snapshot) {
+                (true, None, Some(PendingLiveJson::Deltas(_))) => {
+                    // An earlier flush already requested a full export; keep `pending = None`.
+                    st.pending = None;
+                }
+                (
+                    _,
+                    Some(PendingLiveJson::Deltas(mut prev)),
+                    Some(PendingLiveJson::Deltas(next)),
+                ) => {
+                    if prev.len() + next.len() <= 8 {
+                        prev.extend(next);
+                        st.pending = Some(PendingLiveJson::Deltas(prev));
+                    } else {
+                        st.pending = None;
+                    }
+                }
+                (_, _, Some(snap)) => {
+                    st.pending = Some(snap);
+                }
+                (_, _, None) => {
+                    st.pending = None;
+                }
             }
             st.dirty = true;
             if st.active {
@@ -861,6 +967,14 @@ impl Graphs {
                                 .ok()
                                 .map(|()| (nodes, edges))
                             }),
+                            Some(PendingLiveJson::Deltas(deltas)) => {
+                                let refs: Vec<&crate::graph_ir::IrDeltaElements> =
+                                    deltas.iter().map(Arc::as_ref).collect();
+                                graphs.get_ir_store_readonly(&proj).and_then(|ir| {
+                                    ir.patch_live_graph_from_deltas_atomic(&live_graph, &refs)
+                                        .ok()
+                                })
+                            }
                             None => graphs
                                 .get_ir_store_readonly(&proj)
                                 .and_then(|ir| ir.write_live_graph_atomic(&live_graph).ok()),

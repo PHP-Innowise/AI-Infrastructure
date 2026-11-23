@@ -184,9 +184,20 @@ pub(super) fn discover_manifest_dirs(root: &Path, files: &[String]) -> Vec<Strin
     const MANIFESTS: &[&str] = &[
         "Cargo.toml",
         "package.json",
+        "tsconfig.json",
+        "jsconfig.json",
         "composer.json",
         "go.mod",
         "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "Package.swift",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "Gemfile",
+        "deno.json",
+        "deno.jsonc",
     ];
     let mut dirs = BTreeSet::new();
     // Always inspect the repository root `""` so single-crate or workspace-root files group under `"."`.
@@ -425,6 +436,117 @@ pub(crate) fn rebuild_default_map_at_lod(
                 .map(|((f, t), flow)| index.edge_json(f, t, flow))
                 .collect(),
         );
+        if let Some(f) = focus_trim
+            && !seed_syms.is_empty()
+        {
+            let mut key_for_sym = |sym_id: u32| -> String {
+                let s = &index.symbols[sym_id as usize];
+                let keys = file_keys_cache
+                    .entry(s.file)
+                    .or_insert_with(|| index.keys(s.file));
+                keys[sym_id as usize - index.first[s.file as usize] as usize].clone()
+            };
+            let format_side =
+                |flows_map: BTreeMap<(u32, String), EdgeFlow>| -> (Vec<Value>, usize) {
+                    let mut rows: Vec<((u32, String), EdgeFlow)> = flows_map.into_iter().collect();
+                    rows.sort_by(|a, b| {
+                        b.1.flow.links.cmp(&a.1.flow.links).then(a.0.1.cmp(&b.0.1))
+                    });
+                    let more = rows.len().saturating_sub(LISTED);
+                    rows.truncate(LISTED);
+                    let list = rows
+                        .into_iter()
+                        .map(|((other_id, other_key), flow)| {
+                            let other = &index.symbols[other_id as usize];
+                            json!({
+                                "path": other_key,
+                                "name": index.shown(other_id),
+                                "file": index.files[other.file as usize],
+                                "line": other.line,
+                                "kind": other.kind.word(),
+                                "folder": false,
+                                "symbol": true,
+                                "inside": kept_set.contains_key(&other_id),
+                                "links": flow.flow.links,
+                                "guessed": flow.flow.guessed,
+                            })
+                        })
+                        .collect();
+                    (list, more)
+                };
+            let mut out_count = 0u64;
+            let mut in_count = 0u64;
+            let mut out_flows: BTreeMap<(u32, String), EdgeFlow> = BTreeMap::new();
+            let mut in_flows: BTreeMap<(u32, String), EdgeFlow> = BTreeMap::new();
+            let mut focus_kinds: BTreeMap<u16, u64> = BTreeMap::new();
+            for &(from, to, kind, guessed) in &index.uses {
+                if (certain && guessed) || from == to {
+                    continue;
+                }
+                let from_in = seed_syms.contains(&from);
+                let to_in = seed_syms.contains(&to);
+                if from_in && !to_in {
+                    out_count += 1;
+                    *focus_kinds.entry(kind).or_default() += 1;
+                    let tk = key_for_sym(to);
+                    out_flows
+                        .entry((to, tk))
+                        .or_default()
+                        .add_link(kind, guessed);
+                } else if to_in && !from_in {
+                    in_count += 1;
+                    let fk = key_for_sym(from);
+                    in_flows
+                        .entry((from, fk))
+                        .or_default()
+                        .add_link(kind, guessed);
+                }
+            }
+            let (uses, uses_more) = format_side(out_flows);
+            let (used_by, used_by_more) = format_side(in_flows);
+            if !focus_is_path_scope && let Some(&at) = seed_syms.iter().next() {
+                let focus_key = key_for_sym(at);
+                let sym = &index.symbols[at as usize];
+                view["focus"] = json!({
+                    "path": focus_key,
+                    "name": index.shown(at),
+                    "kind": sym.kind.word(),
+                    "line": sym.line,
+                    "file": index.files[sym.file as usize],
+                    "symbol": true,
+                    "folder": false,
+                    "inside": true,
+                    "out": sym_out[at as usize],
+                    "in": sym_in[at as usize],
+                    "uses": uses,
+                    "uses_more": uses_more,
+                    "used_by": used_by,
+                    "used_by_more": used_by_more,
+                    "kinds": index.kinds_json(&focus_kinds),
+                });
+            } else if focus_is_path_scope {
+                let is_folder = matches!(index.reach(f), Some(Reach::Folder(_)));
+                let mut focus_files: HashSet<u32> = HashSet::new();
+                for &sid in &seed_syms {
+                    focus_files.insert(index.symbols[sid as usize].file);
+                }
+                view["focus"] = json!({
+                    "path": f,
+                    "name": if f == "." { "." } else { name(f) },
+                    "folder": is_folder,
+                    "inside": true,
+                    "files": focus_files.len(),
+                    "symbols": seed_syms.len(),
+                    "out": out_count,
+                    "in": in_count,
+                    "uses": uses,
+                    "uses_more": uses_more,
+                    "used_by": used_by,
+                    "used_by_more": used_by_more,
+                    "kinds": index.kinds_json(&focus_kinds),
+                });
+            }
+        }
         if let Some(obj) = view.as_object_mut() {
             obj.remove("paging");
         }
@@ -566,7 +688,7 @@ pub(crate) fn rebuild_default_map_at_lod(
                     json!({
                         "path": p,
                         "name": if p == "." { "." } else { name(p) },
-                        "folder": matches!(lod, Lod::Crate | Lod::Folder) && p != ".",
+                        "folder": matches!(lod, Lod::Crate | Lod::Folder),
                         "inside": true,
                         "links": flow.links,
                         "guessed": flow.guessed,
@@ -580,7 +702,7 @@ pub(crate) fn rebuild_default_map_at_lod(
         view["focus"] = json!({
             "path": fb_path,
             "name": if fb_path == "." { "." } else { name(fb_path) },
-            "folder": matches!(lod, Lod::Crate | Lod::Folder) && fb_path != ".",
+            "folder": matches!(lod, Lod::Crate | Lod::Folder),
             "inside": true,
             "files": fb_tally.files,
             "symbols": fb_tally.symbols,
@@ -607,7 +729,7 @@ pub(crate) fn rebuild_default_map_at_lod(
     view["nodes"] = Value::Array(
         rows.into_iter()
             .map(|(k, t)| {
-                let is_folder = matches!(lod, Lod::Crate | Lod::Folder) && k != ".";
+                let is_folder = matches!(lod, Lod::Crate | Lod::Folder);
                 json!({
                     "path": k,
                     "name": if k == "." { ".".to_owned() } else { name(&k).to_owned() },
@@ -686,10 +808,10 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
         entry.files += node.get("files").and_then(Value::as_u64).unwrap_or(1);
         entry.symbols += node.get("symbols").and_then(Value::as_u64).unwrap_or(0);
         entry.within += node.get("within").and_then(Value::as_u64).unwrap_or(0);
-        entry.folder |= b != "."
-            && (matches!(lod, Lod::Crate | Lod::Folder)
-                || node.get("folder").and_then(Value::as_bool).unwrap_or(false)
-                || file_part.contains('/'));
+        entry.folder |= matches!(lod, Lod::Crate | Lod::Folder)
+            || (b != "."
+                && (node.get("folder").and_then(Value::as_bool).unwrap_or(false)
+                    || file_part.contains('/')));
         entry.changed += node
             .get("changed")
             .and_then(Value::as_u64)
@@ -925,6 +1047,118 @@ pub(super) fn rollup_view_to_lod(index: &Index, view: &mut Value, lod: Lod) -> b
     true
 }
 
+impl Index {
+    /// Builds a default-mode view directly at `lod` without yet applying `min_weight` filtering
+    /// or `offset`/`limit` pagination, so downstream `mark_*` passes annotate the un-truncated view.
+    pub(crate) fn view_at_lod_unfiltered(
+        &self,
+        project: &str,
+        lod: Lod,
+        opts: &LodFilter<'_>,
+    ) -> Value {
+        let scope_norm = opts.scope.trim_matches('/');
+        let scope_val = if self.folder(scope_norm) {
+            scope_norm
+        } else {
+            ""
+        };
+        let mut out = json!({
+            "scope": scope_val,
+            "crumbs": Index::crumbs(project, scope_val),
+            "certain": opts.certain,
+            "totals": self.totals(),
+            "beyond": false,
+            "nodes": [],
+            "frames": [],
+            "backbone": false,
+            "focus": null,
+        });
+        if let Some(ref backend) = self.backend {
+            out["backend"] = json!(backend);
+        }
+        self.apply_lod_shape_only(&mut out, Some(lod), opts);
+        out
+    }
+
+    /// Applies progressive `lod` bucketing/expansion without `min_weight` filtering or pagination.
+    pub(crate) fn apply_lod_shape_only(
+        &self,
+        view: &mut Value,
+        lod: Option<Lod>,
+        opts: &LodFilter<'_>,
+    ) -> bool {
+        let Some(level) = lod else {
+            return false;
+        };
+        let mode = view.get("mode").and_then(Value::as_str).map(str::to_owned);
+        let reshaped = if mode.is_none() {
+            rebuild_default_map_at_lod(self, view, level, opts)
+        } else if mode.as_deref() != Some("file") {
+            rollup_view_to_lod(self, view, level)
+        } else {
+            false
+        };
+        if let Some(obj) = view.as_object_mut() {
+            obj.insert("lod".into(), json!(level.as_str()));
+        }
+        reshaped
+    }
+
+    /// Applies minimum edge weight (`min_weight`) filtering and pagination onto an annotated view.
+    pub(crate) fn apply_min_weight_and_pagination(
+        view: &mut Value,
+        min_weight: Option<u64>,
+        focus: Option<&str>,
+        offset: usize,
+        limit: Option<usize>,
+        reshaped: bool,
+    ) {
+        if let Some(threshold) = min_weight {
+            if let Some(edges) = view.get_mut("edges").and_then(Value::as_array_mut) {
+                edges.retain(|edge| {
+                    edge.get("links")
+                        .or_else(|| edge.get("weight"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                        >= threshold
+                });
+                let new_len = edges.len() as u64;
+                if view.get("between").is_some()
+                    && view.get("backbone").and_then(Value::as_bool) != Some(true)
+                {
+                    view["between"] = json!(new_len);
+                }
+            }
+            if let Some(cross) = view
+                .get_mut("paging")
+                .and_then(|p| p.get_mut("cross_page_edges"))
+                .and_then(Value::as_array_mut)
+            {
+                cross.retain(|edge| {
+                    edge.get("links")
+                        .or_else(|| edge.get("weight"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                        >= threshold
+                });
+            }
+            if let Some(obj) = view.as_object_mut() {
+                obj.insert("min_weight".into(), json!(threshold));
+            }
+        }
+        if (reshaped || offset > 0 || limit.is_some())
+            && let Value::Object(obj) = view
+            && (reshaped || !obj.get("paging").is_some_and(Value::is_object))
+        {
+            let mut anchors = Vec::new();
+            if let Some(f) = focus.filter(|s| !s.is_empty()) {
+                anchors.push(f);
+            }
+            paginate_lens_view(obj, offset, limit, &anchors);
+        }
+    }
+}
+
 /// Builds a default-mode view directly at `lod` (avoiding building a discarded folder view first).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn view_at_lod(
@@ -934,37 +1168,14 @@ pub(crate) fn view_at_lod(
     min_weight: Option<u64>,
     opts: &LodFilter<'_>,
 ) -> Value {
-    let scope_norm = opts.scope.trim_matches('/');
-    let scope_val = if index.folder(scope_norm) {
-        scope_norm
-    } else {
-        ""
-    };
-    let mut out = json!({
-        "scope": scope_val,
-        "crumbs": Index::crumbs(project, scope_val),
-        "certain": opts.certain,
-        "totals": index.totals(),
-        "beyond": false,
-        "nodes": [],
-        "frames": [],
-        "backbone": false,
-        "focus": null,
-    });
-    if let Some(ref backend) = index.backend {
-        out["backend"] = json!(backend);
-    }
-    apply_lod_and_min_weight(
-        index,
+    let mut out = index.view_at_lod_unfiltered(project, lod, opts);
+    Index::apply_min_weight_and_pagination(
         &mut out,
-        Some(lod),
         min_weight,
-        opts.scope,
         opts.focus,
-        opts.filter,
-        opts.certain,
         opts.offset,
         opts.limit,
+        true,
     );
     out
 }
@@ -985,75 +1196,16 @@ pub(crate) fn apply_lod_and_min_weight(
     offset: usize,
     limit: Option<usize>,
 ) -> bool {
-    let mut reshaped = false;
-    if let Some(level) = lod {
-        let mode = view.get("mode").and_then(Value::as_str).map(str::to_owned);
-        reshaped = if mode.is_none() {
-            rebuild_default_map_at_lod(
-                index,
-                view,
-                level,
-                &LodFilter {
-                    scope,
-                    focus,
-                    filter,
-                    certain,
-                    offset,
-                    limit,
-                },
-            )
-        } else if mode.as_deref() != Some("file") {
-            rollup_view_to_lod(index, view, level)
-        } else {
-            false
-        };
-        if let Some(obj) = view.as_object_mut() {
-            obj.insert("lod".into(), json!(level.as_str()));
-        }
-    }
-    if let Some(threshold) = min_weight {
-        if let Some(edges) = view.get_mut("edges").and_then(Value::as_array_mut) {
-            edges.retain(|edge| {
-                edge.get("links")
-                    .or_else(|| edge.get("weight"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(1)
-                    >= threshold
-            });
-            let new_len = edges.len() as u64;
-            if view.get("between").is_some()
-                && view.get("backbone").and_then(Value::as_bool) != Some(true)
-            {
-                view["between"] = json!(new_len);
-            }
-        }
-        if let Some(cross) = view
-            .get_mut("paging")
-            .and_then(|p| p.get_mut("cross_page_edges"))
-            .and_then(Value::as_array_mut)
-        {
-            cross.retain(|edge| {
-                edge.get("links")
-                    .or_else(|| edge.get("weight"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(1)
-                    >= threshold
-            });
-        }
-        if let Some(obj) = view.as_object_mut() {
-            obj.insert("min_weight".into(), json!(threshold));
-        }
-    }
-    if (reshaped || offset > 0 || limit.is_some())
-        && let Value::Object(obj) = view
-        && (reshaped || !obj.get("paging").is_some_and(Value::is_object))
-    {
-        let mut anchors = Vec::new();
-        if let Some(f) = focus.filter(|s| !s.is_empty()) {
-            anchors.push(f);
-        }
-        paginate_lens_view(obj, offset, limit, &anchors);
-    }
+    let opts = LodFilter {
+        scope,
+        focus,
+        filter,
+        certain,
+        offset,
+        limit,
+    };
+    let reshaped = index.apply_lod_shape_only(view, lod, &opts);
+    Index::apply_min_weight_and_pagination(view, min_weight, focus, offset, limit, reshaped);
     reshaped
 }
 

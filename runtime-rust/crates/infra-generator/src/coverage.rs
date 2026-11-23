@@ -818,3 +818,62 @@ pub fn partition_update_slices(target: &Path, staging: &Path, manifest: &Value) 
         "pending_slices": pending,
     }))
 }
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+
+    #[test]
+    fn partition_update_slices_separates_stamped_unchanged_from_pending() {
+        let dir = std::env::temp_dir().join(format!(
+            "infra-coverage-partition-{}",
+            infra_core::domain::uuid4()
+        ));
+        let target = dir.join("target");
+        let staging = dir.join("staging");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        let a_bytes = b"# Policy unchanged\n";
+        let b_v1 = b"# Skill v1\n";
+        let b_v2 = b"# Skill v2\n";
+        let c_bytes = b"# New skill\n";
+        std::fs::write(target.join("AGENTS.md"), a_bytes).unwrap();
+        std::fs::write(staging.join("AGENTS.md"), a_bytes).unwrap();
+        std::fs::write(target.join("SKILL.md"), b_v1).unwrap();
+        std::fs::write(staging.join("SKILL.md"), b_v2).unwrap();
+        std::fs::write(staging.join("NEW.md"), c_bytes).unwrap();
+
+        let plan = vec!["AGENTS.md".to_owned(), "SKILL.md".to_owned()];
+        let mut manifest = crate::ownership::build_manifest(
+            &target,
+            &plan,
+            &crate::ownership::ManifestRequest {
+                generator: "Infrastructure-Creator".into(),
+                version: "1.0.0".into(),
+                task: "TASK-1".into(),
+                profile: "php-core".into(),
+                editions: vec!["codex".into()],
+                mode: "merge".into(),
+                decisions: serde_json::json!({}),
+                generated_at: None,
+            },
+            None,
+        )
+        .unwrap();
+        let stamps = BTreeMap::from([
+            ("AGENTS.md".to_owned(), sha(a_bytes)),
+            ("SKILL.md".to_owned(), sha(b_v1)),
+        ]);
+        crate::ownership::stamp_validated_artifacts(&mut manifest, &stamps, Some("update"))
+            .unwrap();
+
+        let part = partition_update_slices(&target, &staging, &manifest).unwrap();
+        assert_eq!(part["skipped_unchanged"], serde_json::json!(["AGENTS.md"]));
+        assert_eq!(
+            part["pending_slices"],
+            serde_json::json!(["NEW.md", "SKILL.md"])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

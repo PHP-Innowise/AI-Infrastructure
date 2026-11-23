@@ -1163,6 +1163,60 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+pub(crate) fn capsules_need_preload(
+    project: &str,
+    cached_project: &V,
+    cached_capsules: &V,
+) -> bool {
+    if project.trim().is_empty() {
+        return false;
+    }
+    if !cached_capsules["capsules"].is_array() {
+        return true;
+    }
+    cached_project.as_str().is_some_and(|p| p != project)
+}
+
+pub(crate) fn skills_catalog_needs_preload(catalog: &V) -> bool {
+    !catalog["sources"].is_array()
+}
+
+async fn preload_capsules_for_palette(project: &str) -> bool {
+    let needs = capsules_need_preload(
+        project,
+        &m::data("skill-capsules-project"),
+        &m::data("skill-capsules"),
+    );
+    if !needs {
+        return false;
+    }
+    let url = format!(
+        "/api/projects/{}/skillcache/capsules?include_retired=true",
+        dom::enc(project)
+    );
+    match api::get(&url).await {
+        Ok(listed) if listed["capsules"].is_array() && m::current_project() == project => {
+            m::set("skill-capsules", listed);
+            m::set("skill-capsules-project", json!(project));
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn preload_skills_catalog_for_palette() {
+    if skills_catalog_needs_preload(&m::data("skills-catalog")) {
+        if let Ok(catalog) = api::get("/api/skills").await {
+            if catalog["sources"].is_array() {
+                m::set("skills-catalog", catalog);
+                if palette_open() {
+                    render_palette();
+                }
+            }
+        }
+    }
+}
+
 pub fn open_palette() {
     close();
     dom::save_focus_for_overlay("command-palette");
@@ -1181,6 +1235,17 @@ pub fn open_palette() {
             if crate::management::ensure_installed_skills_loaded().await && palette_open() {
                 render_palette();
             }
+        });
+        let project = m::current_project();
+        if !project.is_empty() {
+            spawn_local(async move {
+                if preload_capsules_for_palette(&project).await && palette_open() {
+                    render_palette();
+                }
+            });
+        }
+        spawn_local(async {
+            preload_skills_catalog_for_palette().await;
         });
     }
 }
@@ -1850,6 +1915,24 @@ mod tests {
             "proj-a",
             "proj-a",
             &json!({"skills": []}),
+        ));
+
+        // Capsules & skills catalog preload guards
+        assert!(capsules_need_preload("proj-a", &V::Null, &V::Null));
+        assert!(capsules_need_preload(
+            "proj-b",
+            &json!("proj-a"),
+            &json!({"capsules": []})
+        ));
+        assert!(!capsules_need_preload(
+            "proj-b",
+            &json!("proj-b"),
+            &json!({"capsules": []})
+        ));
+        assert!(!capsules_need_preload("", &V::Null, &V::Null));
+        assert!(skills_catalog_needs_preload(&V::Null));
+        assert!(!skills_catalog_needs_preload(
+            &json!({"sources": [{"id": "s1"}]})
         ));
     }
 }

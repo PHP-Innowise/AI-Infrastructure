@@ -1285,6 +1285,7 @@ pub(in crate::graph_map) fn rerender_surface_side_only(surface: MapSurface) {
             let side_html = build_surface_side_html(MODAL_SURFACE, &view, &state);
             html("graph-map-side", &side_html);
         }
+        sync_modal_explain_button(Some(&view), &state);
     }
 }
 

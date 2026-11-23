@@ -13,6 +13,46 @@ pub(in crate::graph_map) fn set_surface_attrs(surface: MapSurface, view: &V) {
     }
 }
 
+pub(in crate::graph_map) fn modal_explain_button_state(
+    view: Option<&V>,
+    state: &V,
+    has_dense_hit: bool,
+) -> (bool, &'static str, &'static str) {
+    let focus = view.map(|v| &v["focus"]);
+    let has_focus_obj = focus.is_some_and(V::is_object);
+    let has_focus_state = !m::text(state, "focus").is_empty();
+    let enabled = has_focus_obj || has_focus_state || has_dense_hit;
+    if !enabled {
+        return (
+            false,
+            "Explain",
+            "Select a node first (or right-click any node or link)",
+        );
+    }
+    let label = if let Some(focus) = focus.filter(|f| f.is_object()) {
+        if m::yes(&focus["folder"]) {
+            "Explain folder"
+        } else if m::yes(&focus["symbol"]) {
+            "Explain symbol"
+        } else if focus["path"].is_string() {
+            "Explain file"
+        } else {
+            "Explain node"
+        }
+    } else {
+        "Explain node"
+    };
+    (enabled, label, "Explain the selected node with AI")
+}
+
+pub(in crate::graph_map) fn sync_modal_explain_button(view: Option<&V>, state: &V) {
+    let has_dense_hit = focused_dense_hit_for_canvas("graph-map-canvas").is_some();
+    let (enabled, label, title) = modal_explain_button_state(view, state, has_dense_hit);
+    dom::disabled("graph-map-explain", !enabled);
+    dom::text("graph-map-explain", label);
+    dom::attr("graph-map-explain", "title", title);
+}
+
 pub(in crate::graph_map) fn render(view: &V) {
     crate::graph_explanation::surface_map_context(
         MODAL_SURFACE.canvas,
@@ -217,6 +257,7 @@ pub(in crate::graph_map) fn render(view: &V) {
     };
     html("graph-map-crumbs", &crumbs_html);
     sync_history_and_pin_controls(MODAL_SURFACE, &modal_state);
+    sync_modal_explain_button(Some(view), &modal_state);
     html(
         "graph-map-arrow-legend",
         &key_html(view, &modal_key, "modal"),
@@ -1872,6 +1913,10 @@ pub async fn event(
             sync_history_and_pin_controls(MODAL_SURFACE, &state);
             rerender_surface_preserving_camera(MODAL_SURFACE);
             graph_viewport::announce_live("graph-map-live-announce", "Reset pinned layout");
+            return true;
+        }
+        ("click", "graph-map-explain", _) => {
+            crate::graph_explanation::explain_selected_on_canvas("graph-map-canvas");
             return true;
         }
         ("click", "graph-map-pin-undo", _) => {

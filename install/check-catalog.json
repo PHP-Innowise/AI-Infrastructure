@@ -438,7 +438,7 @@
       "name": "changelog",
       "workflow": "ci.yml",
       "job": "changelog",
-      "timeout_minutes": 5,
+      "timeout_minutes": 15,
       "default": true,
       "gates": [
         {

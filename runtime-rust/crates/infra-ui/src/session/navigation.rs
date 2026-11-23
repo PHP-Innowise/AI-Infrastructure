@@ -59,13 +59,42 @@ pub(crate) fn sync_hash_from_state(push: bool) {
     dom::update_hash_route(&current_hash_route(), push);
 }
 
+pub(crate) fn session_belongs_to_other_project(
+    sid: &str,
+    selected: &V,
+    sessions: &[V],
+    target_project: &str,
+) -> bool {
+    if sid.is_empty() || target_project.is_empty() {
+        return false;
+    }
+    let selected_project = m::text(selected, "project_id");
+    let session_project = if !selected_project.is_empty() {
+        selected_project
+    } else {
+        sessions
+            .iter()
+            .find(|x| m::text(x, "id") == sid)
+            .map(|x| m::text(x, "project_id"))
+            .unwrap_or_default()
+    };
+    !session_project.is_empty() && session_project != target_project
+}
+
 pub(crate) async fn apply_hash_route() {
     let route = dom::hash_route();
-    if !route.project.is_empty()
-        && !m::project(&route.project).is_null()
-        && m::current_project() != route.project
-    {
-        sync_project(&route.project);
+    let route_project_valid = !route.project.is_empty() && !m::project(&route.project).is_null();
+    if route_project_valid {
+        if m::current_project() != route.project {
+            sync_project(&route.project);
+        }
+        if route.session.is_empty()
+            && m::read(|s| {
+                session_belongs_to_other_project(&s.sid, &s.selected, &s.sessions, &route.project)
+            })
+        {
+            clear_session_for_route_project(&route.project);
+        }
     }
     if !route.session.is_empty() && route.session != m::read(|s| s.sid.clone()) {
         select(&route.session).await;
@@ -286,16 +315,31 @@ pub(super) async fn open_view_inner(view: &str, record: bool, focus_heading: boo
         _ => load_git().await,
     }
 }
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn filter_history_sessions(
     sessions: &[V],
     query: &str,
     waiting_only: bool,
     waiting_counts: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<V> {
+    filter_history_sessions_for_project(sessions, "", query, waiting_only, waiting_counts)
+}
+
+pub(crate) fn filter_history_sessions_for_project(
+    sessions: &[V],
+    project_id: &str,
+    query: &str,
+    waiting_only: bool,
+    waiting_counts: &std::collections::BTreeMap<String, usize>,
+) -> Vec<V> {
+    let project = project_id.trim();
     let q = query.trim().to_ascii_lowercase();
     sessions
         .iter()
         .filter_map(|session| {
+            if !project.is_empty() && m::text(session, "project_id") != project {
+                return None;
+            }
             let sid = m::text(session, "id");
             let waiting = waiting_counts
                 .get(&sid)
@@ -371,7 +415,17 @@ pub fn history() {
             s.approvals.waiting_counts.clone(),
         )
     });
-    let filtered = filter_history_sessions(&sessions, &query, waiting_only, &counts);
+    let project = m::current_project();
+    let project_total = if project.trim().is_empty() {
+        sessions.len()
+    } else {
+        sessions
+            .iter()
+            .filter(|s| m::text(s, "project_id") == project.trim())
+            .count()
+    };
+    let filtered =
+        filter_history_sessions_for_project(&sessions, &project, &query, waiting_only, &counts);
     dom::attr(
         "history-filter-waiting",
         "aria-pressed",
@@ -380,7 +434,7 @@ pub fn history() {
     if !query.trim().is_empty() || waiting_only {
         dom::text(
             "history-filter-status",
-            &format!("Showing {} of {}", filtered.len(), sessions.len()),
+            &format!("Showing {} of {}", filtered.len(), project_total),
         );
         dom::hidden("history-filter-status", false);
     } else {

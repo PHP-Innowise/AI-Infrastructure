@@ -6,11 +6,14 @@ use crate::{
     domain::{self, json},
     fs, git,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as object};
 use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{Duration, SystemTime},
 };
 const HOOK: usize = 1024 * 1024;
@@ -19,6 +22,18 @@ const SNAPSHOT: usize = 6 * TRANSCRIPT + HOOK;
 const MERGE: usize = 32 * 1024 * 1024;
 const STORE: usize = 256 * 1024 * 1024;
 const JOIN: usize = 64 * 1024;
+const CURSOR_VERSION: u32 = 1;
+const CURSOR_HEAD_BYTES: usize = 512;
+const CURSOR_TAIL_BYTES: usize = 256;
+const CURSOR_MAX_FILES: usize = 64;
+#[cfg(test)]
+thread_local! {
+    static JSONL_PARSED_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn bump_jsonl_parsed_lines() {
+    JSONL_PARSED_LINES.with(|cell| cell.set(cell.get() + 1));
+}
 const HEADERS: &[&str] = &[
     "environment_context",
     "skill",
@@ -41,8 +56,28 @@ fn sha(value: &str) -> String {
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
-fn named(pattern: &str, value: &str) -> bool {
-    regex::Regex::new(pattern).is_ok_and(|pattern| pattern.is_match(value))
+fn session_id_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^[A-Za-z0-9._-]{1,160}$").expect("constant session regex")
+    })
+}
+fn commit_sha_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"^[0-9a-f]{40,64}$").expect("constant commit regex"))
+}
+fn tmp_snapshot_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^\.[0-9a-f]{24}-[0-9a-f]{24}\.json\..+$")
+            .expect("constant tmp snapshot regex")
+    })
+}
+fn snapshot_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^[0-9a-f]{24}-[0-9a-f]{24}\.json$").expect("constant snapshot regex")
+    })
 }
 fn kind_valid(kind: &str) -> bool {
     [
@@ -62,7 +97,7 @@ fn session(host: &str, payload: &Value) -> Result<String> {
     }]
     .as_str()
     .ok_or_else(|| fail("hook session identifier is invalid"))?;
-    if !named(r"^[A-Za-z0-9._-]{1,160}$", value) {
+    if !session_id_re().is_match(value) {
         return Err(fail("hook session identifier is invalid"));
     }
     Ok(format!("{host}:{value}"))
@@ -109,15 +144,21 @@ fn text_parts(value: &Value) -> Vec<String> {
         .collect()
 }
 fn codex_injected(part: &str) -> Result<bool> {
+    static RE: OnceLock<std::result::Result<fancy_regex::Regex, String>> = OnceLock::new();
     let header = part.trim_start().split('\n').next().unwrap_or("");
     let header = header.strip_suffix('\r').unwrap_or(header);
     if header == "# AGENTS.md instructions" || header.starts_with("# AGENTS.md instructions for ") {
         return Ok(true);
     }
-    let expression = fancy_regex::Regex::new(
-        r"(?s)\A\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1(?:\s[^<>]*)?>\s*\z",
-    )
-    .map_err(|_| fail("Injected-envelope policy unavailable"))?;
+    let expression = RE
+        .get_or_init(|| {
+            fancy_regex::Regex::new(
+                r"(?s)\A\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1(?:\s[^<>]*)?>\s*\z",
+            )
+            .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|_| fail("Injected-envelope policy unavailable"))?;
     Ok(expression
         .captures(part)
         .map_err(|_| fail("Injected-envelope policy unavailable"))?
@@ -182,32 +223,294 @@ fn visible(record: &Value, host: &str) -> Result<Option<(String, String)>> {
     }
     Ok(Some((role.into(), parts.concat())))
 }
-fn project_jsonl(bytes: &[u8], host: &str) -> Result<String> {
-    let source = std::str::from_utf8(bytes).map_err(|_| fail("transcript must be UTF-8"))?;
-    let mut lines = Vec::new();
-    for line in source.split(|c| {
-        [
-            '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
-            '\u{2029}',
-        ]
-        .contains(&c)
-    }) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let record =
-            json::parse(line).map_err(|_| fail("JSONL transcript has an invalid record"))?;
-        if let Some((role, body)) = visible(&record, host)? {
-            let label = if role == "user" { "User" } else { "Assistant" };
-            lines.push(format!("{label}:\n{body}"));
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct JsonlCursor {
+    version: u32,
+    transcript_path: String,
+    host: String,
+    offset: usize,
+    header_sha256: String,
+    offset_tail_sha256: String,
+    projected_prefix: String,
+    last_len: usize,
+    last_tail_sha256: String,
+    last_projected: String,
+}
+
+fn is_jsonl_separator(ch: char) -> bool {
+    matches!(
+        ch,
+        '\n' | '\r'
+            | '\u{b}'
+            | '\u{c}'
+            | '\u{1c}'
+            | '\u{1d}'
+            | '\u{1e}'
+            | '\u{85}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
+}
+
+fn complete_line_end(source: &str) -> usize {
+    let mut end = 0;
+    for (idx, ch) in source.char_indices() {
+        if is_jsonl_separator(ch) {
+            end = idx + ch.len_utf8();
         }
     }
-    if lines.is_empty() {
+    end
+}
+
+fn combine_blocks(prefix: &str, suffix: &str) -> String {
+    match (prefix.is_empty(), suffix.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => suffix.to_string(),
+        (false, true) => prefix.to_string(),
+        (false, false) => format!("{prefix}\n\n{suffix}"),
+    }
+}
+
+fn project_jsonl_segment(source: &str, host: &str) -> Result<(String, usize, String)> {
+    let complete_end = complete_line_end(source);
+    let mut complete_blocks = Vec::new();
+    let mut trailing_blocks = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in source.char_indices() {
+        if is_jsonl_separator(ch) {
+            let line = &source[start..idx];
+            start = idx + ch.len_utf8();
+            if line.trim().is_empty() {
+                continue;
+            }
+            #[cfg(test)]
+            bump_jsonl_parsed_lines();
+            let record =
+                json::parse(line).map_err(|_| fail("JSONL transcript has an invalid record"))?;
+            if let Some((role, body)) = visible(&record, host)? {
+                let label = if role == "user" { "User" } else { "Assistant" };
+                complete_blocks.push(format!("{label}:\n{body}"));
+            }
+        }
+    }
+    if start < source.len() {
+        let line = &source[start..];
+        if !line.trim().is_empty() {
+            #[cfg(test)]
+            bump_jsonl_parsed_lines();
+            let record =
+                json::parse(line).map_err(|_| fail("JSONL transcript has an invalid record"))?;
+            if let Some((role, body)) = visible(&record, host)? {
+                let label = if role == "user" { "User" } else { "Assistant" };
+                trailing_blocks.push(format!("{label}:\n{body}"));
+            }
+        }
+    }
+    let complete_text = complete_blocks.join("\n\n");
+    let all_text = combine_blocks(&complete_text, &trailing_blocks.join("\n\n"));
+    Ok((complete_text, complete_end, all_text))
+}
+
+#[cfg(test)]
+fn project_jsonl(bytes: &[u8], host: &str) -> Result<String> {
+    let source = std::str::from_utf8(bytes).map_err(|_| fail("transcript must be UTF-8"))?;
+    let (_, _, all_text) = project_jsonl_segment(source, host)?;
+    if all_text.is_empty() {
         return Err(fail(
             "JSONL transcript has no visible user or assistant text",
         ));
     }
-    Ok(lines.join("\n\n"))
+    Ok(all_text)
+}
+
+fn open_safe_regular(path: &Path, limit: usize) -> Result<(File, usize, String)> {
+    let path = fs::absolute(path)?;
+    let anchor = path
+        .ancestors()
+        .last()
+        .ok_or_else(|| fail("transcript path is unavailable"))?;
+    fs::admit_descendant(anchor, &path).map_err(|_| fail("transcript path contains a symlink"))?;
+    let image =
+        std::fs::symlink_metadata(&path).map_err(|_| fail("transcript path is unavailable"))?;
+    if fs::linked(&image) || !image.is_file() {
+        return Err(fail("transcript path must be a regular file"));
+    }
+    if image.len() > limit as u64 {
+        return Err(fail("transcript is too large"));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|_| fail("transcript cannot be read"))?;
+    let meta = file
+        .metadata()
+        .map_err(|_| fail("transcript cannot be read"))?;
+    if fs::linked(&meta) || !meta.is_file() {
+        return Err(fail("transcript path must be a regular file"));
+    }
+    let len = usize::try_from(meta.len()).map_err(|_| fail("transcript is too large"))?;
+    if len > limit {
+        return Err(fail("transcript is too large"));
+    }
+    let canonical = fs::canonicalize(&path)?;
+    Ok((file, len, canonical.to_string_lossy().into_owned()))
+}
+
+fn read_range(file: &mut File, start: usize, len: usize) -> Result<Vec<u8>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    file.seek(SeekFrom::Start(start as u64))
+        .map_err(|_| fail("transcript cannot be read"))?;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)
+        .map_err(|_| fail("transcript cannot be read"))?;
+    Ok(buf)
+}
+
+fn read_all_bounded(file: &mut File, limit: usize) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| fail("transcript cannot be read"))?;
+    let mut buf = Vec::new();
+    let mut limited = file.take(limit as u64 + 1);
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|_| fail("transcript cannot be read"))?;
+    if buf.len() > limit {
+        return Err(fail("transcript is too large"));
+    }
+    Ok(buf)
+}
+
+fn cursor_relative(canonical_path: &str, host: &str) -> String {
+    format!(
+        ".context-handoff/cursors/{}-{host}.json",
+        &publication::sha256(canonical_path.as_bytes())[..24]
+    )
+}
+
+fn load_jsonl_cursor(state_root: &Path, relative: &str) -> Option<JsonlCursor> {
+    let raw = safe_path(&state_root.join(relative), HOOK).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+struct CursorUpdate {
+    relative: String,
+    cursor: JsonlCursor,
+}
+
+struct PayloadContent {
+    kind: String,
+    content: String,
+    append: bool,
+    cursor: Option<CursorUpdate>,
+}
+
+fn project_jsonl_with_cursor(
+    state_root: Option<&Path>,
+    path: &Path,
+    host: &str,
+) -> Result<(String, Option<CursorUpdate>)> {
+    let (mut file, len, canonical_path) = open_safe_regular(path, TRANSCRIPT)?;
+    let relative = cursor_relative(&canonical_path, host);
+    let existing = state_root.and_then(|root| load_jsonl_cursor(root, &relative));
+    let header_len = len.min(CURSOR_HEAD_BYTES);
+    let header = read_range(&mut file, 0, header_len)?;
+    let header_sha256 = publication::sha256(&header);
+
+    if let Some(prev) = existing.as_ref().filter(|prev| {
+        prev.version == CURSOR_VERSION
+            && prev.host == host
+            && prev.transcript_path == canonical_path
+            && prev.header_sha256 == header_sha256
+    }) {
+        if len == prev.last_len && prev.offset <= len && !prev.last_projected.is_empty() {
+            let tail_start = len.saturating_sub(CURSOR_TAIL_BYTES);
+            let tail_bytes = read_range(&mut file, tail_start, len - tail_start)?;
+            if publication::sha256(&tail_bytes) == prev.last_tail_sha256 {
+                return Ok((prev.last_projected.clone(), None));
+            }
+        }
+        if len >= prev.offset && prev.offset > 0 {
+            let off_tail_start = prev.offset.saturating_sub(CURSOR_TAIL_BYTES);
+            let off_tail = read_range(&mut file, off_tail_start, prev.offset - off_tail_start)?;
+            if publication::sha256(&off_tail) == prev.offset_tail_sha256 {
+                let tail_bytes = read_range(&mut file, prev.offset, len - prev.offset)?;
+                if let Ok(tail_source) = std::str::from_utf8(&tail_bytes) {
+                    let (delta_complete, delta_complete_end, delta_all) =
+                        project_jsonl_segment(tail_source, host)?;
+                    let projected = combine_blocks(&prev.projected_prefix, &delta_all);
+                    if projected.is_empty() {
+                        return Err(fail(
+                            "JSONL transcript has no visible user or assistant text",
+                        ));
+                    }
+                    let new_offset = prev.offset + delta_complete_end;
+                    let new_prefix = combine_blocks(&prev.projected_prefix, &delta_complete);
+                    let new_offset_tail_sha256 = if new_offset == prev.offset {
+                        prev.offset_tail_sha256.clone()
+                    } else {
+                        let start = new_offset.saturating_sub(CURSOR_TAIL_BYTES);
+                        let bytes = read_range(&mut file, start, new_offset - start)?;
+                        publication::sha256(&bytes)
+                    };
+                    let new_last_tail_sha256 = if tail_bytes.len() >= CURSOR_TAIL_BYTES {
+                        publication::sha256(&tail_bytes[tail_bytes.len() - CURSOR_TAIL_BYTES..])
+                    } else {
+                        let start = len.saturating_sub(CURSOR_TAIL_BYTES);
+                        let bytes = read_range(&mut file, start, len - start)?;
+                        publication::sha256(&bytes)
+                    };
+                    let cursor = JsonlCursor {
+                        version: CURSOR_VERSION,
+                        transcript_path: canonical_path,
+                        host: host.to_string(),
+                        offset: new_offset,
+                        header_sha256,
+                        offset_tail_sha256: new_offset_tail_sha256,
+                        projected_prefix: new_prefix,
+                        last_len: len,
+                        last_tail_sha256: new_last_tail_sha256,
+                        last_projected: projected.clone(),
+                    };
+                    return Ok((projected, Some(CursorUpdate { relative, cursor })));
+                }
+            }
+        }
+    }
+
+    let full = read_all_bounded(&mut file, TRANSCRIPT)?;
+    let full_len = full.len();
+    let source = std::str::from_utf8(&full).map_err(|_| fail("transcript must be UTF-8"))?;
+    let (complete_text, complete_end, projected) = project_jsonl_segment(source, host)?;
+    if projected.is_empty() {
+        return Err(fail(
+            "JSONL transcript has no visible user or assistant text",
+        ));
+    }
+    let header_sha256 = publication::sha256(&full[..full_len.min(CURSOR_HEAD_BYTES)]);
+    let offset_tail_sha256 =
+        publication::sha256(&full[complete_end.saturating_sub(CURSOR_TAIL_BYTES)..complete_end]);
+    let last_tail_sha256 = publication::sha256(&full[full_len.saturating_sub(CURSOR_TAIL_BYTES)..]);
+    let cursor = JsonlCursor {
+        version: CURSOR_VERSION,
+        transcript_path: canonical_path,
+        host: host.to_string(),
+        offset: complete_end,
+        header_sha256,
+        offset_tail_sha256,
+        projected_prefix: complete_text,
+        last_len: full_len,
+        last_tail_sha256,
+        last_projected: projected.clone(),
+    };
+    Ok((projected, Some(CursorUpdate { relative, cursor })))
 }
 fn event_content(payload: &Value, host: &str) -> Option<String> {
     let message = payload["last_assistant_message"].as_str().or_else(|| {
@@ -225,13 +528,17 @@ fn event_content(payload: &Value, host: &str) -> Option<String> {
         .filter(|prompt| !prompt.is_empty())
         .map(|prompt| format!("{}:\n{prompt}", "User"))
 }
-fn content_from_payload(payload: &Value, host: &str) -> Result<(String, String, bool)> {
+fn content_from_payload_with_cursor(
+    state_root: Option<&Path>,
+    payload: &Value,
+    host: &str,
+) -> Result<PayloadContent> {
     let event = event_content(payload, host);
     if let Some(transcript) = payload["transcript_path"]
         .as_str()
         .filter(|value| !value.is_empty())
     {
-        let projected = (|| -> Result<(String, String, bool)> {
+        let projected = (|| -> Result<PayloadContent> {
             let path = Path::new(transcript);
             let suffix = path
                 .extension()
@@ -248,13 +555,15 @@ fn content_from_payload(payload: &Value, host: &str) -> Result<(String, String, 
             }) {
                 return Err(fail("sensitive transcript path"));
             }
-            let raw = safe_path(path, TRANSCRIPT)?;
-            let (mut kind, mut content) = if suffix == "jsonl" {
-                ("projected-jsonl".to_string(), project_jsonl(&raw, host)?)
+            let (mut kind, mut content, cursor) = if suffix == "jsonl" {
+                let (projected, cursor) = project_jsonl_with_cursor(state_root, path, host)?;
+                ("projected-jsonl".to_string(), projected, cursor)
             } else {
+                let raw = safe_path(path, TRANSCRIPT)?;
                 (
                     "visible-export".into(),
                     String::from_utf8(raw).map_err(|_| fail("transcript must be UTF-8"))?,
+                    None,
                 )
             };
             if let Some(event) = &event
@@ -265,7 +574,12 @@ fn content_from_payload(payload: &Value, host: &str) -> Result<(String, String, 
                 content.push_str(event);
             }
             reject_secrets(&content)?;
-            Ok((kind, content, false))
+            Ok(PayloadContent {
+                kind,
+                content,
+                append: false,
+                cursor,
+            })
         })();
         if projected.is_ok() || event.is_none() {
             return projected;
@@ -273,7 +587,12 @@ fn content_from_payload(payload: &Value, host: &str) -> Result<(String, String, 
     }
     if let Some(content) = event {
         reject_secrets(&content)?;
-        return Ok(("event-history".into(), content, true));
+        return Ok(PayloadContent {
+            kind: "event-history".into(),
+            content,
+            append: true,
+            cursor: None,
+        });
     }
     Err(fail(
         "hook payload has no visible assistant message or transcript",
@@ -481,13 +800,13 @@ impl ChatContinuity {
         let Some(raw) = text(&value, "session").strip_prefix(&format!("{host}:")) else {
             return Ok(None);
         };
-        if !named(r"^[A-Za-z0-9._-]{1,160}$", raw) {
+        if !session_id_re().is_match(raw) {
             return Ok(None);
         }
         if !value["commit"].is_null()
             && !value["commit"]
                 .as_str()
-                .is_some_and(|value| named(r"^[0-9a-f]{40,64}$", value))
+                .is_some_and(|value| commit_sha_re().is_match(value))
         {
             return Ok(None);
         }
@@ -549,8 +868,8 @@ impl ChatContinuity {
             let Some(name) = entry.file_name().to_str().map(String::from) else {
                 continue;
             };
-            let temporary = named(r"^\.[0-9a-f]{24}-[0-9a-f]{24}\.json\..+$", &name);
-            if !temporary && !named(r"^[0-9a-f]{24}-[0-9a-f]{24}\.json$", &name) {
+            let temporary = tmp_snapshot_re().is_match(&name);
+            if !temporary && !snapshot_re().is_match(&name) {
                 continue;
             }
             let Ok(image) = std::fs::symlink_metadata(entry.path()) else {
@@ -587,11 +906,52 @@ impl ChatContinuity {
         }
         Ok(())
     }
+    fn save_jsonl_cursor(
+        &self,
+        guard: &mut Guard,
+        relative: &str,
+        cursor: &JsonlCursor,
+    ) -> Result<()> {
+        let dir = self.roots.state.join(".context-handoff/cursors");
+        fs::ensure_directory(&dir, true)?;
+        fs::admit_descendant(&self.roots.state, &dir)?;
+        let keep = Path::new(relative).file_name();
+        let mut entries = std::fs::read_dir(&dir)?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let file_name = entry.file_name();
+                if keep == Some(file_name.as_os_str()) {
+                    return None;
+                }
+                let name = file_name.to_str()?;
+                if !name.ends_with(".json") {
+                    return None;
+                }
+                let path = entry.path();
+                let meta = std::fs::symlink_metadata(&path).ok()?;
+                if fs::linked(&meta) || !meta.is_file() {
+                    return None;
+                }
+                Some((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), path))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| right.cmp(left));
+        for (_, path) in entries.into_iter().skip(CURSOR_MAX_FILES.saturating_sub(1)) {
+            let _ = std::fs::remove_file(path);
+        }
+        let value = serde_json::to_value(cursor)?;
+        guard.write(relative, &value, HOOK)
+    }
     pub fn capture(&self, host: &str, payload: &Value) -> Result<()> {
         let Some(branch) = self.branch() else {
             return Ok(());
         };
-        let (mut kind, mut content, append) = content_from_payload(payload, host)?;
+        let PayloadContent {
+            mut kind,
+            mut content,
+            append,
+            cursor: cursor_update,
+        } = content_from_payload_with_cursor(Some(&self.roots.state), payload, host)?;
         if content.trim().is_empty() {
             return Err(fail("visible content is empty"));
         }
@@ -644,7 +1004,11 @@ impl ChatContinuity {
             record["sha256"] = sha(&content).into();
             record["kind"] = kind.into();
         }
-        guard.write(&destination, &record, SNAPSHOT)
+        guard.write(&destination, &record, SNAPSHOT)?;
+        if let Some(CursorUpdate { relative, cursor }) = cursor_update {
+            self.save_jsonl_cursor(&mut guard, &relative, &cursor)?;
+        }
+        Ok(())
     }
     fn bundle(&self, branch: &str, sources: Vec<Value>) -> Result<Value> {
         Ok(
@@ -1039,4 +1403,150 @@ pub fn execute(
         ),
         Err(_) => cli(0, String::new(), String::new(), Value::Null),
     })
+}
+
+#[cfg(test)]
+mod incremental_cursor_tests {
+    use super::*;
+    use crate::domain::uuid4;
+    use std::io::Write;
+    use std::process::Command;
+
+    struct OwnedDir(PathBuf);
+    impl Drop for OwnedDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn init_repo(root: &Path) {
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "Tester"],
+            vec!["config", "user.email", "tester@example.com"],
+            vec!["commit", "--allow-empty", "-m", "init"],
+        ] {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        }
+    }
+
+    fn reset_parsed_lines() {
+        JSONL_PARSED_LINES.with(|cell| cell.set(0));
+    }
+
+    fn parsed_lines() -> usize {
+        JSONL_PARSED_LINES.with(|cell| cell.get())
+    }
+
+    fn claude_line(role: &str, text: &str) -> String {
+        serde_json::to_string(&object!({
+            "type": role,
+            "message": {
+                "role": role,
+                "content": [{"type": "text", "text": text}]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn once_lock_regexes_and_codex_injected_match_expected_inputs() {
+        assert!(session_id_re().is_match("sess_123.abc-def"));
+        assert!(!session_id_re().is_match("bad/session"));
+        assert!(commit_sha_re().is_match(&"a".repeat(40)));
+        assert!(!commit_sha_re().is_match("short"));
+        assert!(
+            codex_injected("<environment_context><cwd>/tmp</cwd></environment_context>").unwrap()
+        );
+        assert!(!codex_injected("<custom_tag>keep me</custom_tag>").unwrap());
+        assert!(!codex_injected("normal user question").unwrap());
+        assert!(codex_injected("# AGENTS.md instructions for repo\nrules").unwrap());
+    }
+
+    #[test]
+    fn incremental_jsonl_cursor_parses_tail_only_and_falls_back_on_mutation() {
+        let root = std::env::temp_dir().join(format!("infra-chat-cur-{}", uuid4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let _dir = OwnedDir(root.clone());
+        init_repo(&root);
+
+        let transcript = root.join("transcript.jsonl");
+        let mut initial = String::new();
+        for idx in 0..20 {
+            let role = if idx % 2 == 0 { "user" } else { "assistant" };
+            initial.push_str(&claude_line(
+                role,
+                &format!(
+                    "Turn number {idx} with padding text so header and tail windows stay separate."
+                ),
+            ));
+            initial.push('\n');
+        }
+        std::fs::write(&transcript, &initial).unwrap();
+
+        let service = ChatContinuity {
+            roots: Roots::discover(&root, &root).unwrap(),
+        };
+        let payload = object!({
+            "session_id": "sess-inc",
+            "transcript_path": transcript,
+        });
+
+        // First capture parses all 20 lines.
+        reset_parsed_lines();
+        service.capture("claude", &payload).unwrap();
+        assert_eq!(parsed_lines(), 20);
+
+        // Repeated capture with unchanged file skips all JSONL parsing.
+        reset_parsed_lines();
+        service.capture("claude", &payload).unwrap();
+        assert_eq!(parsed_lines(), 0);
+
+        // Append 2 new complete lines -> only parses the 2 new tail lines.
+        let mut extra = String::new();
+        extra.push_str(&claude_line("user", "Follow-up question on retry locks"));
+        extra.push('\n');
+        extra.push_str(&claude_line("assistant", "Retry locks stay per-session"));
+        extra.push('\n');
+        {
+            let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
+            file.write_all(extra.as_bytes()).unwrap();
+        }
+        reset_parsed_lines();
+        service.capture("claude", &payload).unwrap();
+        assert_eq!(parsed_lines(), 2);
+
+        // Verify projected snapshot matches fresh uncached project_jsonl byte-for-byte.
+        let full_bytes = std::fs::read(&transcript).unwrap();
+        let expected_content = project_jsonl(&full_bytes, "claude").unwrap();
+        let snapshots = service.list().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["content"], expected_content);
+
+        // Header mutation invalidates the cursor and cleanly falls back to full re-parse.
+        let rewritten = format!(
+            "{}\n{}",
+            claude_line(
+                "user",
+                "Rewritten opening message that alters header digest"
+            ),
+            initial.lines().skip(1).collect::<Vec<_>>().join("\n")
+        ) + "\n"
+            + &extra;
+        std::fs::write(&transcript, &rewritten).unwrap();
+        reset_parsed_lines();
+        service.capture("claude", &payload).unwrap();
+        assert_eq!(parsed_lines(), 22);
+        let rewritten_snapshots = service.list().unwrap();
+        assert_eq!(
+            rewritten_snapshots[0]["content"],
+            project_jsonl(rewritten.as_bytes(), "claude").unwrap()
+        );
+    }
 }

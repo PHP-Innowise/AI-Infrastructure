@@ -1527,4 +1527,95 @@ mod update_tests {
         assert!(ok_plan.clear_files);
         assert!(ok_plan.error.is_empty());
     }
+
+    #[test]
+    fn resolve_bootstrap_session_id_ignores_cross_project_fallback_on_project_deep_link() {
+        let projects = vec![json!({"id": "proj-a"}), json!({"id": "proj-b"})];
+        let sessions = vec![
+            json!({"id": "sess-a", "project_id": "proj-a"}),
+            json!({"id": "sess-b", "project_id": "proj-b"}),
+        ];
+        let prefs = json!({"project_id": "proj-a", "session_id": "sess-a"});
+
+        // Route ?project=proj-b without ?session= must not fall back to PREFS["session_id"]
+        // or previous_sid belonging to proj-a.
+        assert_eq!(
+            super::resolve_bootstrap_session_id("proj-b", "", "", &prefs, &sessions, &projects),
+            ""
+        );
+        assert_eq!(
+            super::resolve_bootstrap_session_id(
+                "proj-b", "", "sess-a", &prefs, &sessions, &projects
+            ),
+            ""
+        );
+        // If fallback belongs to the pinned project itself, keeping it is safe.
+        assert_eq!(
+            super::resolve_bootstrap_session_id(
+                "proj-b", "", "sess-b", &prefs, &sessions, &projects
+            ),
+            "sess-b"
+        );
+        // Without ?project= in route, stored PREFS["session_id"] is restored normally.
+        assert_eq!(
+            super::resolve_bootstrap_session_id("", "", "", &prefs, &sessions, &projects),
+            "sess-a"
+        );
+        // Explicit ?session= always wins.
+        assert_eq!(
+            super::resolve_bootstrap_session_id(
+                "proj-b", "sess-b", "sess-a", &prefs, &sessions, &projects
+            ),
+            "sess-b"
+        );
+
+        // Bootstrap poll guard rejects cross-project select while allowing normal post-bootstrap switches.
+        assert!(super::poll::route_blocks_cross_project_sync(
+            true, "proj-b", true, "", "proj-a"
+        ));
+        assert!(!super::poll::route_blocks_cross_project_sync(
+            false, "proj-b", true, "", "proj-a"
+        ));
+        assert!(!super::poll::route_blocks_cross_project_sync(
+            true, "proj-b", true, "sess-a", "proj-a"
+        ));
+        assert!(super::navigation::session_belongs_to_other_project(
+            "sess-a",
+            &json!({"id": "sess-a", "project_id": "proj-a"}),
+            &sessions,
+            "proj-b"
+        ));
+        assert!(!super::navigation::session_belongs_to_other_project(
+            "sess-b",
+            &V::Null,
+            &sessions,
+            "proj-b"
+        ));
+    }
+
+    #[test]
+    fn filter_history_sessions_for_project_isolates_current_project() {
+        let sessions = vec![
+            json!({"id": "s-1", "title": "Auth fix", "project_id": "proj-a", "status": "idle", "waiting_permissions": 1}),
+            json!({"id": "s-2", "title": "Auth port", "project_id": "proj-b", "status": "idle", "waiting_permissions": 0}),
+            json!({"id": "s-3", "title": "DB migration", "project_id": "proj-a", "status": "idle", "waiting_permissions": 0}),
+        ];
+        let counts = std::collections::BTreeMap::new();
+        let proj_a = super::navigation::filter_history_sessions_for_project(
+            &sessions, "proj-a", "", false, &counts,
+        );
+        assert_eq!(proj_a.len(), 2);
+        assert!(proj_a.iter().all(|s| s["project_id"] == "proj-a"));
+
+        let proj_b_auth = super::navigation::filter_history_sessions_for_project(
+            &sessions, "proj-b", "auth", false, &counts,
+        );
+        assert_eq!(proj_b_auth.len(), 1);
+        assert_eq!(proj_b_auth[0]["id"], "s-2");
+
+        let proj_b_waiting = super::navigation::filter_history_sessions_for_project(
+            &sessions, "proj-b", "", true, &counts,
+        );
+        assert!(proj_b_waiting.is_empty());
+    }
 }

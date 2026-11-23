@@ -1389,3 +1389,178 @@ fn system_map_dense_scene_populates_meta_adjacency_and_explain_targets() {
     let adj0 = meta.node_adjacency.get(&idx_0).expect("svc-0 adjacency");
     assert_eq!(adj0, &vec![(0, idx_1)]);
 }
+
+#[test]
+fn system_map_dense_scene_populates_tier_band_and_service_frame_containers() {
+    let mut nodes = vec![
+        json!({ "id": "svc-0", "name": "Gateway", "kind": "service", "layer": "Edge" }),
+        json!({ "id": "svc-0::ep0", "name": "GET /orders", "parent_service": "svc-0", "kind": "contract" }),
+        json!({ "id": "svc-1", "name": "Orders", "kind": "service", "layer": "Core" }),
+    ];
+    for i in 2..184 {
+        nodes.push(json!({
+            "id": format!("svc-{i}"),
+            "name": format!("Service {i}"),
+            "kind": "service",
+            "layer": if i % 2 == 0 { "Edge" } else { "Core" },
+        }));
+    }
+    let edges = vec![json!({
+        "from": "svc-0::ep0",
+        "to": "svc-1",
+        "kinds": ["http"],
+        "provenance": "code_declared",
+        "against": true,
+    })];
+    let doc = json!({ "nodes": nodes, "edges": edges });
+    let state = json!({ "layers": true });
+    let layout = layout_system_nodes(&doc, true);
+    assert!(!layout.tier_bands.is_empty());
+    assert!(!layout.frames.is_empty());
+
+    let bundle =
+        super::render::render_canvas_bundle_with_layout(SERVICES_SURFACE, &doc, &state, &layout);
+    assert!(bundle.is_dense);
+    assert!(!bundle.html.contains("system-tier-band"));
+    assert!(!bundle.html.contains("system-service-frame"));
+
+    let (_scene, meta) = super::render::build_dense_scene_and_meta_for_surface(
+        SERVICES_SURFACE,
+        &doc,
+        &state,
+        &layout,
+    )
+    .expect("dense containers");
+    let tier_count = meta
+        .containers
+        .iter()
+        .filter(|c| c.kind == graph_viewport::canvas2d::DenseContainerKind::TierBand)
+        .count();
+    let frame_count = meta
+        .containers
+        .iter()
+        .filter(|c| c.kind == graph_viewport::canvas2d::DenseContainerKind::ServiceFrame)
+        .count();
+    assert_eq!(tier_count, layout.tier_bands.len());
+    assert_eq!(frame_count, layout.frames.len());
+    let ep_idx = layout
+        .nodes
+        .iter()
+        .position(|n| n.id == "svc-0::ep0")
+        .unwrap();
+    assert_eq!(
+        meta.nodes[&ep_idx].explain_payload["services"],
+        json!(["svc-0"])
+    );
+    assert_eq!(
+        meta.edges[&0].explain_payload["services"],
+        json!(["svc-0", "svc-1"])
+    );
+    assert_eq!(meta.edges[&0].explain_payload["against"], json!(true));
+}
+
+#[test]
+fn system_map_layout_routes_edges_around_intermediate_boxes() {
+    // Chain a -> b -> c puts a (col 0), b (col 1), c (col 2), plus skip edge a -> c.
+    // Same-column stack s0 -> s1 -> s2 plus skip edge s0 -> s2 checks gutter detour.
+    let doc = json!({
+        "nodes": [
+            { "id": "a", "name": "Gateway" },
+            { "id": "b", "name": "Auth" },
+            { "id": "c", "name": "Billing" },
+            { "id": "s0", "name": "Worker 0" },
+            { "id": "s1", "name": "Worker 1" },
+            { "id": "s2", "name": "Worker 2" }
+        ],
+        "edges": [
+            { "from": "a", "to": "b", "kinds": ["http"] },
+            { "from": "b", "to": "c", "kinds": ["http"] },
+            { "from": "a", "to": "c", "kinds": ["rpc"] },
+            { "from": "a", "to": "s0", "kinds": ["event"] },
+            { "from": "a", "to": "s1", "kinds": ["event"] },
+            { "from": "a", "to": "s2", "kinds": ["event"] },
+            { "from": "s0", "to": "s2", "kinds": ["rpc"] }
+        ]
+    });
+    let pins = BTreeMap::from([
+        ("a".to_owned(), (40.0, 120.0)),
+        ("b".to_owned(), (320.0, 120.0)),
+        ("c".to_owned(), (620.0, 120.0)),
+        ("s0".to_owned(), (40.0, 260.0)),
+        ("s1".to_owned(), (40.0, 360.0)),
+        ("s2".to_owned(), (40.0, 460.0)),
+    ]);
+    let layout = layout_system_nodes_with_pins(&doc, false, &pins);
+
+    let check_wire_avoids = |edge_idx: usize, obstacle_id: &str| {
+        let wire = layout
+            .wires
+            .iter()
+            .find(|w| w.edge_index == edge_idx)
+            .expect("wire present");
+        let obs = layout
+            .nodes
+            .iter()
+            .find(|n| n.id == obstacle_id)
+            .expect("obstacle present");
+        let spec = graph_viewport::canvas2d::DenseEdgeSpec::from_svg_path(
+            edge_idx,
+            &wire.path_d,
+            1,
+            false,
+            false,
+            "rpc".into(),
+            false,
+            false,
+            false,
+            false,
+        );
+        // Sample points from cmds directly via dense polyline sampling.
+        let mut pts = Vec::new();
+        let mut cur = (0.0, 0.0);
+        for cmd in &spec.cmds {
+            match *cmd {
+                graph_viewport::canvas2d::DensePathCmd::Move(x, y) => cur = (x, y),
+                graph_viewport::canvas2d::DensePathCmd::Line(x, y) => {
+                    for s in 1..=8 {
+                        let t = (s as f64) / 8.0;
+                        pts.push((cur.0 + (x - cur.0) * t, cur.1 + (y - cur.1) * t));
+                    }
+                    cur = (x, y);
+                }
+                graph_viewport::canvas2d::DensePathCmd::Curve { c1, c2, to } => {
+                    for s in 1..=12 {
+                        let t = (s as f64) / 12.0;
+                        let u = 1.0 - t;
+                        pts.push((
+                            u * u * u * cur.0
+                                + 3.0 * u * u * t * c1.0
+                                + 3.0 * u * t * t * c2.0
+                                + t * t * t * to.0,
+                            u * u * u * cur.1
+                                + 3.0 * u * u * t * c1.1
+                                + 3.0 * u * t * t * c2.1
+                                + t * t * t * to.1,
+                        ));
+                    }
+                    cur = to;
+                }
+            }
+        }
+        assert!(!pts.is_empty());
+        for (px, py) in pts {
+            assert!(
+                !(px >= obs.x && px <= obs.x + obs.w && py >= obs.y && py <= obs.y + obs.h),
+                "wire {edge_idx} point ({px:.1},{py:.1}) cut through {obstacle_id} [{:.1}..{:.1}, {:.1}..{:.1}] path={}",
+                obs.x,
+                obs.x + obs.w,
+                obs.y,
+                obs.y + obs.h,
+                wire.path_d
+            );
+        }
+    };
+
+    check_wire_avoids(2, "b");
+    check_wire_avoids(6, "s1");
+}

@@ -7,11 +7,157 @@ use crate::{
     domain::{self},
     fs,
 };
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
+
+pub type SymbolLookupCallback<'a> = dyn Fn(&str, &str) -> Result<bool> + 'a;
+
+pub enum SymbolVerifier<'a> {
+    Callback(&'a SymbolLookupCallback<'a>),
+    Sqlite(&'a Path),
+}
+
+enum ActiveSymbolVerifier<'a> {
+    Callback(&'a SymbolLookupCallback<'a>),
+    Sqlite(Connection),
+}
+
+impl<'a> ActiveSymbolVerifier<'a> {
+    fn open(verifier: &'a SymbolVerifier<'a>) -> Result<Self> {
+        match verifier {
+            SymbolVerifier::Callback(cb) => Ok(Self::Callback(*cb)),
+            SymbolVerifier::Sqlite(path) => {
+                let meta = std::fs::symlink_metadata(path).map_err(|_| {
+                    RuntimeError::unavailable(format!(
+                        "Graph IR database unavailable: {}",
+                        path.display()
+                    ))
+                })?;
+                if fs::linked_at(path, &meta)? || !meta.is_file() {
+                    return Err(RuntimeError::policy(format!(
+                        "Graph IR database must be a regular non-linked file: {}",
+                        path.display()
+                    )));
+                }
+                let conn = Connection::open_with_flags(
+                    path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                Ok(Self::Sqlite(conn))
+            }
+        }
+    }
+
+    fn verify(&self, file_path: &str, symbol: &str) -> Result<bool> {
+        match self {
+            Self::Callback(cb) => cb(file_path, symbol),
+            Self::Sqlite(conn) => sqlite_symbol_exists(conn, file_path, symbol),
+        }
+    }
+}
+
+fn is_line_anchor(fragment: &str) -> bool {
+    let trimmed = fragment.strip_prefix(['L', 'l']).unwrap_or(fragment);
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Some((start, end)) = trimmed.split_once('-') {
+        let end = end.strip_prefix(['L', 'l']).unwrap_or(end);
+        !start.is_empty()
+            && !end.is_empty()
+            && start.bytes().all(|b| b.is_ascii_digit())
+            && end.bytes().all(|b| b.is_ascii_digit())
+    } else {
+        trimmed.bytes().all(|b| b.is_ascii_digit())
+    }
+}
+
+fn is_symbol_citation(base_path: &str, fragment: &str) -> bool {
+    if fragment.is_empty() || is_line_anchor(fragment) {
+        return false;
+    }
+    let ext = Path::new(base_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    !matches!(
+        ext.as_str(),
+        "md" | "markdown" | "txt" | "rst" | "adoc" | "json" | "toml" | "yaml" | "yml"
+    )
+}
+
+fn split_symbol_query(query: &str) -> (Option<&str>, &str) {
+    if let Some((qual, leaf)) = query.rsplit_once("::")
+        && !qual.is_empty()
+        && !leaf.is_empty()
+    {
+        return (Some(qual), leaf);
+    }
+    if query.contains('\\')
+        && let Some((qual, leaf)) = query.rsplit_once('\\')
+        && !leaf.is_empty()
+    {
+        return (Some(qual).filter(|q| !q.is_empty()), leaf);
+    }
+    if let Some((qual, leaf)) = query.rsplit_once('.')
+        && !qual.is_empty()
+        && !leaf.is_empty()
+    {
+        return (Some(qual), leaf);
+    }
+    (None, query)
+}
+
+fn symbol_matches_query(
+    symbol_id: &str,
+    name: &str,
+    parent_name: Option<&str>,
+    raw_query: &str,
+) -> bool {
+    if symbol_id == raw_query {
+        return true;
+    }
+    let (qual, leaf) = split_symbol_query(raw_query);
+    if let Some(q) = qual {
+        let q_short = q.rsplit([':', '\\', '.']).next().unwrap_or(q);
+        name == leaf
+            && parent_name.is_some_and(|parent| {
+                parent == q
+                    || parent == q_short
+                    || parent.ends_with(&format!("::{q}"))
+                    || parent.ends_with(&format!("\\{q}"))
+                    || parent.ends_with(&format!(".{q}"))
+            })
+    } else {
+        name == raw_query || name == leaf
+    }
+}
+
+fn sqlite_symbol_exists(conn: &Connection, file_path: &str, symbol: &str) -> Result<bool> {
+    let (_, leaf) = split_symbol_query(symbol);
+    let mut normalized = file_path.replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT symbol_id, name, parent_name FROM ir_symbols WHERE file_path=?1 AND (symbol_id=?2 OR name=?3)",
+    )?;
+    let mut rows = stmt.query(params![normalized, symbol, leaf])?;
+    while let Some(row) = rows.next()? {
+        let symbol_id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let parent_name: Option<String> = row.get(2)?;
+        if symbol_matches_query(&symbol_id, &name, parent_name.as_deref(), symbol) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 const REQUIRED: [&str; 12] = [
     "id",
@@ -79,8 +225,27 @@ fn date_of(value: &Value, key: &str) -> Result<chrono::NaiveDate> {
 /// cited file is gone pass, as the full report does; without it the chunk is
 /// refused, which keeps retrieval's gate strict.
 pub fn metadata(service: &BankService, path: &str, value: &Value, warnings: bool) -> Result<()> {
+    metadata_with_symbol_verifier(service, path, value, warnings, None)
+}
+
+pub fn metadata_with_symbol_verifier(
+    service: &BankService,
+    path: &str,
+    value: &Value,
+    warnings: bool,
+    symbol_verifier: Option<&SymbolVerifier<'_>>,
+) -> Result<()> {
+    let active = symbol_verifier
+        .map(ActiveSymbolVerifier::open)
+        .transpose()?;
     let mut ignored = Vec::new();
-    checked(service, path, value, warnings.then_some(&mut ignored))
+    checked(
+        service,
+        path,
+        value,
+        warnings.then_some(&mut ignored),
+        active.as_ref(),
+    )
 }
 
 fn checked(
@@ -88,6 +253,7 @@ fn checked(
     path: &str,
     value: &Value,
     mut warnings: Option<&mut Vec<String>>,
+    symbol_verifier: Option<&ActiveSymbolVerifier<'_>>,
 ) -> Result<()> {
     let object = value
         .as_object()
@@ -183,10 +349,21 @@ fn checked(
             return Err(invalid("active chunk is past its valid_to date"));
         }
     }
-    let local = sources
+    let local_refs = sources
         .iter()
         .filter(|source| !source.starts_with("https://") && !source.starts_with("http://"))
-        .map(|source| source.split('#').next().unwrap_or(source))
+        .map(|source| {
+            let (base, fragment) = source
+                .split_once('#')
+                .map_or((source.as_str(), None), |(b, f)| {
+                    (b, (!f.is_empty()).then_some(f))
+                });
+            (source.as_str(), base, fragment)
+        })
+        .collect::<Vec<_>>();
+    let local = local_refs
+        .iter()
+        .map(|(_, base, _)| *base)
         .collect::<Vec<_>>();
     if let Some(digests) = value.get("source_digests").filter(|value| !value.is_null()) {
         let rows = digests
@@ -231,7 +408,7 @@ fn checked(
     }
     let terminal =
         ["superseded", "archived"].contains(&status) || end.is_some_and(|end| end < today);
-    for source in local {
+    for (raw_source, source, fragment) in local_refs {
         let resolved = fs::canonical_or_missing(&service.context.roots.resolve(source))?;
         let inside = [
             &service.context.roots.project,
@@ -255,6 +432,21 @@ fn checked(
                 continue;
             }
             return Err(invalid(format!("source path does not exist: {source}")));
+        }
+        if let Some(symbol) = fragment
+            && let Some(verifier) = symbol_verifier
+            && is_symbol_citation(source, symbol)
+            && !verifier.verify(source, symbol)?
+        {
+            if terminal && let Some(warnings) = warnings.as_deref_mut() {
+                warnings.push(format!(
+                    "{path}: cited symbol no longer exists: {raw_source} (chunk is {status} and no longer retrievable)"
+                ));
+                continue;
+            }
+            return Err(invalid(format!(
+                "cited symbol does not exist: {raw_source}"
+            )));
         }
     }
     Ok(())
@@ -305,13 +497,30 @@ fn parse_index(text: &str) -> Result<Vec<(String, Row)>> {
 }
 
 pub fn validate_bank(service: &BankService) -> Result<Vec<String>> {
-    Ok(report(service)?.0)
+    validate_bank_with_symbol_verifier(service, None)
+}
+
+pub fn validate_bank_with_symbol_verifier(
+    service: &BankService,
+    symbol_verifier: Option<&SymbolVerifier<'_>>,
+) -> Result<Vec<String>> {
+    Ok(report_with_symbol_verifier(service, symbol_verifier)?.0)
 }
 
 /// Errors and warnings, separately, in the retired validator's order: a
 /// chunk that is wrong fails the bank, while one that correctly reached the
 /// end of its life after a file it cites was deleted only warns.
 pub fn report(service: &BankService) -> Result<(Vec<String>, Vec<String>)> {
+    report_with_symbol_verifier(service, None)
+}
+
+pub fn report_with_symbol_verifier(
+    service: &BankService,
+    symbol_verifier: Option<&SymbolVerifier<'_>>,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let active = symbol_verifier
+        .map(ActiveSymbolVerifier::open)
+        .transpose()?;
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let roots = &service.context.roots;
@@ -405,7 +614,13 @@ pub fn report(service: &BankService) -> Result<(Vec<String>, Vec<String>)> {
         }
         let result = (|| -> Result<codec::Chunk> {
             let chunk = codec::read(&mut files, &path)?;
-            checked(service, &path, &chunk.metadata, Some(&mut warnings))?;
+            checked(
+                service,
+                &path,
+                &chunk.metadata,
+                Some(&mut warnings),
+                active.as_ref(),
+            )?;
             secret(&chunk.raw)?;
             let id = chunk.metadata["id"].as_str().unwrap_or("").to_string();
             on_disk.insert(id.clone());
@@ -537,7 +752,19 @@ pub fn write_errors(
     before: &[String],
     attested: &[String],
 ) -> Result<Vec<String>> {
-    let mut errors = validate_bank(service)?
+    write_errors_with_symbol_verifier(service, before, attested, None)
+}
+
+pub fn write_errors_with_symbol_verifier(
+    service: &BankService,
+    before: &[String],
+    attested: &[String],
+    symbol_verifier: Option<&SymbolVerifier<'_>>,
+) -> Result<Vec<String>> {
+    let active = symbol_verifier
+        .map(ActiveSymbolVerifier::open)
+        .transpose()?;
+    let mut errors = validate_bank_with_symbol_verifier(service, symbol_verifier)?
         .into_iter()
         .filter(|error| !before.contains(error))
         .collect::<Vec<_>>();
@@ -545,7 +772,7 @@ pub fn write_errors(
     for path in attested {
         let result = (|| -> Result<()> {
             let chunk = codec::read(&mut files, path)?;
-            metadata(service, path, &chunk.metadata, true)?;
+            checked(service, path, &chunk.metadata, None, active.as_ref())?;
             secret(&chunk.raw)
         })();
         if let Err(error) = result {
@@ -611,6 +838,168 @@ mod readme_tests {
             readme_errors(Roots::installed(&state).unwrap()),
             ["memory-bank/README.md: required file is missing"],
             "an installed bank must keep its own README"
+        );
+    }
+
+    #[test]
+    fn symbol_verifier_checks_code_symbols_against_callback_and_sqlite_ir() {
+        let root = std::env::temp_dir().join(format!("infra-bank-sym-{}", crate::domain::uuid4()));
+        let _cleanup = Directory(root.clone());
+        std::fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("specs")).unwrap();
+        std::fs::write(root.join("memory-bank/README.md"), "# Memory Bank\n").unwrap();
+        std::fs::write(
+            root.join("memory-bank/INDEX.md"),
+            "# Memory Bank Index\n\n| ID | Title | Type | Status | Updated | File |\n|---|---|---|---|---|---|\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/InvoiceService.php"),
+            "<?php\nclass InvoiceService { public function issue(): void {} }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("specs/invoice.md"), "# Invoice\n\n## Rules\n").unwrap();
+
+        let service = BankService::new(
+            RuntimeContext::new(Roots::installed(&root).unwrap(), "local", "governed").unwrap(),
+        );
+
+        let chunk_meta = |id: &str, status: &str, superseded_by: Option<&str>, sources: Value| {
+            serde_json::json!({
+                "id": id,
+                "title": "Invoice rules",
+                "type": "convention",
+                "status": status,
+                "scope": ["application"],
+                "tags": ["project-brain", "promoted"],
+                "created": "2026-01-01",
+                "last_verified": "2026-01-01",
+                "review_after": "9999-12-31",
+                "sources": sources,
+                "supersedes": [],
+                "superseded_by": superseded_by
+            })
+        };
+
+        // Line anchors & markdown section anchors are exempt from Graph IR symbol checks even when verifier rejects unknown symbols.
+        let valid_meta = chunk_meta(
+            "MEM-20260101-00000001",
+            "active",
+            None,
+            serde_json::json!([
+                "src/InvoiceService.php#InvoiceService::issue",
+                "src/InvoiceService.php#L1-L2",
+                "specs/invoice.md#rules"
+            ]),
+        );
+        let cb = |path: &str, sym: &str| {
+            Ok(path == "src/InvoiceService.php" && sym == "InvoiceService::issue")
+        };
+        metadata_with_symbol_verifier(
+            &service,
+            "memory-bank/chunks/MEM-20260101-00000001-invoice.md",
+            &valid_meta,
+            true,
+            Some(&SymbolVerifier::Callback(&cb)),
+        )
+        .unwrap();
+
+        let missing_cb_meta = chunk_meta(
+            "MEM-20260101-00000002",
+            "active",
+            None,
+            serde_json::json!(["src/InvoiceService.php#InvoiceService::missing"]),
+        );
+        let err = metadata_with_symbol_verifier(
+            &service,
+            "memory-bank/chunks/MEM-20260101-00000002-invoice.md",
+            &missing_cb_meta,
+            true,
+            Some(&SymbolVerifier::Callback(&cb)),
+        )
+        .unwrap_err();
+        assert!(err.message.contains("cited symbol does not exist"));
+
+        // Verify against a real read-only SQLite ir_symbols table.
+        let ir_db = root.join("ir.sqlite");
+        {
+            let conn = Connection::open(&ir_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE ir_symbols(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    symbol_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    parent_name TEXT,
+                    signature TEXT,
+                    visibility TEXT,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    modifiers_json TEXT NOT NULL,
+                    body_fingerprint TEXT NOT NULL,
+                    is_test INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ir_symbols(file_path,symbol_id,kind,name,parent_name,start_line,end_line,modifiers_json,body_fingerprint,is_test)
+                 VALUES('src/InvoiceService.php','sym:method:App\\InvoiceService::issue','method','issue','App\\InvoiceService',2,2,'[]','fp',0)",
+                [],
+            )
+            .unwrap();
+        }
+        let sqlite_verifier = SymbolVerifier::Sqlite(&ir_db);
+        metadata_with_symbol_verifier(
+            &service,
+            "memory-bank/chunks/MEM-20260101-00000001-invoice.md",
+            &valid_meta,
+            true,
+            Some(&sqlite_verifier),
+        )
+        .unwrap();
+
+        let missing_err = metadata_with_symbol_verifier(
+            &service,
+            "memory-bank/chunks/MEM-20260101-00000002-invoice.md",
+            &missing_cb_meta,
+            true,
+            Some(&sqlite_verifier),
+        )
+        .unwrap_err();
+        assert!(missing_err.message.contains("cited symbol does not exist"));
+
+        // Terminal chunks with a missing cited symbol emit a warning instead of failing report().
+        let retired_bytes = codec::render_chunk(
+            &chunk_meta(
+                "MEM-20260101-00000003",
+                "archived",
+                None,
+                serde_json::json!(["src/InvoiceService.php#InvoiceService::legacy"]),
+            ),
+            "Archived chunk body\n",
+        )
+        .unwrap();
+        let retired_path = "memory-bank/chunks/MEM-20260101-00000003-retired.md";
+        std::fs::write(root.join(retired_path), retired_bytes).unwrap();
+        std::fs::write(
+            root.join("memory-bank/INDEX.md"),
+            "# Memory Bank Index\n\n| ID | Title | Type | Scope | Tags | Status | Last Verified | File |\n|---|---|---|---|---|---|---|---|\n| MEM-20260101-00000003 | Invoice rules | convention | application | project-brain, promoted | archived | 2026-01-01 | [chunks/MEM-20260101-00000003-retired.md](chunks/MEM-20260101-00000003-retired.md) |\n",
+        )
+        .unwrap();
+        let (errors, warnings) =
+            report_with_symbol_verifier(&service, Some(&sqlite_verifier)).unwrap();
+        assert!(
+            errors.is_empty(),
+            "unexpected validation errors: {errors:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("cited symbol no longer exists")
+                    && w.contains("InvoiceService::legacy")),
+            "expected symbol warning in {warnings:?}"
         );
     }
 }

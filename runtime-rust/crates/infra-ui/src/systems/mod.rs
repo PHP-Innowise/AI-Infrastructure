@@ -180,6 +180,22 @@ pub(super) fn can_switch_system_project_now() -> bool {
         && !m::yes(&m::data("discovery-active"))
 }
 
+pub(super) fn consume_pending_project_sync() -> bool {
+    if !can_switch_system_project_now() {
+        return false;
+    }
+    let pending_project = m::take("system-pending-project-sync");
+    let Some(project) = pending_project
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    on_global_project_change(project);
+    true
+}
+
 #[allow(dead_code)]
 pub(crate) fn on_global_project_change(project: &str) {
     let project = project.trim();
@@ -279,6 +295,10 @@ pub async fn load() {
 }
 
 pub(super) fn controls() {
+    let _ = consume_pending_project_sync();
+    if !cfg!(target_arch = "wasm32") {
+        return;
+    }
     let pending = m::yes(&m::data("system-pending"));
     let dirty = m::yes(&m::data("editor-dirty"));
     let locked = m::yes(&m::data("editor-pending"));
@@ -865,4 +885,50 @@ mod test_exports {
     pub(super) use super::editor::*;
     pub(super) use super::runs::*;
     pub(super) use super::*;
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    fn clear_sync_test_keys() {
+        for key in [
+            "editor-dirty",
+            "editor-pending",
+            "system-pending",
+            "discovery-active",
+            "system-pending-project-sync",
+            "system-project-sync",
+            "system-run",
+            "system-catalog",
+            "system-graph-status",
+            "system-graph-map",
+        ] {
+            m::take(key);
+        }
+    }
+
+    #[test]
+    fn deferred_project_sync_consumes_when_blocking_states_clear() {
+        clear_sync_test_keys();
+        m::set("system-project-sync", json!("proj-a"));
+
+        m::set("editor-dirty", json!(true));
+        on_global_project_change("proj-b");
+        assert_eq!(m::data("system-pending-project-sync"), json!("proj-b"));
+        assert_eq!(m::string(&m::data("system-project-sync")), "proj-a");
+        assert!(!consume_pending_project_sync());
+        assert_eq!(m::data("system-pending-project-sync"), json!("proj-b"));
+
+        m::set("editor-dirty", json!(false));
+        m::set("discovery-active", json!(true));
+        assert!(!consume_pending_project_sync());
+        assert_eq!(m::data("system-pending-project-sync"), json!("proj-b"));
+
+        m::set("discovery-active", json!(false));
+        controls();
+        assert!(m::data("system-pending-project-sync").is_null());
+        assert_eq!(m::string(&m::data("system-project-sync")), "proj-b");
+        clear_sync_test_keys();
+    }
 }

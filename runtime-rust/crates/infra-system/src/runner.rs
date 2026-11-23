@@ -26,6 +26,306 @@ use std::{
     time::Instant,
 };
 
+const SYSTEM_CACHE_RACY_NS: i128 = 2_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WatchedFileStamp {
+    exists: bool,
+    is_file: bool,
+    len: u64,
+    mtime_ns: i128,
+    racy_sha256: Option<String>,
+}
+
+impl WatchedFileStamp {
+    fn capture(path: &Path, now_ns: i128) -> Self {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return Self {
+                exists: false,
+                is_file: false,
+                len: 0,
+                mtime_ns: 0,
+                racy_sha256: None,
+            };
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Self {
+                exists: true,
+                is_file: false,
+                len: 0,
+                mtime_ns: 0,
+                racy_sha256: None,
+            };
+        }
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i128::try_from(d.as_nanos()).ok())
+            .unwrap_or(0);
+        let is_racy = mtime_ns <= 0 || now_ns <= 0 || mtime_ns > now_ns - SYSTEM_CACHE_RACY_NS;
+        let racy_sha256 = if is_racy {
+            std::fs::read(path).ok().map(|bytes| digest(&bytes))
+        } else {
+            None
+        };
+        Self {
+            exists: true,
+            is_file: true,
+            len: meta.len(),
+            mtime_ns,
+            racy_sha256,
+        }
+    }
+
+    fn matches(&self, path: &Path, now_ns: i128) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return !self.exists;
+        };
+        if !self.exists {
+            return false;
+        }
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return !self.is_file;
+        }
+        if !self.is_file {
+            return false;
+        }
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i128::try_from(d.as_nanos()).ok())
+            .unwrap_or(0);
+        if meta.len() != self.len || mtime_ns != self.mtime_ns {
+            return false;
+        }
+        let is_racy = mtime_ns <= 0 || now_ns <= 0 || mtime_ns > now_ns - SYSTEM_CACHE_RACY_NS;
+        if is_racy || self.racy_sha256.is_some() {
+            let Some(expected) = &self.racy_sha256 else {
+                return false;
+            };
+            return std::fs::read(path)
+                .ok()
+                .is_some_and(|bytes| digest(&bytes) == *expected);
+        }
+        true
+    }
+}
+
+fn resolve_git_dir(root: &Path) -> Option<PathBuf> {
+    let top = root
+        .ancestors()
+        .find(|folder| std::fs::symlink_metadata(folder.join(".git")).is_ok())?;
+    let dot_git = top.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    if meta.is_dir() {
+        return Some(dot_git);
+    }
+    if meta.is_file()
+        && let Ok(text) = std::fs::read_to_string(&dot_git)
+        && let Some(raw) = text.trim().strip_prefix("gitdir:")
+    {
+        let p = Path::new(raw.trim());
+        return Some(if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            top.join(p)
+        });
+    }
+    None
+}
+
+fn collect_watched_system_paths(system: &System) -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    paths.insert(system.config.clone());
+    paths.insert(system.root.join("project-brain/config/runtime.json"));
+    let mut git_dirs = BTreeSet::new();
+    if let Some(gd) = resolve_git_dir(&system.root) {
+        git_dirs.insert(gd);
+    }
+    for svc in system.services.values() {
+        if !svc.manifest_path.is_empty() {
+            paths.insert(svc.root.join(&svc.manifest_path));
+        }
+        if let Some(gd) = resolve_git_dir(&svc.root) {
+            git_dirs.insert(gd);
+        }
+    }
+    for gd in git_dirs {
+        let head = gd.join("HEAD");
+        if let Ok(head_text) = std::fs::read_to_string(&head)
+            && let Some(ref_rel) = head_text.trim().strip_prefix("ref:")
+        {
+            paths.insert(gd.join(ref_rel.trim()));
+        }
+        paths.insert(head);
+        paths.insert(gd.join("packed-refs"));
+    }
+    paths.into_iter().collect()
+}
+
+struct CachedSystem {
+    system: System,
+    watched: Vec<(PathBuf, WatchedFileStamp)>,
+    reload_count: usize,
+}
+
+impl CachedSystem {
+    fn from_system(system: &System) -> Self {
+        let now_ns = current_unix_ns();
+        let watched = collect_watched_system_paths(system)
+            .into_iter()
+            .map(|p| {
+                let stamp = WatchedFileStamp::capture(&p, now_ns);
+                (p, stamp)
+            })
+            .collect();
+        Self {
+            system: system.clone(),
+            watched,
+            reload_count: 0,
+        }
+    }
+
+    fn is_drifted(&self) -> bool {
+        let now_ns = current_unix_ns();
+        self.watched
+            .iter()
+            .any(|(path, stamp)| !stamp.matches(path, now_ns))
+    }
+
+    fn get_or_reload(&mut self, allow_roots: &[PathBuf]) -> Result<&mut System> {
+        if self.is_drifted() {
+            let reloaded = System::new(&self.system.config, allow_roots)?;
+            let now_ns = current_unix_ns();
+            self.watched = collect_watched_system_paths(&reloaded)
+                .into_iter()
+                .map(|p| {
+                    let stamp = WatchedFileStamp::capture(&p, now_ns);
+                    (p, stamp)
+                })
+                .collect();
+            self.system = reloaded;
+            self.reload_count += 1;
+        }
+        Ok(&mut self.system)
+    }
+}
+
+fn current_unix_ns() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i128::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+struct PrelaunchHealthDecision {
+    active_model: Option<String>,
+    max_attempts: u64,
+}
+
+fn evaluate_prelaunch_health(
+    health_db_path: &Path,
+    provider: &str,
+    step: &Value,
+    state: &mut Value,
+    event: &mut (dyn FnMut(Value) -> Result<()> + Send),
+) -> PrelaunchHealthDecision {
+    let requested_model = state
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let pre_health = execution::summarize_system_health(
+        health_db_path,
+        "system",
+        provider,
+        requested_model.as_deref(),
+    );
+    let healthier_model = execution::select_healthier_model(
+        health_db_path,
+        "system",
+        provider,
+        requested_model.as_deref(),
+    );
+    let active_model = healthier_model.clone().or_else(|| requested_model.clone());
+    let mut pre_warnings = pre_health.warnings.clone();
+    if let Some(alt) = &healthier_model {
+        pre_warnings.push(format!(
+            "Selected healthier model `{alt}` over degraded `{}` for system/{provider}",
+            requested_model.as_deref().unwrap_or("default")
+        ));
+    }
+    merge_health_warnings(state, &pre_warnings);
+    let max_attempts = pre_health.recommended_max_attempts(100);
+    if pre_health.is_degraded() || healthier_model.is_some() {
+        notify(
+            event,
+            object!({
+                "type": "system_health",
+                "phase": step["id"],
+                "provider": provider,
+                "requested_model": requested_model,
+                "selected_model": &active_model,
+                "recommended_max_attempts": max_attempts,
+                "recommended_concurrency": pre_health.recommended_concurrency(1),
+                "warnings": pre_warnings,
+            }),
+        );
+    }
+    PrelaunchHealthDecision {
+        active_model,
+        max_attempts,
+    }
+}
+
+fn should_require_verify_llm_review(
+    verify_plan_step: Option<&Value>,
+    state: &Value,
+    prior: &[Value],
+) -> bool {
+    let deterministic_only = verify_plan_step.is_some_and(|s| s["deterministic_only"] == true);
+    let prior_step_mutated = prior.iter().any(|rep| {
+        rep.get("changed_files")
+            .and_then(Value::as_array)
+            .is_some_and(|arr| !arr.is_empty())
+    });
+    let has_explicit_mutating_step = state["steps"].as_array().is_some_and(|all_steps| {
+        all_steps.iter().any(|s| {
+            s["kind"].as_str() == Some("mutate")
+                || s["mutating"] == true
+                || s["mode"].as_str() == Some("edit")
+        })
+    });
+    let mode_forbids_zero_token = state["mode"].as_str() != Some("read-only")
+        || has_explicit_mutating_step
+        || prior_step_mutated;
+    verify_plan_step.is_some_and(|s| s["require_llm_review"] == true)
+        || (!deterministic_only && mode_forbids_zero_token)
+}
+
+fn merge_health_warnings(state: &mut Value, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    let mut existing: Vec<String> = state
+        .get("health_warnings")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    for w in warnings {
+        if !existing.contains(w) {
+            existing.push(w.clone());
+        }
+    }
+    state["health_warnings"] = object!(existing);
+}
+
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Optional code-graph bridge, launch identity, and approval hooks threaded through a system run.
@@ -1127,6 +1427,7 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
             .as_array()
             .cloned()
             .ok_or_else(|| fail("Missing steps"))?;
+        let mut cached_system = CachedSystem::from_system(system);
         for step in steps {
             if step["status"] == "completed" {
                 continue;
@@ -1138,8 +1439,8 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                     "interrupted",
                 ));
             }
-            let mut current = System::new(&system.config, &system.allow_roots)?;
-            let verdict = current.verify(&plan)?;
+            let current_ref = cached_system.get_or_reload(&system.allow_roots)?;
+            let verdict = current_ref.verify(&plan)?;
             if verdict["fresh"] != true {
                 // Memory that stopped holding between dispatches leaves the shared context; any other change needs a new plan.
                 if verdict["changed"].as_array().is_some_and(|changed| {
@@ -1147,25 +1448,34 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                         .iter()
                         .all(|change| change["reason"] == "memory_ineligible")
                 }) {
-                    plan = current.refresh_checkpoint(&plan, &BTreeSet::new())?;
+                    plan = current_ref.refresh_checkpoint(&plan, &BTreeSet::new())?;
                     save(directory, "checkpoint.json", &plan, false)?;
                 } else {
-                    check_changes(&mut current, &plan, None, None, state, false)?;
+                    check_changes(current_ref, &plan, None, None, state, false)?;
                     return Err(fail("Sources changed between dispatches; prepare new plan"));
                 }
             }
+            let current = current_ref.clone();
             let prior = reports(directory, state)?;
+            let sid = string(&step["service"]).to_string();
+            let provider = string(&state["provider"]).to_string();
+            let health_db_path = directory
+                .parent()
+                .unwrap_or(directory)
+                .join("system_health.sqlite3");
+            let PrelaunchHealthDecision {
+                active_model,
+                max_attempts,
+            } = evaluate_prelaunch_health(&health_db_path, &provider, &step, state, event);
             let attempt = step["attempt"]
                 .as_u64()
-                .filter(|attempt| *attempt < 100)
+                .filter(|attempt| *attempt < max_attempts)
                 .ok_or_else(|| fail("Dispatch retry limit reached"))?
                 + 1;
             let mut preview = step.clone();
             preview["dispatch_id"] = id32().into();
             preview["status"] = "running".into();
             preview["attempt"] = object!(attempt);
-            let sid = string(&step["service"]).to_string();
-            let provider = string(&state["provider"]).to_string();
             let executable = PathBuf::from(string(&state["executable"]));
             let scratch = native::read_only_scratch(
                 &provider,
@@ -1250,13 +1560,9 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
             let deterministic_only =
                 verify_plan_step.is_some_and(|s| s["deterministic_only"] == true);
             let require_llm_review =
-                verify_plan_step.is_some_and(|s| s["require_llm_review"] == true);
+                should_require_verify_llm_review(verify_plan_step, state, &prior);
             let mut deterministic_short_circuit = None;
             let mut det_prompt_note: Option<String> = None;
-            let health_db_path = directory
-                .parent()
-                .unwrap_or(directory)
-                .join("system_health.sqlite3");
             if !verify_programs.is_empty() {
                 let det = execution::run_deterministic_verify_checks_cached(
                     &verify_programs,
@@ -1329,7 +1635,7 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                     project: root.clone(),
                     prompt: prompt.clone(),
                     mode: "edit".into(),
-                    model: None,
+                    model: active_model.clone(),
                     session: None,
                     agents: false,
                     count: 1,
@@ -1471,6 +1777,7 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 "ok": false,
                 "report": null
             });
+            let is_deterministic_short_circuit = deterministic_short_circuit.is_some();
             let (native_collector, mut receipt) = if let Some(det) = deterministic_short_circuit {
                 let mut det_receipt = receipt;
                 det_receipt["duration_seconds"] = object!(det.duration_seconds);
@@ -1717,11 +2024,16 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 string(&preview["id"]),
                 attempt
             );
+            let step_model = if is_deterministic_short_circuit {
+                None
+            } else {
+                active_model.as_deref()
+            };
             execution::record_system_health(
                 &health_db_path,
                 "system",
                 step_provider,
-                state["model"].as_str(),
+                step_model,
                 &run_key,
                 string(&preview["id"]),
                 if receipt["ok"] == true {
@@ -1739,11 +2051,9 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 &health_db_path,
                 "system",
                 step_provider,
-                state["model"].as_str(),
+                step_model,
             );
-            if !health.warnings.is_empty() {
-                state["health_warnings"] = object!(health.warnings);
-            }
+            merge_health_warnings(state, &health.warnings);
             let finished = object!({
                 "type": "dispatch_finished",
                 "phase": preview["id"],
@@ -1797,9 +2107,9 @@ fn execute_run_steps_boxed<'a>(args: RunStepsArgs<'a>) -> BoxFuture<'a, Result<V
                 notify(event, finished);
                 return Ok(state.clone());
             }
-            current = System::new(&system.config, &system.allow_roots)?;
+            let refreshed = cached_system.get_or_reload(&system.allow_roots)?;
             plan = check_changes(
-                &mut current,
+                refreshed,
                 &plan,
                 Some(&preview),
                 Some(&receipt["report"]),
@@ -2568,5 +2878,282 @@ mod tests {
                 assert_eq!(collector.commands, 1);
             }
         }
+    }
+
+    fn write_exec_script(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn cached_system_avoids_reloads_when_clean_and_reloads_on_manifest_drift() {
+        let dir =
+            std::env::temp_dir().join(format!("infra-runner-cached-sys-{}", uuid::Uuid::new_v4()));
+        let sys_dir = dir.join("sys");
+        let orders_dir = dir.join("orders");
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        std::fs::create_dir_all(&orders_dir).unwrap();
+        std::fs::write(sys_dir.join("AGENTS.md"), "# Policy\n").unwrap();
+        std::fs::write(
+            sys_dir.join("system.json"),
+            serde_json::to_string_pretty(&object!({
+                "schema_version": 1,
+                "name": "cache-sys",
+                "services": [{"id": "orders", "root": "../orders", "manifest": "ai-service.json"}],
+                "shared_sources": [{"kind": "policy", "path": "AGENTS.md"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let make_manifest = |desc: &str| {
+            serde_json::to_string_pretty(&object!({
+                "schema_version": 1,
+                "id": "orders",
+                "description": desc,
+                "owner": "@team",
+                "capabilities": [{"id": "orders", "description": desc, "status": "implemented", "sources": []}],
+                "provides": [],
+                "consumes": [],
+                "sources": []
+            }))
+            .unwrap()
+        };
+        std::fs::write(
+            orders_dir.join("ai-service.json"),
+            make_manifest("orders-v1"),
+        )
+        .unwrap();
+
+        let system = System::new(&sys_dir.join("system.json"), std::slice::from_ref(&dir)).unwrap();
+        let mut cached = CachedSystem::from_system(&system);
+        let _ = cached.get_or_reload(std::slice::from_ref(&dir)).unwrap();
+        let _ = cached.get_or_reload(std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(cached.reload_count, 0);
+
+        // Mutate service manifest inside RACY_NS with exact same byte length -> triggers reload.
+        std::fs::write(
+            orders_dir.join("ai-service.json"),
+            make_manifest("orders-v2"),
+        )
+        .unwrap();
+        let desc = {
+            let reloaded = cached.get_or_reload(std::slice::from_ref(&dir)).unwrap();
+            reloaded.services["orders"].manifest.as_ref().unwrap()["description"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        assert_eq!(cached.reload_count, 1);
+        assert_eq!(desc.as_deref(), Some("orders-v2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn zero_token_verify_respects_mode_and_prelaunch_health_clamps_and_switches_model() {
+        let dir = std::env::temp_dir().join(format!("infra-runner-wave3-{}", uuid::Uuid::new_v4()));
+        let sys_dir = dir.join("sys");
+        let orders_dir = dir.join("orders");
+        std::fs::create_dir_all(orders_dir.join("project-brain")).unwrap();
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        std::fs::write(sys_dir.join("AGENTS.md"), "# Policy\n").unwrap();
+        std::fs::write(
+            sys_dir.join("system.json"),
+            serde_json::to_string_pretty(&object!({
+                "schema_version": 1,
+                "name": "runner-w3-sys",
+                "services": [{"id": "orders", "root": "../orders", "manifest": "ai-service.json"}],
+                "shared_sources": [{"kind": "policy", "path": "AGENTS.md"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            orders_dir.join("ai-service.json"),
+            serde_json::to_string_pretty(&object!({
+                "schema_version": 1,
+                "id": "orders",
+                "description": "orders",
+                "owner": "@team",
+                "capabilities": [{"id": "orders", "description": "orders", "status": "implemented", "sources": []}],
+                "provides": [],
+                "consumes": [],
+                "sources": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            orders_dir.join("package.json"),
+            r#"{"name":"orders","scripts":{"test":"phpunit"}}"#,
+        )
+        .unwrap();
+
+        let fake_cli = dir.join("fake-claude.sh");
+        let verify_log = dir.join("verify-llm.log");
+        let script = format!(
+            r#"#!/bin/sh
+prompt=$(cat)
+case "$prompt" in
+  *'"phase":"verify"'*)
+    echo "verify" >> "{vlog}"
+    report='{{"status":"completed","summary":"Verify LLM","checks":[{{"name":"v","status":"passed","detail":"ok"}}],"changed_files":[],"service_order":[]}}'
+    ;;
+  *'"phase":"contracts"'*)
+    report='{{"status":"completed","summary":"Contracts","checks":[{{"name":"c","status":"passed","detail":"ok"}}],"changed_files":[],"service_order":["orders"]}}'
+    ;;
+  *)
+    report='{{"status":"completed","summary":"Orders","checks":[{{"name":"o","status":"passed","detail":"ok"}}],"changed_files":[],"service_order":[]}}'
+    ;;
+esac
+echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+printf '{{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":%s,"session_id":"s1"}}\n' "$report"
+"#,
+            vlog = verify_log.display()
+        );
+        write_exec_script(&fake_cli, &script);
+        let cli_str = fake_cli.to_string_lossy().into_owned();
+
+        let mut system =
+            System::new(&sys_dir.join("system.json"), std::slice::from_ref(&dir)).unwrap();
+        let plan = system
+            .plan("Check orders", "chg-w3", &["orders".into()], &[], 8000, 4)
+            .unwrap();
+        // Planner marks safe deterministic verify as require_llm_review: false.
+        let planned_verify = plan["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "verify")
+            .unwrap();
+        assert_eq!(planned_verify["require_llm_review"], false);
+
+        // 1. Mode / mutating step gating on 0-token verify short-circuit.
+        let ro_state = object!({
+            "mode": "read-only",
+            "steps": [{"id": "contracts", "mode": "read-only"}, {"id": "verify", "mode": "read-only"}],
+        });
+        assert!(!should_require_verify_llm_review(
+            Some(planned_verify),
+            &ro_state,
+            &[],
+        ));
+        let edit_state = object!({
+            "mode": "edit",
+            "steps": [{"id": "contracts", "mode": "read-only"}, {"id": "verify", "mode": "read-only"}],
+        });
+        assert!(should_require_verify_llm_review(
+            Some(planned_verify),
+            &edit_state,
+            &[],
+        ));
+        let mutated_prior = vec![object!({"changed_files": ["src/Order.php"]})];
+        assert!(should_require_verify_llm_review(
+            Some(planned_verify),
+            &ro_state,
+            &mutated_prior,
+        ));
+        let explicit_require = object!({"require_llm_review": true});
+        assert!(should_require_verify_llm_review(
+            Some(&explicit_require),
+            &ro_state,
+            &[],
+        ));
+        let det_only = object!({"require_llm_review": false, "deterministic_only": true});
+        assert!(!should_require_verify_llm_review(
+            Some(&det_only),
+            &edit_state,
+            &mutated_prior,
+        ));
+
+        // 2. Pre-launch health check clamps attempts before spawning and proactively selects healthier model.
+        std::fs::create_dir_all(dir.join("runs")).unwrap();
+        let health_db = dir.join("runs/system_health.sqlite3");
+        for i in 0..4 {
+            execution::record_system_health(
+                &health_db,
+                "system",
+                "claude",
+                None,
+                &format!("bad-{i}"),
+                "verify",
+                "schema_error",
+                true,
+                true,
+                1.0,
+            );
+            execution::record_system_health(
+                &health_db,
+                "system",
+                "claude",
+                Some("claude-healthy"),
+                &format!("good-{i}"),
+                "verify",
+                "completed",
+                false,
+                false,
+                0.2,
+            );
+        }
+        let clamp_dir = dir.join("runs/clamp-run");
+        native::create_run(
+            &mut system,
+            &plan,
+            &clamp_dir,
+            "claude",
+            Some(&cli_str),
+            "read-only",
+            30,
+            "service",
+        )
+        .await
+        .unwrap();
+        let mut state = read_json(&clamp_dir, "run.json", MAX_BYTES).unwrap();
+        state["steps"][0]["attempt"] = object!(2u64);
+        state["steps"][0]["dispatch_id"] = object!("0123456789abcdef0123456789abcdef");
+        state["steps"][0]["input_sha256"] = object!(digest(b"prior-attempt"));
+        save(&clamp_dir, "run.json", &state, false).unwrap();
+        let mut clamp_events = Vec::new();
+        let err = execute_run_locked(
+            &mut system,
+            &clamp_dir,
+            None,
+            false,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            &mut |ev| {
+                clamp_events.push(ev);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Dispatch retry limit reached"),
+            "{err}"
+        );
+        let health_ev = clamp_events
+            .iter()
+            .find(|ev| ev["type"] == "system_health")
+            .expect("expected prelaunch system_health event");
+        assert_eq!(health_ev["selected_model"], "claude-healthy");
+        assert_eq!(health_ev["recommended_max_attempts"], 2);
+        let saved_state = read_json(&clamp_dir, "run.json", MAX_BYTES).unwrap();
+        assert!(
+            saved_state["health_warnings"]
+                .as_array()
+                .is_some_and(|w| !w.is_empty()),
+            "{saved_state}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

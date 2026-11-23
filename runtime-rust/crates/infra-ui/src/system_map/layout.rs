@@ -433,8 +433,8 @@ pub fn layout_system_nodes_with_pins(
         }
     }
 
-    let total_w = (cur_x - COL_GAP + MARGIN).max(420.0).max(extra_w);
-    let total_h = (max_y - ROW_GAP + MARGIN).max(240.0).max(extra_h);
+    let mut total_w = (cur_x - COL_GAP + MARGIN).max(420.0).max(extra_w);
+    let mut total_h = (max_y - ROW_GAP + MARGIN).max(240.0).max(extra_h);
 
     struct CandidateWire {
         edge_index: usize,
@@ -557,6 +557,7 @@ pub fn layout_system_nodes_with_pins(
     };
 
     let mut wires = Vec::with_capacity(candidates.len());
+    let mut detour_lane_use: BTreeMap<i64, usize> = BTreeMap::new();
     for (cw_idx, cw) in candidates.into_iter().enumerate() {
         let f_mid_x = cw.fx + cw.fw * 0.5;
         let t_mid_x = cw.tx + cw.tw * 0.5;
@@ -585,10 +586,20 @@ pub fn layout_system_nodes_with_pins(
             (sx - dx, ex + dx)
         };
         let _ = (cw.fcol, cw.tcol);
-        let path_d = format!("M{sx:.1},{sy:.1} C{c1x:.1},{sy:.1} {c2x:.1},{ey:.1} {ex:.1},{ey:.1}");
-        let mid_x = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
-        let mid_y = 0.5 * (sy + ey);
-        let _ = (cw.from, cw.to);
+        let (path_d, mid_x, mid_y, max_route_x, max_route_y) = route_wire_avoiding_boxes(
+            &placed_nodes,
+            &cw.from,
+            &cw.to,
+            same_x_col,
+            cw_idx,
+            (sx, sy),
+            (c1x, sy),
+            (c2x, ey),
+            (ex, ey),
+            &mut detour_lane_use,
+        );
+        total_w = total_w.max(max_route_x + MARGIN);
+        total_h = total_h.max(max_route_y + MARGIN);
         wires.push(PlacedSysWire {
             edge_index: cw.edge_index,
             path_d,
@@ -606,6 +617,252 @@ pub fn layout_system_nodes_with_pins(
         width: total_w,
         height: total_h,
     }
+}
+
+const WIRE_OBSTACLE_PAD: f64 = 8.0;
+
+fn point_in_padded_box(pt: (f64, f64), box_node: &PlacedSysNode, pad: f64) -> bool {
+    pt.0 >= box_node.x - pad
+        && pt.0 <= box_node.x + box_node.w + pad
+        && pt.1 >= box_node.y - pad
+        && pt.1 <= box_node.y + box_node.h + pad
+}
+
+fn segment_intersects_padded_box(
+    a: (f64, f64),
+    b: (f64, f64),
+    box_node: &PlacedSysNode,
+    pad: f64,
+) -> bool {
+    let x0 = box_node.x - pad;
+    let y0 = box_node.y - pad;
+    let x1 = box_node.x + box_node.w + pad;
+    let y1 = box_node.y + box_node.h + pad;
+    if a.0.max(b.0) < x0 || a.0.min(b.0) > x1 || a.1.max(b.1) < y0 || a.1.min(b.1) > y1 {
+        return false;
+    }
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let mut t0 = 0.0_f64;
+    let mut t1 = 1.0_f64;
+    for (p, q) in [
+        (-dx, a.0 - x0),
+        (dx, x1 - a.0),
+        (-dy, a.1 - y0),
+        (dy, y1 - a.1),
+    ] {
+        if p.abs() <= 1e-9 {
+            if q < 0.0 {
+                return false;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return false;
+                }
+                t0 = t0.max(r);
+            } else {
+                if r < t0 {
+                    return false;
+                }
+                t1 = t1.min(r);
+            }
+        }
+    }
+    t0 <= t1
+}
+
+fn cubic_intersects_obstacles(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    obstacles: &[&PlacedSysNode],
+) -> bool {
+    if obstacles.is_empty() {
+        return false;
+    }
+    let steps = 14usize;
+    let mut prev = p0;
+    for i in 1..=steps {
+        let t = (i as f64) / (steps as f64);
+        let u = 1.0 - t;
+        let pt = (
+            u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0,
+            u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1,
+        );
+        if obstacles
+            .iter()
+            .any(|b| segment_intersects_padded_box(prev, pt, b, WIRE_OBSTACLE_PAD))
+        {
+            return true;
+        }
+        prev = pt;
+    }
+    false
+}
+
+fn find_clear_horizontal_corridor(
+    x_min: f64,
+    x_max: f64,
+    sy: f64,
+    ey: f64,
+    obstacles: &[&PlacedSysNode],
+) -> f64 {
+    let mut y_bands: Vec<(f64, f64)> = obstacles
+        .iter()
+        .filter(|b| b.x + b.w + WIRE_OBSTACLE_PAD >= x_min && b.x - WIRE_OBSTACLE_PAD <= x_max)
+        .map(|b| (b.y - WIRE_OBSTACLE_PAD, b.y + b.h + WIRE_OBSTACLE_PAD))
+        .collect();
+    if y_bands.is_empty() {
+        return 0.5 * (sy + ey);
+    }
+    y_bands.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(y_bands.len());
+    for (b0, b1) in y_bands {
+        if let Some(last) = merged.last_mut() {
+            if b0 <= last.1 + 10.0 {
+                last.1 = last.1.max(b1);
+                continue;
+            }
+        }
+        merged.push((b0, b1));
+    }
+
+    let mut candidates = Vec::new();
+    let top_y = merged[0].0 - 16.0;
+    if top_y >= 10.0 {
+        candidates.push(top_y);
+    }
+    for pair in merged.windows(2) {
+        if pair[1].0 - pair[0].1 >= 12.0 {
+            candidates.push(0.5 * (pair[0].1 + pair[1].0));
+        }
+    }
+    let bottom_y = merged[merged.len() - 1].1 + 16.0;
+    candidates.push(bottom_y);
+
+    candidates
+        .into_iter()
+        .min_by(|a, b| {
+            let cost_a = (a - sy).abs() + (a - ey).abs();
+            let cost_b = (b - sy).abs() + (b - ey).abs();
+            cost_a.total_cmp(&cost_b)
+        })
+        .unwrap_or(bottom_y)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_wire_avoiding_boxes(
+    placed_nodes: &[PlacedSysNode],
+    from_id: &str,
+    to_id: &str,
+    same_x_col: bool,
+    cw_idx: usize,
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    detour_lane_use: &mut BTreeMap<i64, usize>,
+) -> (String, f64, f64, f64, f64) {
+    let (sx, sy) = p0;
+    let (c1x, c2x) = (p1.0, p2.0);
+    let (ex, ey) = p3;
+    let obstacles: Vec<&PlacedSysNode> = placed_nodes
+        .iter()
+        .filter(|b| {
+            b.id != from_id
+                && b.id != to_id
+                && !point_in_padded_box(p0, b, 2.0)
+                && !point_in_padded_box(p3, b, 2.0)
+        })
+        .collect();
+
+    if same_x_col {
+        let y_lo = sy.min(ey) - 4.0;
+        let y_hi = sy.max(ey) + 4.0;
+        let x_rightmost = obstacles
+            .iter()
+            .filter(|b| {
+                b.y + b.h + WIRE_OBSTACLE_PAD >= y_lo
+                    && b.y - WIRE_OBSTACLE_PAD <= y_hi
+                    && b.x + b.w >= sx.min(ex) - 24.0
+                    && b.x <= c1x.max(c2x) + 12.0
+            })
+            .map(|b| b.x + b.w)
+            .reduce(f64::max);
+        let hits = cubic_intersects_obstacles(p0, p1, p2, p3, &obstacles);
+        if !hits && x_rightmost.is_none() {
+            let path_d =
+                format!("M{sx:.1},{sy:.1} C{c1x:.1},{sy:.1} {c2x:.1},{ey:.1} {ex:.1},{ey:.1}");
+            let mid_x = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
+            return (
+                path_d,
+                mid_x,
+                0.5 * (sy + ey),
+                mid_x.max(sx).max(ex),
+                sy.max(ey),
+            );
+        }
+        let stagger = ((cw_idx % 4) as f64) * 10.0;
+        let clear_x = x_rightmost
+            .map(|rx| (rx + 30.0 + stagger).max(sx.max(ex) + 44.0 + stagger))
+            .unwrap_or_else(|| c1x.max(c2x) + 28.0 + stagger);
+        let path_d =
+            format!("M{sx:.1},{sy:.1} C{clear_x:.1},{sy:.1} {clear_x:.1},{ey:.1} {ex:.1},{ey:.1}");
+        let mid_x = 0.125 * sx + 0.75 * clear_x + 0.125 * ex;
+        return (path_d, mid_x, 0.5 * (sy + ey), clear_x, sy.max(ey));
+    }
+
+    if !cubic_intersects_obstacles(p0, p1, p2, p3, &obstacles) {
+        let path_d = format!("M{sx:.1},{sy:.1} C{c1x:.1},{sy:.1} {c2x:.1},{ey:.1} {ex:.1},{ey:.1}");
+        let mid_x = 0.125 * sx + 0.375 * c1x + 0.375 * c2x + 0.125 * ex;
+        return (path_d, mid_x, 0.5 * (sy + ey), sx.max(ex), sy.max(ey));
+    }
+
+    // Route through the nearest unobstructed horizontal inter-row / outer corridor.
+    let dir = if ex >= sx { 1.0 } else { -1.0 };
+    let span = (ex - sx).abs();
+    let lead = (span * 0.16).clamp(18.0, 42.0);
+    let gx0 = sx + dir * lead;
+    let gx1 = ex - dir * lead;
+    let base_lane_y =
+        find_clear_horizontal_corridor(gx0.min(gx1) - 4.0, gx0.max(gx1) + 4.0, sy, ey, &obstacles);
+    let bucket = base_lane_y.round() as i64;
+    let slot = *detour_lane_use.get(&bucket).unwrap_or(&0);
+    detour_lane_use.insert(bucket, slot + 1);
+    let step = slot.div_ceil(2) as f64 * 4.0;
+    let signed_offset = if slot == 0 {
+        0.0
+    } else if slot % 2 == 1 {
+        -step
+    } else {
+        step
+    };
+    let candidate_y = (base_lane_y + signed_offset).max(10.0);
+    let lane_y = if obstacles
+        .iter()
+        .any(|b| segment_intersects_padded_box((gx0, candidate_y), (gx1, candidate_y), b, 4.0))
+    {
+        base_lane_y
+    } else {
+        candidate_y
+    };
+
+    let c0x = sx + dir * lead * 0.55;
+    let c3x = ex - dir * lead * 0.55;
+    let path_d = format!(
+        "M{sx:.1},{sy:.1} C{c0x:.1},{sy:.1} {c0x:.1},{lane_y:.1} {gx0:.1},{lane_y:.1} L{gx1:.1},{lane_y:.1} C{c3x:.1},{lane_y:.1} {c3x:.1},{ey:.1} {ex:.1},{ey:.1}"
+    );
+    let mid_x = 0.5 * (gx0 + gx1);
+    (
+        path_d,
+        mid_x,
+        lane_y,
+        sx.max(ex).max(gx0).max(gx1),
+        sy.max(ey).max(lane_y),
+    )
 }
 
 pub(super) fn place_sys_edge_label(

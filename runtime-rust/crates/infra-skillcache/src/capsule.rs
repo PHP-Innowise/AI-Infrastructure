@@ -208,6 +208,8 @@ pub enum Step {
     },
     Program {
         program: String,
+        inputs: BTreeMap<String, String>,
+        outputs: BTreeMap<String, String>,
     },
     /// A verification step the agent performs itself.
     Inspection {
@@ -225,7 +227,19 @@ impl Step {
     }
     pub fn program(&self) -> Option<&str> {
         match self {
-            Self::Program { program } => Some(program),
+            Self::Program { program, .. } => Some(program),
+            _ => None,
+        }
+    }
+    pub fn program_inputs(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::Program { inputs, .. } => Some(inputs),
+            _ => None,
+        }
+    }
+    pub fn program_outputs(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::Program { outputs, .. } => Some(outputs),
             _ => None,
         }
     }
@@ -287,9 +301,29 @@ pub fn is_title(text: &str) -> bool {
 /// A bare interpreter name resolved on `PATH`, never a path.
 pub fn is_runtime(text: &str) -> bool {
     let mut bytes = text.bytes();
-    text.len() <= 64
+    let valid_chars = text.len() <= 64
         && bytes.next().is_some_and(|b| b.is_ascii_alphanumeric())
-        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'));
+    if !valid_chars {
+        return false;
+    }
+    !matches!(
+        text.to_ascii_lowercase().as_str(),
+        "env"
+            | "sudo"
+            | "doas"
+            | "xargs"
+            | "nohup"
+            | "nice"
+            | "time"
+            | "timeout"
+            | "stdbuf"
+            | "setsid"
+            | "chroot"
+            | "su"
+            | "script"
+            | "expect"
+    )
 }
 /// A `/`-separated path of plain components below some root: no `..`, no
 /// drive, no leading separator, no backslash.
@@ -445,6 +479,53 @@ impl Reader<'_> {
         }
         names
     }
+    fn name_map(
+        &mut self,
+        map: &Map<String, Value>,
+        key: &str,
+        at: &str,
+    ) -> BTreeMap<String, String> {
+        let place = join(at, key);
+        let Some(value) = map.get(key).filter(|value| !value.is_null()) else {
+            return BTreeMap::new();
+        };
+        let Some(entries) = value.as_object() else {
+            self.refuse("invalid_type", &place, "Expected a JSON object.");
+            return BTreeMap::new();
+        };
+        if entries.len() > NAMES {
+            self.refuse(
+                "size_limit",
+                &place,
+                format!("At most {NAMES} parameter mappings."),
+            );
+            return BTreeMap::new();
+        }
+        let mut out = BTreeMap::new();
+        for (param, target) in entries {
+            let here = join(&place, param);
+            if !is_name(param) {
+                self.refuse(
+                    "invalid_value",
+                    &here,
+                    "A name is lower-case letters, digits and `_`, starting with a letter.",
+                );
+                continue;
+            }
+            match target.as_str() {
+                Some(name) if is_name(name) => {
+                    out.insert(param.clone(), name.to_string());
+                }
+                Some(_) => self.refuse(
+                    "invalid_value",
+                    &here,
+                    "A name is lower-case letters, digits and `_`, starting with a letter.",
+                ),
+                None => self.refuse("invalid_type", &here, "Expected a string."),
+            }
+        }
+        out
+    }
     fn arguments(&mut self, map: &Map<String, Value>, key: &str, at: &str) -> Vec<String> {
         let place = join(at, key);
         let Some(value) = self.required(map, key, at) else {
@@ -501,7 +582,7 @@ impl Reader<'_> {
             .unwrap_or("");
         match kind {
             "program" => {
-                let map = self.object(value, at, &["kind", "program"])?;
+                let map = self.object(value, at, &["kind", "program", "inputs", "outputs"])?;
                 let program = self.required_text(map, "program", at, 64)?;
                 if !is_name(&program) {
                     self.refuse(
@@ -511,7 +592,13 @@ impl Reader<'_> {
                     );
                     return None;
                 }
-                Some(Step::Program { program })
+                let inputs = self.name_map(map, "inputs", at);
+                let outputs = self.name_map(map, "outputs", at);
+                Some(Step::Program {
+                    program,
+                    inputs,
+                    outputs,
+                })
             }
             "instruction" if !verification => {
                 let map = self.object(value, at, &["kind", "text", "source", "produces"])?;
@@ -633,22 +720,32 @@ impl SkillCapsule {
     }
     /// The declared outputs of plan step `index` that a later program reads.
     pub fn outputs_read_later(&self, index: usize) -> Vec<String> {
-        let Some(program) = self
-            .plan_step(index)
-            .and_then(Step::program)
-            .and_then(|id| self.program(id))
-        else {
+        let Some(step) = self.plan_step(index) else {
             return Vec::new();
         };
+        let Some(program) = step.program().and_then(|id| self.program(id)) else {
+            return Vec::new();
+        };
+        let step_outputs = step.program_outputs();
         program
             .outputs
             .iter()
-            .filter(|output| {
-                self.plan()
-                    .skip(index + 1)
-                    .filter_map(Step::program)
-                    .filter_map(|id| self.program(id))
-                    .any(|later| later.inputs.contains(output))
+            .map(|output| {
+                step_outputs
+                    .and_then(|map| map.get(output))
+                    .unwrap_or(output)
+            })
+            .filter(|effective| {
+                self.plan().skip(index + 1).any(|later_step| {
+                    let Some(later_program) = later_step.program().and_then(|id| self.program(id))
+                    else {
+                        return false;
+                    };
+                    let later_inputs = later_step.program_inputs();
+                    later_program.inputs.iter().any(|inp| {
+                        later_inputs.and_then(|map| map.get(inp)).unwrap_or(inp) == *effective
+                    })
+                })
             })
             .cloned()
             .collect()
@@ -669,8 +766,18 @@ impl SkillCapsule {
             let mut value = Map::new();
             value.insert("kind".into(), step.kind().into());
             match step {
-                Step::Program { program } => {
+                Step::Program {
+                    program,
+                    inputs,
+                    outputs,
+                } => {
                     value.insert("program".into(), program.clone().into());
+                    if !inputs.is_empty() {
+                        value.insert("inputs".into(), json!(inputs));
+                    }
+                    if !outputs.is_empty() {
+                        value.insert("outputs".into(), json!(outputs));
+                    }
                 }
                 Step::Instruction {
                     text,

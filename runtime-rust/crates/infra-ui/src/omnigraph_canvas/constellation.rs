@@ -97,7 +97,19 @@ pub fn render_constellation(
         lit: bool,
         dimmed: bool,
         on_path: bool,
+        against: bool,
+        guessed: bool,
+        code_edge: bool,
     }
+
+    let overlay = extract_arch_overlay(graph);
+    let file_of_node = |n: &CanvasNode| -> String {
+        if !n.file_path.is_empty() {
+            n.file_path.clone()
+        } else {
+            n.id.clone()
+        }
+    };
 
     let mut routed = Vec::with_capacity(kept_edges.len());
     let mut node_edges = Vec::with_capacity(kept_edges.len());
@@ -109,6 +121,11 @@ pub fn render_constellation(
         node_edges.push((u_idx, v_idx));
         let u = &placed_nodes[u_idx];
         let v = &placed_nodes[v_idx];
+        let u_file = file_of_node(u);
+        let v_file = file_of_node(v);
+        let against = overlay.is_violated_edge(&u_file, &v_file);
+        let guessed = overlay.is_inferred_edge(&edge.from, &edge.to, &u_file, &v_file);
+        let code_edge = is_code_ir_subkind(&edge.subkind);
         let pair_key = ordered_pair(&edge.from, &edge.to);
         let slot = *pair_seen.get(&pair_key).unwrap_or(&0);
         pair_seen.insert(pair_key.clone(), slot + 1);
@@ -178,6 +195,9 @@ pub fn render_constellation(
                 lit,
                 dimmed,
                 on_path: is_path_edge,
+                against,
+                guessed,
+                code_edge,
             },
         ));
     }
@@ -227,8 +247,8 @@ pub fn render_constellation(
                     r.p2,
                     r.p3,
                     if r.on_path { 3 } else { 1 },
-                    false,
-                    false,
+                    r.guessed,
+                    r.against,
                     edge.arrow_key.clone(),
                     r.selected || r.on_path,
                     r.lit,
@@ -294,8 +314,24 @@ pub fn render_constellation(
                 edge.subkind.as_str()
             };
             let arrow_key = escape_attr_token(&edge.arrow_key);
+            let violation_class = if r.against {
+                " omni-edge-violation"
+            } else {
+                ""
+            };
+            let code_class = if r.code_edge { " omni-edge-code" } else { "" };
+            let violation_attr = if r.against {
+                " data-arch-violation=\"true\""
+            } else {
+                ""
+            };
+            let code_attr = if r.code_edge {
+                " data-code-edge=\"true\""
+            } else {
+                ""
+            };
             html.push_str(&format!(
-                "<path class=\"omni-edge omni-edge-{arrow_key}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key}{})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\" data-path=\"{}\"{dash_attr}><title>{} {} {}</title></path>",
+                "<path class=\"omni-edge omni-edge-{arrow_key}{violation_class}{code_class}\" d=\"{}\" stroke=\"url(#omni-flow-{arrow_key}{})\" marker-end=\"url(#omni-arrow-{arrow_key})\" data-rel=\"{}\" data-subkind=\"{}\" data-from=\"{}\" data-to=\"{}\" data-selected=\"{}\" data-lit=\"{}\" data-dimmed=\"{}\" data-path=\"{}\"{violation_attr}{code_attr}{dash_attr}><title>{} {} {}</title></path>",
                 r.path_d,
                 r.flow_suffix,
                 escape_attr_token(&edge.relation),
@@ -395,6 +431,7 @@ pub fn render_constellation(
             is_dimmed,
             offscreen_attr,
             is_roving_active,
+            Some(&overlay),
         );
         if is_dense {
             node_htmls.push(node_html.clone());
@@ -438,6 +475,223 @@ pub fn render_constellation(
         node_edges,
         node_htmls,
         edge_endpoints,
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ArchOverlayIndex {
+    violations_by_file: BTreeMap<String, usize>,
+    violation_msgs_by_file: BTreeMap<String, Vec<String>>,
+    violated_pairs: BTreeSet<(String, String)>,
+    inferred_pairs: BTreeSet<(String, String)>,
+    cycle_files: BTreeSet<String>,
+    blast_by_file: BTreeMap<String, (u64, u64, String)>,
+    semantic_by_file: BTreeMap<String, Vec<(String, String)>>,
+}
+
+impl ArchOverlayIndex {
+    fn is_violated_edge(&self, from_file: &str, to_file: &str) -> bool {
+        if from_file.is_empty() || to_file.is_empty() {
+            return false;
+        }
+        self.violated_pairs
+            .contains(&(from_file.to_owned(), to_file.to_owned()))
+    }
+
+    fn is_inferred_edge(&self, from_id: &str, to_id: &str, from_file: &str, to_file: &str) -> bool {
+        self.inferred_pairs
+            .contains(&(from_id.to_owned(), to_id.to_owned()))
+            || (!from_file.is_empty()
+                && !to_file.is_empty()
+                && self
+                    .inferred_pairs
+                    .contains(&(from_file.to_owned(), to_file.to_owned())))
+    }
+
+    fn violation_count(&self, path: &str) -> usize {
+        self.violations_by_file.get(path).copied().unwrap_or(0)
+    }
+
+    fn in_cycle(&self, path: &str) -> bool {
+        self.cycle_files.contains(path)
+    }
+
+    fn blast_summary(&self, path: &str) -> Option<(u64, u64, &str)> {
+        self.blast_by_file
+            .get(path)
+            .map(|(f, t, r)| (*f, *t, r.as_str()))
+    }
+
+    fn semantic_count(&self, path: &str) -> usize {
+        self.semantic_by_file.get(path).map_or(0, Vec::len)
+    }
+}
+
+fn is_code_ir_subkind(subkind: &str) -> bool {
+    matches!(
+        subkind,
+        "imports"
+            | "calls"
+            | "extends"
+            | "implements"
+            | "uses"
+            | "type_ref"
+            | "exposes_route"
+            | "calls_route"
+            | "publishes_event"
+            | "handles_event"
+            | "reads_table"
+            | "writes_table"
+            | "di_binds"
+            | "di_binding"
+            | "shares_route"
+            | "shares_event"
+            | "shares_table"
+            | "shares_di"
+    )
+}
+
+pub(super) fn extract_arch_overlay(graph: &Value) -> ArchOverlayIndex {
+    let mut overlay = ArchOverlayIndex::default();
+
+    if let Some(arr) = graph
+        .get("architecture_violations")
+        .and_then(Value::as_array)
+    {
+        for v in arr {
+            let kind = str_field(v, &["kind"]);
+            let from = str_field(v, &["from"]);
+            let to = str_field(v, &["to"]);
+            let msg = str_field(v, &["message"]);
+            let from_is_file = !from.is_empty()
+                && (kind != "cycle_budget" || from.contains('/') || from.contains('.'));
+            if from_is_file {
+                *overlay.violations_by_file.entry(from.clone()).or_default() += 1;
+                if !msg.is_empty() {
+                    overlay
+                        .violation_msgs_by_file
+                        .entry(from.clone())
+                        .or_default()
+                        .push(msg.clone());
+                }
+            }
+            let is_edge_file_viol = matches!(kind.as_str(), "layer" | "package");
+            if is_edge_file_viol && !to.is_empty() && to != from {
+                *overlay.violations_by_file.entry(to.clone()).or_default() += 1;
+                if !msg.is_empty() {
+                    overlay
+                        .violation_msgs_by_file
+                        .entry(to.clone())
+                        .or_default()
+                        .push(msg);
+                }
+            }
+            if is_edge_file_viol && !from.is_empty() && !to.is_empty() {
+                overlay.violated_pairs.insert((from, to));
+            }
+        }
+    }
+
+    if let Some(arr) = graph.get("blast_markers").and_then(Value::as_array) {
+        for m in arr {
+            let path = str_field(m, &["path", "file_path"]);
+            if path.is_empty() {
+                continue;
+            }
+            let bf = m["blast_files"].as_u64().unwrap_or(0);
+            let bt = m["blast_tests"].as_u64().unwrap_or(0);
+            let vc = m["violation_count"].as_u64().unwrap_or(0) as usize;
+            let in_cycle = bool_field(m, &["in_cycle"]);
+            let risk = str_field(m, &["risk"]);
+            if vc > 0 {
+                overlay
+                    .violations_by_file
+                    .entry(path.clone())
+                    .and_modify(|prev| *prev = (*prev).max(vc))
+                    .or_insert(vc);
+            }
+            if in_cycle {
+                overlay.cycle_files.insert(path.clone());
+            }
+            overlay.blast_by_file.insert(path, (bf, bt, risk));
+        }
+    }
+
+    if let Some(arr) = graph.get("ir_edges").and_then(Value::as_array) {
+        for e in arr {
+            let conf = str_field(e, &["confidence"]);
+            if !conf.eq_ignore_ascii_case("INFERRED") {
+                continue;
+            }
+            let from = str_field(e, &["from", "source"]);
+            let to = str_field(e, &["to", "target"]);
+            if !from.is_empty() && !to.is_empty() {
+                overlay.inferred_pairs.insert((from, to));
+            }
+            let sf = str_field(e, &["source_file"]);
+            let tf = str_field(e, &["target_file"]);
+            if !sf.is_empty() && !tf.is_empty() {
+                overlay.inferred_pairs.insert((sf, tf));
+            }
+        }
+    }
+
+    if let Some(arr) = graph.get("ir_semantic_edges").and_then(Value::as_array) {
+        for s in arr {
+            let fp = str_field(s, &["file_path", "source_file", "source"]);
+            let rel = str_field(s, &["relation", "kind"]);
+            let tgt = str_field(s, &["target"]);
+            if fp.is_empty() || rel.is_empty() || tgt.is_empty() {
+                continue;
+            }
+            let list = overlay.semantic_by_file.entry(fp).or_default();
+            let pair = (rel, tgt);
+            if !list.contains(&pair) {
+                list.push(pair);
+            }
+        }
+    }
+
+    overlay
+}
+
+fn enrich_node_from_overlay(
+    overlay: &ArchOverlayIndex,
+    file_path: &str,
+    broken_risk: &mut bool,
+    drift_status: &mut String,
+    blob: &mut String,
+) {
+    if file_path.is_empty() {
+        return;
+    }
+    let v_count = overlay.violation_count(file_path);
+    let in_cycle = overlay.in_cycle(file_path);
+    let blast = overlay.blast_summary(file_path);
+    let sem_count = overlay.semantic_count(file_path);
+    if v_count > 0 || in_cycle || blast.is_some_and(|(_, _, r)| r == "high") {
+        *broken_risk = true;
+    }
+    if drift_status.is_empty() {
+        if in_cycle {
+            *drift_status = "cycle".to_owned();
+        } else if v_count > 0 {
+            *drift_status = "violation".to_owned();
+        } else if blast.is_some_and(|(_, _, r)| r == "high") {
+            *drift_status = "high blast".to_owned();
+        }
+    }
+    if v_count > 0 {
+        blob.push_str(" violation architecture");
+    }
+    if in_cycle {
+        blob.push_str(" cycle");
+    }
+    if let Some((bf, _, risk)) = blast {
+        blob.push_str(&format!(" blast {risk} blast:{bf}"));
+    }
+    if sem_count > 0 {
+        blob.push_str(" semantic");
     }
 }
 
@@ -520,6 +774,8 @@ pub(super) fn extract_graph_items(
     let mut nodes = Vec::new();
     let mut aliases: BTreeMap<String, String> = BTreeMap::new();
     let mut seen_ids: BTreeSet<String> = BTreeSet::new();
+    let mut file_to_node_id: BTreeMap<String, String> = BTreeMap::new();
+    let overlay = extract_arch_overlay(graph);
 
     if let Some(arr) = graph.get("sessions").and_then(Value::as_array) {
         for item in arr {
@@ -671,19 +927,32 @@ pub(super) fn extract_graph_items(
             if path != id && !path.is_empty() {
                 aliases.entry(path.clone()).or_insert_with(|| id.clone());
             }
+            if !path.is_empty() {
+                file_to_node_id
+                    .entry(path.clone())
+                    .or_insert_with(|| id.clone());
+            }
             let branch = str_field(item, &["branch", "source_branch", "graph_branch"]);
             let lang = str_field(item, &["language", "kind"]);
             let touch_count = i64_field(item, &["touch_count", "atom_count"])
                 .unwrap_or(0)
                 .max(0) as usize;
-            let broken_risk = bool_field(item, &["broken_risk"]);
-            let drift_status = if broken_risk {
+            let mut broken_risk = bool_field(item, &["broken_risk"]);
+            let mut drift_status = if broken_risk {
                 "broken".to_owned()
             } else {
                 str_field(item, &["drift_status", "drift", "change_status"])
             };
             let (base_name, dir_hint) = split_file_label(&path);
-            let blob = format!("{id} {path} {branch} {lang} {drift_status}").to_ascii_lowercase();
+            let mut blob =
+                format!("{id} {path} {branch} {lang} {drift_status}").to_ascii_lowercase();
+            enrich_node_from_overlay(
+                &overlay,
+                &path,
+                &mut broken_risk,
+                &mut drift_status,
+                &mut blob,
+            );
             let (w, h) = NodeKindGroup::File.size();
             nodes.push(CanvasNode {
                 id,
@@ -746,16 +1015,23 @@ pub(super) fn extract_graph_items(
             let mention_count = i64_field(item, &["mention_count", "atom_count"])
                 .unwrap_or(atom_ids.len() as i64)
                 .max(0) as usize;
-            let broken_risk = bool_field(item, &["broken_risk"]);
-            let drift_status = if broken_risk {
+            let mut broken_risk = bool_field(item, &["broken_risk"]);
+            let mut drift_status = if broken_risk {
                 "broken".to_owned()
             } else {
                 str_field(item, &["drift_status", "drift", "change_status"])
             };
-            let blob = format!(
+            let mut blob = format!(
                 "{id} {fqn} {symbol_id} {title} {file_path} {symbol_kind} {owner} {name} {branch} {drift_status}"
             )
             .to_ascii_lowercase();
+            enrich_node_from_overlay(
+                &overlay,
+                &file_path,
+                &mut broken_risk,
+                &mut drift_status,
+                &mut blob,
+            );
             let (w, h) = NodeKindGroup::Symbol.size();
             nodes.push(CanvasNode {
                 id,
@@ -807,6 +1083,216 @@ pub(super) fn extract_graph_items(
                     continue;
                 }
                 edges.push(edge);
+            }
+        }
+    }
+
+    let mut synth_files = 0usize;
+    let resolve_or_synth_file = |raw_ep: &str,
+                                 fallback_file: &str,
+                                 seen_ids: &mut BTreeSet<String>,
+                                 file_to_node_id: &mut BTreeMap<String, String>,
+                                 nodes: &mut Vec<CanvasNode>,
+                                 synth_files: &mut usize|
+     -> Option<String> {
+        if let Some(resolved) = aliases.get(raw_ep) {
+            if seen_ids.contains(resolved) {
+                return Some(resolved.clone());
+            }
+        }
+        if seen_ids.contains(raw_ep) {
+            return Some(raw_ep.to_owned());
+        }
+        if !fallback_file.is_empty() {
+            if let Some(existing) = file_to_node_id.get(fallback_file) {
+                return Some(existing.clone());
+            }
+            if *synth_files < 24 && seen_ids.insert(fallback_file.to_owned()) {
+                *synth_files += 1;
+                file_to_node_id.insert(fallback_file.to_owned(), fallback_file.to_owned());
+                let mut broken_risk = false;
+                let mut drift_status = String::new();
+                let (base_name, dir_hint) = split_file_label(fallback_file);
+                let mut blob = format!("{fallback_file} code ir").to_ascii_lowercase();
+                enrich_node_from_overlay(
+                    &overlay,
+                    fallback_file,
+                    &mut broken_risk,
+                    &mut drift_status,
+                    &mut blob,
+                );
+                let (w, h) = NodeKindGroup::File.size();
+                nodes.push(CanvasNode {
+                    id: fallback_file.to_owned(),
+                    group: NodeKindGroup::File,
+                    kind: "file".to_owned(),
+                    title: base_name,
+                    subtitle: dir_hint,
+                    branch: String::new(),
+                    shared_space: String::new(),
+                    session_id: String::new(),
+                    status: String::new(),
+                    provider: String::new(),
+                    file_path: fallback_file.to_owned(),
+                    symbol_id: String::new(),
+                    symbol_fqn: String::new(),
+                    symbol_kind: String::new(),
+                    symbols: Vec::new(),
+                    confidence: None,
+                    pinned: false,
+                    pin_priority: 0,
+                    tags: Vec::new(),
+                    touch_count: 0,
+                    search_blob: blob,
+                    drift_status,
+                    broken_risk,
+                    user_pinned: false,
+                    x: 0.0,
+                    y: 0.0,
+                    w,
+                    h,
+                });
+                return Some(fallback_file.to_owned());
+            }
+        }
+        None
+    };
+
+    if let Some(arr) = graph.get("ir_edges").and_then(Value::as_array) {
+        for item in arr {
+            let raw_from = str_field(item, &["from", "src", "source"]);
+            let raw_to = str_field(item, &["to", "dst", "target"]);
+            let sf = str_field(item, &["source_file"]);
+            let tf = str_field(item, &["target_file"]);
+            let Some(from_id) = resolve_or_synth_file(
+                &raw_from,
+                &sf,
+                &mut seen_ids,
+                &mut file_to_node_id,
+                &mut nodes,
+                &mut synth_files,
+            ) else {
+                continue;
+            };
+            let Some(to_id) = resolve_or_synth_file(
+                &raw_to,
+                &tf,
+                &mut seen_ids,
+                &mut file_to_node_id,
+                &mut nodes,
+                &mut synth_files,
+            ) else {
+                continue;
+            };
+            let raw_rel = str_field(item, &["relation", "kind"]).if_empty("depends_on");
+            let subkind_hint = str_field(item, &["subkind"]).if_empty(&raw_rel);
+            let (relation, subkind, arrow_key, _) =
+                normalize_edge_relation(&raw_rel, &subkind_hint);
+            let label = subkind_hint.replace('_', " ");
+            if !seen_edges.insert((
+                from_id.clone(),
+                to_id.clone(),
+                relation.clone(),
+                subkind.clone(),
+            )) {
+                continue;
+            }
+            edges.push(CanvasEdge {
+                from: from_id,
+                to: to_id,
+                relation,
+                subkind,
+                arrow_key,
+                label,
+            });
+        }
+    }
+
+    if let Some(arr) = graph.get("ir_semantic_edges").and_then(Value::as_array) {
+        let mut by_target: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for item in arr {
+            let sf = str_field(item, &["file_path", "source_file", "source"]);
+            let rel = str_field(item, &["relation", "kind"]);
+            let tgt = str_field(item, &["target"]);
+            if sf.is_empty() || rel.is_empty() || tgt.is_empty() {
+                continue;
+            }
+            by_target.entry(tgt).or_default().push((sf, rel));
+        }
+        let mut sem_links = 0usize;
+        for (tgt, entries) in by_target {
+            if sem_links >= 64 {
+                break;
+            }
+            let producers: Vec<&(String, String)> = entries
+                .iter()
+                .filter(|(_, r)| {
+                    matches!(
+                        r.as_str(),
+                        "exposes_route"
+                            | "publishes_event"
+                            | "writes_table"
+                            | "di_binds"
+                            | "di_binding"
+                    )
+                })
+                .collect();
+            let consumers: Vec<&(String, String)> = entries
+                .iter()
+                .filter(|(_, r)| {
+                    matches!(
+                        r.as_str(),
+                        "calls_route"
+                            | "handles_event"
+                            | "reads_table"
+                            | "writes_table"
+                            | "di_binds"
+                    )
+                })
+                .collect();
+            for (src_file, rel) in &producers {
+                for (dst_file, _) in &consumers {
+                    if src_file == dst_file || sem_links >= 64 {
+                        continue;
+                    }
+                    let Some(from_id) = resolve_or_synth_file(
+                        src_file,
+                        src_file,
+                        &mut seen_ids,
+                        &mut file_to_node_id,
+                        &mut nodes,
+                        &mut synth_files,
+                    ) else {
+                        continue;
+                    };
+                    let Some(to_id) = resolve_or_synth_file(
+                        dst_file,
+                        dst_file,
+                        &mut seen_ids,
+                        &mut file_to_node_id,
+                        &mut nodes,
+                        &mut synth_files,
+                    ) else {
+                        continue;
+                    };
+                    let (relation, subkind, arrow_key, _) = normalize_edge_relation(rel, rel);
+                    if seen_edges.insert((
+                        from_id.clone(),
+                        to_id.clone(),
+                        relation.clone(),
+                        subkind.clone(),
+                    )) {
+                        sem_links += 1;
+                        edges.push(CanvasEdge {
+                            from: from_id,
+                            to: to_id,
+                            relation,
+                            subkind,
+                            arrow_key,
+                            label: tgt.clone(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -1653,6 +2139,7 @@ pub(super) fn render_constellation_node(
     dimmed: bool,
     offscreen: bool,
     roving_active: bool,
+    overlay: Option<&ArchOverlayIndex>,
 ) -> String {
     let kind_label = match node.group {
         NodeKindGroup::Session => "Session",
@@ -1851,6 +2338,55 @@ pub(super) fn render_constellation_node(
     }
     if node.broken_risk {
         push_raw_attr(&mut extra_attrs, "data-broken-risk", "true");
+    }
+    if matches!(node.group, NodeKindGroup::File | NodeKindGroup::Symbol) {
+        if let Some(ov) = overlay {
+            let ov_path = if node.file_path.is_empty() {
+                node.id.as_str()
+            } else {
+                node.file_path.as_str()
+            };
+            let v_count = ov.violation_count(ov_path);
+            let in_cycle = ov.in_cycle(ov_path);
+            let blast = ov.blast_summary(ov_path);
+            let sem_count = ov.semantic_count(ov_path);
+            if v_count > 0 {
+                let v_str = v_count.to_string();
+                push_raw_attr(&mut extra_attrs, "data-arch-violations", &v_str);
+                let title_hint = ov
+                    .violation_msgs_by_file
+                    .get(ov_path)
+                    .map(|msgs| msgs.join("; "))
+                    .unwrap_or_else(|| format!("{v_count} architectural violation(s)"));
+                let plural = if v_count == 1 { "" } else { "s" };
+                indicators.push_str(&format!(
+                    "<span class=\"omni-arch-badge\" data-violations=\"{v_count}\" title=\"{}\">{v_count} viol{plural}</span>",
+                    esc(&title_hint)
+                ));
+            }
+            if in_cycle {
+                push_raw_attr(&mut extra_attrs, "data-in-cycle", "true");
+                indicators.push_str(
+                    "<span class=\"omni-cycle-badge\" title=\"File participates in dependency cycle\">cycle</span>",
+                );
+            }
+            if let Some((bf, bt, risk)) = blast {
+                if bf > 0 {
+                    let bf_str = bf.to_string();
+                    push_raw_attr(&mut extra_attrs, "data-blast-files", &bf_str);
+                    push_attr(&mut extra_attrs, "data-blast-risk", risk);
+                    indicators.push_str(&format!(
+                        "<span class=\"omni-blast-badge\" data-risk=\"{}\" title=\"Blast radius: {bf} files, {bt} tests\">{bf} blast</span>",
+                        escape_attr_token(risk)
+                    ));
+                }
+            }
+            if sem_count > 0 {
+                indicators.push_str(&format!(
+                    "<span class=\"omni-sem-badge\" title=\"Semantic IR edges\">{sem_count} sem</span>"
+                ));
+            }
+        }
     }
     if offscreen {
         push_raw_attr(&mut extra_attrs, "data-offscreen", "true");

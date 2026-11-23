@@ -2102,6 +2102,8 @@ fn matches_sse_filter(
                 | "system_graph_status"
                 | "omnigraph_status"
                 | "skillcache_capsule"
+                | "creator_run"
+                | "system_run"
                 | "resync"
         )
         && frame.session_id.as_deref() != Some(sid)
@@ -3769,5 +3771,42 @@ mod skillcache_route_tests {
         assert!(matches_sse_filter(&frame, Some("s1"), Some("p1")));
         assert!(matches_sse_filter(&frame, Some("s1"), None));
         assert!(!matches_sse_filter(&frame, Some("s1"), Some("p2")));
+    }
+
+    #[test]
+    fn sse_filter_admits_creator_and_system_run_for_session_subscribers() {
+        for event in ["creator_run", "system_run"] {
+            let scoped_other_session = StreamFrame {
+                seq: 2,
+                event,
+                session_id: Some("child-run-sess".into()),
+                project_id: Some("p1".into()),
+                data: json!({"status": "running"}),
+            };
+            assert!(matches_sse_filter(
+                &scoped_other_session,
+                Some("s1"),
+                Some("p1")
+            ));
+            assert!(matches_sse_filter(&scoped_other_session, Some("s1"), None));
+            assert!(!matches_sse_filter(
+                &scoped_other_session,
+                Some("s1"),
+                Some("p2")
+            ));
+
+            let unscoped_session = StreamFrame {
+                seq: 3,
+                event,
+                session_id: None,
+                project_id: Some("p1".into()),
+                data: json!({"status": "running"}),
+            };
+            assert!(matches_sse_filter(
+                &unscoped_session,
+                Some("s1"),
+                Some("p1")
+            ));
+        }
     }
 }

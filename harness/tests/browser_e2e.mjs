@@ -66,6 +66,9 @@ function parseArgs(argv) {
     projectId: '',
     sessionId: '',
     otherSessionId: '',
+    secondaryProjectId: '',
+    secondarySessionId: '',
+    evalViewerUrl: '',
     commitA: '',
     commitB: '',
     systemRunId: '',
@@ -97,6 +100,15 @@ function parseArgs(argv) {
         break;
       case 'other-session-id':
         opts.otherSessionId = val;
+        break;
+      case 'secondary-project-id':
+        opts.secondaryProjectId = val;
+        break;
+      case 'secondary-session-id':
+        opts.secondarySessionId = val;
+        break;
+      case 'eval-viewer-url':
+        opts.evalViewerUrl = val;
         break;
       case 'commit-a':
         opts.commitA = val;
@@ -689,8 +701,16 @@ function createHarnessDriver(cdp, baseUrl, defaultTimeoutMs) {
   };
 }
 
-async function withIsolatedPage(browserCdp, browserWsUrl, opts, fn) {
-  const { targetId } = await browserCdp.send('Target.createTarget', { url: 'about:blank' });
+async function withIsolatedPage(browserCdp, browserWsUrl, opts, fn, { isolatedStorage = false } = {}) {
+  let browserContextId;
+  if (isolatedStorage) {
+    const ctx = await browserCdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+    browserContextId = ctx.browserContextId;
+  }
+  const { targetId } = await browserCdp.send('Target.createTarget', {
+    url: 'about:blank',
+    ...(browserContextId ? { browserContextId } : {}),
+  });
   const port = new URL(browserWsUrl).port;
   let targetInfo = null;
   for (let i = 0; i < 40; i += 1) {
@@ -715,6 +735,9 @@ async function withIsolatedPage(browserCdp, browserWsUrl, opts, fn) {
   } finally {
     tabCdp.close();
     await browserCdp.send('Target.closeTarget', { targetId }).catch(() => {});
+    if (browserContextId) {
+      await browserCdp.send('Target.disposeBrowserContext', { browserContextId }).catch(() => {});
+    }
   }
 }
 
@@ -1195,6 +1218,89 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     await driver.waitFor(() => Number(document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '0') > 0, 'restore zoom after culling check', 4_000);
   }
 
+  // Verify auto_lod zoom threshold behavior (<0.65 -> lod=folder, <0.35 -> lod=crate&min_weight=2, >=0.65 -> full)
+  {
+    await driver.click('#graph-map-display-toggle');
+    await driver.waitFor(() => !document.getElementById('graph-map-display-popover')?.hidden, 'open #graph-map-display-popover for auto_lod check', 4_000);
+    await driver.callFn(() => {
+      const sel = document.getElementById('graph-map-lod');
+      sel.value = 'file';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await driver.waitFor(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true', 'explicit file LOD settled before switching to Auto', 6_000);
+    await driver.callFn(() => {
+      const sel = document.getElementById('graph-map-lod');
+      sel.value = '';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await driver.waitFor(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true', 'Auto LOD enabled on #graph-map', 6_000);
+    await driver.click('#graph-map-display-toggle');
+    await driver.waitFor(() => document.getElementById('graph-map-display-popover')?.hidden === true, 'close #graph-map-display-popover after enabling Auto LOD', 4_000);
+
+    await driver.click('#graph-map-zoom-level');
+    await driver.waitFor(() => {
+      const c = document.getElementById('graph-map-canvas');
+      const s = Number(document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '0');
+      return c?.getAttribute('aria-busy') !== 'true' && s >= 0.65;
+    }, 'reset zoom >= 0.65 before auto_lod zoom-out checks', 6_000);
+
+    const beforeFolderIdx = driver.responsesByUrl.length;
+    for (let step = 0; step < 6; step += 1) {
+      const curScale = Number(await driver.callFn(() => document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '1'));
+      if (curScale < 0.65) break;
+      await driver.click('#graph-map-zoom-out');
+      await driver.waitFor((prev) => {
+        const s = Number(document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '1');
+        return s < prev;
+      }, `auto_lod zoom out step ${step + 1} toward folder tier`, 4_000, curScale);
+    }
+    await driver.waitUntil(() => driver.responsesByUrl.slice(beforeFolderIdx).some((r) => {
+      if (r.status !== 200 || !r.url.includes('/graph/map')) return false;
+      try {
+        return new URL(r.url).searchParams.get('lod') === 'folder';
+      } catch {
+        return false;
+      }
+    }), 'auto_lod reloads with lod=folder when zoom crosses <0.65', 8_000);
+    await driver.waitFor(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true', '#graph-map settled at lod=folder', 8_000);
+
+    const beforeCrateIdx = driver.responsesByUrl.length;
+    for (let step = 0; step < 6; step += 1) {
+      const curScale = Number(await driver.callFn(() => document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '1'));
+      if (curScale < 0.35) break;
+      await driver.click('#graph-map-zoom-out');
+      await driver.waitFor((prev) => {
+        const s = Number(document.querySelector('#graph-map-canvas .graph-map-plane')?.getAttribute('data-scale') || '1');
+        return s < prev;
+      }, `auto_lod zoom out step ${step + 1} toward crate tier`, 4_000, curScale);
+    }
+    await driver.waitUntil(() => driver.responsesByUrl.slice(beforeCrateIdx).some((r) => {
+      if (r.status !== 200 || !r.url.includes('/graph/map')) return false;
+      try {
+        const sp = new URL(r.url).searchParams;
+        return sp.get('lod') === 'crate' && sp.get('min_weight') === '2';
+      } catch {
+        return false;
+      }
+    }), 'auto_lod reloads with lod=crate&min_weight=2 when zoom crosses <0.35', 8_000);
+    await driver.waitFor(() => document.getElementById('graph-map-canvas')?.getAttribute('aria-busy') !== 'true', '#graph-map settled at lod=crate', 8_000);
+
+    const beforeFullIdx = driver.responsesByUrl.length;
+    await driver.click('#graph-map-zoom-level');
+    await driver.waitUntil(() => driver.responsesByUrl.slice(beforeFullIdx).some((r) => {
+      if (r.status !== 200 || !r.url.includes('/graph/map')) return false;
+      try {
+        return !new URL(r.url).searchParams.has('lod');
+      } catch {
+        return false;
+      }
+    }), 'auto_lod clears lod param when zoom restores to 100% (>=0.65)', 8_000);
+    await driver.waitFor(() => {
+      const c = document.getElementById('graph-map-canvas');
+      return Boolean(c && c.getAttribute('aria-busy') !== 'true' && c.querySelectorAll('.graph-map-node').length > 0);
+    }, '#graph-map restores full nodes after auto_lod zoom back to 100%', 8_000);
+  }
+
   // Click a visible node inside #graph-map-canvas
   const nodeTarget = await driver.callFn(() => {
     const canvas = document.getElementById('graph-map-canvas');
@@ -1493,8 +1599,72 @@ async function suite2Canvas2dAndMapLayout(driver, cdp, opts) {
     const subj = document.getElementById('graph-explanation-subject');
     return Boolean(dlg && dlg.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
   }, '#graph-explanation dialog opens with subject from Canvas2D context menu', 8_000);
-  await driver.click('#graph-explanation-close');
-  await driver.waitFor(() => !document.getElementById('graph-explanation')?.hasAttribute('open'), '#graph-explanation closes cleanly');
+
+  // Escape stacking order over visible #graph-explanation + #graph-map:
+  // Cmd/Ctrl+K and Alt+A dialogs must close on Escape BEFORE dismissing #graph-explanation or #graph-map.
+  await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
+  await driver.waitFor(() => {
+    const p = document.getElementById('command-palette');
+    return Boolean(
+      p && !p.hidden && (p.tagName !== 'DIALOG' || p.hasAttribute('open'))
+        && document.getElementById('graph-explanation')?.hasAttribute('open')
+        && document.getElementById('graph-map')?.hasAttribute('open'),
+    );
+  }, '#command-palette stacks above #graph-explanation and #graph-map', 5_000);
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(() => {
+    const p = document.getElementById('command-palette');
+    return Boolean(
+      p && p.hidden && !p.hasAttribute('open')
+        && document.getElementById('graph-explanation')?.hasAttribute('open')
+        && document.getElementById('graph-map')?.hasAttribute('open'),
+    );
+  }, 'Escape closes top #command-palette without closing #graph-explanation or #graph-map', 5_000);
+
+  await driver.pressKey({ key: 'a', code: 'KeyA', keyCode: 65, modifiers: 1 });
+  await driver.waitFor(() => {
+    const d = document.getElementById('approvals-drawer');
+    return Boolean(
+      d && !d.hidden && (d.tagName !== 'DIALOG' || d.hasAttribute('open'))
+        && document.getElementById('graph-explanation')?.hasAttribute('open')
+        && document.getElementById('graph-map')?.hasAttribute('open'),
+    );
+  }, 'Alt+A #approvals-drawer stacks above #graph-explanation and #graph-map', 5_000);
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(() => {
+    const d = document.getElementById('approvals-drawer');
+    return Boolean(
+      d && d.hidden && !d.hasAttribute('open')
+        && document.getElementById('graph-explanation')?.hasAttribute('open')
+        && document.getElementById('graph-map')?.hasAttribute('open'),
+    );
+  }, 'Escape closes top #approvals-drawer without closing #graph-explanation or #graph-map', 5_000);
+
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(
+    () => !document.getElementById('graph-explanation')?.hasAttribute('open') && document.getElementById('graph-map')?.hasAttribute('open'),
+    'Next Escape closes #graph-explanation while keeping #graph-map open',
+    5_000,
+  );
+
+  // Clicking a node enables the toolbar #graph-map-explain button, and clicking it opens #graph-explanation.
+  await driver.clickAt(pinTargetsAfterReset[0].cx, pinTargetsAfterReset[0].cy);
+  await driver.waitFor(() => {
+    const btn = document.getElementById('graph-map-explain');
+    return Boolean(btn && !btn.disabled && (btn.textContent || '').startsWith('Explain'));
+  }, 'toolbar #graph-map-explain enables when a node is selected', 5_000);
+  await driver.click('#graph-map-explain');
+  await driver.waitFor(() => {
+    const dlg = document.getElementById('graph-explanation');
+    const subj = document.getElementById('graph-explanation-subject');
+    return Boolean(dlg && dlg.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
+  }, 'toolbar #graph-map-explain opens #graph-explanation with subject', 8_000);
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(
+    () => !document.getElementById('graph-explanation')?.hasAttribute('open') && document.getElementById('graph-map')?.hasAttribute('open'),
+    'Escape closes toolbar-opened #graph-explanation',
+    5_000,
+  );
 
   // Cmd/Ctrl+K palette opens visibly ABOVE <dialog open> #graph-map in top layer
   await driver.pressKey({ key: 'k', code: 'KeyK', keyCode: 75, modifiers: 2 });
@@ -2493,7 +2663,14 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const d = document.getElementById('approvals-drawer');
     const main = document.getElementById('main');
     const sidebar = document.getElementById('sidebar');
-    return d?.hidden === true && !main?.hasAttribute('inert') && !sidebar?.hasAttribute('inert');
+    return Boolean(
+      d?.hidden === true
+        && !d?.hasAttribute('open')
+        && !main?.hasAttribute('inert')
+        && !sidebar?.hasAttribute('inert')
+        && document.activeElement
+        && !d.contains(document.activeElement),
+    );
   }, '#approvals-drawer closes on Escape and clears inert');
 
   // Verify Alt+A opens #approvals-drawer globally when no pending card is focused, and Ctrl+K stacks above it cleanly
@@ -2538,6 +2715,26 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const main = document.getElementById('main');
     return Boolean(pal?.hidden && !pal?.hasAttribute('open') && drawer?.hidden && !drawer?.hasAttribute('open') && !main?.hasAttribute('inert'));
   }, 'Executing navigating Command Palette entry closes underlying #approvals-drawer and clears inert', 6_000);
+
+  // Alt+A while focused inside #prompt toggles #approvals-drawer open without resolving pending permission
+  await driver.callFn(() => {
+    const p = document.getElementById('prompt');
+    p?.focus();
+  });
+  const promptFocused = await driver.callFn(() => document.activeElement?.id === 'prompt');
+  assert(promptFocused, 'Expected #prompt focused before Alt+A drawer toggle regression check');
+  await driver.pressKey({ key: 'a', code: 'KeyA', keyCode: 65, modifiers: 1 });
+  await driver.waitFor(() => {
+    const d = document.getElementById('approvals-drawer');
+    const toggle = document.getElementById('approvals-queue-toggle');
+    return Boolean(d && !d.hidden && toggle?.getAttribute('data-count') === '1');
+  }, 'Alt+A opens #approvals-drawer from inside #prompt without approving pending card', 5_000);
+  await driver.pressKey({ key: 'Escape', code: 'Escape', keyCode: 27 });
+  await driver.waitFor(
+    () => document.getElementById('approvals-drawer')?.hidden === true && !document.getElementById('main')?.hasAttribute('inert'),
+    '#approvals-drawer closes after Alt+A inside #prompt check',
+    5_000,
+  );
 
   // WCAG AA >=4.5:1 contrast on .composer textarea::placeholder & .skill-hint[aria-selected="true"] .skill-hint-argument (Light & Dark)
   // Switch to idle completed other_session_id so composer slash hints open (#skill-hints-panel suppresses while session is running)
@@ -3683,7 +3880,7 @@ async function suite7SystemMap(driver, cdp, opts) {
   );
   await driver.callFn(() => new Promise((r) => setTimeout(r, 150)));
 
-  // Select service node & keyboard navigate #system-map-side tabs
+  // Select service node, right-click Explain on normal #system-map-canvas, & keyboard navigate #system-map-side tabs
   const sysNode = await driver.callFn(() => {
     const host = document.getElementById('system-map-canvas');
     const cr = host.getBoundingClientRect();
@@ -3692,12 +3889,36 @@ async function suite7SystemMap(driver, cdp, opts) {
       const cx = nr.left + nr.width / 2;
       const cy = nr.top + nr.height / 2;
       if (cx > cr.left + 8 && cx < cr.right - 8 && cy > cr.top + 8 && cy < cr.bottom - 8) {
-        return { cx, cy };
+        return {
+          cx,
+          cy,
+          svcId: n.getAttribute('data-n') || n.getAttribute('data-service') || '',
+        };
       }
     }
     return null;
   });
-  assert(sysNode, 'Expected clickable node inside #system-map-canvas');
+  assert(sysNode && sysNode.svcId, 'Expected clickable node with service id inside #system-map-canvas');
+  await driver.rightClickAt(sysNode.cx, sysNode.cy);
+  await driver.waitFor(() => {
+    const btn = document.getElementById('graph-explain-action');
+    return Boolean(btn && !btn.hidden && (btn.textContent || '').toLowerCase().includes('explain'));
+  }, 'normal #system-map-canvas right-click #graph-explain-action menu', 5_000);
+  await driver.click('#graph-explain-action');
+  const sysExplainInfo = await driver.waitFor(() => {
+    const dlg = document.getElementById('graph-explanation');
+    const subj = document.getElementById('graph-explanation-subject')?.textContent?.trim() || '';
+    const errHidden = document.getElementById('graph-explanation-error')?.hidden !== false;
+    if (!dlg?.hasAttribute('open') || !subj) return null;
+    return { subj, errHidden };
+  }, '#graph-explanation opens from normal #system-map-canvas Explain action', 8_000);
+  assert(
+    sysExplainInfo.errHidden && !sysExplainInfo.subj.includes('__system__') && sysExplainInfo.subj.includes(sysNode.svcId),
+    `Expected normal #system-map-canvas Explain subject for ${sysNode.svcId}, got ${JSON.stringify(sysExplainInfo)}`,
+  );
+  await driver.click('#graph-explanation-close');
+  await driver.waitFor(() => !document.getElementById('graph-explanation')?.hasAttribute('open'), '#graph-explanation closes after normal SystemMap check', 5_000);
+
   await driver.clickAt(sysNode.cx, sysNode.cy);
   const sideTabs = await driver.waitFor(() => {
     const tabs = Array.from(document.querySelectorAll('#system-map-side [role="tab"][data-action="system-map-side-tab"]'));
@@ -3943,7 +4164,7 @@ async function suite7SystemMap(driver, cdp, opts) {
       }
     }
     const denseSysPayload = { ...(sysBaseMap || {}), nodes: denseNodes, edges: denseEdges };
-    let explainPostSeen = false;
+    let explainPostBody = '';
     await withFetchOverride(
       cdp,
       [
@@ -3963,7 +4184,7 @@ async function suite7SystemMap(driver, cdp, opts) {
           return true;
         }
         if (method === 'POST' && new URL(reqUrl).pathname === '/api/sessions' && (params.request?.postData || '').includes('svc-dense-')) {
-          explainPostSeen = true;
+          explainPostBody = params.request?.postData || '';
           await cdp.send('Fetch.fulfillRequest', {
             requestId: params.requestId,
             responseCode: 200,
@@ -4038,12 +4259,23 @@ async function suite7SystemMap(driver, cdp, opts) {
           return Boolean(btn && !btn.hidden && (btn.textContent || '').toLowerCase().includes('explain'));
         }, 'dense #system-map-canvas right-click #graph-explain-action menu', 5_000);
         await driver.click('#graph-explain-action');
-        await driver.waitFor(() => {
+        const denseExplain = await driver.waitFor(() => {
           const dlg = document.getElementById('graph-explanation');
-          const subj = document.getElementById('graph-explanation-subject');
-          return Boolean(dlg?.hasAttribute('open') && subj && subj.textContent.trim().length > 0);
+          const subj = document.getElementById('graph-explanation-subject')?.textContent?.trim() || '';
+          const ans = document.getElementById('graph-explanation-answer')?.textContent?.trim() || '';
+          const errHidden = document.getElementById('graph-explanation-error')?.hidden !== false;
+          if (!dlg?.hasAttribute('open') || !subj) return null;
+          return { subj, ans, errHidden };
         }, '#graph-explanation opens from dense #system-map-canvas Explain action', 8_000);
-        await driver.waitUntil(() => explainPostSeen, 'synthetic dense System Map explain request handled cleanly', 5_000);
+        await driver.waitUntil(() => explainPostBody.includes(sysHoverPt.id), `synthetic dense System Map explain request targeted ${sysHoverPt.id}`, 5_000);
+        const denseIdx = Number.parseInt(sysHoverPt.id.replace('svc-dense-', ''), 10);
+        const expectedDenseName = Number.isFinite(denseIdx) ? `Dense Service ${denseIdx}` : sysHoverPt.id;
+        assert(
+          denseExplain.errHidden
+            && !denseExplain.subj.includes('__system__')
+            && (denseExplain.subj.includes(sysHoverPt.id) || denseExplain.subj.includes(expectedDenseName)),
+          `Expected dense SystemMap Explain subject for ${sysHoverPt.id} (${expectedDenseName}), got ${JSON.stringify(denseExplain)}`,
+        );
         await driver.click('#graph-explanation-close');
         await driver.waitFor(() => !document.getElementById('graph-explanation')?.hasAttribute('open'), '#graph-explanation closes after dense System Map check', 5_000);
       },
@@ -4546,7 +4778,8 @@ async function suite10KnowledgeSkillsManagementDialogs(driver, cdp, opts) {
     const kv = document.getElementById('kit3-view');
     const frame = document.getElementById('kit3-frame');
     const openKit = document.getElementById('open-kit3');
-    return Boolean(kv && !kv.hidden && openKit && !openKit.hidden && frame && (frame.getAttribute('src') || '').includes('/kit3') && frame.contentDocument?.readyState === 'complete');
+    const docUrl = frame?.contentDocument?.URL || frame?.contentWindow?.location?.href || '';
+    return Boolean(kv && !kv.hidden && openKit && !openKit.hidden && frame && (frame.getAttribute('src') || '').includes('/kit3') && docUrl.includes('/kit3') && frame.contentDocument?.readyState === 'complete');
   }, '#kit3-view loads /kit3/ iframe cleanly', 10_000);
   await driver.callFn(() => {
     document.getElementById('kit3-frame').contentWindow.__e2eKit3Alive = true;
@@ -4664,8 +4897,31 @@ async function suite10KnowledgeSkillsManagementDialogs(driver, cdp, opts) {
   driver.assertNoErrors('Suite 10');
 }
 
+function buildEvalFixtureHtmlHelpers(origin) {
+  const viewerTemplate = fs.readFileSync(
+    path.join(REPO_ROOT_DIR, 'runtime-rust/crates/infra-skill-tools/resources/viewer.html'),
+    'utf8',
+  );
+  const evalSetTemplate = fs.readFileSync(
+    path.join(REPO_ROOT_DIR, 'runtime-rust/crates/infra-skill-tools/resources/eval-set.html'),
+    'utf8',
+  );
+  return {
+    renderViewerDoc: (payload) => viewerTemplate
+      .replace('__BOOT_URL__', `${origin}/boot.js`)
+      .replace('__EVAL_DATA__', JSON.stringify(payload).replace(/</g, '\\u003c')),
+    renderEvalSetDoc: (payload) => evalSetTemplate
+      .replaceAll('__SKILL_NAME_PLACEHOLDER__', payload.skill_name || 'e2e-pdf-skill')
+      .replaceAll('__SKILL_DESCRIPTION_PLACEHOLDER__', payload.description || 'E2E evaluation queries')
+      .replace('__BOOT_URL__', `${origin}/boot.js`)
+      .replace('__EVAL_DATA__', JSON.stringify(payload).replace(/</g, '\\u003c')),
+  };
+}
+
 async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts) {
-  console.log('[Suite 11] Cold-boot 390x844 mobile layout + prefers-reduced-motion: reduce');
+  console.log('[Suite 11] Cold-boot 390x844 mobile layout (all views, approvals, viewer & eval-set) & prefers-reduced-motion: reduce');
+  const origin = new URL(opts.url).origin;
+  const { renderViewerDoc, renderEvalSetDoc } = buildEvalFixtureHtmlHelpers(origin);
   await withIsolatedPage(browserCdp, browserWsUrl, opts, async (mobileCdp, mobileDriver) => {
     await mobileCdp.send('Emulation.setDeviceMetricsOverride', {
       width: 390,
@@ -4711,8 +4967,418 @@ async function suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, o
     assert(boot.reducedMotionMatch, 'Expected matchMedia("(prefers-reduced-motion: reduce)").matches === true');
     assert(boot.workAnim === 'none' && (boot.runTrans === '0s' || boot.runTrans === '0ms'), `Expected reduced-motion animation/transition disabled: ${JSON.stringify(boot)}`);
 
+    const assertMobileViewportFit = async (label, selectors = []) => {
+      const report = await mobileDriver.callFn((sels) => {
+        const iw = window.innerWidth;
+        const sw = document.documentElement.scrollWidth;
+        const bodySw = document.body ? document.body.scrollWidth : 0;
+        const boxes = sels.map((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return { sel, missing: true };
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return {
+            sel,
+            hidden: el.hidden || cs.display === 'none' || cs.visibility === 'hidden',
+            left: Math.round(r.left * 10) / 10,
+            right: Math.round(r.right * 10) / 10,
+            top: Math.round(r.top * 10) / 10,
+            bottom: Math.round(r.bottom * 10) / 10,
+            width: Math.round(r.width * 10) / 10,
+            height: Math.round(r.height * 10) / 10,
+          };
+        });
+        return { iw, sw, bodySw, boxes };
+      }, selectors);
+      assert(report.iw === 390, `${label}: expected innerWidth 390, got ${report.iw}`);
+      assert(report.sw <= report.iw + 1 && report.bodySw <= report.iw + 1, `${label}: horizontal overflow at 390px: ${JSON.stringify(report)}`);
+      for (const box of report.boxes) {
+        assert(!box.missing, `${label}: missing element ${box.sel}`);
+        assert(!box.hidden, `${label}: expected visible element ${box.sel}`);
+        assert(box.width > 0 && box.height > 0, `${label}: zero-sized control ${JSON.stringify(box)}`);
+        assert(box.left >= -1 && box.right <= report.iw + 1, `${label}: element exceeds 390px viewport: ${JSON.stringify(box)}`);
+      }
+      return report;
+    };
+
+    const assertSelectorContrast = async (label, selectors, minRatio = 4.5) => {
+      const samples = await mobileDriver.callFn((sels) => {
+        const parseRgba = (css) => {
+          const m = css && css.match(/rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/i);
+          if (!m) return null;
+          return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])];
+        };
+        const resolveOpaqueBg = (el) => {
+          const layers = [];
+          let cur = el;
+          while (cur) {
+            const parsed = parseRgba(getComputedStyle(cur).backgroundColor);
+            if (parsed && parsed[3] > 0) layers.push(parsed);
+            cur = cur.parentElement;
+          }
+          let r = 255;
+          let g = 255;
+          let b = 255;
+          for (let i = layers.length - 1; i >= 0; i -= 1) {
+            const [lr, lg, lb, la] = layers[i];
+            r = r * (1 - la) + lr * la;
+            g = g * (1 - la) + lg * la;
+            b = b * (1 - la) + lb * la;
+          }
+          return `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
+        };
+        return sels.map((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return { sel, missing: true };
+          const cs = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return {
+            sel,
+            visible: !(el.hidden || cs.display === 'none' || cs.visibility === 'hidden' || r.width === 0 || r.height === 0),
+            fg: cs.color,
+            bg: resolveOpaqueBg(el),
+            opacity: Number.parseFloat(cs.opacity || '1'),
+          };
+        });
+      }, selectors);
+      for (const s of samples) {
+        assert(!s.missing && s.visible, `${label}: missing/invisible contrast target ${JSON.stringify(s)}`);
+        const ratio = blendedContrastRatio(s.fg, s.bg, s.opacity);
+        assert(ratio >= minRatio, `${label}: WCAG AA contrast ${ratio?.toFixed?.(2)} < ${minRatio} for ${JSON.stringify(s)}`);
+      }
+    };
+
+    // Open #approvals-drawer on 390x844 (perm-e2e-1 is still pending here when Suite 11 runs before Suite 5).
+    await mobileDriver.click('#approvals-queue-toggle');
+    await mobileDriver.waitFor(() => {
+      const drawer = document.getElementById('approvals-drawer');
+      const toggle = document.getElementById('approvals-queue-toggle');
+      const card = document.querySelector('#approvals-drawer-list .approvals-queue-item, #approvals-drawer-list .conversation-permission[data-state="pending"]');
+      const btn = document.querySelector('#approvals-drawer-list button[data-action="permission-decide"]');
+      return drawer && !drawer.hasAttribute('hidden') && toggle?.getAttribute('aria-expanded') === 'true' && card && btn;
+    }, 'Suite 11 #approvals-drawer opens with pending card at 390x844', 5_000);
+    await assertMobileViewportFit('Suite 11 #approvals-drawer', [
+      '#approvals-drawer',
+      '#approvals-drawer-close',
+      '#approvals-drawer-list .approvals-queue-item, #approvals-drawer-list .conversation-permission[data-state="pending"]',
+      '#approvals-drawer-list button[data-action="permission-decide"]',
+    ]);
+    await mobileDriver.click('#approvals-drawer-close');
+    await mobileDriver.waitFor(() => {
+      const drawer = document.getElementById('approvals-drawer');
+      const toggle = document.getElementById('approvals-queue-toggle');
+      return drawer?.hasAttribute('hidden') && !drawer?.hasAttribute('open') && toggle?.getAttribute('aria-expanded') === 'false';
+    }, 'Suite 11 #approvals-drawer closed', 5_000);
+
+    // Helper for top-level mobile sidebar navigation
+    const openMobileSection = async (navName, viewId) => {
+      await mobileDriver.click('#menu-toggle');
+      await mobileDriver.waitFor(() => {
+        const sb = document.getElementById('sidebar');
+        return sb?.classList.contains('open') && !sb.hasAttribute('inert');
+      }, `mobile sidebar open for ${navName}`, 5_000);
+      await mobileDriver.click(`button.nav-item[data-nav="${navName}"]`);
+      await mobileDriver.waitFor((id) => {
+        const view = document.getElementById(id);
+        const sb = document.getElementById('sidebar');
+        return view && !view.hasAttribute('hidden') && !sb?.classList.contains('open');
+      }, `mobile section ${navName} visible and sidebar closed`, 10_000, viewId);
+    };
+
+    // Select seeded completed session opts.sessionId from the mobile drawer, switch to mobile Workspace -> Checks -> Run checks -> #results-view.
+    const targetSessionSel = `#history button[data-action="session-open"][data-payload='${JSON.stringify(opts.sessionId)}']`;
+    await mobileDriver.click('#menu-toggle');
+    await mobileDriver.waitFor((sel) => {
+      const sb = document.getElementById('sidebar');
+      const row = document.querySelector(sel);
+      return sb?.classList.contains('open') && !sb.hasAttribute('inert') && row;
+    }, 'Suite 11 mobile sidebar opens with target session', 5_000, targetSessionSel);
+    await mobileDriver.click(targetSessionSel);
+    await mobileDriver.waitFor((sel) => Boolean(document.querySelector(`${sel}[aria-current="true"]`)), 'Suite 11 mobile session selected', 8_000, targetSessionSel);
+    const sbStillOpen = await mobileDriver.callFn(() => Boolean(document.getElementById('sidebar')?.classList.contains('open')));
+    if (sbStillOpen) {
+      await mobileDriver.clickAt(360, 200);
+      await mobileDriver.waitFor(() => !document.getElementById('sidebar')?.classList.contains('open') && !document.getElementById('main')?.hasAttribute('inert'), 'Suite 11 mobile sidebar closes after selecting session', 5_000);
+    }
+
+    await mobileDriver.click('#session-mobile-tab-graph');
+    await mobileDriver.waitFor(() => {
+      const btn = document.getElementById('right-tab-checks');
+      return btn && btn.getBoundingClientRect().width > 0;
+    }, 'Suite 11 mobile Workspace pane reveals #right-tab-checks', 5_000);
+    await mobileDriver.click('#right-tab-checks');
+    await mobileDriver.waitFor(() => {
+      const pane = document.getElementById('workspace-checks-pane');
+      return pane && !pane.hasAttribute('hidden') && document.getElementById('workspace-open-checks');
+    }, 'Suite 11 #workspace-checks-pane visible at 390x844', 5_000);
+    await mobileDriver.click('#workspace-open-checks');
+
+    // #results-view (checks, changes, usage) via #view-tabs on the sessions section
+    await mobileDriver.waitFor(() => {
+      const rv = document.getElementById('results-view');
+      return rv && !rv.hasAttribute('hidden') && rv.getAttribute('data-tab') === 'checks' && document.getElementById('check-form');
+    }, 'Suite 11 #results-view checks tab visible at 390x844', 8_000);
+    await assertMobileViewportFit('Suite 11 #results-view (checks)', [
+      '#results-view',
+      '#check-form',
+      '#check-command',
+      '#check-start',
+    ]);
+    await mobileDriver.click('#view-tabs [data-view="changes"]');
+    await mobileDriver.waitFor(() => {
+      const rv = document.getElementById('results-view');
+      const diff = document.getElementById('results-diff');
+      return rv && !rv.hasAttribute('hidden') && rv.getAttribute('data-tab') === 'changes' && diff && (diff.children.length > 0 || (diff.textContent || '').trim().length > 0);
+    }, 'Suite 11 #results-view changes tab renders diff at 390x844', 8_000);
+    await assertMobileViewportFit('Suite 11 #results-view (changes)', ['#results-view', '#results-refresh', '#results-view details.fleet-report[data-tab="changes"]', '#results-diff']);
+    await mobileDriver.click('#view-tabs [data-view="usage"]');
+    await mobileDriver.waitFor(() => {
+      const rv = document.getElementById('results-view');
+      const totals = document.getElementById('results-totals');
+      return rv && !rv.hasAttribute('hidden') && rv.getAttribute('data-tab') === 'usage' && totals && totals.textContent.trim().length > 0;
+    }, 'Suite 11 #results-view usage tab visible at 390x844', 8_000);
+    await assertMobileViewportFit('Suite 11 #results-view (usage)', ['#results-view', '#results-totals']);
+
+    // #systems-view
+    await openMobileSection('systems', 'systems-view');
+    await mobileDriver.waitFor(() => {
+      const sv = document.getElementById('systems-view');
+      const canvas = document.getElementById('system-map-canvas');
+      const cat = document.getElementById('system-catalog');
+      return sv && !sv.hasAttribute('hidden') && canvas && canvas.getBoundingClientRect().width > 0 && cat && cat.children.length > 0 && sv.getAttribute('aria-busy') !== 'true';
+    }, 'Suite 11 #systems-view loaded at 390x844', 15_000);
+    await assertMobileViewportFit('Suite 11 #systems-view', [
+      '#systems-view',
+      '#system-catalog',
+      '#system-map-canvas',
+      '#system-map-unfold',
+      '#system-map-expand',
+    ]);
+
+    // #skill-capsules-view (under skills nav -> skill-capsules tab)
+    await openMobileSection('skills', 'skills-view');
+    await mobileDriver.click('#view-tabs [data-view="skill-capsules"]');
+    await mobileDriver.waitFor(() => {
+      const scv = document.getElementById('skill-capsules-view');
+      const row = document.querySelector('#skill-capsules-list .skill-capsule-row');
+      return scv && !scv.hasAttribute('hidden') && row;
+    }, 'Suite 11 #skill-capsules-view loaded at 390x844', 15_000);
+    await assertMobileViewportFit('Suite 11 #skill-capsules-view (list)', [
+      '#skill-capsules-view',
+      '#skill-capsules-form',
+      '#skill-capsules-refresh',
+      '#skill-capsules-list .skill-capsule-row',
+    ]);
+    await mobileDriver.click('#skill-capsules-list .skill-capsule-row');
+    await mobileDriver.waitFor(() => {
+      const detail = document.getElementById('skill-capsule-detail');
+      const btn = document.querySelector('#skill-capsule-detail .skill-capsule-actions button');
+      return detail && !detail.hasAttribute('hidden') && btn;
+    }, 'Suite 11 #skill-capsule-detail visible at 390x844', 10_000);
+    await assertMobileViewportFit('Suite 11 #skill-capsule-detail', [
+      '#skill-capsule-detail',
+      '#skill-capsule-detail .skill-capsule-actions button',
+    ]);
+
+    // viewer.html & eval-set.html at 390x844: zero page horizontal overflow, scroll wrappers, control bounds & WCAG AA contrast
+    const mobileViewerPayload = {
+      skill_name: 'e2e-mobile-eval',
+      standalone: false,
+      runs: [
+        {
+          id: 'eval-1-with_skill-run-1',
+          eval_id: 1,
+          configuration: 'with_skill',
+          prompt: 'VeryLongPromptTokenWithoutSpacesToTestWrappingOnNarrowMobileScreens_0123456789abcdefghijklmnopqrstuvwxyz',
+          outputs: [
+            { name: 'report.pdf', type: 'pdf', content: 'PDF summary excerpt for E2E' },
+            { name: 'artifact.bin', type: 'binary', data: 'data:application/octet-stream;base64,AAEC' },
+          ],
+          grading: {
+            summary: { passed: 1, failed: 0, total: 1, pass_rate: 1.0 },
+            expectations: [
+              { text: 'Passes CSP-safe check', passed: true, evidence: 'ok' },
+            ],
+          },
+        },
+        {
+          id: 'eval-1-without_skill-run-1',
+          eval_id: 1,
+          configuration: 'without_skill',
+          prompt: 'Baseline run prompt',
+          outputs: [{ name: 'notes.txt', type: 'text', content: 'Baseline text output' }],
+          grading: {
+            summary: { passed: 0, failed: 1, total: 1, pass_rate: 0.0 },
+            expectations: [{ text: 'Baseline failed', passed: false, evidence: 'no skill' }],
+          },
+        },
+      ],
+      benchmark: {
+        metadata: { skill_name: 'e2e-mobile-eval' },
+        runs: [
+          {
+            eval_name: 'eval-1-long-benchmark-column-check',
+            configuration: 'with_skill',
+            run_number: 1,
+            result: { pass_rate: 1.0, time_seconds: 1.25, tokens: 1200, passed: true },
+          },
+          {
+            eval_name: 'eval-1-long-benchmark-column-check',
+            configuration: 'without_skill',
+            run_number: 1,
+            result: { pass_rate: 0.0, time_seconds: 2.50, tokens: 1800, passed: false },
+          },
+        ],
+        run_summary: {
+          with_skill: { pass_rate: { mean: 1.0, stddev: 0.0 } },
+          without_skill: { pass_rate: { mean: 0.0, stddev: 0.0 } },
+          delta: { pass_rate: '+1.00', time_seconds: '-1.25' },
+        },
+      },
+    };
+    const mobileEvalSetPayload = {
+      mode: 'eval-set',
+      skill_name: 'e2e-mobile-eval',
+      description: 'Mobile responsive eval set checks',
+      items: [
+        { query: 'SupercalifragilisticexpialidociousQueryTokenFor390pxViewportOverflowCheck_123456789', should_trigger: false },
+        { query: 'Trigger query two', should_trigger: true },
+      ],
+    };
+
+    await withFetchOverride(
+      mobileCdp,
+      [
+        { urlPattern: `${origin}/__e2e_mobile_*` },
+        { urlPattern: `${origin}/api/feedback*` },
+      ],
+      async (params) => {
+        const parsed = new URL(params.request?.url || '');
+        if (parsed.pathname === '/__e2e_mobile_viewer.html') {
+          await mobileCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            body: Buffer.from(renderViewerDoc(mobileViewerPayload)).toString('base64'),
+          });
+          return true;
+        }
+        if (parsed.pathname === '/__e2e_mobile_eval_set.html') {
+          await mobileCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            body: Buffer.from(renderEvalSetDoc(mobileEvalSetPayload)).toString('base64'),
+          });
+          return true;
+        }
+        if (parsed.pathname === '/api/feedback') {
+          await mobileCdp.send('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+            body: Buffer.from('{"reviews":[]}').toString('base64'),
+          });
+          return true;
+        }
+        return false;
+      },
+      async () => {
+        await mobileCdp.send('Page.navigate', { url: `${origin}/__e2e_mobile_viewer.html` });
+        await mobileDriver.waitFor(() => {
+          const btn = document.getElementById('done-btn');
+          return btn && !btn.disabled && document.getElementById('grades-toggle');
+        }, 'Suite 11 viewer.html boots at 390x844', 20_000);
+        await mobileDriver.click('#grades-toggle');
+        await mobileDriver.waitFor(() => document.getElementById('grades-toggle')?.getAttribute('aria-expanded') === 'true', 'Suite 11 viewer.html grades expanded', 4_000);
+
+        // Advance to run 2 so .config-baseline, .grade-fail and .done-btn.ready are covered
+        await assertSelectorContrast('Suite 11 viewer.html outputs run 1', [
+          '.config-badge.config-primary',
+          '.grade-pass',
+          '#outputs-body .dl-btn',
+        ]);
+        await mobileDriver.click('#next-btn');
+        await mobileDriver.waitFor(() => document.getElementById('done-btn')?.classList.contains('ready'), 'Suite 11 viewer.html .done-btn.ready after visiting all runs', 5_000);
+        if (await mobileDriver.callFn(() => document.getElementById('grades-toggle')?.getAttribute('aria-expanded') !== 'true')) {
+          await mobileDriver.click('#grades-toggle');
+          await mobileDriver.waitFor(() => document.getElementById('grades-toggle')?.getAttribute('aria-expanded') === 'true', 'Suite 11 viewer.html run 2 grades expanded', 4_000);
+        }
+
+        await assertMobileViewportFit('Suite 11 viewer.html outputs at 390x844', [
+          '#tab-outputs',
+          '#tab-benchmark',
+          '#prev-btn',
+          '#progress',
+          '#next-btn',
+          '#done-btn',
+          '.config-badge.config-baseline',
+        ]);
+        await assertSelectorContrast('Suite 11 viewer.html run 2 + ready button', [
+          '.config-badge.config-baseline',
+          '.grade-fail',
+          '.done-btn.ready',
+        ]);
+
+        // Benchmark tab: wide table must scroll inside .table-scroll, never overflowing page 390px
+        await mobileDriver.click('#tab-benchmark');
+        await mobileDriver.waitFor(() => {
+          const panel = document.getElementById('panel-benchmark');
+          return panel && !panel.hidden && document.querySelector('#benchmark-content .benchmark-table');
+        }, 'Suite 11 viewer.html benchmark tab renders at 390x844', 5_000);
+        await assertMobileViewportFit('Suite 11 viewer.html benchmark at 390x844', [
+          '#benchmark-content .table-scroll',
+        ]);
+        const benchScrollWrap = await mobileDriver.callFn(() => {
+          const tbl = document.querySelector('#benchmark-content .benchmark-table');
+          const wrap = tbl?.closest('.table-scroll');
+          return {
+            wrapped: Boolean(wrap),
+            overflowX: wrap ? getComputedStyle(wrap).overflowX : '',
+            tableWidth: tbl ? Math.round(tbl.getBoundingClientRect().width) : 0,
+            wrapWidth: wrap ? Math.round(wrap.getBoundingClientRect().width) : 0,
+          };
+        });
+        assert(
+          benchScrollWrap.wrapped && (benchScrollWrap.overflowX === 'auto' || benchScrollWrap.overflowX === 'scroll') && benchScrollWrap.wrapWidth <= 390,
+          `Suite 11 viewer.html .benchmark-table must sit inside horizontal .table-scroll: ${JSON.stringify(benchScrollWrap)}`,
+        );
+        await assertSelectorContrast('Suite 11 viewer.html benchmark deltas', [
+          '.benchmark-delta-positive',
+          '.benchmark-delta-negative',
+        ]);
+
+        // eval-set.html at 390x844: table scrolls inside .table-scroll, zero page overflow, AA buttons
+        await mobileCdp.send('Page.navigate', { url: `${origin}/__e2e_mobile_eval_set.html` });
+        await mobileDriver.waitFor(() => document.querySelectorAll('#eval-body tr[data-editor-row]').length === 2, 'Suite 11 eval-set.html boots at 390x844', 15_000);
+        await assertMobileViewportFit('Suite 11 eval-set.html at 390x844', [
+          '.table-scroll',
+          '.btn-add',
+          '.btn-export',
+        ]);
+        const evalSetWrap = await mobileDriver.callFn(() => {
+          const tbl = document.querySelector('.table-scroll table');
+          const wrap = tbl?.closest('.table-scroll');
+          return {
+            wrapped: Boolean(wrap),
+            overflowX: wrap ? getComputedStyle(wrap).overflowX : '',
+            wrapWidth: wrap ? Math.round(wrap.getBoundingClientRect().width) : 0,
+          };
+        });
+        assert(
+          evalSetWrap.wrapped && (evalSetWrap.overflowX === 'auto' || evalSetWrap.overflowX === 'scroll') && evalSetWrap.wrapWidth <= 390,
+          `Suite 11 eval-set.html #eval-table must sit inside .table-scroll: ${JSON.stringify(evalSetWrap)}`,
+        );
+        await assertSelectorContrast('Suite 11 eval-set.html buttons', [
+          '.btn-add',
+          '.btn-export',
+          '.btn-delete',
+        ]);
+      },
+    );
+
     mobileDriver.assertNoErrors('Suite 11');
-  });
+  }, { isolatedStorage: true });
 }
 
 async function suite12SkillCache(driver, opts) {
@@ -4765,6 +5431,35 @@ async function suite12SkillCache(driver, opts) {
     return document.getElementById('option-skillcache-value')?.textContent === 'Auto'
       && note.includes('$skill') && note.includes('`/command` runs natively');
   }, 'Auto says how a Claude session runs a capsule and keeps /command native', 5_000);
+
+  // Switching provider to Codex clarifies that the compiler remains Claude without a shell.
+  await driver.callFn(() => {
+    const prov = document.getElementById('provider');
+    if (prov && Array.from(prov.options).some((o) => o.value === 'codex')) {
+      prov.value = 'codex';
+      prov.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  await driver.waitFor(() => {
+    const prov = document.getElementById('provider');
+    if (!prov || prov.value !== 'codex') return true;
+    const hint = document.getElementById('skillcache-compiler-hint')?.textContent || '';
+    const ph = document.getElementById('skillcache-compiler-model')?.getAttribute('placeholder') || '';
+    return hint.includes('Codex sessions') && ph.includes('compiler');
+  }, 'SkillCache compiler hint/placeholder clarify Codex sessions still compile via Claude', 5_000);
+  await driver.callFn(() => {
+    const prov = document.getElementById('provider');
+    if (prov && prov.value !== 'claude') {
+      prov.value = 'claude';
+      prov.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  await driver.waitFor(
+    () => document.getElementById('skillcache-compiler-model')?.getAttribute('placeholder') === "Claude's default model",
+    'Restoring Claude session provider restores default compiler placeholder',
+    5_000,
+  );
+
   await setMode('observe');
   await driver.click('#option-skillcache');
   await driver.waitFor(() => document.getElementById('panel-skillcache')?.hidden === true, '#panel-skillcache closes', 4_000);
@@ -4830,10 +5525,24 @@ async function suite12SkillCache(driver, opts) {
     `program_failed row names reason, step and program: ${pane.failed}`);
   assert(pane.opens >= 1, 'The tab links to the capsule the turn used');
 
-  // 4. From the turn to its capsule: the Skill capsules view with the capsule open.
-  // Activated in the page, not by pointer coordinates: in the detailed run panel the pane scrolls
-  // under the sticky composer, so the centered button may sit beneath it.
-  await driver.callFn(() => document.querySelector('#run-pane-skillcache [data-action="skillcache-open-capsule"]').click());
+  // 4. From the turn to its capsule: real pointer-hit click on the scrolled button in #run-pane-skillcache.
+  const openCapsuleSel = '#run-pane-skillcache [data-action="skillcache-open-capsule"]';
+  await driver.callFn((sel) => {
+    const paneEl = document.getElementById('run-pane-skillcache');
+    const btn = document.querySelector(sel);
+    if (paneEl && btn) {
+      paneEl.scrollTop = paneEl.scrollHeight;
+      btn.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    }
+  }, openCapsuleSel);
+  const openCapsuleBox = await driver.elementBox(openCapsuleSel);
+  const pointerHitsCapsuleBtn = await driver.callFn((x, y, sel) => {
+    const btn = document.querySelector(sel);
+    const hit = document.elementFromPoint(x, y);
+    return Boolean(btn && hit && (hit === btn || btn.contains(hit)));
+  }, openCapsuleBox.cx, openCapsuleBox.cy, openCapsuleSel);
+  assert(pointerHitsCapsuleBtn, `Expected pointer coordinates (${openCapsuleBox.cx}, ${openCapsuleBox.cy}) to hit ${openCapsuleSel} rather than sticky composer`);
+  await driver.click(openCapsuleSel);
   await driver.waitFor(() => {
     const view = document.getElementById('skill-capsules-view');
     const detail = document.getElementById('skill-capsule-detail');
@@ -4984,8 +5693,208 @@ async function suite12SkillCache(driver, opts) {
 }
 
 async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) {
-  console.log('[Suite 13] Multi-project waiting_counts clearance & eval_viewer / eval-set ARIA & error UX');
+  console.log('[Suite 13] Cross-project PREFS deep-link, live multi-project SSE waiting_counts & eval_viewer / eval-set UX');
   const origin = new URL(opts.url).origin;
+  assert(
+    opts.projectId && opts.secondaryProjectId && opts.secondarySessionId,
+    `Suite 13 requires --project-id, --secondary-project-id, and --secondary-session-id: ${JSON.stringify({
+      projectId: opts.projectId,
+      secondaryProjectId: opts.secondaryProjectId,
+      secondarySessionId: opts.secondarySessionId,
+    })}`,
+  );
+
+  // 1a. Deep-link ?project= overrides stale cross-project PREFS.project_id / PREFS.session_id
+  await withIsolatedPage(browserCdp, browserWsUrl, opts, async (deepCdp, deepDriver) => {
+    await deepCdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1280,
+      height: 840,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    const { identifier: preSeedId } = await deepCdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        if (!sessionStorage.getItem('__e2e_cross_project_prefs_seeded')) {
+          sessionStorage.setItem('__e2e_cross_project_prefs_seeded', '1');
+          localStorage.setItem('harness.sessions.preferences.v1', JSON.stringify({
+            project_id: ${JSON.stringify(opts.secondaryProjectId)},
+            session_id: ${JSON.stringify(opts.secondarySessionId)},
+          }));
+        }
+        const OrigES = window.EventSource;
+        window.__e2eRealSseUrls = [];
+        window.EventSource = function(url, init) {
+          window.__e2eRealSseUrls.push(String(url));
+          return new OrigES(url, init);
+        };
+        window.EventSource.prototype = OrigES.prototype;
+      })();`,
+    });
+    try {
+      const deepUrl = `${origin}/?view=sessions&project=${encodeURIComponent(opts.projectId)}`;
+      await deepCdp.send('Page.navigate', { url: deepUrl });
+      const state = await deepDriver.waitFor((expectedPid, staleSid) => {
+        const connecting = document.getElementById('connecting');
+        const sse = document.getElementById('sse-status')?.getAttribute('data-state');
+        const sw = document.getElementById('project-switcher');
+        const hist = document.querySelectorAll('#history [data-action="session-open"]');
+        if (!connecting?.hidden || sse !== 'live' || !sw || !hist.length) return null;
+        const activeRow = document.querySelector('#history [data-action="session-open"][aria-current="true"]');
+        const activePayload = activeRow?.getAttribute('data-payload') || '';
+        const params = new URLSearchParams(location.search);
+        let prefs = {};
+        try {
+          prefs = JSON.parse(localStorage.getItem('harness.sessions.preferences.v1') || '{}');
+        } catch {
+          prefs = {};
+        }
+        return {
+          switcherValue: sw.value,
+          urlProject: params.get('project') || '',
+          urlSession: params.get('session') || '',
+          sseUrls: (window.__e2eRealSseUrls || []).slice(),
+          activePayload,
+          prefs,
+          matchesExpectedPid: sw.value === expectedPid,
+          hasStaleSidInActive: activePayload.includes(staleSid),
+        };
+      }, 'deep-link ?project= overrides cross-project PREFS.session_id', 20_000, opts.projectId, opts.secondarySessionId);
+
+      const fetchedStaleSid = deepDriver.responsesByUrl.some((r) => r.url.includes(opts.secondarySessionId));
+      assert(
+        state.matchesExpectedPid && state.urlProject === opts.projectId,
+        `Expected ?project=${opts.projectId} to win over stale PREFS: ${JSON.stringify(state)}`,
+      );
+      assert(
+        state.urlSession !== opts.secondarySessionId && !state.hasStaleSidInActive && !fetchedStaleSid,
+        `Cross-project PREFS.session_id (${opts.secondarySessionId}) must not be restored or fetched on ${opts.projectId}: ${JSON.stringify({ state, fetchedStaleSid })}`,
+      );
+      assert(
+        state.sseUrls.some((u) => u.includes(`project_id=${encodeURIComponent(opts.projectId)}`))
+          && !state.sseUrls.some((u) => u.includes(`project_id=${encodeURIComponent(opts.secondaryProjectId)}`) || u.includes(`session_id=${encodeURIComponent(opts.secondarySessionId)}`)),
+        `Expected live EventSource bound strictly to ${opts.projectId}: ${JSON.stringify(state.sseUrls)}`,
+      );
+      deepDriver.assertNoErrors('Suite 13a cross-project PREFS deep-link');
+    } finally {
+      await deepCdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: preSeedId }).catch(() => {});
+    }
+  }, { isolatedStorage: true });
+
+  // 1b. Live http.rs / store.rs multi-project SSE waiting_counts end-to-end (real server, no MockEventSource)
+  await withIsolatedPage(browserCdp, browserWsUrl, opts, async (liveCdp, liveDriver) => {
+    await liveCdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1280,
+      height: 840,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    const { identifier: sseSpyId } = await liveCdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        const OrigES = window.EventSource;
+        window.__e2eRealSseUrls = [];
+        window.EventSource = function(url, init) {
+          window.__e2eRealSseUrls.push(String(url));
+          return new OrigES(url, init);
+        };
+        window.EventSource.prototype = OrigES.prototype;
+      })();`,
+    });
+    try {
+      await liveCdp.send('Page.navigate', { url: `${origin}/?view=sessions&project=${encodeURIComponent(opts.projectId)}` });
+      await liveDriver.waitFor((pid) => {
+        const connecting = document.getElementById('connecting');
+        const sse = document.getElementById('sse-status')?.getAttribute('data-state');
+        const sw = document.getElementById('project-switcher');
+        const toggle = document.getElementById('approvals-queue-toggle');
+        return connecting?.hidden
+          && sse === 'live'
+          && sw?.value === pid
+          && toggle?.getAttribute('data-count') === '0';
+      }, 'Suite 13b live primary-project session boots with 0 waiting approvals', 20_000, opts.projectId);
+
+      // Create a manual-permission session on secondaryProjectId directly via real server API;
+      // the open primary-project tab must receive waiting_counts=1 via real /api/events/stream.
+      const created = await liveDriver.callFn(async (secPid) => {
+        const bootRes = await fetch('/api/bootstrap', { credentials: 'same-origin' });
+        if (!bootRes.ok) throw new Error('bootstrap failed: ' + bootRes.status);
+        const boot = await bootRes.json();
+        const res = await fetch('/api/sessions', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-harness-token': boot.csrf,
+          },
+          body: JSON.stringify({
+            project_id: secPid,
+            provider: 'claude',
+            mode: 'edit',
+            prompt: '[E2E_HOLD_PERMISSION] [E2E_HOLD_PERMISSION_SECONDARY] Live cross-project waiting_counts SSE check',
+            workflow: 'native',
+            permissions: 'manual',
+          }),
+        });
+        const payload = await res.json();
+        return { status: res.status, id: payload.id || payload.session?.id || '' };
+      }, opts.secondaryProjectId);
+      assert(created.status === 201 && created.id, `Expected 201 session create for live SSE waiting_counts check: ${JSON.stringify(created)}`);
+
+      await liveDriver.waitFor((pid) => {
+        const toggle = document.getElementById('approvals-queue-toggle');
+        const sw = document.getElementById('project-switcher');
+        return sw?.value === pid && toggle?.getAttribute('data-count') === '1';
+      }, 'live SSE waiting_counts increments primary tab #approvals-queue-toggle to 1 while secondary session waits', 20_000, opts.projectId);
+
+      // Switch #project-switcher to secondaryProjectId and confirm SSE reconnect + waiting filter + approval clears badge back to 0
+      await liveDriver.callFn((secPid) => {
+        const sw = document.getElementById('project-switcher');
+        sw.value = secPid;
+        sw.dispatchEvent(new Event('change', { bubbles: true }));
+      }, opts.secondaryProjectId);
+      await liveDriver.waitFor((secPid, createdId) => {
+        const sw = document.getElementById('project-switcher');
+        const sse = document.getElementById('sse-status')?.getAttribute('data-state');
+        const hasSecondarySse = (window.__e2eRealSseUrls || []).some((u) => u.includes(`project_id=${encodeURIComponent(secPid)}`));
+        const hasSession = Array.from(document.querySelectorAll('#history [data-action="session-open"]'))
+          .some((el) => (el.getAttribute('data-payload') || '').includes(createdId));
+        return sw?.value === secPid && sse === 'live' && hasSecondarySse && hasSession;
+      }, 'live project-switcher reconnects real SSE to secondary project with new session', 15_000, opts.secondaryProjectId, created.id);
+
+      await liveDriver.click('#history-filter-waiting');
+      await liveDriver.waitFor((createdId) => {
+        const pressed = document.getElementById('history-filter-waiting')?.getAttribute('aria-pressed') === 'true';
+        const rows = Array.from(document.querySelectorAll('#history [data-action="session-open"]'));
+        return pressed && rows.length === 1 && (rows[0].getAttribute('data-payload') || '').includes(createdId);
+      }, 'live #history-filter-waiting lists new secondary waiting session', 10_000, created.id);
+
+      await liveDriver.click('#approvals-queue-toggle');
+      const allowBox = await liveDriver.waitFor(() => {
+        const drawer = document.getElementById('approvals-drawer');
+        const list = document.getElementById('approvals-drawer-list');
+        if (!drawer || drawer.hasAttribute('hidden') || !list) return null;
+        const buttons = Array.from(list.querySelectorAll('button[data-action="permission-decide"]'));
+        const allowBtn = buttons.find((b) => /^(allow|approve)/i.test((b.textContent || '').trim()));
+        if (!allowBtn) return null;
+        const r = allowBtn.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      }, 'Suite 13b #approvals-drawer shows Allow button for secondary permission', 10_000);
+
+      await liveCdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: allowBox.x, y: allowBox.y });
+      await liveCdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: allowBox.x, y: allowBox.y, button: 'left', clickCount: 1 });
+      await liveCdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: allowBox.x, y: allowBox.y, button: 'left', clickCount: 1 });
+
+      await liveDriver.waitFor(() => {
+        const toggle = document.getElementById('approvals-queue-toggle');
+        const rows = document.querySelectorAll('#history [data-action="session-open"]').length;
+        return toggle?.getAttribute('data-count') === '0' && rows === 0;
+      }, 'live approval clears SSE waiting_counts badge and #history-filter-waiting back to 0', 15_000);
+
+      liveDriver.assertNoErrors('Suite 13b live multi-project SSE waiting_counts');
+    } finally {
+      await liveCdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: sseSpyId }).catch(() => {});
+    }
+  }, { isolatedStorage: true });
+
   await withIsolatedPage(browserCdp, browserWsUrl, opts, async (tabCdp, tabDriver) => {
     await tabCdp.send('Emulation.setDeviceMetricsOverride', {
       width: 1280,
@@ -4994,7 +5903,7 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
       mobile: false,
     });
 
-    // 1. Multi-project #project-switcher + waiting_counts zero-clearance
+    // 1c. MockEventSource deterministic multi-project #project-switcher + waiting_counts zero-clearance
     const { identifier: mockSseScriptId } = await tabCdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `(() => {
         window.__e2eSseUrls = [];
@@ -5164,15 +6073,8 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
       await tabCdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: mockSseScriptId }).catch(() => {});
     }
 
-    // 2. eval_viewer (viewer.html server HTTP 500 vs standalone, PDF preview, ARIA) & eval-set.html (ARIA + focus)
-    const viewerTemplate = fs.readFileSync(
-      path.join(REPO_ROOT_DIR, 'runtime-rust/crates/infra-skill-tools/resources/viewer.html'),
-      'utf8',
-    );
-    const evalSetTemplate = fs.readFileSync(
-      path.join(REPO_ROOT_DIR, 'runtime-rust/crates/infra-skill-tools/resources/eval-set.html'),
-      'utf8',
-    );
+    // 2. eval_viewer (viewer.html initial GET 500, POST 500 vs standalone, PDF preview, ARIA) & eval-set.html (ARIA + focus)
+    const { renderViewerDoc, renderEvalSetDoc } = buildEvalFixtureHtmlHelpers(origin);
     const baseEvalPayload = {
       skill_name: 'e2e-pdf-skill',
       runs: [
@@ -5206,15 +6108,7 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
         { query: 'First positive query', should_trigger: true },
       ],
     };
-
-    const renderViewerDoc = (payload) => viewerTemplate
-      .replace('__BOOT_URL__', `${origin}/boot.js`)
-      .replace('__EVAL_DATA__', JSON.stringify(payload).replace(/</g, '\\u003c'));
-    const renderEvalSetDoc = (payload) => evalSetTemplate
-      .replaceAll('__SKILL_NAME_PLACEHOLDER__', 'e2e-pdf-skill')
-      .replaceAll('__SKILL_DESCRIPTION_PLACEHOLDER__', 'E2E evaluation queries')
-      .replace('__BOOT_URL__', `${origin}/boot.js`)
-      .replace('__EVAL_DATA__', JSON.stringify(payload).replace(/</g, '\\u003c'));
+    let mockGetFeedbackStatus = 200;
 
     await withFetchOverride(
       tabCdp,
@@ -5258,11 +6152,16 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
         }
         if (parsed.pathname === '/api/feedback') {
           if (method === 'GET') {
+            const fail = mockGetFeedbackStatus !== 200;
             await tabCdp.send('Fetch.fulfillRequest', {
               requestId: params.requestId,
-              responseCode: 200,
+              responseCode: mockGetFeedbackStatus,
               responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
-              body: Buffer.from('{"reviews":[]}').toString('base64'),
+              body: Buffer.from(
+                fail
+                  ? JSON.stringify({ error: 'Simulated feedback load failure' })
+                  : '{"reviews":[]}',
+              ).toString('base64'),
             });
             return true;
           }
@@ -5279,6 +6178,32 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
         return false;
       },
       async () => {
+        // 2a-err. Initial GET /api/feedback failure surfaces #eval-load-error and #feedback-status.error while unlocking controls
+        mockGetFeedbackStatus = 500;
+        await tabDriver.allowHttpErrors(async () => {
+          await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_viewer.html` });
+          const errState = await tabDriver.waitFor(() => {
+            const banner = document.getElementById('eval-load-error');
+            const st = document.getElementById('feedback-status');
+            const ta = document.getElementById('feedback');
+            const doneBtn = document.getElementById('done-btn');
+            if (!banner || banner.hidden || !st?.classList.contains('error')) return null;
+            if (!ta || ta.disabled || !doneBtn || doneBtn.disabled) return null;
+            return {
+              role: banner.getAttribute('role') || '',
+              bannerText: banner.textContent?.trim() || '',
+              statusText: st.textContent?.trim() || '',
+            };
+          }, 'viewer.html initial GET /api/feedback failure surfaces #eval-load-error and unlocks controls', 20_000);
+          assert(
+            errState.role === 'alert'
+              && errState.bannerText.length > 0
+              && errState.statusText.length > 0,
+            `Expected non-empty alert banner and error status on initial GET failure: ${JSON.stringify(errState)}`,
+          );
+        });
+        mockGetFeedbackStatus = 200;
+
         // 2a. viewer.html in server mode (HTTP 500 toast without #done-overlay, CSP-safe PDF preview, ARIA)
         await tabCdp.send('Page.navigate', { url: `${origin}/__e2e_eval_viewer.html` });
         const viewerReady = await tabDriver.waitFor(() => {
@@ -5417,6 +6342,58 @@ async function suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts) 
       },
     );
 
+    // 2d. Live infra-skill-tools review server in Chrome (query-stripping GET /, live CSP + WASM, GET/POST /api/feedback)
+    assert(opts.evalViewerUrl, 'Suite 13 requires --eval-viewer-url for live eval review server test');
+    await tabCdp.send('Page.navigate', { url: `${opts.evalViewerUrl}/?run=1&tab=outputs` });
+    const liveEvalBoot = await tabDriver.waitFor(() => {
+      const doneBtn = document.getElementById('done-btn');
+      const feedbackEl = document.getElementById('feedback');
+      const outputs = document.getElementById('outputs-body');
+      const banner = document.getElementById('eval-load-error');
+      const progress = document.getElementById('progress')?.textContent?.trim() || '';
+      const skillName = document.getElementById('skill-name')?.textContent?.trim() || '';
+      if (!progress || !skillName || !doneBtn || doneBtn.disabled || !feedbackEl || feedbackEl.disabled || !outputs || !banner) return null;
+      return {
+        bannerHidden: banner.hidden,
+        feedbackValue: feedbackEl.value,
+        counterText: progress,
+      };
+    }, 'live infra-skill-tools review server boots WASM with query string and hydrates feedback', 20_000);
+    assert(
+      liveEvalBoot.bannerHidden && liveEvalBoot.feedbackValue === 'smoke check note' && liveEvalBoot.counterText.includes('of'),
+      `Expected live eval server to hydrate seeded feedback without error banner: ${JSON.stringify(liveEvalBoot)}`,
+    );
+
+    await tabDriver.callFn(() => {
+      const ta = document.getElementById('feedback');
+      ta.value = 'verified live e2e feedback';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await tabDriver.click('#done-btn');
+    await tabDriver.waitFor(() => {
+      const overlay = document.getElementById('done-overlay');
+      const banner = document.getElementById('eval-load-error');
+      return Boolean(overlay && !overlay.hidden && overlay.classList.contains('visible') && banner?.hidden);
+    }, 'live review server POST /api/feedback persists and opens #done-overlay', 8_000);
+
+    await tabCdp.send('Page.navigate', { url: `${opts.evalViewerUrl}/?run=1&reloaded=1` });
+    const liveReloaded = await tabDriver.waitFor(() => {
+      const doneBtn = document.getElementById('done-btn');
+      const ta = document.getElementById('feedback');
+      const banner = document.getElementById('eval-load-error');
+      const progress = document.getElementById('progress')?.textContent?.trim() || '';
+      const skillName = document.getElementById('skill-name')?.textContent?.trim() || '';
+      if (!progress || !skillName || !doneBtn || doneBtn.disabled || !ta || ta.disabled || !banner) return null;
+      return {
+        bannerHidden: banner.hidden,
+        feedbackValue: ta.value,
+      };
+    }, 'live review server reload with query string restores saved feedback', 20_000);
+    assert(
+      liveReloaded.bannerHidden && liveReloaded.feedbackValue === 'verified live e2e feedback',
+      `Expected reloaded live review server to restore saved feedback: ${JSON.stringify(liveReloaded)}`,
+    );
+
     tabDriver.assertNoErrors('Suite 13');
   });
 }
@@ -5461,6 +6438,8 @@ async function main() {
       await pageCdp.send('Page.bringToFront');
 
       await suite1BootThemeTransport(driver, pageCdp, opts);
+      // Run Suite 11 before Suite 5 approves perm-e2e-1 and Suite 12 deletes SKILLCACHE_CAPSULE.
+      await suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts);
       await suite2Canvas2dAndMapLayout(driver, pageCdp, opts);
       await suite3MapLenses(driver);
       await suite4LiveSseAndStyling(driver, pageCdp, opts);
@@ -5471,9 +6450,8 @@ async function main() {
       await suite10KnowledgeSkillsManagementDialogs(driver, pageCdp, opts);
       await suite12SkillCache(driver, opts);
 
-      driver.assertNoErrors('Suites 1-7, 9-10 & 12 check');
+      driver.assertNoErrors('Suites 1-7, 9-12 check');
       await suite8NegativeNetworkAndSseRecovery(driver, pageCdp);
-      await suite11ColdBootMobileAndReducedMotion(browserCdp, browserWsUrl, opts);
       await suite13MultiProjectAndEvalViewer(browserCdp, browserWsUrl, opts);
 
       driver.assertNoErrors('final check');

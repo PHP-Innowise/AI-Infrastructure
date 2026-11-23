@@ -470,13 +470,16 @@ mod tests {
 }
 
 #[test]
-fn watcher_dir_events_sql_cte_joins_and_blade_exclusion_work() {
+fn watcher_dir_events_sql_cte_joins_and_blade_support_work() {
     use notify::{
         Event, EventKind,
         event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
     };
 
-    assert!(AstGrammar::from_rel_path("resources/views/home.blade.php").is_none());
+    assert_eq!(
+        AstGrammar::from_rel_path("resources/views/home.blade.php"),
+        Some(AstGrammar::Blade)
+    );
 
     let ev_dir_rm = Event::new(EventKind::Remove(RemoveKind::Folder))
         .add_path(PathBuf::from("/proj/src/legacy"))
@@ -740,5 +743,103 @@ export async function syncEvents(broker: any) {
             .any(|e| e.kind == "handles_event" && e.target == "event:billing.refund"),
         "expected consume handles_event: {:?}",
         ts_ir.semantic_edges
+    );
+}
+
+#[test]
+fn parses_blade_templates_directives_components_livewire_and_routes() {
+    let blade = r#"{{-- @include('ignored.comment') --}}
+@extends('layouts.app')
+@inject('metrics', 'App\Services\MetricsService')
+@include('partials.header')
+@includeWhen($show, 'partials.banner')
+@component('components.modal')
+    <x-forms.input name="email" />
+    <x-slot:footer>ignored slot</x-slot:footer>
+    @livewire('users.profile-card')
+    <livewire:orders.summary-table />
+    <a href="{{ route('orders.show') }}">View</a>
+    <form action="{{ action([App\Http\Controllers\OrderController::class, 'store']) }}">
+        {{ App\Helpers\Format::currency($total) }}
+    </form>
+@endcomponent
+@php
+    $svc = new \App\Services\QuoteService();
+    $svc->calculate();
+@endphp
+"#;
+    let ir = parse_file_ir("resources/views/orders/show.blade.php", blade).expect("blade ir");
+    assert_eq!(ir.language, "blade");
+    let imp_paths: Vec<&str> = ir.imports.iter().map(|i| i.path.as_str()).collect();
+    assert!(
+        imp_paths.contains(&"blade-view:layouts.app"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"blade-view:partials.header"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"blade-view:partials.banner"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"blade-view:components.modal"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"blade-component:forms.input"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        !imp_paths.iter().any(|p| p.contains("slot")),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"blade-livewire:users.profile-card"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"blade-livewire:orders.summary-table"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        imp_paths.contains(&"App\\Services\\MetricsService"),
+        "{imp_paths:?}"
+    );
+    assert!(
+        !imp_paths.contains(&"blade-view:ignored.comment"),
+        "{imp_paths:?}"
+    );
+
+    assert!(
+        ir.semantic_edges
+            .iter()
+            .any(|e| e.kind == "calls_route" && e.target == "route:NAME orders.show"),
+        "expected route() semantic edge: {:?}",
+        ir.semantic_edges
+    );
+    assert!(
+        ir.calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("OrderController")
+                && r.member.as_deref() == Some("store")),
+        "expected action() controller ref: {:?}",
+        ir.calls_and_refs
+    );
+    assert!(
+        ir.calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("Format") && r.member.as_deref() == Some("currency")),
+        "expected static call ref: {:?}",
+        ir.calls_and_refs
+    );
+    assert!(
+        ir.calls_and_refs
+            .iter()
+            .any(|r| r.target_name.contains("QuoteService")
+                && r.member.as_deref() == Some("calculate")),
+        "expected @php block ref: {:?}",
+        ir.calls_and_refs
     );
 }

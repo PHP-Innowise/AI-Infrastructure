@@ -821,36 +821,30 @@ impl SystemGraphDomain {
                     }
                 }
                 if let Ok(Some(rules)) = graph_map::layer_rules::Rules::read(&target.root) {
-                    for (from_f, to_f, pair) in idx.pairs() {
-                        if pair.weight(false) == 0 {
-                            continue;
+                    for v in idx.architecture_violations("", false, &rules) {
+                        if entry.layer_violations.len() >= 32 {
+                            break;
                         }
-                        let (Some(fp), Some(tp)) = (
-                            idx.files().get(*from_f as usize),
-                            idx.files().get(*to_f as usize),
-                        ) else {
-                            continue;
-                        };
-                        if let Some((_, from_layer, _, to_layer)) =
-                            graph_map::check_layer_rule(&rules, fp, tp)
-                            && entry.layer_violations.len() < 32
-                        {
-                            entry.layer_violations.push(LayerViolationEntry {
-                                from_path: fp.clone(),
-                                to_path: tp.clone(),
-                                from_layer,
-                                to_layer,
-                                reason: Some(format!("{fp} depends upward on {tp}")),
-                            });
-                        }
+                        let from_layer = v.rule_id.unwrap_or_else(|| v.kind.clone());
+                        entry.layer_violations.push(LayerViolationEntry {
+                            from_path: v.from,
+                            to_path: v.to,
+                            from_layer,
+                            to_layer: v.kind,
+                            reason: Some(v.message),
+                        });
                     }
                 }
             }
 
             if target.service_id != "__system__" && !provided_tokens.is_empty() {
-                let ir_data = self
-                    .graphs
-                    .get_ir_store_readonly(&target.graph_id)
+                let ir_store_opt = super::semantics::ensure_ir_store_for_system(
+                    Some(&self.graphs),
+                    Some(&self.store.state),
+                    Some(target),
+                );
+                let ir_data = ir_store_opt
+                    .as_ref()
                     .and_then(|ir| ir.semantic_edges_for_system().ok());
                 if let Some((_, ref sem_edges)) = ir_data {
                     for (rel_path, sem_kind, sem_target, from_sym, _line, _ev) in sem_edges {
@@ -886,75 +880,127 @@ impl SystemGraphDomain {
                         }
                     }
                 }
-                let ir_populated = ir_data
+                let ir_refs_ready = ir_store_opt
                     .as_ref()
-                    .is_some_and(|(ir_files, _)| !ir_files.is_empty());
-                let candidate_files: Vec<String> = if ir_populated && !entry.stale {
-                    // Clean populated IR already provided semantic edges; skip disk walks.
-                    Vec::new()
-                } else if ir_populated {
-                    entry
-                        .changed_files
-                        .iter()
-                        .map(|f| f.path.as_str())
-                        .filter(|p| !graph_map::is_test_path(p))
-                        .take(MAX_UNDECLARED_SCAN_FILES)
-                        .map(str::to_owned)
-                        .collect()
-                } else if let Some(idx) = &live_idx {
-                    idx.files()
-                        .iter()
-                        .filter(|p| !graph_map::is_test_path(p))
-                        .take(MAX_UNDECLARED_SCAN_FILES)
-                        .cloned()
-                        .collect()
-                } else {
-                    collect_service_code_files(&target.root, MAX_UNDECLARED_SCAN_FILES)
-                };
-                for rel_path in candidate_files {
-                    if rel_path == "ai-service.json" || rel_path.ends_with(".lock") {
-                        continue;
-                    }
-                    let full_path = target.root.join(&rel_path);
-                    let Ok(meta) = fs::symlink_metadata(&full_path) else {
-                        continue;
-                    };
-                    if !meta.is_file() || meta.len() > MAX_UNDECLARED_SCAN_BYTES {
-                        continue;
-                    }
-                    let Ok(content) = fs::read_to_string(&full_path) else {
-                        continue;
-                    };
-                    for (provider_id, cid, ckind, probes) in &provided_tokens {
+                    .is_some_and(|ir| ir.has_symbol_refs_index().unwrap_or(false));
+                if ir_refs_ready && let Some(ref ir) = ir_store_opt {
+                    let mut all_probes = BTreeSet::new();
+                    for (provider_id, _, _, probes) in &provided_tokens {
                         if provider_id == &target.service_id {
                             continue;
                         }
-                        let matched_probe = probes
-                            .iter()
-                            .find(|probe| !probe.is_empty() && content.contains(probe.as_str()));
-                        let service_url_probe = format!("http://{provider_id}");
-                        let matched = matched_probe.cloned().or_else(|| {
-                            content
-                                .contains(&service_url_probe)
-                                .then_some(service_url_probe)
-                        });
-                        if let Some(token) = matched {
-                            let contract_opt = (!cid.is_empty()).then(|| cid.clone());
-                            let already = entry.code_refs.iter().any(|r| {
-                                r.from_path == rel_path
-                                    && r.target_service == *provider_id
-                                    && r.contract == contract_opt
-                            });
-                            if !already {
-                                entry.code_refs.push(CodeReference {
-                                    from_path: rel_path.clone(),
-                                    from_symbol: None,
-                                    target_service: provider_id.clone(),
-                                    contract: contract_opt,
-                                    kind: ckind.clone(),
-                                    certainty: "EXTRACTED".to_owned(),
-                                    detail: Some(format!("code references `{token}`")),
+                        for p in probes {
+                            if !p.trim().is_empty() {
+                                all_probes.insert(p.clone());
+                            }
+                        }
+                        all_probes.insert(format!("http://{provider_id}"));
+                    }
+                    let probe_vec: Vec<String> = all_probes.into_iter().collect();
+                    let matches = super::semantics::find_ir_probe_matches(ir, &probe_vec);
+                    for (rel_path, matched_tok) in matches {
+                        if graph_map::is_test_path(&rel_path) {
+                            continue;
+                        }
+                        for (provider_id, cid, ckind, probes) in &provided_tokens {
+                            if provider_id == &target.service_id {
+                                continue;
+                            }
+                            let url_probe = format!("http://{provider_id}");
+                            if matched_tok == url_probe || probes.iter().any(|p| p == &matched_tok)
+                            {
+                                let contract_opt = (!cid.is_empty()).then(|| cid.clone());
+                                let already = entry.code_refs.iter().any(|r| {
+                                    r.from_path == rel_path
+                                        && r.target_service == *provider_id
+                                        && r.contract == contract_opt
                                 });
+                                if !already {
+                                    entry.code_refs.push(CodeReference {
+                                        from_path: rel_path.clone(),
+                                        from_symbol: None,
+                                        target_service: provider_id.clone(),
+                                        contract: contract_opt,
+                                        kind: ckind.clone(),
+                                        certainty: "EXTRACTED".to_owned(),
+                                        detail: Some(format!(
+                                            "IR symbol ref matches `{matched_tok}`"
+                                        )),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let ir_populated = ir_data
+                        .as_ref()
+                        .is_some_and(|(ir_files, _)| !ir_files.is_empty());
+                    let candidate_files: Vec<String> = if ir_populated && !entry.stale {
+                        Vec::new()
+                    } else if ir_populated {
+                        entry
+                            .changed_files
+                            .iter()
+                            .map(|f| f.path.as_str())
+                            .filter(|p| !graph_map::is_test_path(p))
+                            .take(MAX_UNDECLARED_SCAN_FILES)
+                            .map(str::to_owned)
+                            .collect()
+                    } else if let Some(idx) = &live_idx {
+                        idx.files()
+                            .iter()
+                            .filter(|p| !graph_map::is_test_path(p))
+                            .take(MAX_UNDECLARED_SCAN_FILES)
+                            .cloned()
+                            .collect()
+                    } else {
+                        collect_service_code_files(&target.root, MAX_UNDECLARED_SCAN_FILES)
+                    };
+                    for rel_path in candidate_files {
+                        if rel_path == "ai-service.json" || rel_path.ends_with(".lock") {
+                            continue;
+                        }
+                        let full_path = target.root.join(&rel_path);
+                        let Ok(meta) = fs::symlink_metadata(&full_path) else {
+                            continue;
+                        };
+                        if !meta.is_file() || meta.len() > MAX_UNDECLARED_SCAN_BYTES {
+                            continue;
+                        }
+                        let Ok(content) = fs::read_to_string(&full_path) else {
+                            continue;
+                        };
+                        for (provider_id, cid, ckind, probes) in &provided_tokens {
+                            if provider_id == &target.service_id {
+                                continue;
+                            }
+                            let matched_probe = probes.iter().find(|probe| {
+                                !probe.is_empty() && content.contains(probe.as_str())
+                            });
+                            let service_url_probe = format!("http://{provider_id}");
+                            let matched = matched_probe.cloned().or_else(|| {
+                                content
+                                    .contains(&service_url_probe)
+                                    .then_some(service_url_probe)
+                            });
+                            if let Some(token) = matched {
+                                let contract_opt = (!cid.is_empty()).then(|| cid.clone());
+                                let already = entry.code_refs.iter().any(|r| {
+                                    r.from_path == rel_path
+                                        && r.target_service == *provider_id
+                                        && r.contract == contract_opt
+                                });
+                                if !already {
+                                    entry.code_refs.push(CodeReference {
+                                        from_path: rel_path.clone(),
+                                        from_symbol: None,
+                                        target_service: provider_id.clone(),
+                                        contract: contract_opt,
+                                        kind: ckind.clone(),
+                                        certainty: "EXTRACTED".to_owned(),
+                                        detail: Some(format!("code references `{token}`")),
+                                    });
+                                }
                             }
                         }
                     }
@@ -2553,6 +2599,119 @@ mod domain_cache_tests {
         );
         assert_eq!(domain.summary_cache.lock().unwrap().len(), 0);
 
+        graphs.close();
+    }
+
+    #[test]
+    fn system_graph_domain_uses_isolated_ir_and_surfaces_rich_architecture_violations() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let sys_dir = dir.path().join("sys");
+        let svc_a = sys_dir.join("svc-a");
+        let svc_b = sys_dir.join("svc-b");
+        std::fs::create_dir_all(svc_a.join("src/Controllers")).unwrap();
+        std::fs::create_dir_all(svc_a.join("src/Data")).unwrap();
+        std::fs::create_dir_all(svc_b.join("src")).unwrap();
+        std::fs::write(
+            svc_a.join(".harness-architecture.json"),
+            r#"{"version":1,"layers":[{"id":"controller","name":"Controllers","paths":["src/Controllers/**"],"forbids":["data"],"forbids_semantic":["writes_table"]},{"id":"data","name":"Data","paths":["src/Data/**"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            svc_a.join("src/Data/Repo.php"),
+            "<?php\nclass Repo { public static function save() {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            svc_a.join("src/Controllers/ApiController.php"),
+            "<?php\nclass ApiController { public function go() { Repo::save(); DB::table('orders')->insert([]); } }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            svc_a.join("ai-service.json"),
+            r#"{"schema_version":1,"id":"svc-a","description":"A","owner":"team","capabilities":[],"sources":[],"provides":[],"consumes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            svc_b.join("src/BillingServer.ts"),
+            "export const endpoint = 'orders-http-v1';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            svc_b.join("ai-service.json"),
+            r#"{"schema_version":1,"id":"svc-b","description":"B","owner":"team","capabilities":[],"sources":[],"provides":[{"id":"orders-http-v1","kind":"http","version":"1.0.0","sources":["src/BillingServer.ts"]}],"consumes":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sys_dir.join("ai-system.json"),
+            r#"{"schema_version":1,"name":"sys-rich","shared_sources":[],"services":[{"id":"svc-a","root":"svc-a","manifest":"ai-service.json"},{"id":"svc-b","root":"svc-b","manifest":"ai-service.json"}]}"#,
+        )
+        .unwrap();
+
+        let store = SessionStore::open(&state).unwrap();
+        let sys_proj = store.register(&sys_dir).unwrap();
+        let sys_pid = sys_proj["id"].as_str().unwrap().to_owned();
+        let (system, _, _) =
+            crate::system_graph::resolve_system(&store, None, &sys_pid, Some("ai-system.json"))
+                .unwrap();
+        let svc_a_proj = store.register(&svc_a).unwrap();
+        let svc_a_gid = svc_a_proj["id"].as_str().unwrap().to_owned();
+        let svc_b_proj = store.register(&svc_b).unwrap();
+        let svc_b_gid = svc_b_proj["id"].as_str().unwrap().to_owned();
+        let targets = vec![
+            ResolvedServiceTarget {
+                project_id: sys_pid.clone(),
+                config_path: "ai-system.json".to_owned(),
+                service_id: "svc-a".to_owned(),
+                graph_id: svc_a_gid.clone(),
+                root: svc_a.clone(),
+                name: "A".to_owned(),
+                reused_project: true,
+            },
+            ResolvedServiceTarget {
+                project_id: sys_pid,
+                config_path: "ai-system.json".to_owned(),
+                service_id: "svc-b".to_owned(),
+                graph_id: svc_b_gid,
+                root: svc_b,
+                name: "B".to_owned(),
+                reused_project: true,
+            },
+        ];
+        let graphs = Graphs::with_native_backend(store.clone(), Duration::ZERO);
+        assert_eq!(
+            graphs.act(&svc_a_gid, "enable").unwrap()["state"],
+            "building"
+        );
+        let dead = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < dead {
+            if graphs.status(&svc_a_gid, false).unwrap()["state"] == "ready" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let bridge = HarnessCodeGraphBridge::new(store.clone(), graphs.clone());
+        let domain = SystemGraphDomain::new(store, graphs.clone(), bridge, None);
+        let summaries = domain
+            .build_enriched_system_graph_summaries(&system, &targets, None, None, None)
+            .unwrap();
+        let sum_a = summaries.get("svc-a").unwrap();
+        assert!(
+            sum_a.layer_violations.iter().any(
+                |v| v.from_path.contains("ApiController.php") && v.to_path.contains("Repo.php")
+            ),
+            "expected layer forbids violation in SystemGraph summary: {:?}",
+            sum_a.layer_violations
+        );
+        assert!(
+            sum_a
+                .layer_violations
+                .iter()
+                .any(|v| v.to_layer == "semantic" && v.to_path.contains("orders")),
+            "expected semantic writes_table violation in SystemGraph summary: {:?}",
+            sum_a.layer_violations
+        );
         graphs.close();
     }
 }

@@ -107,12 +107,18 @@ impl Pending {
     }
 }
 
+#[derive(Clone)]
+struct ReadOnlyAutoScope {
+    workspace: std::path::PathBuf,
+    store: Option<crate::store::SessionStore>,
+}
+
 /// Every request waiting for a person, by session and request.
 pub struct PermissionDesk {
     pending: Mutex<BTreeMap<(String, String), Pending>>,
     session_rules: Mutex<BTreeMap<String, BTreeSet<String>>>,
     session_rule_meta: Mutex<BTreeMap<String, BTreeMap<String, SessionRuleInfo>>>,
-    read_only_auto_workspaces: Mutex<BTreeMap<String, std::path::PathBuf>>,
+    read_only_auto_workspaces: Mutex<BTreeMap<String, ReadOnlyAutoScope>>,
     change_notifier: Mutex<Option<ChangeNotifier>>,
     timeout: Option<Duration>,
     next_nonce: AtomicU64,
@@ -140,11 +146,36 @@ impl PermissionDesk {
             next_nonce: AtomicU64::new(1),
         }
     }
-    /// Enables automatic scoped `session_rule_key` approval for Gate-1-verified
-    /// read-only program commands inside `workspace`.
+    /// Enables automatic scoped `session_rule_key` approval for verified
+    /// read-only CLI commands inside `workspace`.
     pub fn enable_read_only_auto_rules(&self, session: &str, workspace: std::path::PathBuf) {
         if let Ok(mut slot) = self.read_only_auto_workspaces.lock() {
-            slot.insert(session.to_owned(), workspace);
+            slot.insert(
+                session.to_owned(),
+                ReadOnlyAutoScope {
+                    workspace,
+                    store: None,
+                },
+            );
+        }
+    }
+    /// Enables automatic scoped `session_rule_key` approval inside `workspace`
+    /// with `store` access so active, gate-verified sealed `read_only` SkillCache
+    /// capsules can also be verified.
+    pub fn enable_read_only_auto_rules_with_store(
+        &self,
+        session: &str,
+        workspace: std::path::PathBuf,
+        store: crate::store::SessionStore,
+    ) {
+        if let Ok(mut slot) = self.read_only_auto_workspaces.lock() {
+            slot.insert(
+                session.to_owned(),
+                ReadOnlyAutoScope {
+                    workspace,
+                    store: Some(store),
+                },
+            );
         }
     }
     /// Registers a callback invoked after releasing locks whenever a session's
@@ -612,26 +643,20 @@ fn tokenize_program_command(command: &str) -> std::result::Result<Vec<String>, S
 }
 
 type FileStamp = Option<(i64, u64)>;
-type Gate1CacheKey = (String, i64, u64, Vec<String>);
-type Gate1CacheResult = std::result::Result<bool, String>;
+type VerifiedCapsuleCacheKey = (String, String, String, i64);
 
 const MAX_CACHED_WORKSPACES: usize = 64;
-const MAX_CACHED_PROGRAMS_PER_WS: usize = 256;
-const MAX_CACHED_GATE1_PER_WS: usize = 512;
-const MAX_CACHED_PROGRAM_BYTES: u64 = 1024 * 1024;
+const MAX_CACHED_CAPSULES_PER_WS: usize = 128;
 
-struct CachedProgramFile {
-    mtime_ns: i64,
-    size: u64,
-    bytes: Vec<u8>,
+#[derive(Clone)]
+struct VerifiedCapsuleSnapshot {
+    package: Arc<infra_skillcache::package::Package>,
 }
 
 struct WorkspaceReadOnlyCacheEntry {
     analyzer_stamps: (FileStamp, FileStamp),
     analyzer: Option<Arc<infra_generator::commands::CommandAnalyzer>>,
-    programs_dir_stamp: FileStamp,
-    programs: BTreeMap<String, CachedProgramFile>,
-    gate1_results: BTreeMap<Gate1CacheKey, Gate1CacheResult>,
+    verified_capsules: BTreeMap<VerifiedCapsuleCacheKey, VerifiedCapsuleSnapshot>,
     #[cfg(test)]
     analyzer_builds: usize,
     #[cfg(test)]
@@ -684,9 +709,7 @@ fn ensure_workspace_entry<'a>(
         .or_insert_with(|| WorkspaceReadOnlyCacheEntry {
             analyzer_stamps: (None, None),
             analyzer: None,
-            programs_dir_stamp: None,
-            programs: BTreeMap::new(),
-            gate1_results: BTreeMap::new(),
+            verified_capsules: BTreeMap::new(),
             #[cfg(test)]
             analyzer_builds: 0,
             #[cfg(test)]
@@ -721,54 +744,12 @@ fn cached_command_analyzer(ws: &Path) -> Option<Arc<infra_generator::commands::C
     built
 }
 
-/// Pre-warms cached `CommandAnalyzer` and `programs/` entries for `workspace`.
+/// Pre-warms cached `CommandAnalyzer` entries for `workspace`.
 pub(crate) fn warm_read_only_cache(workspace: &Path) {
     let Ok(ws_canon) = infra_core::fs::canonicalize(workspace) else {
         return;
     };
     let _ = cached_command_analyzer(&ws_canon);
-    let prog_dir = ws_canon.join("programs");
-    let dir_stamp = path_stamp(&prog_dir);
-    let mut loaded_programs = BTreeMap::new();
-    if let Ok(entries) = std::fs::read_dir(&prog_dir) {
-        for item in entries.flatten().take(MAX_CACHED_PROGRAMS_PER_WS) {
-            let path = item.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if infra_core::fs::linked(&meta)
-                || !meta.is_file()
-                || meta.len() > MAX_CACHED_PROGRAM_BYTES
-            {
-                continue;
-            }
-            let Some((mtime_ns, size)) = path_stamp(&path) else {
-                continue;
-            };
-            let Ok(rel) = path.strip_prefix(&ws_canon) else {
-                continue;
-            };
-            let rel_key = rel.to_string_lossy().replace('\\', "/");
-            if let Ok(bytes) = std::fs::read(&path) {
-                loaded_programs.insert(
-                    rel_key,
-                    CachedProgramFile {
-                        mtime_ns,
-                        size,
-                        bytes,
-                    },
-                );
-            }
-        }
-    }
-    if let Ok(mut guard) = read_only_workspace_cache().lock() {
-        let entry = ensure_workspace_entry(&mut guard, &ws_canon);
-        entry.programs_dir_stamp = dir_stamp;
-        if !loaded_programs.is_empty() {
-            entry.programs = loaded_programs;
-            entry.gate1_results.clear();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -786,154 +767,216 @@ fn read_only_cache_counters(ws: &Path) -> (usize, usize, usize) {
     })
 }
 
-fn check_read_only_capsule_program(
-    workspace: &std::path::Path,
-    tokens: &[String],
-) -> std::result::Result<bool, String> {
-    let Some(rel_prog) = tokens.iter().skip(1).find_map(|arg| {
-        let mut rest = arg.split_once('=').map_or(arg.as_str(), |(_, v)| v);
-        while let Some(t) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
-            rest = t;
-        }
-        rest.starts_with("programs/").then(|| rest.to_owned())
-    }) else {
-        return Ok(false);
-    };
-    let ws_canon = infra_core::fs::canonicalize(workspace)
-        .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?;
-    let prog_path = ws_canon.join(&rel_prog);
-    let meta = std::fs::symlink_metadata(&prog_path)
-        .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?;
-    if infra_core::fs::linked(&meta) || !meta.is_file() {
-        return Err(format!(
-            "program_symlink_refused: linked or non-regular `{rel_prog}` is not admitted"
-        ));
+fn package_relative_arg(arg: &str) -> Option<String> {
+    let mut rest = arg.split_once('=').map_or(arg, |(_, v)| v);
+    while let Some(t) = rest.strip_prefix("./").or_else(|| rest.strip_prefix(".\\")) {
+        rest = t;
     }
-    let dir_stamp = path_stamp(&ws_canon.join("programs"));
-    let (mtime_ns, size) = path_stamp(&prog_path)
-        .ok_or_else(|| format!("program file `{rel_prog}` does not exist inside workspace"))?;
-    let eval_key = (rel_prog.clone(), mtime_ns, size, tokens.to_vec());
-
-    let mut cached_bytes: Option<Vec<u8>> = None;
-    if let Ok(guard) = read_only_workspace_cache().lock()
-        && let Some(entry) = guard.workspaces.get(&ws_canon)
-        && entry.programs_dir_stamp == dir_stamp
-    {
-        if let Some(hit) = entry.gate1_results.get(&eval_key) {
-            return hit.clone();
-        }
-        if let Some(prog) = entry.programs.get(&rel_prog)
-            && prog.mtime_ns == mtime_ns
-            && prog.size == size
-        {
-            cached_bytes = Some(prog.bytes.clone());
-        }
-    }
-
-    let mut did_read = false;
-    let body = match cached_bytes {
-        Some(bytes) => bytes,
-        None => {
-            did_read = true;
-            std::fs::read(&prog_path)
-                .map_err(|_| format!("program file `{rel_prog}` does not exist inside workspace"))?
-        }
-    };
-    let outcome = evaluate_read_only_capsule_program(&rel_prog, &body, tokens);
-    if let Ok(mut guard) = read_only_workspace_cache().lock() {
-        let entry = ensure_workspace_entry(&mut guard, &ws_canon);
-        #[cfg(test)]
-        {
-            if did_read {
-                entry.program_reads += 1;
-            }
-            entry.gate1_evals += 1;
-        }
-        let _ = did_read;
-        if entry.programs_dir_stamp != dir_stamp {
-            entry.programs_dir_stamp = dir_stamp;
-            entry.programs.clear();
-            entry.gate1_results.clear();
-        }
-        if entry.programs.len() >= MAX_CACHED_PROGRAMS_PER_WS {
-            entry.programs.clear();
-        }
-        if size <= MAX_CACHED_PROGRAM_BYTES {
-            entry.programs.insert(
-                rel_prog,
-                CachedProgramFile {
-                    mtime_ns,
-                    size,
-                    bytes: body,
-                },
-            );
-        }
-        if entry.gate1_results.len() >= MAX_CACHED_GATE1_PER_WS {
-            entry.gate1_results.clear();
-        }
-        entry.gate1_results.insert(eval_key, outcome.clone());
-    }
-    outcome
+    (rest.starts_with("programs/") || rest.starts_with("assets/")).then(|| rest.to_owned())
 }
 
-fn evaluate_read_only_capsule_program(
-    rel_prog: &str,
-    body: &[u8],
+fn latest_round_gates_passed(db: &rusqlite::Connection, capsule_id: &str) -> Option<i64> {
+    let gates = crate::skillcache::db::gates(db, capsule_id).ok()?;
+    let max_round = gates.iter().filter_map(|g| g["round"].as_i64()).max()?;
+    let mut g1 = false;
+    let mut g2 = false;
+    let mut g3 = false;
+    for row in gates {
+        if row["round"].as_i64() != Some(max_round) {
+            continue;
+        }
+        if row["passed"] != true {
+            return None;
+        }
+        match row["gate"].as_str() {
+            Some("gate1") => g1 = true,
+            Some("gate2") => g2 = true,
+            Some("gate3") => g3 = true,
+            _ => {}
+        }
+    }
+    (g1 && g2 && g3).then_some(max_round)
+}
+
+fn workspace_file_matches_sealed(
+    ws_canon: &Path,
+    rel: &str,
+    sealed_bytes: &[u8],
+) -> std::result::Result<(), String> {
+    let ws_path = ws_canon.join(rel);
+    match std::fs::symlink_metadata(&ws_path) {
+        Ok(meta) => {
+            if infra_core::fs::linked(&meta) || !meta.is_file() {
+                return Err(format!(
+                    "program_symlink_refused: linked or non-regular `{rel}` is not admitted"
+                ));
+            }
+            let Ok(disk_bytes) = std::fs::read(&ws_path) else {
+                return Err(format!("program_unreadable: `{rel}` is not readable"));
+            };
+            if infra_skillcache::fingerprint::sha256(&disk_bytes)
+                != infra_skillcache::fingerprint::sha256(sealed_bytes)
+            {
+                return Err(format!(
+                    "program_digest_mismatch: workspace `{rel}` does not match sealed capsule"
+                ));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(format!("program_unreadable: `{rel}` is not readable")),
+    }
+}
+
+fn load_verified_sealed_capsule(
+    ws_canon: &Path,
+    db: &rusqlite::Connection,
+    capsule_row: &Value,
+) -> Option<Arc<infra_skillcache::package::Package>> {
+    let capsule_id = capsule_row["capsule_id"].as_str()?;
+    let expected_cap_sha = capsule_row["capsule_sha256"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let expected_pkg_sha = capsule_row["package_sha256"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let artifact_dir = capsule_row["artifact_dir"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let max_round = latest_round_gates_passed(db, capsule_id)?;
+    let warm_dir = PathBuf::from(artifact_dir).join("warm");
+    let cache_key = (
+        capsule_id.to_owned(),
+        expected_cap_sha.to_owned(),
+        expected_pkg_sha.to_owned(),
+        max_round,
+    );
+
+    if let Ok(guard) = read_only_workspace_cache().lock()
+        && let Some(entry) = guard.workspaces.get(ws_canon)
+        && let Some(hit) = entry.verified_capsules.get(&cache_key)
+        && infra_skillcache::package::digest(&warm_dir).ok().as_deref() == Some(expected_pkg_sha)
+    {
+        return Some(hit.package.clone());
+    }
+
+    let loaded = infra_skillcache::package::load(&warm_dir).ok()?;
+    if loaded.capsule.form != infra_skillcache::Form::Hybrid
+        || loaded.capsule_sha256 != expected_cap_sha
+        || loaded.package_sha256 != expected_pkg_sha
+        || !infra_skillcache::gate1::structure(&loaded.capsule, &loaded.files).is_empty()
+    {
+        return None;
+    }
+    let pkg = Arc::new(loaded);
+    if let Ok(mut guard) = read_only_workspace_cache().lock() {
+        let entry = ensure_workspace_entry(&mut guard, ws_canon);
+        #[cfg(test)]
+        {
+            entry.program_reads += 1;
+            entry.gate1_evals += 1;
+        }
+        if entry.verified_capsules.len() >= MAX_CACHED_CAPSULES_PER_WS {
+            entry.verified_capsules.clear();
+        }
+        entry.verified_capsules.insert(
+            cache_key,
+            VerifiedCapsuleSnapshot {
+                package: pkg.clone(),
+            },
+        );
+    }
+    Some(pkg)
+}
+
+fn check_read_only_capsule_program(
+    workspace: &std::path::Path,
+    store: Option<&crate::store::SessionStore>,
     tokens: &[String],
 ) -> std::result::Result<bool, String> {
-    let mut files = infra_skillcache::package::Files::new();
-    files.insert(rel_prog, body.to_vec());
-    let runtime = tokens.first().cloned().unwrap_or_default();
-    let capsule_json = json!({
-        "schema_version": infra_skillcache::SCHEMA_VERSION,
-        "form": "hybrid",
-        "mu": {
-            "name": "readonly-check",
-            "description": "Read-only permission rule program check"
-        },
-        "source": {
-            "skills": [{
-                "name": "readonly-check",
-                "path": ".agents/skills/readonly-check/SKILL.md",
-                "tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-            }]
-        },
-        "capabilities": {
-            "network": "none",
-            "runtimes": [runtime]
-        },
-        "bindings": [],
-        "programs": [{
-            "id": "main",
-            "entry": tokens,
-            "inputs": [],
-            "outputs": [],
-            "check": tokens,
-            "timeout_seconds": 60,
-            "read_only": true
-        }],
-        "steps": [{
-            "kind": "program",
-            "program": "main"
-        }],
-        "verification": []
-    });
-    let capsule =
-        infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).map_err(|v| {
-            v.into_iter()
-                .map(|e| format!("{}: {}", e.code, e.message))
-                .collect::<Vec<_>>()
-                .join("; ")
-        })?;
-    let violations = infra_skillcache::gate1::structure(&capsule, &files);
-    if !violations.is_empty() {
-        return Err(violations
-            .into_iter()
-            .map(|v| format!("{}: {}", v.code, v.message))
-            .collect::<Vec<_>>()
-            .join("; "));
+    let rel_refs: Vec<String> = tokens
+        .iter()
+        .skip(1)
+        .filter_map(|arg| package_relative_arg(arg))
+        .collect();
+    if !rel_refs.iter().any(|rel| rel.starts_with("programs/")) {
+        return Ok(false);
     }
-    Ok(true)
+    let ws_canon = infra_core::fs::canonicalize(workspace)
+        .map_err(|_| "workspace path does not exist".to_owned())?;
+    for rel in &rel_refs {
+        let ws_path = ws_canon.join(rel);
+        if let Ok(meta) = std::fs::symlink_metadata(&ws_path)
+            && (infra_core::fs::linked(&meta) || !meta.is_file())
+        {
+            return Err(format!(
+                "program_symlink_refused: linked or non-regular `{rel}` is not admitted"
+            ));
+        }
+    }
+    let Some(store) = store else {
+        return Ok(false);
+    };
+    let Ok(projects) = store.projects() else {
+        return Ok(false);
+    };
+    let mut matching_projects: Vec<(usize, String)> = projects
+        .into_iter()
+        .filter_map(|p| {
+            let id = p["id"].as_str()?.to_owned();
+            let proj_path = p["path"]
+                .as_str()
+                .and_then(|s| infra_core::fs::canonicalize(s).ok())?;
+            if ws_canon == proj_path || ws_canon.starts_with(&proj_path) {
+                Some((proj_path.components().count(), id))
+            } else {
+                None
+            }
+        })
+        .collect();
+    matching_projects.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let Ok(db) = store.connection() else {
+        return Ok(false);
+    };
+    for (_, project_id) in matching_projects {
+        let Ok(capsules) = crate::skillcache::db::capsules(
+            &db,
+            &project_id,
+            None,
+            Some("active"),
+            Some("hybrid"),
+            false,
+            false,
+        ) else {
+            continue;
+        };
+        for row in capsules {
+            let Some(pkg) = load_verified_sealed_capsule(&ws_canon, &db, &row) else {
+                continue;
+            };
+            let matches_program = pkg.capsule.programs.iter().any(|program| {
+                program.read_only && (tokens == program.entry || tokens == program.check)
+            });
+            if !matches_program {
+                continue;
+            }
+            let mut all_files_verified = true;
+            for rel in &rel_refs {
+                let Some(sealed_bytes) = pkg.files.get(rel) else {
+                    all_files_verified = false;
+                    break;
+                };
+                if workspace_file_matches_sealed(&ws_canon, rel, sealed_bytes).is_err() {
+                    all_files_verified = false;
+                    break;
+                }
+            }
+            if all_files_verified {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 const ALIGNED_READONLY_CLIS: &[&str] = &[
@@ -1062,10 +1105,21 @@ fn is_known_read_only_cli(tokens: &[String]) -> bool {
     false
 }
 
-/// Verifies whether `command` is a Gate-1 / verification-safe read-only program command
-/// and returns its deterministic scoped `session_rule_key` (`readonly:program:...`).
+/// Verifies whether `command` is a verified read-only CLI or an active,
+/// gate-verified sealed `read_only` SkillCache capsule program command, and returns
+/// its deterministic scoped `session_rule_key` (`readonly:program:...`).
 pub fn classify_read_only_program_command(
     workspace: Option<&std::path::Path>,
+    command: &str,
+) -> std::result::Result<Option<String>, String> {
+    classify_read_only_program_command_in_store(workspace, None, command)
+}
+
+/// Like [`classify_read_only_program_command`], additionally checking `store` for
+/// active, gate-verified sealed `read_only` SkillCache capsules matching `command`.
+pub fn classify_read_only_program_command_in_store(
+    workspace: Option<&std::path::Path>,
+    store: Option<&crate::store::SessionStore>,
     command: &str,
 ) -> std::result::Result<Option<String>, String> {
     let tokens = tokenize_program_command(command)?;
@@ -1097,7 +1151,7 @@ pub fn classify_read_only_program_command(
     }
 
     if let Some(ws) = workspace
-        && check_read_only_capsule_program(ws, &tokens)?
+        && check_read_only_capsule_program(ws, store, &tokens)?
     {
         return Ok(Some(format!("readonly:program:{}", tokens.join(" "))));
     }
@@ -1120,16 +1174,19 @@ impl PermissionDesk {
         if ask.kind != "command" || ask.summary.trim().is_empty() {
             return Ok(None);
         }
-        let workspace = self
+        let scope = self
             .read_only_auto_workspaces
             .lock()
             .ok()
             .and_then(|m| m.get(session).cloned());
-        let Some(ws) = workspace else {
+        let Some(scope) = scope else {
             return Ok(None);
         };
-        let Ok(Some(scoped_key)) = classify_read_only_program_command(Some(&ws), &ask.summary)
-        else {
+        let Ok(Some(scoped_key)) = classify_read_only_program_command_in_store(
+            Some(&scope.workspace),
+            scope.store.as_ref(),
+            &ask.summary,
+        ) else {
             return Ok(None);
         };
         if let Some(requested_key) = ask.session_rule_key.as_deref()
@@ -1567,23 +1624,119 @@ mod tests {
         assert_eq!(changed.lock().unwrap().len(), 2);
     }
 
+    fn seed_sealed_capsule(
+        store: &crate::store::SessionStore,
+        project_id: &str,
+        capsule_id: &str,
+        program_rel: &str,
+        program_body: &[u8],
+        read_only: bool,
+        passed_gates: &[&str],
+    ) -> (PathBuf, String) {
+        let warm_root = store
+            .state
+            .join(format!("skillcache/capsules/{project_id}/{capsule_id}/1"));
+        let warm_dir = warm_root.join("warm");
+        let _ = infra_skillcache::package::remove(&warm_dir);
+        let cmd = vec!["python3".to_string(), program_rel.to_string()];
+        let check_cmd = vec![
+            "python3".to_string(),
+            program_rel.to_string(),
+            "--check".to_string(),
+        ];
+        let capsule_json = json!({
+            "schema_version": infra_skillcache::SCHEMA_VERSION,
+            "form": "hybrid",
+            "mu": {"name": "ro-check", "description": "Read-only capsule check"},
+            "source": {"skills": [{"name": "ro-check", "path": ".agents/skills/ro-check/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "main",
+                "entry": cmd,
+                "inputs": [],
+                "outputs": [],
+                "check": check_cmd,
+                "timeout_seconds": 60,
+                "read_only": read_only
+            }],
+            "steps": [{"kind": "program", "program": "main"}],
+            "verification": []
+        });
+        let cap =
+            infra_skillcache::capsule::SkillCapsule::from_value(&capsule_json).expect("capsule");
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert(program_rel, program_body.to_vec());
+        let pkg_sha =
+            infra_skillcache::package::write_warm(&warm_dir, &cap, None, &files).expect("warm");
+        let loaded = infra_skillcache::package::load(&warm_dir).expect("load");
+        let db = store.connection().unwrap();
+        let skill_ref = json!({
+            "name": "ro-check",
+            "path": ".agents/skills/ro-check/SKILL.md",
+            "tree_sha256": "0".repeat(64)
+        });
+        crate::skillcache::db::begin_capsule(
+            &db,
+            capsule_id,
+            &format!("cmp-{capsule_id}"),
+            project_id,
+            "s-seed",
+            &format!("gen-{capsule_id}"),
+            &skill_ref,
+            None,
+        )
+        .unwrap();
+        crate::skillcache::db::activate_capsule(
+            &db,
+            &crate::skillcache::db::Qualified {
+                capsule_id,
+                mu_name: "ro-check",
+                mu_description: "Read-only capsule check",
+                form: "hybrid",
+                capsule_sha256: &loaded.capsule_sha256,
+                package_sha256: &pkg_sha,
+                skill_files: &json!({}),
+                env_fingerprint: "env",
+                engine_digest: "eng",
+                artifact_dir: warm_root.to_str().unwrap(),
+                capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+            },
+        )
+        .unwrap();
+        for gate in passed_gates {
+            crate::skillcache::db::record_gate(
+                &db,
+                capsule_id,
+                1,
+                gate,
+                true,
+                &json!({"gate": gate, "passed": true}),
+            )
+            .unwrap();
+        }
+        (warm_dir, pkg_sha)
+    }
+
     #[tokio::test]
     async fn gate1_read_only_program_rules_auto_approve_safe_commands_and_block_unsafe() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
         std::fs::create_dir_all(ws.join("programs")).unwrap();
-        std::fs::write(ws.join("programs/check.py"), "print('ok')\n").unwrap();
+        let prog_bytes = b"print('ok')\n";
+        std::fs::write(ws.join("programs/check.py"), prog_bytes).unwrap();
 
         let safe_key = classify_read_only_program_command(Some(&ws), "git status --short")
             .unwrap()
             .unwrap();
         assert_eq!(safe_key, "readonly:program:git status --short");
 
-        let capsule_key =
-            classify_read_only_program_command(Some(&ws), "python3 programs/check.py")
-                .unwrap()
-                .unwrap();
-        assert_eq!(capsule_key, "readonly:program:python3 programs/check.py");
+        // Arbitrary unsealed workspace `programs/...` without an active sealed capsule MUST NOT auto-approve.
+        assert_eq!(
+            classify_read_only_program_command(Some(&ws), "python3 programs/check.py").unwrap(),
+            None
+        );
 
         assert!(classify_read_only_program_command(Some(&ws), "python3 -c 'print(1)'").is_err());
         assert!(classify_read_only_program_command(Some(&ws), "python3 ../escape.py").is_err());
@@ -1593,8 +1746,95 @@ mod tests {
             None
         );
 
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // Still denied when no capsule is in store.
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap(),
+            None
+        );
+
+        // Capsule missing Gate 3 replay must NOT auto-approve.
+        seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-no-g3",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2"],
+        );
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap(),
+            None
+        );
+
+        // Capsule with read_only=false must NOT auto-approve even with all 3 gates.
+        seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-rw",
+            "programs/check.py",
+            prog_bytes,
+            false,
+            &["gate1", "gate2", "gate3"],
+        );
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap(),
+            None
+        );
+
+        // Active, sealed, Gate 1+2+3 verified read_only=true capsule IS approved.
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-ro",
+            "programs/check.py",
+            prog_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+        let capsule_key = classify_read_only_program_command_in_store(
+            Some(&ws),
+            Some(&store),
+            "python3 programs/check.py",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(capsule_key, "readonly:program:python3 programs/check.py");
+
+        // Extra arguments outside verified entry/check are rejected.
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py --extra",
+            )
+            .unwrap(),
+            None
+        );
+
         let desk = Arc::new(PermissionDesk::default());
-        desk.enable_read_only_auto_rules("s-ro", ws.clone());
+        desk.enable_read_only_auto_rules_with_store("s-ro", ws.clone(), store.clone());
         let (emit, events) = recorder();
         let approvals = desk.approvals("s-ro", emit);
         let mut req = ask("codex-ro-1", true);
@@ -1609,14 +1849,69 @@ mod tests {
         assert_eq!(evs[0]["state"], "allowed_session");
         assert_eq!(evs[0]["by"], "gate1_read_only_rule");
         assert!(desk.has_session_rule("s-ro", &capsule_key).unwrap());
+
+        // Mutating workspace file to mismatch sealed SHA-256 revokes auto-approval.
+        std::fs::write(
+            ws.join("programs/check.py"),
+            b"import os; os.system('id')\n",
+        )
+        .unwrap();
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap(),
+            None
+        );
+
+        // Restoring workspace bytes re-enables, and invalidating or tampering sealed package revokes.
+        std::fs::write(ws.join("programs/check.py"), prog_bytes).unwrap();
+        assert!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap()
+            .is_some()
+        );
+        infra_skillcache::package::release(&warm_dir);
+        let tampered_prog = warm_dir.join("programs/check.py");
+        let mut perms = std::fs::metadata(&tampered_prog).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o644);
+        }
+        #[cfg(not(unix))]
+        {
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(&tampered_prog, perms).unwrap();
+        std::fs::write(&tampered_prog, b"print('tampered')\n").unwrap();
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/check.py",
+            )
+            .unwrap(),
+            None
+        );
+        let _ = infra_skillcache::package::remove(&warm_dir);
     }
 
     #[test]
     fn readonly_cli_alignment_and_workspace_cache_reuse_and_invalidate() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let root = infra_core::fs::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
         std::fs::create_dir_all(ws.join("programs")).unwrap();
-        std::fs::write(ws.join("programs/lint.py"), "print('ok')\n").unwrap();
+        let lint_bytes = b"print('ok')\n";
+        std::fs::write(ws.join("programs/lint.py"), lint_bytes).unwrap();
         std::fs::write(
             ws.join("composer.json"),
             r#"{"scripts":{"test":"phpunit"}}"#,
@@ -1650,42 +1945,78 @@ mod tests {
         );
         assert!(classify_read_only_program_command(Some(&ws), "find . -exec rm {} ;").is_err());
 
-        // Cache hit on repeated program + CommandAnalyzer lookups without mtime changes.
+        let store = crate::store::SessionStore::open(&root.join("state")).unwrap();
+        let project_id = store.register(&ws).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (warm_dir, _) = seed_sealed_capsule(
+            &store,
+            &project_id,
+            "cap-lint",
+            "programs/lint.py",
+            lint_bytes,
+            true,
+            &["gate1", "gate2", "gate3"],
+        );
+
+        // Cache hit on repeated sealed capsule + CommandAnalyzer lookups without changes.
         assert_eq!(
-            classify_read_only_program_command(Some(&ws), "python3 programs/lint.py")
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/lint.py",
+            )
+            .unwrap()
+            .as_deref(),
+            Some("readonly:program:python3 programs/lint.py")
+        );
+        assert_eq!(
+            classify_read_only_program_command_in_store(Some(&ws), Some(&store), "composer test",)
                 .unwrap()
                 .as_deref(),
-            Some("readonly:program:python3 programs/lint.py")
+            Some("readonly:program:composer test")
         );
         let (builds_1, reads_1, evals_1) = read_only_cache_counters(&ws);
         assert_eq!(
-            classify_read_only_program_command(Some(&ws), "python3 programs/lint.py")
-                .unwrap()
-                .as_deref(),
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/lint.py",
+            )
+            .unwrap()
+            .as_deref(),
             Some("readonly:program:python3 programs/lint.py")
         );
         assert_eq!(
-            classify_read_only_program_command(Some(&ws), "composer test")
+            classify_read_only_program_command_in_store(Some(&ws), Some(&store), "composer test",)
                 .unwrap()
                 .as_deref(),
             Some("readonly:program:composer test")
         );
         let (builds_2, reads_2, evals_2) = read_only_cache_counters(&ws);
         assert_eq!(builds_2, builds_1, "CommandAnalyzer should be cached");
-        assert_eq!(reads_2, reads_1, "program bytes should be cached");
-        assert_eq!(evals_2, evals_1, "Gate-1 program result should be cached");
-
-        // Changing program bytes/size invalidates the program cache entry cleanly.
-        std::fs::write(ws.join("programs/lint.py"), "print('updated')\n").unwrap();
+        assert_eq!(reads_2, reads_1, "sealed package load should be cached");
         assert_eq!(
-            classify_read_only_program_command(Some(&ws), "python3 programs/lint.py")
-                .unwrap()
-                .as_deref(),
-            Some("readonly:program:python3 programs/lint.py")
+            evals_2, evals_1,
+            "sealed capsule verification should be cached"
         );
-        let (_, reads_3, evals_3) = read_only_cache_counters(&ws);
-        assert!(reads_3 > reads_2);
-        assert!(evals_3 > evals_2);
+
+        // Marking capsule stale immediately revokes approval.
+        {
+            let db = store.connection().unwrap();
+            crate::skillcache::db::set_capsule_status(&db, "cap-lint", "stale", Some("stale"))
+                .unwrap();
+        }
+        assert_eq!(
+            classify_read_only_program_command_in_store(
+                Some(&ws),
+                Some(&store),
+                "python3 programs/lint.py",
+            )
+            .unwrap(),
+            None
+        );
 
         // Changing composer.json invalidates CommandAnalyzer cache cleanly.
         std::fs::write(
@@ -1699,5 +2030,6 @@ mod tests {
         );
         let (builds_4, _, _) = read_only_cache_counters(&ws);
         assert!(builds_4 > builds_2);
+        let _ = infra_skillcache::package::remove(&warm_dir);
     }
 }
