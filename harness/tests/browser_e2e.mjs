@@ -2944,11 +2944,21 @@ async function suite5ModalsApprovalsPaletteMobile(driver, cdp, opts) {
     const tmpAttachPath = path.join(os.tmpdir(), `e2e-composer-err-${process.pid}.txt`);
     fs.writeFileSync(tmpAttachPath, 'composer attachment preserved on error\n', 'utf8');
     try {
+      const brainReqsBefore = driver.responsesByUrl.filter((r) => r.url.includes('/brain')).length;
       await driver.click('#new-session');
       await driver.waitFor(() => {
         const p = document.getElementById('prompt');
-        return Boolean(p && !p.disabled);
+        const lbl = document.getElementById('send-label')?.textContent || '';
+        return Boolean(p && !p.disabled && lbl === 'Send');
       }, 'new session draft ready for composer error preservation check', 6_000);
+      await driver.waitUntil(async () => {
+        const brainResponses = driver.responsesByUrl.filter((r) => r.url.includes('/brain'));
+        if (brainResponses.length <= brainReqsBefore) return false;
+        const latest = brainResponses[brainResponses.length - 1];
+        if (!latest || latest.status !== 200) return false;
+        return Boolean(await driver.readLatestFinishedJson('/brain', (_j, rec) => rec.requestId === latest.requestId));
+      }, 'knowledge roots finish loading after #new-session', 15_000);
+      await new Promise((r) => setTimeout(r, 50));
 
       const { root } = await cdp.send('DOM.getDocument', { depth: 1 });
       const { nodeId: inputNodeId } = await cdp.send('DOM.querySelector', {
