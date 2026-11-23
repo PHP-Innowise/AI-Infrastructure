@@ -156,17 +156,30 @@ impl Checkpoint {
             && self.steps[n - 2]["step"] == "flush"
             && self.steps[n - 1]["step"] == "update"
             && self.steps[n - 2..].iter().all(|s| s["ok"] == true);
-        let mut summary = json!({"cli":self.cli,"status_on_detached_head":self.takes_status(),"task":self.task,"steps":self.steps,"stopped":self.stopped,"landed":landed,"ok":ok});
+        let summary = json!({"cli":self.cli,"status_on_detached_head":self.takes_status(),"task":self.task,"steps":self.steps,"stopped":self.stopped,"landed":landed,"ok":ok});
         let input_digest =
             artifact::digest(&json!({"task":task,"cli":&self.cli,"steps":&self.steps}))?;
-        let sealed_envelope = crate::sealed_ab::seal_experiment_envelope(
-            "native-checkpoint-report-v1",
-            summary.clone(),
-            &input_digest,
-        )?;
-        summary["sealed_envelope"] = sealed_envelope;
-        Ok(summary)
+        seal_bench_report("native-checkpoint-report-v1", summary, &input_digest)
     }
+}
+/// Wraps a native benchmark or checkpoint report in a tamper-evident sealed A/B
+/// envelope covering the root report keys via [`crate::sealed_ab`].
+pub fn seal_bench_report(schema: &str, report: Value, input_digest: &str) -> Result<Value> {
+    if !report.is_object() {
+        return Err(artifact::invalid(
+            "native benchmark report must be a JSON object",
+        ));
+    }
+    let sealed = crate::sealed_ab::seal_experiment_envelope(schema, report, input_digest)?;
+    verify_bench_report(&sealed)?;
+    Ok(sealed)
+}
+/// Verifies a sealed native benchmark or checkpoint report against its recorded `seal_sha256`.
+pub fn verify_bench_report(sealed: &Value) -> Result<()> {
+    crate::sealed_ab::verify_sealed_digest(
+        sealed,
+        "the native benchmark report was modified after sealing",
+    )
 }
 pub fn result_for(source: &str) -> Value {
     json!({"progress":format!("Read \x60{source}\x60: \x60Invoice::next($tenant)\x60 restarts per tenant; fee is $5.\nTab\there; path C:\\shop\\src; it's \"quoted\"; счёт."),"verified":true,"learnings":[{"type":"finding","title":"Invoice numbers are per tenant","consequence":"Call \x60Invoice::next($tenant)\x60; never share one counter between tenants.","sources":[source]}]})
@@ -189,17 +202,16 @@ pub fn run(driver: &mut impl BenchmarkDriver, host: &str, request: &Value) -> Re
             .unwrap_or(Duration::ZERO),
     )?;
     let mut observed = driver.run(host, request, &provider)?;
+    if !observed.is_object() {
+        return Err(artifact::invalid(
+            "native benchmark driver output must be a JSON object",
+        ));
+    }
     observed["provider_requests"] = json!(provider.requests());
     observed["real_provider_contacted"] = false.into();
     observed["provider_tokens_spent"] = 0.into();
     let input_digest = artifact::digest(&json!({"host":host,"request":request}))?;
-    let sealed_envelope = crate::sealed_ab::seal_experiment_envelope(
-        "native-benchmark-run-v1",
-        observed.clone(),
-        &input_digest,
-    )?;
-    observed["sealed_envelope"] = sealed_envelope;
-    Ok(observed)
+    seal_bench_report("native-benchmark-run-v1", observed, &input_digest)
 }
 #[derive(Default)]
 struct State {
@@ -991,13 +1003,73 @@ mod codex_output_tests {
             &serde_json::json!({"source": "src/App.php"}),
         )
         .unwrap();
-        let envelope = &report["sealed_envelope"];
-        assert_eq!(envelope["schema"], "native-benchmark-run-v1");
-        crate::sealed_ab::verify_sealed_digest(envelope, "bench envelope tampered").unwrap();
+        assert!(
+            report.get("sealed_envelope").is_none(),
+            "bench::run must seal root report keys directly without nested sealed_envelope"
+        );
+        assert_eq!(report["schema"], "native-benchmark-run-v1");
+        assert_eq!(report["ok"], true);
+        super::verify_bench_report(&report).unwrap();
+        crate::sealed_ab::verify_sealed_digest(&report, "bench envelope tampered").unwrap();
 
-        let mut tampered = envelope.clone();
-        tampered["ok"] = serde_json::json!(false);
-        assert!(crate::sealed_ab::verify_sealed_digest(&tampered, "tamper").is_err());
+        for (field, forged) in [
+            ("ok", serde_json::json!(false)),
+            ("provider_tokens_spent", serde_json::json!(42)),
+            ("real_provider_contacted", serde_json::json!(true)),
+            ("host", serde_json::json!("claude")),
+        ] {
+            let mut tampered = report.clone();
+            tampered[field] = forged;
+            assert!(
+                super::verify_bench_report(&tampered).is_err(),
+                "tampering top-level field `{field}` must fail verification"
+            );
+            assert!(
+                crate::sealed_ab::verify_sealed_digest(&tampered, "tamper").is_err(),
+                "tampering top-level field `{field}` must fail seal_sha256 check"
+            );
+        }
+
+        // Checkpoint::report must also seal root keys directly and detect top-level tampering.
+        let temp =
+            crate::artifact::Scratch::new(&std::env::temp_dir(), "bench-checkpoint-seal").unwrap();
+        let root = temp.0.join("project");
+        std::fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/config")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/tasks")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/handoffs")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/findings")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/decisions")).unwrap();
+        std::fs::create_dir_all(root.join("project-brain/schemas")).unwrap();
+        std::fs::write(
+            root.join("project-brain/config/runtime.json"),
+            r#"{"canonical_edition":".agents","mode":"governed"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("AGENTS.md"), "# Policy\n").unwrap();
+        let mut checkpoint = super::Checkpoint::new("# Skill\n".into());
+        checkpoint.cli = "memory-bank/bin/infra-engine memory".into();
+        checkpoint.task = Some("TASK-1".into());
+        checkpoint.record(&super::Step {
+            name: "flush".into(),
+            output: r#"{"queued":false}"#.into(),
+            failed: false,
+        });
+        checkpoint.record(&super::Step {
+            name: "update".into(),
+            output: "ok".into(),
+            failed: false,
+        });
+        let ckpt = checkpoint.report(&root, "TASK-1").unwrap();
+        assert!(ckpt.get("sealed_envelope").is_none());
+        assert_eq!(ckpt["schema"], "native-checkpoint-report-v1");
+        super::verify_bench_report(&ckpt).unwrap();
+        let mut tampered_ckpt = ckpt.clone();
+        tampered_ckpt["landed"] = serde_json::json!(true);
+        assert!(super::verify_bench_report(&tampered_ckpt).is_err());
+        let mut tampered_ckpt_ok = ckpt.clone();
+        tampered_ckpt_ok["ok"] = serde_json::json!(true);
+        assert!(super::verify_bench_report(&tampered_ckpt_ok).is_err());
 
         let phase = |tokens: u64| {
             serde_json::json!({
@@ -1033,14 +1105,16 @@ mod codex_output_tests {
             &acq(15),
         )
         .unwrap();
-        assert_eq!(
-            cmp["sealed_envelope"]["schema"],
-            "memory-incremental-comparison-v1"
-        );
-        crate::sealed_ab::verify_sealed_digest(
-            &cmp["sealed_envelope"],
-            "comparison envelope invalid",
-        )
-        .unwrap();
+        let cmp_sealed = if cmp.get("seal_sha256").is_some() {
+            assert!(cmp.get("sealed_envelope").is_none());
+            &cmp
+        } else {
+            &cmp["sealed_envelope"]
+        };
+        assert_eq!(cmp_sealed["schema"], "memory-incremental-comparison-v1");
+        crate::sealed_ab::verify_sealed_digest(cmp_sealed, "comparison envelope invalid").unwrap();
+        let mut tampered_cmp = cmp_sealed.clone();
+        tampered_cmp["horizon"] = serde_json::json!(99);
+        assert!(crate::sealed_ab::verify_sealed_digest(&tampered_cmp, "tamper").is_err());
     }
 }
