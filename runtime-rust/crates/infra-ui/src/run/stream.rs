@@ -1,9 +1,10 @@
 use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct StreamMdEntry {
+pub(crate) struct StreamMdEntry {
     settled_bytes: usize,
     settled_dom_blocks: usize,
     tail_blocks: Vec<String>,
@@ -28,24 +29,603 @@ const TOOL_OUTPUT_MAX_CACHED_KEYS: usize = 256;
 const TOOL_OUTPUT_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const LIVE_STICKY_DOM_BLOCK_CAP: usize = 200;
 const SCROLLED_UP_DOM_BLOCK_CAP: usize = 1_200;
+const STATE_EVENTS_HARD_CAP: usize = SCROLLED_UP_DOM_BLOCK_CAP;
 const FOLD_CHECKPOINT_STRIDE: usize = 64;
+const MAX_FOLD_CHECKPOINTS: usize = 16;
+
+#[derive(Clone, Debug)]
+struct RunCallEntry {
+    tool: String,
+    key: String,
+    path: V,
+    detail: V,
+    event_id: V,
+    started: V,
+    open: bool,
+    ok: bool,
+    settled: bool,
+    touched: BTreeMap<String, &'static str>,
+}
+
+impl RunCallEntry {
+    fn to_value(&self) -> V {
+        let mut obj = serde_json::Map::new();
+        obj.insert("tool".into(), V::String(self.tool.clone()));
+        obj.insert("key".into(), V::String(self.key.clone()));
+        obj.insert("path".into(), self.path.clone());
+        obj.insert("detail".into(), self.detail.clone());
+        obj.insert("event_id".into(), self.event_id.clone());
+        obj.insert("started".into(), self.started.clone());
+        obj.insert("open".into(), V::Bool(self.open));
+        obj.insert("ok".into(), V::Bool(self.ok));
+        if !self.touched.is_empty() {
+            let mut touched_map = serde_json::Map::new();
+            for (k, v) in &self.touched {
+                touched_map.insert(k.clone(), V::String((*v).to_owned()));
+            }
+            obj.insert("touched".into(), V::Object(touched_map));
+        }
+        if self.settled {
+            obj.insert("settled".into(), V::Bool(true));
+        }
+        V::Object(obj)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RunFileEntry {
+    path: String,
+    reads: u64,
+    edits: u64,
+    outside: bool,
+    order: usize,
+    first_step: V,
+    last_step: V,
+    event_id: V,
+    main: bool,
+    helper: bool,
+    created: bool,
+    deleted: bool,
+    failed: bool,
+}
+
+impl RunFileEntry {
+    fn to_value(&self) -> V {
+        let mut obj = serde_json::Map::new();
+        obj.insert("path".into(), V::String(self.path.clone()));
+        obj.insert("reads".into(), json!(self.reads));
+        obj.insert("edits".into(), json!(self.edits));
+        obj.insert("outside".into(), V::Bool(self.outside));
+        obj.insert("order".into(), json!(self.order));
+        obj.insert("first_step".into(), self.first_step.clone());
+        obj.insert("last_step".into(), self.last_step.clone());
+        obj.insert("event_id".into(), self.event_id.clone());
+        if self.main {
+            obj.insert("main".into(), V::Bool(true));
+        }
+        if self.helper {
+            obj.insert("helper".into(), V::Bool(true));
+        }
+        if self.created {
+            obj.insert("created".into(), V::Bool(true));
+        }
+        if self.deleted {
+            obj.insert("deleted".into(), V::Bool(true));
+        }
+        if self.failed {
+            obj.insert("failed".into(), V::Bool(true));
+        }
+        V::Object(obj)
+    }
+}
+
+/// Structural-sharing fold state for `run` events (`Rc` entries prevent cloning whole maps per event/checkpoint).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunState {
+    active: bool,
+    launch: String,
+    started: V,
+    check: bool,
+    steps: u64,
+    messages: u64,
+    finished: bool,
+    outcome: Option<String>,
+    kinds: Vec<String>,
+    calls: BTreeMap<String, Rc<RunCallEntry>>,
+    uncalled: BTreeMap<String, VecDeque<String>>,
+    files: BTreeMap<String, Rc<RunFileEntry>>,
+    commands: Vec<Rc<V>>,
+    command_idx_by_call: BTreeMap<String, usize>,
+    plan: V,
+    searches: Vec<Rc<V>>,
+    skillcache: Vec<Rc<V>>,
+    usage: Option<Rc<V>>,
+    memory: Option<Rc<V>>,
+    omnigraph: Option<Rc<V>>,
+    delegation: Option<Rc<V>>,
+    error: Option<Rc<V>>,
+    result: Option<Rc<V>>,
+}
+
+impl RunState {
+    fn reset_launch(&mut self, launch: String, started: V) {
+        self.active = true;
+        self.launch = launch;
+        self.started = started;
+        self.check = false;
+        self.steps = 0;
+        self.messages = 0;
+        self.finished = false;
+        self.outcome = None;
+        self.kinds.clear();
+        self.calls.clear();
+        self.uncalled.clear();
+        self.files.clear();
+        self.commands.clear();
+        self.command_idx_by_call.clear();
+        self.plan = V::Array(Vec::new());
+        self.searches.clear();
+        self.skillcache.clear();
+        self.usage = None;
+        self.memory = None;
+        self.omnigraph = None;
+        self.delegation = None;
+        self.error = None;
+        self.result = None;
+    }
+
+    fn is_check(&self) -> bool {
+        self.check
+            && !self.kinds.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "session" | "text" | "tool" | "plan" | "usage" | "result"
+                )
+            })
+    }
+
+    fn pair_anonymous(&mut self, key: &str, start: bool, event_id: &str) -> String {
+        let queue = self.uncalled.entry(key.to_owned()).or_default();
+        let call = if start || queue.is_empty() {
+            format!("anonymous-{event_id}")
+        } else {
+            queue.pop_front().unwrap_or_default()
+        };
+        if start {
+            queue.push_back(call.clone());
+        }
+        call
+    }
+
+    fn apply_event(&mut self, event: &V) -> (Option<Rc<V>>, Option<String>) {
+        let launch = m::text(event, "launch_id");
+        let mut replaced = None;
+        let mut resolved_call = None;
+        if !self.active || (!launch.is_empty() && self.launch != launch) {
+            if self.active && !self.is_check() {
+                replaced = Some(Rc::new(self.to_value()));
+            }
+            self.reset_launch(launch, event["at"].clone());
+        }
+        let kind = m::text(event, "kind");
+        if !self.kinds.iter().any(|k| k == &kind) {
+            self.kinds.push(kind.clone());
+        }
+        match kind.as_str() {
+            "tool" => {
+                let name = tool_name(event);
+                let key = name.to_lowercase();
+                let start = starts(event);
+                let call = match event["call_id"].as_str().or_else(|| event["call"].as_str()) {
+                    Some(call) => call.to_owned(),
+                    None => self.pair_anonymous(&key, start, &m::string(&event["id"])),
+                };
+                resolved_call = Some(call.clone());
+                let target = event["path"]
+                    .as_str()
+                    .or_else(|| event["detail"].as_str())
+                    .unwrap_or("");
+                let mut item_rc = self.calls.remove(&call).unwrap_or_else(|| {
+                    Rc::new(RunCallEntry {
+                        tool: name.clone(),
+                        key: key.clone(),
+                        path: event["path"].clone(),
+                        detail: event["detail"].clone(),
+                        event_id: event["id"].clone(),
+                        started: event["at"].clone(),
+                        open: start,
+                        ok: true,
+                        settled: false,
+                        touched: BTreeMap::new(),
+                    })
+                });
+                let ok_val = event["ok"]
+                    .as_bool()
+                    .unwrap_or(!m::text(event, "text").contains("failed"));
+                {
+                    let item = Rc::make_mut(&mut item_rc);
+                    item.open = start;
+                    item.ok = ok_val;
+                    item.event_id = event["id"].clone();
+                    if start {
+                        self.steps += 1;
+                    }
+                    let touched_names = named(&key, target, event);
+                    if !touched_names.is_empty() {
+                        let step_val = json!(self.steps);
+                        let by_helper = event["parent"].as_str().is_some_and(|id| !id.is_empty());
+                        for (path, how, outside) in touched_names {
+                            if item.touched.contains_key(&path) {
+                                continue;
+                            }
+                            item.touched.insert(path.clone(), how);
+                            let next_order = self.files.len();
+                            let file_rc = self.files.entry(path.clone()).or_insert_with(|| {
+                                Rc::new(RunFileEntry {
+                                    path,
+                                    reads: 0,
+                                    edits: 0,
+                                    outside,
+                                    order: next_order,
+                                    first_step: step_val.clone(),
+                                    last_step: step_val.clone(),
+                                    event_id: event["id"].clone(),
+                                    main: false,
+                                    helper: false,
+                                    created: false,
+                                    deleted: false,
+                                    failed: false,
+                                })
+                            });
+                            let file = Rc::make_mut(file_rc);
+                            if how == "read" {
+                                file.reads += 1;
+                            }
+                            if by_helper {
+                                file.helper = true;
+                            } else {
+                                file.main = true;
+                            }
+                            file.last_step = step_val.clone();
+                            file.event_id = event["id"].clone();
+                        }
+                    }
+                    if !start && !item.settled {
+                        item.settled = true;
+                        let item_ok = item.ok;
+                        for (path, how) in &item.touched {
+                            let Some(file_rc) = self.files.get_mut(path) else {
+                                continue;
+                            };
+                            let file = Rc::make_mut(file_rc);
+                            if !item_ok {
+                                if event["outcome"] != "not_run" {
+                                    file.failed = true;
+                                }
+                                continue;
+                            }
+                            match *how {
+                                "read" => continue,
+                                "add" => file.created = true,
+                                "delete" => file.deleted = true,
+                                _ => {}
+                            }
+                            file.edits += 1;
+                            file.event_id = event["id"].clone();
+                        }
+                    }
+                }
+                self.calls.insert(call.clone(), item_rc);
+                if ["grep", "glob", "ls"].contains(&key.as_str()) && start {
+                    self.searches.push(Rc::new(
+                        json!({"pattern":event["detail"],"scope":event["path"],"event_id":event["id"]}),
+                    ));
+                }
+                if ["bash", "shell"].contains(&key.as_str()) {
+                    if let Some(&cmd_idx) = self.command_idx_by_call.get(&call) {
+                        if let Some(cmd_rc) = self.commands.get_mut(cmd_idx) {
+                            let cmd = Rc::make_mut(cmd_rc);
+                            cmd["running"] = json!(start);
+                            cmd["ok"] = json!(ok_val);
+                            cmd["event_id"] = event["id"].clone();
+                        }
+                    } else {
+                        let command = event["detail"].as_str().unwrap_or_else(|| {
+                            event["text"]
+                                .as_str()
+                                .unwrap_or("")
+                                .split_once(": ")
+                                .map(|(_, s)| s)
+                                .unwrap_or("")
+                        });
+                        let idx = self.commands.len();
+                        self.commands.push(Rc::new(json!({
+                            "call": call,
+                            "command": command,
+                            "class": classify(command),
+                            "running": start,
+                            "ok": ok_val,
+                            "event_id": event["id"],
+                            "at": event["at"],
+                        })));
+                        self.command_idx_by_call.insert(call, idx);
+                    }
+                }
+            }
+            "plan" => {
+                self.plan = event["items"]
+                    .as_array()
+                    .or_else(|| event["plan"].as_array())
+                    .cloned()
+                    .map(V::Array)
+                    .unwrap_or_else(|| event["plan"].clone());
+            }
+            "text" => self.messages += 1,
+            "usage" => self.usage = Some(Rc::new(event.clone())),
+            "memory" => self.memory = Some(Rc::new(event.clone())),
+            "omnigraph" => self.omnigraph = Some(Rc::new(event.clone())),
+            "skillcache" => self.skillcache.push(Rc::new(event.clone())),
+            "delegation" => self.delegation = Some(Rc::new(event.clone())),
+            "status" => {
+                if check_status(&m::text(event, "text")) {
+                    self.check = true;
+                }
+                let status = event["status"]
+                    .as_str()
+                    .unwrap_or_else(|| event["text"].as_str().unwrap_or(""));
+                if ["completed", "failed", "cancelled", "interrupted"].contains(&status) {
+                    self.finished = true;
+                    self.outcome = Some(status.to_owned());
+                }
+            }
+            "error" => {
+                self.error = Some(Rc::new(event.clone()));
+                if m::text(event, "text").starts_with("Run failed (") {
+                    self.finished = true;
+                    self.outcome = Some("failed".into());
+                }
+            }
+            "result" => self.result = Some(Rc::new(event.clone())),
+            _ => {}
+        }
+        (replaced, resolved_call)
+    }
+
+    fn to_value(&self) -> V {
+        if !self.active {
+            return V::Null;
+        }
+        let mut obj = serde_json::Map::new();
+        obj.insert("launch".into(), V::String(self.launch.clone()));
+        let mut calls_map = serde_json::Map::new();
+        for (k, v) in &self.calls {
+            calls_map.insert(k.clone(), v.to_value());
+        }
+        obj.insert("calls".into(), V::Object(calls_map));
+        obj.insert("open".into(), V::Array(Vec::new()));
+        let mut files_map = serde_json::Map::new();
+        for (k, v) in &self.files {
+            files_map.insert(k.clone(), v.to_value());
+        }
+        obj.insert("files".into(), V::Object(files_map));
+        obj.insert(
+            "commands".into(),
+            V::Array(self.commands.iter().map(|c| c.as_ref().clone()).collect()),
+        );
+        obj.insert("plan".into(), self.plan.clone());
+        obj.insert(
+            "searches".into(),
+            V::Array(self.searches.iter().map(|s| s.as_ref().clone()).collect()),
+        );
+        obj.insert("steps".into(), json!(self.steps));
+        obj.insert("messages".into(), json!(self.messages));
+        obj.insert("finished".into(), V::Bool(self.finished));
+        obj.insert(
+            "outcome".into(),
+            self.outcome
+                .as_ref()
+                .map_or(V::Null, |s| V::String(s.clone())),
+        );
+        obj.insert(
+            "memory".into(),
+            self.memory.as_ref().map_or(V::Null, |v| v.as_ref().clone()),
+        );
+        obj.insert(
+            "omnigraph".into(),
+            self.omnigraph
+                .as_ref()
+                .map_or(V::Null, |v| v.as_ref().clone()),
+        );
+        obj.insert(
+            "skillcache".into(),
+            V::Array(self.skillcache.iter().map(|s| s.as_ref().clone()).collect()),
+        );
+        obj.insert(
+            "kinds".into(),
+            V::Array(self.kinds.iter().cloned().map(V::String).collect()),
+        );
+        obj.insert("started".into(), self.started.clone());
+        if !self.uncalled.is_empty() {
+            let mut uncalled_map = serde_json::Map::new();
+            for (k, q) in &self.uncalled {
+                uncalled_map.insert(
+                    k.clone(),
+                    V::Array(q.iter().cloned().map(V::String).collect()),
+                );
+            }
+            obj.insert("uncalled".into(), V::Object(uncalled_map));
+        }
+        if self.check {
+            obj.insert("check".into(), V::Bool(true));
+        }
+        if let Some(usage) = &self.usage {
+            obj.insert("usage".into(), usage.as_ref().clone());
+        }
+        if let Some(delegation) = &self.delegation {
+            obj.insert("delegation".into(), delegation.as_ref().clone());
+        }
+        if let Some(error) = &self.error {
+            obj.insert("error".into(), error.as_ref().clone());
+        }
+        if let Some(result) = &self.result {
+            obj.insert("result".into(), result.as_ref().clone());
+        }
+        V::Object(obj)
+    }
+}
+
+fn fnv1a_fold_feed(h1: &mut u64, h2: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *h1 ^= u64::from(b);
+        *h1 = h1.wrapping_mul(0x0000_0100_0000_01B3);
+        *h2 = h2.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ u64::from(b).wrapping_add(0x517C_C1B7_2722_0A95);
+    }
+}
+
+fn feed_fold_value(h1: &mut u64, h2: &mut u64, v: &V) {
+    match v {
+        V::Null => fnv1a_fold_feed(h1, h2, b"N"),
+        V::Bool(true) => fnv1a_fold_feed(h1, h2, b"T"),
+        V::Bool(false) => fnv1a_fold_feed(h1, h2, b"F"),
+        V::Number(n) => {
+            fnv1a_fold_feed(h1, h2, b"#");
+            fnv1a_fold_feed(h1, h2, n.to_string().as_bytes());
+            fnv1a_fold_feed(h1, h2, b"\0");
+        }
+        V::String(s) => {
+            fnv1a_fold_feed(h1, h2, b"$");
+            fnv1a_fold_feed(h1, h2, &s.len().to_le_bytes());
+            fnv1a_fold_feed(h1, h2, s.as_bytes());
+        }
+        V::Array(arr) => {
+            fnv1a_fold_feed(h1, h2, b"[");
+            fnv1a_fold_feed(h1, h2, &arr.len().to_le_bytes());
+            for item in arr {
+                feed_fold_value(h1, h2, item);
+            }
+            fnv1a_fold_feed(h1, h2, b"]");
+        }
+        V::Object(map) => {
+            fnv1a_fold_feed(h1, h2, b"{");
+            fnv1a_fold_feed(h1, h2, &map.len().to_le_bytes());
+            for (k, val) in map {
+                fnv1a_fold_feed(h1, h2, &k.len().to_le_bytes());
+                fnv1a_fold_feed(h1, h2, k.as_bytes());
+                feed_fold_value(h1, h2, val);
+            }
+            fnv1a_fold_feed(h1, h2, b"}");
+        }
+    }
+}
+
+fn event_fold_sig(v: &V) -> [u64; 2] {
+    let mut h1: u64 = 0xCBF2_9CE4_8422_2325;
+    let mut h2: u64 = 0x517C_C1B7_2722_0A95;
+    feed_fold_value(&mut h1, &mut h2, v);
+    [h1, h2]
+}
 
 #[derive(Default)]
 pub(crate) struct FoldCache {
-    events: Vec<V>,
+    session_key: Option<(u64, String)>,
+    prefix_end_id: Option<u64>,
+    prefix_run: Option<RunState>,
+    prefix_before: Option<Rc<V>>,
+    event_sigs: Vec<[u64; 2]>,
+    event_ids: Vec<Option<u64>>,
     resolved_calls: Vec<Option<String>>,
-    checkpoints: Vec<(V, Option<V>)>,
-    last_run: V,
-    last_before: Option<V>,
+    checkpoints: Vec<(usize, RunState, Option<Rc<V>>)>,
+    last_run: RunState,
+    last_before: Option<Rc<V>>,
 }
 
 impl FoldCache {
+    fn sync_session(&mut self, epoch: u64, sid: &str) {
+        let matches = self
+            .session_key
+            .as_ref()
+            .is_some_and(|(e, s)| *e == epoch && s == sid);
+        if !matches {
+            self.clear();
+            self.session_key = Some((epoch, sid.to_owned()));
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
-        self.events.clear();
+        self.session_key = None;
+        self.prefix_end_id = None;
+        self.prefix_run = None;
+        self.prefix_before = None;
+        self.clear_checkpoints_only();
+    }
+
+    fn clear_checkpoints_only(&mut self) {
+        self.event_sigs.clear();
+        self.event_ids.clear();
         self.resolved_calls.clear();
         self.checkpoints.clear();
-        self.last_run = V::Null;
+        self.last_run = RunState::default();
         self.last_before = None;
+    }
+
+    fn advance_pruned_prefix(&mut self, drained: &[V]) {
+        if drained.is_empty() {
+            return;
+        }
+        let matches_cached = self.event_sigs.len() >= drained.len()
+            && self
+                .event_sigs
+                .iter()
+                .zip(drained.iter())
+                .all(|(sig, ev)| *sig == event_fold_sig(ev));
+        let mut run = self.prefix_run.clone().unwrap_or_default();
+        let mut before = self.prefix_before.clone();
+        let mut max_id = self.prefix_end_id;
+        for ev in drained {
+            let ev_id = stream_event_id(ev);
+            let already_in_prefix = match (max_id, ev_id) {
+                (Some(prev), Some(cur)) => cur <= prev,
+                _ => false,
+            };
+            if !already_in_prefix {
+                let (replaced, _) = run.apply_event(ev);
+                if let Some(r) = replaced {
+                    before = Some(r);
+                }
+                if let Some(cur) = ev_id {
+                    max_id = Some(max_id.map_or(cur, |prev| prev.max(cur)));
+                }
+            }
+        }
+        self.prefix_end_id = max_id;
+        self.prefix_run = Some(run);
+        self.prefix_before = before;
+        if matches_cached {
+            let k = drained.len();
+            self.event_sigs.drain(..k);
+            self.event_ids.drain(..k);
+            self.resolved_calls.drain(..k);
+            self.checkpoints.retain_mut(|(idx, _, _)| {
+                if *idx > k {
+                    *idx -= k;
+                    true
+                } else {
+                    false
+                }
+            });
+        } else {
+            self.clear_checkpoints_only();
+        }
+    }
+
+    fn push_checkpoint(&mut self, idx: usize, run: &RunState, before: &Option<Rc<V>>) {
+        self.checkpoints.push((idx, run.clone(), before.clone()));
+        if self.checkpoints.len() > MAX_FOLD_CHECKPOINTS {
+            // Retain evenly spaced older checkpoints plus the newest suffix.
+            let drop_pos = self.checkpoints.len() / 2;
+            self.checkpoints.remove(drop_pos.saturating_sub(1));
+        }
     }
 }
 
@@ -53,14 +633,14 @@ thread_local! {
     static FOLD_CACHE: RefCell<FoldCache> = RefCell::new(FoldCache::default());
 }
 
-/// Clears DOM-bound stream caches while retaining `TOOL_FULL_OUTPUTS` across in-session replays.
+/// Clears DOM-bound stream caches while retaining `TOOL_FULL_OUTPUTS` and pruned fold prefix across in-session replays.
 fn clear_stream_dom_caches() {
     STREAM_MD_CACHE.with(|cache| cache.borrow_mut().clear());
     STREAM_RAW_TEXT.with(|raw| raw.borrow_mut().clear());
     CALL_BLOCK_CACHE.with(|cache| cache.borrow_mut().clear());
     RENDERED_EVENT_IDS.with(|ids| ids.borrow_mut().clear());
     LAST_MAX_RENDERED_ID.with(|max| max.set(None));
-    FOLD_CACHE.with(|cache| cache.borrow_mut().clear());
+    FOLD_CACHE.with(|cache| cache.borrow_mut().clear_checkpoints_only());
     let evicted = TOOL_FULL_OUTPUTS.with(|cache| {
         TOOL_OUTPUT_ORDER.with(|order| {
             prune_tool_outputs_with_budget(
@@ -118,6 +698,7 @@ pub(crate) fn prune_tool_outputs_map(map: &mut BTreeMap<String, String>, max_ent
 
 pub(crate) fn clear_stream_md_cache() {
     clear_stream_dom_caches();
+    FOLD_CACHE.with(|cache| cache.borrow_mut().clear());
     TOOL_FULL_OUTPUTS.with(|cache| cache.borrow_mut().clear());
     TOOL_OUTPUT_ORDER.with(|order| order.borrow_mut().clear());
 }
@@ -849,30 +1430,49 @@ fn try_patch_streaming_code_block(existing: &web_sys::Element, new_html: &str) -
     true
 }
 
+pub(crate) fn build_init_stream_markdown(text: &str) -> (String, StreamMdEntry) {
+    let settled_bytes = find_settled_markdown_boundary(text, 0);
+    if settled_bytes > 0 && settled_bytes <= text.len() && text.is_char_boundary(settled_bytes) {
+        let settled_html = render_assistant_markdown_html(&text[..settled_bytes]);
+        let settled_count = split_top_level_html_blocks(&settled_html).len();
+        let (tail_html, tail_blocks) = if settled_bytes < text.len() {
+            let html = render_assistant_markdown_html(&text[settled_bytes..]);
+            let blocks = split_top_level_html_blocks(&html);
+            (html, blocks)
+        } else {
+            (String::new(), Vec::new())
+        };
+        let combined = if tail_html.is_empty() {
+            settled_html
+        } else {
+            format!("{settled_html}{tail_html}")
+        };
+        (
+            combined,
+            StreamMdEntry {
+                settled_bytes,
+                settled_dom_blocks: settled_count,
+                tail_blocks,
+            },
+        )
+    } else {
+        let html = render_assistant_markdown_html(text);
+        let tail_blocks = split_top_level_html_blocks(&html);
+        (
+            html,
+            StreamMdEntry {
+                settled_bytes: 0,
+                settled_dom_blocks: 0,
+                tail_blocks,
+            },
+        )
+    }
+}
+
 fn init_stream_markdown_body(block: &web_sys::Element, body: &web_sys::Element, text: &str) {
     let stream_key = ensure_block_stream_key(block);
-
-    let html = render_assistant_markdown_html(text);
+    let (html, entry) = build_init_stream_markdown(text);
     body.set_inner_html(&html);
-    let settled_bytes = find_settled_markdown_boundary(text, 0);
-    let entry = if settled_bytes > 0 {
-        let settled_count =
-            split_top_level_html_blocks(&render_assistant_markdown_html(&text[..settled_bytes]))
-                .len();
-        let tail_blocks =
-            split_top_level_html_blocks(&render_assistant_markdown_html(&text[settled_bytes..]));
-        StreamMdEntry {
-            settled_bytes,
-            settled_dom_blocks: settled_count,
-            tail_blocks,
-        }
-    } else {
-        StreamMdEntry {
-            settled_bytes: 0,
-            settled_dom_blocks: 0,
-            tail_blocks: split_top_level_html_blocks(&html),
-        }
-    };
     STREAM_MD_CACHE.with(|cache| {
         cache.borrow_mut().insert(stream_key, entry);
     });
@@ -1007,6 +1607,59 @@ pub(crate) fn plan_top_dom_eviction(can_evict: &[bool], cap: usize) -> Vec<usize
         .filter_map(|(idx, &evictable)| evictable.then_some(idx))
         .take(excess)
         .collect()
+}
+
+pub(crate) fn plan_state_events_prune_count(
+    events: &[V],
+    cap: usize,
+    min_keep_id: Option<u64>,
+) -> usize {
+    if events.len() <= cap {
+        return 0;
+    }
+    let excess = events.len() - cap;
+    let mut prune_count = 0usize;
+    for ev in events.iter().take(excess) {
+        if let Some(keep_id) = min_keep_id {
+            if stream_event_id(ev).is_some_and(|id| id >= keep_id) {
+                break;
+            }
+        }
+        prune_count += 1;
+    }
+    prune_count
+}
+
+fn prune_state_events_to_cap() {
+    let min_keep_id = if cfg!(target_arch = "wasm32") {
+        earliest_rendered_dom_event_id()
+    } else {
+        None
+    };
+    let (epoch, sid, drained) = m::write(|s| {
+        let prune_count =
+            plan_state_events_prune_count(&s.events, STATE_EVENTS_HARD_CAP, min_keep_id);
+        if prune_count == 0 {
+            return (s.epoch, s.sid.clone(), Vec::new());
+        }
+        let (drained, oldest, drained_any_numeric) =
+            m::prune_events_prefix(&mut s.events, &mut s.seen, prune_count);
+        if drained_any_numeric {
+            s.stream.has_older = true;
+        }
+        if let Some(oldest_id) = oldest {
+            s.stream.oldest_event_id = Some(oldest_id);
+        }
+        s.stream.visible_limit = s.stream.visible_limit.min(s.events.len().max(1));
+        (s.epoch, s.sid.clone(), drained)
+    });
+    if !drained.is_empty() {
+        FOLD_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.sync_session(epoch, &sid);
+            cache.advance_pruned_prefix(&drained);
+        });
+    }
 }
 
 pub(crate) fn clamped_visible_limit_after_eviction(
@@ -1150,6 +1803,7 @@ pub(super) fn conversation_with_call(v: &V, resolved_call: Option<&str>) {
         conv.as_ref(),
         was_sticky,
     );
+    prune_state_events_to_cap();
     if let Some(conv) = conv {
         if was_sticky {
             conv.set_scroll_top(conv.scroll_height());
@@ -1234,29 +1888,7 @@ fn render_event_into(
     if kind == "tool" {
         let call_id = conversation_event_call_id(v, resolved_call);
         if let Some(block) = find_tool_block_by_call_id(container, &call_id) {
-            let is_start = starts(v);
-            let failed = !is_start && v["ok"] == false;
-            let state_str = if is_start {
-                "running"
-            } else if failed {
-                "failed"
-            } else {
-                "completed"
-            };
-            let _ = block.set_attribute("data-event-id", &id);
-            let _ = block.set_attribute("data-tool-state", state_str);
-            if let Ok(Some(summary)) = block.query_selector("summary") {
-                summary.set_text_content(Some(&format_tool_summary(v)));
-            }
-            let output_key = if !call_id.is_empty() {
-                call_id.clone()
-            } else {
-                format!("ev:{id}")
-            };
-            let _ = block.set_attribute("data-output-key", &output_key);
-            let full_text = store_tool_output(&output_key, &text, is_start);
-            apply_tool_output_dom(&block, &output_key, &full_text);
-            sync_tool_failure_button(&block, v, &full_text, failed);
+            update_existing_tool_block(&block, v, resolved_call);
             mutated_existing = true;
         }
     } else if matches!(kind.as_str(), "text" | "thinking") {
@@ -1469,6 +2101,13 @@ fn prepend_events_range(start: usize, end: usize) {
     for (idx, ev) in events.iter().enumerate().take(end).skip(start) {
         let resolved_call = resolved_calls.get(idx).and_then(|c| c.as_deref());
         record_rendered_event_id(ev);
+        if m::text(ev, "kind") == "tool" {
+            let call_id = conversation_event_call_id(ev, resolved_call);
+            if let Some(existing) = find_tool_block_by_call_id(&events_el, &call_id) {
+                update_existing_tool_block(&existing, ev, resolved_call);
+                continue;
+            }
+        }
         render_event_into(&staging, ev, resolved_call, false);
     }
     let anchor = events_el.first_child();
@@ -1483,57 +2122,99 @@ pub(crate) fn fold_run_events_with_cache(
     events: &[V],
 ) -> (V, Option<V>, Vec<Option<String>>) {
     if events.is_empty() {
-        cache.clear();
-        return (V::Null, None, Vec::new());
-    }
-    let common = cache
-        .events
-        .iter()
-        .zip(events.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-    if common == events.len() && cache.events.len() == events.len() {
+        cache.clear_checkpoints_only();
         return (
-            cache.last_run.clone(),
-            cache.last_before.clone(),
+            cache
+                .prefix_run
+                .as_ref()
+                .map(RunState::to_value)
+                .unwrap_or(V::Null),
+            cache.prefix_before.as_deref().cloned(),
+            Vec::new(),
+        );
+    }
+    let first_id = events.first().and_then(stream_event_id);
+    let prefix_valid = match cache.prefix_end_id {
+        Some(pend) => first_id.is_some_and(|id| id > pend),
+        None => true,
+    };
+    if !prefix_valid {
+        cache.prefix_end_id = None;
+        cache.prefix_run = None;
+        cache.prefix_before = None;
+        cache.clear_checkpoints_only();
+    }
+
+    let common = cache
+        .event_sigs
+        .iter()
+        .zip(cache.event_ids.iter())
+        .zip(events.iter())
+        .take_while(|((&sig, &id), ev)| sig == event_fold_sig(ev) && id == stream_event_id(ev))
+        .count();
+    if common == events.len() && cache.event_sigs.len() == events.len() {
+        return (
+            cache.last_run.to_value(),
+            cache.last_before.as_deref().cloned(),
             cache.resolved_calls.clone(),
         );
     }
-    let (resume_idx, mut run, mut before) = if common == cache.events.len() {
+    let (resume_idx, mut run, mut before) = if common == cache.event_sigs.len() && common > 0 {
         (common, cache.last_run.clone(), cache.last_before.clone())
     } else {
-        let cp_count = common / FOLD_CHECKPOINT_STRIDE;
-        let idx = cp_count * FOLD_CHECKPOINT_STRIDE;
-        let state = if cp_count > 0 {
-            cache.checkpoints[cp_count - 1].clone()
+        let cp_pos = cache
+            .checkpoints
+            .iter()
+            .rposition(|(cp_idx, _, _)| *cp_idx <= common);
+        if let Some(pos) = cp_pos {
+            let (idx, cp_run, cp_before) = cache.checkpoints[pos].clone();
+            cache.event_sigs.truncate(idx);
+            cache.event_ids.truncate(idx);
+            cache.resolved_calls.truncate(idx);
+            cache.checkpoints.truncate(pos + 1);
+            (idx, cp_run, cp_before)
         } else {
-            (V::Null, None)
-        };
-        cache.events.truncate(idx);
-        cache.resolved_calls.truncate(idx);
-        cache.checkpoints.truncate(cp_count);
-        (idx, state.0, state.1)
+            cache.event_sigs.clear();
+            cache.event_ids.clear();
+            cache.resolved_calls.clear();
+            cache.checkpoints.clear();
+            (
+                0,
+                cache.prefix_run.clone().unwrap_or_default(),
+                cache.prefix_before.clone(),
+            )
+        }
     };
     for (offset, ev) in events[resume_idx..].iter().enumerate() {
         let idx = resume_idx + offset;
-        let (next_run, replaced, resolved_call) = advance_with_call(run, ev);
+        let (replaced, resolved_call) = run.apply_event(ev);
         if let Some(replaced) = replaced {
             before = Some(replaced);
         }
-        run = next_run;
-        cache.events.push(ev.clone());
+        cache.event_sigs.push(event_fold_sig(ev));
+        cache.event_ids.push(stream_event_id(ev));
         cache.resolved_calls.push(resolved_call);
-        if (idx + 1) % FOLD_CHECKPOINT_STRIDE == 0 {
-            cache.checkpoints.push((run.clone(), before.clone()));
+        let applied_len = idx + 1;
+        if applied_len % FOLD_CHECKPOINT_STRIDE == 0 {
+            cache.push_checkpoint(applied_len, &run, &before);
         }
     }
-    cache.last_run = run.clone();
-    cache.last_before = before.clone();
-    (run, before, cache.resolved_calls.clone())
+    cache.last_run = run;
+    cache.last_before = before;
+    (
+        cache.last_run.to_value(),
+        cache.last_before.as_deref().cloned(),
+        cache.resolved_calls.clone(),
+    )
 }
 
 fn fold_run_events_cached(events: &[V]) -> (V, Option<V>, Vec<Option<String>>) {
-    FOLD_CACHE.with(|cache| fold_run_events_with_cache(&mut cache.borrow_mut(), events))
+    let (epoch, sid) = m::read(|s| (s.epoch, s.sid.clone()));
+    FOLD_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.sync_session(epoch, &sid);
+        fold_run_events_with_cache(&mut cache, events)
+    })
 }
 
 /// Folds `events` locally into `(run, run_before, resolved_calls)` without per-event global store writes.
@@ -1847,9 +2528,34 @@ fn read_rendered_blocks(
     Some((tracked_nodes, metas))
 }
 
+pub(crate) fn decide_existing_tool_update(
+    existing_id: Option<u64>,
+    incoming_id: Option<u64>,
+) -> bool {
+    match (existing_id, incoming_id) {
+        (Some(cur), Some(inc)) => inc >= cur,
+        _ => true,
+    }
+}
+
 fn update_existing_tool_block(block: &web_sys::Element, v: &V, resolved_call: Option<&str>) {
     let id = m::string(&v["id"]);
     let call_id = conversation_event_call_id(v, resolved_call);
+    let existing_id = block
+        .get_attribute("data-event-id")
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let incoming_id = stream_event_id(v);
+    if let Some(inc) = incoming_id {
+        let first_id = block
+            .get_attribute("data-first-event-id")
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        if first_id.is_none_or(|cur| inc < cur) {
+            let _ = block.set_attribute("data-first-event-id", &id);
+        }
+    }
+    if !decide_existing_tool_update(existing_id, incoming_id) {
+        return;
+    }
     let is_start = starts(v);
     let failed = !is_start && v["ok"] == false;
     let state_str = if is_start {
@@ -1859,20 +2565,10 @@ fn update_existing_tool_block(block: &web_sys::Element, v: &V, resolved_call: Op
     } else {
         "completed"
     };
-    let existing_id = block
-        .get_attribute("data-event-id")
-        .and_then(|s| s.trim().parse::<u64>().ok());
-    let incoming_id = stream_event_id(v);
-    let newer_or_equal = match (existing_id, incoming_id) {
-        (Some(cur), Some(inc)) => inc >= cur,
-        _ => true,
-    };
-    if newer_or_equal {
-        let _ = block.set_attribute("data-event-id", &id);
-        let _ = block.set_attribute("data-tool-state", state_str);
-        if let Ok(Some(summary)) = block.query_selector("summary") {
-            summary.set_text_content(Some(&format_tool_summary(v)));
-        }
+    let _ = block.set_attribute("data-event-id", &id);
+    let _ = block.set_attribute("data-tool-state", state_str);
+    if let Ok(Some(summary)) = block.query_selector("summary") {
+        summary.set_text_content(Some(&format_tool_summary(v)));
     }
     let output_key = if !call_id.is_empty() {
         call_id
@@ -2029,6 +2725,7 @@ pub(crate) fn replay_visible_stream() {
                 update_scroll_ui();
             }
         }
+        prune_state_events_to_cap();
         sync_load_earlier_control();
         return;
     }
@@ -2069,6 +2766,7 @@ pub(crate) fn replay_visible_stream() {
             was_sticky,
         );
     }
+    prune_state_events_to_cap();
     if rendered_any {
         if let Some(conv) = dom::get("conversation") {
             if was_sticky {
@@ -2468,5 +3166,35 @@ mod tests {
         let evicted = prune_tool_outputs_with_budget(&mut map, &mut order, 1, 100);
         assert_eq!(evicted, vec!["k1".to_owned()]);
         assert!(evicted_tool_output_label().contains("Evicted"));
+
+        // Init stream markdown splits settled prefix cleanly before parsing.
+        let md = "Paragraph one.\n\n```rust\nlet x = 1;\n```\n\nTrailing live";
+        let (init_html, init_entry) = build_init_stream_markdown(md);
+        assert!(init_entry.settled_bytes > 0 && init_entry.settled_bytes < md.len());
+        assert!(init_entry.settled_dom_blocks >= 2);
+        assert!(!init_entry.tail_blocks.is_empty());
+        assert_eq!(init_html, render_assistant_markdown_html(md));
+
+        // Cross-page ?before= tool dedup never downgrades a newer completed block to older running.
+        assert!(!decide_existing_tool_update(Some(205), Some(195)));
+        assert!(decide_existing_tool_update(Some(195), Some(205)));
+        assert!(decide_existing_tool_update(Some(205), Some(205)));
+
+        // Pruning old events past STATE_EVENTS_HARD_CAP advances FoldCache prefix and matches full fold.
+        assert_eq!(plan_state_events_prune_count(&events, 141, None), 0);
+        assert_eq!(plan_state_events_prune_count(&events, 100, Some(25)), 24);
+        assert_eq!(plan_state_events_prune_count(&events, 100, None), 41);
+
+        let full_expected = fold_run_events(&events);
+        let mut pruned_cache = FoldCache::default();
+        pruned_cache.sync_session(7, "s-prune");
+        let _ = fold_run_events_with_cache(&mut pruned_cache, &events);
+        let drained = events[..41].to_vec();
+        let remaining = events[41..].to_vec();
+        pruned_cache.advance_pruned_prefix(&drained);
+        let after_prune = fold_run_events_with_cache(&mut pruned_cache, &remaining);
+        assert_eq!(after_prune.0, full_expected.0);
+        assert_eq!(after_prune.1, full_expected.1);
+        assert_eq!(after_prune.2, full_expected.2[41..].to_vec());
     }
 }

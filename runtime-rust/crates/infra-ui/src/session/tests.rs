@@ -1618,4 +1618,60 @@ mod update_tests {
         );
         assert!(proj_b_waiting.is_empty());
     }
+
+    #[test]
+    fn results_launches_render_structured_metrics_without_raw_json() {
+        let launch = json!({
+            "id": "launch-42",
+            "kind": "launch",
+            "status": "completed",
+            "started_at": "2026-11-23T10:00:00Z",
+            "finished_at": "2026-11-23T10:00:04Z",
+            "settings": {
+                "provider": "claude",
+                "workflow": "native",
+                "model": "sonnet",
+                "mode": "edit",
+                "permissions": "auto",
+                "skillcache": {"decision": "hit", "capsule_id": "cap-7"}
+            },
+            "usage": {
+                "tokens": 1240,
+                "input_tokens": 1000,
+                "output_tokens": 240,
+                "cost_usd": 0.0125,
+                "seconds": 4.2
+            },
+            "context": {"used_tokens": 4200, "window": 200000},
+            "receipt": {"outcome": "completed"}
+        });
+        let summary = super::results::launch_metric_summary(&launch);
+        assert!(summary.contains("claude (sonnet)"));
+        assert!(summary.contains("1240 tokens"));
+        assert!(summary.contains("$0.0125"));
+        assert!(summary.contains("4.20s"));
+
+        let html = super::results::render_launch_metrics_html(&launch);
+        crate::test_support::assert_no_inline_hex_colors(&html);
+        assert!(html.contains("skill-capsule-facts-grid"));
+        assert!(html.contains("<dt>Tokens</dt><dd>1240 total · 1000 in · 240 out</dd>"));
+        assert!(html.contains("<dt>Cost</dt><dd>$0.0125</dd>"));
+        assert!(html.contains("<dt>SkillCache</dt><dd>hit · capsule cap-7</dd>"));
+        assert!(html.contains("<dt>Receipt</dt><dd>outcome: completed</dd>"));
+        assert!(!html.contains("\"input_tokens\":"));
+        assert!(!html.contains("{\n"));
+
+        assert!(super::navigation::should_trap_mobile_sidebar(
+            true, true, false
+        ));
+        assert!(!super::navigation::should_trap_mobile_sidebar(
+            false, true, false
+        ));
+        assert!(!super::navigation::should_trap_mobile_sidebar(
+            true, false, false
+        ));
+        assert!(!super::navigation::should_trap_mobile_sidebar(
+            true, true, true
+        ));
+    }
 }

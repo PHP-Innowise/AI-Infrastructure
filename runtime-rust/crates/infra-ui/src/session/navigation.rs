@@ -120,6 +120,15 @@ pub(crate) async fn apply_hash_route() {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn should_trap_mobile_sidebar(
+    sidebar_open: bool,
+    mobile: bool,
+    top_modal_open: bool,
+) -> bool {
+    sidebar_open && mobile && !top_modal_open
+}
+
 pub(crate) fn set_sidebar_open(open: bool, restore_focus: bool) {
     let was_open = m::read(|s| s.workspace.sidebar_open)
         || dom::get("sidebar").is_some_and(|e| e.class_list().contains("open"));
@@ -129,11 +138,13 @@ pub(crate) fn set_sidebar_open(open: bool, restore_focus: bool) {
     m::write(|s| s.workspace.sidebar_open = open);
     dom::class("sidebar", "open", open);
     dom::class("scrim", "open", open);
+    dom::attr("scrim", "tabindex", "-1");
     dom::attr(
         "menu-toggle",
         "aria-expanded",
         if open { "true" } else { "false" },
     );
+    dom::sync_overlay_inert();
     if open {
         if dom::get("history-search").is_some() {
             dom::focus("history-search");
