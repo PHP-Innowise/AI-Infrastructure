@@ -2069,10 +2069,48 @@ pub(crate) mod canvas2d {
         pub file_line: String,
     }
 
+    pub const CLUSTER_HULL_MAX_SCALE: f64 = 0.35;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum DenseContainerKind {
+        #[default]
+        TierBand,
+        ServiceFrame,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct DenseContainerSpec {
+        pub kind: DenseContainerKind,
+        pub x: f64,
+        pub y: f64,
+        pub w: f64,
+        pub h: f64,
+        pub radius: f64,
+        pub label: String,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct DenseClusterHull {
+        pub key: String,
+        pub label: String,
+        pub color_slot: usize,
+        pub node_count: usize,
+        pub polygon: Vec<(f64, f64)>,
+        pub centroid: (f64, f64),
+        pub bounds: (f64, f64, f64, f64),
+    }
+
+    #[allow(dead_code)]
+    pub fn should_render_cluster_hulls(scale: f64) -> bool {
+        scale.is_finite() && scale > 0.0 && scale < CLUSTER_HULL_MAX_SCALE
+    }
+
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct DenseSceneMeta {
         pub nodes: HashMap<usize, DenseNodeMeta>,
         pub edges: HashMap<usize, DenseEdgeMeta>,
+        pub containers: Vec<DenseContainerSpec>,
+        pub cluster_hulls: Vec<DenseClusterHull>,
         pub kind_hover: Option<String>,
         pub hidden_kinds: HashSet<String>,
         pub label_min_scale: Option<f64>,
@@ -2138,6 +2176,11 @@ pub(crate) mod canvas2d {
                     (None, None) => {}
                 }
             }
+            self.cluster_hulls = if self.containers.is_empty() {
+                compute_dense_cluster_hulls(scene, self)
+            } else {
+                Vec::new()
+            };
         }
 
         pub fn update_edge_bounds(&mut self, scene: &DenseScene, edge_indices: &[usize]) {
@@ -2160,6 +2203,444 @@ pub(crate) mod canvas2d {
                 }
             }
         }
+    }
+
+    fn strip_path_prefix_and_line(raw: &str) -> String {
+        let mut s = raw.trim().replace('\\', "/");
+        for prefix in ["file:", "sym:", "module:", "layer:", "session:"] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                s = rest.to_owned();
+                break;
+            }
+        }
+        if let Some((head, tail)) = s.rsplit_once(':') {
+            if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+                s = head.to_owned();
+            }
+        }
+        s
+    }
+
+    fn node_path_segments(node: &DenseNodeSpec, nm: Option<&DenseNodeMeta>) -> Option<Vec<String>> {
+        if let Some(meta) = nm {
+            for candidate in [
+                meta.explain_payload["module"].as_str(),
+                meta.explain_payload["service"].as_str(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let trimmed = candidate.trim();
+                if !trimmed.is_empty()
+                    && trimmed != "__system__"
+                    && !trimmed.starts_with("__unmatched__")
+                {
+                    let segs: Vec<String> = trimmed
+                        .split(['/', ':'])
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && *s != ".")
+                        .map(str::to_owned)
+                        .collect();
+                    if !segs.is_empty() {
+                        return Some(segs);
+                    }
+                }
+            }
+            for raw in [
+                meta.explain_payload["file_path"].as_str(),
+                meta.explain_payload["path"].as_str(),
+                (!meta.file_line.trim().is_empty()).then_some(meta.file_line.as_str()),
+                meta.explain_payload.as_str(),
+                meta.explain_payload["node_id"].as_str(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let cleaned = strip_path_prefix_and_line(raw);
+                if cleaned.is_empty() {
+                    continue;
+                }
+                if cleaned.contains('/') {
+                    let trailing_dir = cleaned.ends_with('/');
+                    let mut parts: Vec<String> = cleaned
+                        .split('/')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty() && *p != ".")
+                        .map(str::to_owned)
+                        .collect();
+                    if !trailing_dir && parts.len() >= 2 {
+                        parts.pop();
+                    }
+                    if !parts.is_empty() {
+                        return Some(parts);
+                    }
+                } else if cleaned.contains("::") {
+                    let mut parts: Vec<String> = cleaned
+                        .split("::")
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    if parts.len() >= 2 {
+                        parts.pop();
+                    }
+                    if !parts.is_empty() {
+                        return Some(parts);
+                    }
+                }
+            }
+        }
+        let cleaned = strip_path_prefix_and_line(&node.label);
+        if cleaned.contains('/') {
+            let mut parts: Vec<String> = cleaned
+                .split('/')
+                .map(str::trim)
+                .filter(|p| !p.is_empty() && *p != ".")
+                .map(str::to_owned)
+                .collect();
+            if parts.len() >= 2 {
+                parts.pop();
+            }
+            if !parts.is_empty() {
+                return Some(parts);
+            }
+        }
+        None
+    }
+
+    fn count_multi_node_clusters<'a>(keys: impl Iterator<Item = Option<&'a str>>) -> usize {
+        let mut counts: HashMap<&'a str, usize> = HashMap::new();
+        for key in keys.flatten() {
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts.values().filter(|&&c| c >= 2).count()
+    }
+
+    fn pick_path_cluster_keys(
+        scene: &DenseScene,
+        meta: &DenseSceneMeta,
+    ) -> Option<Vec<Option<(String, String)>>> {
+        let segs_per_node: Vec<Option<Vec<String>>> = scene
+            .nodes
+            .iter()
+            .map(|n| node_path_segments(n, meta.nodes.get(&n.index)))
+            .collect();
+        if segs_per_node.iter().filter(|s| s.is_some()).count() < 2 {
+            return None;
+        }
+        let make_keys = |depth: usize| -> Vec<Option<String>> {
+            segs_per_node
+                .iter()
+                .map(|opt| {
+                    opt.as_ref().and_then(|segs| {
+                        let take_n = segs.len().min(depth);
+                        (take_n > 0).then(|| segs[..take_n].join("/"))
+                    })
+                })
+                .collect()
+        };
+        let keys_d2 = make_keys(2);
+        let keys_d1 = make_keys(1);
+        let multi_d2 = count_multi_node_clusters(keys_d2.iter().map(|k| k.as_deref()));
+        let multi_d1 = count_multi_node_clusters(keys_d1.iter().map(|k| k.as_deref()));
+        let chosen = if multi_d2 >= 2 && (multi_d2 <= 28 || multi_d1 < 2) {
+            keys_d2
+        } else if multi_d1 >= 2 {
+            keys_d1
+        } else if multi_d2 >= 2 {
+            keys_d2
+        } else {
+            return None;
+        };
+        Some(
+            chosen
+                .into_iter()
+                .map(|opt| opt.map(|k| (format!("dir:{k}"), k)))
+                .collect(),
+        )
+    }
+
+    fn community_label_propagation(
+        scene: &DenseScene,
+        meta: &DenseSceneMeta,
+    ) -> Vec<Option<(String, String)>> {
+        let n = scene.nodes.len();
+        if n < 2 || meta.node_adjacency.is_empty() {
+            return vec![None; n];
+        }
+        let mut labels: Vec<usize> = scene.nodes.iter().map(|node| node.index).collect();
+        for _ in 0..10 {
+            let mut changed = false;
+            for pos in 0..n {
+                let node_idx = scene.nodes[pos].index;
+                let Some(adj) = meta.node_adjacency.get(&node_idx) else {
+                    continue;
+                };
+                let mut freq: HashMap<usize, usize> = HashMap::new();
+                for &(_, neighbor_idx) in adj {
+                    if neighbor_idx == node_idx {
+                        continue;
+                    }
+                    if let Some(&npos) = meta.node_pos_by_idx.get(&neighbor_idx) {
+                        *freq.entry(labels[npos]).or_insert(0) += 1;
+                    }
+                }
+                if let Some((&best_comm, _)) = freq
+                    .iter()
+                    .max_by(|(ca, va), (cb, vb)| va.cmp(vb).then_with(|| cb.cmp(ca)))
+                {
+                    if best_comm != labels[pos] {
+                        labels[pos] = best_comm;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut counts: HashMap<usize, usize> = HashMap::new();
+        for &cid in &labels {
+            *counts.entry(cid).or_insert(0) += 1;
+        }
+        let mut multi_cids: Vec<usize> = counts
+            .into_iter()
+            .filter_map(|(cid, count)| (count >= 2).then_some(cid))
+            .collect();
+        multi_cids.sort_unstable();
+        let ordinal_by_cid: HashMap<usize, usize> = multi_cids
+            .into_iter()
+            .enumerate()
+            .map(|(i, cid)| (cid, i + 1))
+            .collect();
+        labels
+            .into_iter()
+            .map(|cid| {
+                ordinal_by_cid
+                    .get(&cid)
+                    .map(|ord| (format!("comm:{cid}"), format!("Cluster {ord}")))
+            })
+            .collect()
+    }
+
+    fn convex_hull(mut pts: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+        pts.retain(|p| p.0.is_finite() && p.1.is_finite());
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+        pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
+        if pts.len() <= 3 {
+            return pts;
+        }
+        let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| -> f64 {
+            (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+        };
+        let mut lower: Vec<(f64, f64)> = Vec::new();
+        for &p in &pts {
+            while lower.len() >= 2
+                && cross(lower[lower.len() - 2], lower[lower.len() - 1], p) <= 0.0
+            {
+                lower.pop();
+            }
+            lower.push(p);
+        }
+        let mut upper: Vec<(f64, f64)> = Vec::new();
+        for &p in pts.iter().rev() {
+            while upper.len() >= 2
+                && cross(upper[upper.len() - 2], upper[upper.len() - 1], p) <= 0.0
+            {
+                upper.pop();
+            }
+            upper.push(p);
+        }
+        lower.pop();
+        upper.pop();
+        lower.extend(upper);
+        lower
+    }
+
+    pub fn compute_dense_cluster_hulls(
+        scene: &DenseScene,
+        meta: &DenseSceneMeta,
+    ) -> Vec<DenseClusterHull> {
+        if scene.nodes.len() < 2 {
+            return Vec::new();
+        }
+        // 1. Prefer explicit architecture layers when multiple layers group nodes cleanly.
+        let mut layer_assign: Vec<Option<(String, String)>> = Vec::with_capacity(scene.nodes.len());
+        let mut multi_layer_counts: HashMap<&str, usize> = HashMap::new();
+        for node in &scene.nodes {
+            if let Some(layer) = meta
+                .layer_of_node
+                .get(&node.index)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                *multi_layer_counts.entry(layer).or_insert(0) += 1;
+                layer_assign.push(Some((format!("layer:{layer}"), layer.to_owned())));
+            } else {
+                layer_assign.push(None);
+            }
+        }
+        let multi_layers = multi_layer_counts.values().filter(|&&c| c >= 2).count();
+        let assignments = if multi_layers >= 2 {
+            layer_assign
+        } else if let Some(path_assign) = pick_path_cluster_keys(scene, meta) {
+            path_assign
+        } else {
+            let comm_assign = community_label_propagation(scene, meta);
+            if comm_assign.iter().any(Option::is_some) {
+                comm_assign
+            } else {
+                let mut role_counts: HashMap<&str, usize> = HashMap::new();
+                for node in &scene.nodes {
+                    let r = node.role.trim();
+                    if !r.is_empty() {
+                        *role_counts.entry(r).or_insert(0) += 1;
+                    }
+                }
+                if role_counts.values().filter(|&&c| c >= 2).count() >= 2 {
+                    scene
+                        .nodes
+                        .iter()
+                        .map(|n| {
+                            let r = n.role.trim();
+                            (!r.is_empty()).then(|| (format!("role:{r}"), r.to_owned()))
+                        })
+                        .collect()
+                } else {
+                    return Vec::new();
+                }
+            }
+        };
+
+        let mut grouped: HashMap<String, (String, Vec<&DenseNodeSpec>)> = HashMap::new();
+        for (node, assign) in scene.nodes.iter().zip(assignments) {
+            let Some((key, label)) = assign else {
+                continue;
+            };
+            let entry = grouped.entry(key).or_insert_with(|| (label, Vec::new()));
+            entry.1.push(node);
+        }
+
+        const HULL_PAD: f64 = 18.0;
+        let mut hulls: Vec<DenseClusterHull> = Vec::new();
+        for (key, (label, members)) in grouped {
+            if members.len() < 2 {
+                continue;
+            }
+            let mut pts = Vec::with_capacity(members.len() * 4);
+            let mut sum_cx = 0.0;
+            let mut sum_cy = 0.0;
+            let mut min_x = f64::INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for node in &members {
+                let x0 = node.x - HULL_PAD;
+                let y0 = node.y - HULL_PAD;
+                let x1 = node.x + node.w.max(10.0) + HULL_PAD;
+                let y1 = node.y + node.h.max(10.0) + HULL_PAD;
+                pts.push((x0, y0));
+                pts.push((x1, y0));
+                pts.push((x1, y1));
+                pts.push((x0, y1));
+                sum_cx += node.x + node.w * 0.5;
+                sum_cy += node.y + node.h * 0.5;
+                min_x = min_x.min(x0);
+                min_y = min_y.min(y0);
+                max_x = max_x.max(x1);
+                max_y = max_y.max(y1);
+            }
+            let polygon = convex_hull(pts);
+            if polygon.len() < 3 {
+                continue;
+            }
+            let denom = members.len() as f64;
+            hulls.push(DenseClusterHull {
+                key,
+                label,
+                color_slot: 0,
+                node_count: members.len(),
+                polygon,
+                centroid: (sum_cx / denom, sum_cy / denom),
+                bounds: (min_x, min_y, max_x, max_y),
+            });
+        }
+        hulls.sort_by(|a, b| {
+            b.node_count
+                .cmp(&a.node_count)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        for (idx, hull) in hulls.iter_mut().enumerate() {
+            hull.color_slot = idx % 6;
+        }
+        hulls
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct PlacedClusterLabel {
+        pub label: String,
+        pub color_slot: usize,
+        pub x: f64,
+        pub y: f64,
+        pub w: f64,
+        pub h: f64,
+    }
+
+    /// Computes non-overlapping screen-space pill labels for cluster hulls at overview zoom.
+    #[allow(dead_code)]
+    pub fn layout_cluster_hull_labels<M>(
+        hulls: &[DenseClusterHull],
+        cam: Camera,
+        vw: f64,
+        vh: f64,
+        mut measure_w: M,
+    ) -> Vec<PlacedClusterLabel>
+    where
+        M: FnMut(&str) -> f64,
+    {
+        if !should_render_cluster_hulls(cam.scale) || hulls.is_empty() {
+            return Vec::new();
+        }
+        let mut placed: Vec<PlacedClusterLabel> = Vec::new();
+        for hull in hulls {
+            let hull_screen_w = (hull.bounds.2 - hull.bounds.0) * cam.scale;
+            let hull_screen_h = (hull.bounds.3 - hull.bounds.1) * cam.scale;
+            if hull_screen_w.max(hull_screen_h) < 22.0 {
+                continue;
+            }
+            let sx = cam.tx + hull.centroid.0 * cam.scale;
+            let sy = cam.ty + hull.centroid.1 * cam.scale;
+            let short = truncate_label_chars(&hull.label, 24);
+            let pill_text = format!("{short} · {}", hull.node_count);
+            let text_w = measure_w(&pill_text).max(20.0);
+            let pw = (text_w + 14.0).clamp(38.0, 220.0);
+            let ph = 20.0;
+            let px = (sx - pw * 0.5).clamp(6.0, (vw - pw - 6.0).max(6.0));
+            let py = (sy - ph * 0.5).clamp(6.0, (vh - ph - 6.0).max(6.0));
+            if sx + pw < 0.0 || sx - pw > vw || sy + ph < 0.0 || sy - ph > vh {
+                continue;
+            }
+            let pad = 6.0;
+            let overlaps = placed.iter().any(|existing| {
+                px < existing.x + existing.w + pad
+                    && px + pw + pad > existing.x
+                    && py < existing.y + existing.h + pad
+                    && py + ph + pad > existing.y
+            });
+            if overlaps {
+                continue;
+            }
+            placed.push(PlacedClusterLabel {
+                label: pill_text,
+                color_slot: hull.color_slot,
+                x: px,
+                y: py,
+                w: pw,
+                h: ph,
+            });
+        }
+        placed
     }
 
     #[allow(dead_code)]
@@ -3198,6 +3679,9 @@ pub(crate) mod canvas2d {
             } else {
                 grid.update_nodes_and_edges(scene, moved_nodes, moved_edges);
                 meta.update_edge_bounds(scene, moved_edges);
+                if !moved_nodes.is_empty() && meta.containers.is_empty() {
+                    meta.cluster_hulls = compute_dense_cluster_hulls(scene, meta);
+                }
             }
             true
         })
@@ -3708,6 +4192,226 @@ pub(crate) mod canvas2d {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn palette_for_cluster_slot(p: &CanvasPalette, slot: usize) -> &str {
+        match slot % 6 {
+            0 => &p.edge_imports,
+            1 => &p.edge_calls,
+            2 => &p.edge_extends,
+            3 => &p.edge_writes,
+            4 => &p.sys_rpc,
+            _ => &p.purple,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn trace_rounded_rect(ctx: &wasm_ctx::Ctx2d, x: f64, y: f64, w: f64, h: f64, radius: f64) {
+        let r = radius.max(0.0).min(w * 0.5).min(h * 0.5);
+        ctx.begin_path();
+        if r <= 0.5 {
+            ctx.move_to(x, y);
+            ctx.line_to(x + w, y);
+            ctx.line_to(x + w, y + h);
+            ctx.line_to(x, y + h);
+            ctx.close_path();
+            return;
+        }
+        let k = r * 0.552_284_749_8;
+        ctx.move_to(x + r, y);
+        ctx.line_to(x + w - r, y);
+        ctx.bezier_curve_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
+        ctx.line_to(x + w, y + h - r);
+        ctx.bezier_curve_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
+        ctx.line_to(x + r, y + h);
+        ctx.bezier_curve_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
+        ctx.line_to(x, y + r);
+        ctx.bezier_curve_to(x, y + r - k, x + r - k, y, x + r, y);
+        ctx.close_path();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    fn paint_dense_containers(
+        ctx: &wasm_ctx::Ctx2d,
+        containers: &[DenseContainerSpec],
+        pal: &CanvasPalette,
+        dashes: &DashArrays,
+        cam_scale: f64,
+        view_bounds: (f64, f64, f64, f64),
+        current_font: &mut Option<&'static str>,
+    ) {
+        if containers.is_empty() {
+            return;
+        }
+        let (view_x0, view_y0, view_x1, view_y1) = view_bounds;
+        let show_headers = cam_scale >= 0.20;
+        let stroke_w = (1.1 / cam_scale.max(0.25)).clamp(1.0, 2.2);
+        for pass_kind in [
+            DenseContainerKind::TierBand,
+            DenseContainerKind::ServiceFrame,
+        ] {
+            for container in containers.iter().filter(|c| c.kind == pass_kind) {
+                if !container.x.is_finite()
+                    || !container.y.is_finite()
+                    || !container.w.is_finite()
+                    || !container.h.is_finite()
+                    || container.w <= 0.0
+                    || container.h <= 0.0
+                {
+                    continue;
+                }
+                if container.x + container.w < view_x0
+                    || container.x > view_x1
+                    || container.y + container.h < view_y0
+                    || container.y > view_y1
+                {
+                    continue;
+                }
+                trace_rounded_rect(
+                    ctx,
+                    container.x,
+                    container.y,
+                    container.w,
+                    container.h,
+                    container.radius,
+                );
+                match container.kind {
+                    DenseContainerKind::TierBand => {
+                        ctx.set_line_dash(&dashes.solid);
+                        ctx.set_global_alpha(0.65);
+                        ctx.set_fill_style(&pal.soft);
+                        ctx.fill();
+                        ctx.set_global_alpha(0.55);
+                        ctx.set_line_width(stroke_w);
+                        ctx.set_stroke_style(&pal.line);
+                        ctx.stroke();
+                    }
+                    DenseContainerKind::ServiceFrame => {
+                        ctx.set_global_alpha(0.32);
+                        ctx.set_fill_style(&pal.soft);
+                        ctx.fill();
+                        ctx.set_line_dash(&dashes.dashed);
+                        ctx.set_global_alpha(0.85);
+                        ctx.set_line_width(stroke_w * 1.1);
+                        ctx.set_stroke_style(&pal.line);
+                        ctx.stroke();
+                    }
+                }
+                if show_headers && !container.label.is_empty() {
+                    let header_font = "600 11px sans-serif";
+                    if *current_font != Some(header_font) {
+                        ctx.set_font(header_font);
+                        *current_font = Some(header_font);
+                    }
+                    let (lx, ly, alpha, color) = match container.kind {
+                        DenseContainerKind::TierBand => {
+                            (container.x + 10.0, container.y + 18.0, 0.85, &pal.muted)
+                        }
+                        DenseContainerKind::ServiceFrame => {
+                            (container.x + 12.0, container.y + 18.0, 0.92, &pal.ink)
+                        }
+                    };
+                    ctx.set_global_alpha(alpha);
+                    ctx.set_fill_style(color);
+                    let max_w = (container.w - 22.0).max(16.0);
+                    ctx.fill_text(&container.label, lx, ly, max_w);
+                }
+            }
+        }
+        ctx.set_line_dash(&dashes.solid);
+        ctx.set_global_alpha(1.0);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn paint_cluster_hulls_underlay(
+        ctx: &wasm_ctx::Ctx2d,
+        hulls: &[DenseClusterHull],
+        pal: &CanvasPalette,
+        dashes: &DashArrays,
+        cam_scale: f64,
+        view_bounds: (f64, f64, f64, f64),
+    ) {
+        if hulls.is_empty() {
+            return;
+        }
+        let (view_x0, view_y0, view_x1, view_y1) = view_bounds;
+        let stroke_w = (1.3 / cam_scale.max(0.12)).clamp(1.2, 6.0);
+        ctx.set_line_width(stroke_w);
+        for hull in hulls {
+            if hull.polygon.len() < 3 {
+                continue;
+            }
+            if hull.bounds.2 < view_x0
+                || hull.bounds.0 > view_x1
+                || hull.bounds.3 < view_y0
+                || hull.bounds.1 > view_y1
+            {
+                continue;
+            }
+            let color = palette_for_cluster_slot(pal, hull.color_slot);
+            ctx.begin_path();
+            ctx.move_to(hull.polygon[0].0, hull.polygon[0].1);
+            for pt in &hull.polygon[1..] {
+                ctx.line_to(pt.0, pt.1);
+            }
+            ctx.close_path();
+            ctx.set_global_alpha(0.09);
+            ctx.set_fill_style(color);
+            ctx.fill();
+            ctx.set_line_dash(&dashes.dashed);
+            ctx.set_global_alpha(0.45);
+            ctx.set_stroke_style(color);
+            ctx.stroke();
+        }
+        ctx.set_line_dash(&dashes.solid);
+        ctx.set_global_alpha(1.0);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    fn paint_cluster_hull_labels(
+        ctx: &wasm_ctx::Ctx2d,
+        hulls: &[DenseClusterHull],
+        pal: &CanvasPalette,
+        cam: Camera,
+        dpr: f64,
+        vw: f64,
+        vh: f64,
+        current_font: &mut Option<&'static str>,
+    ) {
+        if hulls.is_empty() {
+            return;
+        }
+        ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
+        let pill_font = "600 11px sans-serif";
+        if *current_font != Some(pill_font) {
+            ctx.set_font(pill_font);
+            *current_font = Some(pill_font);
+        }
+        let placed =
+            layout_cluster_hull_labels(hulls, cam, vw, vh, |s| ctx.measure_text(s).width());
+        for pill in placed {
+            let color = palette_for_cluster_slot(pal, pill.color_slot);
+            trace_rounded_rect(ctx, pill.x, pill.y, pill.w, pill.h, 6.0);
+            ctx.set_global_alpha(0.92);
+            ctx.set_fill_style(&pal.paper);
+            ctx.fill();
+            ctx.set_global_alpha(0.82);
+            ctx.set_line_width(1.2);
+            ctx.set_stroke_style(color);
+            ctx.stroke();
+            ctx.set_global_alpha(1.0);
+            ctx.set_fill_style(&pal.ink);
+            ctx.fill_text(
+                &pill.label,
+                pill.x + 7.0,
+                pill.y + 13.5,
+                (pill.w - 14.0).max(8.0),
+            );
+        }
+        ctx.set_global_alpha(1.0);
+    }
+
     #[allow(unused_variables)]
     pub fn paint_scene(canvas_id: &str, cam: Camera, hover: Option<(u8, usize)>, draw_nodes: bool) {
         #[cfg(target_arch = "wasm32")]
@@ -3822,6 +4526,8 @@ pub(crate) mod canvas2d {
                     _ => {}
                 }
 
+                let show_cluster_hulls =
+                    should_render_cluster_hulls(cam.scale) && meta.containers.is_empty();
                 with_dash_arrays(|dashes| {
                     struct PreparedEdge<'a> {
                         edge: &'a DenseEdgeSpec,
@@ -3906,6 +4612,25 @@ pub(crate) mod canvas2d {
                     let mut prepared: Vec<PreparedEdge<'_>> =
                         Vec::with_capacity(scene.edges.len().min(256));
                     let view_bounds = (view_x0, view_y0, view_x1, view_y1);
+                    paint_dense_containers(
+                        &ctx,
+                        &meta.containers,
+                        &pal,
+                        dashes,
+                        cam.scale,
+                        view_bounds,
+                        &mut current_font,
+                    );
+                    if show_cluster_hulls {
+                        paint_cluster_hulls_underlay(
+                            &ctx,
+                            &meta.cluster_hulls,
+                            &pal,
+                            dashes,
+                            cam.scale,
+                            view_bounds,
+                        );
+                    }
                     if let Some(edge_indices) = grid.visible_edge_indices(
                         view_x0 - 8.0,
                         view_y0 - 8.0,
@@ -4245,6 +4970,18 @@ pub(crate) mod canvas2d {
                         for node in &scene.nodes {
                             paint_node(node);
                         }
+                    }
+                    if show_cluster_hulls {
+                        paint_cluster_hull_labels(
+                            &ctx,
+                            &meta.cluster_hulls,
+                            &pal,
+                            cam,
+                            dpr,
+                            vw,
+                            vh,
+                            &mut current_font,
+                        );
                     }
                 }
                 ctx.set_global_alpha(1.0);
@@ -5175,6 +5912,276 @@ mod tests {
             "calls",
             &cull_scene.edges[1]
         ));
+    }
+
+    #[test]
+    fn dense_cluster_hulls_group_by_layer_directory_and_community_with_convex_bounds() {
+        // 1. Directory path grouping selects coherent sub-clusters (src/api vs src/db).
+        let dir_nodes = vec![
+            canvas2d::DenseNodeSpec {
+                index: 0,
+                x: 40.0,
+                y: 40.0,
+                w: 120.0,
+                h: 36.0,
+                label: "routes.rs".into(),
+                ..Default::default()
+            },
+            canvas2d::DenseNodeSpec {
+                index: 1,
+                x: 200.0,
+                y: 60.0,
+                w: 120.0,
+                h: 36.0,
+                label: "handlers.rs".into(),
+                ..Default::default()
+            },
+            canvas2d::DenseNodeSpec {
+                index: 2,
+                x: 40.0,
+                y: 420.0,
+                w: 120.0,
+                h: 36.0,
+                label: "pool.rs".into(),
+                ..Default::default()
+            },
+            canvas2d::DenseNodeSpec {
+                index: 3,
+                x: 210.0,
+                y: 440.0,
+                w: 120.0,
+                h: 36.0,
+                label: "queries.rs".into(),
+                ..Default::default()
+            },
+        ];
+        let dir_scene = canvas2d::DenseScene {
+            width: 600.0,
+            height: 600.0,
+            nodes: dir_nodes,
+            edges: vec![],
+        };
+        let mut dir_meta = canvas2d::DenseSceneMeta::default();
+        for (idx, path) in [
+            (0usize, "src/api/routes.rs"),
+            (1, "src/api/handlers.rs"),
+            (2, "src/db/pool.rs"),
+            (3, "src/db/queries.rs"),
+        ] {
+            dir_meta.nodes.insert(
+                idx,
+                canvas2d::DenseNodeMeta {
+                    explain_kind: "node".into(),
+                    explain_payload: json!({ "path": path }),
+                    ..Default::default()
+                },
+            );
+        }
+        dir_meta.rebuild_caches(&dir_scene);
+        assert_eq!(dir_meta.cluster_hulls.len(), 2);
+        let api_hull = dir_meta
+            .cluster_hulls
+            .iter()
+            .find(|h| h.label == "src/api")
+            .expect("api hull");
+        assert_eq!(api_hull.node_count, 2);
+        assert!(api_hull.polygon.len() >= 4);
+        assert!(api_hull.bounds.0 < 40.0 && api_hull.bounds.2 > 320.0);
+
+        // 2. Explicit layer assignments take priority when multiple multi-node layers exist.
+        let mut layered_meta = dir_meta.clone();
+        layered_meta.layer_of_node.insert(0, "Http".into());
+        layered_meta.layer_of_node.insert(1, "Http".into());
+        layered_meta.layer_of_node.insert(2, "Storage".into());
+        layered_meta.layer_of_node.insert(3, "Storage".into());
+        layered_meta.rebuild_caches(&dir_scene);
+        let layer_labels: Vec<&str> = layered_meta
+            .cluster_hulls
+            .iter()
+            .map(|h| h.label.as_str())
+            .collect();
+        assert!(layer_labels.contains(&"Http"));
+        assert!(layer_labels.contains(&"Storage"));
+
+        // 3. Pure graph topology with no path/layer metadata falls back to community propagation.
+        let bare_nodes: Vec<canvas2d::DenseNodeSpec> = (0..4)
+            .map(|i| canvas2d::DenseNodeSpec {
+                index: i,
+                x: if i < 2 {
+                    50.0 + (i as f64) * 140.0
+                } else {
+                    550.0 + ((i - 2) as f64) * 140.0
+                },
+                y: 80.0,
+                w: 100.0,
+                h: 32.0,
+                label: format!("n{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let bare_edges = vec![
+            canvas2d::DenseEdgeSpec {
+                index: 0,
+                pts: vec![(100.0, 96.0), (190.0, 96.0)],
+                kind: "calls".into(),
+                ..Default::default()
+            },
+            canvas2d::DenseEdgeSpec {
+                index: 1,
+                pts: vec![(600.0, 96.0), (690.0, 96.0)],
+                kind: "calls".into(),
+                ..Default::default()
+            },
+        ];
+        let bare_scene = canvas2d::DenseScene {
+            width: 900.0,
+            height: 300.0,
+            nodes: bare_nodes,
+            edges: bare_edges,
+        };
+        let mut bare_meta = canvas2d::DenseSceneMeta::default();
+        bare_meta.edges.insert(
+            0,
+            canvas2d::DenseEdgeMeta {
+                from_index: Some(0),
+                to_index: Some(1),
+                ..Default::default()
+            },
+        );
+        bare_meta.edges.insert(
+            1,
+            canvas2d::DenseEdgeMeta {
+                from_index: Some(2),
+                to_index: Some(3),
+                ..Default::default()
+            },
+        );
+        bare_meta.rebuild_caches(&bare_scene);
+        assert_eq!(bare_meta.cluster_hulls.len(), 2);
+    }
+
+    #[test]
+    fn dense_cluster_hulls_label_overlap_culling_and_scale_threshold() {
+        assert!(canvas2d::should_render_cluster_hulls(0.20));
+        assert!(canvas2d::should_render_cluster_hulls(0.349));
+        assert!(!canvas2d::should_render_cluster_hulls(0.35));
+        assert!(!canvas2d::should_render_cluster_hulls(0.80));
+        assert!(!canvas2d::should_render_cluster_hulls(0.0));
+
+        let hulls = vec![
+            canvas2d::DenseClusterHull {
+                key: "dir:large".into(),
+                label: "core/engine".into(),
+                color_slot: 0,
+                node_count: 18,
+                polygon: vec![(0.0, 0.0), (900.0, 0.0), (900.0, 700.0), (0.0, 700.0)],
+                centroid: (450.0, 350.0),
+                bounds: (0.0, 0.0, 900.0, 700.0),
+            },
+            canvas2d::DenseClusterHull {
+                key: "dir:overlapping".into(),
+                label: "core/sub".into(),
+                color_slot: 1,
+                node_count: 5,
+                polygon: vec![
+                    (380.0, 300.0),
+                    (620.0, 300.0),
+                    (620.0, 440.0),
+                    (380.0, 440.0),
+                ],
+                centroid: (460.0, 355.0),
+                bounds: (380.0, 300.0, 620.0, 440.0),
+            },
+            canvas2d::DenseClusterHull {
+                key: "dir:far".into(),
+                label: "cli/cmd".into(),
+                color_slot: 2,
+                node_count: 9,
+                polygon: vec![
+                    (1400.0, 200.0),
+                    (2000.0, 200.0),
+                    (2000.0, 600.0),
+                    (1400.0, 600.0),
+                ],
+                centroid: (1700.0, 400.0),
+                bounds: (1400.0, 200.0, 2000.0, 600.0),
+            },
+        ];
+        let placed = canvas2d::layout_cluster_hull_labels(
+            &hulls,
+            Camera::new(0.0, 0.0, 0.25),
+            1200.0,
+            800.0,
+            |s| (s.len() as f64) * 6.5,
+        );
+        // Overlapping smaller cluster pill is culled while non-overlapping ones remain.
+        let texts: Vec<&str> = placed.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(texts, vec!["core/engine · 18", "cli/cmd · 9"]);
+
+        // Above 0.35 zoom, cluster hull pills are suppressed in favor of regular node labels.
+        assert!(canvas2d::layout_cluster_hull_labels(
+            &hulls,
+            Camera::new(0.0, 0.0, 0.40),
+            1200.0,
+            800.0,
+            |s| (s.len() as f64) * 6.5,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn dense_scene_meta_containers_preserve_default_construction_and_suppress_auto_hulls() {
+        let scene = canvas2d::DenseScene {
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![
+                canvas2d::DenseNodeSpec {
+                    index: 0,
+                    x: 40.0,
+                    y: 40.0,
+                    w: 140.0,
+                    h: 54.0,
+                    label: "api/orders".into(),
+                    ..Default::default()
+                },
+                canvas2d::DenseNodeSpec {
+                    index: 1,
+                    x: 40.0,
+                    y: 120.0,
+                    w: 140.0,
+                    h: 54.0,
+                    label: "api/billing".into(),
+                    ..Default::default()
+                },
+            ],
+            edges: vec![],
+        };
+        let mut meta = canvas2d::DenseSceneMeta {
+            containers: vec![
+                canvas2d::DenseContainerSpec {
+                    kind: canvas2d::DenseContainerKind::TierBand,
+                    x: 16.0,
+                    y: 16.0,
+                    w: 220.0,
+                    h: 220.0,
+                    radius: 8.0,
+                    label: "ENTRY".into(),
+                },
+                canvas2d::DenseContainerSpec {
+                    kind: canvas2d::DenseContainerKind::ServiceFrame,
+                    x: 28.0,
+                    y: 28.0,
+                    w: 180.0,
+                    h: 180.0,
+                    radius: 10.0,
+                    label: "api".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        meta.rebuild_caches(&scene);
+        assert_eq!(meta.containers.len(), 2);
+        assert!(meta.cluster_hulls.is_empty());
     }
 
     trait CameraTestExt {

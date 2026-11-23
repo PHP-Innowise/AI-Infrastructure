@@ -824,8 +824,136 @@ fn refresh_active_external_views(proj: &str) {
     }
 }
 
-/// Schedules a non-disruptive debounced reload of open/mounted surfaces when no pointer
-/// pan or pin drag is in progress, keeping camera and selection intact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SseRefreshMode {
+    SkipAlreadyCurrent,
+    TargetedPatch,
+    FullReload,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(super) fn plan_sse_graph_refresh(
+    delta: &crate::graph::SseDeltaPayload,
+    prev_nodes: Option<u64>,
+    prev_edges: Option<u64>,
+    view: &V,
+    state: &V,
+) -> SseRefreshMode {
+    let Some(nodes) = view["nodes"].as_array() else {
+        return SseRefreshMode::FullReload;
+    };
+    if !view.is_object() {
+        return SseRefreshMode::FullReload;
+    }
+    if delta.full_reload || delta.schema_changed || !delta.removed_files.is_empty() {
+        return SseRefreshMode::FullReload;
+    }
+    let counts_changed =
+        (delta.nodes.is_some() && prev_nodes.is_some() && delta.nodes != prev_nodes)
+            || (delta.edges.is_some() && prev_edges.is_some() && delta.edges != prev_edges);
+    if counts_changed {
+        return SseRefreshMode::FullReload;
+    }
+    let view_rev = view["ir_revision"].as_u64();
+    if delta.revision.is_some() && view_rev == delta.revision && delta.changed_files.is_empty() {
+        return SseRefreshMode::SkipAlreadyCurrent;
+    }
+    if delta.changed_files.is_empty() || delta.changed_files.len() > 32 {
+        return SseRefreshMode::FullReload;
+    }
+    if m::yes(&view["preliminary"]) || m::yes(&view["truncated"]) {
+        return SseRefreshMode::FullReload;
+    }
+    let mode = view["mode"].as_str().unwrap_or("");
+    let lod = view["lod"].as_str().unwrap_or("");
+    if matches!(
+        mode,
+        "layers" | "architecture" | "tests" | "history" | "link" | "cycle"
+    ) || matches!(lod, "crate" | "folder")
+        || m::yes(&state["modules"])
+        || m::yes(&state["history"])
+        || state["cycle"].is_string()
+        || state["pattern"].is_string()
+        || !m::text(state, "path_nodes").is_empty()
+    {
+        return SseRefreshMode::FullReload;
+    }
+    let unscoped = m::text(state, "scope").is_empty()
+        && m::text(state, "focus").is_empty()
+        && !m::yes(&state["isolate_active"]);
+    if unscoped && delta.nodes.is_some_and(|n| n as usize != nodes.len()) {
+        return SseRefreshMode::FullReload;
+    }
+    SseRefreshMode::TargetedPatch
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(super) fn apply_sse_delta_patch_to_view(
+    view: &mut V,
+    delta: &crate::graph::SseDeltaPayload,
+) -> usize {
+    if let Some(rev) = delta.revision {
+        view["ir_revision"] = json!(rev);
+    }
+    view["stale"] = json!(delta.state == "stale");
+    if delta.changed_files.is_empty() {
+        return 0;
+    }
+    let changed_set: BTreeSet<String> = delta
+        .changed_files
+        .iter()
+        .map(|f| normalize_rel_path(f))
+        .filter(|f| !f.is_empty())
+        .collect();
+    if changed_set.is_empty() {
+        return 0;
+    }
+    let mut patched = 0usize;
+    if let Some(nodes) = view["nodes"].as_array_mut() {
+        for node in nodes {
+            let path = normalize_rel_path(&m::text(node, "path"));
+            let file = normalize_rel_path(&m::text(node, "file"));
+            if (!path.is_empty() && changed_set.contains(&path))
+                || (!file.is_empty() && changed_set.contains(&file))
+            {
+                node["changed"] = json!(true);
+                patched += 1;
+            }
+        }
+    }
+    if view["focus"].is_object() {
+        let fpath = normalize_rel_path(&m::text(&view["focus"], "path"));
+        if !fpath.is_empty() && changed_set.contains(&fpath) {
+            view["focus"]["changed"] = json!(true);
+        }
+    }
+    patched
+}
+
+#[cfg(target_arch = "wasm32")]
+fn patch_surface_sse_delta(
+    surface: MapSurface,
+    delta: &crate::graph::SseDeltaPayload,
+    prev_nodes: Option<u64>,
+    prev_edges: Option<u64>,
+) -> SseRefreshMode {
+    let mut view = m::data(surface.view_key);
+    let surf_state = surface_state(surface);
+    let mode = plan_sse_graph_refresh(delta, prev_nodes, prev_edges, &view, &surf_state);
+    if mode == SseRefreshMode::TargetedPatch {
+        apply_sse_delta_patch_to_view(&mut view, delta);
+        m::set(surface.view_key, view);
+        rerender_surface_preserving_camera(surface);
+        if delta.state != "stale" {
+            dom::hidden(&format!("{}-stale-banner", surface.id_prefix), true);
+        }
+    }
+    mode
+}
+
+/// Schedules a non-disruptive debounced reload (or targeted SSE delta patch when safe)
+/// of open/mounted surfaces when no pointer pan or pin drag is in progress, keeping
+/// camera and selection intact.
 pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
     if any_graph_drag_active() {
         return;
@@ -837,17 +965,23 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
             if any_graph_drag_active() {
                 return;
             }
+            let raw_event = m::data("graph-sse-status");
+            let delta = crate::graph::extract_sse_delta_payload(&raw_event);
+            let delta_meta = m::data("graph-sse-delta-meta");
+            let prev_nodes = delta_meta["prev_nodes"].as_u64();
+            let prev_edges = delta_meta["prev_edges"].as_u64();
+
+            let mut need_full_modal = false;
             if open() {
                 let modal_proj = surface_scope(MODAL_SURFACE).project_id().to_owned();
                 if project_scope_matches(&proj, &modal_proj) {
-                    spawn_local(async {
-                        crate::graph::load(false).await;
-                        if open() {
-                            modal_lifecycle::load(true).await;
-                        }
-                    });
+                    need_full_modal =
+                        patch_surface_sse_delta(MODAL_SURFACE, &delta, prev_nodes, prev_edges)
+                            == SseRefreshMode::FullReload;
                 }
             }
+
+            let mut embedded_full = Vec::new();
             for surface in [
                 SESSION_SURFACE,
                 SYSTEM_EMBEDDED_SURFACE,
@@ -855,11 +989,40 @@ pub(crate) fn maybe_schedule_idle_refresh(project_id: &str) {
             ] {
                 if dom::get(surface.canvas).is_some() {
                     let surf_proj = surface_scope(surface).project_id().to_owned();
-                    if project_scope_matches(&proj, &surf_proj) {
-                        spawn_local(async move {
-                            load_embedded_surface(surface, true).await;
-                        });
+                    if project_scope_matches(&proj, &surf_proj)
+                        && patch_surface_sse_delta(surface, &delta, prev_nodes, prev_edges)
+                            == SseRefreshMode::FullReload
+                    {
+                        embedded_full.push(surface);
                     }
+                }
+            }
+
+            if need_full_modal {
+                let also_session = embedded_full.iter().any(|s| s.name == SESSION_SURFACE.name);
+                spawn_local(async move {
+                    crate::graph::load(false).await;
+                    if open() {
+                        modal_lifecycle::load(true).await;
+                    }
+                    if !also_session {
+                        for surface in embedded_full {
+                            load_embedded_surface(surface, true).await;
+                        }
+                    } else {
+                        for surface in embedded_full
+                            .into_iter()
+                            .filter(|s| s.name != SESSION_SURFACE.name)
+                        {
+                            load_embedded_surface(surface, true).await;
+                        }
+                    }
+                });
+            } else {
+                for surface in embedded_full {
+                    spawn_local(async move {
+                        load_embedded_surface(surface, true).await;
+                    });
                 }
             }
             refresh_active_external_views(&proj);
@@ -999,6 +1162,81 @@ pub(in crate::graph_map) fn sync_surface_toolbar(
     sync_history_and_pin_controls(surface, state);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AutoLodTier {
+    Crate,
+    Folder,
+    Full,
+}
+
+pub(super) fn auto_lod_tier_for_scale(scale: f64) -> AutoLodTier {
+    if scale < 0.35 {
+        AutoLodTier::Crate
+    } else if scale < 0.65 {
+        AutoLodTier::Folder
+    } else {
+        AutoLodTier::Full
+    }
+}
+
+pub(super) fn loaded_view_differs_from_lod(
+    view: &V,
+    target: &(Option<String>, Option<u64>),
+) -> bool {
+    if !view.is_object() {
+        return false;
+    }
+    let view_lod = view["lod"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| matches!(*s, "crate" | "folder"))
+        .map(str::to_owned);
+    let view_weight = view["min_weight"].as_u64().filter(|&w| w >= 2);
+    (&view_lod, &view_weight) != (&target.0, &target.1)
+}
+
+pub(super) fn should_trigger_auto_lod_for_target(state: &V, view: &V, scale: f64) -> bool {
+    if !m::yes(&state["auto_lod"])
+        || state["lod"].as_str().is_some_and(|s| !s.trim().is_empty())
+        || state["min_weight"].as_u64().is_some_and(|w| w >= 1)
+    {
+        return false;
+    }
+    let target = progressive_lod_for_state(state, Some(scale));
+    loaded_view_differs_from_lod(view, &target)
+}
+
+pub(super) fn should_trigger_auto_lod_reload(
+    embedded: bool,
+    state: &V,
+    view: &V,
+    prev_scale: f64,
+    next_scale: f64,
+) -> bool {
+    if embedded || !prev_scale.is_finite() || !next_scale.is_finite() || next_scale <= 0.0 {
+        return false;
+    }
+    if auto_lod_tier_for_scale(prev_scale) == auto_lod_tier_for_scale(next_scale)
+        && !should_trigger_auto_lod_for_target(state, view, next_scale)
+    {
+        return false;
+    }
+    should_trigger_auto_lod_for_target(state, view, next_scale)
+}
+
+fn live_camera_scale_for_map_path(state: &V, embedded: bool) -> Option<f64> {
+    if embedded || m::yes(&state["fit"]) {
+        return None;
+    }
+    let raw_cam = m::data(MODAL_SURFACE.camera_key);
+    if !raw_cam.is_object() || raw_cam["fit_mode"].as_bool() != Some(false) {
+        return None;
+    }
+    raw_cam["scale"]
+        .as_f64()
+        .filter(|s| s.is_finite() && *s > 0.0)
+}
+
 pub fn progressive_lod_for_state(
     state: &V,
     camera_scale: Option<f64>,
@@ -1020,6 +1258,8 @@ pub fn progressive_lod_for_state(
     }
     let scale = camera_scale
         .or_else(|| state["scale"].as_f64())
+        .or_else(|| state["zoom"].as_f64())
+        .filter(|s| s.is_finite() && *s > 0.0)
         .unwrap_or(1.0);
     let no_submode = state["cycle"].is_null()
         && state["pattern"].is_null()
@@ -1118,7 +1358,8 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
         let depth = state["isolate_depth"].as_u64().unwrap_or(2).clamp(1, 6);
         query.push(("depth", depth.to_string()));
     }
-    let (lod_val, min_weight_val) = progressive_lod_for_state(state, None);
+    let live_scale = live_camera_scale_for_map_path(state, embedded);
+    let (lod_val, min_weight_val) = progressive_lod_for_state(state, live_scale);
     if let Some(level) = lod_val {
         query.push(("lod", level));
     }
@@ -1288,5 +1529,130 @@ mod tests {
         assert!(any_graph_drag_active());
         m::take("omnigraph-node-drag");
         assert!(!any_graph_drag_active());
+    }
+
+    #[test]
+    fn auto_lod_threshold_crossing_and_loaded_view_diff_checks() {
+        let state = json!({
+            "auto_lod": true,
+            "scope": "",
+            "focus": "",
+        });
+        let full_view = json!({ "mode": "map", "nodes": [] });
+        let folder_view = json!({ "mode": "map", "lod": "folder", "nodes": [] });
+        let crate_view = json!({ "mode": "map", "lod": "crate", "min_weight": 2, "nodes": [] });
+
+        assert_eq!(auto_lod_tier_for_scale(0.20), AutoLodTier::Crate);
+        assert_eq!(auto_lod_tier_for_scale(0.35), AutoLodTier::Folder);
+        assert_eq!(auto_lod_tier_for_scale(0.65), AutoLodTier::Full);
+
+        // Crossing 0.65 downward while full view is loaded triggers reload; staying at 0.8 -> 0.7 does not.
+        assert!(!should_trigger_auto_lod_reload(
+            false, &state, &full_view, 0.85, 0.72
+        ));
+        assert!(should_trigger_auto_lod_reload(
+            false, &state, &full_view, 0.72, 0.55
+        ));
+        // Crossing 0.35 downward while folder view is loaded triggers crate reload.
+        assert!(should_trigger_auto_lod_reload(
+            false,
+            &state,
+            &folder_view,
+            0.50,
+            0.30
+        ));
+        // Already loaded at crate LOD -> zooming within < 0.35 does not reload again.
+        assert!(!should_trigger_auto_lod_reload(
+            false,
+            &state,
+            &crate_view,
+            0.30,
+            0.20
+        ));
+        // Embedded surfaces do not trigger modal auto_lod reloads.
+        assert!(!should_trigger_auto_lod_reload(
+            true, &state, &full_view, 0.72, 0.55
+        ));
+    }
+
+    #[test]
+    fn sse_refresh_planner_distinguishes_skip_patch_and_full_reload() {
+        let base_state = json!({});
+        let map_view = json!({
+            "mode": "map",
+            "ir_revision": 10,
+            "nodes": [
+                { "path": "src/auth.rs", "name": "auth.rs" },
+                { "path": "src/db.rs", "name": "db.rs" }
+            ],
+            "edges": []
+        });
+
+        // Identical revision without changed files skips reload.
+        let same_rev = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "ir_updated",
+            "revision": 10
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(&same_rev, Some(2), Some(0), &map_view, &base_state),
+            SseRefreshMode::SkipAlreadyCurrent
+        );
+
+        // Incremental changed_files with unchanged counts qualifies for targeted patch.
+        let inc = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 11,
+            "nodes": 2,
+            "edges": 0,
+            "changed_files": ["src/auth.rs"]
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(&inc, Some(2), Some(0), &map_view, &base_state),
+            SseRefreshMode::TargetedPatch
+        );
+        let mut patched_view = map_view.clone();
+        let patched_n = apply_sse_delta_patch_to_view(&mut patched_view, &inc);
+        assert_eq!(patched_n, 1);
+        assert_eq!(patched_view["ir_revision"], json!(11));
+        assert_eq!(patched_view["nodes"][0]["changed"], json!(true));
+        assert!(patched_view["nodes"][1]["changed"].is_null());
+
+        // Removals, count changes, schema updates, or aggregate modes fall back to FullReload.
+        let count_changed = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 12,
+            "nodes": 3,
+            "edges": 1,
+            "changed_files": ["src/auth.rs"]
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(&count_changed, Some(2), Some(0), &map_view, &base_state),
+            SseRefreshMode::FullReload
+        );
+
+        let removed = crate::graph::extract_sse_delta_payload(&json!({
+            "state": "ready",
+            "reason": "incremental_update",
+            "revision": 12,
+            "removed_files": ["src/old.rs"],
+            "changed_files": ["src/auth.rs"]
+        }));
+        assert_eq!(
+            plan_sse_graph_refresh(&removed, Some(2), Some(0), &map_view, &base_state),
+            SseRefreshMode::FullReload
+        );
+
+        let layers_view = json!({
+            "mode": "layers",
+            "ir_revision": 10,
+            "nodes": [{ "path": "layer:Api" }],
+        });
+        assert_eq!(
+            plan_sse_graph_refresh(&inc, Some(2), Some(0), &layers_view, &base_state),
+            SseRefreshMode::FullReload
+        );
     }
 }
