@@ -2069,16 +2069,37 @@ impl Index {
                         .extend(hits.iter().cloned());
                 }
             }
-            for ((fb, tb), hits) in &sem_by_bucket {
-                if fb != tb
-                    && drawn_nodes.contains(fb.as_str())
-                    && drawn_nodes.contains(tb.as_str())
-                    && !present_edges.contains(&(fb.clone(), tb.clone()))
-                {
-                    missing
-                        .entry((fb.clone(), tb.clone()))
-                        .or_default()
-                        .extend(hits.iter().cloned());
+            if matches!(view_lod.as_deref(), Some("crate" | "folder")) {
+                for ((fb, tb), hits) in &sem_by_bucket {
+                    if fb != tb
+                        && drawn_nodes.contains(fb.as_str())
+                        && drawn_nodes.contains(tb.as_str())
+                        && !present_edges.contains(&(fb.clone(), tb.clone()))
+                    {
+                        missing
+                            .entry((fb.clone(), tb.clone()))
+                            .or_default()
+                            .extend(hits.iter().cloned());
+                    }
+                }
+            } else {
+                for ((fb, clean_target), hits) in &sem_by_exact_target {
+                    let candidates = [
+                        format!("sem:{clean_target}"),
+                        clean_target.clone(),
+                        crate::graph_ir::semantic_namespace_bucket(clean_target).to_owned(),
+                    ];
+                    if drawn_nodes.contains(fb.as_str())
+                        && let Some(tb) = candidates
+                            .into_iter()
+                            .find(|cand| fb != cand && drawn_nodes.contains(cand.as_str()))
+                        && !present_edges.contains(&(fb.clone(), tb.clone()))
+                    {
+                        missing
+                            .entry((fb.clone(), tb))
+                            .or_default()
+                            .extend(hits.iter().cloned());
+                    }
                 }
             }
             if !missing.is_empty() {

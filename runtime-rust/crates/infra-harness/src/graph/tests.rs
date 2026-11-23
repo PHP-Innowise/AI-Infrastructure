@@ -4322,3 +4322,91 @@ fn git_print_cache_respects_racy_window_and_invalidates_on_head_index_or_worktre
     assert_ne!(committed.commit, cached.commit);
     assert_ne!(committed.hash, cached.hash);
 }
+
+#[test]
+fn git_print_cache_detects_untracked_files_in_empty_and_ignored_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run_git = |args: &[&str]| {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let out = projects::git(root, &owned, 20).expect("git invocation");
+        assert_eq!(out.code, 0, "git {args:?} failed: {:?}", out);
+    };
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Test"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(root.join(".gitignore"), "ignored_only/*.tmp\n").unwrap();
+    std::fs::write(root.join("app.txt"), "v1\n").unwrap();
+    let empty_dir = root.join("empty_sub");
+    let ignored_dir = root.join("ignored_only");
+    std::fs::create_dir_all(&empty_dir).unwrap();
+    std::fs::create_dir_all(&ignored_dir).unwrap();
+    std::fs::write(ignored_dir.join("scratch.tmp"), "ign\n").unwrap();
+    run_git(&["add", ".gitignore", "app.txt"]);
+    run_git(&["commit", "-m", "init"]);
+
+    let max_mtime_ns = || -> i128 {
+        let mut latest = 0_i128;
+        for p in [
+            root.to_path_buf(),
+            root.join("app.txt"),
+            root.join(".gitignore"),
+            empty_dir.clone(),
+            empty_dir.join("new.php"),
+            ignored_dir.clone(),
+            ignored_dir.join("scratch.tmp"),
+            root.join(".git/HEAD"),
+            root.join(".git/index"),
+            root.join(".git/refs/heads/main"),
+        ] {
+            if let Ok(m) = std::fs::metadata(&p)
+                && let Ok(t) = m.modified()
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                latest = latest.max(d.as_nanos() as i128);
+            }
+        }
+        latest
+    };
+
+    let t1 = max_mtime_ns() + helpers::PRINT_RACY_NS + 5_000_000_000;
+    let p1 = helpers::print_with_now(root, t1).expect("warm settled cache");
+    let spawns_after_warm = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    let p1_hit = helpers::print_with_now(root, t1 + 1_000_000).expect("cache hit");
+    assert_eq!(p1, p1_hit);
+    assert_eq!(
+        helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get()),
+        spawns_after_warm
+    );
+
+    // Creating a new untracked file inside a pre-existing empty directory must invalidate cache.
+    std::fs::write(empty_dir.join("new.php"), "<?php\n").unwrap();
+    let t2 = max_mtime_ns() + helpers::PRINT_RACY_NS + 10_000_000_000;
+    let p2 = helpers::print_with_now(root, t2).expect("print after empty_sub untracked");
+    assert_ne!(
+        p2.hash, p1.hash,
+        "creating untracked file in previously empty directory must bust git print cache"
+    );
+
+    // Stage/commit `empty_sub/new.php` so `git status` is clean again and ignored_only settles into cache.
+    run_git(&["add", "empty_sub/new.php"]);
+    run_git(&["commit", "-m", "track new.php"]);
+    let t2_clean = max_mtime_ns() + helpers::PRINT_RACY_NS + 15_000_000_000;
+    let p2_clean = helpers::print_with_now(root, t2_clean).expect("re-warm settled cache");
+    let spawns_before_ign_hit = helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get());
+    let p2_hit = helpers::print_with_now(root, t2_clean + 1_000_000).expect("settled hit");
+    assert_eq!(p2_clean, p2_hit);
+    assert_eq!(
+        helpers::LOCAL_PRINT_GIT_SPAWN_COUNT.with(|c| c.get()),
+        spawns_before_ign_hit
+    );
+
+    // Creating a non-ignored untracked file inside an ignored-only dir must also invalidate cache.
+    std::fs::write(ignored_dir.join("visible.php"), "<?php\n").unwrap();
+    let t3 = max_mtime_ns() + helpers::PRINT_RACY_NS + 20_000_000_000;
+    let p3 = helpers::print_with_now(root, t3).expect("print after ignored_only untracked");
+    assert_ne!(
+        p3.hash, p2_clean.hash,
+        "creating visible file in directory with only ignored files must bust git print cache"
+    );
+}

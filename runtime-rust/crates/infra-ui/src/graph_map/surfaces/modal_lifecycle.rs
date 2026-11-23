@@ -2121,6 +2121,7 @@ pub async fn event(
             let clean = value.trim().to_ascii_lowercase();
             if matches!(clean.as_str(), "crate" | "folder" | "file" | "symbol") {
                 state["lod"] = json!(clean);
+                state["auto_lod"] = json!(false);
             } else {
                 state["lod"] = V::Null;
                 state["auto_lod"] = json!(true);

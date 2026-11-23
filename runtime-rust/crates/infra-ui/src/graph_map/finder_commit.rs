@@ -1450,7 +1450,7 @@ pub(super) fn watch() {
     }
 }
 pub(super) fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "whole": false, "side_tab": "details", "changes_filter": "all", "member_filter": "all", "side_pinned": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null, "patterns": false, "pattern": null, "pattern_return": null, "kinds": []})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "whole": false, "auto_lod": true, "lod": null, "min_weight": null, "side_tab": "details", "changes_filter": "all", "member_filter": "all", "side_pinned": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null, "patterns": false, "pattern": null, "pattern_return": null, "kinds": []})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 pub(super) const SPREAD: usize = 32;
@@ -1952,6 +1952,11 @@ pub(super) fn normalize_map_state(mut state: V) -> V {
         } else {
             state["min_weight"] = json!(mw.clamp(1, 1_000_000));
         }
+    }
+    if !state["auto_lod"].is_boolean() {
+        let has_explicit_override =
+            state["lod"].as_str().is_some() || state["min_weight"].as_u64().is_some();
+        state["auto_lod"] = json!(!has_explicit_override);
     }
     state
 }

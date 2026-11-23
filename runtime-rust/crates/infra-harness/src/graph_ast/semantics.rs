@@ -337,7 +337,16 @@ pub(super) fn emit_semantic_from_call(
         callee_lower.as_str(),
         "bind" | "singleton" | "scoped" | "addsingleton" | "addscoped" | "addtransient" | "provide"
     );
-    let is_container_resolve = !args_inner.is_empty()
+    let is_express_app_get = callee_lower == "get"
+        && recv_lower == "app"
+        && (!string_args.is_empty()
+            || (matches!(ctx.grammar, AstGrammar::TypeScript | AstGrammar::JavaScript) && {
+                let parts = split_top_level_commas(args_inner);
+                parts.len() >= 2 && !parts[1].trim_start().starts_with('{')
+            }));
+    let is_container_resolve = !route_emitted
+        && !is_express_app_get
+        && !args_inner.is_empty()
         && ((matches!(
             callee_lower.as_str(),
             "make" | "makewith" | "get" | "resolve"

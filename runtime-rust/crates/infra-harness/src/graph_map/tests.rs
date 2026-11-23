@@ -8393,3 +8393,45 @@ fn semantic_virtual_hubs_partition_by_namespace_not_anchor_file_at_all_lods() {
     assert_eq!(sem_node["node_kind"], "semantic");
     assert_eq!(sem_node["semantic"], true);
 }
+
+#[test]
+fn apply_min_weight_preserves_one_link_violations_in_edges_and_cross_page() {
+    let mut view = json!({
+        "nodes": [
+            {"path": "crates/a"},
+            {"path": "crates/b"},
+            {"path": "crates/c"}
+        ],
+        "edges": [
+            {"from": "crates/a", "to": "crates/b", "links": 1},
+            {"from": "crates/a", "to": "crates/c", "links": 1, "against": true},
+            {"from": "crates/b", "to": "crates/c", "links": 1, "kept": "violation"},
+            {"from": "crates/c", "to": "crates/a", "links": 4}
+        ],
+        "between": 4,
+        "paging": {
+            "cross_page_edges": [
+                {"from": "crates/a", "to": "crates/b", "links": 1},
+                {"from": "crates/a", "to": "crates/c", "links": 1, "against": true}
+            ]
+        }
+    });
+    Index::apply_min_weight_and_pagination(&mut view, Some(2), None, 0, None, false);
+    let edges = view["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 3, "only clean 1-link edge dropped: {edges:?}");
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["to"] == "crates/c" && e["against"] == true)
+    );
+    assert!(edges.iter().any(|e| e["kept"] == "violation"));
+    assert!(
+        !edges
+            .iter()
+            .any(|e| e["from"] == "crates/a" && e["to"] == "crates/b")
+    );
+    assert_eq!(view["between"], 3);
+    let cross = view["paging"]["cross_page_edges"].as_array().unwrap();
+    assert_eq!(cross.len(), 1);
+    assert_eq!(cross[0]["against"], true);
+}

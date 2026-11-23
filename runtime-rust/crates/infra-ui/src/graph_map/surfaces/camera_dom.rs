@@ -223,6 +223,7 @@ pub(in crate::graph_map) fn apply_surface_camera(surface: MapSurface, cam: &Came
     );
 }
 pub(in crate::graph_map) fn fit_surface_camera(surface: MapSurface, cam: &mut Camera) {
+    let prev_scale = cam.scale;
     let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
     cam.fit_mode = true;
@@ -236,8 +237,14 @@ pub(in crate::graph_map) fn fit_surface_camera(surface: MapSurface, cam: &mut Ca
             12.0,
         ));
     }
+    let mut st = surface_state(surface);
+    st["fit"] = json!(true);
+    st["zoom"] = V::Null;
+    st["scale"] = V::Null;
+    save_surface_state(surface, &st);
     save_surface_camera(surface, cam);
     apply_surface_camera(surface, cam);
+    maybe_schedule_auto_lod_reload(surface, prev_scale, 1.0);
 }
 pub(in crate::graph_map) fn zoom_surface_camera_to_bbox(
     surface: MapSurface,
@@ -276,15 +283,17 @@ fn maybe_schedule_auto_lod_reload(surface: MapSurface, prev_scale: f64, next_sca
                     return;
                 }
                 let cur_cam = load_surface_camera(surface);
-                if cur_cam.fit_mode {
-                    return;
-                }
                 let cur_st = surface_state(surface);
                 let cur_view = m::data(surface.view_key);
+                let effective_scale = if cur_cam.fit_mode || m::yes(&cur_st["fit"]) {
+                    1.0
+                } else {
+                    cur_cam.scale
+                };
                 if !super::state_urls::should_trigger_auto_lod_for_target(
                     &cur_st,
                     &cur_view,
-                    cur_cam.scale,
+                    effective_scale,
                 ) {
                     return;
                 }
