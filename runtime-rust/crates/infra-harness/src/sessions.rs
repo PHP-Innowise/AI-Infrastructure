@@ -1177,6 +1177,146 @@ impl Sessions {
             evidence: evidence_dir,
         }))
     }
+    #[inline(never)]
+    async fn verify_direct_protected(
+        &self,
+        protected_cfg: &ProtectedSandbox,
+        workspace: &Path,
+        warm: &crate::skillcache::warm::Warm,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        struct ProbeCleanup(PathBuf, Vec<PathBuf>);
+        impl Drop for ProbeCleanup {
+            fn drop(&mut self) {
+                for file in &self.1 {
+                    let _ = std::fs::remove_file(file);
+                }
+                infra_skillcache::package::release(&self.0);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let state_root = self.store.state.join("skillcache");
+        infra_host::util::private_directory(&state_root)?;
+        let probe_root =
+            state_root.join(format!("direct-protected-probe-{}", crate::store::hexid()));
+        let mut cleanup = ProbeCleanup(probe_root.clone(), Vec::new());
+        let probe_ws = probe_root.join("work");
+        let evidence_dir = probe_root.join("evidence");
+        infra_core::fs::ensure_directory(&probe_ws, true)?;
+        infra_core::fs::ensure_directory(&evidence_dir, true)?;
+        let probe_file = evidence_dir.join("probe.txt");
+        infra_core::fs::atomic_write(&probe_file, b"ok\n")?;
+        let canon_probe_ws = infra_core::fs::canonicalize(&probe_ws)?;
+        let canon_evidence = infra_core::fs::canonicalize(&evidence_dir)?;
+        let probe_engine = protected_cfg.engine.clone().or_else(|| warm.engine.clone());
+        let helper_path = match &probe_engine {
+            Some(path) => path.clone(),
+            None => infra_host::sandbox::trusted_helper(&canon_probe_ws)?,
+        };
+        let mut readable = vec![
+            infra_core::fs::canonicalize(workspace)?,
+            canon_evidence.clone(),
+        ];
+        for extra in [
+            warm.package.as_deref(),
+            probe_engine.as_deref().and_then(Path::parent),
+            warm.engine.as_deref().and_then(Path::parent),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let canon = infra_core::fs::canonicalize(extra)?;
+            if !readable.contains(&canon) {
+                readable.push(canon);
+            }
+        }
+        let mut accounts = Vec::new();
+        if let Some(state_dir) = &warm.state_dir {
+            infra_core::fs::ensure_directory(state_dir, true)?;
+            accounts.push(infra_core::fs::canonicalize(state_dir)?);
+        }
+        let runtime = if let Some(pkg) = &warm.package
+            && let Ok(loaded) = infra_skillcache::package::load(pkg)
+        {
+            crate::skillcache::gates::gate_runtime_dirs(&loaded.capsule.capabilities.runtimes)
+        } else {
+            Vec::new()
+        };
+        let spec = infra_host::sandbox::Spec {
+            workspace: canon_probe_ws.clone(),
+            target: canon_probe_ws.clone(),
+            protected: protected_cfg.protected.clone(),
+            readable,
+            accounts,
+            runtime,
+            codex: warm.codex.clone(),
+            evidence: Some(canon_evidence.clone()),
+            network: false,
+        };
+        let mut denied_paths =
+            crate::skillcache::compile::sample_paths(&protected_cfg.protected, 2000);
+        let sentinel =
+            std::env::temp_dir().join(format!("harness-direct-sentinel-{}", crate::store::hexid()));
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&sentinel)?;
+        infra_host::util::private_file(&sentinel)?;
+        cleanup.1.push(sentinel.clone());
+        denied_paths.push(sentinel);
+        let mut lines: Vec<String> = denied_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let expected_denied = lines.len();
+        lines.push("--readable".into());
+        lines.push(
+            infra_core::fs::canonicalize(&probe_file)?
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let listing = probe_root.join("boundary-paths.txt");
+        infra_core::fs::atomic_write(&listing, format!("{}\n", lines.join("\n")).as_bytes())?;
+        let argv = vec![
+            helper_path.to_string_lossy().into_owned(),
+            "internal-discovery-probe".into(),
+            listing.to_string_lossy().into_owned(),
+            canon_probe_ws.to_string_lossy().into_owned(),
+            canon_evidence.to_string_lossy().into_owned(),
+        ];
+        let command = infra_host::sandbox::gate(&spec, &argv)?;
+        let probe_env = std::env::vars().collect::<BTreeMap<_, _>>();
+        let probe = Box::pin(infra_system::native::run_raw_monitored(
+            &command,
+            workspace,
+            &probe_env,
+            &[],
+            &[],
+            60,
+            cancel.clone(),
+            Some(self.store.runner_lock()),
+            None,
+            |_| Ok(()),
+        ))
+        .await?;
+        let attested = probe
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .next_back()
+            .unwrap_or(Value::Null);
+        let verified = probe.code == 0
+            && attested["ok"] == true
+            && attested["denied"].as_u64() == Some(expected_denied as u64)
+            && attested["evidence_read_only"] == true
+            && attested["workspace_writable"] == true;
+        if !verified {
+            return Err(HarnessError::forbidden(
+                infra_system::workers::probe_failure(&probe.bytes, probe.code),
+            ));
+        }
+        Ok(())
+    }
     /// Resolves the shared SkillCache runtime.
     pub(crate) fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
         lock(&self.skillcache)
@@ -2410,14 +2550,36 @@ impl Sessions {
                 &job.generation,
             );
         }
+        let protected_cfg = lock(&self.protected)?.clone();
+        let protected_paths = protected_cfg
+            .as_ref()
+            .map(|cfg| cfg.protected.clone())
+            .unwrap_or_default();
         let mut direct_answer: Option<(serde_json::Value, String)> = None;
         let warm = match decision {
             crate::skillcache::warm::Decision::Hit(warm) if warm.direct_dispatch => {
+                if let Some(ref cfg) = protected_cfg
+                    && let Err(error) =
+                        Box::pin(self.verify_direct_protected(cfg, &workspace, &warm, &cancel))
+                            .await
+                {
+                    warm.cleanup_abandoned();
+                    let _ = self.lifecycle.abort(&binding, "failed");
+                    return Err(error);
+                }
                 let warm_run = warm.clone();
                 let ws_run = workspace.clone();
                 let gen_run = job.generation.clone();
+                let cancel_run = cancel.clone();
                 let direct = tokio::task::spawn_blocking(move || {
-                    crate::skillcache::warm::try_direct_execute(&warm_run, &ws_run, &gen_run, None)
+                    crate::skillcache::warm::try_direct_execute_with(
+                        &warm_run,
+                        &ws_run,
+                        &gen_run,
+                        None,
+                        &protected_paths,
+                        Some(&cancel_run),
+                    )
                 })
                 .await
                 .unwrap_or_else(|_| {

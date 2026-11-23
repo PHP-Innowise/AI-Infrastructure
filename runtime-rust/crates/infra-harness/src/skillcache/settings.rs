@@ -97,6 +97,7 @@ pub fn validate(value: &Value) -> Result<Value> {
             "trace_generation",
             "capsule_id",
             "tool_chain",
+            "direct_dispatch",
             "edition",
         ]
         .contains(&key.as_str())
@@ -163,6 +164,11 @@ pub fn validate(value: &Value) -> Result<Value> {
         Some(Value::Bool(enabled)) => *enabled,
         Some(_) => return Err(invalid()),
     };
+    let direct_dispatch = match settings.get("direct_dispatch") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => return Err(invalid()),
+    };
     let edition = match settings.get("edition") {
         None | Some(Value::Null) => None,
         Some(val) => {
@@ -192,6 +198,9 @@ pub fn validate(value: &Value) -> Result<Value> {
     }
     if tool_chain {
         stored["tool_chain"] = true.into();
+    }
+    if direct_dispatch {
+        stored["direct_dispatch"] = true.into();
     }
     if let Some(edition) = edition {
         stored["edition"] = edition.into();

@@ -193,12 +193,12 @@ fn unnumbered(text: &str) -> String {
     }
 }
 
-fn unwrap_shell_command(command: &str) -> &str {
+pub fn unwrap_shell_command(command: &str) -> &str {
     static SHELL: OnceLock<Regex> = OnceLock::new();
     let trimmed = command.trim();
     if let Some(captures) = SHELL
         .get_or_init(|| {
-            Regex::new(r#"^(?:(?:/usr)?/bin/)?(?:bash|sh|zsh)\s+-(?:lc|c)\s+(.+)$"#)
+            Regex::new(r#"^(?:(?:/usr(?:/local)?)?/bin/)?(?:bash|sh|zsh|dash)\s+-(?:lc|c)\s+(.+)$"#)
                 .expect("a fixed expression")
         })
         .captures(trimmed)
@@ -214,6 +214,138 @@ fn unwrap_shell_command(command: &str) -> &str {
         return body;
     }
     trimmed
+}
+
+/// Whether `name` is a provider shell / terminal execution tool whose
+/// read-only safety depends on `input["command"]`.
+pub fn is_shell_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "bash"
+            | "shell"
+            | "shelltoolcall"
+            | "command_execution"
+            | "run_terminal"
+            | "run_terminal_cmd"
+            | "run_command"
+            | "exec_command"
+    )
+}
+
+/// Extracts the shell command string from a recorded tool step, if present.
+pub fn step_shell_command(step: &Value) -> Option<&str> {
+    step["input"]["command"]
+        .as_str()
+        .or_else(|| step["input"]["cmd"].as_str())
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty())
+}
+
+/// Unwraps outer shell wrappers (`bash -lc`, `sh -c`, etc.) and splits
+/// deterministic `&&` / `;` / `|` chains outside quotes. Returns `None` for
+/// redirects, command substitution, subshells, backgrounding, or unclosed quotes.
+pub fn split_read_only_shell_chain(command: &str) -> Option<Vec<String>> {
+    let mut body = command.trim();
+    for _ in 0..2 {
+        let unwrapped = unwrap_shell_command(body);
+        if unwrapped == body {
+            break;
+        }
+        body = unwrapped;
+    }
+    if body.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                current.push(ch);
+                if ch == '\'' {
+                    quote = None;
+                }
+            }
+            Some('"') => {
+                if ch == '`' || ch == '\0' {
+                    return None;
+                }
+                if ch == '$' && chars.peek() == Some(&'(') {
+                    return None;
+                }
+                current.push(ch);
+                if ch == '\\' {
+                    let next = chars.next()?;
+                    current.push(next);
+                } else if ch == '"' {
+                    quote = None;
+                }
+            }
+            Some(_) => unreachable!(),
+            None => match ch {
+                '`' | '>' | '<' | '(' | ')' | '\n' | '\r' | '\0' => return None,
+                '$' if chars.peek() == Some(&'(') => return None,
+                '\\' => {
+                    current.push(ch);
+                    escaped = true;
+                }
+                '\'' | '"' => {
+                    current.push(ch);
+                    quote = Some(ch);
+                }
+                '&' => {
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        let seg = current.trim();
+                        if seg.is_empty() {
+                            return None;
+                        }
+                        segments.push(seg.to_owned());
+                        current.clear();
+                    } else {
+                        return None;
+                    }
+                }
+                '|' => {
+                    if chars.peek() == Some(&'|') {
+                        return None;
+                    }
+                    let seg = current.trim();
+                    if seg.is_empty() {
+                        return None;
+                    }
+                    segments.push(seg.to_owned());
+                    current.clear();
+                }
+                ';' => {
+                    let seg = current.trim();
+                    if seg.is_empty() {
+                        return None;
+                    }
+                    segments.push(seg.to_owned());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if quote.is_some() || escaped {
+        return None;
+    }
+    let tail = current.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    segments.push(tail.to_owned());
+    Some(segments)
 }
 
 fn reads_python_inline(body: &str) -> bool {
@@ -1223,5 +1355,46 @@ mod tests {
         assert_eq!(cursor.steps[0]["output"], "out\nerr");
         assert_eq!(cursor.steps[0]["exit_code"], 7);
         assert_eq!(cursor.steps[0]["error"], true);
+    }
+
+    #[test]
+    fn shell_chain_splitter_unwraps_wrappers_and_rejects_redirects_and_subshells() {
+        assert!(is_shell_tool_name("command_execution"));
+        assert!(is_shell_tool_name("Bash"));
+        assert!(is_shell_tool_name("shellToolCall"));
+        assert!(is_shell_tool_name("shell"));
+        assert!(!is_shell_tool_name("file_change"));
+
+        assert_eq!(
+            split_read_only_shell_chain("bash -lc 'git status --short && cat composer.json'"),
+            Some(vec![
+                "git status --short".to_string(),
+                "cat composer.json".to_string()
+            ])
+        );
+        assert_eq!(
+            split_read_only_shell_chain("/bin/sh -c \"ls -la; rg 'a|b' src\""),
+            Some(vec!["ls -la".to_string(), "rg 'a|b' src".to_string()])
+        );
+        assert_eq!(
+            split_read_only_shell_chain("cat a.txt | grep foo"),
+            Some(vec!["cat a.txt".to_string(), "grep foo".to_string()])
+        );
+        for unsafe_cmd in [
+            "cat a.txt > out.txt",
+            "echo $(whoami)",
+            "echo `whoami`",
+            "git status && ",
+            "git status &",
+            "git status || ls",
+            "bash -lc 'unclosed",
+            "(cd sub && ls)",
+        ] {
+            assert_eq!(
+                split_read_only_shell_chain(unsafe_cmd),
+                None,
+                "{unsafe_cmd}"
+            );
+        }
     }
 }

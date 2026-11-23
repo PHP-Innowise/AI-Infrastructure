@@ -171,3 +171,110 @@ fn a_replay_runs_inside_the_gate_sandbox() {
     assert_eq!(state["bindings"]["rows_file"], "out/rows.json");
     package::remove(&package).unwrap();
 }
+
+#[test]
+fn read_only_live_run_keeps_workspace_read_only_and_state_writable_with_scratch_home() {
+    if !bubblewrap_usable() {
+        eprintln!("skipped: bubblewrap cannot create a sandbox on this host");
+        return;
+    }
+    let root = scratch::scratch();
+    let base = infra_core::fs::canonicalize(root.path()).unwrap();
+    let fixture = Path::new(FIXTURE);
+    let runtime = fixture.file_stem().unwrap().to_str().unwrap();
+
+    let mut files = package::Files::new();
+    files.insert(
+        "programs/probe/program.json",
+        serde_json::to_vec(&json!({
+            "result": {"ok": true},
+            "write": {"attempted-write.txt": "should-fail"},
+            "env_names_to": "env-names.txt"
+        }))
+        .unwrap(),
+    );
+    let ro_cap = SkillCapsule::parse(
+        &serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "ro-probe", "description": "Read-only probe"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": [runtime]},
+            "bindings": [],
+            "programs": [{
+                "id": "probe",
+                "entry": [runtime, "programs/probe/program.json"],
+                "inputs": [],
+                "outputs": [],
+                "check": [runtime, "programs/probe/program.json", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "probe"}],
+            "verification": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let package_dir = base.join("capsules/c2/1/warm");
+    package::write_warm(&package_dir, &ro_cap, None, &files).unwrap();
+
+    let project_ws = base.join("project-ws");
+    std::fs::create_dir_all(&project_ws).unwrap();
+    std::fs::write(project_ws.join("existing.txt"), b"keep").unwrap();
+
+    let sandbox_ws = base.join("sandbox-ctl/work");
+    let scratch_home = sandbox_ws.join(".harness-tmp");
+    let state_dir = base.join("run-state");
+    std::fs::create_dir_all(&scratch_home).unwrap();
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_file = state_dir.join("plan-state.json");
+
+    let spec = Spec {
+        workspace: sandbox_ws.clone(),
+        target: sandbox_ws.clone(),
+        protected: vec![],
+        readable: vec![
+            package_dir.clone(),
+            project_ws.clone(),
+            fixture.parent().unwrap().to_path_buf(),
+        ],
+        accounts: vec![state_dir.clone()],
+        runtime: vec![],
+        codex: None,
+        evidence: None,
+        network: false,
+    };
+    let argv = sandbox::gate(
+        &spec,
+        &[FIXTURE.to_string(), "skillcache".into(), "run".into()],
+    )
+    .unwrap();
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", fixture.parent().unwrap().display()),
+        )
+        .env("HOME", &scratch_home)
+        .env("TMPDIR", &scratch_home)
+        .env("SKILLCACHE_PACKAGE", &package_dir)
+        .env("SKILLCACHE_WORKSPACE", &project_ws)
+        .env("SKILLCACHE_STATE_FILE", &state_file)
+        .env("SKILLCACHE_GENERATION", "live-ro")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    // Because `project_ws` was mounted read-only via `spec.readable`, neither
+    // `attempted-write.txt` nor `env-names.txt` could be written into `project_ws`,
+    // while `state_file` in `spec.accounts` was written.
+    assert_eq!(answer["status"], "complete", "{answer}");
+    assert!(!project_ws.join("attempted-write.txt").exists());
+    assert!(!project_ws.join("env-names.txt").exists());
+    assert!(state_file.is_file());
+    package::remove(&package_dir).unwrap();
+}

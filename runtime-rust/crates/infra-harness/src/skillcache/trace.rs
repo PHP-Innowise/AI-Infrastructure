@@ -87,7 +87,7 @@ const TOOLCHAIN_MANIFEST_FILES: [&str; 8] = [
     "artisan",
 ];
 
-fn hash_workspace_target(path: &Path) -> String {
+pub(crate) fn hash_workspace_target(path: &Path) -> String {
     const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
     const MAX_DIR_FILES: usize = 10_000;
     const MAX_DIR_BYTES: u64 = 64 * 1024 * 1024;
@@ -379,6 +379,94 @@ pub fn is_read_only_tool_name(name: &str) -> bool {
             | "list_dir"
             | "search"
     )
+}
+
+fn strip_workspace_prefix(workspace: &Path, ws_canon: Option<&Path>, raw: &str) -> Option<String> {
+    if !raw.starts_with('/') {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    for root in [Some(workspace), ws_canon].into_iter().flatten() {
+        if let Ok(rel) = candidate.strip_prefix(root) {
+            let text = rel.to_string_lossy().replace('\\', "/");
+            let trimmed = text.trim_start_matches("./").trim_end_matches('/');
+            return Some(if trimmed.is_empty() {
+                ".".to_owned()
+            } else {
+                trimmed.to_owned()
+            });
+        }
+    }
+    None
+}
+
+fn normalize_workspace_segment(
+    workspace: &Path,
+    ws_canon: Option<&Path>,
+    segment: &str,
+) -> Option<String> {
+    let tokens = infra_generator::commands::tokenize(segment).ok()?;
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(tokens.len());
+    for (idx, token) in tokens.into_iter().enumerate() {
+        let rewritten = if idx == 0 {
+            token
+        } else if let Some((flag, rhs)) = token.split_once('=')
+            && !flag.is_empty()
+            && rhs.starts_with('/')
+            && let Some(rel) = strip_workspace_prefix(workspace, ws_canon, rhs)
+        {
+            format!("{flag}={rel}")
+        } else if let Some(rel) = strip_workspace_prefix(workspace, ws_canon, &token) {
+            rel
+        } else {
+            token
+        };
+        normalized.push(infra_generator::commands::quote(&rewritten));
+    }
+    Some(normalized.join(" "))
+}
+
+fn is_read_only_shell_command(store: &SessionStore, workspace: &Path, command: &str) -> bool {
+    let Some(segments) = infra_skillcache::trace::split_read_only_shell_chain(command) else {
+        return false;
+    };
+    let ws_canon = infra_core::fs::canonicalize(workspace).ok();
+    segments.into_iter().all(|segment| {
+        let candidate = normalize_workspace_segment(workspace, ws_canon.as_deref(), &segment)
+            .unwrap_or(segment);
+        matches!(
+            crate::permissions::classify_read_only_program_command_in_store(
+                Some(workspace),
+                Some(store),
+                &candidate,
+            ),
+            Ok(Some(_))
+        )
+    })
+}
+
+fn is_read_only_toolchain_step(store: &SessionStore, workspace: &Path, step: &Value) -> bool {
+    let name = step["tool"]
+        .as_str()
+        .or_else(|| step["name"].as_str())
+        .unwrap_or("");
+    if is_read_only_tool_name(name) {
+        return true;
+    }
+    if !infra_skillcache::trace::is_shell_tool_name(name) {
+        return false;
+    }
+    infra_skillcache::trace::step_shell_command(step)
+        .is_some_and(|command| is_read_only_shell_command(store, workspace, command))
 }
 
 /// Store setting JSON controlling short-turn observation admission
@@ -768,13 +856,7 @@ pub fn check_admissible_with_toolchain(
             .steps
             .iter()
             .filter(|step| step["kind"] == "tool")
-            .any(|step| {
-                let name = step["tool"]
-                    .as_str()
-                    .or_else(|| step["name"].as_str())
-                    .unwrap_or("");
-                !is_read_only_tool_name(name)
-            });
+            .any(|step| !is_read_only_toolchain_step(store, workspace, step));
         if has_mutating {
             return Err(skipped(
                 "mutating_tool_chain",
@@ -1229,5 +1311,96 @@ mod tests {
         assert!(!out.contains("pwd-value-7777"));
         assert!(!out.contains("auth-value-6666"));
         assert!(out.contains("visible-safe-5555"));
+    }
+
+    #[test]
+    fn check_admissible_with_toolchain_classifies_codex_claude_and_cursor_shell_steps() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let workspace = infra_core::fs::canonicalize(&ws).unwrap();
+        std::fs::write(workspace.join("composer.json"), "{}").unwrap();
+        std::fs::write(workspace.join("src/App.php"), "<?php echo 1;\n").unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "check php files and git status".into(),
+            requests: vec![],
+            notice: None,
+        };
+
+        // Codex `command_execution` with wrapped bash -lc + chained read-only commands + workspace-abs path.
+        let abs_php = workspace.join("src/App.php");
+        let codex_ro = Trace {
+            provider: "codex".into(),
+            steps: vec![
+                json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status --short && cat composer.json'"}}),
+                json!({"kind": "tool", "tool": "command_execution", "input": {"command": format!("php -l {}", abs_php.display())}}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        let (skills, tools, tree_sha) = check_admissible_with_toolchain(
+            &store,
+            true,
+            &workspace,
+            &route,
+            "check php files and git status",
+            &codex_ro,
+            &Value::Null,
+        )
+        .expect("read-only codex command_execution turn should qualify");
+        assert!(skills.is_empty());
+        assert_eq!(tools, 2);
+        assert!(tree_sha.is_some());
+
+        // Claude `Bash` + Cursor `shell` / `shellToolCall` read-only turns also qualify.
+        let claude_cursor_ro = Trace {
+            provider: "claude".into(),
+            steps: vec![
+                json!({"kind": "tool", "tool": "Bash", "input": {"command": "git status --short"}}),
+                json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "rg echo src"}}),
+                json!({"kind": "tool", "tool": "shell", "input": {"command": "ls -la"}}),
+            ],
+            skills: vec![],
+            counters: Default::default(),
+            complete: true,
+        };
+        assert!(
+            check_admissible_with_toolchain(
+                &store,
+                true,
+                &workspace,
+                &route,
+                "check php files and git status",
+                &claude_cursor_ro,
+                &Value::Null,
+            )
+            .is_ok()
+        );
+
+        // Mutating shell commands, redirects, inline eval, and out-of-workspace absolute paths are rejected.
+        for bad_step in [
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "bash -lc 'git status && rm -rf src'"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "cat composer.json > copy.json"}}),
+            json!({"kind": "tool", "tool": "Bash", "input": {"command": "python3 -c 'print(1)'"}}),
+            json!({"kind": "tool", "tool": "shellToolCall", "input": {"command": "cat /etc/passwd"}}),
+            json!({"kind": "tool", "tool": "command_execution", "input": {"command": "git commit -m oops"}}),
+        ] {
+            let mut bad = codex_ro.clone();
+            bad.steps.push(bad_step.clone());
+            let err = check_admissible_with_toolchain(
+                &store,
+                true,
+                &workspace,
+                &route,
+                "check php files and git status",
+                &bad,
+                &Value::Null,
+            )
+            .unwrap_err();
+            assert_eq!(err["reason"], "mutating_tool_chain", "{bad_step}");
+        }
     }
 }

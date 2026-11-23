@@ -813,8 +813,7 @@ pub(crate) fn set_dependency_manifest(
     manifest: &ArtifactDependencyManifest,
 ) -> Result<()> {
     let mut stored_manifest = manifest.clone();
-    if stored_manifest.path_hashes.is_empty()
-        && let Some(cap) = capsule(db, capsule_id)?
+    if let Some(cap) = capsule(db, capsule_id)?
         && let Some(generation_id) = cap["source_generation"].as_str().filter(|s| !s.is_empty())
         && let Some(source_trace) = trace(db, generation_id)?
         && let Some(obj) = source_trace["redaction"]["tool_chain_manifest_hashes"].as_object()
@@ -823,7 +822,8 @@ pub(crate) fn set_dependency_manifest(
             if let Some(hash_str) = hash.as_str() {
                 stored_manifest
                     .path_hashes
-                    .insert(path.clone(), hash_str.to_owned());
+                    .entry(path.clone())
+                    .or_insert_with(|| hash_str.to_owned());
             }
         }
     }

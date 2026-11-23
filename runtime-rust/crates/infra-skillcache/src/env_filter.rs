@@ -15,9 +15,11 @@ pub const STATE_FILE: &str = "SKILLCACHE_STATE_FILE";
 pub const LOG_FILE: &str = "SKILLCACHE_LOG_FILE";
 pub const GENERATION: &str = "SKILLCACHE_GENERATION";
 
-/// Whether a variable is withheld from programs: its name contains `KEY`,
-/// `TOKEN`, `PASSWORD`, `SECRET`, `CREDENTIAL`, `PASSWD` or `AUTH` in any
-/// letter case.
+/// Whether a variable is withheld from programs: its name contains a
+/// credential, session, connection-string, or secret-store pattern
+/// (`KEY`, `TOKEN`, `PASSWORD`, `SECRET`, `CREDENTIAL`, `PASSWD`, `AUTH`,
+/// `DATABASE_URL`, `_URI`, `DSN`, `PGPASS`, `JWT`, `BEARER`, `COOKIE`,
+/// `PRIVATE_KEY`, `KUBECONFIG`, `NETRC`, `DOCKER_CONFIG`) in any letter case.
 pub fn withheld(name: &str) -> bool {
     let name = name.to_uppercase();
     [
@@ -28,6 +30,17 @@ pub fn withheld(name: &str) -> bool {
         "CREDENTIAL",
         "PASSWD",
         "AUTH",
+        "DATABASE_URL",
+        "_URI",
+        "DSN",
+        "PGPASS",
+        "JWT",
+        "BEARER",
+        "COOKIE",
+        "PRIVATE_KEY",
+        "KUBECONFIG",
+        "NETRC",
+        "DOCKER_CONFIG",
     ]
     .iter()
     .any(|part| name.contains(part))
@@ -179,6 +192,8 @@ mod tests {
             "TMPDIR",
             "TMP",
             "TEMP",
+            "SECURITY_MODE",
+            "DURING_BUILD",
         ] {
             assert!(!withheld(name), "{name}");
         }
@@ -194,6 +209,23 @@ mod tests {
             "ROOT_PASSWD",
             "OAUTH_HEADER",
             "basic_auth",
+            "DATABASE_URL",
+            "test_database_url",
+            "REDIS_URI",
+            "mongo_uri",
+            "SENTRY_DSN",
+            "db_dsn",
+            "PGPASS",
+            "PGPASSFILE",
+            "JWT",
+            "supabase_jwt_val",
+            "HTTP_BEARER",
+            "session_cookie",
+            "PRIVATE_KEY",
+            "KUBECONFIG",
+            "NETRC",
+            "CURL_NETRC",
+            "DOCKER_CONFIG",
         ] {
             assert!(withheld(name), "{name}");
         }

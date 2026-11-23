@@ -87,6 +87,12 @@ files in this folder and return one structured answer.
 - A program in `verification` has `"read_only": true` and changes nothing.
 - `capabilities.network` is `required` only when the trace shows the kept
   calls using the network; otherwise `none`.
+- `capabilities.allow_ignored` is an optional list of safe default-ignored
+  workspace entry names (e.g., `dist`, `build`, `node_modules`, `vendor`,
+  `.venv`, `.next`) to include in workspace diffing when the trace's kept
+  programs legitimately read or produce them. Always-ignored names (`.git`,
+  `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.DS_Store`),
+  `.` / `..`, and paths containing `/` or `\` are forbidden.
 - An instruction's `source` points at the skill passage it comes from.
 - `mu.description` and the step texts describe parameters, never this
   instance: no observed value appears anywhere in the capsule.
@@ -105,8 +111,11 @@ files in this folder and return one structured answer.
 - On failure it exits non-zero with a short reason on standard error.
 - With `--check` it tests itself without task files and without the network,
   then prints `{"status": "complete", "result": {}}`.
-- Environment variables whose names contain `KEY`, `TOKEN` or `PASSWORD` are
-  removed before it starts. It asks no questions and waits for no input.
+- Environment variables whose names match credential, connection-string, or
+  secret-store patterns (`KEY`, `TOKEN`, `PASSWORD`, `SECRET`, `CREDENTIAL`,
+  `PASSWD`, `AUTH`, `DATABASE_URL`, `_URI`, `DSN`, `PGPASS`, `JWT`, `BEARER`,
+  `COOKIE`, `PRIVATE_KEY`, `KUBECONFIG`, `NETRC`, `DOCKER_CONFIG`) are removed
+  before it starts. It asks no questions and waits for no input.
 - Use only the declared runtimes and their standard libraries, plus what the
   trace shows installed and used.
 
