@@ -11,6 +11,35 @@ pub(super) fn results_relevant() -> bool {
         })
 }
 
+pub(super) fn set_delivery_loading(loading: bool) {
+    for id in ["delivery-section", "delivery-options"] {
+        if let Some(el) = dom::get(id) {
+            if loading {
+                let _ = el.set_attribute("data-loading", "true");
+            } else {
+                let _ = el.remove_attribute("data-loading");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeliveryUpfrontPlan {
+    Clear,
+    KeepWithLoading,
+    Ignore,
+}
+
+pub(super) fn plan_delivery_upfront(sid: &str, result_view: bool) -> DeliveryUpfrontPlan {
+    if sid.trim().is_empty() {
+        DeliveryUpfrontPlan::Clear
+    } else if result_view {
+        DeliveryUpfrontPlan::KeepWithLoading
+    } else {
+        DeliveryUpfrontPlan::Ignore
+    }
+}
+
 pub(super) fn reset_results() {
     dom::cancel_timer("results-poll");
     m::next("results");
@@ -23,6 +52,7 @@ pub(super) fn reset_results() {
         s.diff_view.focused_file.clear();
     });
     invalidate_delivery();
+    set_delivery_loading(false);
     dom::hidden("delivery-options", true);
     dom::clear("delivery-files");
     dom::set_value("delivery-message", "");
@@ -173,13 +203,21 @@ pub async fn results() {
     if !results_relevant() {
         return;
     }
-    if result_view() {
-        m::take("delivery");
-        invalidate_delivery();
-        dom::hidden("delivery-options", true);
-        result_controls();
-    }
     let sid = m::read(|s| s.sid.clone());
+    match plan_delivery_upfront(&sid, result_view()) {
+        DeliveryUpfrontPlan::Clear => {
+            m::take("delivery");
+            invalidate_delivery();
+            set_delivery_loading(false);
+            dom::hidden("delivery-options", true);
+            result_controls();
+        }
+        DeliveryUpfrontPlan::KeepWithLoading => {
+            set_delivery_loading(true);
+            result_controls();
+        }
+        DeliveryUpfrontPlan::Ignore => {}
+    }
     if sid.is_empty() {
         dom::error("results-error", "Choose a session first.");
         set_workspace_note_error(
@@ -441,6 +479,8 @@ pub async fn results() {
                     return;
                 }
                 sync_results_memory_prefill(&sid);
+            } else {
+                set_delivery_loading(false);
             }
             if result_view() {
                 result_controls();
@@ -461,6 +501,7 @@ pub async fn results() {
         }
         Ok(_) => {}
         Err(e) if !e.aborted && m::read(|s| s.sid == sid) && results_relevant() => {
+            set_delivery_loading(false);
             dom::error("results-error", &e.message);
             set_workspace_note_error("workspace-diff-note", &e.message, true);
             set_workspace_note_error("workspace-checks-status", &e.message, true);
@@ -621,49 +662,59 @@ pub(super) fn result_controls() {
 }
 pub(super) async fn delivery_load(sid: &str) {
     let key = "delivery";
+    set_delivery_loading(true);
     let response = api::scoped(key, &format!("/api/sessions/{}/delivery", dom::enc(sid))).await;
-    if let Ok((epoch, v)) = response {
-        if !m::current(key, epoch) || !m::read(|s| s.sid == sid) || !result_view() {
-            return;
-        }
-        m::set("delivery", v.clone());
-        dom::hidden(
-            "delivery-options",
-            !m::yes(&v["available"]) && !v["preview"].is_object(),
-        );
-        dom::text(
-            "delivery-availability",
-            v["notice"]
-                .as_str()
-                .or_else(|| v["reason"].as_str())
-                .unwrap_or(""),
-        );
-        dom::clear("delivery-files");
-        for file in m::array(&v["files"]) {
-            dom::append(
-                "delivery-files",
-                &dom::check(
-                    &format!("{} · {}", m::text(&file, "path"), m::text(&file, "status")),
-                    "delivery-file",
-                    &m::text(&file, "path"),
-                    false,
-                ),
+    match response {
+        Ok((epoch, v)) => {
+            if !m::current(key, epoch) || !m::read(|s| s.sid == sid) || !result_view() {
+                return;
+            }
+            set_delivery_loading(false);
+            m::set("delivery", v.clone());
+            dom::hidden(
+                "delivery-options",
+                !m::yes(&v["available"]) && !v["preview"].is_object(),
             );
+            dom::text(
+                "delivery-availability",
+                v["notice"]
+                    .as_str()
+                    .or_else(|| v["reason"].as_str())
+                    .unwrap_or(""),
+            );
+            dom::clear("delivery-files");
+            for file in m::array(&v["files"]) {
+                dom::append(
+                    "delivery-files",
+                    &dom::check(
+                        &format!("{} · {}", m::text(&file, "path"), m::text(&file, "status")),
+                        "delivery-file",
+                        &m::text(&file, "path"),
+                        false,
+                    ),
+                );
+            }
+            let mut commits = vec![json!({"id":"","name":"Choose a commit"})];
+            commits.extend(m::array(&v["commits"]).into_iter().map(|x|json!({"id":x["sha"],"name":format!("{} · {}",m::text(&x,"sha"),m::text(&x,"subject"))})));
+            dom::options("delivery-source", &commits, m::summary, None);
+            let mut branches = vec![json!({"id":"","name":"Choose a local branch"})];
+            branches.extend(
+                m::array(&v["branches"])
+                    .into_iter()
+                    .map(|x| json!({"id":x["name"],"name":x["name"]})),
+            );
+            dom::options("delivery-target", &branches, m::summary, None);
+            if v["preview"].is_object() {
+                render_delivery(&v["preview"]);
+            } else {
+                clear_delivery_preview();
+            }
+            result_controls();
         }
-        let mut commits = vec![json!({"id":"","name":"Choose a commit"})];
-        commits.extend(m::array(&v["commits"]).into_iter().map(|x|json!({"id":x["sha"],"name":format!("{} · {}",m::text(&x,"sha"),m::text(&x,"subject"))})));
-        dom::options("delivery-source", &commits, m::summary, None);
-        let mut branches = vec![json!({"id":"","name":"Choose a local branch"})];
-        branches.extend(
-            m::array(&v["branches"])
-                .into_iter()
-                .map(|x| json!({"id":x["name"],"name":x["name"]})),
-        );
-        dom::options("delivery-target", &branches, m::summary, None);
-        if v["preview"].is_object() {
-            render_delivery(&v["preview"]);
+        Err(e) if !e.aborted && m::read(|s| s.sid == sid) => {
+            set_delivery_loading(false);
         }
-        result_controls();
+        Err(_) => {}
     }
 }
 pub(super) fn render_delivery(v: &V) {
@@ -722,8 +773,7 @@ pub(super) fn render_delivery(v: &V) {
         &m::text(&v["target_check"], "output"),
     );
 }
-pub(super) fn invalidate_delivery() {
-    m::next("delivery");
+pub(super) fn clear_delivery_preview() {
     m::take("delivery-preview");
     dom::hidden("delivery-preview", true);
     dom::hidden("delivery-commit-preview", true);
@@ -733,6 +783,10 @@ pub(super) fn invalidate_delivery() {
     }
     dom::disabled("delivery-commit", true);
     dom::disabled("delivery-apply", true);
+}
+pub(super) fn invalidate_delivery() {
+    m::next("delivery");
+    clear_delivery_preview();
 }
 pub(super) async fn delivery(action: &str, body: V) {
     let sid = m::read(|s| s.sid.clone());
@@ -1059,5 +1113,27 @@ pub(crate) fn localize_failure_on_map(request: &V) {
     }
     for handler in handlers {
         handler(request);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_refresh_plan_is_non_destructive_for_active_session_result_views() {
+        assert_eq!(
+            plan_delivery_upfront("sess-1", true),
+            DeliveryUpfrontPlan::KeepWithLoading
+        );
+        assert_eq!(
+            plan_delivery_upfront("sess-1", false),
+            DeliveryUpfrontPlan::Ignore
+        );
+        assert_eq!(plan_delivery_upfront("", true), DeliveryUpfrontPlan::Clear);
+        assert_eq!(
+            plan_delivery_upfront("   ", false),
+            DeliveryUpfrontPlan::Clear
+        );
     }
 }

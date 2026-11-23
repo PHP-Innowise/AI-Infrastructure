@@ -1726,7 +1726,8 @@ pub(super) async fn decide_permission(payload: &V) {
         }
         if m::read(|s| s.approvals.drawer_open) {
             refresh_approvals_queue().await;
-            if sid == current_sid {
+            let rules_sid = m::read(|s| s.approvals.rules_sid.clone());
+            if sid == rules_sid || (rules_sid.is_empty() && sid == current_sid) {
                 load_permission_rules(&sid).await;
             }
         }
@@ -2012,15 +2013,300 @@ pub(crate) fn sync_approvals_badge() {
     dom::hidden("approvals-queue-count", count == 0);
 }
 
-pub(crate) fn render_permission_rules_panel() {
-    let (sid, rules, loading, error) = m::read(|s| {
+pub(crate) fn permission_rules_session_options(
+    sessions: &[V],
+    waiting_counts: &BTreeMap<String, usize>,
+    active_sid: &str,
+    current_rules_sid: &str,
+    focused_drawer_sid: Option<&str>,
+) -> Vec<(String, String)> {
+    const MAX_OPTIONS: usize = 50;
+    let mut by_sid: std::collections::HashMap<String, &V> = std::collections::HashMap::new();
+    for s in sessions {
+        let sid = m::text(s, "id");
+        if !sid.is_empty() {
+            by_sid.insert(sid, s);
+        }
+    }
+    let format_label = |sid: &str| -> String {
+        let base = by_sid
+            .get(sid)
+            .map(|s| m::summary(s))
+            .filter(|lbl| !lbl.is_empty())
+            .unwrap_or_else(|| sid.to_owned());
+        let waiting = waiting_counts.get(sid).copied().unwrap_or_else(|| {
+            by_sid
+                .get(sid)
+                .and_then(|s| s["waiting_permissions"].as_u64())
+                .unwrap_or(0) as usize
+        });
+        if waiting > 0 {
+            format!("{base} ({waiting} waiting)")
+        } else {
+            base
+        }
+    };
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut push = |sid: &str| {
+        let sid = sid.trim();
+        if sid.is_empty() || out.len() >= MAX_OPTIONS || !seen.insert(sid.to_owned()) {
+            return;
+        }
+        out.push((sid.to_owned(), format_label(sid)));
+    };
+
+    if let Some(focused) = focused_drawer_sid {
+        push(focused);
+    }
+    push(active_sid);
+    push(current_rules_sid);
+
+    for (sid, count) in waiting_counts {
+        if *count > 0 {
+            push(sid);
+        }
+    }
+    for s in sessions {
+        let sid = m::text(s, "id");
+        if waiting_counts.get(&sid).copied().unwrap_or(0) > 0
+            || s["waiting_permissions"].as_u64().unwrap_or(0) > 0
+        {
+            push(&sid);
+        }
+    }
+    for s in sessions {
+        push(&m::text(s, "id"));
+    }
+    out
+}
+
+pub(crate) fn resolve_drawer_rules_session_id(
+    focused_drawer_sid: Option<&str>,
+    current_rules_sid: &str,
+    manual: bool,
+    waiting_sids: &[String],
+    active_sid: &str,
+) -> String {
+    if manual && !current_rules_sid.trim().is_empty() {
+        return current_rules_sid.trim().to_owned();
+    }
+    if let Some(focused) = focused_drawer_sid.map(str::trim).filter(|s| !s.is_empty()) {
+        return focused.to_owned();
+    }
+    if !active_sid.trim().is_empty() {
+        return active_sid.trim().to_owned();
+    }
+    if let Some(waiting) = waiting_sids
+        .iter()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+    {
+        return waiting.to_owned();
+    }
+    if !current_rules_sid.trim().is_empty() {
+        return current_rules_sid.trim().to_owned();
+    }
+    String::new()
+}
+
+pub(crate) fn parse_waiting_permissions_batch_response(resp: &V) -> Vec<(String, Vec<V>)> {
+    let mut out = Vec::new();
+    for entry in m::array(&resp["sessions"]) {
+        let sid = m::text(&entry, "session_id");
+        if sid.is_empty() {
+            continue;
+        }
+        let items = if entry["waiting_permissions"].is_array() {
+            m::array(&entry["waiting_permissions"])
+        } else {
+            m::array(&entry["items"])
+        };
+        out.push((sid, items));
+    }
+    out
+}
+
+pub(crate) fn parse_session_waiting_permissions_response(
+    fallback_sid: &str,
+    resp: &V,
+) -> Option<(String, Vec<V>)> {
+    if !resp.is_object() {
+        return None;
+    }
+    let sid = {
+        let s = m::text(resp, "session_id");
+        if s.is_empty() {
+            fallback_sid.to_owned()
+        } else {
+            s
+        }
+    };
+    if sid.is_empty() {
+        return None;
+    }
+    let items = if resp["waiting_permissions"].is_array() {
+        m::array(&resp["waiting_permissions"])
+    } else if resp["items"].is_array() {
+        m::array(&resp["items"])
+    } else if resp["session"]["waiting_permissions"].is_array() {
+        m::array(&resp["session"]["waiting_permissions"])
+    } else {
+        Vec::new()
+    };
+    Some((sid, items))
+}
+
+fn focused_drawer_session_from_element(el: &web_sys::Element) -> Option<String> {
+    let in_drawer = el.closest("#approvals-drawer").ok().flatten().is_some();
+    if !in_drawer {
+        return None;
+    }
+    let item = el
+        .closest(".approvals-queue-item[data-session-id]")
+        .ok()
+        .flatten()?;
+    let sid = item.get_attribute("data-session-id")?;
+    let trimmed = sid.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn focused_drawer_session_id() -> Option<String> {
+    dom::document()
+        .active_element()
+        .and_then(|el| focused_drawer_session_from_element(&el))
+}
+
+fn ensure_permission_rules_session_selector(selected_sid: &str, options: &[(String, String)]) {
+    let Some(panel) = dom::get("permission-rules-panel") else {
+        return;
+    };
+    let select = if let Some(existing) = dom::get("permission-rules-session") {
+        existing
+    } else {
+        let wrap = dom::el("div", "approvals-rules-session-row", "");
+        let _ = wrap.set_attribute("id", "permission-rules-session-wrap");
+        let label = dom::el("label", "sr-only", "Session for approval rules");
+        let _ = label.set_attribute("for", "permission-rules-session");
+        let sel = dom::el("select", "approvals-rules-session-select", "");
+        let _ = sel.set_attribute("id", "permission-rules-session");
+        let _ = sel.set_attribute("data-action", "permission-rules-session");
+        let _ = sel.set_attribute("aria-label", "Session for approval rules");
+        dom::add(&wrap, &label);
+        dom::add(&wrap, &sel);
+        if let Some(err_el) = dom::get("permission-rules-error") {
+            let _ = panel.insert_before(&wrap, Some(&err_el));
+        } else {
+            dom::add(&panel, &wrap);
+        }
+        sel
+    };
+    let Ok(select_el) = select.dyn_into::<web_sys::HtmlSelectElement>() else {
+        return;
+    };
+    let desired: Vec<(String, String)> = if options.is_empty() {
+        vec![(String::new(), "No sessions available".to_owned())]
+    } else {
+        options.to_vec()
+    };
+    let current_children = select_el.children();
+    let mut matches_existing = current_children.length() as usize == desired.len();
+    if matches_existing {
+        for (idx, (val, lbl)) in desired.iter().enumerate() {
+            let Some(opt) = current_children.item(idx as u32) else {
+                matches_existing = false;
+                break;
+            };
+            if opt.get_attribute("value").as_deref() != Some(val.as_str())
+                || opt.text_content().as_deref() != Some(lbl.as_str())
+            {
+                matches_existing = false;
+                break;
+            }
+        }
+    }
+    if !matches_existing {
+        select_el.set_text_content(None);
+        for (val, lbl) in &desired {
+            let opt = dom::el("option", "", lbl);
+            let _ = opt.set_attribute("value", val);
+            let _ = select_el.append_child(&opt);
+        }
+    }
+    select_el.set_disabled(options.is_empty());
+    select_el.set_value(selected_sid);
+}
+
+pub(crate) fn sync_permission_rules_for_focus(target: &web_sys::Element) {
+    let (drawer_open, manual, current_rules_sid) = m::read(|s| {
         (
+            s.approvals.drawer_open,
+            s.approvals.rules_sid_manual,
+            s.approvals.rules_sid.clone(),
+        )
+    });
+    if !drawer_open || manual {
+        return;
+    }
+    let Some(focused_sid) = focused_drawer_session_from_element(target) else {
+        return;
+    };
+    if focused_sid == current_rules_sid {
+        return;
+    }
+    wasm_bindgen_futures::spawn_local(async move {
+        load_permission_rules(&focused_sid).await;
+    });
+}
+
+pub(crate) async fn select_permission_rules_session(sid: &str) {
+    let clean = sid.trim();
+    m::write(|s| s.approvals.rules_sid_manual = !clean.is_empty());
+    load_permission_rules(clean).await;
+}
+
+pub(crate) async fn revoke_active_permission_rules() {
+    let sid = m::read(|s| {
+        if !s.approvals.rules_sid.is_empty() {
+            s.approvals.rules_sid.clone()
+        } else {
+            s.sid.clone()
+        }
+    });
+    revoke_all_permission_rules(&sid).await;
+}
+
+pub(crate) fn render_permission_rules_panel() {
+    let focused_sid = focused_drawer_session_id();
+    let (sessions, waiting_counts, active_sid, rules_sid, rules, loading, error) = m::read(|s| {
+        (
+            s.sessions.clone(),
+            s.approvals.waiting_counts.clone(),
             s.sid.clone(),
+            s.approvals.rules_sid.clone(),
             s.approvals.rules.clone(),
             s.approvals.rules_loading,
             s.approvals.rules_error.clone(),
         )
     });
+    let sid = if !rules_sid.is_empty() {
+        rules_sid.clone()
+    } else {
+        active_sid.clone()
+    };
+    let options = permission_rules_session_options(
+        &sessions,
+        &waiting_counts,
+        &active_sid,
+        &sid,
+        focused_sid.as_deref(),
+    );
+    ensure_permission_rules_session_selector(&sid, &options);
     dom::error("permission-rules-error", &error);
     dom::hidden(
         "permission-rules-revoke-all",
@@ -2036,7 +2322,7 @@ pub(crate) fn render_permission_rules_panel() {
             &dom::el(
                 "p",
                 "muted",
-                "Open a session to inspect remembered approval rules.",
+                "Select or open a session to inspect remembered approval rules.",
             ),
         );
         return;
@@ -2087,6 +2373,7 @@ pub(crate) async fn load_permission_rules(sid: &str) {
         m::write(|s| {
             s.approvals.rules.clear();
             s.approvals.rules_sid.clear();
+            s.approvals.rules_sid_manual = false;
             s.approvals.rules_loading = false;
             s.approvals.rules_error.clear();
         });
@@ -2102,7 +2389,7 @@ pub(crate) async fn load_permission_rules(sid: &str) {
     let url = format!("/api/sessions/{}/permission-rules", dom::enc(sid));
     match api::get(&url).await {
         Ok(v) => {
-            if m::read(|s| s.sid != sid) {
+            if m::read(|s| s.approvals.rules_sid != sid) {
                 return;
             }
             let raw = v["rules"]
@@ -2119,7 +2406,7 @@ pub(crate) async fn load_permission_rules(sid: &str) {
             });
         }
         Err(e) if !e.aborted => {
-            if m::read(|s| s.sid != sid) {
+            if m::read(|s| s.approvals.rules_sid != sid) {
                 return;
             }
             m::write(|s| {
@@ -2419,6 +2706,63 @@ pub(crate) fn prioritize_waiting_sessions_for_drawer(
     (selected, total_waiting_sessions)
 }
 
+async fn fetch_per_session_waiting_permissions(
+    targets: Vec<(String, String)>,
+) -> (Vec<(String, Vec<V>)>, Vec<String>) {
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+    let fetches = js_sys::Array::new();
+    for (sid, _label) in targets {
+        let url = format!("/api/sessions/{}/waiting-permissions", dom::enc(&sid));
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let item = match api::get(&url).await {
+                Ok(resp) => json!({ "sid": sid, "ok": true, "resp": resp }),
+                Err(e) => {
+                    json!({ "sid": sid, "ok": false, "aborted": e.aborted, "error": e.message })
+                }
+            };
+            Ok(wasm_bindgen::JsValue::from_str(&item.to_string()))
+        });
+        fetches.push(&promise);
+    }
+    if fetches.length() == 0 {
+        return (results, errors);
+    }
+    match wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&fetches)).await {
+        Ok(resolved) => {
+            for val in js_sys::Array::from(&resolved).iter() {
+                let Some(raw) = val.as_string() else {
+                    continue;
+                };
+                let Ok(parsed) = serde_json::from_str::<V>(&raw) else {
+                    continue;
+                };
+                let sid = m::text(&parsed, "sid");
+                if parsed["ok"] != true {
+                    if parsed["aborted"] != true {
+                        let err_msg = m::text(&parsed, "error");
+                        if !err_msg.is_empty() {
+                            errors.push(err_msg);
+                        } else {
+                            errors.push(format!("Could not load session {sid}"));
+                        }
+                    }
+                    continue;
+                }
+                if let Some(pair) =
+                    parse_session_waiting_permissions_response(&sid, &parsed["resp"])
+                {
+                    results.push(pair);
+                }
+            }
+        }
+        Err(_) => {
+            errors.push("Could not load pending session approvals.".into());
+        }
+    }
+    (results, errors)
+}
+
 async fn refresh_approvals_queue_inner(force_all: bool) {
     let Some(container) = dom::get("approvals-drawer-list") else {
         return;
@@ -2469,65 +2813,59 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
         );
     }
 
-    let fetches = js_sys::Array::new();
-    for (sid, _label) in to_fetch {
-        let url = format!("/api/sessions/{}?limit=1&tail=1", dom::enc(&sid));
-        let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let item = match api::get(&url).await {
-                Ok(session) => json!({ "sid": sid, "ok": true, "session": session }),
-                Err(e) => {
-                    json!({ "sid": sid, "ok": false, "aborted": e.aborted, "error": e.message })
-                }
-            };
-            Ok(wasm_bindgen::JsValue::from_str(&item.to_string()))
-        });
-        fetches.push(&promise);
-    }
     let mut fetch_errors = Vec::<String>::new();
-    if fetches.length() > 0 {
-        match wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&fetches)).await {
-            Ok(resolved) => {
-                for val in js_sys::Array::from(&resolved).iter() {
-                    let Some(raw) = val.as_string() else {
-                        continue;
-                    };
-                    let Ok(parsed) = serde_json::from_str::<V>(&raw) else {
-                        continue;
-                    };
-                    let sid = m::text(&parsed, "sid");
-                    if parsed["ok"] != true {
-                        if parsed["aborted"] != true {
-                            let err_msg = m::text(&parsed, "error");
-                            if !err_msg.is_empty() {
-                                fetch_errors.push(err_msg);
-                            } else {
-                                fetch_errors.push(format!("Could not load session {sid}"));
-                            }
-                        }
-                        continue;
-                    }
-                    let waiting_for_sid = m::array(&parsed["session"]["waiting_permissions"]);
-                    if parsed["session"].is_object() {
-                        let count = waiting_for_sid.len();
-                        m::write(|s| {
-                            apply_session_waiting_count(
-                                &mut s.sessions,
-                                &mut s.approvals.waiting_counts,
-                                &sid,
-                                count,
-                            );
-                        });
-                        APPROVALS_SESSION_CACHE.with(|cache| {
-                            cache
-                                .borrow_mut()
-                                .insert(sid.clone(), (count, waiting_for_sid));
-                        });
-                    }
+    let apply_waiting_items = |sid: &str, waiting_for_sid: Vec<V>| {
+        let count = waiting_for_sid.len();
+        m::write(|s| {
+            apply_session_waiting_count(
+                &mut s.sessions,
+                &mut s.approvals.waiting_counts,
+                sid,
+                count,
+            );
+        });
+        APPROVALS_SESSION_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(sid.to_owned(), (count, waiting_for_sid));
+        });
+    };
+
+    if to_fetch.len() == 1 {
+        let (items, errs) = fetch_per_session_waiting_permissions(to_fetch).await;
+        fetch_errors.extend(errs);
+        for (sid, waiting_for_sid) in items {
+            apply_waiting_items(&sid, waiting_for_sid);
+        }
+    } else if to_fetch.len() > 1 {
+        let sids_param = to_fetch
+            .iter()
+            .map(|(sid, _)| dom::enc(sid))
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit = to_fetch.len().clamp(50, 200);
+        let batch_url = format!("/api/permissions/waiting?session_id={sids_param}&limit={limit}");
+        match api::get(&batch_url).await {
+            Ok(resp) => {
+                for (sid, waiting_for_sid) in parse_waiting_permissions_batch_response(&resp) {
+                    apply_waiting_items(&sid, waiting_for_sid);
                 }
             }
-            Err(_) => {
-                fetch_errors.push("Could not load pending session approvals.".into());
+            Err(e) if !e.aborted && e.status == 404 => {
+                let (items, errs) = fetch_per_session_waiting_permissions(to_fetch).await;
+                fetch_errors.extend(errs);
+                for (sid, waiting_for_sid) in items {
+                    apply_waiting_items(&sid, waiting_for_sid);
+                }
             }
+            Err(e) if !e.aborted => {
+                if !e.message.is_empty() {
+                    fetch_errors.push(e.message);
+                } else {
+                    fetch_errors.push("Could not load pending session approvals.".into());
+                }
+            }
+            Err(_) => {}
         }
     }
 
@@ -2624,6 +2962,7 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
                     origin_run_id,
                     ..
                 } => {
+                    let _ = wrap.set_attribute("data-session-id", sid);
                     let header = wrap
                         .query_selector(".approvals-queue-item-head")
                         .ok()
@@ -2670,6 +3009,7 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
                     jump_payload,
                     ..
                 } => {
+                    let _ = wrap.remove_attribute("data-session-id");
                     let text = format!("{title} · {pending_count} waiting");
                     let header = wrap
                         .query_selector(".approvals-queue-item-head")
@@ -2726,19 +3066,47 @@ async fn refresh_approvals_queue_inner(force_all: bool) {
     }
     schedule_permission_countdowns();
     sync_approvals_badge();
+    if m::read(|s| s.approvals.drawer_open) {
+        render_permission_rules_panel();
+    }
     crate::session::history();
 }
 
 pub(crate) async fn open_approvals_drawer() {
     crate::commands::close_palette();
-    m::write(|s| s.approvals.drawer_open = true);
+    m::write(|s| {
+        s.approvals.drawer_open = true;
+        s.approvals.rules_sid_manual = false;
+    });
     dom::save_focus_for_overlay("approvals-drawer");
     dom::hidden("approvals-drawer", false);
     dom::attr("approvals-queue-toggle", "aria-expanded", "true");
     if let Some(close) = dom::get("approvals-drawer-close") {
         focus_node(&close);
     }
-    let sid = m::read(|s| s.sid.clone());
+    let (sessions, waiting_counts, active_sid) = m::read(|s| {
+        (
+            s.sessions.clone(),
+            s.approvals.waiting_counts.clone(),
+            s.sid.clone(),
+        )
+    });
+    let current_project = m::current_project();
+    let (waiting_entries, _) = prioritize_waiting_sessions_for_drawer(
+        &sessions,
+        &waiting_counts,
+        &active_sid,
+        &current_project,
+        APPROVALS_DRAWER_SESSION_CAP,
+    );
+    let waiting_ids: Vec<String> = waiting_entries.into_iter().map(|(id, _, _)| id).collect();
+    let initial_sid = resolve_drawer_rules_session_id(
+        focused_drawer_session_id().as_deref(),
+        "",
+        false,
+        &waiting_ids,
+        &active_sid,
+    );
     let queue_promise = wasm_bindgen_futures::future_to_promise(async move {
         refresh_approvals_queue().await;
         if m::read(|s| s.approvals.drawer_open) {
@@ -2760,14 +3128,44 @@ pub(crate) async fn open_approvals_drawer() {
         }
         Ok(wasm_bindgen::JsValue::UNDEFINED)
     });
+    let rules_sid_for_promise = initial_sid.clone();
     let rules_promise = wasm_bindgen_futures::future_to_promise(async move {
-        load_permission_rules(&sid).await;
+        load_permission_rules(&rules_sid_for_promise).await;
         Ok(wasm_bindgen::JsValue::UNDEFINED)
     });
     let pair = js_sys::Array::new();
     pair.push(&queue_promise);
     pair.push(&rules_promise);
     let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&pair)).await;
+    if m::read(|s| s.approvals.drawer_open && !s.approvals.rules_sid_manual) {
+        let (sessions, waiting_counts, active_sid, current_rules_sid) = m::read(|s| {
+            (
+                s.sessions.clone(),
+                s.approvals.waiting_counts.clone(),
+                s.sid.clone(),
+                s.approvals.rules_sid.clone(),
+            )
+        });
+        let current_project = m::current_project();
+        let (waiting_entries, _) = prioritize_waiting_sessions_for_drawer(
+            &sessions,
+            &waiting_counts,
+            &active_sid,
+            &current_project,
+            APPROVALS_DRAWER_SESSION_CAP,
+        );
+        let waiting_ids: Vec<String> = waiting_entries.into_iter().map(|(id, _, _)| id).collect();
+        let resolved_sid = resolve_drawer_rules_session_id(
+            focused_drawer_session_id().as_deref(),
+            &current_rules_sid,
+            false,
+            &waiting_ids,
+            &active_sid,
+        );
+        if !resolved_sid.is_empty() && resolved_sid != current_rules_sid {
+            load_permission_rules(&resolved_sid).await;
+        }
+    }
 }
 
 pub(crate) fn close_approvals_drawer() {
@@ -2942,5 +3340,71 @@ mod tests {
             approvals_cap_notice(12, 17).as_deref(),
             Some("Showing 12 of 17 sessions with pending approvals.")
         );
+    }
+
+    #[test]
+    fn drawer_rules_session_resolution_and_waiting_payload_parsers() {
+        let waiting = vec!["s-wait-1".to_owned(), "s-wait-2".to_owned()];
+        // Focused drawer card overrides active session unless the user chose one manually.
+        assert_eq!(
+            resolve_drawer_rules_session_id(
+                Some("s-wait-2"),
+                "s-active",
+                false,
+                &waiting,
+                "s-active"
+            ),
+            "s-wait-2"
+        );
+        assert_eq!(
+            resolve_drawer_rules_session_id(
+                Some("s-wait-2"),
+                "s-manual",
+                true,
+                &waiting,
+                "s-active"
+            ),
+            "s-manual"
+        );
+        // Without a focused card, fall back to active session, then first waiting session.
+        assert_eq!(
+            resolve_drawer_rules_session_id(None, "", false, &waiting, "s-active"),
+            "s-active"
+        );
+        assert_eq!(
+            resolve_drawer_rules_session_id(None, "", false, &waiting, ""),
+            "s-wait-1"
+        );
+
+        let sessions = vec![
+            json!({"id": "s1", "title": "Main Chat", "waiting_permissions": 0}),
+            json!({"id": "s2", "title": "Queued Worker", "waiting_permissions": 2}),
+        ];
+        let counts = std::collections::BTreeMap::from([("s2".to_owned(), 2usize)]);
+        let opts = permission_rules_session_options(&sessions, &counts, "s1", "s2", Some("s2"));
+        assert_eq!(opts[0].0, "s2");
+        assert!(opts[0].1.contains("Queued Worker"));
+        assert!(opts[0].1.contains("2 waiting"));
+        assert_eq!(opts[1].0, "s1");
+
+        let batch = json!({
+            "counts": {"s1": 1, "s2": 0},
+            "sessions": [
+                {"session_id": "s1", "waiting_permissions": [{"request_id": "r1"}]},
+                {"session_id": "s2", "items": [{"request_id": "r2"}]}
+            ]
+        });
+        let parsed_batch = parse_waiting_permissions_batch_response(&batch);
+        assert_eq!(parsed_batch.len(), 2);
+        assert_eq!(parsed_batch[0].0, "s1");
+        assert_eq!(parsed_batch[0].1[0]["request_id"], "r1");
+        assert_eq!(parsed_batch[1].0, "s2");
+        assert_eq!(parsed_batch[1].1[0]["request_id"], "r2");
+
+        let single = json!({"session_id": "s9", "waiting_permissions": [{"request_id": "r9"}]});
+        let parsed_single =
+            parse_session_waiting_permissions_response("fallback", &single).unwrap();
+        assert_eq!(parsed_single.0, "s9");
+        assert_eq!(parsed_single.1[0]["request_id"], "r9");
     }
 }

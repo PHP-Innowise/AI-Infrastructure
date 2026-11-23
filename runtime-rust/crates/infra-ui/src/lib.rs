@@ -235,6 +235,7 @@ pub fn start() -> Result<(), JsValue> {
             if k == "focusin" {
                 dom::sync_widget_from_target(&target);
                 commands::handle_focus_in(&target);
+                run::sync_permission_rules_for_focus(&target);
                 return;
             }
             if k == "focusout" {
@@ -623,6 +624,16 @@ async fn dispatch(
         return;
     }
     if commands::event(kind, id, action, &payload, &value).await {
+        return;
+    }
+    if kind == "change"
+        && (action == "permission-rules-session" || id == "permission-rules-session")
+    {
+        run::select_permission_rules_session(&value).await;
+        return;
+    }
+    if kind == "click" && action == "permission-rules-revoke-all" {
+        run::revoke_active_permission_rules().await;
         return;
     }
     if run::event(kind, id, action, &payload, &value).await {

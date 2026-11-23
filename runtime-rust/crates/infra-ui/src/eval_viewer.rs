@@ -327,6 +327,79 @@ fn grades(run: &V) {
         }
     }
 }
+fn run_select_label(index: usize, total: usize, run: &V) -> String {
+    let id = text(run, "id");
+    let config = configuration_of(&id).map(|c| c.replace('_', " "));
+    let eval_part = run["eval_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| run["eval_id"].as_u64().map(|n| format!("eval {n}")))
+        .unwrap_or_default();
+    let suffix = match (config, eval_part.is_empty(), id.is_empty()) {
+        (Some(cfg), false, _) => format!(" — {eval_part} ({cfg})"),
+        (Some(cfg), true, false) => format!(" — {id} ({cfg})"),
+        (Some(cfg), true, true) => format!(" — {cfg}"),
+        (None, _, false) => format!(" — {id}"),
+        (None, false, true) => format!(" — {eval_part}"),
+        (None, true, true) => String::new(),
+    };
+    format!("{} of {total}{suffix}", index + 1)
+}
+
+fn sync_run_select(runs: &[V], active_idx: usize) {
+    let Some(el) = dom::get("run-select") else {
+        return;
+    };
+    let Ok(select_el) = el.dyn_into::<web_sys::HtmlSelectElement>() else {
+        return;
+    };
+    let total = runs.len();
+    let desired: Vec<(String, String)> = if runs.is_empty() {
+        vec![("0".to_owned(), "No runs".to_owned())]
+    } else {
+        runs.iter()
+            .enumerate()
+            .map(|(i, r)| (i.to_string(), run_select_label(i, total, r)))
+            .collect()
+    };
+    let current = select_el.children();
+    let mut matches_existing = current.length() as usize == desired.len();
+    if matches_existing {
+        for (idx, (val, lbl)) in desired.iter().enumerate() {
+            let Some(opt) = current.item(idx as u32) else {
+                matches_existing = false;
+                break;
+            };
+            if opt.get_attribute("value").as_deref() != Some(val.as_str())
+                || opt.text_content().as_deref() != Some(lbl.as_str())
+            {
+                matches_existing = false;
+                break;
+            }
+        }
+    }
+    if !matches_existing {
+        select_el.set_text_content(None);
+        for (val, lbl) in &desired {
+            let opt = dom::el("option", "", lbl);
+            let _ = opt.set_attribute("value", val);
+            let _ = select_el.append_child(&opt);
+        }
+    }
+    select_el.set_disabled(runs.len() <= 1);
+    select_el.set_value(&active_idx.to_string());
+}
+
+fn jump_to_run(index: usize) {
+    save(false);
+    let valid = read(|s| index < list(&s.data["runs"]).len());
+    if valid {
+        show_run(index);
+    }
+}
+
 fn show_run(index: usize) {
     let Some((run, data, feedback, visited, total)) = write(|s| {
         let runs = list(&s.data["runs"]);
@@ -345,6 +418,7 @@ fn show_run(index: usize) {
         return;
     };
     dom::text("progress", &format!("{} of {total}", index + 1));
+    sync_run_select(list(&data["runs"]), index);
     dom::text("prompt-text", &text(&run, "prompt"));
     let id = text(&run, "id");
     let config = configuration_of(&id);
@@ -691,7 +765,6 @@ fn save(complete: bool) {
     });
 }
 fn navigate(delta: i32) {
-    save(false);
     let next = read(|s| {
         let n = s.index as i64 + delta as i64;
         if n >= 0 && (n as usize) < list(&s.data["runs"]).len() {
@@ -701,7 +774,7 @@ fn navigate(delta: i32) {
         }
     });
     if let Some(index) = next {
-        show_run(index);
+        jump_to_run(index);
     }
 }
 fn switch_view(view: &str) {
@@ -809,6 +882,147 @@ fn table(parent: &Element, headers: &[String]) -> Element {
     }
     add(&table, "tbody", "", "")
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BenchmarkCell {
+    text: String,
+    class: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BenchmarkSummaryTable {
+    headers: Vec<String>,
+    rows: Vec<Vec<BenchmarkCell>>,
+}
+
+fn metric_mean(value: &V) -> Option<f64> {
+    if let Some(n) = value.as_f64() {
+        n.is_finite().then_some(n)
+    } else {
+        value
+            .get("mean")
+            .and_then(V::as_f64)
+            .filter(|n| n.is_finite())
+    }
+}
+
+fn find_baseline_delta(
+    summary: &V,
+    cfg: &str,
+    baseline: &str,
+    key: &str,
+    use_top_delta: bool,
+) -> V {
+    for path in [
+        summary
+            .get("delta_vs_baseline")
+            .and_then(|d| d.get(cfg))
+            .and_then(|d| d.get(key)),
+        summary
+            .get("deltas")
+            .and_then(|d| d.get(cfg))
+            .and_then(|d| d.get(key)),
+        summary
+            .get(cfg)
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get(key)),
+    ] {
+        if let Some(val) = path.filter(|v| !v.is_null()) {
+            return val.clone();
+        }
+    }
+    if use_top_delta && !summary["delta"][key].is_null() {
+        return summary["delta"][key].clone();
+    }
+    match (
+        metric_mean(&summary[cfg][key]),
+        metric_mean(&summary[baseline][key]),
+    ) {
+        (Some(cur), Some(base)) => json!(cur - base),
+        _ => V::Null,
+    }
+}
+
+fn build_benchmark_summary_table(summary: &V, configs: &[String]) -> BenchmarkSummaryTable {
+    let effective_configs = if configs.is_empty() {
+        vec!["config_a".to_owned(), "config_b".to_owned()]
+    } else {
+        configs.to_vec()
+    };
+    let mut headers = vec!["Metric".to_owned()];
+    for cfg in &effective_configs {
+        headers.push(title(cfg));
+    }
+
+    let baseline = effective_configs.iter().find(|c| is_baseline(c)).cloned();
+    enum DeltaCol {
+        TopLevel,
+        VsBaseline { cfg: String, base: String },
+    }
+    let mut delta_cols = Vec::new();
+    if effective_configs.len() == 2 {
+        headers.push("Delta".to_owned());
+        if let Some(base) = baseline.clone() {
+            let primary = effective_configs
+                .iter()
+                .find(|c| *c != &base)
+                .cloned()
+                .unwrap_or_else(|| effective_configs[0].clone());
+            delta_cols.push(DeltaCol::VsBaseline { cfg: primary, base });
+        } else {
+            delta_cols.push(DeltaCol::TopLevel);
+        }
+    } else if effective_configs.len() >= 3 {
+        if let Some(base) = baseline.clone() {
+            for cfg in effective_configs.iter().filter(|c| *c != &base) {
+                headers.push(format!("{} vs {}", title(cfg), title(&base)));
+                delta_cols.push(DeltaCol::VsBaseline {
+                    cfg: cfg.clone(),
+                    base: base.clone(),
+                });
+            }
+        } else if !summary["delta"].is_null() {
+            headers.push("Delta".to_owned());
+            delta_cols.push(DeltaCol::TopLevel);
+        }
+    } else if !summary["delta"].is_null() {
+        headers.push("Delta".to_owned());
+        delta_cols.push(DeltaCol::TopLevel);
+    }
+
+    let use_top_delta_in_vs_baseline = effective_configs.len() == 2;
+    let mut rows = Vec::new();
+    for (key, label, pct, suffix, decimals, lower_is_better) in METRICS {
+        if key != "pass_rate" && effective_configs.iter().all(|c| summary[c][key].is_null()) {
+            continue;
+        }
+        let mut row = Vec::with_capacity(headers.len());
+        row.push(BenchmarkCell {
+            text: label.to_owned(),
+            class: "",
+        });
+        for cfg in &effective_configs {
+            row.push(BenchmarkCell {
+                text: stat(&summary[cfg][key], pct, decimals),
+                class: "",
+            });
+        }
+        for dcol in &delta_cols {
+            let d = match dcol {
+                DeltaCol::TopLevel => summary["delta"][key].clone(),
+                DeltaCol::VsBaseline { cfg, base } => {
+                    find_baseline_delta(summary, cfg, base, key, use_top_delta_in_vs_baseline)
+                }
+            };
+            row.push(BenchmarkCell {
+                text: format_delta(&d, pct, suffix),
+                class: delta_class(&d, lower_is_better),
+            });
+        }
+        rows.push(row);
+    }
+    BenchmarkSummaryTable { headers, rows }
+}
+
 fn render_benchmark() {
     let data = read(|s| s.data["benchmark"].clone());
     if data.is_null() {
@@ -854,27 +1068,13 @@ fn render_benchmark() {
             })
             .unwrap_or_default()
     };
-    let a = configs.first().map(String::as_str).unwrap_or("config_a");
-    let b = configs.get(1).map(String::as_str).unwrap_or("config_b");
-    let body = table(
-        &root,
-        &["Metric".into(), title(a), title(b), "Delta".into()],
-    );
-    for (key, label, pct, suffix, decimals, lower_is_better) in METRICS {
-        if key != "pass_rate" && summary[a][key].is_null() && summary[b][key].is_null() {
-            continue;
-        }
+    let tbl = build_benchmark_summary_table(summary, &configs);
+    let body = table(&root, &tbl.headers);
+    for row in tbl.rows {
         let tr = add(&body, "tr", "", "");
-        add(&tr, "td", "", label);
-        add(&tr, "td", "", &stat(&summary[a][key], pct, decimals));
-        add(&tr, "td", "", &stat(&summary[b][key], pct, decimals));
-        let d = &summary["delta"][key];
-        add(
-            &tr,
-            "td",
-            delta_class(d, lower_is_better),
-            &format_delta(d, pct, suffix),
-        );
+        for cell in row {
+            add(&tr, "td", cell.class, &cell.text);
+        }
     }
     let runs = list(&data["runs"]);
     if !runs.is_empty() {
@@ -1149,6 +1349,20 @@ pub fn start() -> Result<(), JsValue> {
         dom::document()
             .add_event_listener_with_callback("click", click.as_ref().unchecked_ref())?;
         click.forget();
+        let run_jump = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+            let Some(target) = event.target().and_then(|e| e.dyn_into::<Element>().ok()) else {
+                return;
+            };
+            if target.id() != "run-select" || target.has_attribute("disabled") {
+                return;
+            }
+            if let Ok(index) = dom::value_of(&target).trim().parse::<usize>() {
+                jump_to_run(index);
+            }
+        });
+        dom::document()
+            .add_event_listener_with_callback("change", run_jump.as_ref().unchecked_ref())?;
+        run_jump.forget();
         let input = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
             if event
                 .target()
@@ -1163,8 +1377,8 @@ pub fn start() -> Result<(), JsValue> {
         dom::document()
             .add_event_listener_with_callback("input", input.as_ref().unchecked_ref())?;
         input.forget();
-        let key =
-            Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(|event: web_sys::KeyboardEvent| {
+        let key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+            |event: web_sys::KeyboardEvent| {
                 if dom::get("done-overlay").is_some_and(|el| el.class_list().contains("visible")) {
                     match event.key().as_str() {
                         "Escape" => {
@@ -1182,6 +1396,9 @@ pub fn start() -> Result<(), JsValue> {
                         }
                         _ => {}
                     }
+                    return;
+                }
+                if event.alt_key() || event.ctrl_key() || event.meta_key() || event.is_composing() {
                     return;
                 }
                 if let Some(target_el) = event.target().and_then(|e| e.dyn_into::<Element>().ok()) {
@@ -1211,12 +1428,39 @@ pub fn start() -> Result<(), JsValue> {
                             return;
                         }
                     }
-                    if target_el.tag_name() == "TEXTAREA"
-                        || target_el.tag_name() == "INPUT"
-                        || target_el.has_attribute("contenteditable")
-                    {
+                    let outputs_active =
+                        dom::get("panel-outputs").is_none_or(|p| p.class_list().contains("active"));
+                    let is_contenteditable = target_el.has_attribute("contenteditable")
+                        || target_el
+                            .dyn_ref::<web_sys::HtmlElement>()
+                            .is_some_and(|h| h.is_content_editable());
+                    let has_interactive_ancestor = target_el
+                        .closest(
+                            "button, summary, details, select, input, textarea, [contenteditable], a[href], [role='button'], [role='menuitem'], [role='listbox'], [role='combobox']",
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    let in_horizontal_scroll = target_el
+                        .closest("pre, .table-scroll")
+                        .ok()
+                        .flatten()
+                        .is_some_and(|sc| sc.scroll_width() > sc.client_width());
+                    if should_ignore_review_arrow_key(
+                        event.key().as_str(),
+                        &target_el.tag_name(),
+                        has_interactive_ancestor,
+                        in_horizontal_scroll,
+                        is_contenteditable,
+                        outputs_active,
+                        false,
+                    ) {
                         return;
                     }
+                } else if dom::get("panel-outputs")
+                    .is_some_and(|p| !p.class_list().contains("active"))
+                {
+                    return;
                 }
                 let delta = match event.key().as_str() {
                     "ArrowLeft" | "ArrowUp" => -1,
@@ -1225,7 +1469,8 @@ pub fn start() -> Result<(), JsValue> {
                 };
                 event.prevent_default();
                 navigate(delta);
-            });
+            },
+        );
         dom::document()
             .add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref())?;
         key.forget();
@@ -1612,22 +1857,88 @@ fn render_editor() {
 
     editor_summary();
 }
-fn export_editor() {
-    let items = read(|s| {
-        list(&s.data["items"])
-            .iter()
-            .filter_map(|item| {
-                let query = text(item, "query");
-                if query.trim().is_empty() {
-                    None
-                } else {
-                    Some(
-                        json!({"query":query.trim(),"should_trigger":item["should_trigger"]==true}),
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
+fn should_ignore_review_arrow_key(
+    key: &str,
+    tag_name: &str,
+    has_interactive_ancestor: bool,
+    in_horizontal_scroll: bool,
+    is_contenteditable: bool,
+    outputs_panel_active: bool,
+    has_modifier: bool,
+) -> bool {
+    if !outputs_panel_active || has_modifier || is_contenteditable || has_interactive_ancestor {
+        return true;
+    }
+    let upper = tag_name.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "TEXTAREA" | "INPUT" | "SELECT" | "OPTION" | "BUTTON" | "SUMMARY" | "DETAILS" | "A"
+    ) {
+        return true;
+    }
+    matches!(key, "ArrowLeft" | "ArrowRight") && in_horizontal_scroll
+}
+
+fn apply_editor_query_value(index: usize, value: String) {
+    write(|s| {
+        if let Some(item) = s.data["items"]
+            .as_array_mut()
+            .and_then(|items| items.get_mut(index))
+        {
+            item["query"] = json!(value);
+        }
     });
+    editor_summary();
+}
+
+fn collect_export_editor_items(items: &[V], overrides: &[(usize, String)]) -> Vec<V> {
+    let override_map: BTreeMap<usize, &str> =
+        overrides.iter().map(|(i, v)| (*i, v.as_str())).collect();
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| {
+            let query = override_map
+                .get(&idx)
+                .copied()
+                .unwrap_or_else(|| item["query"].as_str().unwrap_or(""));
+            let trimmed = query.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(json!({
+                    "query": trimmed,
+                    "should_trigger": item["should_trigger"] == true
+                }))
+            }
+        })
+        .collect()
+}
+
+fn flush_editor_inputs() {
+    for input in dom::all("textarea.query-input[data-editor-index]") {
+        let Some(index) = input
+            .get_attribute("data-editor-index")
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let value = dom::value_of(&input);
+        write(|s| {
+            if let Some(item) = s.data["items"]
+                .as_array_mut()
+                .and_then(|items| items.get_mut(index))
+            {
+                item["query"] = json!(value);
+            }
+        });
+    }
+    editor_summary();
+}
+
+fn export_editor() {
+    flush_editor_inputs();
+    let items = read(|s| collect_export_editor_items(list(&s.data["items"]), &[]));
     let a = dom::el("a", "", "");
     let _ = a.set_attribute("download", "eval_set.json");
     let _ = a.set_attribute(
@@ -1725,15 +2036,7 @@ fn start_editor(data: V) -> Result<(), JsValue> {
         };
         let field = input.get_attribute("data-editor-field").unwrap_or_default();
         if field == "query" {
-            write(|s| {
-                if let Some(item) = s.data["items"]
-                    .as_array_mut()
-                    .and_then(|items| items.get_mut(index))
-                {
-                    item["query"] = json!(dom::value_of(&input));
-                }
-            });
-            editor_summary();
+            apply_editor_query_value(index, dom::value_of(&input));
         } else if field == "should_trigger" {
             write(|s| {
                 if let Some(item) = s.data["items"]
@@ -1748,6 +2051,24 @@ fn start_editor(data: V) -> Result<(), JsValue> {
     });
     dom::document().add_event_listener_with_callback("change", edit.as_ref().unchecked_ref())?;
     edit.forget();
+    let live_input = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+        let Some(input) = event.target().and_then(|e| e.dyn_into::<Element>().ok()) else {
+            return;
+        };
+        if input.get_attribute("data-editor-field").as_deref() != Some("query") {
+            return;
+        }
+        let Some(index) = input
+            .get_attribute("data-editor-index")
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            return;
+        };
+        apply_editor_query_value(index, dom::value_of(&input));
+    });
+    dom::document()
+        .add_event_listener_with_callback("input", live_input.as_ref().unchecked_ref())?;
+    live_input.forget();
     Ok(())
 }
 
@@ -1932,5 +2253,146 @@ mod tests {
         let blank_err = plan_initial_feedback_load(Some(&Err("   ".into())));
         assert!(blank_err.banner_message.is_some());
         assert!(blank_err.status_error);
+    }
+
+    #[test]
+    fn benchmark_summary_renders_all_configs_and_baseline_deltas() {
+        let summary = json!({
+            "with_skill": {
+                "pass_rate": {"mean": 0.9, "stddev": 0.05},
+                "time_seconds": {"mean": 10.0, "stddev": 1.0},
+                "tokens": {"mean": 1200.0, "stddev": 50.0}
+            },
+            "skillcache": {
+                "pass_rate": {"mean": 0.95, "stddev": 0.02},
+                "time_seconds": {"mean": 6.0, "stddev": 0.5},
+                "compile_usd": 0.0042
+            },
+            "without_skill": {
+                "pass_rate": {"mean": 0.6, "stddev": 0.1},
+                "time_seconds": {"mean": 14.0, "stddev": 2.0},
+                "tokens": {"mean": 2000.0, "stddev": 100.0}
+            },
+            "delta_vs_baseline": {
+                "with_skill": {"pass_rate": "+30%"}
+            }
+        });
+        let configs = vec![
+            "with_skill".to_owned(),
+            "skillcache".to_owned(),
+            "without_skill".to_owned(),
+        ];
+        let tbl = build_benchmark_summary_table(&summary, &configs);
+        assert_eq!(
+            tbl.headers,
+            vec![
+                "Metric",
+                "With Skill",
+                "Skillcache",
+                "Without Skill",
+                "With Skill vs Without Skill",
+                "Skillcache vs Without Skill"
+            ]
+        );
+        // Pass Rate row uses override for with_skill and computed delta for skillcache.
+        assert_eq!(tbl.rows[0][0].text, "Pass Rate");
+        assert_eq!(tbl.rows[0][1].text, "90% ± 5%");
+        assert_eq!(tbl.rows[0][2].text, "95% ± 2%");
+        assert_eq!(tbl.rows[0][3].text, "60% ± 10%");
+        assert_eq!(tbl.rows[0][4].text, "+30%");
+        assert_eq!(tbl.rows[0][5].text, "+35%");
+        assert_eq!(tbl.rows[0][5].class, "benchmark-delta-positive");
+        // Metric present ONLY on 3rd/middle config (compile_usd) must NOT be skipped.
+        assert!(tbl.rows.iter().any(|r| r[0].text == "Compilation (USD)"));
+    }
+
+    #[test]
+    fn arrow_navigation_guards_controls_and_horizontal_scrollables() {
+        assert!(!should_ignore_review_arrow_key(
+            "ArrowRight",
+            "BODY",
+            false,
+            false,
+            false,
+            true,
+            false
+        ));
+        for tag in [
+            "BUTTON", "SUMMARY", "DETAILS", "SELECT", "INPUT", "TEXTAREA",
+        ] {
+            assert!(
+                should_ignore_review_arrow_key("ArrowLeft", tag, false, false, false, true, false),
+                "expected {tag} to block ArrowLeft"
+            );
+        }
+        assert!(should_ignore_review_arrow_key(
+            "ArrowRight",
+            "SPAN",
+            true,
+            false,
+            false,
+            true,
+            false
+        ));
+        assert!(should_ignore_review_arrow_key(
+            "ArrowRight",
+            "PRE",
+            false,
+            true,
+            false,
+            true,
+            false
+        ));
+        assert!(should_ignore_review_arrow_key(
+            "ArrowLeft",
+            "DIV",
+            false,
+            true,
+            false,
+            true,
+            false
+        ));
+        // ArrowUp still works inside non-interactive horizontally scrollable containers.
+        assert!(!should_ignore_review_arrow_key(
+            "ArrowUp", "PRE", false, true, false, true, false
+        ));
+        // Inactive outputs panel or modifier keys ignore navigation arrows.
+        assert!(should_ignore_review_arrow_key(
+            "ArrowRight",
+            "BODY",
+            false,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(should_ignore_review_arrow_key(
+            "ArrowRight",
+            "BODY",
+            false,
+            false,
+            false,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn editor_export_flushes_unsaved_query_overrides_and_formats_run_select_labels() {
+        let items = vec![
+            json!({"query": "old query", "should_trigger": true}),
+            json!({"query": "   ", "should_trigger": false}),
+        ];
+        let exported =
+            collect_export_editor_items(&items, &[(0, "  live edit before blur  ".into())]);
+        assert_eq!(
+            exported,
+            vec![json!({"query": "live edit before blur", "should_trigger": true})]
+        );
+
+        let r = json!({"id": "eval-2-with_skill", "eval_id": 2});
+        assert_eq!(run_select_label(0, 4, &r), "1 of 4 — eval 2 (with skill)");
+        let plain = json!({"id": "custom-run"});
+        assert_eq!(run_select_label(1, 4, &plain), "2 of 4 — custom-run");
     }
 }

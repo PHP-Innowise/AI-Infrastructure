@@ -830,6 +830,22 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "GET",
+        pattern: "/api/sessions/{session_id}/waiting-permissions",
+        operation: "sessions.waiting_permissions",
+        status: 200,
+        token: false,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/permissions/waiting",
+        operation: "permissions.waiting",
+        status: 200,
+        token: false,
+        query: &["project_id", "session_id", "limit"],
+    },
+    Route {
+        method: "GET",
         pattern: "/api/sessions/{session_id}/permission-rules",
         operation: "sessions.permission_rules_list",
         status: 200,
@@ -2055,6 +2071,7 @@ struct SseRegistration {
     start: ReplayStart,
     filter_sid: Option<String>,
     filter_pid: Option<String>,
+    services: Arc<dyn Services>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -2082,15 +2099,47 @@ fn take_sse_handoff(token: &str) -> Option<SseRegistration> {
     map.remove(token).map(|(_, reg)| reg)
 }
 
+#[cfg(test)]
 fn matches_sse_filter(
     frame: &StreamFrame,
     filter_sid: Option<&str>,
     filter_pid: Option<&str>,
 ) -> bool {
+    matches_sse_filter_with(frame, filter_sid, filter_pid, |_, _| false)
+}
+
+fn matches_sse_filter_for_services(
+    frame: &StreamFrame,
+    filter_sid: Option<&str>,
+    filter_pid: Option<&str>,
+    services: &dyn Services,
+) -> bool {
+    matches_sse_filter_with(
+        frame,
+        filter_sid,
+        filter_pid,
+        |subscribed_pid, event_pid| services.allows_sse_graph_project(subscribed_pid, event_pid),
+    )
+}
+
+fn matches_sse_filter_with<F>(
+    frame: &StreamFrame,
+    filter_sid: Option<&str>,
+    filter_pid: Option<&str>,
+    allows_graph_project: F,
+) -> bool
+where
+    F: FnOnce(&str, &str) -> bool,
+{
     if let Some(pid) = filter_pid
         && frame.event != "waiting_counts"
         && !(frame.event == "resync" && frame.project_id.is_none())
         && frame.project_id.as_deref() != Some(pid)
+        && !(matches!(frame.event, "graph_status" | "system_graph_status")
+            && frame
+                .project_id
+                .as_deref()
+                .is_some_and(|event_pid| allows_graph_project(pid, event_pid)))
     {
         return false;
     }
@@ -2179,8 +2228,12 @@ async fn run_sse_stream(
                     continue;
                 }
                 last_sent_seq = frame.seq;
-                if !matches_sse_filter(&frame, reg.filter_sid.as_deref(), reg.filter_pid.as_deref())
-                {
+                if !matches_sse_filter_for_services(
+                    &frame,
+                    reg.filter_sid.as_deref(),
+                    reg.filter_pid.as_deref(),
+                    reg.services.as_ref(),
+                ) {
                     continue;
                 }
                 let formatted = format_sse_frame(frame.seq, frame.event, &frame.data);
@@ -2221,10 +2274,11 @@ async fn run_sse_stream(
                             continue;
                         }
                         last_sent_seq = frame.seq;
-                        if !matches_sse_filter(
+                        if !matches_sse_filter_for_services(
                             &frame,
                             reg.filter_sid.as_deref(),
                             reg.filter_pid.as_deref(),
+                            reg.services.as_ref(),
                         ) {
                             continue;
                         }
@@ -3023,6 +3077,7 @@ fn serve_sse_request(
         start,
         filter_sid,
         filter_pid,
+        services: Arc::clone(&app.services),
         shutdown: app.shutdown.subscribe(),
     });
     apply_security_headers(
@@ -3808,5 +3863,88 @@ mod skillcache_route_tests {
                 Some("p1")
             ));
         }
+    }
+
+    #[test]
+    fn route_matches_dedicated_waiting_permissions_endpoints() {
+        let (per_session, params) =
+            route("GET", "/api/sessions/sess-42/waiting-permissions").unwrap();
+        assert_eq!(per_session.operation, "sessions.waiting_permissions");
+        assert_eq!(
+            params.get("session_id").and_then(Value::as_str),
+            Some("sess-42")
+        );
+        assert!(per_session.query.is_empty());
+
+        let (batch, batch_params) = route("GET", "/api/permissions/waiting").unwrap();
+        assert_eq!(batch.operation, "permissions.waiting");
+        assert!(batch_params.is_empty());
+        assert_eq!(batch.query, &["project_id", "session_id", "limit"]);
+    }
+
+    #[test]
+    fn sse_filter_for_services_admits_member_project_graph_events_only() {
+        struct SystemGraphServicesStub;
+        impl crate::services::Services for SystemGraphServicesStub {
+            fn request<'a>(
+                &'a self,
+                _operation: &'a str,
+                _request: Value,
+            ) -> crate::services::Reply<'a> {
+                Box::pin(async { Ok(Payload::Json(json!({}))) })
+            }
+
+            fn allows_sse_graph_project(&self, subscribed_pid: &str, event_pid: &str) -> bool {
+                subscribed_pid == "sys-1" && event_pid == "member-a"
+            }
+
+            fn close<'a>(&'a self) -> crate::services::CloseFuture<'a> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let services = SystemGraphServicesStub;
+        for event in ["graph_status", "system_graph_status"] {
+            let member_frame = StreamFrame {
+                seq: 10,
+                event,
+                session_id: None,
+                project_id: Some("member-a".into()),
+                data: json!({"state": "ready"}),
+            };
+            assert!(matches_sse_filter_for_services(
+                &member_frame,
+                Some("sess-1"),
+                Some("sys-1"),
+                &services
+            ));
+            let unrelated_frame = StreamFrame {
+                seq: 11,
+                event,
+                session_id: None,
+                project_id: Some("other-proj".into()),
+                data: json!({"state": "ready"}),
+            };
+            assert!(!matches_sse_filter_for_services(
+                &unrelated_frame,
+                Some("sess-1"),
+                Some("sys-1"),
+                &services
+            ));
+        }
+
+        let non_graph_member_frame = StreamFrame {
+            seq: 12,
+            event: "session_status",
+            session_id: Some("sess-member".into()),
+            project_id: Some("member-a".into()),
+            data: json!({"status": "idle"}),
+        };
+        assert!(!matches_sse_filter_for_services(
+            &non_graph_member_frame,
+            None,
+            Some("sys-1"),
+            &services
+        ));
     }
 }
