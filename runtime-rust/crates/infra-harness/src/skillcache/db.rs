@@ -207,7 +207,8 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0,
             dependency_manifest TEXT NOT NULL DEFAULT '{}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
             tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT,
-            needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0);
+            needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0,
+            is_read_only INTEGER);
         CREATE INDEX IF NOT EXISTS skillcache_capsules_skill ON skillcache_capsules(project_id,skill_path,status);
         CREATE TABLE IF NOT EXISTS skillcache_pending_requalify(
             capsule_id TEXT PRIMARY KEY,
@@ -295,6 +296,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
             "needs_trace_after_rowid",
             "INTEGER NOT NULL DEFAULT 0",
         ),
+        ("skillcache_capsules", "is_read_only", "INTEGER"),
         ("skillcache_compiles", "eval_arm", "TEXT"),
     ] {
         let cols = {
@@ -337,7 +339,8 @@ pub(crate) fn initialize(db: &Connection) -> Result<()> {
                  engine_digest TEXT NOT NULL DEFAULT '', eval_arm TEXT, runs_reset_rowid INTEGER NOT NULL DEFAULT 0,
                  dependency_manifest TEXT NOT NULL DEFAULT '{{}}', capsule_kind TEXT NOT NULL DEFAULT 'skill',
                  tool_chain_tree_sha TEXT NOT NULL DEFAULT '', reason TEXT,
-                 needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0);
+                 needs_trace INTEGER NOT NULL DEFAULT 0, needs_trace_after_rowid INTEGER NOT NULL DEFAULT 0,
+                 is_read_only INTEGER);
              INSERT INTO skillcache_capsules_new({CAPSULE_COLUMNS},runs_reset_rowid)
              SELECT {CAPSULE_COLUMNS},runs_reset_rowid FROM skillcache_capsules;
              DROP TABLE skillcache_capsules;
@@ -488,7 +491,7 @@ pub(crate) fn delete_trace(db: &Connection, generation: &str) -> Result<bool> {
     )? > 0)
 }
 
-const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha,needs_trace,needs_trace_after_rowid";
+const CAPSULE_COLUMNS: &str = "capsule_id,project_id,skill_name,skill_path,mu_name,mu_description,form,status,revision,capsule_sha256,tree_sha256,skill_files,env_fingerprint,schema_version,compile_rules_version,source_session_id,source_generation,compile_id,artifact_dir,created_at,updated_at,last_used_at,package_sha256,capabilities,engine_digest,eval_arm,reason,dependency_manifest,capsule_kind,tool_chain_tree_sha,needs_trace,needs_trace_after_rowid,is_read_only";
 
 fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -523,6 +526,7 @@ fn capsule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "tool_chain_tree_sha": row.get::<_, String>(29)?,
         "needs_trace": row.get::<_, i64>(30)? != 0,
         "needs_trace_after_rowid": row.get::<_, i64>(31)?,
+        "is_read_only": row.get::<_, Option<i64>>(32)?.map(|v| v != 0),
     }))
 }
 
@@ -854,6 +858,43 @@ pub(crate) fn set_capsule_kind_meta(
     Ok(())
 }
 
+/// Persists whether every program in the compiled capsule is declared read-only.
+pub(crate) fn set_capsule_read_only(
+    db: &Connection,
+    capsule_id: &str,
+    read_only: bool,
+) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE skillcache_capsules SET is_read_only=?2 WHERE capsule_id=?1",
+        params![capsule_id, i64::from(read_only)],
+    )?;
+    if changed == 0 {
+        return Err(HarnessError::missing("Capsule not found."));
+    }
+    Ok(())
+}
+
+/// Returns the attached accelerator edition recorded in `project_accelerators`, if any.
+pub(crate) fn project_accelerator_edition(
+    db: &Connection,
+    project_id: &str,
+) -> Result<Option<String>> {
+    match db
+        .query_row(
+            "SELECT edition FROM project_accelerators WHERE project_id=?1",
+            [project_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+    {
+        Ok(found) => Ok(found.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// All active `ToolChain` capsules in `project_id` matching `eval_arm`, filtered in-memory
 /// by dependency manifest / touched-path hashes.
 pub(crate) fn active_toolchain_capsules_for_project(
@@ -927,6 +968,24 @@ pub(crate) fn upsert_template(
     Ok(template_id)
 }
 
+fn template_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "template_id": row.get::<_, String>(0)?,
+        "edition": row.get::<_, String>(1)?,
+        "skill_name": row.get::<_, String>(2)?,
+        "skill_tree_sha256": row.get::<_, String>(3)?,
+        "form": row.get::<_, String>(4)?,
+        "mu": {"name": row.get::<_, String>(5)?, "description": row.get::<_, String>(6)?},
+        "capsule_json": row.get::<_, String>(7)?,
+        "files_json": decoded(row.get(8)?),
+        "markdown": row.get::<_, Option<String>>(9)?,
+        "examples_json": row.get::<_, Option<String>>(10)?,
+        "portability_sha256": row.get::<_, String>(11)?,
+        "created_at": row.get::<_, String>(12)?,
+        "updated_at": row.get::<_, String>(13)?,
+    }))
+}
+
 /// Looks up portable edition templates matching `(edition, skill_name, skill_tree_sha256)`.
 pub(crate) fn find_templates(
     db: &Connection,
@@ -941,23 +1000,23 @@ pub(crate) fn find_templates(
          WHERE edition=?1 AND skill_name=?2 AND skill_tree_sha256=?3
          ORDER BY updated_at DESC",
     )?;
-    let rows = query.query_map(params![edition, skill_name, skill_tree_sha256], |row| {
-        Ok(json!({
-            "template_id": row.get::<_, String>(0)?,
-            "edition": row.get::<_, String>(1)?,
-            "skill_name": row.get::<_, String>(2)?,
-            "skill_tree_sha256": row.get::<_, String>(3)?,
-            "form": row.get::<_, String>(4)?,
-            "mu": {"name": row.get::<_, String>(5)?, "description": row.get::<_, String>(6)?},
-            "capsule_json": row.get::<_, String>(7)?,
-            "files_json": decoded(row.get(8)?),
-            "markdown": row.get::<_, Option<String>>(9)?,
-            "examples_json": row.get::<_, Option<String>>(10)?,
-            "portability_sha256": row.get::<_, String>(11)?,
-            "created_at": row.get::<_, String>(12)?,
-            "updated_at": row.get::<_, String>(13)?,
-        }))
-    })?;
+    let rows = query.query_map(
+        params![edition, skill_name, skill_tree_sha256],
+        template_row,
+    )?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Lists all portable templates indexed for `edition`.
+pub(crate) fn edition_templates(db: &Connection, edition: &str) -> Result<Vec<Value>> {
+    let mut query = db.prepare(
+        "SELECT template_id,edition,skill_name,skill_tree_sha256,form,mu_name,mu_description,
+                capsule_json,files_json,markdown,examples_json,portability_sha256,created_at,updated_at
+         FROM skillcache_templates
+         WHERE edition=?1
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = query.query_map([edition], template_row)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 

@@ -17,7 +17,9 @@ use crate::{
 };
 use infra_host::provider::{Launch, LaunchAdapter, PreparedCommand};
 use infra_skillcache::{
-    Form, Step, capsule::Network, env_filter, package, prompt, state, trace as sc_trace,
+    Form, Step,
+    capsule::{CapsuleKind, Network},
+    env_filter, executor, package, prompt, state, trace as sc_trace,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
@@ -69,6 +71,9 @@ pub struct Warm {
     pub bin: Option<PathBuf>,
     pub package: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
+    /// True when the active verified capsule is pure deterministic read-only (`Step::Program` only)
+    /// and eligible for direct in-process execution without paying the ~25k prefix LLM turn.
+    pub direct_dispatch: bool,
     /// The last journal line already turned into a session event.
     seen: AtomicU64,
     /// The last sidecar `run-log.changes.jsonl` line already forwarded to focus tracking.
@@ -91,6 +96,7 @@ impl Warm {
             bin: None,
             package: None,
             state_dir: Some(state_dir),
+            direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         }
@@ -366,14 +372,11 @@ fn is_read_only_capsule(capsule_row: &Value) -> bool {
     if capsule_row["form"] == "textual" {
         return true;
     }
+    if let Some(read_only) = capsule_row["is_read_only"].as_bool() {
+        return read_only;
+    }
     let warm_dir = PathBuf::from(capsule_row["artifact_dir"].as_str().unwrap_or("")).join("warm");
-    package::load(&warm_dir).is_ok_and(|stored| {
-        stored
-            .capsule
-            .programs
-            .iter()
-            .all(|program| program.read_only)
-    })
+    super::cached_package_read_only(&warm_dir).unwrap_or(false)
 }
 
 /// Among several active capsules of one skill, the one whose description
@@ -579,6 +582,7 @@ fn decide_raw_trace(
         bin: None,
         package: None,
         state_dir: None,
+        direct_dispatch: false,
         seen: AtomicU64::new(0),
         seen_changes: AtomicU64::new(0),
     }))
@@ -844,7 +848,7 @@ fn decide_for(
             .and_then(|dir| infra_skillcache::fingerprint::tree_sha256(&dir).ok())
             .map(|tree| tree.sha256)
             .unwrap_or_default();
-        let candidates = match runtime.store.connection().and_then(|db| match arm {
+        let mut candidates = match runtime.store.connection().and_then(|db| match arm {
             None => db::active_capsules_for_skill_or_mirror(
                 &db,
                 project_id,
@@ -890,6 +894,32 @@ fn decide_for(
             Ok(candidates) => candidates,
             Err(error) => return miss("unavailable", error.to_string()),
         };
+        if candidates.is_empty()
+            && arm.is_none()
+            && generation.is_some()
+            && let Some(edition) = super::compile::workspace_edition_for_project(
+                &runtime.store,
+                project_id,
+                workspace,
+                Some(session),
+            )
+            && super::compile::admit_textual_templates_sync(
+                runtime, project_id, workspace, &edition,
+            )
+            .is_ok_and(|admitted| !admitted.is_empty())
+            && let Ok(refreshed) = runtime.store.connection().and_then(|db| {
+                db::active_capsules_for_skill_or_mirror(
+                    &db,
+                    project_id,
+                    &skill_path,
+                    skill_name,
+                    &skill_tree_sha,
+                    None,
+                )
+            })
+        {
+            candidates = refreshed;
+        }
         let has_any = !candidates.is_empty();
         let eligible = if provider == "cursor" {
             candidates
@@ -1004,10 +1034,23 @@ fn decide_for(
             bin: None,
             package: None,
             state_dir: None,
+            direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         }));
     };
+    let all_read_only = stored.capsule.programs.iter().all(|p| p.read_only);
+    let all_program_steps = stored
+        .capsule
+        .plan()
+        .all(|step| matches!(step, Step::Program { .. }));
+    let direct_dispatch = arm.is_none()
+        && !agent_only
+        && all_read_only
+        && all_program_steps
+        && !stored.capsule.programs.is_empty()
+        && stored.capsule.bindings.is_empty()
+        && (plan_only || stored.capsule.kind == CapsuleKind::ToolChain);
     let staged = (|| -> Result<(PathBuf, PathBuf)> {
         let bin = stage_tools_for(runtime, !agent_only)?;
         let state_dir = runtime
@@ -1050,6 +1093,7 @@ fn decide_for(
         bin: Some(bin),
         package: Some(warm_dir),
         state_dir: Some(state_dir),
+        direct_dispatch,
         seen: AtomicU64::new(0),
         seen_changes: AtomicU64::new(0),
     }))
@@ -1439,6 +1483,142 @@ impl Warm {
     }
 }
 
+pub(crate) enum DirectDispatchOutcome {
+    Completed {
+        answer: Value,
+        formatted: String,
+    },
+    Fallback {
+        reason: String,
+        program_failed: bool,
+    },
+}
+
+/// Formats verified deterministic program outputs concisely for direct user return
+/// or light prose wrapping.
+pub fn format_direct_output(capsule_name: &str, answer: &Value) -> String {
+    let results = answer
+        .get("result")
+        .filter(|v| v.is_object())
+        .or_else(|| answer.get("results").filter(|v| v.is_object()))
+        .unwrap_or(&Value::Null);
+    if let Some(obj) = results.as_object() {
+        const PROSE_KEYS: [&str; 6] =
+            ["markdown", "summary", "report", "output", "text", "message"];
+        for key in PROSE_KEYS {
+            if let Some(s) = obj
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return s.to_owned();
+            }
+        }
+        if obj.len() == 1
+            && let Some((_, single)) = obj.iter().next()
+        {
+            for key in PROSE_KEYS {
+                if let Some(s) = single
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return s.to_owned();
+                }
+            }
+        }
+        let formatted_json = serde_json::to_string_pretty(results).unwrap_or_else(|_| "{}".into());
+        return format!("Verified output ({capsule_name}):\n```json\n{formatted_json}\n```");
+    }
+    serde_json::to_string_pretty(answer).unwrap_or_else(|_| answer.to_string())
+}
+
+/// Executes an eligible deterministic read-only capsule directly via `executor::execute`,
+/// avoiding the ~25k prefix LLM loop while falling back cleanly on error, missing bindings,
+/// residual steps, or program failure.
+pub(crate) fn try_direct_execute(
+    warm: &Warm,
+    workspace: &Path,
+    generation: &str,
+    supplied_bindings: Option<&Value>,
+) -> DirectDispatchOutcome {
+    if !warm.direct_dispatch {
+        return DirectDispatchOutcome::Fallback {
+            reason: "not_eligible".into(),
+            program_failed: false,
+        };
+    }
+    let (Some(package_dir), Some(state_dir)) = (&warm.package, &warm.state_dir) else {
+        return DirectDispatchOutcome::Fallback {
+            reason: "missing_stage".into(),
+            program_failed: false,
+        };
+    };
+    let stored = match package::load(package_dir) {
+        Ok(pkg) => pkg,
+        Err(err) => {
+            return DirectDispatchOutcome::Fallback {
+                reason: err.to_string(),
+                program_failed: false,
+            };
+        }
+    };
+    if !stored.capsule.programs.iter().all(|p| p.read_only)
+        || !stored
+            .capsule
+            .plan()
+            .all(|step| matches!(step, Step::Program { .. }))
+    {
+        return DirectDispatchOutcome::Fallback {
+            reason: "requires_agent".into(),
+            program_failed: false,
+        };
+    }
+    if !stored.capsule.bindings.is_empty() && supplied_bindings.is_none() {
+        return DirectDispatchOutcome::Fallback {
+            reason: "needs_bindings".into(),
+            program_failed: false,
+        };
+    }
+    let state_file = state_dir.join("plan-state.json");
+    let exec_session = executor::Session {
+        package: &stored,
+        workspace,
+        state_file: &state_file,
+        generation,
+    };
+    match executor::execute(
+        &exec_session,
+        executor::Command::Run(supplied_bindings.cloned()),
+    ) {
+        Ok(answer) => {
+            let status = answer["status"].as_str().unwrap_or("");
+            let no_failures = answer["failed"].as_array().is_none_or(Vec::is_empty);
+            if status == "complete" && no_failures {
+                let formatted = format_direct_output(&warm.name, &answer);
+                return DirectDispatchOutcome::Completed { answer, formatted };
+            }
+            let program_failed = status == "program_failed"
+                || !answer["failed"].as_array().is_none_or(Vec::is_empty);
+            let reason = if status == "program_failed" && !answer["diagnostics"].is_null() {
+                format!("program_failed: {}", answer["diagnostics"])
+            } else {
+                status.to_owned()
+            };
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            }
+        }
+        Err(refusal) => DirectDispatchOutcome::Fallback {
+            reason: refusal.message,
+            program_failed: refusal.code == "program_failed",
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1719,6 +1899,7 @@ mod tests {
             bin: Some(PathBuf::from("/state/skillcache/bin/abc")),
             package: Some(PathBuf::from("/state/warm")),
             state_dir: Some(PathBuf::from("/state/skillcache/sessions/s/g")),
+            direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         });
@@ -1849,6 +2030,7 @@ mod tests {
                 bin: None,
                 package: None,
                 state_dir: None,
+                direct_dispatch: false,
                 seen: AtomicU64::new(0),
                 seen_changes: AtomicU64::new(0),
             }),
@@ -1888,6 +2070,7 @@ mod tests {
             bin: Some(root.path().join("bin")),
             package: None,
             state_dir: Some(state_dir.clone()),
+            direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -2142,6 +2325,7 @@ mod tests {
             bin: Some(root.path().join("bin")),
             package: None,
             state_dir: Some(state_dir),
+            direct_dispatch: false,
             seen: AtomicU64::new(0),
             seen_changes: AtomicU64::new(0),
         };
@@ -2818,5 +3002,349 @@ mod tests {
             )),
             "stale"
         );
+    }
+
+    #[test]
+    fn direct_dispatch_executes_deterministic_read_only_capsule_and_falls_back_on_error() {
+        let dir = crate::skillcache::test_support::scratch();
+        let workspace = dir.path().join("workspace");
+        let warm_dir = dir.path().join("warm");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "ro-direct", "description": "Direct deterministic check"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert(
+            "programs/scan/main.py",
+            b"import sys\nif '--check' in sys.argv:\n    print('{\"status\": \"complete\", \"result\": {}}')\nelse:\n    print('{\"status\": \"complete\", \"result\": {\"summary\": \"42 files ok\"}}')\n".to_vec(),
+        );
+        package::write_warm(&warm_dir, &cap, None, &files).unwrap();
+
+        let warm = Warm {
+            capsule_id: "cap-direct".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "ro-direct".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(warm_dir.clone()),
+            state_dir: Some(state_dir.clone()),
+            direct_dispatch: true,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        };
+        // Unit tests do not install the real native guardian binary; check formatting,
+        // thin-formatter prompt, eligibility gates, and error fallback cleanly here
+        // (full subprocess execution is verified in integration test `skillcache_harness`).
+        assert_eq!(
+            format_direct_output(
+                "ro-direct",
+                &json!({"status": "complete", "result": {"summary": "42 files ok"}})
+            ),
+            "42 files ok"
+        );
+        assert_eq!(
+            format_direct_output(
+                "ro-direct",
+                &json!({"status": "complete", "results": {"scan": {"summary": "via step result"}}})
+            ),
+            "via step result"
+        );
+
+        let ineligible_warm = Warm {
+            capsule_id: "cap-inelig".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "ro-direct".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(warm_dir.clone()),
+            state_dir: Some(state_dir.clone()),
+            direct_dispatch: false,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        };
+        match try_direct_execute(&ineligible_warm, &workspace, "g-inelig", None) {
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            } => {
+                assert_eq!(reason, "not_eligible");
+                assert!(!program_failed);
+            }
+            DirectDispatchOutcome::Completed { .. } => {
+                panic!("expected fallback when direct_dispatch is false");
+            }
+        }
+
+        // Mixed instruction + program capsule falls back cleanly with `requires_agent`.
+        let hybrid_instr_dir = dir.path().join("hybrid-instr");
+        let hybrid_instr_state = dir.path().join("hybrid-instr-state");
+        std::fs::create_dir_all(&hybrid_instr_state).unwrap();
+        let instr_cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "mu": {"name": "ro-agent", "description": "Needs agent step"},
+            "source": {"skills": [{"name": "s", "path": ".agents/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [
+                {"kind": "instruction", "text": "Review notes."},
+                {"kind": "program", "program": "scan"}
+            ],
+            "verification": []
+        }))
+        .unwrap();
+        package::write_warm(&hybrid_instr_dir, &instr_cap, None, &files).unwrap();
+        let instr_warm = Warm {
+            capsule_id: "cap-instr".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "ro-agent".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(hybrid_instr_dir.clone()),
+            state_dir: Some(hybrid_instr_state),
+            direct_dispatch: true,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        };
+        match try_direct_execute(&instr_warm, &workspace, "g-agent", None) {
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            } => {
+                assert_eq!(reason, "requires_agent");
+                assert!(!program_failed);
+            }
+            DirectDispatchOutcome::Completed { .. } => {
+                panic!("expected fallback when capsule contains instruction step");
+            }
+        }
+
+        // Thin formatter prompt omits heavy 25k prefixes cleanly.
+        let thin = crate::prompt::build_thin_formatter_prompt(
+            "check workspace",
+            "ro-direct",
+            &json!({"scan": {"summary": "42 files ok"}}),
+        )
+        .unwrap();
+        assert_eq!(thin.ledger["thin_formatter"], true);
+        assert!(thin.text.len() < 512);
+
+        // Failing read-only program falls back cleanly with program_failed = true.
+        let bad_warm_dir = dir.path().join("bad-warm");
+        let bad_state_dir = dir.path().join("bad-state");
+        std::fs::create_dir_all(&bad_state_dir).unwrap();
+        let mut bad_files = infra_skillcache::package::Files::new();
+        bad_files.insert(
+            "programs/scan/main.py",
+            b"import sys\nsys.exit(2)\n".to_vec(),
+        );
+        package::write_warm(&bad_warm_dir, &cap, None, &bad_files).unwrap();
+        let bad_warm = Warm {
+            package: Some(bad_warm_dir),
+            state_dir: Some(bad_state_dir),
+            ..warm
+        };
+        match try_direct_execute(&bad_warm, &workspace, "g-fail", None) {
+            DirectDispatchOutcome::Fallback { program_failed, .. } => assert!(program_failed),
+            DirectDispatchOutcome::Completed { .. } => {
+                panic!("expected fallback when direct execution failed");
+            }
+        }
+        let _ = package::remove(&hybrid_instr_dir);
+
+        // Parameterized read-only capsule (!bindings.is_empty()) in `plan` mode MUST NOT set
+        // `direct_dispatch = true` (it keeps a normal warm hit so the agent binds inputs).
+        let param_cap_dir = dir.path().join("param-caps/cap-param-1/warm");
+        let param_cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "kind": "tool_chain",
+            "mu": {"name": "inspect-target", "description": "Inspect parameterized PHP app"},
+            "source": {"skills": []},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [{"name": "target", "type": "path", "origin": "request", "description": "Target path"}],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": ["target"],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let pkg_sha = package::write_warm(&param_cap_dir, &param_cap, None, &files).unwrap();
+        let loaded_param = package::load(&param_cap_dir).unwrap();
+
+        let param_warm_stub = Warm {
+            capsule_id: "cap-param-1".into(),
+            form: Form::Hybrid,
+            eval_arm: None,
+            name: "inspect-target".into(),
+            block: String::new(),
+            environment: BTreeMap::new(),
+            bin: None,
+            package: Some(param_cap_dir.clone()),
+            state_dir: Some(dir.path().join("param-direct-state")),
+            direct_dispatch: true,
+            seen: AtomicU64::new(0),
+            seen_changes: AtomicU64::new(0),
+        };
+        match try_direct_execute(&param_warm_stub, &workspace, "g-param-bindings", None) {
+            DirectDispatchOutcome::Fallback {
+                reason,
+                program_failed,
+            } => {
+                assert_eq!(reason, "needs_bindings");
+                assert!(!program_failed);
+            }
+            DirectDispatchOutcome::Completed { .. } => {
+                panic!("expected needs_bindings fallback when bindings are unsupplied");
+            }
+        }
+
+        let repo = dir.path().join("param-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("composer.json"), "{}\n").unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "init"]);
+        let tree_sha = trace::workspace_tree_sha(&repo).unwrap();
+        let store = SessionStore::open(&dir.path().join("param-store")).unwrap();
+        let project_id = store.register(&repo).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rt = Runtime {
+            store,
+            providers: Arc::new(crate::provider::ProviderDomain {
+                providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            }),
+            engine: None,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enqueuer: None,
+            requalifying: None,
+        };
+        let env_fp = infra_skillcache::fingerprint::env_fingerprint(
+            &infra_skillcache::fingerprint::runtime_versions(&["python3".into()]),
+        );
+        {
+            let db = rt.store.connection().unwrap();
+            let tc_ref = json!({"name": "tool-chain", "path": "", "tree_sha256": &tree_sha});
+            db::begin_capsule(
+                &db,
+                "cap-param-1",
+                "cmp-param-1",
+                &project_id,
+                "s-param",
+                "g-param",
+                &tc_ref,
+                None,
+            )
+            .unwrap();
+            db::activate_capsule(
+                &db,
+                &db::Qualified {
+                    capsule_id: "cap-param-1",
+                    mu_name: "inspect-target",
+                    mu_description: "Inspect parameterized PHP app",
+                    form: "hybrid",
+                    capsule_sha256: &loaded_param.capsule_sha256,
+                    package_sha256: &pkg_sha,
+                    skill_files: &json!({}),
+                    env_fingerprint: &env_fp,
+                    engine_digest: &rt.engine_digest(),
+                    artifact_dir: param_cap_dir.parent().unwrap().to_str().unwrap(),
+                    capabilities: &json!({"network": "none", "runtimes": ["python3"]}),
+                },
+            )
+            .unwrap();
+            db::set_capsule_kind_meta(&db, "cap-param-1", "tool_chain", &tree_sha).unwrap();
+            db::set_capsule_read_only(&db, "cap-param-1", true).unwrap();
+            for gate in ["gate1", "gate2", "gate3"] {
+                db::record_gate(&db, "cap-param-1", 1, gate, true, &json!({"passed": true}))
+                    .unwrap();
+            }
+        }
+        let route = ResolvedCommand {
+            mode: "text".into(),
+            text: "inspect target path".into(),
+            requests: vec![],
+            notice: None,
+        };
+        let sess = json!({
+            "id": "s-param",
+            "project_id": project_id,
+            "provider": "codex",
+            "mode": "plan",
+            "workflow": "native",
+            "permissions": "auto",
+            "skillcache": {"mode": "auto", "tool_chain": true},
+        });
+        match decide_for(&rt, &sess, &route, "inspect target path", &repo, None) {
+            Decision::Hit(decided) => {
+                assert_eq!(decided.capsule_id, "cap-param-1");
+                assert!(
+                    !decided.direct_dispatch,
+                    "parameterized capsule in plan mode must remain normal warm hit"
+                );
+            }
+            other => panic!("expected normal warm hit, got {}", reason(&other)),
+        }
+        let _ = package::remove(&param_cap_dir);
     }
 }

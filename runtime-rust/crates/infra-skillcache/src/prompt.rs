@@ -55,7 +55,11 @@ fn step(text: &mut String, capsule: &SkillCapsule, number: usize, step: &Step) {
             text.push_str(&format!("Check yourself: {instruction}"));
             source(text, from.as_ref());
         }
-        Step::Program { program } => {
+        Step::Program {
+            program,
+            inputs,
+            outputs,
+        } => {
             let Some(program) = capsule.program(program) else {
                 text.push_str(&format!("Run program `{program}`.\n"));
                 return;
@@ -67,10 +71,28 @@ fn step(text: &mut String, capsule: &SkillCapsule, number: usize, step: &Step) {
             if let Some(description) = &program.description {
                 text.push_str(&format!(": {description}"));
             }
+            let mapped_inputs: Vec<String> = program
+                .inputs
+                .iter()
+                .map(|name| {
+                    inputs
+                        .get(name)
+                        .map_or_else(|| name.clone(), |src| format!("{name}<-{src}"))
+                })
+                .collect();
+            let mapped_outputs: Vec<String> = program
+                .outputs
+                .iter()
+                .map(|name| {
+                    outputs
+                        .get(name)
+                        .map_or_else(|| name.clone(), |dst| format!("{name}->{dst}"))
+                })
+                .collect();
             text.push_str(&format!(
                 ". Inputs: {}. Outputs for later steps: {}.",
-                names(&program.inputs),
-                names(&program.outputs)
+                names(&mapped_inputs),
+                names(&mapped_outputs)
             ));
             if program.read_only {
                 text.push_str(" It changes nothing.");

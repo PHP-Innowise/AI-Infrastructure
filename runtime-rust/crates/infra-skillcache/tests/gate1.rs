@@ -588,3 +588,169 @@ fn gate1_rejects_extended_inline_flags_and_package_file_example_leaks() {
         report.violations
     );
 }
+
+#[test]
+fn gate1_catches_short_string_and_numeric_example_smuggling() {
+    // Short (<8 chars) example binding like "EUR" in capsule description or script literal is refused.
+    refused("example_value_in_capsule", |value| {
+        value["mu"]["description"] = "Convert EUR invoices into a summary".into();
+    });
+
+    let mut pkg = Files::new();
+    for (path, content) in files().iter() {
+        let replacement = if path == "programs/summarize/main.py" {
+            b"RATE = {'EUR': 1.0}\nprint('{\"status\": \"complete\", \"result\": {}}')\n".to_vec()
+        } else {
+            content.to_vec()
+        };
+        pkg.insert(path, replacement);
+    }
+    assert!(gate(&capsule(), &pkg, Some(&examples())).has("example_value_in_capsule"));
+
+    // Numeric constant smuggling in observed step outputs and numeric bindings is refused.
+    let mut numeric_obs = examples();
+    numeric_obs["bindings"]["tax_rate"] = json!(42);
+    let mut cap_with_num = capsule();
+    cap_with_num["bindings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "tax_rate", "type": "number", "origin": "request"}));
+    cap_with_num["programs"][0]["inputs"] = json!(["input_dir", "quarter_files", "tax_rate"]);
+    cap_with_num["steps"][0]["text"] = "Apply rate 42 for the quarter.".into();
+    let num_report = gate(&cap_with_num, &files(), Some(&numeric_obs));
+    assert!(
+        num_report.has("example_value_in_capsule"),
+        "{:?}",
+        num_report.violations
+    );
+
+    // Numeric smuggling inside package script from examples.steps result.
+    let mut step_num_obs = examples();
+    step_num_obs["steps"]["1"]["result"]["invoices"] = json!(777);
+    let mut num_pkg = Files::new();
+    for (path, content) in files().iter() {
+        let replacement = if path == "programs/extract/main.py" {
+            b"COUNT = 777\nprint('{\"status\": \"complete\", \"result\": {}}')\n".to_vec()
+        } else {
+            content.to_vec()
+        };
+        num_pkg.insert(path, replacement);
+    }
+    let step_num_report = gate(&capsule(), &num_pkg, Some(&step_num_obs));
+    assert!(
+        step_num_report.has("example_value_in_capsule"),
+        "{:?}",
+        step_num_report.violations
+    );
+}
+
+#[test]
+fn gate1_tightens_shell_env_and_module_flags() {
+    refused("invalid_value", |value| {
+        value["capabilities"]["runtimes"] = json!(["env"]);
+    });
+
+    for (runtimes, args) in [
+        (
+            json!(["sh", "python3"]),
+            json!(["sh", "-s", "programs/extract/main.py"]),
+        ),
+        (
+            json!(["sh", "python3"]),
+            json!(["sh", "-m", "programs/extract/main.py"]),
+        ),
+        (
+            json!(["bash", "python3"]),
+            json!(["bash", "-lc", "echo hi", "programs/extract/main.py"]),
+        ),
+        (
+            json!(["bash", "python3"]),
+            json!([
+                "bash",
+                "--rcfile=programs/extract/main.py",
+                "programs/extract/main.py"
+            ]),
+        ),
+        (
+            json!(["python3"]),
+            json!(["python3", "-m", "runpy", "programs/extract/main.py"]),
+        ),
+        (
+            json!(["sh", "python3"]),
+            json!(["sh", "FOO=bar", "programs/extract/main.py"]),
+        ),
+        (
+            json!(["sh", "python3"]),
+            json!(["sh", "env", "programs/extract/main.py"]),
+        ),
+    ] {
+        refused("argv_inline_code", |value| {
+            value["capabilities"]["runtimes"] = runtimes.clone();
+            value["programs"][0]["entry"] = args.clone();
+        });
+    }
+
+    // Direct sh execution of a package script with flags AFTER the script remains allowed.
+    let mut ok = capsule();
+    ok["capabilities"]["runtimes"] = json!(["sh", "python3"]);
+    ok["programs"][0]["entry"] = json!(["sh", "programs/extract/main.py", "-s", "--mode"]);
+    let report = gate(&ok, &files(), Some(&examples()));
+    assert!(report.passed, "{:?}", report.violations);
+}
+
+#[test]
+fn gate1_allows_parameterized_multi_call_helper_reuse() {
+    let cap = json!({
+        "schema_version": 1,
+        "form": "hybrid",
+        "kind": "tool_chain",
+        "mu": {"name": "hash-pair", "description": "Read and compare two source paths"},
+        "source": {"skills": []},
+        "capabilities": {"network": "none", "runtimes": ["python3"]},
+        "bindings": [
+            {"name": "first_path", "type": "path", "origin": "request"},
+            {"name": "second_path", "type": "path", "origin": "request"}
+        ],
+        "programs": [
+            {
+                "id": "hash_file",
+                "entry": ["python3", "programs/hash_file/main.py"],
+                "inputs": ["target_path"],
+                "outputs": ["digest"],
+                "check": ["python3", "programs/hash_file/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            },
+            {
+                "id": "compare",
+                "entry": ["python3", "programs/compare/main.py"],
+                "inputs": ["first_digest", "second_digest"],
+                "outputs": [],
+                "check": ["python3", "programs/compare/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }
+        ],
+        "steps": [
+            {
+                "kind": "program",
+                "program": "hash_file",
+                "inputs": {"target_path": "first_path"},
+                "outputs": {"digest": "first_digest"}
+            },
+            {
+                "kind": "program",
+                "program": "hash_file",
+                "inputs": {"target_path": "second_path"},
+                "outputs": {"digest": "second_digest"}
+            },
+            {"kind": "program", "program": "compare"}
+        ],
+        "verification": []
+    });
+    let mut pkg = Files::new();
+    pkg.insert("programs/hash_file/main.py", b"print('ok')\n".to_vec());
+    pkg.insert("programs/compare/main.py", b"print('ok')\n".to_vec());
+    let report = gate(&cap, &pkg, None);
+    assert!(report.passed, "{:?}", report.violations);
+}

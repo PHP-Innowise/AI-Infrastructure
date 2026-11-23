@@ -24,10 +24,10 @@ use compile::{EnqueueCompileFn, Job, Runtime};
 use infra_skillcache::{compile_rules, fingerprint, package};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -343,10 +343,166 @@ pub fn staleness(capsule: &Value, workspace: &Path) -> Option<String> {
         );
     }
     let warm = PathBuf::from(capsule["artifact_dir"].as_str().unwrap_or("")).join("warm");
-    match package::digest(&warm) {
+    match cached_package_digest(&warm) {
         Ok(digest) if capsule["package_sha256"].as_str() == Some(digest.as_str()) => None,
         _ => Some("The capsule's package is missing or was changed.".into()),
     }
+}
+
+#[derive(Clone)]
+struct CachedPackageMeta {
+    stats: Vec<(String, u64, u128)>,
+    digest: String,
+    read_only: bool,
+}
+
+#[derive(Default)]
+struct PackageMetaCache {
+    entries: HashMap<PathBuf, CachedPackageMeta>,
+    order: VecDeque<PathBuf>,
+}
+
+const MAX_PACKAGE_META_CACHE: usize = 256;
+
+fn package_meta_cache() -> &'static Mutex<PackageMetaCache> {
+    static CACHE: OnceLock<Mutex<PackageMetaCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PackageMetaCache::default()))
+}
+
+fn stat_package_tree(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    now_ns: u128,
+    stats: &mut Vec<(String, u64, u128)>,
+    racy_safe: &mut bool,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if infra_core::fs::linked(&meta) {
+            return false;
+        }
+        if meta.is_dir() {
+            if !stat_package_tree(root, &path, depth + 1, now_ns, stats, racy_safe) {
+                return false;
+            }
+        } else if meta.is_file() {
+            let Ok(rel) = path.strip_prefix(root) else {
+                return false;
+            };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            if mtime_ns == 0 || now_ns.saturating_sub(mtime_ns) < db::RACY_NS {
+                *racy_safe = false;
+            }
+            stats.push((rel_str, meta.len(), mtime_ns));
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn cached_package_meta(
+    warm: &Path,
+) -> std::result::Result<(String, bool), infra_core::RuntimeError> {
+    let canonical_warm = std::fs::canonicalize(warm).unwrap_or_else(|_| warm.to_path_buf());
+    let now_ns = db::current_unix_ns();
+    let mut stats = Vec::new();
+    let mut racy_safe = true;
+    let stat_ok = std::fs::symlink_metadata(warm)
+        .is_ok_and(|m| !infra_core::fs::linked(&m) && m.is_dir())
+        && stat_package_tree(warm, warm, 0, now_ns, &mut stats, &mut racy_safe);
+    if stat_ok {
+        stats.sort();
+        if racy_safe
+            && let Ok(guard) = package_meta_cache().lock()
+            && let Some(cached) = guard.entries.get(&canonical_warm)
+            && cached.stats == stats
+        {
+            return Ok((cached.digest.clone(), cached.read_only));
+        }
+    }
+    let loaded = package::load(warm)?;
+    let read_only = loaded.capsule.form == infra_skillcache::Form::Textual
+        || loaded.capsule.programs.iter().all(|p| p.read_only);
+    let digest = loaded.package_sha256;
+    if stat_ok
+        && racy_safe
+        && let Ok(mut guard) = package_meta_cache().lock()
+    {
+        if !guard.entries.contains_key(&canonical_warm) {
+            if guard.entries.len() >= MAX_PACKAGE_META_CACHE
+                && let Some(evicted) = guard.order.pop_front()
+            {
+                guard.entries.remove(&evicted);
+            }
+            guard.order.push_back(canonical_warm.clone());
+        }
+        guard.entries.insert(
+            canonical_warm,
+            CachedPackageMeta {
+                stats,
+                digest: digest.clone(),
+                read_only,
+            },
+        );
+    }
+    Ok((digest, read_only))
+}
+
+pub(super) fn cached_package_digest(
+    warm: &Path,
+) -> std::result::Result<String, infra_core::RuntimeError> {
+    cached_package_meta(warm).map(|(digest, _)| digest)
+}
+
+pub(super) fn cached_package_read_only(warm: &Path) -> Option<bool> {
+    cached_package_meta(warm).ok().map(|(_, ro)| ro)
+}
+
+fn ir_revisions() -> &'static Mutex<HashMap<String, u64>> {
+    static REVS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REVS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn record_ir_revision(project_id: &str, ir_revision: u64) {
+    if ir_revision == 0 || project_id.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = ir_revisions().lock() {
+        let entry = guard.entry(project_id.to_owned()).or_insert(0);
+        if ir_revision > *entry {
+            *entry = ir_revision;
+        }
+    }
+}
+
+pub(super) fn latest_ir_revision(state: &Path, project_id: &str) -> u64 {
+    if let Ok(guard) = ir_revisions().lock()
+        && let Some(&rev) = guard.get(project_id)
+        && rev > 0
+    {
+        return rev;
+    }
+    crate::graph_ir::GraphIrStore::open_readonly_cached(state, project_id)
+        .ok()
+        .flatten()
+        .map(|ir| ir.current_write_epoch())
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -1022,6 +1178,7 @@ pub fn on_ir_paths_updated(
     caller_files: &[String],
     ir_revision: u64,
 ) -> Result<usize> {
+    record_ir_revision(project_id, ir_revision);
     if changed_paths.is_empty() && caller_files.is_empty() {
         return Ok(0);
     }
@@ -2043,5 +2200,72 @@ mod tests {
             });
         let db = store.connection().unwrap();
         assert_eq!(db::pending_requalify_count(&db).unwrap(), 0);
+    }
+
+    #[test]
+    fn package_meta_cache_validates_with_racy_ns_and_avoids_stale_reads() {
+        let dir = test_support::scratch();
+        let warm = dir.path().join("warm");
+        let cap = infra_skillcache::SkillCapsule::from_value(&json!({
+            "schema_version": 1,
+            "form": "hybrid",
+            "mu": {"name": "cached-pkg", "description": "Test cached digest"},
+            "source": {"skills": [{"name": "s", "path": ".claude/skills/s/SKILL.md", "tree_sha256": "0".repeat(64)}]},
+            "capabilities": {"network": "none", "runtimes": ["python3"]},
+            "bindings": [],
+            "programs": [{
+                "id": "scan",
+                "entry": ["python3", "programs/scan/main.py"],
+                "inputs": [],
+                "outputs": [],
+                "check": ["python3", "programs/scan/main.py", "--check"],
+                "timeout_seconds": 30,
+                "read_only": true
+            }],
+            "steps": [{"kind": "program", "program": "scan"}],
+            "verification": []
+        }))
+        .unwrap();
+        let mut files = infra_skillcache::package::Files::new();
+        files.insert("programs/scan/main.py", b"print('ok')\n".to_vec());
+        let expected_digest = package::write_warm(&warm, &cap, None, &files).unwrap();
+
+        // Backdate package files beyond RACY_NS so cache populates and hits cleanly.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        for rel in ["capsule.json", "programs/scan/main.py"] {
+            let file_path = warm.join(rel);
+            let orig_perms = std::fs::metadata(&file_path).unwrap().permissions();
+            #[cfg(unix)]
+            let writable = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::Permissions::from_mode(orig_perms.mode() | 0o200)
+            };
+            #[cfg(not(unix))]
+            #[expect(clippy::permissions_set_readonly_false)]
+            let writable = {
+                let mut p = orig_perms.clone();
+                p.set_readonly(false);
+                p
+            };
+            std::fs::set_permissions(&file_path, writable).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file_path)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+            std::fs::set_permissions(&file_path, orig_perms).unwrap();
+        }
+        assert_eq!(cached_package_digest(&warm).unwrap(), expected_digest);
+        assert_eq!(cached_package_read_only(&warm), Some(true));
+        let canon_warm = std::fs::canonicalize(&warm).unwrap();
+        assert!(
+            package_meta_cache()
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&canon_warm)
+        );
+        let _ = package::remove(&warm);
     }
 }

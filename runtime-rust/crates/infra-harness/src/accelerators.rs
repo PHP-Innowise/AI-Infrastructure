@@ -140,6 +140,27 @@ impl Accelerators {
         }
         attach::prepare_state(&self.source, &path, &self.state(project)?, &edition)?;
         self.store.connection()?.execute("INSERT INTO project_accelerators(project_id,edition,attached_at)VALUES(?1,?2,?3)ON CONFLICT(project_id)DO UPDATE SET edition=excluded.edition,attached_at=excluded.attached_at",params![project,edition,store::now()])?;
+        let sc_runtime = runner.skillcache_runtime();
+        let _ = crate::skillcache::compile::admit_textual_templates_sync(
+            &sc_runtime,
+            project,
+            &path,
+            &edition,
+        );
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let project_owned = project.to_owned();
+            let workspace_owned = path.clone();
+            let edition_owned = edition.clone();
+            handle.spawn(async move {
+                let _ = crate::skillcache::compile::admit_edition_templates_for_project(
+                    &sc_runtime,
+                    &project_owned,
+                    &workspace_owned,
+                    &edition_owned,
+                )
+                .await;
+            });
+        }
         self.get(project)
     }
     pub fn detach(&self, project: &str) -> Result<Value> {
@@ -1136,5 +1157,125 @@ mod system_launch_tests {
             infra_host::permission::Decision::Allow
         );
         let _ = infra_skillcache::package::remove(&warm_dir);
+    }
+
+    #[tokio::test]
+    async fn attach_proactively_admits_matching_portable_edition_templates() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("laravel-app");
+        let skill_dir = root.join(".claude/skills/check-app");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Check App\n").unwrap();
+        std::fs::write(root.join("artisan"), "#!/usr/bin/env php\n").unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"require":{"laravel/framework":"^11.0"}}"#,
+        )
+        .unwrap();
+        let tree = infra_skillcache::fingerprint::tree_sha256(&skill_dir).unwrap();
+
+        let source = scratch.path().join("acc-source");
+        std::fs::create_dir_all(source.join("Laravel/.claude/skills")).unwrap();
+        std::fs::create_dir_all(source.join("Laravel/.cursor/skills")).unwrap();
+        std::fs::create_dir_all(source.join("Laravel/.agents/skills")).unwrap();
+        std::fs::create_dir_all(source.join("Laravel/memory-bank")).unwrap();
+        std::fs::write(source.join("Laravel/AGENTS.md"), "# Laravel\n").unwrap();
+
+        struct NoSpecial;
+        impl crate::sessions::BlackboardFactory for NoSpecial {
+            fn for_session(&self, _session: &Value) -> Result<Arc<dyn crate::fleet::Blackboard>> {
+                Err(HarnessError::unavailable("unused"))
+            }
+        }
+        impl crate::sessions::SpecialWorkflow for NoSpecial {
+            fn run<'a>(
+                &'a self,
+                _session: Value,
+                _prompt: String,
+                _generation: String,
+                _cancel: Arc<std::sync::atomic::AtomicBool>,
+                _emit: crate::sessions::Event,
+            ) -> crate::sessions::RunReply<'a> {
+                Box::pin(async { Ok(json!({})) })
+            }
+        }
+        let store = SessionStore::open(&scratch.path().join("state")).unwrap();
+        let providers = Arc::new(crate::provider::ProviderDomain {
+            providers: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+        });
+        let knowledge = Arc::new(crate::knowledge::KnowledgeDomain::new(
+            store.clone(),
+            source.clone(),
+        ));
+        let special = ["creator", "system_run", "system_discovery"]
+            .into_iter()
+            .map(|k| {
+                (
+                    k.to_owned(),
+                    Arc::new(NoSpecial) as Arc<dyn crate::sessions::SpecialWorkflow>,
+                )
+            })
+            .collect();
+        let sessions = crate::sessions::Sessions::new(
+            store.clone(),
+            source.clone(),
+            providers.clone(),
+            knowledge,
+            Arc::new(NoSpecial),
+            special,
+            crate::sessions::SessionLimits {
+                seconds: 60,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        let accelerators =
+            Accelerators::new(store.clone(), source, providers, Arc::downgrade(&sessions)).unwrap();
+        let project = store.register(&root).unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+
+        // Index a portable Laravel textual template for `check-app`.
+        let skill = infra_skillcache::candidate::KnownSkill {
+            name: "check-app".into(),
+            path: ".claude/skills/check-app/SKILL.md".into(),
+            tree_sha256: tree.sha256.clone(),
+        };
+        let answer = json!({
+            "form": "textual",
+            "capsule": {
+                "mu": {"name": "check-app", "description": "Inspect Laravel routes"},
+                "source": {"skills": [{"name": "check-app", "path": ".claude/skills/check-app/SKILL.md"}]}
+            },
+            "markdown": "# Check App\n\n1. Inspect `routes/web.php`.\n"
+        });
+        let cand = infra_skillcache::candidate::from_answer(
+            &answer,
+            std::slice::from_ref(&skill),
+            infra_skillcache::Form::Textual,
+        )
+        .unwrap();
+        let tpl = infra_skillcache::candidate::as_portable_template(&cand, "Laravel");
+        crate::skillcache::db::upsert_template(
+            &store.connection().unwrap(),
+            "Laravel",
+            "check-app",
+            &tree.sha256,
+            &tpl,
+        )
+        .unwrap();
+
+        accelerators.attach(&project_id, Some("Laravel")).unwrap();
+        let active = crate::skillcache::db::active_capsules_for_skill_or_mirror(
+            &store.connection().unwrap(),
+            &project_id,
+            ".claude/skills/check-app/SKILL.md",
+            "check-app",
+            &tree.sha256,
+            None,
+        )
+        .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0]["kind"], "template");
+        assert_eq!(active[0]["status"], "active");
     }
 }

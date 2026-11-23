@@ -1376,6 +1376,7 @@ dependencies = [
  "libc",
  "ooxml-numfmt",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

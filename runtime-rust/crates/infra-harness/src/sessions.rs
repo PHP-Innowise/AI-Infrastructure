@@ -1178,7 +1178,7 @@ impl Sessions {
         }))
     }
     /// Resolves the shared SkillCache runtime.
-    fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
+    pub(crate) fn skillcache_runtime(&self) -> Arc<crate::skillcache::compile::Runtime> {
         lock(&self.skillcache)
             .ok()
             .and_then(|slot| slot.clone())
@@ -2374,8 +2374,34 @@ impl Sessions {
         }
         // A turn that may run a SkillCache capsule decides it only once the
         // turn is ready to dispatch, so `awaiting_context` never leaves stage files.
-        let warm = {
-            let decision = crate::skillcache::warm::decide(
+        let mut decision = crate::skillcache::warm::decide(
+            &self.skillcache_runtime(),
+            &session,
+            &route,
+            &job.prompt,
+            &workspace,
+            &job.generation,
+        );
+        if matches!(
+            &decision,
+            crate::skillcache::warm::Decision::Miss {
+                reason: "no_capsule",
+                ..
+            }
+        ) && crate::skillcache::settings::eval_arm(&session).is_none()
+            && crate::skillcache::compile::try_admit_template_on_miss(
+                &self.skillcache_runtime(),
+                &session,
+                &job.generation,
+                &route,
+                &workspace,
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            decision = crate::skillcache::warm::decide(
                 &self.skillcache_runtime(),
                 &session,
                 &route,
@@ -2383,16 +2409,220 @@ impl Sessions {
                 &workspace,
                 &job.generation,
             );
-            if let Some(event) = decision.event() {
-                emit(event)?;
+        }
+        let mut direct_answer: Option<(serde_json::Value, String)> = None;
+        let warm = match decision {
+            crate::skillcache::warm::Decision::Hit(warm) if warm.direct_dispatch => {
+                let warm_run = warm.clone();
+                let ws_run = workspace.clone();
+                let gen_run = job.generation.clone();
+                let direct = tokio::task::spawn_blocking(move || {
+                    crate::skillcache::warm::try_direct_execute(&warm_run, &ws_run, &gen_run, None)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    crate::skillcache::warm::DirectDispatchOutcome::Fallback {
+                        reason: "join_error".into(),
+                        program_failed: false,
+                    }
+                });
+                match direct {
+                    crate::skillcache::warm::DirectDispatchOutcome::Completed {
+                        answer,
+                        formatted,
+                    } => {
+                        let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
+                        if let Some(mut event) = hit_decision.event() {
+                            event["direct_dispatch"] = json!(true);
+                            emit(event)?;
+                        }
+                        if let Some(mut record) = hit_decision.record() {
+                            record["direct_dispatch"] = json!(true);
+                            let _ = results.note_skillcache(&job.generation, &record);
+                        }
+                        direct_answer = Some((answer, formatted));
+                        Some(warm)
+                    }
+                    crate::skillcache::warm::DirectDispatchOutcome::Fallback {
+                        reason,
+                        program_failed,
+                    } => {
+                        if reason == "needs_bindings" && !program_failed {
+                            let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
+                            if let Some(event) = hit_decision.event() {
+                                emit(event)?;
+                            }
+                            if let Some(record) = hit_decision.record() {
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            Some(warm)
+                        } else {
+                            if program_failed {
+                                warm.finish(&self.store, &session, &job.generation, &|event| {
+                                    emit(event)
+                                });
+                                crate::skillcache::maybe_enqueue_recompile_on_finish(
+                                    &self.skillcache_runtime(),
+                                    &warm.capsule_id,
+                                    &|event| {
+                                        let _ = emit(event);
+                                    },
+                                );
+                            } else {
+                                warm.cleanup_abandoned();
+                            }
+                            let fallback_decision = crate::skillcache::warm::Decision::Miss {
+                                reason: "direct_fallback",
+                                text: format!("direct execution fell back to cold run ({reason})"),
+                            };
+                            if let Some(event) = fallback_decision.event() {
+                                emit(event)?;
+                            }
+                            if let Some(record) = fallback_decision.record() {
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            None
+                        }
+                    }
+                }
             }
-            if let Some(record) = decision.record() {
-                let _ = results.note_skillcache(&job.generation, &record);
+            other => {
+                if let Some(event) = other.event() {
+                    emit(event)?;
+                }
+                if let Some(record) = other.record() {
+                    let _ = results.note_skillcache(&job.generation, &record);
+                }
+                match other {
+                    crate::skillcache::warm::Decision::Hit(warm) => Some(warm),
+                    _ => None,
+                }
             }
-            match decision {
-                crate::skillcache::warm::Decision::Hit(warm) => Some(warm),
-                _ => None,
+        };
+        let thin_formatter_results = if let Some((answer, formatted)) = direct_answer {
+            let warm_ref = warm.as_ref().expect("direct dispatch requires warm");
+            if session["skillcache_thin_formatter"] == true {
+                Some(answer["result"].clone())
+            } else {
+                let started = std::time::Instant::now();
+                let initial_focus =
+                    self.emit_initial_focus(&job.sid, &session, &workspace, &route.text, &emit)?;
+                let live_focus = Arc::new(Mutex::new(crate::graph_live::LiveFocusTracker::new(
+                    workspace.clone(),
+                )));
+                if let Ok(mut tracker) = live_focus.lock() {
+                    tracker.seed_focus(initial_focus);
+                }
+                let graphs = lock(&self.graphs).ok().and_then(|slot| slot.clone());
+                let direct_ledger = json!({
+                    "total": 0,
+                    "direct_dispatch": true,
+                    "message": 0,
+                    "instructions": 0,
+                    "skillcache": 0,
+                    "prefix_cache_hit": true,
+                });
+                let direct_setup = (|| -> Result<Launch> {
+                    let mut launch = self.configure_launch(&session, &route.text)?;
+                    launch.prompt = formatted.clone();
+                    self.lifecycle
+                        .set_prompt_ledger(&binding, &direct_ledger, 1)?;
+                    if let Some(model) = launch.model.as_deref() {
+                        self.lifecycle
+                            .set_window(&binding, results.last_window(&job.sid, model)?)?;
+                    }
+                    self.lifecycle.before_dispatch(&binding, &launch)?;
+                    Ok(launch)
+                })();
+                if let Err(err) = direct_setup {
+                    warm_ref.cleanup_abandoned();
+                    let _ = self.lifecycle.abort(&binding, "failed");
+                    return Err(err);
+                }
+                let usage_ev = json!({
+                    "kind": "usage",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cost_usd": 0.0,
+                    "model_calls": 0,
+                    "direct_dispatch": true,
+                });
+                provider::RunEvents::observe(&binding, None, Some(&usage_ev))?;
+                emit(usage_ev)?;
+                emit(json!({"kind": "text", "text": formatted.clone()}))?;
+                let result_ev = json!({
+                    "kind": "result",
+                    "ok": true,
+                    "text": formatted.clone(),
+                    "cost_usd": 0.0,
+                    "direct_dispatch": true,
+                });
+                provider::RunEvents::observe(&binding, None, Some(&result_ev))?;
+                emit(result_ev)?;
+                ingest_warm_with_live_focus(
+                    warm_ref,
+                    &self.store,
+                    &job.sid,
+                    session["project_id"].as_str().unwrap_or(""),
+                    &workspace,
+                    graphs.as_deref(),
+                    &live_focus,
+                    &|event| emit(event),
+                );
+                warm_ref.finish(&self.store, &session, &job.generation, &|event| emit(event));
+                crate::skillcache::maybe_enqueue_recompile_on_finish(
+                    &self.skillcache_runtime(),
+                    &warm_ref.capsule_id,
+                    &|event| {
+                        let _ = emit(event);
+                    },
+                );
+                let mut recovery = NativeRecovery {
+                    adapter: self.launch_adapter(&session)?,
+                    human_cancel: cancel.clone(),
+                };
+                let worker = infra_host::provider::WorkerResult {
+                    text: formatted,
+                    ok: true,
+                    cost_usd: Some(0.0),
+                    session_id: session["native_session_id"].as_str().map(str::to_owned),
+                    duration_seconds: started.elapsed().as_secs_f64(),
+                    error: None,
+                    limit_reached: None,
+                };
+                let memory =
+                    Box::pin(
+                        self.lifecycle
+                            .finish(&binding, &worker, &emit, &mut recovery),
+                    )
+                    .await?;
+                if let Ok(mut tracker) = live_focus.lock()
+                    && tracker.complete()
+                {
+                    let _ = crate::graph_live::save_session_focus(
+                        &self.store,
+                        &job.sid,
+                        tracker.focus(),
+                    );
+                    if let Some(delta) = tracker.take_delta_event() {
+                        let _ = emit(delta);
+                    }
+                }
+                *native_proof = worker.session_id.clone();
+                return Ok(json!({
+                    "kind": "result",
+                    "ok": true,
+                    "text": worker.text,
+                    "observed_cost_usd": worker.cost_usd,
+                    "provider_billing": "direct_dispatch",
+                    "memory": memory["memory"],
+                    "full_cost": memory["full_cost"],
+                }));
             }
+        } else {
+            None
         };
         self.graph_moment(&job.sid, crate::graph::Trigger::Launch);
         let initial_focus =
@@ -2405,14 +2635,19 @@ impl Sessions {
         }
         let configured = (|| -> Result<Launch> {
             let mut launch = self.configure_launch(&session, &route.text)?;
-            let prepared = crate::prompt::build_with_skillcache(
-                &self.store,
-                &session,
-                &job.prompt,
-                &route,
-                &binding.instructions,
-                warm.as_ref().map(|warm| warm.block.as_str()),
-            )?;
+            let prepared = if let Some(results_json) = &thin_formatter_results {
+                let warm_name = warm.as_ref().map_or("capsule", |w| w.name.as_str());
+                crate::prompt::build_thin_formatter_prompt(&job.prompt, warm_name, results_json)?
+            } else {
+                crate::prompt::build_with_skillcache(
+                    &self.store,
+                    &session,
+                    &job.prompt,
+                    &route,
+                    &binding.instructions,
+                    warm.as_ref().map(|warm| warm.block.as_str()),
+                )?
+            };
             launch.prompt = if session["system_explain"].is_object() {
                 format!(
                     "{}{}",

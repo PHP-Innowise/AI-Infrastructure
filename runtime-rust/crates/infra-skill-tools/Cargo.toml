@@ -27,6 +27,7 @@ tiny_http = "0.12"
 xmltree = "0.11"
 
 infra-tooling = { path = "../infra-tooling" }
+rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite"] }
 
 ooxml-numfmt = { path = "../../vendor/ooxml-numfmt", version = "=0.2.3", default-features = false }
 
