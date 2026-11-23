@@ -806,17 +806,33 @@ pub(crate) fn needs_state(key: &str, read_key: &V, loading: &V, held: &V) -> boo
     !(read || loading == key)
 }
 
-/// Loads the session's traces and compilations when the run shows SkillCache
-/// events the loaded state has not seen. The key holds the session and the
-/// number of events. It is recorded as read only once the state has arrived:
-/// a request that was cut short by a change of session is asked again.
+pub(crate) fn sync_session_key(
+    sid: &str,
+    run_events: usize,
+    stream_events: usize,
+) -> Option<String> {
+    (!sid.is_empty() && (run_events > 0 || stream_events > 0))
+        .then(|| format!("{sid}:{run_events}:{stream_events}"))
+}
+
+/// Loads the session's traces and compilations when the run or rendered stream
+/// shows SkillCache events the loaded state has not seen. The key holds the
+/// session and event counts. It is recorded as read only once the state has
+/// arrived: a request that was cut short by a change of session is asked again.
 pub fn sync_session(run: &V) {
-    let sid = m::read(|s| s.sid.clone());
+    let (sid, stream_events) = m::read(|s| {
+        let count = s
+            .events
+            .iter()
+            .filter(|e| m::text(e, "kind") == "skillcache")
+            .count();
+        (s.sid.clone(), count)
+    });
+    let dom_cards = dom::all("#events .conversation-skillcache").len();
     let events = m::array(&run["skillcache"]).len();
-    if sid.is_empty() || events == 0 {
+    let Some(key) = sync_session_key(&sid, events, stream_events.max(dom_cards)) else {
         return;
-    }
-    let key = format!("{sid}:{events}");
+    };
     if !needs_state(
         &key,
         &m::data("skillcache-session-key"),
@@ -1361,5 +1377,8 @@ mod tests {
             false,
             true
         ));
+        assert_eq!(sync_session_key("", 1, 1), None);
+        assert_eq!(sync_session_key("s1", 0, 0), None);
+        assert_eq!(sync_session_key("s1", 0, 1).as_deref(), Some("s1:0:1"));
     }
 }

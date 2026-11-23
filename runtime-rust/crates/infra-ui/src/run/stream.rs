@@ -216,7 +216,16 @@ impl RunState {
                 let name = tool_name(event);
                 let key = name.to_lowercase();
                 let start = starts(event);
-                let call = match event["call_id"].as_str().or_else(|| event["call"].as_str()) {
+                let call = match event["call_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        event["call"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                    }) {
                     Some(call) => call.to_owned(),
                     None => self.pair_anonymous(&key, start, &m::string(&event["id"])),
                 };
@@ -748,9 +757,6 @@ fn parse_fence_opener(trimmed: &str) -> Option<(char, usize)> {
     }
     let count = trimmed.chars().take_while(|c| *c == first).count();
     if count >= 3 {
-        if first == '`' && trimmed[count..].contains('`') {
-            return None;
-        }
         Some((first, count))
     } else {
         None
@@ -758,6 +764,10 @@ fn parse_fence_opener(trimmed: &str) -> Option<(char, usize)> {
 }
 
 fn is_matching_fence_closer(trimmed: &str, open_ch: char, open_len: usize) -> bool {
+    if open_ch == '`' {
+        // `graph_explanation::render_markdown_html` toggles any line starting with "```".
+        return trimmed.starts_with("```");
+    }
     let count = trimmed.chars().take_while(|c| *c == open_ch).count();
     count >= open_len && trimmed[count * open_ch.len_utf8()..].trim().is_empty()
 }
@@ -1344,21 +1354,27 @@ fn is_pending_permission_block(el: &web_sys::Element) -> bool {
         && el.get_attribute("data-state").as_deref() == Some("pending")
 }
 
+pub(crate) fn fold_min_rendered_event_id(acc: Option<u64>, candidate: Option<u64>) -> Option<u64> {
+    match (acc, candidate) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a @ Some(_), None) | (None, a) => a,
+    }
+}
+
 fn earliest_rendered_dom_event_id() -> Option<u64> {
     let container = dom::get("events")?;
+    let mut best = None;
     for el in dom::children(&container) {
         if is_pending_permission_block(&el) {
             continue;
         }
-        if let Some(id) = el
+        let id = el
             .get_attribute("data-first-event-id")
             .or_else(|| el.get_attribute("data-event-id"))
-            .and_then(|s| s.trim().parse::<u64>().ok())
-        {
-            return Some(id);
-        }
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        best = fold_min_rendered_event_id(best, id);
     }
-    None
+    best
 }
 
 pub(crate) fn sync_load_earlier_control() {
@@ -2084,6 +2100,49 @@ fn cache_call_block_if_present(node: &web_sys::Element) {
     }
 }
 
+pub(crate) fn plan_anonymous_rekeys(
+    events: &[V],
+    resolved_calls: &[Option<String>],
+    prepend_end: usize,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (idx, ev) in events.iter().enumerate().skip(prepend_end) {
+        if m::text(ev, "kind") != "tool"
+            || starts(ev)
+            || ev["call_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| ev["call"].as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .is_some()
+        {
+            continue;
+        }
+        let id = m::string(&ev["id"]);
+        if id.is_empty() {
+            continue;
+        }
+        let fallback = format!("anonymous-{id}");
+        if let Some(resolved) = resolved_calls.get(idx).and_then(|c| c.as_deref()) {
+            if resolved != fallback {
+                out.push((fallback, resolved.to_owned()));
+            }
+        }
+    }
+    out
+}
+
+fn rekey_existing_tool_block(events_el: &web_sys::Element, old_call: &str, new_call: &str) {
+    if let Some(existing) = find_tool_block_by_call_id(events_el, old_call) {
+        let _ = existing.set_attribute("data-call-id", new_call);
+        CALL_BLOCK_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.remove(old_call);
+            cache.insert(new_call.to_owned(), existing);
+        });
+    }
+}
+
 fn prepend_events_range(start: usize, end: usize) {
     let Some(events_el) = dom::get("events") else {
         return;
@@ -2097,6 +2156,9 @@ fn prepend_events_range(start: usize, end: usize) {
         return;
     }
     let (_, _, resolved_calls) = fold_run_events_cached(&events);
+    for (old_call, new_call) in plan_anonymous_rekeys(&events, &resolved_calls, end) {
+        rekey_existing_tool_block(&events_el, &old_call, &new_call);
+    }
     let staging = dom::el("div", "", "");
     for (idx, ev) in events.iter().enumerate().take(end).skip(start) {
         let resolved_call = resolved_calls.get(idx).and_then(|c| c.as_deref());
@@ -3174,6 +3236,34 @@ mod tests {
         assert!(init_entry.settled_dom_blocks >= 2);
         assert!(!init_entry.tail_blocks.is_empty());
         assert_eq!(init_html, render_assistant_markdown_html(md));
+
+        // Backtick info strings stay aligned with `render_markdown_html` (no mid-fence split on `\n\n`).
+        let backtick_info = "Intro.\n\n```rust `inline`\nlet a = 1;\n\nlet b = 2;\n```\n\nAfter";
+        let settled_bt = find_settled_markdown_boundary(backtick_info, 0);
+        assert_eq!(
+            &backtick_info[..settled_bt],
+            "Intro.\n\n```rust `inline`\nlet a = 1;\n\nlet b = 2;\n```\n\n"
+        );
+        let (bt_html, _) = build_init_stream_markdown(backtick_info);
+        assert_eq!(bt_html, render_assistant_markdown_html(backtick_info));
+
+        // Anonymous un-keyed completion rendered initially as `anonymous-510` is planned for
+        // re-keying to `anonymous-490` when `?before=` prepends its start (`id=490`).
+        let anon_events = vec![
+            json!({"id": 490, "kind": "tool", "tool": "Bash", "state": "started"}),
+            json!({"id": 510, "kind": "tool", "tool": "Bash", "state": "completed", "ok": true, "text": "done"}),
+        ];
+        let (_, _, anon_calls) = fold_run_events(&anon_events);
+        assert_eq!(
+            plan_anonymous_rekeys(&anon_events, &anon_calls, 1),
+            vec![("anonymous-510".to_owned(), "anonymous-490".to_owned())]
+        );
+        // When a later completed block absorbs an earlier prepended `started` event (`192`),
+        // folding min rendered ID returns `192` instead of trapping `client_hidden > 0`.
+        let min_rendered = [Some(193), Some(201), Some(192)]
+            .into_iter()
+            .fold(None, fold_min_rendered_event_id);
+        assert_eq!(min_rendered, Some(192));
 
         // Cross-page ?before= tool dedup never downgrades a newer completed block to older running.
         assert!(!decide_existing_tool_update(Some(205), Some(195)));

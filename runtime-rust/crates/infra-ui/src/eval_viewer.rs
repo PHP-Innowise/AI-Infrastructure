@@ -132,7 +132,8 @@ fn configuration_of(id: &str) -> Option<&'static str> {
     })
 }
 fn is_baseline(configuration: &str) -> bool {
-    ["without_skill", "old_skill", "cold"].contains(&configuration)
+    ["without_skill", "old_skill", "cold", "baseline"].contains(&configuration)
+        || configuration.starts_with("baseline_")
 }
 /// The summary rows of a benchmark: key, label, shown as a percentage, the
 /// delta's suffix, decimals of a plain number, and whether a lower value is
@@ -2094,8 +2095,18 @@ mod tests {
         assert_eq!(configuration_of("t1/exact/raw_trace"), Some("raw_trace"));
         assert_eq!(configuration_of("scold-1"), None);
         assert_eq!(configuration_of("eval-7"), None);
-        assert!(is_baseline("cold") && is_baseline("without_skill") && is_baseline("old_skill"));
-        assert!(!is_baseline("skillcache_executor") && !is_baseline("with_skill"));
+        assert!(
+            is_baseline("cold")
+                && is_baseline("without_skill")
+                && is_baseline("old_skill")
+                && is_baseline("baseline")
+                && is_baseline("baseline_no_skill")
+        );
+        assert!(
+            !is_baseline("skillcache_executor")
+                && !is_baseline("with_skill")
+                && !is_baseline("not_baseline")
+        );
     }
 
     #[test]
@@ -2304,6 +2315,32 @@ mod tests {
         assert_eq!(tbl.rows[0][5].class, "benchmark-delta-positive");
         // Metric present ONLY on 3rd/middle config (compile_usd) must NOT be skipped.
         assert!(tbl.rows.iter().any(|r| r[0].text == "Compilation (USD)"));
+
+        // `baseline` / `baseline_*` arms also act as baselines for multi-arm comparisons.
+        let baseline_summary = json!({
+            "baseline_no_skill": {"pass_rate": {"mean": 0.5, "stddev": 0.1}},
+            "with_skill": {"pass_rate": {"mean": 0.85, "stddev": 0.05}},
+            "with_capsule": {"pass_rate": {"mean": 0.95, "stddev": 0.05}}
+        });
+        let baseline_tbl = build_benchmark_summary_table(
+            &baseline_summary,
+            &[
+                "baseline_no_skill".to_owned(),
+                "with_skill".to_owned(),
+                "with_capsule".to_owned(),
+            ],
+        );
+        assert_eq!(
+            baseline_tbl.headers,
+            vec![
+                "Metric",
+                "Baseline No Skill",
+                "With Skill",
+                "With Capsule",
+                "With Skill vs Baseline No Skill",
+                "With Capsule vs Baseline No Skill",
+            ]
+        );
     }
 
     #[test]
