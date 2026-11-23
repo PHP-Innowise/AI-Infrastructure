@@ -275,12 +275,13 @@ impl Graphs {
         root: &Path,
         delta: &crate::graph_ir::IrUpdateDelta,
     ) {
-        let _ = crate::system_graph::SystemGraphDomain::invalidate_summary_cache_for_ir_delta(
-            &self.store.state,
-            project,
-            root,
-            delta,
-        );
+        let _ =
+            crate::system_graph::SystemGraphDomain::invalidate_summary_cache_and_notify_for_ir_delta(
+                &self.store,
+                project,
+                root,
+                delta,
+            );
         self.notify_skillcache_ir_paths(
             project,
             &delta.changed_paths,
@@ -415,6 +416,7 @@ impl Graphs {
                     && d.removed_files.is_empty()
                     && d.re_resolved_files.is_empty()
                     && !d.manifest_changed
+                    && !d.reexport_changed
             })
             && self.maps.latest_live_ir_index(project).is_some()
         {
@@ -900,6 +902,7 @@ impl Graphs {
             || !bus_delta.incoming_caller_files.is_empty()
             || bus_delta.manifest_changed
             || bus_delta.semantic_changed
+            || bus_delta.reexport_changed
         {
             bus_delta.ir_revision = rev;
             self.emit_ir_invalidation_bus(project, root, &bus_delta);
@@ -1009,6 +1012,7 @@ impl Graphs {
             || !delta.incoming_caller_files.is_empty()
             || delta.manifest_changed
             || delta.semantic_changed
+            || delta.reexport_changed
         {
             delta.ir_revision = rev;
             self.emit_ir_invalidation_bus(project, root, &delta);
@@ -1364,7 +1368,7 @@ mod ir_bus_tests {
         let sid = store::id();
         db.execute(
             "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at,sdd)
-             VALUES(?1,'SDD Disabled',?2,?3,'claude','plan','sdd',0,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
+             VALUES(?1,'SDD Disabled',?2,?3,'claude','plan','sdd',0,'running','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?4)",
             rusqlite::params![
                 sid,
                 pid,

@@ -31,7 +31,7 @@ const CSHARP_EXTS: &[&str] = &["cs"];
 const RUBY_EXTS: &[&str] = &["rb"];
 const SWIFT_EXTS: &[&str] = &["swift"];
 const SCALA_EXTS: &[&str] = &["scala", "sc"];
-const MAX_REEXPORT_HOPS: usize = 8;
+pub(crate) const MAX_REEXPORT_HOPS: usize = 8;
 const MAX_REEXPORT_VISITS: usize = 64;
 const MAX_CACHED_MANIFEST_ROOTS: usize = 16;
 const MAX_MANIFEST_CACHE_BYTES: u64 = 512 * 1024;
@@ -40,8 +40,18 @@ const MAX_MANIFEST_CACHE_BYTES: u64 = 512 * 1024;
 struct CachedResolutionBundles {
     stamp: String,
     known_len: usize,
+    known_hash: u128,
     manifests: Arc<ManifestIndex>,
     crate_map: Arc<CratePackageMap>,
+}
+
+pub(crate) fn known_files_hash(known_files: &BTreeSet<String>) -> u128 {
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    for path in known_files {
+        hasher.update(&(path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+    }
+    hasher.digest128()
 }
 
 fn manifest_cache() -> &'static Mutex<Vec<(PathBuf, CachedResolutionBundles)>> {
@@ -75,7 +85,7 @@ fn manifest_stamp_for_root(canon_root: &Path, known_files: &BTreeSet<String>) ->
     parts.join("|")
 }
 
-/// Returns cached `(ManifestIndex, CratePackageMap)` keyed by `(canonical_root, manifest_stamp, known_len)`.
+/// Returns cached `(ManifestIndex, CratePackageMap)` keyed by `(canonical_root, manifest_stamp, known_len, known_hash)`.
 pub(crate) fn cached_manifests_for_root(
     root: &Path,
     known_files: &BTreeSet<String>,
@@ -89,10 +99,14 @@ pub(crate) fn cached_manifests_for_root(
     let canon_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let stamp = manifest_stamp_for_root(&canon_root, known_files);
     let known_len = known_files.len();
+    let known_hash = known_files_hash(known_files);
 
     if let Ok(mut guard) = manifest_cache().lock()
         && let Some(pos) = guard.iter().position(|(p, entry)| {
-            *p == canon_root && entry.stamp == stamp && entry.known_len == known_len
+            *p == canon_root
+                && entry.stamp == stamp
+                && entry.known_len == known_len
+                && entry.known_hash == known_hash
         })
     {
         let item = guard.remove(pos);
@@ -131,6 +145,7 @@ pub(crate) fn cached_manifests_for_root(
             CachedResolutionBundles {
                 stamp,
                 known_len,
+                known_hash,
                 manifests: manifests.clone(),
                 crate_map: crate_map.clone(),
             },
@@ -2552,8 +2567,76 @@ fn resolve_reexport_step(
     }
     // TS/JS re-export `export { Foo } from './bar'`
     let dir = folder_of(cur_file);
-    let target = resolve_ts_js_spec(&dir, &entry.source_module_path, lookup)?;
+    let target = resolve_ts_js_spec(&dir, &entry.source_module_path, lookup)
+        .or_else(|| resolve_ts_js_alias_fallback(&entry.source_module_path, lookup))?;
     Some((target, next_sym))
+}
+
+/// Traverses `(barrel_file, orig_path)` re-export links backwards from `seeds` up to
+/// `max_hops` (`MAX_REEXPORT_HOPS`), returning every barrel file on any upstream re-export
+/// chain (including seed files that themselves declare re-exports) in a cycle-safe BFS.
+pub(crate) fn collect_backward_reexport_barrels(
+    reexport_rows: &[(String, String)],
+    seeds: &BTreeSet<String>,
+    known_files: &BTreeSet<String>,
+    manifests_opt: Option<&ManifestIndex>,
+    crate_map_opt: Option<&CratePackageMap>,
+    max_hops: usize,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if reexport_rows.is_empty() || seeds.is_empty() {
+        return out;
+    }
+    let lookup = KnownLookup::new(known_files);
+    let mut barrels_with_reexports = BTreeSet::new();
+    let mut reverse_adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (barrel_file, orig_path) in reexport_rows {
+        barrels_with_reexports.insert(barrel_file.as_str());
+        let entry = ReexportEntry {
+            source_module_path: orig_path.clone(),
+            exported_symbol: "*".to_owned(),
+            original_symbol: "*".to_owned(),
+            is_wildcard: true,
+        };
+        let resolved_target =
+            resolve_reexport_step(barrel_file, &entry, "*", &lookup, crate_map_opt)
+                .map(|(t, _)| t)
+                .or_else(|| {
+                    manifests_opt
+                        .and_then(|m| m.resolve_ts_import(barrel_file, orig_path, known_files))
+                });
+        if let Some(target_file) = resolved_target {
+            reverse_adj
+                .entry(target_file)
+                .or_default()
+                .push(barrel_file.clone());
+        }
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for seed in seeds {
+        if barrels_with_reexports.contains(seed.as_str()) {
+            out.insert(seed.clone());
+        }
+        if visited.insert(seed.clone()) {
+            queue.push_back((seed.clone(), 0usize));
+        }
+    }
+    while let Some((cur, hops)) = queue.pop_front() {
+        if hops >= max_hops {
+            continue;
+        }
+        if let Some(barrels) = reverse_adj.get(&cur) {
+            for barrel in barrels {
+                out.insert(barrel.clone());
+                if visited.insert(barrel.clone()) {
+                    queue.push_back((barrel.clone(), hops + 1));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn strip_comments_for_lines(rel_path: &str, source: &str) -> String {
@@ -5709,6 +5792,95 @@ class UserService {
                 .iter()
                 .any(|m| m.name == "notify" && m.parent.as_deref() == Some("UserService")),
             "expected PHP $this->notify() intra-file edge: {php_self_refs:?}"
+        );
+    }
+
+    #[test]
+    fn cached_manifests_invalidates_crate_map_on_equal_count_non_manifest_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/alpha/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/beta/src")).unwrap();
+        std::fs::write(
+            root.join("crates/alpha/Cargo.toml"),
+            "[package]\nname = \"alpha-pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/beta/Cargo.toml"),
+            "[package]\nname = \"beta-pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("crates/beta/src/lib.rs"), "pub fn b() {}\n").unwrap();
+
+        let alpha_only = known(&["crates/alpha/src/lib.rs"]);
+        let beta_only = known(&["crates/beta/src/lib.rs"]);
+        assert_eq!(alpha_only.len(), beta_only.len());
+
+        let (_, c_alpha) = cached_manifests_for_root(root, &alpha_only);
+        assert!(
+            c_alpha
+                .resolve_crate_module("alpha_pkg", &[], &alpha_only)
+                .is_some()
+        );
+        assert!(
+            c_alpha
+                .resolve_crate_module("beta_pkg", &[], &alpha_only)
+                .is_none()
+        );
+
+        // Swapping to an equal-count non-manifest file set must NOT hit stale CratePackageMap.
+        let (_, c_beta) = cached_manifests_for_root(root, &beta_only);
+        assert!(!Arc::ptr_eq(&c_alpha, &c_beta));
+        assert!(
+            c_beta
+                .resolve_crate_module("beta_pkg", &[], &beta_only)
+                .is_some(),
+            "equal-count swap must rebuild CratePackageMap for crates/beta"
+        );
+        assert!(
+            c_beta
+                .resolve_crate_module("alpha_pkg", &[], &beta_only)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn backward_reexport_traversal_respects_max_hops_and_cycles() {
+        let mut known_files = BTreeSet::from(["src/leaf.ts".to_owned()]);
+        let mut rows = Vec::new();
+        for i in 1..=10 {
+            let cur = format!("src/b{i}/index.ts");
+            let prev = if i == 1 {
+                "../leaf".to_owned()
+            } else {
+                format!("../b{}", i - 1)
+            };
+            known_files.insert(cur.clone());
+            rows.push((cur, prev));
+        }
+        // Add a re-export cycle b2 <-> b1 to prove termination.
+        rows.push(("src/b1/index.ts".to_owned(), "../b2".to_owned()));
+
+        let seeds = BTreeSet::from(["src/leaf.ts".to_owned()]);
+        let barrels = collect_backward_reexport_barrels(
+            &rows,
+            &seeds,
+            &known_files,
+            None,
+            None,
+            MAX_REEXPORT_HOPS,
+        );
+        for i in 1..=MAX_REEXPORT_HOPS {
+            assert!(
+                barrels.contains(&format!("src/b{i}/index.ts")),
+                "expected hop {i} barrel in {barrels:?}"
+            );
+        }
+        assert!(
+            !barrels.contains("src/b9/index.ts"),
+            "hop 9 must stay bounded by MAX_REEXPORT_HOPS={MAX_REEXPORT_HOPS}: {barrels:?}"
         );
     }
 }
