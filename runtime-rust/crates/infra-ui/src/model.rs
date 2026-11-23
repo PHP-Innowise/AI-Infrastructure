@@ -173,6 +173,7 @@ pub struct ApprovalQueueState {
     pub drawer_open: bool,
     pub rules: Vec<ApprovalRule>,
     pub rules_sid: String,
+    pub rules_sid_manual: bool,
     pub rules_loading: bool,
     pub rules_error: String,
     pub waiting_counts: BTreeMap<String, usize>,

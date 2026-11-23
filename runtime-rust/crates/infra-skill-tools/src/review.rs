@@ -94,7 +94,9 @@ pub fn build_run(root: &Path, directory: &Path) -> Result<Value> {
         }
     }
     if prompt.is_empty() {
-        let re = regex::Regex::new(r"(?s)## Eval Prompt\n\n(.*?)(?:\n##|$)").unwrap();
+        static EVAL_PROMPT_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = EVAL_PROMPT_RE
+            .get_or_init(|| regex::Regex::new(r"(?s)## Eval Prompt\n\n(.*?)(?:\n##|$)").unwrap());
         for file in [
             directory.join("transcript.md"),
             directory.join("outputs/transcript.md"),
@@ -118,17 +120,21 @@ pub fn build_run(root: &Path, directory: &Path) -> Result<Value> {
         .to_string_lossy()
         .replace(['/', '\\'], "-");
     let mut outputs = vec![];
+    let mut seen_names = std::collections::BTreeSet::new();
     for file in common::sorted(&directory.join("outputs"))? {
-        if file.is_file()
-            && !["transcript.md", "user_notes.md", "metrics.json"].contains(
-                &file
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .as_ref(),
-            )
-        {
+        if file.is_file() {
+            if let Some(name) = file.file_name().map(|n| n.to_string_lossy().into_owned()) {
+                seen_names.insert(name);
+            }
             outputs.push(embed_file(&file));
+        }
+    }
+    for extra in ["transcript.md", "metrics.json", "user_notes.md"] {
+        if !seen_names.contains(extra) {
+            let candidate = directory.join(extra);
+            if candidate.is_file() {
+                outputs.push(embed_file(&candidate));
+            }
         }
     }
     let mut grading = Value::Null;
@@ -429,6 +435,28 @@ struct RequestContext<'a> {
     feedback_store: &'a mut FeedbackStore,
 }
 
+fn json_error_response(
+    status: u16,
+    message: impl Into<String>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    response(
+        status,
+        "application/json",
+        json!({"error": message.into()}).to_string().into_bytes(),
+    )
+}
+
+fn status_for_runtime_error(err: &RuntimeError) -> u16 {
+    match err.kind {
+        infra_core::ErrorKind::InvalidInput => 400,
+        infra_core::ErrorKind::NotFound => 404,
+        infra_core::ErrorKind::Conflict => 409,
+        infra_core::ErrorKind::Unauthorized | infra_core::ErrorKind::Policy => 403,
+        infra_core::ErrorKind::Unavailable => 503,
+        infra_core::ErrorKind::Io => 500,
+    }
+}
+
 fn handle_request(
     method: &str,
     raw_url: &str,
@@ -436,17 +464,21 @@ fn handle_request(
     body_reader: &mut impl Read,
     ctx: &mut RequestContext<'_>,
 ) -> Result<tiny_http::Response<std::io::Cursor<Vec<u8>>>> {
+    const MAX_FEEDBACK_BYTES: usize = 8 * 1024 * 1024;
     let path = request_path(raw_url);
     Ok(match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => {
-            let runs = find_runs(ctx.workspace)?;
-            let b = ctx.benchmark.and_then(|p| common::json_file(p).ok());
-            response(
-                200,
-                "text/html; charset=utf-8",
-                generate_html(&runs, ctx.name, ctx.previous, b.as_ref(), ctx.assets, false)?
-                    .into_bytes(),
-            )
+            let rendered = (|| -> Result<String> {
+                let runs = find_runs(ctx.workspace)?;
+                let b = ctx.benchmark.and_then(|p| common::json_file(p).ok());
+                generate_html(&runs, ctx.name, ctx.previous, b.as_ref(), ctx.assets, false)
+            })();
+            match rendered {
+                Ok(html) => response(200, "text/html; charset=utf-8", html.into_bytes()),
+                Err(error) => {
+                    json_error_response(status_for_runtime_error(&error), error.to_string())
+                }
+            }
         }
         ("GET", "/boot.js") => response(
             200,
@@ -463,33 +495,41 @@ fn handle_request(
         }
         ("GET", "/api/feedback") => match ctx.feedback_store.read() {
             Ok(bytes) => response(200, "application/json", bytes),
-            Err(error) => response(
-                500,
-                "application/json",
-                json!({"error":error.to_string()}).to_string().into_bytes(),
-            ),
+            Err(error) => json_error_response(status_for_runtime_error(&error), error.to_string()),
         },
         ("POST", "/api/feedback") => {
+            if !content_type.is_some_and(|ct| feedback::json_content_type(&ct.to_ascii_lowercase()))
+            {
+                return Ok(json_error_response(
+                    415,
+                    "Feedback requires application/json",
+                ));
+            }
             let mut body = vec![];
-            let outcome = (|| -> Result<()> {
-                if !content_type.is_some_and(feedback::json_content_type) {
-                    return Err(RuntimeError::invalid("Feedback requires application/json"));
-                }
-                body_reader
-                    .take(8 * 1024 * 1024 + 1)
-                    .read_to_end(&mut body)?;
-                if body.len() > 8 * 1024 * 1024 {
-                    return Err(RuntimeError::invalid("Feedback exceeds limit"));
-                }
-                ctx.feedback_store.save(&body)
-            })();
-            match outcome {
+            if let Err(error) = body_reader
+                .take((MAX_FEEDBACK_BYTES + 1) as u64)
+                .read_to_end(&mut body)
+            {
+                let status = if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidInput
+                        | std::io::ErrorKind::InvalidData
+                        | std::io::ErrorKind::UnexpectedEof
+                ) {
+                    400
+                } else {
+                    500
+                };
+                return Ok(json_error_response(status, error.to_string()));
+            }
+            if body.len() > MAX_FEEDBACK_BYTES {
+                return Ok(json_error_response(413, "Feedback exceeds limit"));
+            }
+            match ctx.feedback_store.save(&body) {
                 Ok(()) => response(200, "application/json", b"{\"ok\":true}".to_vec()),
-                Err(e) => response(
-                    500,
-                    "application/json",
-                    json!({"error":e.to_string()}).to_string().into_bytes(),
-                ),
+                Err(error) => {
+                    json_error_response(status_for_runtime_error(&error), error.to_string())
+                }
             }
         }
         _ => response(404, "text/plain", b"Not found".to_vec()),
@@ -642,13 +682,16 @@ pub fn execute(v: &Value) -> Result<Value> {
             .iter()
             .find(|h| h.field.equiv("Content-Type"))
             .map(|h| h.value.as_str().to_owned());
-        let reply = handle_request(
+        let reply = match handle_request(
             &method,
             &raw_url,
             content_type.as_deref(),
             &mut request.as_reader(),
             &mut ctx,
-        )?;
+        ) {
+            Ok(reply) => reply,
+            Err(error) => json_error_response(status_for_runtime_error(&error), error.to_string()),
+        };
         let _ = request.respond(reply);
     }
     Ok(common::cli(
@@ -1005,12 +1048,122 @@ mod http_hardening_tests {
             &mut ctx,
         )
         .unwrap();
-        assert_eq!(bad_post.status_code().0, 500);
+        assert_eq!(bad_post.status_code().0, 415);
         assert_security_headers(bad_post.headers());
+
+        let missing_ct = handle_request(
+            "POST",
+            "/api/feedback",
+            None,
+            &mut Cursor::new(payload.as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(missing_ct.status_code().0, 415);
+
+        let upper_ct_ok = handle_request(
+            "POST",
+            "/api/feedback",
+            Some("Application/JSON; charset=utf-8"),
+            &mut Cursor::new(payload.as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(upper_ct_ok.status_code().0, 200);
+
+        let bad_json = handle_request(
+            "POST",
+            "/api/feedback",
+            Some("application/json"),
+            &mut Cursor::new(b"{not-json".as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(bad_json.status_code().0, 400);
+        assert_security_headers(bad_json.headers());
+
+        let missing_reviews = handle_request(
+            "POST",
+            "/api/feedback",
+            Some("application/json"),
+            &mut Cursor::new(br#"{"wrong":[]}"#.as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(missing_reviews.status_code().0, 400);
+
+        let oversized = vec![b'a'; 8 * 1024 * 1024 + 1];
+        let too_large = handle_request(
+            "POST",
+            "/api/feedback",
+            Some("application/json"),
+            &mut Cursor::new(oversized.as_slice()),
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(too_large.status_code().0, 413);
+        assert_security_headers(too_large.headers());
 
         let not_found =
             handle_request("GET", "/unknown?x=1", None, &mut Cursor::new(&[]), &mut ctx).unwrap();
         assert_eq!(not_found.status_code().0, 404);
         assert_security_headers(not_found.headers());
+    }
+
+    #[test]
+    fn build_run_includes_metadata_files_and_missing_workspace_returns_http_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("workspace");
+        let run1 = ws.join("eval-1/with_skill");
+        std::fs::create_dir_all(run1.join("outputs")).unwrap();
+        std::fs::write(run1.join("outputs/report.txt"), "done").unwrap();
+        std::fs::write(
+            run1.join("outputs/transcript.md"),
+            "## Eval Prompt\n\nRun check\n",
+        )
+        .unwrap();
+        std::fs::write(run1.join("outputs/metrics.json"), r#"{"tokens":42}"#).unwrap();
+        std::fs::write(run1.join("user_notes.md"), "root note").unwrap();
+
+        let built = build_run(&ws, &run1).unwrap();
+        assert_eq!(built["prompt"], "Run check");
+        let names: Vec<&str> = built["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect();
+        assert!(names.contains(&"report.txt"), "{names:?}");
+        assert!(names.contains(&"transcript.md"), "{names:?}");
+        assert!(names.contains(&"metrics.json"), "{names:?}");
+        assert!(names.contains(&"user_notes.md"), "{names:?}");
+
+        // Per-request error on GET /api/feedback returns an HTTP error response rather than propagating Err.
+        let mut store = FeedbackStore::open(&ws).unwrap();
+        std::fs::create_dir_all(ws.join("feedback.json")).unwrap();
+        let assets_dir = temp.path().join("wasm-ui");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let assets = test_assets(&assets_dir);
+        let prev = Value::Null;
+        let mut ctx = RequestContext {
+            workspace: &ws,
+            name: "demo",
+            previous: &prev,
+            benchmark: None,
+            assets: &assets,
+            feedback_store: &mut store,
+        };
+        let err_reply = handle_request(
+            "GET",
+            "/api/feedback",
+            None,
+            &mut std::io::Cursor::new(&[]),
+            &mut ctx,
+        )
+        .expect(
+            "GET /api/feedback error must return HTTP response rather than killing server loop",
+        );
+        assert!(err_reply.status_code().0 >= 400);
+        assert_security_headers(err_reply.headers());
     }
 }

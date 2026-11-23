@@ -419,6 +419,15 @@ fn reset_active_session_core(project: Option<&str>) {
 
 pub(crate) fn clear_session_for_route_project(project: &str) {
     reset_active_session_core(Some(project));
+    m::write(|s| {
+        if !s.approvals.drawer_open {
+            s.approvals.rules.clear();
+            s.approvals.rules_sid.clear();
+            s.approvals.rules_sid_manual = false;
+            s.approvals.rules_loading = false;
+            s.approvals.rules_error.clear();
+        }
+    });
     history();
     controls();
     run::sync_approvals_badge();
@@ -431,6 +440,15 @@ pub fn new_session(project: Option<&str>) {
     }
     save_preferences();
     reset_active_session_core(project);
+    m::write(|s| {
+        if !s.approvals.drawer_open {
+            s.approvals.rules.clear();
+            s.approvals.rules_sid.clear();
+            s.approvals.rules_sid_manual = false;
+            s.approvals.rules_loading = false;
+            s.approvals.rules_error.clear();
+        }
+    });
     let selected = preferences_selection(dom::json_storage(PREFS), &dom::value("project"), "");
     dom::save(PREFS, Some(&selected.to_string()));
     history();
@@ -914,6 +932,80 @@ pub(crate) fn apply_waiting_counts_snapshot(
     true
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionStatusTransition {
+    pub(crate) became_idle: bool,
+    pub(crate) refresh_results: bool,
+}
+
+pub(crate) fn plan_session_status_transition(
+    was_active: bool,
+    next_session: &V,
+    is_selected: bool,
+    results_relevant: bool,
+) -> SessionStatusTransition {
+    let became_idle = is_selected && was_active && !m::active(next_session);
+    SessionStatusTransition {
+        became_idle,
+        refresh_results: became_idle && results_relevant,
+    }
+}
+
+pub(crate) fn apply_permission_sse_waiting_update(
+    sessions: &mut [V],
+    selected: &mut V,
+    waiting_counts: &mut std::collections::BTreeMap<String, usize>,
+    target_sid: &str,
+    current_sid: &str,
+    pending_map_count: Option<usize>,
+    is_pending: bool,
+) -> bool {
+    if target_sid.is_empty() {
+        return false;
+    }
+    let next_count = if target_sid == current_sid {
+        pending_map_count.unwrap_or_else(|| {
+            let prev = waiting_counts
+                .get(target_sid)
+                .copied()
+                .or_else(|| {
+                    (selected["id"].as_str() == Some(target_sid))
+                        .then(|| selected["waiting_permissions"].as_u64())
+                        .flatten()
+                        .map(|n| n as usize)
+                })
+                .unwrap_or(0);
+            if is_pending {
+                prev.saturating_add(1)
+            } else {
+                prev.saturating_sub(1)
+            }
+        })
+    } else {
+        let prev = waiting_counts
+            .get(target_sid)
+            .copied()
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find(|sess| sess["id"].as_str() == Some(target_sid))
+                    .and_then(|sess| sess["waiting_permissions"].as_u64())
+                    .map(|n| n as usize)
+            })
+            .unwrap_or(0);
+        if is_pending {
+            prev.saturating_add(1)
+        } else {
+            prev.saturating_sub(1)
+        }
+    };
+    run::apply_session_waiting_count(sessions, waiting_counts, target_sid, next_count);
+    if selected["id"].as_str() == Some(target_sid) && selected.is_object() {
+        selected["waiting_permissions"] = json!(next_count);
+    }
+    true
+}
+
 /// Wires `/api/events/stream` SSE event handlers for real-time session events, statuses, approvals, and fallback recovery.
 pub(crate) fn initialize_sse_listeners() {
     if m::yes(&m::data("session-sse-wired")) {
@@ -938,6 +1030,8 @@ pub(crate) fn initialize_sse_listeners() {
         if event["id"].is_null() && !payload["id"].is_null() {
             event["id"] = payload["id"].clone();
         }
+        let is_permission = event["kind"] == "permission";
+        let is_pending_permission = is_permission && event["state"] == "pending";
         if !target_sid.is_empty() && target_sid == current_sid {
             let buffered = STREAM_SYNC.with(|sync| {
                 let mut s = sync.borrow_mut();
@@ -949,11 +1043,32 @@ pub(crate) fn initialize_sse_listeners() {
                 }
             });
             if buffered {
+                if is_permission {
+                    run::invalidate_approvals_cache_for(&target_sid);
+                    m::write(|s| {
+                        apply_permission_sse_waiting_update(
+                            &mut s.sessions,
+                            &mut s.selected,
+                            &mut s.approvals.waiting_counts,
+                            &target_sid,
+                            &current_sid,
+                            None,
+                            is_pending_permission,
+                        )
+                    });
+                    history();
+                    run::sync_approvals_badge();
+                    if m::read(|s| s.approvals.drawer_open) {
+                        run::schedule_approvals_queue_refresh();
+                    }
+                }
                 return;
             }
             let (fresh_events, out_of_order) = m::write(|s| {
                 merge_ordered_events(&mut s.events, &mut s.seen, &mut s.cursor, vec![event])
             });
+            let mut observed_fresh = false;
+            let mut pending_map_count = None;
             if out_of_order {
                 STREAM_SYNC.with(|sync| {
                     queue_sse_ui_batch(
@@ -966,7 +1081,16 @@ pub(crate) fn initialize_sse_listeners() {
                 });
                 dom::schedule_frame(SSE_UI_FRAME_KEY, flush_sse_ui_batch);
             } else if let Some(event) = fresh_events.into_iter().next() {
+                observed_fresh = true;
                 run::observe(event.clone());
+                if is_permission {
+                    pending_map_count = Some(
+                        m::data("permission-pending")
+                            .as_object()
+                            .map(|o| o.len())
+                            .unwrap_or(0),
+                    );
+                }
                 let mutation = is_mutation_tool_event(&event);
                 let focus = event_focus_payload(&event);
                 STREAM_SYNC.with(|sync| {
@@ -980,8 +1104,44 @@ pub(crate) fn initialize_sse_listeners() {
                 });
                 dom::schedule_frame(SSE_UI_FRAME_KEY, flush_sse_ui_batch);
             }
-        } else if event["kind"] == "permission" {
+            if is_permission && (out_of_order || observed_fresh) {
+                run::invalidate_approvals_cache_for(&target_sid);
+                m::write(|s| {
+                    apply_permission_sse_waiting_update(
+                        &mut s.sessions,
+                        &mut s.selected,
+                        &mut s.approvals.waiting_counts,
+                        &target_sid,
+                        &current_sid,
+                        pending_map_count,
+                        is_pending_permission,
+                    )
+                });
+                history();
+                run::sync_approvals_badge();
+                if m::read(|s| s.approvals.drawer_open) {
+                    run::schedule_approvals_queue_refresh();
+                }
+            }
+        } else if is_permission {
             run::invalidate_approvals_cache_for(&target_sid);
+            if m::write(|s| {
+                apply_permission_sse_waiting_update(
+                    &mut s.sessions,
+                    &mut s.selected,
+                    &mut s.approvals.waiting_counts,
+                    &target_sid,
+                    &current_sid,
+                    None,
+                    is_pending_permission,
+                )
+            }) {
+                history();
+                run::sync_approvals_badge();
+            }
+            if m::read(|s| s.approvals.drawer_open) {
+                run::schedule_approvals_queue_refresh();
+            }
             spawn_local(async {
                 refresh().await;
             });
@@ -1003,22 +1163,37 @@ pub(crate) fn initialize_sse_listeners() {
             return;
         }
         let was_active = m::read(|s| s.sid == sid && m::active(&s.selected));
+        m::upsert(session.clone());
         if let Some(waiting) = session["waiting_permissions"].as_u64() {
             m::write(|s| {
-                s.approvals
-                    .waiting_counts
-                    .insert(sid.clone(), waiting as usize);
+                run::apply_session_waiting_count(
+                    &mut s.sessions,
+                    &mut s.approvals.waiting_counts,
+                    &sid,
+                    waiting as usize,
+                );
             });
         }
-        m::upsert(session.clone());
         history();
         run::sync_approvals_badge();
-        if m::read(|s| s.sid == sid) {
+        let is_selected = m::read(|s| s.sid == sid);
+        if is_selected {
             apply_settings(&session);
             controls();
             let is_active = m::active(&session);
             crate::graph::run_state(is_active);
-            if was_active && !is_active {
+            let transition = plan_session_status_transition(
+                was_active,
+                &session,
+                is_selected,
+                results_relevant(),
+            );
+            if transition.refresh_results {
+                spawn_local(async {
+                    results().await;
+                });
+            }
+            if transition.became_idle {
                 let current_sid = sid.clone();
                 spawn_local(async move {
                     let epoch = m::read(|s| s.epoch);
@@ -1181,5 +1356,130 @@ mod tests {
             &mut waiting_counts,
             &json!({"total": 9}),
         ));
+    }
+
+    #[test]
+    fn session_status_transition_captures_was_active_before_upsert_and_triggers_results() {
+        let idle = json!({"id": "s-done", "status": "completed"});
+        let active = json!({"id": "s-done", "status": "running"});
+
+        m::write(|s| {
+            s.sid = "s-done".into();
+            s.selected = active.clone();
+            s.sessions = vec![active.clone()];
+        });
+
+        let was_active_before = m::read(|s| s.sid == "s-done" && m::active(&s.selected));
+        assert!(was_active_before);
+
+        m::upsert(idle.clone());
+        // After m::upsert, s.selected is already idle; only pre-upsert capture preserves was_active.
+        assert!(!m::read(|s| m::active(&s.selected)));
+
+        let relevant = plan_session_status_transition(was_active_before, &idle, true, true);
+        assert_eq!(
+            relevant,
+            SessionStatusTransition {
+                became_idle: true,
+                refresh_results: true,
+            }
+        );
+
+        let not_relevant = plan_session_status_transition(was_active_before, &idle, true, false);
+        assert_eq!(
+            not_relevant,
+            SessionStatusTransition {
+                became_idle: true,
+                refresh_results: false,
+            }
+        );
+
+        let still_running = plan_session_status_transition(was_active_before, &active, true, true);
+        assert_eq!(
+            still_running,
+            SessionStatusTransition {
+                became_idle: false,
+                refresh_results: false,
+            }
+        );
+
+        let other_session = plan_session_status_transition(was_active_before, &idle, false, true);
+        assert_eq!(
+            other_session,
+            SessionStatusTransition {
+                became_idle: false,
+                refresh_results: false,
+            }
+        );
+
+        m::write(|s| {
+            s.sid.clear();
+            s.selected = V::Null;
+            s.sessions.clear();
+        });
+    }
+
+    #[test]
+    fn permission_sse_updates_waiting_counts_for_current_and_other_sessions() {
+        let mut sessions = vec![
+            json!({"id": "s-1", "title": "Active", "waiting_permissions": 0}),
+            json!({"id": "s-2", "title": "Background", "waiting_permissions": 0}),
+        ];
+        let mut selected = json!({"id": "s-1", "waiting_permissions": 0});
+        let mut waiting_counts = std::collections::BTreeMap::new();
+
+        // Active session receives pending permission (authoritative permission-pending map has 1).
+        assert!(apply_permission_sse_waiting_update(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            "s-1",
+            "s-1",
+            Some(1),
+            true,
+        ));
+        assert_eq!(waiting_counts.get("s-1"), Some(&1));
+        assert_eq!(sessions[0]["waiting_permissions"], json!(1));
+        assert_eq!(selected["waiting_permissions"], json!(1));
+
+        // Background session receives pending permission (optimistic +1).
+        assert!(apply_permission_sse_waiting_update(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            "s-2",
+            "s-1",
+            None,
+            true,
+        ));
+        assert_eq!(waiting_counts.get("s-2"), Some(&1));
+        assert_eq!(sessions[1]["waiting_permissions"], json!(1));
+
+        // Active session permission resolves (authoritative permission-pending map has 0).
+        assert!(apply_permission_sse_waiting_update(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            "s-1",
+            "s-1",
+            Some(0),
+            false,
+        ));
+        assert!(!waiting_counts.contains_key("s-1"));
+        assert_eq!(sessions[0]["waiting_permissions"], json!(0));
+        assert_eq!(selected["waiting_permissions"], json!(0));
+
+        // Background session permission resolves (optimistic -1 clamped to 0).
+        assert!(apply_permission_sse_waiting_update(
+            &mut sessions,
+            &mut selected,
+            &mut waiting_counts,
+            "s-2",
+            "s-1",
+            None,
+            false,
+        ));
+        assert!(!waiting_counts.contains_key("s-2"));
+        assert_eq!(sessions[1]["waiting_permissions"], json!(0));
     }
 }

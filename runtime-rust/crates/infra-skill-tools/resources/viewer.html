@@ -8,6 +8,7 @@
 
   <style>
     :root {
+      color-scheme: light dark;
       --bg: #faf9f5;
       --surface: #ffffff;
       --border: #e8e6dc;
@@ -15,6 +16,13 @@
       --text-muted: #6f6d65;
       --accent: #b34a28;
       --accent-hover: #963c1e;
+      --done-ready-bg: #b34a28;
+      --done-ready-hover: #963c1e;
+      --done-ready-text: #ffffff;
+      --badge-primary-bg: rgba(33, 150, 243, 0.12);
+      --badge-primary-text: #155fa8;
+      --badge-baseline-bg: rgba(255, 193, 7, 0.15);
+      --badge-baseline-text: #8a4b00;
       --green: #4a612d;
       --green-bg: #eef2e8;
       --red: #b3261e;
@@ -24,9 +32,44 @@
       --radius: 6px;
       --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121210;
+        --surface: #1b1a17;
+        --border: #33312b;
+        --text: #f3f1ea;
+        --text-muted: #b8b3a8;
+        --accent: #f07c51;
+        --accent-hover: #ff946c;
+        --done-ready-bg: #b84b26;
+        --done-ready-hover: #9f3e1d;
+        --done-ready-text: #ffffff;
+        --badge-primary-bg: rgba(96, 165, 250, 0.22);
+        --badge-primary-text: #93c5fd;
+        --badge-baseline-bg: rgba(251, 191, 36, 0.2);
+        --badge-baseline-text: #fcd34d;
+        --green: #8ac96b;
+        --green-bg: #1e2b17;
+        --red: #f28b82;
+        --red-bg: #351918;
+        --header-bg: #0c0c0b;
+        --header-text: #f3f1ea;
+      }
+    }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     [hidden] { display: none !important; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
 
     body {
       font-family: Georgia, 'Times New Roman', serif;
@@ -131,12 +174,12 @@
       vertical-align: middle;
     }
     .config-badge.config-primary {
-      background: rgba(33, 150, 243, 0.12);
-      color: #155fa8;
+      background: var(--badge-primary-bg);
+      color: var(--badge-primary-text);
     }
     .config-badge.config-baseline {
-      background: rgba(255, 193, 7, 0.15);
-      color: #8a4b00;
+      background: var(--badge-baseline-bg);
+      color: var(--badge-baseline-text);
     }
 
     /* ---- Prompt ---- */
@@ -283,6 +326,7 @@
       padding: 0.75rem;
       border: 1px solid var(--border);
       border-radius: 4px;
+      background: var(--surface);
       font-family: inherit;
       font-size: 0.9375rem;
       line-height: 1.5;
@@ -538,12 +582,37 @@
     }
     .done-btn.ready {
       border: none;
-      background: var(--accent);
-      color: white;
+      background: var(--done-ready-bg);
+      color: var(--done-ready-text);
       font-weight: 600;
     }
     .done-btn.ready:hover {
-      background: var(--accent-hover);
+      background: var(--done-ready-hover);
+    }
+    .nav-jump {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .run-select {
+      font-family: var(--font-sans);
+      font-size: 0.8125rem;
+      font-weight: 500;
+      padding: 0.45rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      color: var(--text);
+      min-width: 0;
+      max-width: 16rem;
+      cursor: pointer;
+    }
+    .run-select:focus-visible,
+    .nav-btn:focus-visible,
+    .done-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
     /* ---- Done overlay ---- */
     .done-overlay {
@@ -585,6 +654,7 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       background: var(--surface);
+      color: var(--text);
       cursor: pointer;
       font-size: 0.875rem;
     }
@@ -654,6 +724,14 @@
       }
       .done-btn {
         flex: 1 1 auto;
+      }
+      .nav-jump {
+        flex: 1 1 100%;
+        order: 1;
+      }
+      .run-select {
+        width: 100%;
+        max-width: 100%;
       }
       .done-card {
         margin: 1rem;
@@ -752,6 +830,10 @@
 
     <div class="nav" id="outputs-nav">
       <button type="button" class="nav-btn" id="prev-btn" data-eval-action="previous">&#8592; Previous</button>
+      <div class="nav-jump">
+        <label class="sr-only" for="run-select">Jump to run</label>
+        <select class="run-select" id="run-select" aria-label="Jump to run"></select>
+      </div>
       <button type="button" class="done-btn" id="done-btn" data-eval-action="submit">Submit All Reviews</button>
       <button type="button" class="nav-btn" id="next-btn" data-eval-action="next">Next &#8594;</button>
     </div>
