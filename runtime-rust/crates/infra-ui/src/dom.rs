@@ -2063,18 +2063,30 @@ pub(crate) fn handle_a11y_toggle(target: &Element) {
     }
 }
 
+fn should_apply_dialog_close(dialog_still_open: bool) -> bool {
+    !dialog_still_open
+}
+
 /// Keeps `hidden`, `inert`, and focus restoration synchronized when a `<dialog>` closes.
 pub(crate) fn handle_a11y_dialog_close(target: &Element) {
     if target.tag_name() != "DIALOG" {
         return;
     }
     let id = target.id();
+    let suppressed = SUPPRESS_CLOSE_FOCUS_RESTORE
+        .with(|set| take_suppress_close_restore(&mut set.borrow_mut(), &id));
+    let dialog_still_open = target
+        .dyn_ref::<web_sys::HtmlDialogElement>()
+        .map_or_else(|| target.has_attribute("open"), |dialog| dialog.open());
+    // Native <dialog>.close() queues the `close` event asynchronously; ignore stale
+    // events that arrive after the same dialog has already been reopened.
+    if !should_apply_dialog_close(dialog_still_open) {
+        return;
+    }
     remove_overlay_stack(&id);
     if MODAL_OVERLAY_IDS.contains(&id.as_str()) {
         let _ = target.set_attribute("hidden", "");
     }
-    let suppressed = SUPPRESS_CLOSE_FOCUS_RESTORE
-        .with(|set| take_suppress_close_restore(&mut set.borrow_mut(), &id));
     sync_overlay_inert();
     if !id.is_empty() && !suppressed {
         restore_focus_for_overlay(&id);
@@ -2434,5 +2446,11 @@ mod tests {
         );
         assert!(reg.active.is_empty());
         assert!(reg.retired.is_empty());
+    }
+
+    #[test]
+    fn stale_async_dialog_close_is_ignored_when_reopened() {
+        assert!(should_apply_dialog_close(false));
+        assert!(!should_apply_dialog_close(true));
     }
 }

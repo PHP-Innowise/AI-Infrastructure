@@ -207,6 +207,296 @@ fn find_chrome_binary() -> Option<PathBuf> {
     find_executable_in_path(&["google-chrome", "chromium", "chromium-browser"])
 }
 
+fn find_infra_engine_bin(repo: &Path) -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("INFRA_ENGINE_BIN").filter(|v| !v.is_empty()) {
+        let p = PathBuf::from(explicit);
+        if p.is_file() {
+            return Some(p);
+        }
+        return None;
+    }
+    let exe_name = format!("infra-engine{}", std::env::consts::EXE_SUFFIX);
+    for profile in ["release", "debug"] {
+        let candidate = repo
+            .join("runtime-rust/target")
+            .join(profile)
+            .join(&exe_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    find_executable_in_path(&["infra-engine"])
+}
+
+struct ReviewServerGuard {
+    child: Option<Child>,
+}
+
+impl Drop for ReviewServerGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn seed_eval_review_workspace(workspace: &Path) -> PathBuf {
+    let run1 = workspace.join("eval-1-with_skill-run-1/outputs");
+    let run2 = workspace.join("eval-2-without_skill-run-1/outputs");
+    fs::create_dir_all(&run1).expect("create eval-1 outputs");
+    fs::create_dir_all(&run2).expect("create eval-2 outputs");
+    fs::write(
+        workspace.join("eval-1-with_skill-run-1/eval_metadata.json"),
+        json!({ "eval_id": 1, "prompt": "Summarize the Q3 invoice PDF safely." }).to_string(),
+    )
+    .expect("write eval-1 metadata");
+    fs::write(
+        workspace.join("eval-1-with_skill-run-1/grading.json"),
+        json!({
+            "summary": { "passed": 1, "failed": 0, "total": 1, "pass_rate": 1.0 },
+            "expectations": [{ "text": "CSP-safe preview renders", "passed": true, "evidence": "ok" }]
+        })
+        .to_string(),
+    )
+    .expect("write eval-1 grading");
+    fs::write(run1.join("summary.txt"), "Invoice total: $1250.00\n").expect("write summary.txt");
+    fs::write(run1.join("report.pdf"), b"%PDF-1.4\n% E2E stub\n").expect("write report.pdf");
+
+    fs::write(
+        workspace.join("eval-2-without_skill-run-1/eval_metadata.json"),
+        json!({ "eval_id": 2, "prompt": "Baseline prompt without skill." }).to_string(),
+    )
+    .expect("write eval-2 metadata");
+    fs::write(run2.join("baseline.txt"), "Baseline output\n").expect("write baseline.txt");
+
+    let benchmark_path = workspace.join("benchmark.json");
+    fs::write(
+        &benchmark_path,
+        json!({
+            "metadata": {
+                "skill_name": "e2e-pdf-skill",
+                "timestamp": "2026-11-23T12:00:00Z",
+                "evals_run": [1, 2],
+                "runs_per_configuration": 1
+            },
+            "run_summary": {
+                "with_skill": {
+                    "pass_rate": { "mean": 1.0, "stddev": 0.0 },
+                    "time_seconds": { "mean": 1.4, "stddev": 0.1 },
+                    "tokens": { "mean": 1200.0, "stddev": 50.0 }
+                },
+                "without_skill": {
+                    "pass_rate": { "mean": 0.5, "stddev": 0.0 },
+                    "time_seconds": { "mean": 2.1, "stddev": 0.2 },
+                    "tokens": { "mean": 1800.0, "stddev": 75.0 }
+                },
+                "delta": {
+                    "pass_rate": "+0.50",
+                    "time_seconds": -0.7,
+                    "tokens": -600
+                }
+            },
+            "runs": [
+                {
+                    "eval_id": 1,
+                    "eval_name": "Invoice Summary",
+                    "configuration": "with_skill",
+                    "run_number": 1,
+                    "result": { "pass_rate": 1.0, "passed": 1, "total": 1, "time_seconds": 1.4, "errors": 0 },
+                    "expectations": [{ "text": "CSP-safe preview renders", "passed": true, "evidence": "ok" }]
+                },
+                {
+                    "eval_id": 2,
+                    "eval_name": "Invoice Summary",
+                    "configuration": "without_skill",
+                    "run_number": 1,
+                    "result": { "pass_rate": 0.5, "passed": 1, "total": 2, "time_seconds": 2.1, "errors": 0 },
+                    "expectations": [{ "text": "CSP-safe preview renders", "passed": false, "evidence": "missing" }]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write benchmark.json");
+    benchmark_path
+}
+
+fn spawn_eval_review_server(
+    engine: &Path,
+    workspace: &Path,
+    benchmark: &Path,
+    ui_assets: &Path,
+) -> (ReviewServerGuard, String) {
+    let mut cmd = Command::new(engine);
+    cmd.env("INFRA_NO_BROWSER", "1")
+        .arg("skill-tools")
+        .arg("generate-review")
+        .arg(workspace)
+        .arg("--port")
+        .arg("0")
+        .arg("--skill-name")
+        .arg("e2e-pdf-skill")
+        .arg("--benchmark")
+        .arg(benchmark)
+        .arg("--ui-assets")
+        .arg(ui_assets)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .expect("spawn infra-engine skill-tools generate-review");
+    let stdout = child.stdout.take().expect("review server stdout");
+    let stderr = child.stderr.take().expect("review server stderr");
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut buf);
+        buf
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if let Some(url) = line.trim().strip_prefix("URL:") {
+                        let _ = tx.send(Ok(url.trim().to_owned()));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+    let guard = ReviewServerGuard { child: Some(child) };
+    let url = match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Ok(url)) if url.starts_with("http://127.0.0.1:") => url,
+        Ok(Ok(other)) => panic!("Unexpected review server URL `{other}`"),
+        Ok(Err(e)) => {
+            drop(guard);
+            let err = stderr_handle.join().unwrap_or_default();
+            panic!("Failed reading review server stdout: {e}\nstderr:\n{err}");
+        }
+        Err(_) => {
+            drop(guard);
+            let err = stderr_handle.join().unwrap_or_default();
+            panic!("Timed out waiting for review server URL\nstderr:\n{err}");
+        }
+    };
+    (guard, url)
+}
+
+fn assert_review_security_headers(resp: &reqwest::blocking::Response, context: &str) {
+    let hdr = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    };
+    assert_eq!(hdr("x-content-type-options"), "nosniff", "{context}");
+    assert_eq!(hdr("referrer-policy"), "no-referrer", "{context}");
+    assert_eq!(
+        hdr("cross-origin-resource-policy"),
+        "same-origin",
+        "{context}"
+    );
+    assert_eq!(hdr("x-frame-options"), "DENY", "{context}");
+    let csp = hdr("content-security-policy");
+    assert!(
+        csp.contains("default-src 'self'")
+            && csp.contains("frame-ancestors 'none'")
+            && csp.contains("'wasm-unsafe-eval'")
+            && csp.contains("base-uri 'none'")
+            && csp.contains("object-src 'none'"),
+        "missing hardened CSP on {context}: {csp}"
+    );
+}
+
+fn verify_eval_review_server_http(client: &reqwest::blocking::Client, review_url: &str) {
+    let index = client
+        .get(format!("{review_url}/?run=1&tab=benchmark"))
+        .send()
+        .expect("GET review /?run=1&tab=benchmark");
+    assert_eq!(index.status().as_u16(), 200);
+    assert_review_security_headers(&index, "review GET /?query");
+    let body = index.text().expect("review index body");
+    assert!(
+        body.contains("id=\"eval-viewer-data\""),
+        "missing eval-viewer-data"
+    );
+
+    let boot = client
+        .get(format!("{review_url}/boot.js?v=1"))
+        .send()
+        .expect("GET review /boot.js");
+    assert_eq!(boot.status().as_u16(), 200);
+    assert_review_security_headers(&boot, "review GET /boot.js");
+    let boot_js = boot.text().expect("read review /boot.js");
+    assert!(!boot_js.is_empty(), "empty /boot.js response");
+
+    let wasm = client
+        .get(format!("{review_url}/assets/infra_ui_bg.wasm"))
+        .send()
+        .expect("GET review /assets/infra_ui_bg.wasm");
+    assert_eq!(wasm.status().as_u16(), 200);
+    assert_review_security_headers(&wasm, "review GET /assets/infra_ui_bg.wasm");
+    let wasm_bytes = wasm.bytes().expect("read review wasm bytes");
+    assert!(
+        wasm_bytes.starts_with(b"\0asm"),
+        "invalid wasm magic header"
+    );
+
+    let initial_fb = client
+        .get(format!("{review_url}/api/feedback"))
+        .send()
+        .expect("GET review /api/feedback");
+    assert_eq!(initial_fb.status().as_u16(), 200);
+    assert_review_security_headers(&initial_fb, "review GET /api/feedback");
+    assert_eq!(initial_fb.text().expect("initial feedback"), "{}");
+
+    let post_fb = client
+        .post(format!("{review_url}/api/feedback"))
+        .header("Content-Type", "application/json")
+        .body(
+            json!({
+                "reviews": [{ "run_id": "eval-1-with_skill-run-1", "feedback": "smoke check note" }],
+                "status": "in_progress"
+            })
+            .to_string(),
+        )
+        .send()
+        .expect("POST review /api/feedback");
+    assert_eq!(post_fb.status().as_u16(), 200);
+    assert_review_security_headers(&post_fb, "review POST /api/feedback");
+    assert!(
+        post_fb
+            .text()
+            .expect("read review POST body")
+            .contains("\"ok\":true"),
+        "expected ok:true from POST /api/feedback"
+    );
+
+    let saved_fb_text = client
+        .get(format!("{review_url}/api/feedback"))
+        .send()
+        .expect("GET saved review /api/feedback")
+        .error_for_status()
+        .expect("GET saved review status")
+        .text()
+        .expect("read saved review feedback body");
+    let saved_fb: Value =
+        serde_json::from_str(&saved_fb_text).expect("parse saved review feedback");
+    assert_eq!(
+        saved_fb["reviews"][0]["feedback"], "smoke check note",
+        "unexpected saved feedback payload: {saved_fb}"
+    );
+}
+
 fn http_host_port(url: &str) -> (String, u16) {
     let stripped = url
         .strip_prefix("http://")
@@ -271,10 +561,18 @@ fn browser_e2e_fixture_serves_graph_sse_and_range_contracts() {
     let other_session_id = receipt["other_session_id"]
         .as_str()
         .expect("receipt other_session_id");
+    let secondary_project_id = receipt["secondary_project_id"]
+        .as_str()
+        .expect("receipt secondary_project_id");
+    let secondary_session_id = receipt["secondary_session_id"]
+        .as_str()
+        .expect("receipt secondary_session_id");
     let commit_a = receipt["commit_a"].as_str().expect("receipt commit_a");
     let commit_b = receipt["commit_b"].as_str().expect("receipt commit_b");
     assert!(receipt["root"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_ne!(project_id, secondary_project_id);
     assert_ne!(session_id, other_session_id);
+    assert_ne!(session_id, secondary_session_id);
     assert_ne!(commit_a, commit_b);
 
     let client = reqwest::blocking::Client::builder()
@@ -297,6 +595,9 @@ fn browser_e2e_fixture_serves_graph_sse_and_range_contracts() {
     let boot = get_json(&client, &format!("{url}/api/bootstrap"));
     let csrf = boot["csrf"].as_str().expect("bootstrap csrf").to_owned();
     assert!(!csrf.is_empty());
+    let projects = boot["projects"].as_array().expect("bootstrap projects");
+    assert!(projects.iter().any(|p| p["id"] == project_id));
+    assert!(projects.iter().any(|p| p["id"] == secondary_project_id));
     let sessions = boot["sessions"].as_array().expect("bootstrap sessions");
     let main_summary = sessions
         .iter()
@@ -309,6 +610,13 @@ fn browser_e2e_fixture_serves_graph_sse_and_range_contracts() {
         .find(|s| s["id"] == other_session_id)
         .expect("other session in bootstrap");
     assert_eq!(other_summary["status"], "completed");
+    let secondary_summary = sessions
+        .iter()
+        .find(|s| s["id"] == secondary_session_id)
+        .expect("secondary session in bootstrap");
+    assert_eq!(secondary_summary["project_id"], secondary_project_id);
+    assert_eq!(secondary_summary["status"], "completed");
+    assert_eq!(secondary_summary["waiting_permissions"], 0);
 
     let graph_status = get_json(&client, &format!("{url}/api/projects/{project_id}/graph"));
     assert_eq!(graph_status["state"], "ready");
@@ -541,6 +849,16 @@ fn browser_e2e_fixture_serves_graph_sse_and_range_contracts() {
         "expected range change/test_reach summary: {range_map}"
     );
 
+    if let Some(engine) = find_infra_engine_bin(&repo) {
+        let review_ws = temp.path().join("eval-review-ws");
+        let benchmark = seed_eval_review_workspace(&review_ws);
+        let ui_assets = ui_root.join("runtime-rust/target/wasm-ui");
+        let (review_guard, review_url) =
+            spawn_eval_review_server(&engine, &review_ws, &benchmark, &ui_assets);
+        verify_eval_review_server_http(&client, &review_url);
+        drop(review_guard);
+    }
+
     let status = guard.shutdown_gracefully(Duration::from_secs(10));
     let stderr = stderr_handle.join().unwrap_or_default();
     assert!(
@@ -603,9 +921,29 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
     let other_session_id = receipt["other_session_id"]
         .as_str()
         .expect("receipt other_session_id");
+    let secondary_project_id = receipt["secondary_project_id"]
+        .as_str()
+        .expect("receipt secondary_project_id");
+    let secondary_session_id = receipt["secondary_session_id"]
+        .as_str()
+        .expect("receipt secondary_session_id");
     let commit_a = receipt["commit_a"].as_str().expect("receipt commit_a");
     let commit_b = receipt["commit_b"].as_str().expect("receipt commit_b");
     let system_run_id = receipt["system_run_id"].as_str().unwrap_or("");
+
+    let review_server = find_infra_engine_bin(&repo).map(|engine| {
+        let review_ws = temp.path().join("eval-review-e2e-ws");
+        let benchmark = seed_eval_review_workspace(&review_ws);
+        let ui_assets = ui_root.join("runtime-rust/target/wasm-ui");
+        let (guard, review_url) =
+            spawn_eval_review_server(&engine, &review_ws, &benchmark, &ui_assets);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("build review http client");
+        verify_eval_review_server_http(&client, &review_url);
+        (guard, review_url)
+    });
 
     let mut command = Command::new(&node);
     command
@@ -618,12 +956,19 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .arg(session_id)
         .arg("--other-session-id")
         .arg(other_session_id)
+        .arg("--secondary-project-id")
+        .arg(secondary_project_id)
+        .arg("--secondary-session-id")
+        .arg(secondary_session_id)
         .arg("--commit-a")
         .arg(commit_a)
         .arg("--commit-b")
         .arg(commit_b);
     if !system_run_id.is_empty() {
         command.arg("--system-run-id").arg(system_run_id);
+    }
+    if let Some((_, ref review_url)) = review_server {
+        command.arg("--eval-viewer-url").arg(review_url);
     }
     if let Some(capsule) = receipt["skillcache_capsule_id"].as_str() {
         command.arg("--skillcache-capsule-id").arg(capsule);
@@ -635,10 +980,11 @@ fn headless_browser_e2e_canvas2d_lenses_sse_modals() {
         .arg("--chrome")
         .arg(&chrome)
         .arg("--timeout-ms")
-        .arg("150000")
+        .arg("180000")
         .output()
         .expect("execute browser_e2e.mjs");
 
+    drop(review_server);
     let shutdown_status = guard.shutdown_gracefully(Duration::from_secs(10));
     let fixture_stderr = stderr_handle.join().unwrap_or_default();
     let node_stdout = String::from_utf8_lossy(&output.stdout);
