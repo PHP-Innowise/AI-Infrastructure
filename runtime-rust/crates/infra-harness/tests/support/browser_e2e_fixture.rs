@@ -1023,8 +1023,21 @@ fn seed_skillcache(
     let mut files = infra_skillcache::package::Files::new();
     files.insert(
         "programs/extract/main.sh",
-        b"printf '{\"status\":\"complete\",\"result\":{\"rows_file\":\"out/q3-rows.csv\"}}\\n'\n"
-            .to_vec(),
+        concat!(
+            "if [ \"$1\" = \"--check\" ]; then\n",
+            "  printf '{\"status\":\"complete\",\"result\":{}}\\n'\n",
+            "  exit 0\n",
+            "fi\n",
+            "q='\"'\n",
+            "rest=${SKILLCACHE_INPUT#*$q}\n",
+            "rest=${rest#*$q}\n",
+            "rest=${rest#*$q}\n",
+            "dir=${rest%%$q*}\n",
+            "base=${dir##*/}\n",
+            "printf '{\"status\":\"complete\",\"result\":{\"rows_file\":\"out/%s.csv\"}}\\n' \"$base\"\n",
+        )
+        .as_bytes()
+        .to_vec(),
     );
     files.insert(
         "programs/verify/main.sh",
@@ -1049,7 +1062,7 @@ fn seed_skillcache(
         &qual_dir.join("examples.json"),
         &json!({
             "bindings": {"input_dir": "docs/q3-pdfs"},
-            "steps": {"0": {"result": {"rows_file": "out/q3-rows.csv"}}}
+            "steps": {"0": {"result": {"rows_file": "out/q3-pdfs.csv"}}}
         }),
     )?;
     infra_harness::skillcache::snapshot::take(&store.state, project, &generation)?;
