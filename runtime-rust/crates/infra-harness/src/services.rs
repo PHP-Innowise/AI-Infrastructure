@@ -156,7 +156,11 @@ fn collect_registered_system_members(
 
     let mut groups = Vec::new();
     for (proj_root, sys_pid) in &by_root {
-        let mut candidates = vec!["system.json".to_owned(), "ai-system.json".to_owned()];
+        let mut candidates = vec![
+            "system.json".to_owned(),
+            "ai-system.json".to_owned(),
+            ".harness/system.json".to_owned(),
+        ];
         if let Some(extras) = extra_configs.get(sys_pid) {
             for cfg in extras {
                 if !candidates.contains(cfg) {

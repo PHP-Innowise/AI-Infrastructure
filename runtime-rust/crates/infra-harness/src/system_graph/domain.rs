@@ -145,7 +145,8 @@ fn is_service_or_system_graph_path(rel_path: &str, config_paths: &[String]) -> b
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|name| {
-            name.eq_ignore_ascii_case("ai-system.json")
+            name.eq_ignore_ascii_case("system.json")
+                || name.eq_ignore_ascii_case("ai-system.json")
                 || name.eq_ignore_ascii_case("ai-service.json")
         })
     {
@@ -656,36 +657,36 @@ impl SystemGraphDomain {
                 let Some(sys_path) = proj["path"].as_str().map(Path::new) else {
                     continue;
                 };
-                if !sys_path.join("ai-system.json").is_file()
-                    && !sys_path.join(".harness").join("system.json").is_file()
-                {
-                    continue;
-                }
-                if let Ok((_, cfg_rel, targets)) =
-                    resolve_all_targets(store, None, None, sys_pid, None)
-                {
-                    let cfg_slice = std::slice::from_ref(&cfg_rel);
-                    let relevant = has_code_delta
-                        || delta
-                            .changed_paths
-                            .iter()
-                            .any(|p| is_service_or_system_graph_path(p, cfg_slice));
-                    if !relevant {
+                for cfg_candidate in ["system.json", "ai-system.json", ".harness/system.json"] {
+                    if !sys_path.join(cfg_candidate).is_file() {
                         continue;
                     }
-                    for target in targets {
-                        let canon_target = canonical_or_owned(&target.root);
-                        if target.graph_id == project_id
-                            || target.project_id == project_id
-                            || delta_touches_root(&canon_target, &canon_root, cfg_slice, delta)
-                        {
-                            let service = (target.service_id != "__system__")
-                                .then(|| target.service_id.clone());
-                            affected_targets.insert((
-                                target.project_id.clone(),
-                                target.config_path.clone(),
-                                service,
-                            ));
+                    if let Ok((_, cfg_rel, targets)) =
+                        resolve_all_targets(store, None, None, sys_pid, Some(cfg_candidate))
+                    {
+                        let cfg_slice = std::slice::from_ref(&cfg_rel);
+                        let relevant = has_code_delta
+                            || delta
+                                .changed_paths
+                                .iter()
+                                .any(|p| is_service_or_system_graph_path(p, cfg_slice));
+                        if !relevant {
+                            continue;
+                        }
+                        for target in targets {
+                            let canon_target = canonical_or_owned(&target.root);
+                            if target.graph_id == project_id
+                                || target.project_id == project_id
+                                || delta_touches_root(&canon_target, &canon_root, cfg_slice, delta)
+                            {
+                                let service = (target.service_id != "__system__")
+                                    .then(|| target.service_id.clone());
+                                affected_targets.insert((
+                                    target.project_id.clone(),
+                                    target.config_path.clone(),
+                                    service,
+                                ));
+                            }
                         }
                     }
                 }
@@ -3119,5 +3120,62 @@ mod domain_cache_tests {
         assert!(saw_sse, "expected system_graph_status SSE frame");
 
         graphs.close();
+    }
+
+    #[test]
+    fn cold_ir_delta_emits_system_graph_status_for_system_json_and_ai_system_json() {
+        for cfg_name in ["system.json", "ai-system.json"] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = dir.path().join("state");
+            let sys_dir = dir.path().join("sys");
+            let svc_dir = sys_dir.join("svc-a");
+            std::fs::create_dir_all(svc_dir.join("src")).unwrap();
+            std::fs::write(svc_dir.join("src/lib.rs"), "pub fn f() -> i32 { 1 }\n").unwrap();
+            std::fs::write(
+                svc_dir.join("ai-service.json"),
+                r#"{"schema_version":1,"id":"svc-a","description":"Service A","owner":"platform","capabilities":[],"sources":[],"provides":[],"consumes":[]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                sys_dir.join(cfg_name),
+                r#"{"schema_version":1,"name":"sys-cold","shared_sources":[],"services":[{"id":"svc-a","root":"svc-a","manifest":"ai-service.json"}]}"#,
+            )
+            .unwrap();
+
+            let store = SessionStore::open(&state).unwrap();
+            let sys_proj = store.register(&sys_dir).unwrap();
+            let sys_pid = sys_proj["id"].as_str().unwrap().to_owned();
+            let svc_proj = store.register(&svc_dir).unwrap();
+            let svc_pid = svc_proj["id"].as_str().unwrap().to_owned();
+
+            let crate::store::ReplayStart::Frames { mut rx, .. } = store.stream().subscribe(None)
+            else {
+                panic!("expected frames");
+            };
+            let delta = crate::graph_ir::IrUpdateDelta {
+                changed_paths: vec!["src/lib.rs".to_owned()],
+                edited_files: vec!["src/lib.rs".to_owned()],
+                ir_revision: 9,
+                ..Default::default()
+            };
+            let evicted = SystemGraphDomain::invalidate_summary_cache_and_notify_for_ir_delta(
+                &store, &svc_pid, &svc_dir, &delta,
+            );
+            assert_eq!(evicted, 0);
+
+            let mut matched = false;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.event == "system_graph_status" {
+                    assert_eq!(frame.project_id.as_deref(), Some(sys_pid.as_str()));
+                    assert_eq!(frame.data["config_path"], cfg_name);
+                    assert_eq!(frame.data["service"], "svc-a");
+                    matched = true;
+                }
+            }
+            assert!(
+                matched,
+                "expected cold system_graph_status frame for {cfg_name}"
+            );
+        }
     }
 }
