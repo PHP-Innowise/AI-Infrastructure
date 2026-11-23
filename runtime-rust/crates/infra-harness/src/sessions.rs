@@ -45,6 +45,61 @@ struct PreparedTrace {
     redactor: crate::skillcache::trace::SessionRedactor,
     admissible: std::result::Result<(Vec<Value>, usize), Value>,
 }
+
+enum PreTurnObservation {
+    None,
+    Full(Option<crate::skillcache::replay_result::Captured>),
+    Toolchain(Option<crate::skillcache::trace::ToolchainPreTurnStamp>),
+}
+
+fn direct_formatter_payload(answer: &Value) -> Value {
+    answer
+        .get("result")
+        .filter(|v| v.is_object())
+        .or_else(|| answer.get("results").filter(|v| v.is_object()))
+        .cloned()
+        .unwrap_or_else(|| answer.clone())
+}
+
+fn should_run_thin_formatter(pref: Option<bool>, answer: &Value) -> bool {
+    match pref {
+        Some(enabled) => enabled,
+        None => {
+            let results = answer
+                .get("result")
+                .filter(|v| v.is_object())
+                .or_else(|| answer.get("results").filter(|v| v.is_object()));
+            let Some(obj) = results.and_then(Value::as_object) else {
+                return false;
+            };
+            if obj.is_empty() {
+                return false;
+            }
+            const PROSE_KEYS: [&str; 6] =
+                ["markdown", "summary", "report", "output", "text", "message"];
+            let has_prose = |map: &serde_json::Map<String, Value>| {
+                PROSE_KEYS.iter().any(|k| {
+                    map.get(*k)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty())
+                })
+            };
+            if has_prose(obj) {
+                return false;
+            }
+            if obj.len() == 1
+                && obj
+                    .values()
+                    .next()
+                    .and_then(Value::as_object)
+                    .is_some_and(has_prose)
+            {
+                return false;
+            }
+            true
+        }
+    }
+}
 #[derive(Clone)]
 enum JobKind {
     Run,
@@ -735,6 +790,7 @@ impl Sessions {
             "omnigraph",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if !data.is_object()
             || data
@@ -788,6 +844,14 @@ impl Sessions {
         value["agent_count"] = count.into();
         value["permissions"] = crate::permissions::validate(&data["permissions"])?;
         value["skillcache"] = crate::skillcache::settings::validate(&data["skillcache"])?;
+        if let Some(tf) = data.get("skillcache_thin_formatter")
+            && !tf.is_null()
+            && !tf.is_boolean()
+        {
+            return Err(HarnessError::invalid(
+                "`skillcache_thin_formatter` must be true, false, or null.",
+            ));
+        }
         crate::skillcache::settings::admit_with_eval(
             &value,
             crate::skillcache::settings::eval_enabled(&self.store),
@@ -2557,6 +2621,7 @@ impl Sessions {
             .map(|cfg| cfg.protected.clone())
             .unwrap_or_default();
         let mut direct_answer: Option<(serde_json::Value, String)> = None;
+        let mut partial_fallback: Option<crate::skillcache::warm::PartialDirectFailure> = None;
         let warm = match decision {
             crate::skillcache::warm::Decision::Hit(warm) if warm.direct_dispatch => {
                 if let Some(ref cfg) = protected_cfg
@@ -2588,6 +2653,7 @@ impl Sessions {
                     crate::skillcache::warm::DirectDispatchOutcome::Fallback {
                         reason: "join_error".into(),
                         program_failed: false,
+                        partial: None,
                     }
                 });
                 match direct {
@@ -2610,8 +2676,23 @@ impl Sessions {
                     crate::skillcache::warm::DirectDispatchOutcome::Fallback {
                         reason,
                         program_failed,
+                        partial,
                     } => {
-                        if reason == "needs_bindings" && !program_failed {
+                        if let Some(partial_fail) = partial {
+                            let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
+                            if let Some(mut event) = hit_decision.event() {
+                                event["partial_direct_fallback"] = json!(true);
+                                event["failed_step_index"] = json!(partial_fail.step_index);
+                                emit(event)?;
+                            }
+                            if let Some(mut record) = hit_decision.record() {
+                                record["partial_direct_fallback"] = json!(true);
+                                record["failed_step_index"] = json!(partial_fail.step_index);
+                                let _ = results.note_skillcache(&job.generation, &record);
+                            }
+                            partial_fallback = Some(partial_fail);
+                            Some(warm)
+                        } else if reason == "needs_bindings" && !program_failed {
                             let hit_decision = crate::skillcache::warm::Decision::Hit(warm.clone());
                             if let Some(event) = hit_decision.event() {
                                 emit(event)?;
@@ -2665,8 +2746,9 @@ impl Sessions {
         };
         let thin_formatter_results = if let Some((answer, formatted)) = direct_answer {
             let warm_ref = warm.as_ref().expect("direct dispatch requires warm");
-            if session["skillcache_thin_formatter"] == true {
-                Some(answer["result"].clone())
+            let thin_pref = crate::skillcache::settings::thin_formatter(&session);
+            if should_run_thin_formatter(thin_pref, &answer) {
+                Some(direct_formatter_payload(&answer))
             } else {
                 let started = std::time::Instant::now();
                 let initial_focus =
@@ -2803,13 +2885,42 @@ impl Sessions {
                 let warm_name = warm.as_ref().map_or("capsule", |w| w.name.as_str());
                 crate::prompt::build_thin_formatter_prompt(&job.prompt, warm_name, results_json)?
             } else {
+                let partial_block = partial_fallback.as_ref().map(|pf| {
+                    let prefix_json = serde_json::to_string_pretty(&pf.prefix_results)
+                        .unwrap_or_else(|_| "{}".into());
+                    let diag_json = serde_json::to_string_pretty(&pf.diagnostics)
+                        .unwrap_or_else(|_| "{}".into());
+                    let req = if pf.required_outputs.is_empty() {
+                        "then run `skillcache-run continue`".to_owned()
+                    } else {
+                        format!(
+                            "then run `skillcache-run continue '{{...}}'` supplying: {}",
+                            pf.required_outputs.join(", ")
+                        )
+                    };
+                    format!(
+                        "{}\n\nPartial direct execution completed steps 0..{} and failed at step {} (`{}`):\n- Instruction: {}\n- Failure diagnostics: {}\n- Verified prefix outputs (0..{}): {}\nContinue from the saved paused run state ({}).",
+                        warm.as_ref().map_or("", |w| w.block.as_str()),
+                        pf.step_index.saturating_sub(1),
+                        pf.step_index,
+                        pf.program,
+                        pf.instruction,
+                        diag_json,
+                        pf.step_index.saturating_sub(1),
+                        prefix_json,
+                        req,
+                    )
+                });
+                let skillcache_block = partial_block
+                    .as_deref()
+                    .or_else(|| warm.as_ref().map(|w| w.block.as_str()));
                 crate::prompt::build_with_skillcache(
                     &self.store,
                     &session,
                     &job.prompt,
                     &route,
                     &binding.instructions,
-                    warm.as_ref().map(|warm| warm.block.as_str()),
+                    skillcache_block,
                 )?
             };
             launch.prompt = if session["system_explain"].is_object() {
@@ -2839,8 +2950,8 @@ impl Sessions {
         let mut launch = match configured {
             Ok(launch) => launch,
             Err(error) => {
-                if let Some(state_dir) = warm.as_ref().and_then(|w| w.state_dir.as_deref()) {
-                    let _ = std::fs::remove_dir_all(state_dir);
+                if let Some(warm) = &warm {
+                    warm.cleanup_abandoned();
                 }
                 let _ = self.lifecycle.abort(&binding, "failed");
                 return Err(error);
@@ -2939,36 +3050,53 @@ impl Sessions {
             None => Arc::new(binding.clone()),
         };
         let allowlist = crate::skillcache::settings::workspace_allowlist(&self.store);
-        let observed_before = if recorder.is_some()
-            && crate::skillcache::trace::should_snapshot_for_observation_in_store(
+        let obs_strategy = if recorder.is_some() {
+            crate::skillcache::trace::observation_strategy(
                 &self.store,
                 &session,
                 &route,
                 &workspace,
-            ) {
-            // A capsule compiled from this turn is replayed on the workspace
-            // as it is now, before the turn changes it.
-            let (state, root, generation, allowlist) = (
-                self.store.state.clone(),
-                workspace.clone(),
-                job.generation.clone(),
-                allowlist.clone(),
-            );
-            tokio::task::spawn_blocking(move || {
-                crate::skillcache::snapshot::take_with_allowlist(
-                    &state,
-                    &root,
-                    &generation,
-                    &allowlist,
-                )
-                .ok()??;
-                crate::skillcache::replay_result::capture_with(&root, Some(&state), &allowlist).ok()
-            })
-            .await
-            .ok()
-            .flatten()
+            )
         } else {
-            None
+            crate::skillcache::trace::ObservationStrategy::None
+        };
+        let pre_turn_obs = match obs_strategy {
+            crate::skillcache::trace::ObservationStrategy::Full => {
+                // A capsule compiled from this turn is replayed on the workspace
+                // as it is now, before the turn changes it.
+                let (state, root, generation, allowlist) = (
+                    self.store.state.clone(),
+                    workspace.clone(),
+                    job.generation.clone(),
+                    allowlist.clone(),
+                );
+                let captured = tokio::task::spawn_blocking(move || {
+                    crate::skillcache::snapshot::take_with_allowlist(
+                        &state,
+                        &root,
+                        &generation,
+                        &allowlist,
+                    )
+                    .ok()??;
+                    crate::skillcache::replay_result::capture_with(&root, Some(&state), &allowlist)
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten();
+                PreTurnObservation::Full(captured)
+            }
+            crate::skillcache::trace::ObservationStrategy::LightweightToolchain => {
+                let (root, allowlist) = (workspace.clone(), allowlist.clone());
+                let stamp = tokio::task::spawn_blocking(move || {
+                    crate::skillcache::trace::capture_toolchain_pre_turn_stamp(&root, &allowlist)
+                })
+                .await
+                .ok()
+                .flatten();
+                PreTurnObservation::Toolchain(stamp)
+            }
+            crate::skillcache::trace::ObservationStrategy::None => PreTurnObservation::None,
         };
         let graphs = lock(&self.graphs).ok().and_then(|slot| slot.clone());
         let graphs_for_stream = graphs.clone();
@@ -3133,7 +3261,7 @@ impl Sessions {
                 },
             );
         }
-        let prepared_trace = if result.ok {
+        let mut prepared_trace = if result.ok {
             recorder.as_ref().and_then(|recorder| {
                 self.finish_recorded_trace(
                     recorder,
@@ -3150,32 +3278,93 @@ impl Sessions {
         let trace_eligible = prepared_trace
             .as_ref()
             .is_none_or(|prepared| prepared.admissible.is_ok());
-        if result.ok
-            && trace_eligible
-            && let Some(before) = observed_before
-        {
-            // Capture the primary turn's effects before lifecycle recovery
-            // or publication can change the project.
-            let (state, root, generation, allowlist) = (
-                self.store.state.clone(),
-                workspace.clone(),
-                job.generation.clone(),
-                allowlist,
-            );
-            let result_text = result.text.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::skillcache::replay_result::record_with_output(
-                    &state,
-                    &root,
-                    &generation,
-                    before,
-                    Some(&result_text),
-                    &allowlist,
-                )
-            })
-            .await;
-        } else if observed_before.is_some() {
-            let _ = crate::skillcache::snapshot::remove(&self.store.state, &job.generation);
+        match pre_turn_obs {
+            PreTurnObservation::Full(Some(before)) if result.ok && trace_eligible => {
+                // Capture the primary turn's effects before lifecycle recovery
+                // or publication can change the project.
+                let (state, root, generation, allowlist) = (
+                    self.store.state.clone(),
+                    workspace.clone(),
+                    job.generation.clone(),
+                    allowlist,
+                );
+                let result_text = result.text.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::skillcache::replay_result::record_with_output(
+                        &state,
+                        &root,
+                        &generation,
+                        before,
+                        Some(&result_text),
+                        &allowlist,
+                    )
+                })
+                .await;
+            }
+            PreTurnObservation::Full(Some(_)) => {
+                let _ = crate::skillcache::snapshot::remove(&self.store.state, &job.generation);
+            }
+            PreTurnObservation::Toolchain(Some(before_stamp)) if result.ok && trace_eligible => {
+                let (state, root, generation, allowlist) = (
+                    self.store.state.clone(),
+                    workspace.clone(),
+                    job.generation.clone(),
+                    allowlist,
+                );
+                let result_text = result.text.clone();
+                let unchanged = tokio::task::spawn_blocking(move || {
+                    let after_stamp = crate::skillcache::trace::capture_toolchain_pre_turn_stamp(
+                        &root, &allowlist,
+                    );
+                    if after_stamp.as_ref() != Some(&before_stamp) {
+                        return false;
+                    }
+                    let taken = crate::skillcache::snapshot::take_with_allowlist(
+                        &state,
+                        &root,
+                        &generation,
+                        &allowlist,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some();
+                    if taken {
+                        let _ = crate::skillcache::replay_result::record_zero_changes_with_output(
+                            &state,
+                            &generation,
+                            Some(&result_text),
+                        );
+                    }
+                    true
+                })
+                .await
+                .unwrap_or(false);
+                if !unchanged {
+                    // Reject ToolChain admission if workspace files changed post-turn.
+                    if let Some(prepared) = prepared_trace.as_mut() {
+                        prepared.admissible = Err(json!({
+                            "kind": "skillcache",
+                            "phase": "not_observed",
+                            "reason": "workspace_mutated",
+                            "text": "SkillCache: workspace files changed during an unrouted turn, so it was not kept as a read-only tool-chain trace.",
+                        }));
+                    }
+                    let _ = crate::skillcache::snapshot::remove(&self.store.state, &job.generation);
+                }
+            }
+            PreTurnObservation::Toolchain(None) => {
+                if let Some(prepared) = prepared_trace.as_mut()
+                    && prepared.admissible.is_ok()
+                {
+                    prepared.admissible = Err(json!({
+                        "kind": "skillcache",
+                        "phase": "not_observed",
+                        "reason": "snapshot_unavailable",
+                        "text": "SkillCache: pre-turn workspace fingerprint was unavailable for this turn.",
+                    }));
+                }
+            }
+            _ => {}
         }
         let mut recovery = NativeRecovery {
             adapter: recovery_adapter,
@@ -3270,6 +3459,8 @@ impl Sessions {
                 "trace_generation",
                 "capsule_id",
                 "tool_chain",
+                "direct_dispatch",
+                "thin_formatter",
                 "edition",
             ] {
                 if let Some(value) = composer.get(key)
@@ -3436,6 +3627,7 @@ impl Sessions {
             "brain",
             "permissions",
             "skillcache",
+            "skillcache_thin_formatter",
         ];
         if !options.is_object()
             || options
@@ -3453,6 +3645,14 @@ impl Sessions {
         }
         if let Some(raw) = options.get("skillcache") {
             fields["skillcache"] = crate::skillcache::settings::validate(raw)?;
+        }
+        if let Some(tf) = options.get("skillcache_thin_formatter") {
+            if !tf.is_null() && !tf.is_boolean() {
+                return Err(HarnessError::invalid(
+                    "`skillcache_thin_formatter` must be true, false, or null.",
+                ));
+            }
+            fields["skillcache_thin_formatter"] = tf.clone();
         }
         {
             // The turn as it would run: SkillCache stays with ordinary turns.

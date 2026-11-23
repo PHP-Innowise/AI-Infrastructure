@@ -6,6 +6,7 @@
 //! names each phase of the run for the Harness; it carries no values.
 use infra_core::{Result, RuntimeError};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const STATE_SCHEMA: u64 = 1;
@@ -54,6 +55,10 @@ pub struct RunState {
     pub completed: Vec<usize>,
     /// The result of each completed program, by program identifier.
     pub results: Map<String, Value>,
+    /// Workspace fingerprint captured when persisted `step_memo` entries were written.
+    pub step_memo_workspace_sha: Option<String>,
+    /// Persisted read-only step memo keyed by `"{program_digest}:{input_digest}"`.
+    pub step_memo: BTreeMap<String, Map<String, Value>>,
 }
 
 fn names(value: &Value) -> Option<Vec<String>> {
@@ -78,6 +83,8 @@ impl RunState {
             failed: Vec::new(),
             completed: Vec::new(),
             results: Map::new(),
+            step_memo_workspace_sha: None,
+            step_memo: BTreeMap::new(),
         }
     }
     pub fn is_failed(&self, step_index: usize) -> bool {
@@ -103,19 +110,35 @@ impl RunState {
             }
             Awaiting::None => json!({"kind": "none"}),
         };
-        json!({
-            "schema_version": STATE_SCHEMA,
-            "capsule_sha256": self.capsule_sha256,
-            "generation": self.generation,
-            "position": self.position,
-            "awaiting": awaiting,
-            "bindings": self.bindings,
-            "failed": self.failed.iter().map(|failure| json!({
-                "step_index": failure.step_index, "reason": failure.reason,
-            })).collect::<Vec<_>>(),
-            "completed": self.completed,
-            "results": self.results,
-        })
+        let mut obj = Map::new();
+        obj.insert("schema_version".into(), STATE_SCHEMA.into());
+        obj.insert("capsule_sha256".into(), self.capsule_sha256.clone().into());
+        obj.insert("generation".into(), self.generation.clone().into());
+        obj.insert("position".into(), self.position.into());
+        obj.insert("awaiting".into(), awaiting);
+        obj.insert("bindings".into(), Value::Object(self.bindings.clone()));
+        obj.insert(
+            "failed".into(),
+            self.failed
+                .iter()
+                .map(|failure| json!({"step_index": failure.step_index, "reason": failure.reason}))
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        obj.insert("completed".into(), json!(self.completed));
+        obj.insert("results".into(), Value::Object(self.results.clone()));
+        if let Some(sha) = &self.step_memo_workspace_sha {
+            obj.insert("step_memo_workspace_sha".into(), sha.clone().into());
+        }
+        if !self.step_memo.is_empty() {
+            let memo: Map<String, Value> = self
+                .step_memo
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::Object(v.clone())))
+                .collect();
+            obj.insert("step_memo".into(), Value::Object(memo));
+        }
+        Value::Object(obj)
     }
     pub fn from_value(value: &Value) -> Option<Self> {
         if value["schema_version"].as_u64() != Some(STATE_SCHEMA) {
@@ -146,6 +169,21 @@ impl RunState {
             "none" => Awaiting::None,
             _ => return None,
         };
+        let step_memo_workspace_sha = match value.get("step_memo_workspace_sha") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_str()?.to_owned()),
+        };
+        let step_memo = match value.get("step_memo") {
+            None | Some(Value::Null) => BTreeMap::new(),
+            Some(v) => {
+                let obj = v.as_object()?;
+                let mut out = BTreeMap::new();
+                for (key, entry) in obj {
+                    out.insert(key.clone(), entry.as_object()?.clone());
+                }
+                out
+            }
+        };
         Some(Self {
             capsule_sha256: value["capsule_sha256"].as_str()?.into(),
             generation: value["generation"].as_str()?.into(),
@@ -168,6 +206,8 @@ impl RunState {
                 .map(index)
                 .collect::<Option<_>>()?,
             results: value["results"].as_object()?.clone(),
+            step_memo_workspace_sha,
+            step_memo,
         })
     }
     /// Reads the state file; `None` when no run has started.

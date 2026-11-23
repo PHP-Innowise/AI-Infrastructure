@@ -1342,3 +1342,114 @@ fn step_level_memoization_and_parameterized_helper_reuse_invalidate_on_mutation(
     assert_eq!(completed_events[4]["memoized"], false);
     assert_eq!(completed_events[5]["memoized"], false);
 }
+
+#[test]
+fn persistent_step_memo_survives_continue_and_invalidates_on_workspace_edit() {
+    let mut cap = json!({
+        "schema_version": 1,
+        "form": "hybrid",
+        "mu": {"name": "persist-memo-demo", "description": "Persisted memo across continue"},
+        "source": {"skills": [{"name": "pdf", "path": SKILL, "tree_sha256": "0".repeat(64)}]},
+        "capabilities": {"network": "none", "runtimes": [runtime()]},
+        "bindings": [
+            {"name": "path_a", "type": "path", "origin": "request"}
+        ],
+        "programs": [
+            {
+                "id": "inspect_item",
+                "entry": [runtime(), "programs/inspect_item/program.json"],
+                "inputs": ["target"],
+                "outputs": ["digest"],
+                "check": [runtime(), "programs/inspect_item/program.json", "--check"],
+                "timeout_seconds": 20,
+                "read_only": true
+            },
+            {
+                "id": "finalize",
+                "entry": [runtime(), "programs/finalize/program.json"],
+                "inputs": ["d_a1", "d_a2", "review_note"],
+                "outputs": [],
+                "check": [runtime(), "programs/finalize/program.json", "--check"],
+                "timeout_seconds": 20,
+                "read_only": true
+            }
+        ],
+        "steps": [
+            {
+                "kind": "program",
+                "program": "inspect_item",
+                "inputs": {"target": "path_a"},
+                "outputs": {"digest": "d_a1"}
+            },
+            {
+                "kind": "instruction",
+                "text": "Review intermediate state",
+                "source": {"path": SKILL},
+                "produces": ["review_note"]
+            },
+            {
+                "kind": "program",
+                "program": "inspect_item",
+                "inputs": {"target": "path_a"},
+                "outputs": {"digest": "d_a2"}
+            },
+            {"kind": "program", "program": "finalize"}
+        ],
+        "verification": []
+    });
+    let step_specs = vec![
+        (
+            "inspect_item",
+            json!({"result": {"digest": "sha-item"}, "echo_input": true}),
+        ),
+        ("finalize", json!({"result": {}})),
+    ];
+
+    // 1. Unchanged workspace across `instruction` + `continue` preserves memo hit.
+    let stand = Stand::empty();
+    std::fs::create_dir_all(stand.workspace.join("src")).unwrap();
+    std::fs::write(stand.workspace.join("src/a.txt"), "hello").unwrap();
+    stand.install(cap.clone(), step_specs.clone());
+    let paused = stand.ok(&["run", r#"{"path_a":"src/a.txt"}"#]);
+    assert_eq!(paused["status"], "your_steps", "{paused}");
+    assert!(
+        !stand.state()["step_memo"].as_object().unwrap().is_empty(),
+        "step_memo should persist to RunState before instruction pause"
+    );
+    let done = stand.ok(&["continue", r#"{"review_note":"ok"}"#]);
+    assert_eq!(done["status"], "complete", "{done}");
+    let log = infra_skillcache::state::read_log(&stand.state_file, 0).unwrap();
+    let completed: Vec<&Value> = log
+        .iter()
+        .filter(|e| e["event"] == "program_completed")
+        .collect();
+    assert_eq!(completed.len(), 3, "{completed:?}");
+    assert_eq!(completed[0]["memoized"], false);
+    assert_eq!(
+        completed[1]["memoized"], true,
+        "expected memo hit after continue"
+    );
+    assert_eq!(completed[2]["memoized"], false);
+
+    // 2. Editing a workspace file between `run` and `continue` invalidates persisted memo.
+    let stand_edited = Stand::empty();
+    std::fs::create_dir_all(stand_edited.workspace.join("src")).unwrap();
+    std::fs::write(stand_edited.workspace.join("src/a.txt"), "hello").unwrap();
+    stand_edited.install(cap.take(), step_specs);
+    let paused2 = stand_edited.ok(&["run", r#"{"path_a":"src/a.txt"}"#]);
+    assert_eq!(paused2["status"], "your_steps", "{paused2}");
+    std::fs::write(stand_edited.workspace.join("src/a.txt"), "changed!").unwrap();
+    let done2 = stand_edited.ok(&["continue", r#"{"review_note":"ok"}"#]);
+    assert_eq!(done2["status"], "complete", "{done2}");
+    let log2 = infra_skillcache::state::read_log(&stand_edited.state_file, 0).unwrap();
+    let completed2: Vec<&Value> = log2
+        .iter()
+        .filter(|e| e["event"] == "program_completed")
+        .collect();
+    assert_eq!(completed2.len(), 3, "{completed2:?}");
+    assert_eq!(completed2[0]["memoized"], false);
+    assert_eq!(
+        completed2[1]["memoized"], false,
+        "workspace edit must invalidate persisted step_memo across continue"
+    );
+}

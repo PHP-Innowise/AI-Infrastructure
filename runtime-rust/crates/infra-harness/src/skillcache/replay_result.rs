@@ -530,6 +530,33 @@ pub(crate) fn record(
     record_with_output(state, workspace, generation, before, None, &[])
 }
 
+fn write_observed_files(
+    state: &Path,
+    generation: &str,
+    changes: &Changes,
+    mut meta: ObservedMeta,
+    observed_output: Option<&str>,
+) -> Result<()> {
+    let (observed_text, observed_json) = extract_observed_output(observed_output);
+    meta.observed_text = observed_text;
+    meta.observed_json = observed_json;
+    let bytes = serde_json::to_vec(changes)?;
+    if bytes.len() > EVIDENCE_BYTES {
+        return Err(HarnessError::unavailable(
+            "Too many workspace result changes.",
+        ));
+    }
+    let meta_bytes = serde_json::to_vec(&meta)?;
+    if meta_bytes.len() > EVIDENCE_BYTES {
+        return Err(HarnessError::unavailable(
+            "Too many workspace result changes.",
+        ));
+    }
+    core_fs::atomic_write(&path(state, generation)?, &bytes)?;
+    core_fs::atomic_write(&meta_path(state, generation)?, &meta_bytes)?;
+    Ok(())
+}
+
 pub(crate) fn record_with_output(
     state: &Path,
     workspace: &Path,
@@ -557,30 +584,36 @@ pub(crate) fn record_with_output(
         .filter(|(hash, _)| before.digests.contains_key(*hash))
         .map(|(hash, _)| hash.clone())
         .collect::<BTreeSet<_>>();
-    let (observed_text, observed_json) = extract_observed_output(observed_output);
-    let bytes = serde_json::to_vec(&diff.changes)?;
-    if bytes.len() > EVIDENCE_BYTES {
-        return Err(HarnessError::unavailable(
-            "Too many workspace result changes.",
-        ));
-    }
     let meta = ObservedMeta {
         created,
         mutated,
         structural: diff.structural,
         paths: diff.paths,
-        observed_text,
-        observed_json,
+        observed_text: None,
+        observed_json: None,
     };
-    let meta_bytes = serde_json::to_vec(&meta)?;
-    if meta_bytes.len() > EVIDENCE_BYTES {
+    write_observed_files(state, generation, &diff.changes, meta, observed_output)
+}
+
+/// Records empty workspace diffs + output text/JSON for an unrouted `ToolChain`
+/// turn whose pre/post lightweight stat fingerprint verified `changes.is_empty()`.
+pub(crate) fn record_zero_changes_with_output(
+    state: &Path,
+    generation: &str,
+    observed_output: Option<&str>,
+) -> Result<()> {
+    if snapshot::load(state, generation)?.is_none() {
         return Err(HarnessError::unavailable(
-            "Too many workspace result changes.",
+            "The starting workspace snapshot is unavailable.",
         ));
     }
-    core_fs::atomic_write(&path(state, generation)?, &bytes)?;
-    core_fs::atomic_write(&meta_path(state, generation)?, &meta_bytes)?;
-    Ok(())
+    write_observed_files(
+        state,
+        generation,
+        &Changes::new(),
+        ObservedMeta::default(),
+        observed_output,
+    )
 }
 
 pub(super) fn available(state: &Path, generation: &str) -> bool {

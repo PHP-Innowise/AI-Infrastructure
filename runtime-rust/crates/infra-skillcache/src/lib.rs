@@ -25,4 +25,4 @@ pub mod state;
 pub mod tool;
 pub mod trace;
 
-pub use capsule::{Examples, Form, SCHEMA_VERSION, SkillCapsule, Step, Violation};
+pub use capsule::{BindingOrigin, Examples, Form, SCHEMA_VERSION, SkillCapsule, Step, Violation};
